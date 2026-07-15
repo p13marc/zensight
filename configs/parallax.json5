@@ -51,15 +51,26 @@
     // JPEG preview profile (@media/<stream>/preview/jpeg): low-fps thumbnails
     // for the GUI tile grid.
     preview: {
-      fps: 2,        // preview frame rate (thumbnails, not video)
-      quality: 75,   // JPEG quality 1-100
+      fps: 2,            // preview frame rate (thumbnails, not video)
+      quality: 75,       // JPEG quality 1-100
+      max_height: 360,   // aspect-preserving cap; a 1080p camera's thumbnail is
+                         // otherwise a 1080p JPEG (~30x the pixels a tile needs).
+                         // null = source size.
     },
 
-    // H.264 video profile (@media/<stream>/video/h264/main): full-rate live view.
+    // H.264 video (@media/<stream>/video/h264/<tier>): a bandwidth tier ladder.
+    // Each tier is published concurrently on its own <tier> key; a viewer
+    // subscribes to the tier its link can take, so two viewers on different
+    // links never fight over one encoder. The sensor owns the numbers; the
+    // wire and the key carry the name.
     video: {
-      bitrate_kbps: 2000,  // target bitrate
-      gop_frames: 60,      // keyframe (IDR) interval in frames
-      profile: "main",     // profile name used in the media key chunk
+      gop_frames: 60,          // keyframe (IDR) interval in frames (shared)
+      default_tier: "medium",  // the tier an open with no explicit tier gets
+      tiers: [
+        { name: "low",    max_height: 240,  fps: 10, bitrate_kbps: 400  },
+        { name: "medium", max_height: 480,  fps: 20, bitrate_kbps: 1200 },
+        { name: "high",   max_height: null, fps: 30, bitrate_kbps: 4000 },  // null = native
+      ],
     },
 
     // Tear an open profile down after this many seconds with no viewers and

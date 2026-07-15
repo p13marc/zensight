@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use zensight_common::stream::StreamDescriptor;
+use zensight_common::stream::{StreamDescriptor, TierSpec};
 
 use crate::config::{ParallaxConfig, RtspSourceConfig, TestSourceConfig};
 
@@ -39,13 +39,21 @@ pub enum SourceKind {
     },
 }
 
-/// One advertised stream: name + how to open it.
+/// One advertised stream: name + how to open it + its native capabilities.
 #[derive(Debug, Clone)]
 pub struct CatalogEntry {
     /// Stream identifier (single key chunk, unique within the catalogue).
     pub name: String,
     pub kind: SourceKind,
-    /// Human-readable description (camera model / pattern + resolution).
+    /// Native capture width/height/framerate, when known (`None` for an RTSP
+    /// source whose SDP we have not read, or a V4L2 device we could not probe).
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<f32>,
+    /// Codecs this source can be opened with — probed per source, not a
+    /// hardcoded pair (#507).
+    pub codecs: Vec<String>,
+    /// Human-readable description (camera model / pattern).
     pub description: Option<String>,
 }
 
@@ -79,11 +87,20 @@ impl Catalog {
                         {
                             description.push_str(&format!(" ({model})"));
                         }
+                        // Best-effort native-capability probe: open the device,
+                        // read its negotiated geometry, drop it (releasing the
+                        // camera). A busy/failing device just advertises no
+                        // native size — honest "unknown until opened".
+                        let (width, height, fps) = probe_v4l2(&dev.id);
                         entries.push(CatalogEntry {
                             name,
                             kind: SourceKind::V4l2 {
                                 device: dev.id.clone(),
                             },
+                            width,
+                            height,
+                            fps,
+                            codecs: vec!["h264".to_string(), "mjpeg".to_string()],
                             description: Some(description),
                         });
                     }
@@ -128,17 +145,59 @@ impl Catalog {
         self.entries.iter().map(|e| e.name.as_str())
     }
 
-    /// Serve-ready descriptors, stamping `active` from the currently open set.
-    pub fn descriptors(&self, open: &HashSet<String>) -> Vec<StreamDescriptor> {
+    /// Serve-ready descriptors, stamping `active` from the currently open set
+    /// and the tiers each stream offers from the sensor's `ladder` (filtered to
+    /// what the camera can actually feed — no 720p tier for a 480p camera).
+    pub fn descriptors(
+        &self,
+        open: &HashSet<String>,
+        ladder: &[TierSpec],
+    ) -> Vec<StreamDescriptor> {
         self.entries
             .iter()
             .map(|e| StreamDescriptor {
                 stream: e.name.clone(),
-                codecs: vec!["h264".to_string(), "mjpeg".to_string()],
+                codecs: e.codecs.clone(),
                 active: open.contains(&e.name),
+                width: e.width,
+                height: e.height,
+                fps: e.fps,
+                tiers: offered_tiers(e.height, ladder),
                 description: e.description.clone(),
             })
             .collect()
+    }
+}
+
+/// The tiers a source with native height `native_h` can honestly offer: a tier
+/// with a fixed `max_height` above the camera's native height would only be
+/// upscaled (the scaler never upscales), so drop it. A `None`-capped tier (use
+/// native) and every tier when the native size is unknown are always offered.
+fn offered_tiers(native_h: Option<u32>, ladder: &[TierSpec]) -> Vec<TierSpec> {
+    ladder
+        .iter()
+        .filter(|t| match (native_h, t.max_height) {
+            (Some(nh), Some(mh)) => mh <= nh,
+            _ => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// Best-effort probe of a V4L2 device's native geometry (open → read → drop).
+fn probe_v4l2(device: &str) -> (Option<u32>, Option<u32>, Option<f32>) {
+    match parallax::elements::V4l2Src::new(device) {
+        Ok(src) => {
+            let fps = src
+                .framerate()
+                .map(|(num, den)| num as f32 / den.max(1) as f32);
+            (Some(src.width()), Some(src.height()), fps)
+        }
+        Err(e) => {
+            tracing::debug!(device = %device, error = %e,
+                "v4l2 capability probe failed; advertising no native size");
+            (None, None, None)
+        }
     }
 }
 
@@ -150,6 +209,12 @@ fn rtsp_entry(rtsp: &RtspSourceConfig) -> CatalogEntry {
             username: rtsp.username.clone(),
             password: rtsp.password.clone(),
         },
+        // Native size is unknown until the SDP is read at connect; the preview
+        // (JPEG) needs those dims, so RTSP advertises only h264 passthrough.
+        width: None,
+        height: None,
+        fps: None,
+        codecs: vec!["h264".to_string()],
         // Never leak credentials: description is either the configured text
         // or the bare URL (which the operator wrote without inline creds).
         description: rtsp.description.clone().or_else(|| Some(rtsp.url.clone())),
@@ -165,12 +230,12 @@ fn test_entry(test: &TestSourceConfig) -> CatalogEntry {
             height: test.height,
             fps: test.fps,
         },
-        // StreamDescriptor carries no width/height fields — resolution rides
-        // the description by convention.
-        description: Some(format!(
-            "test pattern {} {}x{}@{}",
-            test.pattern, test.width, test.height, test.fps
-        )),
+        // A synthetic source's geometry is exactly its config — no probe needed.
+        width: Some(test.width),
+        height: Some(test.height),
+        fps: Some(test.fps as f32),
+        codecs: vec!["h264".to_string(), "mjpeg".to_string()],
+        description: Some(format!("test pattern {}", test.pattern)),
     }
 }
 
@@ -233,17 +298,37 @@ mod tests {
     fn descriptors_stamp_active_from_open_set() {
         let catalog = Catalog::build(&test_config());
         let open: HashSet<String> = ["test0".to_string()].into();
-        let descs = catalog.descriptors(&open);
+        let ladder = vec![
+            TierSpec {
+                name: "low".into(),
+                max_height: Some(240),
+                fps: 10,
+                bitrate_kbps: 400,
+            },
+            TierSpec {
+                name: "high".into(),
+                max_height: None,
+                fps: 30,
+                bitrate_kbps: 4000,
+            },
+        ];
+        let descs = catalog.descriptors(&open, &ladder);
         assert_eq!(descs.len(), 3);
         for d in &descs {
-            assert_eq!(d.codecs, vec!["h264", "mjpeg"]);
             assert_eq!(d.active, d.stream == "test0");
         }
-        // Resolution rides the description (StreamDescriptor has no w/h).
-        assert_eq!(
-            descs[2].description.as_deref(),
-            Some("test pattern smpte 640x360@15")
-        );
+        // RTSP advertises h264-only (passthrough); the test source advertises
+        // both codecs and its native geometry (no more "resolution rides the
+        // description").
+        let door = descs.iter().find(|d| d.stream == "door").unwrap();
+        assert_eq!(door.codecs, vec!["h264"]);
+        assert_eq!(door.width, None);
+        let test0 = descs.iter().find(|d| d.stream == "test0").unwrap();
+        assert_eq!(test0.codecs, vec!["h264", "mjpeg"]);
+        assert_eq!((test0.width, test0.height), (Some(640), Some(360)));
+        // A 360-high source is offered both tiers (240 fits, high is uncapped).
+        let tier_names: Vec<&str> = test0.tiers.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(tier_names, vec!["low", "high"]);
     }
 
     #[test]

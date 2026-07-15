@@ -573,6 +573,34 @@ pub mod gnmi {
 pub mod parallax {
     use super::*;
     use zensight_common::StreamDescriptor;
+    use zensight_common::stream::TierSpec;
+
+    /// One tier of the default ladder (mirrors `configs/parallax.json5`).
+    fn tier(name: &str, max_height: Option<u32>, fps: u32, bitrate_kbps: u32) -> TierSpec {
+        TierSpec {
+            name: name.to_string(),
+            max_height,
+            fps,
+            bitrate_kbps,
+        }
+    }
+
+    /// The tiers a source of native height `native_h` honestly offers (a fixed
+    /// cap above native would only upscale, so it's dropped) — the same rule
+    /// the sensor's `offered_tiers` applies, so demo mirrors the wire contract.
+    fn offered(native_h: Option<u32>) -> Vec<TierSpec> {
+        [
+            tier("low", Some(240), 10, 400),
+            tier("medium", Some(480), 20, 1200),
+            tier("high", None, 30, 4000),
+        ]
+        .into_iter()
+        .filter(|t| match (native_h, t.max_height) {
+            (Some(nh), Some(mh)) => mh <= nh,
+            _ => true,
+        })
+        .collect()
+    }
 
     /// Mock stream catalogue — mirrors the real `@rpc/parallax/streams` reply
     /// shape (demo mirrors the wire contract).
@@ -582,19 +610,34 @@ pub mod parallax {
                 stream: "video0".to_string(),
                 codecs: vec!["h264".to_string(), "mjpeg".to_string()],
                 active: false,
+                width: Some(1280),
+                height: Some(720),
+                fps: Some(30.0),
+                tiers: offered(Some(720)),
                 description: Some("Integrated Webcam".to_string()),
             },
             StreamDescriptor {
                 stream: "door".to_string(),
-                codecs: vec!["h264".to_string(), "mjpeg".to_string()],
+                codecs: vec!["h264".to_string()],
                 active: true,
+                // RTSP: native geometry is unknown until connected, so every
+                // tier is offered (the scaler clamps once real dims arrive).
+                width: None,
+                height: None,
+                fps: None,
+                tiers: offered(None),
                 description: Some("front door (rtsp)".to_string()),
             },
             StreamDescriptor {
                 stream: "test0".to_string(),
                 codecs: vec!["h264".to_string(), "mjpeg".to_string()],
                 active: false,
-                description: Some("test pattern smpte 640x360@15".to_string()),
+                width: Some(640),
+                height: Some(360),
+                fps: Some(15.0),
+                // 360 native → `medium` (480) would upscale, so only low + high.
+                tiers: offered(Some(360)),
+                description: Some("test pattern smpte".to_string()),
             },
         ]
     }

@@ -8,7 +8,7 @@
 //! [`iced::widget::image`] with a seq/fps caption. Closing (or leaving the
 //! view) aborts the subscriber and sends `close_stream`.
 
-use iced::widget::{Space, button, column, container, image, mouse_area, row, text};
+use iced::widget::{Space, button, column, container, image, mouse_area, pick_list, row, text};
 use iced::{ContentFit, Element, Length, Theme};
 
 use crate::message::Message;
@@ -72,6 +72,58 @@ fn muted(t: &Theme) -> text::Style {
     }
 }
 
+/// The "Auto" sentinel in the preferred-tier picker: maps to `None`, so each
+/// stream falls back to its own catalogue default.
+const TIER_AUTO: &str = "Auto";
+
+/// A device-wide picker for the tier newly-opened video tiles prefer
+/// (#494/#502). Options are the distinct tiers the catalogue advertises (ladder
+/// order) plus Auto. A per-viewer choice: it steers future opens, never a live
+/// stream (the sensor publishes every tier concurrently — switching is a
+/// re-open, not a live re-tune). `None` when the catalogue offers no tiers.
+fn tier_selector(detail: &ParallaxDetailState) -> Option<Element<'_, Message>> {
+    let streams = detail.catalogue.ready()?;
+    let mut names: Vec<String> = Vec::new();
+    for s in streams {
+        for t in &s.tiers {
+            if !names.contains(&t.name) {
+                names.push(t.name.clone());
+            }
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let mut options = vec![TIER_AUTO.to_string()];
+    options.extend(names);
+    let selected = detail
+        .preferred_tier
+        .clone()
+        .unwrap_or_else(|| TIER_AUTO.to_string());
+    let picker = pick_list(options, Some(selected), |choice| {
+        Message::ParallaxSelectTier((choice.as_str() != TIER_AUTO).then_some(choice))
+    })
+    .text_size(12);
+    Some(
+        row![text("Preferred video tier").size(12).style(muted), picker]
+            .spacing(space::SM)
+            .align_y(iced::Alignment::Center)
+            .into(),
+    )
+}
+
+/// The applied-bandwidth suffix for a live video tile (#503): its tier's
+/// applied resolution and bitrate, straight from the sensor's per-tier status
+/// (not a client-side arrival EMA). `None` for previews or an unreported tier.
+fn tier_readout(detail: &ParallaxDetailState, name: &str, tile: &TileState) -> Option<String> {
+    let tier = tile.selected_tier.as_deref()?;
+    let applied = detail.applied_tier(name, tier)?;
+    Some(format!(
+        "{tier} · {}×{} · {} kbps",
+        applied.applied.width, applied.applied.height, applied.applied.bitrate_kbps
+    ))
+}
+
 /// One catalogue row: name · description · codecs · live badge · open/close.
 fn catalogue_row<'a>(
     detail: &'a ParallaxDetailState,
@@ -111,6 +163,25 @@ fn catalogue_row<'a>(
     ]
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
+    // Native geometry (capability-bearing catalogue, #507) so the offered tiers
+    // read as honest — no 720p tier on a 480p camera.
+    if let (Some(w), Some(h)) = (stream.width, stream.height) {
+        cells = cells.push(
+            text(format!("{w}×{h}"))
+                .size(12)
+                .style(muted)
+                .width(Length::Fixed(80.0)),
+        );
+    }
+    if !stream.tiers.is_empty() {
+        let tiers = stream
+            .tiers
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>()
+            .join("·");
+        cells = cells.push(text(tiers).size(12).style(muted));
+    }
     if stream.active {
         cells = cells.push(text("live").size(12).style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).success()),
@@ -125,7 +196,11 @@ fn catalogue_row<'a>(
 
 /// One live preview tile: frame (or placeholder / end reason) + caption.
 /// Clicking the frame expands the tile to the near-fullscreen overlay (#436).
-fn tile<'a>(name: &'a str, tile: &'a TileState) -> Element<'a, Message> {
+fn tile<'a>(
+    detail: &'a ParallaxDetailState,
+    name: &'a str,
+    tile: &'a TileState,
+) -> Element<'a, Message> {
     let picture: Element<'a, Message> = match (&tile.frame, &tile.ended) {
         (Some(handle), _) => preview_frame(handle.clone()),
         (None, Some(reason)) => container(text(reason.as_str()).size(12).style(muted))
@@ -144,7 +219,12 @@ fn tile<'a>(name: &'a str, tile: &'a TileState) -> Element<'a, Message> {
     let caption = if let Some(reason) = &tile.ended {
         format!("{name} — {reason}")
     } else if tile.frame.is_some() {
-        format!("{name} · seq {} · {:.1} fps", tile.last_seq, tile.fps)
+        // For a video tile, prefer the sensor's applied per-tier readout
+        // (resolution + bitrate, #503) over the client-side fps EMA alone.
+        match tier_readout(detail, name, tile) {
+            Some(readout) => format!("{name} · {readout} · {:.1} fps", tile.fps),
+            None => format!("{name} · seq {} · {:.1} fps", tile.last_seq, tile.fps),
+        }
     } else {
         format!("{name} · waiting for frames…")
     };
@@ -180,10 +260,13 @@ pub fn expanded_overlay(detail: &ParallaxDetailState) -> Option<Element<'_, Mess
     let caption = if let Some(reason) = &tile.ended {
         format!("{name} · {profile} — {reason}")
     } else if tile.frame.is_some() {
-        format!(
-            "{name} · {profile} · seq {} · {:.1} fps",
-            tile.last_seq, tile.fps
-        )
+        match tier_readout(detail, name, tile) {
+            Some(readout) => format!("{name} · {readout} · {:.1} fps", tile.fps),
+            None => format!(
+                "{name} · {profile} · seq {} · {:.1} fps",
+                tile.last_seq, tile.fps
+            ),
+        }
     } else {
         format!("{name} · {profile} · waiting for frames…")
     };
@@ -246,6 +329,13 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
     if !parallax_h264::AVAILABLE {
         content = content.push(text(parallax_h264::UNAVAILABLE_HINT).size(11).style(muted));
     }
+    // Preferred-tier picker (#502): only shown with the decoder and once the
+    // catalogue advertises tiers to choose among.
+    if parallax_h264::AVAILABLE
+        && let Some(selector) = tier_selector(detail)
+    {
+        content = content.push(selector);
+    }
     match &detail.catalogue {
         Fetch::Idle => {
             content = content.push(
@@ -303,7 +393,7 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
         for chunk in tiles.chunks(TILES_PER_ROW) {
             let mut grid_row = row![].spacing(space::MD);
             for (name, tile_state) in chunk {
-                grid_row = grid_row.push(tile(name, tile_state));
+                grid_row = grid_row.push(tile(detail, name, tile_state));
             }
             content = content.push(grid_row);
         }
@@ -333,7 +423,7 @@ mod tests {
 
         let mut detail = ParallaxDetailState::default();
         let generation = detail.allocate_generation();
-        detail.open_tile("cam0", generation, None, true);
+        detail.open_tile("cam0", generation, None, true, Some("high".to_string()));
         assert!(
             expanded_overlay(&detail).is_none(),
             "no overlay while nothing is expanded"

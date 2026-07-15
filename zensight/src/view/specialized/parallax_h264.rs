@@ -3,12 +3,13 @@
 //! Default builds ship WITHOUT this (openh264 is a C++ build from source —
 //! unacceptable unconditionally on GUI/CI/flatpak): [`AVAILABLE`] is `false`
 //! and the parallax view renders a "build with `--features h264`" hint. With
-//! the feature, [`h264_tile_stream`] subscribes to
-//! `@media/<stream>/video/h264/*` — the profile chunk is a single-chunk
-//! wildcard because the sensor publishes on its **configurable**
-//! `video.profile` chunk, which the catalogue does not carry; the key stays
-//! scoped to exactly one stream and one codec (see `docs/KEYSPACE.md` §3.3)
-//! — and decodes access units directly
+//! the feature, [`h264_tile_stream`] subscribes to the **exact** tier key
+//! `@media/<stream>/video/h264/<tier>` — keyspace v1.3 revoked the
+//! `video/h264/*` wildcard licence (RFC 07 §3): the sensor publishes every
+//! tier of the ladder concurrently on its own key, the catalogue advertises
+//! which tiers a stream offers, and each viewer subscribes to exactly the one
+//! its link chose. A `*` here would pull *every* tier at once — the opposite
+//! of demand-driven simulcast. The stream then decodes access units directly
 //! (no parallax pipeline/executor — a leaked live-source blocking task in
 //! the GUI process would hang shutdown, see the sensor's `StoppableSource`
 //! notes): gate on the first `FrameMeta.keyframe`, decode → I420 → RGBA →
@@ -111,18 +112,19 @@ mod real {
         session: Arc<Session>,
         origin: String,
         stream: String,
+        tier: String,
         generation: u64,
     ) -> impl Stream<Item = Message> {
         async_stream::stream! {
-            // The profile chunk is a SINGLE-CHUNK wildcard: the sensor
-            // publishes on its configurable `video.profile` chunk (default
-            // `main`), which the catalogue does not carry — a hardcoded
-            // chunk broke every non-default profile silently. The key is
-            // still scoped to one stream + one codec, so the "no wildcard
-            // firehose" rule's intent holds; zenoh matching is
-            // intersection-based, so the sensor's matching listener sees
-            // this subscriber (pinned in the sensor e2e).
-            let key = media_video_key(Protocol::Parallax, &origin, &stream, "h264", "*");
+            // The EXACT tier key (keyspace v1.3): the sensor publishes each
+            // ladder tier concurrently on its own `video/h264/<tier>` key, the
+            // catalogue advertises which tiers a stream offers, and this viewer
+            // subscribes to exactly the one it picked. A `*` here would pull
+            // every tier at once (RFC 07 §3 revoked that licence). Zenoh
+            // matching is exact, so the sensor's per-tier matching listener
+            // counts this subscriber against that tier alone (pinned in the
+            // sensor e2e: two viewers on distinct tiers stream independently).
+            let key = media_video_key(Protocol::Parallax, &origin, &stream, "h264", &tier);
             let subscriber = match session.declare_subscriber(&key).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -243,8 +245,11 @@ mod real {
         #[test]
         fn encode_decode_round_trip_produces_rgba() {
             let (w, h) = (64u32, 48u32);
+            // 0.3.0: the config carries no geometry — dimensions travel with
+            // the frame data (`encode_yuv420_at`), so a resolution switch is a
+            // clean IDR with no configured size to contradict.
             let mut encoder = H264Encoder::new(
-                H264EncoderConfig::new(w, h)
+                H264EncoderConfig::new()
                     .bitrate(200_000)
                     .frame_rate(10.0)
                     .keyframe_interval(10),
@@ -258,7 +263,7 @@ mod real {
 
             let mut decoded = 0usize;
             for _ in 0..5 {
-                let nal = encoder.encode_yuv420(&yuv).expect("encode frame");
+                let nal = encoder.encode_yuv420_at(&yuv, w, h).expect("encode frame");
                 if nal.is_empty() {
                     continue;
                 }
@@ -277,14 +282,14 @@ mod real {
             // A reset decoder keeps working from the next IDR.
             decoder.reset().expect("reset");
             encoder.force_keyframe();
-            let nal = encoder.encode_yuv420(&yuv).expect("encode idr");
+            let nal = encoder.encode_yuv420_at(&yuv, w, h).expect("encode idr");
             assert!(
                 decoder
                     .decode_to_rgba(&nal)
                     .expect("decode after reset")
                     .is_some()
                     || decoder
-                        .decode_to_rgba(&encoder.encode_yuv420(&yuv).expect("encode next"))
+                        .decode_to_rgba(&encoder.encode_yuv420_at(&yuv, w, h).expect("encode next"))
                         .expect("decode next")
                         .is_some(),
                 "decoder must recover after reset + IDR"

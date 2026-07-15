@@ -561,6 +561,10 @@ pub enum Message {
     /// Dismiss the expanded-tile overlay (Esc / backdrop click / Close),
     /// restoring the tile's pre-expand profile.
     ParallaxCollapseTile,
+    /// Choose the bandwidth tier newly-opened video tiles prefer (#494/#502):
+    /// `Some(tier)` pins a ladder rung, `None` = auto (per-stream default).
+    /// A per-viewer choice — it steers future opens, never a live stream.
+    ParallaxSelectTier(Option<String>),
 
     // ── Cross-view identity pivots (#313) — host-local joins over already-
     // published data; every pivot is a query-time read, no new bus traffic.

@@ -683,7 +683,7 @@ mod tests {
             )
             .unwrap(),
             rpc_key(&host(), Some(&p("netlink")), &["sockets"]).unwrap(),
-            media_key(&host(), &p("parallax"), &["cam0", "video", "h264", "main"]).unwrap(),
+            media_key(&host(), &p("parallax"), &["cam0", "video", "h264", "high"]).unwrap(),
             blob_key(&host(), BlobTier::Store, &["sha256", "ab12cd34ef56"]).unwrap(),
             data_key(
                 &Origin::catalog(),
@@ -708,7 +708,7 @@ mod tests {
             "v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7",
             "v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd",
             "v1/h-3fa9c2d41b7e/@rpc/netlink/sockets",
-            "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main",
+            "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high",
             "v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56",
             "v1/@catalog/state/entity/h-3fa9c2d41b7e",
             "v1/@catalog/state/pdns/93-184-216-34",

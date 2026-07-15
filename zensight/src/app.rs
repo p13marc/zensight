@@ -1556,6 +1556,14 @@ impl ZenSight {
             Message::ParallaxCollapseTile => {
                 return ControlFlow::Break(self.collapse_parallax_tile());
             }
+            Message::ParallaxSelectTier(tier) => {
+                // Steers future video opens only; live tiles keep their tier
+                // (the sensor publishes every tier concurrently — switching is
+                // a re-open, not a live re-tune).
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.parallax_detail.preferred_tier = tier;
+                }
+            }
             other => return ControlFlow::Continue(other),
         }
         ControlFlow::Break(Task::none())
@@ -5293,7 +5301,7 @@ impl ZenSight {
                 let generation = device.parallax_detail.allocate_generation();
                 device
                     .parallax_detail
-                    .open_tile(&stream, generation, None, false);
+                    .open_tile(&stream, generation, None, false, None);
             }
             return Task::none();
         }
@@ -5306,10 +5314,15 @@ impl ZenSight {
         // the pre-expand profile, #436) replaces the tile state, so the
         // earlier `open_stream` must be balanced with a `close_stream` —
         // same ordering rationale as the preview→video switch below.
-        let was_open = self
-            .selected_device
-            .as_ref()
-            .is_some_and(|d| d.parallax_detail.is_open(&stream));
+        // Capture the OUTGOING tile's profile-correct close BEFORE `open_tile`
+        // replaces it: a codec-less close would reap the wrong per-tier
+        // refcount (the sensor resolves it to the default video tier).
+        let old_close = self.selected_device.as_ref().and_then(|d| {
+            d.parallax_detail
+                .tiles
+                .get(&stream)
+                .map(|t| t.close_control(&stream))
+        });
         let Some(generation) = self
             .selected_device
             .as_mut()
@@ -5345,6 +5358,7 @@ impl ZenSight {
                 generation,
                 Some(handle.abort_on_drop()),
                 false,
+                None,
             );
         }
         let cmd_key = self.parallax_stream_set_key(&source);
@@ -5352,19 +5366,15 @@ impl ZenSight {
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
                 codec: Some("mjpeg".to_string()),
-                max_height: None,
+                tier: None,
             });
         let mut send = self.send_command(
             cmd_key.clone(),
             &open,
             format!("Opened preview for {stream}"),
         );
-        if was_open {
-            let close = zensight_common::command::Command::new(
-                zensight_common::StreamControl::CloseStream {
-                    stream: stream.clone(),
-                },
-            );
+        if let Some(close) = old_close {
+            let close = zensight_common::command::Command::new(close);
             send = self
                 .send_command(cmd_key, &close, format!("Closed video for {stream}"))
                 .chain(send);
@@ -5383,16 +5393,24 @@ impl ZenSight {
         else {
             return Task::none();
         };
+        // Capture the tile's profile-correct close (preview vs its exact video
+        // tier) BEFORE dropping it — a codec-less close would reap the wrong
+        // per-tier refcount on the sensor.
+        let close_control = self
+            .selected_device
+            .as_ref()
+            .and_then(|d| d.parallax_detail.tiles.get(&stream))
+            .map(|t| t.close_control(&stream));
         if let Some(device) = self.selected_device.as_mut() {
             device.parallax_detail.close_tile(&stream);
         }
         if self.demo_mode || self.command_registry.is_none() {
             return Task::none();
         }
-        let close =
-            zensight_common::command::Command::new(zensight_common::StreamControl::CloseStream {
-                stream: stream.clone(),
-            });
+        let Some(close_control) = close_control else {
+            return Task::none();
+        };
+        let close = zensight_common::command::Command::new(close_control);
         self.send_command(
             self.parallax_stream_set_key(&source),
             &close,
@@ -5415,12 +5433,26 @@ impl ZenSight {
         else {
             return Task::none();
         };
+        // The exact tier to open + subscribe to (#494/#502): the user's
+        // preferred tier when this stream offers it, else the catalogue
+        // default (medium, or the highest a small camera can feed). A stream
+        // whose catalogue hasn't loaded falls back to the sensor's own default
+        // tier name, which every ladder defines.
+        let tier = self
+            .selected_device
+            .as_ref()
+            .and_then(|d| d.parallax_detail.resolve_tier(&stream))
+            .unwrap_or_else(|| "medium".to_string());
         if self.demo_mode {
             if let Some(device) = self.selected_device.as_mut() {
                 let generation = device.parallax_detail.allocate_generation();
-                device
-                    .parallax_detail
-                    .open_tile(&stream, generation, None, true);
+                device.parallax_detail.open_tile(
+                    &stream,
+                    generation,
+                    None,
+                    true,
+                    Some(tier.clone()),
+                );
             }
             return Task::none();
         }
@@ -5437,12 +5469,16 @@ impl ZenSight {
         // strictly ordered: `Task::chain` awaits the close put before the
         // open put, both ride the same cached declared publisher on the same
         // key (per-publisher order is preserved), and the sensor's command
-        // loop feeds its actor mpsc in arrival order. At this point only the
-        // preview profile is open, so the codec-less decrement is balanced.
-        let was_open = self
-            .selected_device
-            .as_ref()
-            .is_some_and(|d| d.parallax_detail.is_open(&stream));
+        // loop feeds its actor mpsc in arrival order. Capture the outgoing
+        // tile's profile-correct close BEFORE `open_tile` replaces it (a
+        // codec-less close would reap the sensor's default video tier, not the
+        // preview / old tier this tile actually held).
+        let old_close = self.selected_device.as_ref().and_then(|d| {
+            d.parallax_detail
+                .tiles
+                .get(&stream)
+                .map(|t| t.close_control(&stream))
+        });
         let Some(generation) = self
             .selected_device
             .as_mut()
@@ -5463,6 +5499,7 @@ impl ZenSight {
             session,
             media_origin,
             stream.clone(),
+            tier.clone(),
             generation,
         ))
         .abortable();
@@ -5472,6 +5509,7 @@ impl ZenSight {
                 generation,
                 Some(handle.abort_on_drop()),
                 true,
+                Some(tier.clone()),
             );
         }
         let cmd_key = self.parallax_stream_set_key(&source);
@@ -5479,16 +5517,12 @@ impl ZenSight {
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
                 codec: Some("h264".to_string()),
-                max_height: None,
+                tier: Some(tier.clone()),
             });
         let mut send =
             self.send_command(cmd_key.clone(), &open, format!("Opened video for {stream}"));
-        if was_open {
-            let close = zensight_common::command::Command::new(
-                zensight_common::StreamControl::CloseStream {
-                    stream: stream.clone(),
-                },
-            );
+        if let Some(close) = old_close {
+            let close = zensight_common::command::Command::new(close);
             send = self
                 .send_command(cmd_key, &close, format!("Closed preview for {stream}"))
                 .chain(send);
@@ -5521,9 +5555,17 @@ impl ZenSight {
         if self.demo_mode || self.command_registry.is_none() {
             return Task::none();
         }
+        // Resync the exact tier this tile watches — the sensor forces an IDR on
+        // that tier's encoder alone (a `None` tier would re-key the default).
+        let tier = self
+            .selected_device
+            .as_ref()
+            .and_then(|d| d.parallax_detail.tiles.get(&stream))
+            .and_then(|t| t.selected_tier.clone());
         let request = zensight_common::command::Command::new(
             zensight_common::StreamControl::RequestKeyframe {
                 stream: stream.clone(),
+                tier,
             },
         );
         // Quiet on success: resync-driven requests are automatic and can
@@ -5611,12 +5653,8 @@ impl ZenSight {
             return Task::none();
         }
         let cmd_key = self.parallax_stream_set_key(&source);
-        Task::batch(streams.into_iter().map(|stream| {
-            let close = zensight_common::command::Command::new(
-                zensight_common::StreamControl::CloseStream {
-                    stream: stream.clone(),
-                },
-            );
+        Task::batch(streams.into_iter().map(|(stream, control)| {
+            let close = zensight_common::command::Command::new(control);
             self.send_command(
                 cmd_key.clone(),
                 &close,

@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use zensight_common::command::query_key;
+use zensight_common::stream::TierSpec;
 
 use crate::catalog::Catalog;
 use crate::session::SessionHandle;
@@ -16,11 +17,13 @@ use crate::session::SessionHandle;
 /// Run the streams catalogue queryable until the session closes.
 ///
 /// `producer` is the producer name (`"parallax"`); the key is
-/// origin-scoped (`zensight/v1/<origin>/@rpc/parallax/streams`).
+/// origin-scoped (`zensight/v1/<origin>/@rpc/parallax/streams`). `tiers` is the
+/// sensor's tier ladder, stamped into each descriptor (filtered per source).
 pub async fn run(
     session: Arc<zenoh::Session>,
     producer: String,
     catalog: Arc<Catalog>,
+    tiers: Vec<TierSpec>,
     handle: SessionHandle,
 ) {
     let key = query_key(&producer, "streams");
@@ -36,7 +39,7 @@ pub async fn run(
     while let Ok(query) = queryable.recv_async().await {
         // Stamp `active` from the actor's open set (empty if the actor died).
         let open = handle.open_streams().await;
-        let descriptors = catalog.descriptors(&open);
+        let descriptors = catalog.descriptors(&open, &tiers);
         match serde_json::to_vec(&descriptors) {
             Ok(payload) => {
                 if let Err(e) = query.reply(key.as_str(), payload).await {

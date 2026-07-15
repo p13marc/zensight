@@ -183,6 +183,25 @@ Normative field table (`[[subject]]`; `[[procedure]]`/`[[media]]` analogous):
 | `since` / `gone` / `replaced_by` | registry versions / path | `since` yes | lifecycle (§3) |
 | `description` | string | yes | one line, human |
 
+`[[media]]` entries (the `@media` plane, RFC 07 §1) are **not** "analogous" —
+they carry opaque encoded frames, not a class payload, so they have their own
+normative field table:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `path` | pattern string | yes | media sub-path after `@media/<producer>/`; same variable rules as below |
+| `encoding` | middleware `Encoding` (may be a `type/*` family) | yes | the wire `Encoding` set on every sample (`video/h264`, `image/jpeg`) — the codec is declared here, never in a payload envelope |
+| `attachment` | type-table name | yes | the per-frame sidecar type on the Zenoh attachment (`FrameMeta`); **CI-resolved against the shared type table** ([§5](#5-ownership-and-process)), exactly like a `[[subject]]` `type`, so a typo or a drifted schema fails the build |
+| `cardinality` | integer | yes if `path` has any `{var}` | key-population bound, budget-reviewed — the same rule as `[[subject]]`, and it now binds the highest-bandwidth plane, whose `{tier}` chunk multiplies its key count |
+| `since` / `gone` / `replaced_by` | registry versions / path | `since` yes | lifecycle (§3) |
+| `description` | string | recommended | one line, human |
+
+A `[[media]]` entry has **no** `class`/`qos`/`ttl_s`/`seed` — those are
+data-class concepts; `@media` QoS is fixed by RFC 07 §1
+(best-effort · drop · interactive-high) and is not a per-entry knob. Media key
+builders are generated from these entries the same way subject/procedure
+builders are, so a hand-written `media_*_key()` cannot drift from the registry.
+
 Variable rules:
 
 - `{var}` = exactly one chunk; MUST document its domain (device name, unit

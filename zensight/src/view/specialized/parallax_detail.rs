@@ -19,7 +19,7 @@ use iced::futures::Stream;
 use iced::widget::image;
 use zenoh::Session;
 use zensight_common::keyexpr::{media_preview_key, origin_rpc_key};
-use zensight_common::stream::{FrameMeta, StreamDescriptor};
+use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus, TierSpec};
 use zensight_common::{Format, Protocol, decode};
 
 use super::fetch::Fetch;
@@ -45,6 +45,16 @@ pub struct ParallaxDetailState {
     pub catalogue: Fetch<Vec<StreamDescriptor>>,
     /// Open preview tiles, keyed by stream name (BTreeMap: stable grid order).
     pub tiles: BTreeMap<String, TileState>,
+    /// Latest per-stream `StreamStatus` (`state/parallax/stream/<stream>`),
+    /// keyed by stream. Carries each open tier's **applied** params
+    /// (resolution/fps/bitrate) + viewer count — the honest bandwidth readout
+    /// the tile shows (#503), sourced from the sensor rather than a client-side
+    /// arrival EMA.
+    pub status: BTreeMap<String, StreamStatus>,
+    /// The tier newly-opened video tiles prefer, when the stream offers it
+    /// (#502). `None` = let each stream fall back to its catalogue default.
+    /// A per-viewer choice: it only steers future opens, never a live stream.
+    pub preferred_tier: Option<String>,
     /// The tile currently shown in the near-fullscreen overlay (#436).
     /// Lives on this state (not the app) so every existing teardown choke
     /// point that clears the tiles also dismisses the overlay.
@@ -93,10 +103,20 @@ pub struct TileState {
     /// preview). Set at open; the expand overlay uses it to decide whether
     /// to upgrade and what to restore on collapse (#436).
     pub video: bool,
+    /// For a video tile, the exact `<tier>` it subscribes to and opened on
+    /// the sensor (#494/#502). `None` for a JPEG preview tile (previews have
+    /// no tier). Every close/keyframe for this tile must carry it so the
+    /// sensor decrements the *right* per-tier refcount.
+    pub selected_tier: Option<String>,
 }
 
 impl TileState {
-    fn new(generation: u64, abort: Option<iced::task::Handle>, video: bool) -> Self {
+    fn new(
+        generation: u64,
+        abort: Option<iced::task::Handle>,
+        video: bool,
+        selected_tier: Option<String>,
+    ) -> Self {
         Self {
             generation,
             frame: None,
@@ -106,6 +126,27 @@ impl TileState {
             abort,
             ended: None,
             video,
+            selected_tier,
+        }
+    }
+
+    /// The `CloseStream` that reaps exactly this tile's profile. A codec-less
+    /// close would resolve to the sensor's *default video tier* (see the
+    /// sensor's `resolve_profile`), so a preview or a non-default tier must
+    /// name its own codec/tier or the wrong refcount is decremented.
+    pub fn close_control(&self, stream: &str) -> StreamControl {
+        if self.video {
+            StreamControl::CloseStream {
+                stream: stream.to_string(),
+                codec: Some("h264".to_string()),
+                tier: self.selected_tier.clone(),
+            }
+        } else {
+            StreamControl::CloseStream {
+                stream: stream.to_string(),
+                codec: Some("mjpeg".to_string()),
+                tier: None,
+            }
         }
     }
 }
@@ -144,9 +185,42 @@ impl ParallaxDetailState {
         generation: u64,
         abort: Option<iced::task::Handle>,
         video: bool,
+        selected_tier: Option<String>,
     ) {
-        self.tiles
-            .insert(stream.to_string(), TileState::new(generation, abort, video));
+        self.tiles.insert(
+            stream.to_string(),
+            TileState::new(generation, abort, video, selected_tier),
+        );
+    }
+
+    /// The tiers `stream` offers, per the catalogue (empty if unknown).
+    pub fn offered_tiers(&self, stream: &str) -> &[TierSpec] {
+        self.catalogue
+            .ready()
+            .and_then(|streams| streams.iter().find(|s| s.stream == stream))
+            .map(|s| s.tiers.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Resolve which tier a new video tile for `stream` should open on: the
+    /// user's [`preferred_tier`](Self::preferred_tier) when the stream offers
+    /// it, else `medium` if offered, else the highest-quality offered tier
+    /// (the ladder's tail). `None` only when the catalogue lists no tiers.
+    pub fn resolve_tier(&self, stream: &str) -> Option<String> {
+        let tiers = self.offered_tiers(stream);
+        if tiers.is_empty() {
+            return None;
+        }
+        if let Some(pref) = self.preferred_tier.as_deref()
+            && tiers.iter().any(|t| t.name == pref)
+        {
+            return Some(pref.to_string());
+        }
+        tiers
+            .iter()
+            .find(|t| t.name == "medium")
+            .or_else(|| tiers.last())
+            .map(|t| t.name.clone())
     }
 
     /// Expand `stream`'s tile into the near-fullscreen overlay (#436),
@@ -237,7 +311,10 @@ impl ParallaxDetailState {
     /// frame means the open failed on the sensor — surface it instead of
     /// "waiting for frames…" forever. The subscriber task stays alive (the
     /// hint self-heals if frames do arrive later: `apply_frame` clears it).
-    pub fn apply_stream_status(&mut self, status: &zensight_common::stream::StreamStatus) {
+    pub fn apply_stream_status(&mut self, status: &StreamStatus) {
+        // Keep the latest per-tier applied params + viewer counts for the
+        // tile's bandwidth readout (#503).
+        self.status.insert(status.stream.clone(), status.clone());
         if status.open {
             return;
         }
@@ -247,6 +324,20 @@ impl ParallaxDetailState {
         {
             tile.ended = Some("stream failed to open on the sensor".to_string());
         }
+    }
+
+    /// The applied params the sensor reports for `stream`'s `tier`, if that
+    /// tier is currently open (drives the honest per-tile bandwidth readout).
+    pub fn applied_tier(
+        &self,
+        stream: &str,
+        tier: &str,
+    ) -> Option<&zensight_common::stream::TierStatus> {
+        self.status
+            .get(stream)?
+            .tiers
+            .iter()
+            .find(|t| t.tier == tier)
     }
 
     /// Close one tile: abort its subscriber task and drop it. Dismisses the
@@ -268,17 +359,22 @@ impl ParallaxDetailState {
 
     /// Tear every tile down (device deselected / disconnected): abort all
     /// subscriber tasks, clear the map (and the expanded overlay with it),
-    /// and return the stream names so the caller can batch `close_stream`
-    /// commands.
-    pub fn teardown(&mut self) -> Vec<String> {
+    /// and return each tile's `(stream, CloseStream)` so the caller can batch
+    /// the profile-correct `close_stream` commands (a codec-less close would
+    /// reap the wrong per-tier refcount).
+    pub fn teardown(&mut self) -> Vec<(String, StreamControl)> {
         self.expanded = None;
-        let streams: Vec<String> = self.tiles.keys().cloned().collect();
+        let closes: Vec<(String, StreamControl)> = self
+            .tiles
+            .iter()
+            .map(|(stream, tile)| (stream.clone(), tile.close_control(stream)))
+            .collect();
         for (_, tile) in std::mem::take(&mut self.tiles) {
             if let Some(abort) = tile.abort {
                 abort.abort();
             }
         }
-        streams
+        closes
     }
 }
 
@@ -385,7 +481,7 @@ mod tests {
     fn frames_replace_and_stale_sequences_drop() {
         let mut state = ParallaxDetailState::default();
         let generation = state.allocate_generation();
-        state.open_tile("cam0", generation, None, false);
+        state.open_tile("cam0", generation, None, false, None);
 
         assert!(state.apply_frame("cam0", generation, 5, dummy_handle()));
         assert_eq!(state.tiles["cam0"].last_seq, 5);
@@ -406,14 +502,14 @@ mod tests {
     fn stale_generation_frames_are_ignored() {
         let mut state = ParallaxDetailState::default();
         let old = state.allocate_generation();
-        state.open_tile("cam0", old, None, false);
+        state.open_tile("cam0", old, None, false, None);
         assert!(state.apply_frame("cam0", old, 500, dummy_handle()));
 
         // Replace the tile (e.g. preview → video switch): a leftover frame
         // from the old subscriber must not land on the new tile — its
         // sequence domain (500…) would freeze the new tile at seq 0….
         let new = state.allocate_generation();
-        state.open_tile("cam0", new, None, false);
+        state.open_tile("cam0", new, None, false, None);
         assert!(!state.apply_frame("cam0", old, 501, dummy_handle()));
         assert!(state.tiles["cam0"].frame.is_none());
 
@@ -426,7 +522,7 @@ mod tests {
     fn restart_regression_reanchors_within_a_generation() {
         let mut state = ParallaxDetailState::default();
         let generation = state.allocate_generation();
-        state.open_tile("cam0", generation, None, false);
+        state.open_tile("cam0", generation, None, false, None);
         assert!(state.apply_frame("cam0", generation, 5_000, dummy_handle()));
 
         // A small regression is reordering: dropped.
@@ -444,9 +540,9 @@ mod tests {
     fn stale_tile_ended_does_not_kill_the_new_tile() {
         let mut state = ParallaxDetailState::default();
         let old = state.allocate_generation();
-        state.open_tile("cam0", old, None, false);
+        state.open_tile("cam0", old, None, false, None);
         let new = state.allocate_generation();
-        state.open_tile("cam0", new, None, false);
+        state.open_tile("cam0", new, None, false, None);
 
         // The replaced (aborted) subscriber's end report arrives late: it
         // must neither clear the new tile's abort handle nor mark it ended.
@@ -463,14 +559,13 @@ mod tests {
         use zensight_common::stream::StreamStatus;
         let mut state = ParallaxDetailState::default();
         let generation = state.allocate_generation();
-        state.open_tile("cam0", generation, None, false);
+        state.open_tile("cam0", generation, None, false, None);
 
         // open: true transitions never touch the tile.
         state.apply_stream_status(&StreamStatus {
             stream: "cam0".into(),
             open: true,
-            viewers: 1,
-            profile: Some("mjpeg".into()),
+            tiers: Vec::new(),
         });
         assert!(state.tiles["cam0"].ended.is_none());
 
@@ -478,8 +573,7 @@ mod tests {
         let closed = StreamStatus {
             stream: "cam0".into(),
             open: false,
-            viewers: 0,
-            profile: None,
+            tiers: Vec::new(),
         };
         state.apply_stream_status(&closed);
         assert!(
@@ -504,9 +598,9 @@ mod tests {
     fn end_and_close_lifecycle() {
         let mut state = ParallaxDetailState::default();
         let g0 = state.allocate_generation();
-        state.open_tile("cam0", g0, None, false);
+        state.open_tile("cam0", g0, None, false, None);
         let g1 = state.allocate_generation();
-        state.open_tile("cam1", g1, None, false);
+        state.open_tile("cam1", g1, None, false, None);
         assert!(state.is_open("cam0"));
 
         state.end_tile("cam0", g0, Some("boom".into()));
@@ -516,7 +610,8 @@ mod tests {
         assert!(!state.is_open("cam0"));
 
         let torn = state.teardown();
-        assert_eq!(torn, vec!["cam1".to_string()]);
+        let torn_streams: Vec<String> = torn.into_iter().map(|(stream, _)| stream).collect();
+        assert_eq!(torn_streams, vec!["cam1".to_string()]);
         assert!(state.tiles.is_empty());
     }
 
@@ -524,7 +619,7 @@ mod tests {
     fn expand_collapse_lifecycle() {
         let mut state = ParallaxDetailState::default();
         let generation = state.allocate_generation();
-        state.open_tile("cam0", generation, None, false);
+        state.open_tile("cam0", generation, None, false, None);
 
         // Expanding an unknown tile is a no-op.
         assert!(state.expand("nope").is_none());
@@ -542,7 +637,7 @@ mod tests {
         // expansion (keyed by stream) survives and remembers the pre-expand
         // profile.
         let upgraded = state.allocate_generation();
-        state.open_tile("cam0", upgraded, None, true);
+        state.open_tile("cam0", upgraded, None, true, Some("high".to_string()));
         assert!(state.expanded_tile().is_some_and(|(_, tile)| tile.video));
 
         // Collapse hands the expansion back so the caller can restore.
@@ -560,9 +655,9 @@ mod tests {
     fn close_and_teardown_dismiss_the_expansion() {
         let mut state = ParallaxDetailState::default();
         let g0 = state.allocate_generation();
-        state.open_tile("cam0", g0, None, true);
+        state.open_tile("cam0", g0, None, true, Some("high".to_string()));
         let g1 = state.allocate_generation();
-        state.open_tile("cam1", g1, None, false);
+        state.open_tile("cam1", g1, None, false, None);
 
         // Closing an unrelated tile keeps the overlay up…
         state.expand("cam0");
@@ -574,7 +669,7 @@ mod tests {
 
         // Teardown (device/view switch, disconnect) always dismisses.
         let g2 = state.allocate_generation();
-        state.open_tile("cam0", g2, None, false);
+        state.open_tile("cam0", g2, None, false, None);
         state.expand("cam0");
         state.teardown();
         assert!(state.expanded.is_none());
@@ -591,10 +686,83 @@ mod tests {
             stream: "cam0".into(),
             codecs: vec!["h264".into(), "mjpeg".into()],
             active: false,
+            width: Some(640),
+            height: Some(480),
+            fps: Some(30.0),
+            tiers: vec![TierSpec {
+                name: "high".into(),
+                max_height: None,
+                fps: 30,
+                bitrate_kbps: 4000,
+            }],
             description: None,
         }]));
         assert_eq!(state.catalogue.ready().map(|v| v.len()), Some(1));
         state.apply(Err("no sensor".into()));
         assert_eq!(state.catalogue.error(), Some("no sensor"));
+    }
+
+    fn spec(name: &str, max_height: Option<u32>) -> TierSpec {
+        TierSpec {
+            name: name.into(),
+            max_height,
+            fps: 30,
+            bitrate_kbps: 4000,
+        }
+    }
+
+    fn ladder_descriptor() -> StreamDescriptor {
+        StreamDescriptor {
+            stream: "cam0".into(),
+            codecs: vec!["h264".into(), "mjpeg".into()],
+            active: false,
+            width: Some(1280),
+            height: Some(720),
+            fps: Some(30.0),
+            tiers: vec![
+                spec("low", Some(240)),
+                spec("medium", Some(480)),
+                spec("high", None),
+            ],
+            description: None,
+        }
+    }
+
+    #[test]
+    fn close_control_names_the_tiles_own_profile() {
+        // A preview closes on mjpeg with no tier; a video tile closes on its
+        // EXACT tier — never a codec-less close (which the sensor would resolve
+        // to its default video tier, decrementing the wrong refcount).
+        let preview = TileState::new(1, None, false, None);
+        assert!(matches!(
+            preview.close_control("cam0"),
+            StreamControl::CloseStream { codec: Some(c), tier: None, .. } if c == "mjpeg"
+        ));
+        let video = TileState::new(2, None, true, Some("low".into()));
+        assert!(matches!(
+            video.close_control("cam0"),
+            StreamControl::CloseStream { codec: Some(c), tier: Some(t), .. }
+                if c == "h264" && t == "low"
+        ));
+    }
+
+    #[test]
+    fn resolve_tier_honors_preference_then_catalogue_default() {
+        let mut state = ParallaxDetailState::default();
+        // No catalogue yet → nothing to resolve.
+        assert_eq!(state.resolve_tier("cam0"), None);
+
+        state.apply(Ok(vec![ladder_descriptor()]));
+        // Default: medium is offered, so it wins over the highest tier.
+        assert_eq!(state.resolve_tier("cam0").as_deref(), Some("medium"));
+
+        // A preference the stream offers is honored.
+        state.preferred_tier = Some("low".into());
+        assert_eq!(state.resolve_tier("cam0").as_deref(), Some("low"));
+
+        // A preference the stream does NOT offer falls back to the default —
+        // never advertises a tier the camera can't feed.
+        state.preferred_tier = Some("ultra".into());
+        assert_eq!(state.resolve_tier("cam0").as_deref(), Some("medium"));
     }
 }

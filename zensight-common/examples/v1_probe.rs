@@ -325,7 +325,7 @@ async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Resu
     let open = zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
         stream: stream.clone(),
         codec: Some("mjpeg".into()),
-        max_height: None,
+        tier: None,
     });
     let set_key = format!("zensight/v1/{origin}/@rpc/parallax/stream/set");
     let body = serde_json::to_vec(&open).map_err(|e| e.to_string())?;
@@ -353,6 +353,8 @@ async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Resu
     let close =
         zensight_common::command::Command::new(zensight_common::StreamControl::CloseStream {
             stream: stream.clone(),
+            codec: Some("mjpeg".into()),
+            tier: None,
         });
     let body = serde_json::to_vec(&close).map_err(|e| e.to_string())?;
     if let Ok(replies) = session

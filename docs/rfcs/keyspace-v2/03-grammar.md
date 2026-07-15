@@ -437,7 +437,7 @@ zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
 zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
 zensight/v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
 zensight/v1/h-3fa9c2d41b7e/@rpc/netlink/sockets
-zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
+zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high
 zensight/v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56
 zensight/v1/@catalog/state/entity/h-3fa9c2d41b7e
 zensight/v1/@catalog/state/pdns/93-184-216-34

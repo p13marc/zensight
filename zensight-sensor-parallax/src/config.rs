@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
+use zensight_common::stream::TierSpec;
 use zensight_sensor_core::{SensorConfig, SensorError, ZenohConfig};
 
 // Re-export LoggingConfig from the framework (they're compatible).
@@ -140,6 +141,11 @@ pub struct PreviewConfig {
     /// JPEG quality 1–100 (default: 75).
     #[serde(default = "default_preview_quality")]
     pub quality: u8,
+    /// Aspect-preserving height cap for the preview, in pixels (default: 360).
+    /// A 1080p camera's thumbnail is a 1080p JPEG otherwise — ~30× the pixels a
+    /// tile needs (#501). `None` = source size.
+    #[serde(default = "default_preview_max_height")]
+    pub max_height: Option<u32>,
 }
 
 impl Default for PreviewConfig {
@@ -147,30 +153,35 @@ impl Default for PreviewConfig {
         Self {
             fps: default_preview_fps(),
             quality: default_preview_quality(),
+            max_height: default_preview_max_height(),
         }
     }
 }
 
-/// H.264 video profile settings.
+/// H.264 video settings: a shared GOP plus the **tier ladder** — the sensor owns
+/// the numbers, the wire and the `<tier>` key carry the name (#498). Each tier is
+/// published concurrently on its own `@media/<stream>/video/h264/<tier>` key, so
+/// two viewers on different links each subscribe to the tier their link can take
+/// without fighting over one encoder (#494).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoConfig {
-    /// Target bitrate in kbit/s (default: 2000).
-    #[serde(default = "default_bitrate_kbps")]
-    pub bitrate_kbps: u32,
-    /// Keyframe (GOP) interval in frames (default: 60).
+    /// Keyframe (GOP) interval in frames, shared across tiers (default: 60).
     #[serde(default = "default_gop_frames")]
     pub gop_frames: u32,
-    /// Profile name used in the media key chunk (default: "main").
-    #[serde(default = "default_video_profile")]
-    pub profile: String,
+    /// The bandwidth tiers this sensor offers (default: low/medium/high).
+    #[serde(default = "default_tiers")]
+    pub tiers: Vec<TierSpec>,
+    /// Which tier an `OpenStream` with no explicit tier resolves to.
+    #[serde(default = "default_default_tier")]
+    pub default_tier: String,
 }
 
 impl Default for VideoConfig {
     fn default() -> Self {
         Self {
-            bitrate_kbps: default_bitrate_kbps(),
             gop_frames: default_gop_frames(),
-            profile: default_video_profile(),
+            tiers: default_tiers(),
+            default_tier: default_default_tier(),
         }
     }
 }
@@ -207,16 +218,42 @@ fn default_preview_quality() -> u8 {
     75
 }
 
-fn default_bitrate_kbps() -> u32 {
-    2000
-}
-
 fn default_gop_frames() -> u32 {
     60
 }
 
-fn default_video_profile() -> String {
-    "main".to_string()
+fn default_preview_max_height() -> Option<u32> {
+    Some(360)
+}
+
+/// The default bandwidth ladder (#498). Bandwidth is ~linear in pixel count at
+/// constant quality, so each rung down is a large, deliberate saving for a
+/// constrained link.
+fn default_tiers() -> Vec<TierSpec> {
+    vec![
+        TierSpec {
+            name: "low".into(),
+            max_height: Some(240),
+            fps: 10,
+            bitrate_kbps: 400,
+        },
+        TierSpec {
+            name: "medium".into(),
+            max_height: Some(480),
+            fps: 20,
+            bitrate_kbps: 1200,
+        },
+        TierSpec {
+            name: "high".into(),
+            max_height: None,
+            fps: 30,
+            bitrate_kbps: 4000,
+        },
+    ]
+}
+
+fn default_default_tier() -> String {
+    "medium".to_string()
 }
 
 fn default_idle_timeout() -> u64 {
@@ -290,15 +327,65 @@ impl ParallaxSensorConfig {
                 )));
             }
         }
-        if p.video.bitrate_kbps == 0 {
+        if let Some(mh) = p.preview.max_height
+            && mh < 2
+        {
             return Err(ConfigError::Validation(
-                "video.bitrate_kbps must be > 0".to_string(),
+                "preview.max_height must be >= 2".to_string(),
             ));
         }
         if p.video.gop_frames == 0 {
             return Err(ConfigError::Validation(
                 "video.gop_frames must be > 0".to_string(),
             ));
+        }
+        // The tier ladder (#498): non-empty, uniquely named single-chunk tiers,
+        // each with a real fps/bitrate, and a default_tier that names one of them.
+        if p.video.tiers.is_empty() {
+            return Err(ConfigError::Validation(
+                "video.tiers must not be empty".to_string(),
+            ));
+        }
+        let mut tier_names = std::collections::HashSet::new();
+        for t in &p.video.tiers {
+            if t.name.is_empty() || t.name.contains('/') || t.name.contains('*') {
+                return Err(ConfigError::Validation(format!(
+                    "tier name {:?} must be a single key chunk (no '/' or '*')",
+                    t.name
+                )));
+            }
+            if !tier_names.insert(&t.name) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate tier name {:?}",
+                    t.name
+                )));
+            }
+            if t.fps == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "tier {:?}: fps must be > 0",
+                    t.name
+                )));
+            }
+            if t.bitrate_kbps == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "tier {:?}: bitrate_kbps must be > 0",
+                    t.name
+                )));
+            }
+            if let Some(mh) = t.max_height
+                && mh < 2
+            {
+                return Err(ConfigError::Validation(format!(
+                    "tier {:?}: max_height must be >= 2",
+                    t.name
+                )));
+            }
+        }
+        if !p.video.tiers.iter().any(|t| t.name == p.video.default_tier) {
+            return Err(ConfigError::Validation(format!(
+                "video.default_tier {:?} names no tier in the ladder",
+                p.video.default_tier
+            )));
         }
         if p.idle_timeout_secs == 0 {
             return Err(ConfigError::Validation(
@@ -368,9 +455,17 @@ mod tests {
         assert!(config.parallax.test_sources.is_empty());
         assert_eq!(config.parallax.preview.fps, 2);
         assert_eq!(config.parallax.preview.quality, 75);
-        assert_eq!(config.parallax.video.bitrate_kbps, 2000);
         assert_eq!(config.parallax.video.gop_frames, 60);
-        assert_eq!(config.parallax.video.profile, "main");
+        // Default tier ladder: low / medium / high, defaulting to medium.
+        let tier_names: Vec<&str> = config
+            .parallax
+            .video
+            .tiers
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(tier_names, vec!["low", "medium", "high"]);
+        assert_eq!(config.parallax.video.default_tier, "medium");
         assert_eq!(config.parallax.idle_timeout_secs, 30);
         assert_eq!(config.parallax.stats_interval_secs, 5);
     }
@@ -391,7 +486,14 @@ mod tests {
                     { name: "test0", pattern: "ball", width: 640, height: 360, fps: 10 },
                 ],
                 preview: { fps: 4, quality: 60 },
-                video: { bitrate_kbps: 4000, gop_frames: 30, profile: "main" },
+                video: {
+                    gop_frames: 30,
+                    default_tier: "low",
+                    tiers: [
+                        { name: "low",  max_height: 240, fps: 10, bitrate_kbps: 500 },
+                        { name: "full", max_height: null, fps: 30, bitrate_kbps: 4000 },
+                    ],
+                },
                 idle_timeout_secs: 10,
                 stats_interval_secs: 2,
             }
@@ -406,7 +508,10 @@ mod tests {
         assert_eq!((t.width, t.height, t.fps), (640, 360, 10));
         assert_eq!(t.pattern, "ball");
         assert_eq!(config.parallax.preview.fps, 4);
-        assert_eq!(config.parallax.video.bitrate_kbps, 4000);
+        assert_eq!(config.parallax.video.gop_frames, 30);
+        assert_eq!(config.parallax.video.default_tier, "low");
+        assert_eq!(config.parallax.video.tiers.len(), 2);
+        assert_eq!(config.parallax.video.tiers[1].bitrate_kbps, 4000);
     }
 
     #[test]

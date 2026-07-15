@@ -6086,9 +6086,9 @@ dependencies = [
 
 [[package]]
 name = "parallax-pipeline"
-version = "0.1.3"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf42d2c904376cfb17ce0ad412de773f220905ba92d867216f932f029a7d0cbe"
+checksum = "cbc873ef2f2d11d3d22c57c52209a0cc516c31d2542601b4a054e950286f98bb"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6101,6 +6101,7 @@ dependencies = [
  "libloading 0.9.0",
  "metrics",
  "openh264",
+ "openh264-sys2",
  "paste",
  "quick-xml 0.41.0",
  "regex",

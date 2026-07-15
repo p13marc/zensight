@@ -92,7 +92,7 @@ break spoke-to-spoke discovery the first time it is used in anger.
 | Protocol-specialist view | `zensight/v1/*/telemetry/netring/**` | one `*`, protocol-first ergonomics preserved |
 | Catalog (evidence intake) | `zensight/v1/*/state/*/evidence/**` | |
 | Late-joiner seeds | `GET` the same state selectors | state is its own seed ([05-control-rpc.md §4](05-control-rpc.md)); discipline in [04-planes.md §3.2](04-planes.md) |
-| Media viewer | exact `…/@media/<producer>/<stream>/preview/jpeg`, or `…/video/<codec>/*` | single-stream only, by construction |
+| Media viewer | exact `…/@media/<producer>/<stream>/preview/jpeg`, or exact `…/video/<codec>/<tier>` | single-stream, single-tier — no `@media` wildcard (07 §1) |
 
 Anti-patterns:
 

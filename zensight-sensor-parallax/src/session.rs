@@ -37,11 +37,15 @@ use crate::{egress, pipeline};
 /// Capacity of the actor's command channel.
 const CHANNEL_CAPACITY: usize = 64;
 
-/// One of the two per-stream media profiles.
+/// One per-stream media profile. A stream has at most one `Preview` and one
+/// `Video(tier)` per tier index — distinct tiers are **independent** encoders
+/// published concurrently on distinct `@media/<stream>/video/h264/<tier>` keys,
+/// so two viewers on different links never fight over one encoder (#494). The
+/// `u8` indexes the config tier ladder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Profile {
-    /// `@media/<stream>/video/h264/<profile>` — full-rate H.264.
-    Video,
+    /// `@media/<stream>/video/h264/<tier>` — one bandwidth tier.
+    Video(u8),
     /// `@media/<stream>/preview/jpeg` — low-fps JPEG previews.
     Preview,
 }
@@ -49,8 +53,16 @@ pub enum Profile {
 impl Profile {
     fn as_str(self) -> &'static str {
         match self {
-            Profile::Video => "video",
+            Profile::Video(_) => "video",
             Profile::Preview => "preview",
+        }
+    }
+
+    /// The tier index for a video profile (`None` for the preview).
+    fn tier_index(self) -> Option<u8> {
+        match self {
+            Profile::Video(idx) => Some(idx),
+            Profile::Preview => None,
         }
     }
 }
@@ -151,7 +163,9 @@ struct ProfileSession {
     /// Cooperative source-EOS switch — the only way to end the source's
     /// blocking task (`abort()` alone leaks a live pipeline).
     stop: pipeline::StopHandle,
-    keyframe: Option<parallax::elements::codec::KeyframeHandle>,
+    /// Live control handles (keyframe, bitrate, scale, framerate, preview
+    /// quality/fps) for reconfiguring this profile without a teardown (#496).
+    controls: pipeline::PipelineControls,
     egress: JoinHandle<()>,
     matcher: JoinHandle<()>,
     /// RTSP feeder task (pushes camera frames into the pipeline's AppSrc);
@@ -171,6 +185,10 @@ struct ProfileSession {
     viewers: bool,
     /// Set while unwatched (no viewers); reaped after `idle_timeout`.
     idle_since: Option<Instant>,
+    /// Encoded dimensions this profile was built at (the scaler's target), for
+    /// the per-tier status doc. `0` = unknown (RTSP passthrough without SDP).
+    width: u32,
+    height: u32,
 }
 
 impl Drop for ProfileSession {
@@ -200,46 +218,33 @@ impl ProfileSession {
     }
 }
 
-/// Per-stream pair of optional profile slots.
+/// A stream's open profile slots, keyed by [`Profile`] — one `Preview` plus any
+/// number of `Video(tier)` slots (each an independent tier pipeline).
 #[derive(Default)]
 struct StreamSession {
-    video: Option<ProfileSlot>,
-    preview: Option<ProfileSlot>,
+    slots: HashMap<Profile, ProfileSlot>,
 }
 
 impl StreamSession {
-    fn slot(&mut self, profile: Profile) -> &mut Option<ProfileSlot> {
-        match profile {
-            Profile::Video => &mut self.video,
-            Profile::Preview => &mut self.preview,
-        }
-    }
-
     fn slot_ref(&self, profile: Profile) -> Option<&ProfileSlot> {
-        match profile {
-            Profile::Video => self.video.as_ref(),
-            Profile::Preview => self.preview.as_ref(),
-        }
+        self.slots.get(&profile)
     }
 
-    /// The occupied profile slots, in fixed (video, preview) order.
+    fn slot_mut(&mut self, profile: Profile) -> Option<&mut ProfileSlot> {
+        self.slots.get_mut(&profile)
+    }
+
+    fn insert_slot(&mut self, profile: Profile, slot: ProfileSlot) {
+        self.slots.insert(profile, slot);
+    }
+
+    fn remove_slot(&mut self, profile: Profile) -> Option<ProfileSlot> {
+        self.slots.remove(&profile)
+    }
+
+    /// The occupied profile slots (unordered).
     fn profiles(&self) -> impl Iterator<Item = (Profile, &ProfileSlot)> {
-        [
-            (Profile::Video, self.video.as_ref()),
-            (Profile::Preview, self.preview.as_ref()),
-        ]
-        .into_iter()
-        .filter_map(|(profile, slot)| slot.map(|s| (profile, s)))
-    }
-
-    /// Mutable variant of [`Self::profiles`].
-    fn profiles_mut(&mut self) -> impl Iterator<Item = (Profile, &mut ProfileSlot)> {
-        [
-            (Profile::Video, self.video.as_mut()),
-            (Profile::Preview, self.preview.as_mut()),
-        ]
-        .into_iter()
-        .filter_map(|(profile, slot)| slot.map(|s| (profile, s)))
+        self.slots.iter().map(|(p, s)| (*p, s))
     }
 
     /// Open profiles with matching subscribers (pending slots have none).
@@ -250,7 +255,7 @@ impl StreamSession {
     }
 
     fn is_empty(&self) -> bool {
-        self.video.is_none() && self.preview.is_none()
+        self.slots.is_empty()
     }
 }
 
@@ -324,10 +329,7 @@ impl SessionManager {
         // Actor shutdown: tear every remaining profile down (pending
         // reservations have nothing running; dropping them is enough).
         for (_, mut session) in self.sessions.drain() {
-            for slot in [session.video.take(), session.preview.take()]
-                .into_iter()
-                .flatten()
-            {
+            for (_, slot) in session.slots.drain() {
                 if let ProfileSlot::Open(p) = slot {
                     p.teardown();
                 }
@@ -343,7 +345,7 @@ impl SessionManager {
                 stream,
                 profile,
                 matching,
-            } => self.handle_viewers(&stream, profile, matching),
+            } => self.handle_viewers(&stream, profile, matching).await,
             SessionMsg::EgressEnded {
                 stream,
                 profile,
@@ -364,25 +366,109 @@ impl SessionManager {
         }
     }
 
+    /// Resolve an `(codec, tier)` selector to a [`Profile`]. `None`/`h264`
+    /// codec → a video tier (named, or the sensor default); `mjpeg`/`jpeg` →
+    /// the preview. An unknown codec or an unknown tier name → `None`.
+    fn resolve_profile(&self, codec: Option<&str>, tier: Option<&str>) -> Option<Profile> {
+        match codec {
+            None | Some("h264") => {
+                let idx = match tier {
+                    Some(name) => self.tier_index(name)?,
+                    None => self.default_tier_index(),
+                };
+                Some(Profile::Video(idx))
+            }
+            Some("mjpeg") | Some("jpeg") => Some(Profile::Preview),
+            Some(_) => None,
+        }
+    }
+
+    /// The config ladder index of a tier by name.
+    fn tier_index(&self, name: &str) -> Option<u8> {
+        self.config
+            .video
+            .tiers
+            .iter()
+            .position(|t| t.name == name)
+            .map(|i| i as u8)
+    }
+
+    /// The default tier's ladder index (validated to exist; 0 as a last resort).
+    fn default_tier_index(&self) -> u8 {
+        self.tier_index(&self.config.video.default_tier)
+            .unwrap_or(0)
+    }
+
+    /// The tier spec at a ladder index.
+    fn tier_spec(&self, idx: u8) -> Option<&zensight_common::stream::TierSpec> {
+        self.config.video.tiers.get(idx as usize)
+    }
+
+    /// The tier name for a ladder index (for the `<tier>` media key chunk).
+    fn tier_name(&self, idx: u8) -> &str {
+        self.tier_spec(idx)
+            .map(|t| t.name.as_str())
+            .unwrap_or("default")
+    }
+
+    /// Resolve a tier index to the encoder parameters `build_video` needs.
+    fn tier_params(&self, idx: u8) -> pipeline::VideoParams {
+        let (bitrate_kbps, fps, max_height) = self
+            .tier_spec(idx)
+            .map(|t| (t.bitrate_kbps, t.fps, t.max_height))
+            .unwrap_or((2000, 30, None));
+        pipeline::VideoParams {
+            bitrate_kbps,
+            gop_frames: self.config.video.gop_frames,
+            fps,
+            max_height,
+        }
+    }
+
     async fn handle_control(&mut self, control: StreamControl) {
         match control {
             StreamControl::OpenStream {
                 stream,
                 codec,
-                max_height,
+                tier,
             } => {
-                let Some(profile) = profile_for_codec(codec.as_deref()) else {
-                    tracing::warn!(stream = %stream, codec = ?codec, "open_stream: unsupported codec");
+                let Some(profile) = self.resolve_profile(codec.as_deref(), tier.as_deref()) else {
+                    tracing::warn!(stream = %stream, codec = ?codec, tier = ?tier,
+                        "open_stream: unsupported codec or unknown tier");
                     return;
                 };
-                self.open(&stream, profile, max_height).await;
+                self.open(&stream, profile).await;
             }
-            StreamControl::CloseStream { stream } => self.close(&stream).await,
-            StreamControl::RequestKeyframe { stream } => self.request_keyframe(&stream),
+            StreamControl::CloseStream {
+                stream,
+                codec,
+                tier,
+            } => {
+                let Some(profile) = self.resolve_profile(codec.as_deref(), tier.as_deref()) else {
+                    tracing::warn!(stream = %stream, codec = ?codec, tier = ?tier,
+                        "close_stream: unsupported codec or unknown tier");
+                    return;
+                };
+                self.close(&stream, profile).await;
+            }
+            StreamControl::RequestKeyframe { stream, tier } => {
+                let idx = match tier.as_deref() {
+                    Some(name) => match self.tier_index(name) {
+                        Some(i) => i,
+                        None => {
+                            tracing::warn!(stream = %stream, tier = ?tier,
+                                "request_keyframe: unknown tier");
+                            return;
+                        }
+                    },
+                    None => self.default_tier_index(),
+                };
+                self.request_keyframe(&stream, Profile::Video(idx));
+            }
         }
     }
 
-    async fn open(&mut self, stream: &str, profile: Profile, max_height: Option<u32>) {
+    async fn open(&mut self, stream: &str, profile: Profile) {
         let Some(entry) = self.catalog.get(stream) else {
             tracing::warn!(stream = %stream, "open_stream: unknown stream");
             return;
@@ -398,7 +484,7 @@ impl SessionManager {
         let existing = match self
             .sessions
             .get_mut(stream)
-            .and_then(|s| s.slot(profile).as_mut())
+            .and_then(|s| s.slot_mut(profile))
         {
             None => Existing::None,
             Some(ProfileSlot::Pending(pending)) => {
@@ -421,7 +507,7 @@ impl SessionManager {
                 if !existing.viewers {
                     existing.idle_since = Some(Instant::now());
                 }
-                if let Some(k) = &existing.keyframe {
+                if let Some(k) = &existing.controls.keyframe {
                     k.request();
                 }
                 tracing::debug!(stream = %stream, profile = profile.as_str(),
@@ -454,11 +540,10 @@ impl SessionManager {
                 username,
                 password,
             } => {
-                *self
-                    .sessions
+                self.sessions
                     .entry(stream.to_string())
                     .or_default()
-                    .slot(profile) = Some(ProfileSlot::Pending(PendingOpen { refcount: 1 }));
+                    .insert_slot(profile, ProfileSlot::Pending(PendingOpen { refcount: 1 }));
                 let tx = self.tx.clone();
                 let (url, username, password) = (url.clone(), username.clone(), password.clone());
                 let task_stream = stream.to_string();
@@ -479,8 +564,8 @@ impl SessionManager {
             }
             _ => {
                 let built = match profile {
-                    Profile::Video => {
-                        pipeline::build_video(&kind, &self.config.video, max_height, &stream_stats)
+                    Profile::Video(idx) => {
+                        pipeline::build_video(&kind, &self.tier_params(idx), &stream_stats)
                     }
                     Profile::Preview => {
                         pipeline::build_preview(&kind, &self.config.preview, &stream_stats)
@@ -535,7 +620,9 @@ impl SessionManager {
         let dims = rtsp_video_dimensions(&rtsp);
         let stream_stats = self.stats.handle(stream);
         let built = match profile {
-            Profile::Video => pipeline::build_rtsp_video_passthrough(dims),
+            // RTSP is passthrough — no encoder in the graph, so it offers a
+            // single tier regardless of which tier was requested (documented).
+            Profile::Video(_) => pipeline::build_rtsp_video_passthrough(dims),
             Profile::Preview => match dims {
                 Some((w, h)) => {
                     pipeline::build_rtsp_preview(w, h, &self.config.preview, &stream_stats)
@@ -577,7 +664,7 @@ impl SessionManager {
         let key = {
             let ctx = self.publisher.v1();
             match profile {
-                Profile::Video => ctx.media_video_key(stream, "h264", &self.config.video.profile),
+                Profile::Video(idx) => ctx.media_video_key(stream, "h264", self.tier_name(idx)),
                 Profile::Preview => ctx.media_preview_key(stream),
             }
         };
@@ -648,7 +735,7 @@ impl SessionManager {
             let stream = stream.to_string();
             let (width, height) = (built.width, built.height);
             let (encoding, preview) = match profile {
-                Profile::Video => (Encoding::VIDEO_H264, false),
+                Profile::Video(_) => (Encoding::VIDEO_H264, false),
                 Profile::Preview => (Encoding::IMAGE_JPEG, true),
             };
             let egress_stats = stream_stats.clone();
@@ -677,7 +764,7 @@ impl SessionManager {
         });
 
         // First IDR right away so an already-waiting viewer decodes at once.
-        if let Some(k) = &built.keyframe {
+        if let Some(k) = &built.controls.keyframe {
             k.request();
         }
 
@@ -691,25 +778,30 @@ impl SessionManager {
         }
         tracing::info!(stream = %stream, profile = profile.as_str(), key = %key, viewers,
             "stream profile opened");
-        *self
-            .sessions
+        self.sessions
             .entry(stream.to_string())
             .or_default()
-            .slot(profile) = Some(ProfileSlot::Open(Box::new(ProfileSession {
-            handle: Some(handle),
-            stop: built.stop,
-            keyframe: built.keyframe,
-            egress,
-            matcher,
-            feeder,
-            publisher: media,
-            refcount,
-            epoch,
-            viewers,
-            // Unwatched until a viewer actually subscribes: give the opener
-            // one idle window to show up, then reap (zombie-open backstop).
-            idle_since: if viewers { None } else { Some(Instant::now()) },
-        })));
+            .insert_slot(
+                profile,
+                ProfileSlot::Open(Box::new(ProfileSession {
+                    handle: Some(handle),
+                    stop: built.stop,
+                    controls: built.controls,
+                    egress,
+                    matcher,
+                    feeder,
+                    publisher: media,
+                    refcount,
+                    epoch,
+                    viewers,
+                    // Unwatched until a viewer actually subscribes: give the
+                    // opener one idle window to show up, then reap (zombie-open
+                    // backstop).
+                    idle_since: if viewers { None } else { Some(Instant::now()) },
+                    width: built.width,
+                    height: built.height,
+                })),
+            );
         self.publish_status(stream).await;
     }
 
@@ -734,8 +826,8 @@ impl SessionManager {
     /// flips), dropping the stream entry when both slots are empty.
     fn clear_pending_slot(&mut self, stream: &str, profile: Profile) {
         if let Some(session) = self.sessions.get_mut(stream) {
-            if matches!(session.slot(profile), Some(ProfileSlot::Pending(_))) {
-                *session.slot(profile) = None;
+            if matches!(session.slot_ref(profile), Some(ProfileSlot::Pending(_))) {
+                session.remove_slot(profile);
             }
             if session.is_empty() {
                 self.sessions.remove(stream);
@@ -743,61 +835,66 @@ impl SessionManager {
         }
     }
 
-    /// `close_stream` carries no codec: decrement every open profile of the
-    /// stream (an open/close pair from one requester is symmetric per key).
-    async fn close(&mut self, stream: &str) {
+    /// `close_stream` decrements the refcount of the one profile it names
+    /// (codec + tier — symmetric with the `open_stream` that raised it). A
+    /// tier reaches zero independently of its siblings.
+    async fn close(&mut self, stream: &str, profile: Profile) {
         let Some(session) = self.sessions.get_mut(stream) else {
             tracing::debug!(stream = %stream, "close_stream: not open");
             return;
         };
-        for (profile, slot) in session.profiles_mut() {
-            match slot {
-                ProfileSlot::Pending(p) => {
-                    // Still connecting: `RtspConnected` discards the camera
-                    // session if the refcount is 0 by the time it resolves.
-                    p.refcount = p.refcount.saturating_sub(1);
-                    tracing::debug!(stream = %stream, profile = profile.as_str(),
-                        refcount = p.refcount, "close_stream: pending refcount decremented");
+        match session.slot_mut(profile) {
+            Some(ProfileSlot::Pending(p)) => {
+                // Still connecting: `RtspConnected` discards the camera session
+                // if the refcount is 0 by the time it resolves.
+                p.refcount = p.refcount.saturating_sub(1);
+                tracing::debug!(stream = %stream, profile = profile.as_str(),
+                    refcount = p.refcount, "close_stream: pending refcount decremented");
+            }
+            Some(ProfileSlot::Open(p)) => {
+                p.refcount = p.refcount.saturating_sub(1);
+                if p.refcount == 0 && !p.viewers && p.idle_since.is_none() {
+                    p.idle_since = Some(Instant::now());
                 }
-                ProfileSlot::Open(p) => {
-                    p.refcount = p.refcount.saturating_sub(1);
-                    if p.refcount == 0 && !p.viewers && p.idle_since.is_none() {
-                        p.idle_since = Some(Instant::now());
-                    }
-                    tracing::debug!(stream = %stream, profile = profile.as_str(),
-                        refcount = p.refcount, "close_stream: refcount decremented");
-                }
+                tracing::debug!(stream = %stream, profile = profile.as_str(),
+                    refcount = p.refcount, "close_stream: refcount decremented");
+            }
+            None => {
+                tracing::debug!(stream = %stream, profile = profile.as_str(),
+                    "close_stream: that profile is not open");
             }
         }
         self.publish_status(stream).await;
     }
 
-    fn request_keyframe(&mut self, stream: &str) {
+    fn request_keyframe(&mut self, stream: &str, profile: Profile) {
         let keyframe = self
             .sessions
             .get(stream)
-            .and_then(|s| match &s.video {
+            .and_then(|s| match s.slot_ref(profile) {
                 Some(ProfileSlot::Open(p)) => Some(p),
                 _ => None,
             })
-            .and_then(|p| p.keyframe.as_ref());
+            .and_then(|p| p.controls.keyframe.as_ref());
         match keyframe {
             Some(k) => {
                 k.request();
-                tracing::debug!(stream = %stream, "request_keyframe: IDR forced");
+                tracing::debug!(stream = %stream, profile = profile.as_str(),
+                    "request_keyframe: IDR forced");
             }
             None => {
-                // RTSP passthrough (no encoder handle) or no open video profile.
-                tracing::debug!(stream = %stream, "request_keyframe: no forceable encoder; ignored");
+                // RTSP passthrough (no encoder handle) or no such open tier.
+                tracing::debug!(stream = %stream, profile = profile.as_str(),
+                    "request_keyframe: no forceable encoder; ignored");
             }
         }
     }
 
-    fn handle_viewers(&mut self, stream: &str, profile: Profile, matching: bool) {
+    async fn handle_viewers(&mut self, stream: &str, profile: Profile, matching: bool) {
         let Some(session) = self.sessions.get_mut(stream) else {
             return;
         };
-        let Some(ProfileSlot::Open(p)) = session.slot(profile).as_mut() else {
+        let Some(ProfileSlot::Open(p)) = session.slot_mut(profile) else {
             return;
         };
         let was = p.viewers;
@@ -807,7 +904,7 @@ impl SessionManager {
             if !was {
                 // Rising edge: force a keyframe so the new viewer gets a
                 // decodable picture immediately (no-op for JPEG previews).
-                if let Some(k) = &p.keyframe {
+                if let Some(k) = &p.controls.keyframe {
                     k.request();
                 }
                 tracing::debug!(stream = %stream, profile = profile.as_str(), "viewer appeared");
@@ -825,6 +922,13 @@ impl SessionManager {
             .handle(stream)
             .viewers
             .store(viewers, std::sync::atomic::Ordering::Relaxed);
+
+        // A viewer edge changes a tier's demand signal — republish the
+        // per-tier status so the state plane reflects the new viewer counts
+        // (the GUI drives its tier picker off this, not just the stats plane).
+        if was != matching {
+            self.publish_status(stream).await;
+        }
     }
 
     async fn handle_egress_ended(
@@ -888,7 +992,7 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(stream) else {
             return;
         };
-        if let Some(slot) = session.slot(profile).take() {
+        if let Some(slot) = session.remove_slot(profile) {
             match slot {
                 ProfileSlot::Open(p) => p.teardown(),
                 // A pending reservation has nothing running; dropping it
@@ -918,22 +1022,35 @@ impl SessionManager {
     }
 
     fn status_for(&self, stream: &str, session: &StreamSession) -> StreamStatus {
-        let viewers = session.viewers();
-        // Active profile string: the video profile wins if open. A pending
-        // RTSP connect counts as open (in progress) — only a resolved
-        // failure publishes the definitive `open: false` transition.
-        let profile = if session.video.is_some() {
-            Some(format!("h264/{}", self.config.video.profile))
-        } else if session.preview.is_some() {
-            Some("mjpeg".to_string())
-        } else {
-            None
-        };
+        use zensight_common::stream::{TierApplied, TierStatus};
+        // One `TierStatus` per open video tier — the applied params (what the
+        // encoder was actually built with) plus that tier's own viewer count.
+        // A pending RTSP connect is not yet a running tier; it counts toward
+        // `open` (in progress) but reports no applied params.
+        let mut tiers: Vec<TierStatus> = session
+            .profiles()
+            .filter_map(|(profile, slot)| {
+                let idx = profile.tier_index()?;
+                let ProfileSlot::Open(p) = slot else {
+                    return None;
+                };
+                Some(TierStatus {
+                    tier: self.tier_name(idx).to_string(),
+                    applied: TierApplied {
+                        width: p.width,
+                        height: p.height,
+                        fps: self.tier_spec(idx).map(|t| t.fps).unwrap_or(0),
+                        bitrate_kbps: self.tier_spec(idx).map(|t| t.bitrate_kbps).unwrap_or(0),
+                    },
+                    viewers: if p.viewers { 1 } else { 0 },
+                })
+            })
+            .collect();
+        tiers.sort_by(|a, b| a.tier.cmp(&b.tier));
         StreamStatus {
             stream: stream.to_string(),
             open: !session.is_empty(),
-            viewers,
-            profile,
+            tiers,
         }
     }
 
@@ -945,8 +1062,7 @@ impl SessionManager {
             None => StreamStatus {
                 stream: stream.to_string(),
                 open: false,
-                viewers: 0,
-                profile: None,
+                tiers: Vec::new(),
             },
         };
         let key = self.state_ctx.state_key(&["stream", stream]);
@@ -996,7 +1112,7 @@ fn rtsp_video_dimensions(session: &RtspSession) -> Option<(u32, u32)> {
 /// unwinds and the egress task reports `EgressEnded`.
 async fn rtsp_feed(mut rtsp: RtspSession, feed: AppSrcHandle, stream: String) {
     loop {
-        match rtsp.produce().await {
+        match rtsp.next_buffer().await {
             Ok(Some(buffer)) => {
                 if feed.is_full() {
                     continue; // shed the frame
@@ -1021,25 +1137,17 @@ async fn rtsp_feed(mut rtsp: RtspSession, feed: AppSrcHandle, stream: String) {
     feed.end_stream();
 }
 
-/// Map a requested codec onto a profile (`None` = sensor default = video).
-fn profile_for_codec(codec: Option<&str>) -> Option<Profile> {
-    match codec {
-        None | Some("h264") => Some(Profile::Video),
-        Some("mjpeg") | Some("jpeg") => Some(Profile::Preview),
-        Some(_) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn codec_maps_to_profile() {
-        assert_eq!(profile_for_codec(None), Some(Profile::Video));
-        assert_eq!(profile_for_codec(Some("h264")), Some(Profile::Video));
-        assert_eq!(profile_for_codec(Some("mjpeg")), Some(Profile::Preview));
-        assert_eq!(profile_for_codec(Some("jpeg")), Some(Profile::Preview));
-        assert_eq!(profile_for_codec(Some("av1")), None);
+    fn profile_tier_index() {
+        assert_eq!(Profile::Video(0).tier_index(), Some(0));
+        assert_eq!(Profile::Video(2).tier_index(), Some(2));
+        assert_eq!(Profile::Preview.tier_index(), None);
+        // Distinct tiers are distinct map keys (independent encoders).
+        assert_ne!(Profile::Video(0), Profile::Video(1));
+        assert_eq!(Profile::Video(1), Profile::Video(1));
     }
 }

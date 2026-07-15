@@ -15,18 +15,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use parallax::buffer::Buffer;
+use parallax::control::{Controllable, EncoderControl, RateControlMode};
 use parallax::converters::PixelFormat as ConvFormat;
 use parallax::element::{Element, ProduceContext, ProduceResult, Source};
 use parallax::elements::codec::KeyframeHandle;
 use parallax::elements::transform::VideoConvertElement;
 use parallax::elements::{
     AppSink, AppSinkHandle, AppSrc, AppSrcHandle, ColorType, H264Decoder, H264Encoder,
-    H264EncoderConfig, JpegDecoder, JpegEncoder, Throttle, V4l2Src, VideoPattern, VideoTestSrc,
+    H264EncoderConfig, JpegDecoder, JpegEncoder, JpegQualityControl, ScaleControl, Throttle,
+    ThrottleControl, V4l2Src, VideoPattern, VideoScale, VideoTestSrc,
 };
 use parallax::pipeline::{Executor, Pipeline, UnifiedExecutorConfig};
 
 use crate::catalog::SourceKind;
-use crate::config::{PreviewConfig, VideoConfig};
+use crate::config::PreviewConfig;
 use crate::stats::StreamStats;
 
 /// How many encoded frames an AppSink may queue before dropping the oldest.
@@ -181,14 +183,40 @@ impl<E: Element> Element for TimedElement<E> {
     }
 }
 
+/// Live control handles for a running pipeline (parallax 0.3.0).
+///
+/// The unified executor **moves** every element into its task at
+/// `Executor::start()`, so a live element is unreachable except through a
+/// handle cloned **before** start. Every controllable knob a running video
+/// pipeline exposes is cloned here at construction; the session actor writes
+/// to them to reconfigure a stream without a teardown (#496). RTSP passthrough
+/// has no encoder in its graph, so its handles are all `None`.
+#[derive(Default, Clone)]
+pub struct PipelineControls {
+    /// Live H.264 bitrate / GOP / QP / rate-control. `None` for passthrough.
+    pub encoder: Option<EncoderControl>,
+    /// Force-IDR handle — present only for encoder-backed video profiles
+    /// (RTSP passthrough cannot force a remote camera's keyframe).
+    pub keyframe: Option<KeyframeHandle>,
+    /// Live aspect-preserving downscale target (`set_max_height`). Present on
+    /// every encoder-backed video graph now that the scaler is in the graph.
+    pub scale: Option<ScaleControl>,
+    /// Live framerate cap (the video-path `Throttle`).
+    pub rate: Option<ThrottleControl>,
+    /// Live JPEG preview quality (present on preview graphs that re-encode).
+    pub preview_quality: Option<JpegQualityControl>,
+    /// Live preview framerate (the preview-path `Throttle`).
+    pub preview_rate: Option<ThrottleControl>,
+}
+
 /// A constructed (not yet started) profile pipeline.
 pub struct BuiltPipeline {
     pub pipeline: Pipeline,
     /// Pull side of the terminal AppSink.
     pub sink: AppSinkHandle,
-    /// Force-IDR handle — present only for encoder-backed video profiles
-    /// (RTSP passthrough cannot force a remote camera's keyframe).
-    pub keyframe: Option<KeyframeHandle>,
+    /// Live control handles (keyframe, bitrate, scale, framerate, …), all
+    /// cloned before the pipeline starts.
+    pub controls: PipelineControls,
     /// Cooperative source stop — MUST be triggered at teardown (see
     /// [`StopHandle`]); `PipelineHandle::abort()` alone leaks the source.
     pub stop: StopHandle,
@@ -206,16 +234,68 @@ pub struct BuiltPipeline {
 /// are shed (live video: never let the feeder back up).
 const FEED_QUEUE: usize = 8;
 
+/// The H.264 encoder config for a video graph (parallax 0.3.0).
+///
+/// Dimensions are **not** set here — geometry travels in-band, stamped into
+/// buffer metadata by the upstream `VideoScale`/`VideoConvert`, and the encoder
+/// re-inits (fresh IDR) whenever the frame size changes.
+///
+/// `RateControlMode::Bitrate` makes `bitrate_kbps` a genuine cap on constrained
+/// links (bandwidth-first), not OpenH264's quality-first hint — and that mode
+/// *requires* `skip_frames(true)` to actually hold the target: OpenH264 warns
+/// (and silently overshoots) if asked to control bitrate with frame-skip off.
+/// The two frame-droppers compose rather than fight: the `Throttle` sets the
+/// tier's nominal framerate (fewer frames ⇒ more bits each ⇒ better per-frame
+/// quality at a low cap), and the encoder skips *further* only when even that
+/// rate exceeds the byte budget on a complex scene — exactly the graceful
+/// degradation a cheap tier wants.
+fn video_encoder_config(params: &VideoParams) -> H264EncoderConfig {
+    H264EncoderConfig::new()
+        .bitrate(params.bitrate_kbps.saturating_mul(1000))
+        .frame_rate(params.fps as f32)
+        .keyframe_interval(params.gop_frames)
+        .rate_control(RateControlMode::Bitrate)
+        .skip_frames(true)
+}
+
+/// The resolved encoder parameters for one video tier — a config `TierSpec`
+/// (bitrate/fps/max_height) plus the stream's shared `gop_frames`. The session
+/// resolves an open's tier name to this before building the pipeline (#498).
+#[derive(Debug, Clone, Copy)]
+pub struct VideoParams {
+    /// Target encoded bitrate (kbit/s).
+    pub bitrate_kbps: u32,
+    /// Keyframe (GOP) interval in frames.
+    pub gop_frames: u32,
+    /// Target framerate (the `Throttle` rate + encoder hint).
+    pub fps: u32,
+    /// Aspect-preserving height cap; `None` = native.
+    pub max_height: Option<u32>,
+}
+
+/// A `VideoScale` element plus its live `ScaleControl`, seeded with the initial
+/// `max_height` (aspect-preserving, never upscales — parallax 0.3.0). A `None`
+/// cap leaves the scaler in passthrough; the session actor can retarget it live.
+fn build_scale(max_height: Option<u32>) -> (VideoScale, ScaleControl) {
+    let scale = VideoScale::new();
+    let control = scale.control();
+    if let Some(mh) = max_height {
+        control.set_max_height(mh);
+    }
+    (scale, control)
+}
+
 /// Build the H.264 video-profile pipeline for one source.
 ///
-/// `max_height` caps the encoded height (aspect preserved, dimensions
-/// even-aligned for I420) on encoder-backed paths.
+/// The graph is `Src → [decode →] Convert(→I420) → VideoScale → Throttle →
+/// H264Encoder → AppSink`. `max_height` seeds the scaler's aspect-preserving
+/// downscale target and can be changed live via [`PipelineControls::scale`].
 pub fn build_video(
     kind: &SourceKind,
-    video: &VideoConfig,
-    max_height: Option<u32>,
+    params: &VideoParams,
     stats: &Arc<StreamStats>,
 ) -> Result<BuiltPipeline> {
+    let max_height = params.max_height;
     match kind {
         SourceKind::Test {
             pattern,
@@ -223,10 +303,11 @@ pub fn build_video(
             height,
             fps,
         } => {
-            let (w, h) = capped_dimensions(*width, *height, max_height);
+            // Generate at native size; the scaler does the downscale so the
+            // whole path exercises the same graph a real camera would.
             let src = VideoTestSrc::new()
                 .with_pattern(parse_pattern(pattern))
-                .with_resolution(w, h)
+                .with_resolution(*width, *height)
                 .with_framerate(*fps, 1)
                 .live(true);
 
@@ -235,19 +316,19 @@ pub fn build_video(
             let convert = VideoConvertElement::new()
                 .with_input_format(ConvFormat::Rgb24)
                 .with_output_format(ConvFormat::I420)
-                .with_size(w, h);
+                .with_size(*width, *height);
+            let (scale, scale_ctl) = build_scale(max_height);
+            // Throttle to the tier framerate (drops the source's excess frames).
+            let throttle = Throttle::rate(params.fps as f64);
+            let rate_ctl = throttle.control();
 
-            let encoder = H264Encoder::new(
-                H264EncoderConfig::new(w, h)
-                    .bitrate(video.bitrate_kbps.saturating_mul(1000))
-                    .frame_rate(*fps as f32)
-                    .keyframe_interval(video.gop_frames),
-            )
-            .context("create H.264 encoder")?;
-            // Clone BEFORE the encoder moves into the pipeline.
+            let encoder =
+                H264Encoder::new(video_encoder_config(params)).context("create H.264 encoder")?;
+            // Clone every control handle BEFORE the elements move into the pipeline.
+            let enc_ctl = encoder.control();
             let keyframe = encoder.keyframe_handle();
 
-            stats.tighten_budget(1_000_000_000 / (*fps).max(1) as u64);
+            stats.tighten_budget(1_000_000_000 / params.fps.max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
             let (src, stop) = StoppableSource::new(src);
@@ -255,21 +336,36 @@ pub fn build_video(
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("test-src", src);
             let conv_id = pipeline.add_filter("convert-i420", convert);
+            let scale_id = pipeline.add_filter("video-scale", scale);
+            let thr_id = pipeline.add_filter("video-throttle", throttle);
             let enc_id =
                 pipeline.add_filter("h264-encoder", TimedElement::new(encoder, stats.clone()));
             let sink_id = pipeline.add_sink("app-sink", sink);
             pipeline.link(src_id, conv_id).context("link src→convert")?;
             pipeline
-                .link(conv_id, enc_id)
-                .context("link convert→encoder")?;
+                .link(conv_id, scale_id)
+                .context("link convert→scale")?;
+            pipeline
+                .link(scale_id, thr_id)
+                .context("link scale→throttle")?;
+            pipeline
+                .link(thr_id, enc_id)
+                .context("link throttle→encoder")?;
             pipeline
                 .link(enc_id, sink_id)
                 .context("link encoder→sink")?;
 
+            let (w, h) = capped_dimensions(*width, *height, max_height);
             Ok(BuiltPipeline {
                 pipeline,
                 sink: sink_handle,
-                keyframe: Some(keyframe),
+                controls: PipelineControls {
+                    encoder: Some(enc_ctl),
+                    keyframe: Some(keyframe),
+                    scale: Some(scale_ctl),
+                    rate: Some(rate_ctl),
+                    ..Default::default()
+                },
                 stop,
                 feed: None,
                 width: w,
@@ -281,33 +377,25 @@ pub fn build_video(
                 .map_err(|e| anyhow::anyhow!("open v4l2 device {device}: {e}"))?;
             let (w, h) = (src.width(), src.height());
             let fourcc = *src.fourcc();
-            let fps = src
-                .framerate()
-                .map(|(num, den)| num as f32 / den.max(1) as f32)
-                .unwrap_or(30.0);
-            if max_height.is_some_and(|mh| mh < h) {
-                // In-pipeline rescale is not wired yet; encode at the
-                // camera's negotiated size rather than fail the open.
-                tracing::warn!(device = %device, native = h, requested = ?max_height,
-                    "max_height below camera resolution ignored (no rescale element yet)");
-            }
 
-            let encoder = H264Encoder::new(
-                H264EncoderConfig::new(w, h)
-                    .bitrate(video.bitrate_kbps.saturating_mul(1000))
-                    .frame_rate(fps)
-                    .keyframe_interval(video.gop_frames),
-            )
-            .context("create H.264 encoder")?;
+            let (scale, scale_ctl) = build_scale(max_height);
+            // Throttle the camera's native rate down to the tier framerate.
+            let throttle = Throttle::rate(params.fps as f64);
+            let rate_ctl = throttle.control();
+            let encoder =
+                H264Encoder::new(video_encoder_config(params)).context("create H.264 encoder")?;
+            let enc_ctl = encoder.control();
             let keyframe = encoder.keyframe_handle();
 
-            stats.tighten_budget((1e9 / f64::from(fps.max(1.0))) as u64);
+            stats.tighten_budget(1_000_000_000 / params.fps.max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
             let (src, stop) = StoppableSource::new(src);
 
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("v4l2-src", src);
+            let scale_id = pipeline.add_filter("video-scale", scale);
+            let thr_id = pipeline.add_filter("video-throttle", throttle);
             let enc_id =
                 pipeline.add_filter("h264-encoder", TimedElement::new(encoder, stats.clone()));
             let sink_id = pipeline.add_sink("app-sink", sink);
@@ -347,20 +435,33 @@ pub fn build_video(
                 ),
             };
             pipeline
-                .link(to_i420, enc_id)
-                .context("link convert→encoder")?;
+                .link(to_i420, scale_id)
+                .context("link convert→scale")?;
+            pipeline
+                .link(scale_id, thr_id)
+                .context("link scale→throttle")?;
+            pipeline
+                .link(thr_id, enc_id)
+                .context("link throttle→encoder")?;
             pipeline
                 .link(enc_id, sink_id)
                 .context("link encoder→sink")?;
 
+            let (out_w, out_h) = capped_dimensions(w, h, max_height);
             Ok(BuiltPipeline {
                 pipeline,
                 sink: sink_handle,
-                keyframe: Some(keyframe),
+                controls: PipelineControls {
+                    encoder: Some(enc_ctl),
+                    keyframe: Some(keyframe),
+                    scale: Some(scale_ctl),
+                    rate: Some(rate_ctl),
+                    ..Default::default()
+                },
                 stop,
                 feed: None,
-                width: w,
-                height: h,
+                width: out_w,
+                height: out_h,
             })
         }
         SourceKind::Rtsp { .. } => {
@@ -392,7 +493,8 @@ pub fn build_rtsp_video_passthrough(dimensions: Option<(u32, u32)>) -> Result<Bu
     Ok(BuiltPipeline {
         pipeline,
         sink: sink_handle,
-        keyframe: None,
+        // Passthrough: no encoder in the graph, so no live controls at all.
+        controls: PipelineControls::default(),
         stop,
         feed: Some(feed),
         width,
@@ -415,11 +517,15 @@ pub fn build_rtsp_preview(
     // Decode everything (delta frames need their references), THEN drop down
     // to the preview rate before the expensive convert+encode.
     let throttle = Throttle::rate(preview.fps as f64);
+    let preview_rate = throttle.control();
     let convert = VideoConvertElement::new()
         .with_input_format(ConvFormat::I420)
         .with_output_format(ConvFormat::Rgb24)
         .with_size(width, height);
-    let encoder = JpegEncoder::new(width, height, ColorType::Rgb).with_quality(preview.quality);
+    let encoder = JpegEncoder::new()
+        .with_color_type(ColorType::Rgb)
+        .with_quality(preview.quality);
+    let preview_quality = encoder.control();
     stats.tighten_budget(1_000_000_000 / preview.fps.max(1) as u64);
     let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
     let sink_handle = sink.handle();
@@ -449,7 +555,11 @@ pub fn build_rtsp_preview(
     Ok(BuiltPipeline {
         pipeline,
         sink: sink_handle,
-        keyframe: None,
+        controls: PipelineControls {
+            preview_quality: Some(preview_quality),
+            preview_rate: Some(preview_rate),
+            ..Default::default()
+        },
         stop,
         feed: Some(feed),
         width,
@@ -478,8 +588,10 @@ pub fn build_preview(
                 .with_framerate(preview.fps, 1)
                 .live(true);
 
-            let encoder =
-                JpegEncoder::new(*width, *height, ColorType::Rgb).with_quality(preview.quality);
+            let encoder = JpegEncoder::new()
+                .with_color_type(ColorType::Rgb)
+                .with_quality(preview.quality);
+            let preview_quality = encoder.control();
             stats.tighten_budget(1_000_000_000 / preview.fps.max(1) as u64);
 
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
@@ -499,7 +611,10 @@ pub fn build_preview(
             Ok(BuiltPipeline {
                 pipeline,
                 sink: sink_handle,
-                keyframe: None,
+                controls: PipelineControls {
+                    preview_quality: Some(preview_quality),
+                    ..Default::default()
+                },
                 stop,
                 feed: None,
                 width: *width,
@@ -514,6 +629,9 @@ pub fn build_preview(
             // Drop frames down to the preview fps right at the source; only
             // then pay for any decode/convert/encode.
             let throttle = Throttle::rate(preview.fps as f64);
+            let preview_rate = throttle.control();
+            // Only the YUYV path re-encodes, so only it exposes a quality knob.
+            let mut preview_quality = None;
 
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
@@ -540,13 +658,12 @@ pub fn build_preview(
                             .with_size(w, h),
                     );
                     stats.tighten_budget(1_000_000_000 / preview.fps.max(1) as u64);
-                    let enc_id = pipeline.add_filter(
-                        "jpeg-encoder",
-                        TimedElement::new(
-                            JpegEncoder::new(w, h, ColorType::Rgb).with_quality(preview.quality),
-                            stats.clone(),
-                        ),
-                    );
+                    let encoder = JpegEncoder::new()
+                        .with_color_type(ColorType::Rgb)
+                        .with_quality(preview.quality);
+                    preview_quality = Some(encoder.control());
+                    let enc_id = pipeline
+                        .add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
                     pipeline
                         .link(thr_id, conv_id)
                         .context("link throttle→convert")?;
@@ -566,7 +683,11 @@ pub fn build_preview(
             Ok(BuiltPipeline {
                 pipeline,
                 sink: sink_handle,
-                keyframe: None,
+                controls: PipelineControls {
+                    preview_quality,
+                    preview_rate: Some(preview_rate),
+                    ..Default::default()
+                },
                 stop,
                 feed: None,
                 width: w,
@@ -631,6 +752,16 @@ mod tests {
         }
     }
 
+    /// A tier's resolved encoder params for the video-pipeline tests.
+    fn vparams(fps: u32, max_height: Option<u32>) -> VideoParams {
+        VideoParams {
+            bitrate_kbps: 2000,
+            gop_frames: 60,
+            fps,
+            max_height,
+        }
+    }
+
     /// What the tests need from one pulled frame; the Buffer itself is
     /// dropped immediately (mirrors the egress task, which copies and drops).
     struct PulledFrame {
@@ -691,11 +822,16 @@ mod tests {
             &PreviewConfig {
                 fps: 10,
                 quality: 75,
+                max_height: None,
             },
             &Arc::default(),
         )
         .expect("build preview");
-        assert!(built.keyframe.is_none());
+        assert!(built.controls.keyframe.is_none());
+        assert!(
+            built.controls.preview_quality.is_some(),
+            "preview exposes a live JPEG quality knob"
+        );
         assert_eq!((built.width, built.height), (320, 240));
 
         let frames = pull_frames(built, 3).await;
@@ -711,9 +847,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_video_pipeline_emits_h264_with_keyframe() {
         let stats: Arc<StreamStats> = Arc::default();
-        let built = build_video(&test_kind(30), &VideoConfig::default(), None, &stats)
-            .expect("build video");
-        let keyframe = built.keyframe.clone();
+        let built = build_video(&test_kind(30), &vparams(30, None), &stats).expect("build video");
+        let keyframe = built.controls.keyframe.clone();
         assert!(keyframe.is_some());
 
         let frames = pull_frames(built, 3).await;
@@ -731,7 +866,7 @@ mod tests {
         assert_eq!(
             stats.budget_ns.load(Ordering::Relaxed),
             1_000_000_000 / 30,
-            "budget derives from the source fps"
+            "budget derives from the tier fps"
         );
     }
 
@@ -744,8 +879,7 @@ mod tests {
                 height: 360,
                 fps: 15,
             },
-            &VideoConfig::default(),
-            Some(180),
+            &vparams(15, Some(180)),
             &Arc::default(),
         )
         .expect("build capped video");
@@ -766,7 +900,7 @@ mod tests {
         let v4l2 = SourceKind::V4l2 {
             device: "/dev/video-does-not-exist".into(),
         };
-        assert!(build_video(&v4l2, &VideoConfig::default(), None, &Arc::default()).is_err());
+        assert!(build_video(&v4l2, &vparams(30, None), &Arc::default()).is_err());
         assert!(build_preview(&v4l2, &PreviewConfig::default(), &Arc::default()).is_err());
     }
 
@@ -777,14 +911,17 @@ mod tests {
             username: None,
             password: None,
         };
-        assert!(build_video(&rtsp, &VideoConfig::default(), None, &Arc::default()).is_err());
+        assert!(build_video(&rtsp, &vparams(30, None), &Arc::default()).is_err());
         assert!(build_preview(&rtsp, &PreviewConfig::default(), &Arc::default()).is_err());
     }
 
     #[test]
     fn rtsp_builders_construct() {
         let v = build_rtsp_video_passthrough(Some((1280, 720))).expect("passthrough");
-        assert!(v.keyframe.is_none(), "passthrough cannot force keyframes");
+        assert!(
+            v.controls.keyframe.is_none(),
+            "passthrough cannot force keyframes"
+        );
         assert!(v.feed.is_some(), "rtsp pipelines are AppSrc-fed");
         assert_eq!((v.width, v.height), (1280, 720));
 
@@ -793,7 +930,7 @@ mod tests {
 
         let p = build_rtsp_preview(640, 360, &PreviewConfig::default(), &Arc::default())
             .expect("preview");
-        assert!(p.keyframe.is_none());
+        assert!(p.controls.keyframe.is_none());
         assert!(p.feed.is_some());
         assert_eq!((p.width, p.height), (640, 360));
     }

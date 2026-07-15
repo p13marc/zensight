@@ -90,7 +90,7 @@ zensight/v1/h-3fa9c2d41b7e/telemetry/logs/by_severity/error
 zensight/v1/h-3fa9c2d41b7e/@rpc/logs/events?since=1720000000000;max=500
 
 # parallax (media)
-zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
+zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high
 zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg
 zensight/v1/h-3fa9c2d41b7e/state/parallax/stream/cam0                (catalogue+status doc)
 zensight/v1/h-3fa9c2d41b7e/telemetry/parallax/cam0/stats/fps

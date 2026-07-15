@@ -13,12 +13,24 @@ per-origin firehose `…/h-xxx/**` — can ever pull them by accident
 ## 1. `@media` — live opaque streams
 
 ```
-<base>/v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>
+<base>/v1/<origin>/@media/<producer>/<stream>/video/<codec>/<tier>
 <base>/v1/<origin>/@media/<producer>/<stream>/preview/<format>
 ```
 
-Example: `zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main`,
+Example: `zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high`,
 `…/@media/parallax/cam0/preview/jpeg`.
+
+The last video chunk is a **tier** — a named bandwidth rung (`low` /
+`medium` / `high`) the publisher offers concurrently, one encoder each, on
+distinct keys. It is *not* an H.264 profile: it names the rung, not the
+bitstream's coding profile. A producer publishes several tiers of one stream
+at once (demand-driven — a tier costs nothing until it has a subscriber), and
+each viewer subscribes to the single tier its link can take. This is what
+lets two operators on different links watch the same camera without fighting
+over one encoder's settings (the constrained-link viewer picks `low`, the LAN
+viewer keeps `high`, and neither move touches the other). The offered tiers
+are advertised in the stream catalogue (the `streams` procedure's
+`StreamDescriptor`), so a viewer *can* know them.
 
 Rules:
 
@@ -44,13 +56,19 @@ Rules:
   one produces no event and obtains its immediate keyframe via
   `@rpc/<producer>/stream/keyframe`
   ([05-control-rpc.md §3](05-control-rpc.md)) instead of waiting out a GOP.
-- **Viewer selectors stay single-stream**: exact key for previews;
-  `…/<stream>/video/<codec>/*` for video (one `*` over the
-  publisher-configured profile chunk, which the viewer cannot know).
-  Matching is intersection-based, so the publisher's matching listener
-  fires for the wildcard subscriber.
-  **The `*` is licensed for the *profile* chunk and nothing else.** In
-  particular a viewer MUST NOT wildcard the **origin**: `…/*/@media/…`
+- **Viewer selectors are exact, on both media shapes.** A preview subscribes
+  to its exact `…/preview/<format>` key; a video viewer subscribes to the
+  exact `…/<stream>/video/<codec>/<tier>` key of the one tier it chose. There
+  is **no wildcard on `@media`**. The old `…/video/<codec>/*` license (v1.1)
+  rested on "the viewer cannot know the last chunk" — but the catalogue now
+  publishes the tier list, so the viewer *can* know it, and §3's rule
+  ("wildcard only a chunk you cannot know") forbids the `*`. The license is
+  **revoked**, and this is load-bearing: with tiers published concurrently, a
+  `…/video/h264/*` subscriber would match *every* tier at once and receive
+  several interleaved H.264 streams on one subscriber, unseparable except by
+  re-parsing the key per sample. Exact-tier subscription is the whole point —
+  the subscription *is* the quality choice.
+  In particular a viewer MUST NOT wildcard the **origin**: `…/*/@media/…`
   subscribes to *every host in the fleet* publishing a stream of that name
   and decodes all of them to render one tile — the same amplification §2
   forbids as a default `@blob` fetch path, on the plane that carries the
@@ -127,8 +145,10 @@ The two halves are not symmetric, and the asymmetry is the point.
   if the origin is a value the publisher owns rather than a string it
   formats ([08-registry.md §1.1](08-registry.md)).
 - **Subscribing** is a question about *what exists*. A `*` is the honest
-  spelling of "I cannot know this chunk" — the profile a publisher chose
-  (§1), the set of producers on a host, the hosts in a fleet.
+  spelling of "I cannot know this chunk" — the set of producers on a host,
+  the hosts in a fleet. (Media tiers were once cited here; they no longer
+  qualify — the catalogue publishes them, so a viewer subscribes to an exact
+  `<tier>`. §1.)
 
 The test for a subscriber is therefore **"can I know this chunk?"**, not
 "is this convenient?". A chunk you *could* resolve but did not is a
