@@ -932,6 +932,10 @@ impl Collector {
             .all_states()
             .with_tcp_info()
             .with_mem_info()
+            // SKMEMINFO carries the actual per-socket send/recv buffer sizes
+            // (nlink 0.25: sndbuf/rcvbuf only populate when this is requested;
+            // without it they read `None` → the buffer totals were silently 0).
+            .with_sk_mem_info()
             .with_congestion()
             .build();
         let socks = conn
@@ -1010,8 +1014,10 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
             *c.by_cong.entry(algo.clone()).or_insert(0) += 1;
         }
         if let Some(mem) = &inet.mem_info {
-            c.snd_buf_total += mem.sndbuf as u64;
-            c.rcv_buf_total += mem.rcvbuf as u64;
+            // nlink 0.25: sndbuf/rcvbuf are `Option<u32>` (None when SKMEMINFO
+            // wasn't requested — we request it via `with_sk_mem_info()`).
+            c.snd_buf_total += mem.sndbuf.unwrap_or(0) as u64;
+            c.rcv_buf_total += mem.rcvbuf.unwrap_or(0) as u64;
         }
     }
     c.rtt_p50_us = percentile(&mut rtts, 50);

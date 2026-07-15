@@ -57,7 +57,7 @@ flowscope = "0.22"
 # kernel socket table (5-tuple + inode) and `SocketOwnerMap` scans `/proc` for the
 # inode→process join — same crate + version the netlink sensor pins, so the
 # workspace resolves ONE nlink. Reads are unprivileged.
-nlink = { version = "0.24", features = ["sockdiag"] }
+nlink = { version = "0.25", features = ["sockdiag"] }
 
 tokio = { workspace = true, features = ["full"] }
 zenoh.workspace = true

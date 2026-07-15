@@ -681,6 +681,9 @@ async fn collect_sockets(
     let builder = SocketFilter::tcp()
         .with_tcp_info()
         .with_mem_info()
+        // SKMEMINFO for the real per-socket buffer sizes (nlink 0.25: sndbuf/
+        // rcvbuf only populate when requested — see the streamed aggregate).
+        .with_sk_mem_info()
         .with_congestion()
         // Structured CC info (BBR/DCTCP/vegas, #322) — one extension bit; the algo
         // name still rides in `congestion` from `with_congestion()` above.
@@ -746,7 +749,8 @@ async fn collect_sockets(
             let (snd_buf, rcv_buf) = inet
                 .mem_info
                 .as_ref()
-                .map(|m| (m.sndbuf, m.rcvbuf))
+                // nlink 0.25: sndbuf/rcvbuf are `Option<u32>`.
+                .map(|m| (m.sndbuf.unwrap_or(0), m.rcvbuf.unwrap_or(0)))
                 .unwrap_or((0, 0));
             // BBR bottleneck bandwidth + min-RTT when the socket runs BBR (#322);
             // cubic/reno report no CC info struct.

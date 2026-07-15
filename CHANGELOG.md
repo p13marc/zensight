@@ -57,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the video profile keyframe-gated, rebuilds the decoder and requests a fresh
   IDR on sequence discontinuities; default builds show a build hint instead.
 
+### Dependencies
+
+- **Bumped `nlink` 0.24 → 0.25** (netlink and netring sensors). 0.25 is largely
+  internal correctness fixes; the only breaking surface here is the sockdiag
+  `MemInfo` rework — `sndbuf`/`rcvbuf` are now `Option<u32>` and only populate
+  when the filter requests `INET_DIAG_SKMEMINFO` (`with_sk_mem_info()`), which
+  the socket collector/drill-down now do.
+- **BREAKING (metric-value corrections)**: the bump above fixes several
+  netlink metrics that were emitting wrong values under 0.24:
+  - socket `snd_buf_total` / `rcv_buf_total` (and the per-socket `snd_buf` /
+    `rcv_buf` in the `@rpc/netlink/sockets` drill-down) were **silently 0** —
+    the code read the SKMEMINFO buffer sizes without requesting them. They now
+    report real kernel buffer sizes.
+  - ethtool link **speed/duplex** now populate (an enum-id misalignment made
+    speed read `None` and duplex read garbage in 0.24).
+
 ## [0.7.0] - 2026-07-08
 
 Identity & evidence release. Sensors now self-report a stable host identity and
