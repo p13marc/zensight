@@ -46,19 +46,20 @@ Commands do not exist in v1: writes are GETs on `<topic>/set`, reads on
 | `fleet_command_key(producer, topic)` | `zensight/v1/*/@rpc/<producer>/<topic>/set` |
 | `origin_rpc_key(origin, producer, procedure)` | `zensight/v1/<origin>/@rpc/<producer>/<procedure>` (single host) |
 
-Topic keys for the **local** host (`command.rs`, where `prefix` is the legacy
-`zensight/<protocol>` config form or a v1 prefix — both derive the same context):
+Topic keys for the **local** host (`command.rs`). Every helper takes the bare
+**producer name** (`"netlink"`, `"logs"`, …) — the legacy `zensight/<protocol>` prefix
+form is gone with `key_prefix` (#465), and the origin is derived, never passed:
 
 | Helper | Result |
 |--------|--------|
-| `command_key(prefix, topic)` | `zensight/v1/<origin>/@rpc/<producer>/<topic>/set` (write) |
-| `status_key(prefix, topic)` | `zensight/v1/<origin>/@rpc/<producer>/<topic>` (read) |
-| `query_key(prefix, topic)` | same as `status_key` — reads are reads (on-demand bulk detail) |
-| `artifact_request_key(prefix)` | `…/@rpc/<producer>/artifact/request` |
-| `artifact_status_key(prefix)` | `…/@rpc/<producer>/artifact/status` |
-| `artifact_cancel_key(prefix)` | `…/@rpc/<producer>/artifact/cancel` (`?id=<ulid>`) |
-| `artifact_blob_prefix(prefix)` | `zensight/v1/<origin>/@blob/artifact` (Tier-1 delivery) |
-| `artifact_store_prefix(prefix)` | `zensight/v1/<origin>/@blob/store` (Tier-2 chunks) |
+| `command_key(producer, topic)` | `zensight/v1/<origin>/@rpc/<producer>/<topic>/set` (write) |
+| `status_key(producer, topic)` | `zensight/v1/<origin>/@rpc/<producer>/<topic>` (read) |
+| `query_key(producer, topic)` | same as `status_key` — reads are reads (on-demand bulk detail) |
+| `artifact_request_key(producer)` | `…/@rpc/<producer>/artifact/request` |
+| `artifact_status_key(producer)` | `…/@rpc/<producer>/artifact/status` |
+| `artifact_cancel_key(producer)` | `…/@rpc/<producer>/artifact/cancel` (`?id=<ulid>`) |
+| `artifact_blob_prefix(producer)` | `zensight/v1/<origin>/@blob/artifact` (Tier-1 delivery) |
+| `artifact_store_prefix(producer)` | `zensight/v1/<origin>/@blob/store` (Tier-2 chunks) |
 | `artifact_tree_prefix(prefix)` | `zensight/v1/<origin>/@blob/tree` (Tier-2 index) |
 
 ## Producer-side keys — `zensight_keyspace::V1Context`

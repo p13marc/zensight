@@ -14,9 +14,13 @@ Validation (`NetringSensorConfig::validate`) requires **either** at least one
 
 ## Capture source
 
+> There is no `key_prefix` knob — it was retired in #465. The producer chunk
+> (`netring`) is a constant of this crate and the origin is derived from the host's
+> machine-id, so keys land under `zensight/v1/<origin>/…/netring/…` with nothing to
+> configure. A `key_prefix:` line left over from 0.7.0 is **silently ignored**.
+
 ```json5
 netring: {
-  key_prefix: "zensight/netring",   // legacy-form prefix; derives the v1 context (base + producer)
   source: "auto",                   // payload `source` field (not in the key); "auto" → hostname
   backend: "auto",                  // "auto" | "afpacket" | "afxdp"
   interfaces: ["eth0"],             // live capture NICs (needs CAP_NET_RAW)

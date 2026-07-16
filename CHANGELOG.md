@@ -7,7 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-16
+
+The v1 keyspace. Every key on the bus moves to the ratified keyspace-v2 grammar
+(`<base>/v1/<origin>/<class>/<producer>/<subject…>`), the control plane becomes
+`@rpc`, alerts become last-writer-wins state documents, the correlator becomes
+`@catalog`, and parallax gains demand-driven tiered simulcast. This is the
+largest breaking surface in the project's history — **there is no compatibility
+shim, and a 0.7.0 deployment will not interoperate with a 0.8.0 one.**
+
+Upgrading from 0.7.0? Read the migration table in
+[`docs/plans/keyspace-v2/RETROSPECTIVE.md`](docs/plans/keyspace-v2/RETROSPECTIVE.md)
+(§2, "The keys themselves" / "What was *deleted*") — it maps every old key to its
+v1 form. The normative spec is [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md);
+the deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
+
 ### Changed — BREAKING
+
+- **Every key on the bus moves to the v1 grammar** (epic #453, #455–#465). Keys are
+  now `<base>/v1/<origin>/<class>/<producer>/<subject…>` with classes
+  `telemetry`/`state`/`events`, verbatim planes `@rpc`/`@media`/`@blob`, and the
+  `@catalog` identity service. Telemetry that was
+  `zensight/sysinfo/toolbx/cpu/usage` is now
+  `zensight/v1/h-9706b31ddad3/telemetry/sysinfo/cpu/usage`. There is **no legacy
+  shim** — `zensight-sensor-core/tests/cutover_e2e.rs` subscribes to the entire
+  legacy bus (`zensight/**`) and asserts it stays silent. The typed builders live in
+  `zensight-keyspace`; never `format!` a key.
+
+- **`key_prefix` is retired from every sensor config** (#465). Producers are *named*
+  (`SensorConfig::producer()`), never prefixed. **This is the breaking config change,
+  and it fails quietly**: nothing in the workspace sets `deny_unknown_fields`, so a
+  `key_prefix:` line left in a 0.7.0 config is **silently ignored** rather than
+  rejected. Delete it from all sensor configs. The `SensorInfo.key_prefix` wire field
+  is likewise renamed to `producer`.
+
+- **The base is the session namespace, not a key chunk** (#466). `zensight/` is no
+  longer spelled in keys — sessions are opened namespaced and keys are declared
+  base-relative. Same bytes on the wire; an unnamespaced client must add the prefix
+  itself. New optional `namespace` knob (`ZENSIGHT_ZENOH_NAMESPACE`, default
+  `zensight`); an empty or wildcard namespace is refused.
+
+- **The version chunk is plain `v1`, not verbatim `@v1`** (#482). Any consumer
+  literal containing `@v1` breaks. This one *fixes* a silent bug: `**` never crosses
+  an `@`-chunk, so zenoh-ext's `@adv` publisher-detection tokens were unparseable and
+  **late-publisher detection had never worked**.
+
+- **Commands become `@rpc` queryables** (#460). The pub/sub command plane is gone:
+  `put zensight/<p>/@/command` → GET `…/@rpc/<producer>/<topic>` (read) or
+  `…/@rpc/<producer>/<topic>/set` (write). Errors now ride `reply_err` instead of a
+  status document. The `@/status` document plane is retired (the health doc absorbed
+  the running flag).
+
+- **Alerts become LWW state documents** (#461). The shared `@/alerts` blob is gone —
+  one document per alert at `state/<producer>/alert/<16hex>`, keyed FNV-1a 64 over
+  rule + sorted labels. The source is no longer hashed and the CamelCase rule prefix
+  is gone, so **alert keys differ from 0.7.0**. Seeding is now a storage-shaped GET.
+
+- **The correlator becomes `@catalog`** (#462). Entities publish at
+  `@catalog/state/entity/<id>`, with `alias/<old-id>` and `pdns/<ip-slug>`. Ownership
+  is a liveliness claim plus lexical election — losers exit rather than double-serve.
+
+- **Telemetry trees become real registry subjects** (#468, #479). sysinfo is 113
+  declared subjects instead of one catch-all, and five more trees followed; the
+  registry stops dropping the type column, and parallax's declared-but-nonexistent
+  payload type is gone. `@rpc/<producer>/introspect` now describes exactly what the
+  build serves.
+
+- **parallax: `<profile>` → `<tier>`, and the wildcard licence is revoked** (#494).
+  Video rides `@media/parallax/<stream>/video/<codec>/<tier>` where `<tier>` is a
+  named bandwidth rung (low/medium/high). **Viewers must subscribe to an exact tier**
+  — `…/video/h264/*` is no longer permitted, because each tier is an independent
+  encoder pipeline and a wildcard would pull all of them. `StreamControl`'s
+  `OpenStream`/`CloseStream` carry `{codec, tier}`; `StreamStatus` is per-tier.
+  Per-viewer quality is expressed by *which tier you subscribe to*, not by a command.
+
+- **GUI: devices are keyed on the publishing origin, not the hostname** (#474, #483).
+  `DeviceId` becomes `{protocol, origin, source}`. This fixes silent misrouting of
+  `@rpc` drill-downs when two hosts share a hostname, and the empty-map fallback in
+  the first few seconds after connect.
 
 - **The exported Prometheus/OTel series for the logs sensor are renamed** (#470).
   The logs sensor was the only producer that prefixed its *metric names* with its
@@ -34,28 +111,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`zensight-sensor-parallax` — live video onto the media plane** (epic #402,
-  phases 0–2). A new sensor built on the `parallax` pipeline engine advertises
-  V4L2 cameras, RTSP cameras, and synthetic test patterns as a stream
-  catalogue (`@/query/streams`), opens/closes encode pipelines on
-  `@/commands/stream`, and publishes opaque H.264 access units
-  (`@media/<stream>/video/h264/<profile>`) and low-fps JPEG previews
-  (`@media/<stream>/preview/jpeg`) with a typed CBOR `FrameMeta` attachment
-  per frame (#403). Streams are refcounted per open, torn down on close or
-  after an idle window without viewers, and force a keyframe the instant a
-  subscriber appears (#404–#406). Per-stream stats
-  (`<stream>/stats/{fps,kbps,drops,viewers,encode_ms}`), per-stream device
-  health, and auto-resolving alert rules (`camera_disappeared`,
+- **`zensight-sensor-parallax` — live video onto the media plane** (epics #402 and
+  #494). A new sensor built on the `parallax` pipeline engine advertises V4L2
+  cameras, RTSP cameras, and synthetic test patterns as a stream catalogue
+  (GET `@rpc/parallax/streams` → `Vec<StreamDescriptor>`), opens and closes encode
+  pipelines via `@rpc/parallax/stream/set`, and publishes opaque H.264 access units
+  (`@media/parallax/<stream>/video/<codec>/<tier>`) and low-fps JPEG previews
+  (`@media/parallax/<stream>/preview/jpeg`) with a typed CBOR `FrameMeta` attachment
+  per frame (#403). Streams are refcounted per open, torn down on close or after an
+  idle window without viewers, and force a keyframe the instant a subscriber appears
+  (#404–#406). Per-stream stats (`<stream>/stats/{fps,kbps,drops,viewers,encode_ms}`),
+  per-stream device health, and auto-resolving alert rules (`camera_disappeared`,
   `rtsp_connect_failed`, `encoder_overrun`) ride the normal channels (#407).
+
+  **Packaged? No — parallax is source-only in 0.8.0.** It is not in the deb/rpm set,
+  not in the `zensight-sensors` container image, and has no systemd unit. Build it
+  with `cargo build --release -p zensight-sensor-parallax` (it compiles openh264 from
+  C++ source). Packaging it is tracked separately.
+
+- **parallax: demand-driven tiered simulcast** (#494, on parallax-pipeline 0.3.0).
+  A stream offers a ladder of named tiers (low/medium/high, each a `TierSpec` of
+  height/fps/bitrate, capped at the source's native resolution); each tier that a
+  viewer actually subscribes to gets its **own independent encoder pipeline**, started
+  on first subscriber and stopped on last. Bitrate is adjustable live without
+  restarting the pipeline. The GUI subscribes to an exact tier, offers a per-tier
+  Live button with an annotated tier picker, and shows a bandwidth readout
+  (#502, #503).
+
 - **GUI: parallax stream catalogue + live JPEG preview tiles** (#408). The
   parallax device view fetches the catalogue on open and renders abortable
   live preview tiles (exact-key media subscriber, latest-frame-wins, CBOR
   `FrameMeta`, JPEG decode off the UI thread) with seq/fps captions; every
   way of leaving the view tears the tiles down and closes the streams.
+
 - **GUI: opt-in H.264 live view** behind the new `zensight` `h264` cargo
   feature (#409; default OFF — openh264 is a C++ build from source). Decodes
-  the video profile keyframe-gated, rebuilds the decoder and requests a fresh
+  the selected tier keyframe-gated, rebuilds the decoder and requests a fresh
   IDR on sequence discontinuities; default builds show a build hint instead.
+
+- **`zenctl` — a bus explorer for the v1 keyspace** (#479, RFC 08 §6).
+  `topic list/info/echo`, `node list`, `service list/call`, and `doctor`, all driven
+  by the registry rather than by hand-written key strings.
+
+- **`@catalog`: operator link/unlink** (#473, #486). An operator can assert the
+  identity that evidence cannot infer — linking two origins into one `HostEntity`, or
+  splitting one that was fused wrongly. Assertions outrank inferred evidence and
+  survive restarts.
+
+- **GUI: the Fleet view** (#469). `introspect` finally has a caller: the fleet is
+  rendered from what each build declares it serves, and a dead sensor is now reported
+  as offline rather than merely `silent` (the alive set is gated on liveliness).
+
+### Fixed
+
+- **The router storage configs are verified against a real `zenohd`** (#471). The five
+  storages across `configs/router-{blob,evidence,pdns-influxdb}-storage.json5` were
+  re-expressed as v1 selectors during the cutover with no test covering them; they now
+  have one (`#[ignore]`d — CI has no `zenohd`; run `just router-verify`).
+
+- **The logs sensor no longer doubles its producer chunk** (#470) — see the breaking
+  note above for the exported series rename.
+
+- **The container image is rebuilt and CI-built** (#472). `docker/Dockerfile.sensors`
+  had rotted since before the v1 cutover; CI now builds it on every push and
+  `docker-compose.yml` matches it. **Not yet verified on a real podman host** —
+  #472 stays open until `scripts/image-verify.sh` runs green.
 
 ### Dependencies
 

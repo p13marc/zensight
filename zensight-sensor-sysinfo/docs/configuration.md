@@ -16,9 +16,13 @@ block with every metric type disabled.
 
 ## `sysinfo`
 
+> There is no `key_prefix` knob — it was retired in #465. The producer chunk
+> (`sysinfo`) is a constant of this crate and the origin is derived from the host's
+> machine-id, so keys land under `zensight/v1/<origin>/…/sysinfo/…` with nothing to
+> configure. A `key_prefix:` line left over from 0.7.0 is **silently ignored**.
+
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `key_prefix` | `zensight/sysinfo` | Legacy-form prefix from which the v1 context derives (base `zensight`, producer `sysinfo` → keys under `zensight/v1/<origin>/…/sysinfo/…`). |
 | `source` | `auto` | `source` field in telemetry payloads (not part of the key); `auto` resolves the local hostname (falls back to `unknown`). |
 | `poll_interval_secs` | `5` | Collection interval (must be > 0). |
 | `collect` | see below | Which metric families to gather. |

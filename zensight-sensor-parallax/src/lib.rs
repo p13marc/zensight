@@ -11,7 +11,7 @@
 //! - catalogue: `@rpc/parallax/streams` → `Vec<StreamDescriptor>`
 //! - control:   `@rpc/parallax/stream/set` ← `Command<StreamControl>`
 //! - status:    `state/parallax/stream/<stream>` → `StreamStatus`
-//! - media:     `@media/parallax/<stream>/video/h264/<profile>` + `@media/parallax/<stream>/preview/jpeg`
+//! - media:     `@media/parallax/<stream>/video/<codec>/<tier>` + `@media/parallax/<stream>/preview/jpeg`
 //! - stats:     `telemetry/parallax/<stream>/stats/<metric>` (ordinary telemetry)
 
 pub mod alerts;
