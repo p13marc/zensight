@@ -65,6 +65,31 @@ type = "TelemetryPoint"
 since = "1.1"
 description = "zombie process count"
 
+# The `collect.processes` top-N stream (gated, off by default). Keyed by RANK,
+# not pid — `process/1/*` is whoever is burning the most CPU this tick, and the
+# pid/name ride along as labels. That keeps the series count bounded by
+# `collect.top_processes` and stable across restarts, where a pid-keyed series
+# would churn forever. The GUI's process panel reads exactly these.
+#
+# `{rank}` is a dimension value, so it stays a `{var}` (the `tcp/{state}`
+# precedent). The per-pid firehose is a different thing entirely and stays on the
+# `processes` query channel below.
+[[subject]]
+path = "process/{rank}/cpu"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "top-N process CPU (percent), by rank; pid/name are labels"
+
+[[subject]]
+path = "process/{rank}/memory"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "top-N process resident memory (bytes), by rank; pid/name are labels"
+
 [[subject]]
 path = "system/saturation_score"
 class = "telemetry"

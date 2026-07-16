@@ -5,15 +5,22 @@
 # example configs (configs/*.json5) into run configs with the opt-in
 # collectors, anomaly detectors and on-demand artifacts (report / directory
 # snapshot / pcap capture) turned ON, so the whole feature surface is visible
-# in the GUI. Build-feature-gated bits (ja4plus / lateral / sigma / snmp /
-# ebpf) and privileged systemd unit control (`actions`) stay off.
+# in the GUI. Bits gated on a non-default build feature (ja4plus / lateral /
+# sigma / snmp / ipfix) and privileged systemd unit control (`actions`) stay off.
+#
+# A sed can only flip a key that is really in configs/*.json5 — a key that is
+# merely absent takes the Rust `#[serde(default)]` silently, and nothing here
+# sets `deny_unknown_fields`. So every flag this script flips is spelled out in
+# the committed example (and pinned by a `shipped_config_spells_out_*` test in
+# the owning crate). Add the key there first, then the sed here.
 #
 # Used by BOTH `just configure` (local runs) and the all-in-one sensors
 # container image (docker/entrypoint-sensors.sh) — change the profile here,
 # never in two places.
 #
 # Usage:
-#   gen-configs.sh --iface IFACE --outdir DIR --configs-dir DIR [--snapshot-dir PATH]
+#   gen-configs.sh --iface IFACE --outdir DIR --configs-dir DIR \
+#                  [--snapshot-dir PATH] [--pcap-dir PATH] [--ebpf]
 #
 #   --iface        interface netring captures on
 #   --outdir       where the generated *.json5 land (created if missing)
@@ -21,21 +28,35 @@
 #   --snapshot-dir optional: enable sysinfo's Tier-2 directory snapshot of this
 #                  path (exposed in the GUI as "Download docs"). Omitted in the
 #                  container, where the repo's docs/ doesn't exist.
+#   --pcap-dir     optional: arm netring's triggered capture-to-disk into this
+#                  path — an anomaly fires and the GUI can download a pcap of the
+#                  lead-up — and expose the finished files for Tier-2 pull.
+#                  Omitted in the container, where the 32 MiB pre-trigger ring
+#                  stays resident for no demo gain.
+#   --ebpf         optional: turn on sysinfo's eBPF histograms (runqlat +
+#                  biolatency on @rpc/sysinfo/latency). Only meaningful for a
+#                  binary built `--features ebpf` that holds CAP_BPF/CAP_PERFMON,
+#                  so `just configure` passes it only when it built one. Never
+#                  passed by the container: a rootless podman userns cannot load
+#                  BPF at all, and claiming `ebpf: true` there would be a lie.
 
 set -euo pipefail
 
-iface="" outdir="" configs_dir="" snapshot_dir=""
+iface="" outdir="" configs_dir="" snapshot_dir="" pcap_dir="" ebpf=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --iface)        iface="$2"; shift 2 ;;
         --outdir)       outdir="$2"; shift 2 ;;
         --configs-dir)  configs_dir="$2"; shift 2 ;;
         --snapshot-dir) snapshot_dir="$2"; shift 2 ;;
+        --pcap-dir)     pcap_dir="$2"; shift 2 ;;
+        --ebpf)         ebpf=1; shift ;;
         *) echo "gen-configs.sh: unknown argument '$1'" >&2; exit 64 ;;
     esac
 done
 if [[ -z "$iface" || -z "$outdir" || -z "$configs_dir" ]]; then
-    echo "Usage: gen-configs.sh --iface IFACE --outdir DIR --configs-dir DIR [--snapshot-dir PATH]" >&2
+    echo "Usage: gen-configs.sh --iface IFACE --outdir DIR --configs-dir DIR \
+[--snapshot-dir PATH] [--pcap-dir PATH] [--ebpf]" >&2
     exit 64
 fi
 
@@ -44,44 +65,103 @@ mkdir -p "$outdir"
 # netring: point capture at the chosen interface + light up the L7 collectors
 # (QUIC/SSH/encrypted-DNS), IP reassembly, the extra anomaly detectors, the
 # on-demand pcap capture (@/artifact, needs CAP_NET_RAW) and the debug report.
-sed -E \
-    -e "s#interfaces: \[[^]]*\]#interfaces: [\"$iface\"]#" \
-    -e 's/quic: false/quic: true/' \
-    -e 's/ssh: false/ssh: true/' \
-    -e 's/encrypted_dns: false/encrypted_dns: true/' \
-    -e 's/ip_reassembly: false/ip_reassembly: true/' \
-    -e 's/encrypted_dns_bypass: false/encrypted_dns_bypass: true/' \
-    -e 's/rita_beacon_fqdn: false/rita_beacon_fqdn: true/' \
-    -e 's/data_exfil: false/data_exfil: true/' \
-    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
-    -e '/^      on_demand:/,/enabled:/ s/enabled: false/enabled: true/' \
-    "$configs_dir/netring.json5" > "$outdir/netring.json5"
+netring_seds=(
+    -e "s#interfaces: \[[^]]*\]#interfaces: [\"$iface\"]#"
+    -e 's/quic: false/quic: true/'
+    -e 's/ssh: false/ssh: true/'
+    -e 's/encrypted_dns: false/encrypted_dns: true/'
+    -e 's/ip_reassembly: false/ip_reassembly: true/'
+    -e 's/encrypted_dns_bypass: false/encrypted_dns_bypass: true/'
+    -e 's/rita_beacon_fqdn: false/rita_beacon_fqdn: true/'
+    -e 's/data_exfil: false/data_exfil: true/'
+    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/'
+    -e '/^      on_demand:/,/enabled:/ s/enabled: false/enabled: true/'
+    # The rest of the detector suite: beaconing/C2 (both the coarse CV detector
+    # and RITA's robust Bowley+MAD one), DNS tunnelling, newly-observed domains,
+    # connection floods and DGA scoring. Their inputs (collect.dns, collect.flows,
+    # names) are already on above, so these cost no extra capture.
+    # Scoped to the anomalies block and line-anchored, so `rita_beacon` cannot
+    # also rewrite the `rita_beacon_fqdn` flipped above.
+    -e '/^    anomalies: \{/,/^    \},/ s/^( *)(beaconing|rita_beacon|dns_tunnel|nod|connection_flood|dga): false/\1\2: true/'
+    # Arm the hot-swappable IOC channel (#328) even though the demo ships no
+    # indicators — otherwise @rpc/netring/threat_intel/set has nothing to fill.
+    -e '/^    threat: \{/,/^    \},/ s/^( *)reload: false/\1reload: true/'
+)
+if [[ -n "$pcap_dir" ]]; then
+    # Triggered capture-to-disk: keep a pre-trigger ring, and when an anomaly
+    # fires write the lead-up to a pcap the GUI can download. Also expose the
+    # finished files as a Tier-2 snapshot dir (the use documented in
+    # configs/netring.json5's artifacts block). netring's disk.rs does its own
+    # create_dir_all, so don't mkdir it here.
+    # BOTH seds MUST stay scoped: an unscoped `dir: null` would rewrite
+    # threat.sigma's, and `mode: "off"` would reach zenoh's `mode: "peer"`.
+    netring_seds+=(
+        -e '/^      to_disk: \{/,/^      \},/ { s/mode: "off"/mode: "triggered"/; s#dir: null#dir: "'"$pcap_dir"'"#; }'
+        -e '/snapshot: \{/,/dirs: \[/ { s/enabled: false/enabled: true/; s#dirs: \[#dirs: [ { name: "pcaps", path: "'"$pcap_dir"'" },# }'
+    )
+fi
+sed -E "${netring_seds[@]}" "$configs_dir/netring.json5" > "$outdir/netring.json5"
 
-# netlink: baseline is already broad; add the IPsec/XFRM collector (needs
-# CAP_NET_ADMIN) + the on-demand debug report.
+# netlink: baseline is already broad; just add the on-demand debug report.
+# NOTE xfrm stays OFF. It is off in the committed config precisely because
+# nlink's XFRM dump trips a ratelimited kernel warning on every poll and that is
+# noisy *in this demo* (#242, nlink#160) — a sed here re-enabling it silently
+# undid that. Re-enable in configs/netlink.json5 when nlink ships the fix, in one
+# place, not two.
 sed -E \
-    -e 's/xfrm: false/xfrm: true/' \
     -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
     "$configs_dir/netlink.json5" > "$outdir/netlink.json5"
 
-# logs: journald ingestion is already on; enable the on-demand debug report.
+# logs: journald ingestion is already on; add the on-demand debug report plus the
+# analytics over the (default-on) Drain3 template miner — novelty/rate-spike
+# anomalies and SLO error-budget burn alerting.
+# Scoped ranges are mandatory: a bare `enabled: false` would hit artifacts.report.
 sed -E \
     -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
+    -e '/^    error_budget: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
+    -e '/^    novelty: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
     "$configs_dir/logs.json5" > "$outdir/logs.json5"
 
-# sysinfo: the on-demand debug report, plus (when --snapshot-dir is given) a
-# Tier-2 directory snapshot of that path. Scoped seds so each block's own
-# `enabled` flips, not the alert rules'.
-if [[ -n "$snapshot_dir" ]]; then
-    sed -E \
-        -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
-        -e '/snapshot: \{/,/dirs: \[/ { s/enabled: false/enabled: true/; s#dirs: \[#dirs: [ { name: "docs", path: "'"$snapshot_dir"'" },# }' \
-        "$configs_dir/sysinfo.json5" > "$outdir/sysinfo.json5"
-else
-    sed -E \
-        -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
-        "$configs_dir/sysinfo.json5" > "$outdir/sysinfo.json5"
+# sysinfo: the opt-in collectors (hwmon temps + fans, cgroup-v2 saturation, TCP
+# states, top processes), the thermal alert that grades against the trip points
+# those temps carry, the on-demand debug report, plus (when --snapshot-dir is
+# given) a Tier-2 directory snapshot of that path.
+# Scoped seds so each block's own `enabled` flips, not the alert rules'.
+#
+# Some boards expose one physical EC through two hwmon drivers, publishing every
+# temperature and fan twice: Dell's modern `dell_ddv` (labelled "CPU Fan",
+# "Ambient", ...) and the legacy `dell_smm` (identical readings, unlabelled).
+# Drop the unlabelled twin, but ONLY when the labelled one is present — a
+# pre-2022 Dell exposes just `dell_smm`, and excluding it there would delete all
+# its fan and EC-temperature data.
+exclude_chips="[]"
+if grep -qxs dell_ddv /sys/class/hwmon/*/name; then
+    exclude_chips='["dell_smm"]'
 fi
+
+sysinfo_seds=(
+    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/'
+    # Line-anchored inside the collect block, so `processes` cannot also rewrite
+    # `top_processes: 10` or the sibling `processes: {` argv-scrub block.
+    -e '/^    collect: \{/,/^    \},/ s/^( *)(processes|temperatures|tcp_states|cgroups|power): false/\1\2: true/'
+    # The only alert rule that ships off: it needs the critical trip points that
+    # collect.temperatures (just flipped) provides. Single-line, so the literal
+    # prefix cannot reach any other rule's `enabled:`.
+    -e 's/thermal: \{ enabled: false/thermal: { enabled: true/'
+    -e "s#exclude_chips: \[\]#exclude_chips: $exclude_chips#"
+)
+if [[ "$ebpf" == 1 ]]; then
+    # runqlat + biolatency histograms on @rpc/sysinfo/latency (never streamed).
+    # The binary is a no-op for this unless built --features ebpf AND holding
+    # CAP_BPF/CAP_PERFMON — `just configure` only passes --ebpf when both hold.
+    sysinfo_seds+=(-e '/^    collect: \{/,/^    \},/ s/^( *)ebpf: false/\1ebpf: true/')
+fi
+if [[ -n "$snapshot_dir" ]]; then
+    sysinfo_seds+=(
+        -e '/snapshot: \{/,/dirs: \[/ { s/enabled: false/enabled: true/; s#dirs: \[#dirs: [ { name: "docs", path: "'"$snapshot_dir"'" },# }'
+    )
+fi
+sed -E "${sysinfo_seds[@]}" "$configs_dir/sysinfo.json5" > "$outdir/sysinfo.json5"
 
 # parallax: the committed config already streams the synthetic test pattern
 # (test0) on any machine — camera or not — and advertises local /dev/video*
@@ -142,4 +222,9 @@ cat > "$outdir/systemd.json5" <<'JSON5'
 }
 JSON5
 
-echo "Configured (demo-max): netring iface='$iface' (L7+capture on), netlink (+xfrm), logs=journald, sysinfo${snapshot_dir:+ snapshot='$snapshot_dir'}, systemd=full, parallax=test-pattern, correlator  (configs in $outdir/)"
+notes=""
+[[ "$ebpf" == 1 ]]              && notes+=" +ebpf(sysinfo)"
+[[ -n "$pcap_dir" ]]            && notes+=" pcap='$pcap_dir'"
+[[ -n "$snapshot_dir" ]]        && notes+=" snapshot='$snapshot_dir'"
+[[ "$exclude_chips" != "[]" ]]  && notes+=" hwmon-exclude=$exclude_chips"
+echo "Configured (demo-max): netring iface='$iface' (L7+detectors+capture on), netlink, logs=journald+novelty, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator$notes  (configs in $outdir/)"

@@ -4838,8 +4838,9 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
     ));
     assert!(
         ui.find(
-            "The sensor is not collecting these — it needs the `ebpf` feature, \
-             a supported kernel and CAP_BPF."
+            "The sensor is not collecting these — they need `collect.ebpf`, a binary \
+             built with the `ebpf` feature, a supported kernel, and CAP_BPF + \
+             CAP_PERFMON (a rootless container cannot load BPF at all)."
         )
         .is_ok(),
         "an unavailable collector must say so, not look like a failed fetch"

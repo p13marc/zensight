@@ -1222,8 +1222,9 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
     if !report.available {
         return col
             .push(empty_state(
-                "The sensor is not collecting these — it needs the `ebpf` feature, \
-                 a supported kernel and CAP_BPF.",
+                "The sensor is not collecting these — they need `collect.ebpf`, a binary \
+                 built with the `ebpf` feature, a supported kernel, and CAP_BPF + \
+                 CAP_PERFMON (a rootless container cannot load BPF at all).",
                 None,
             ))
             .into();

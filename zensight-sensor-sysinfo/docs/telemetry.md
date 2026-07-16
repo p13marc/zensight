@@ -34,6 +34,21 @@ and carry the original name back in a label.
 | cgroup-v2 (Linux) | `cgroups` **(default off)** | `cgroup/cpu/{nr_throttled,throttled_usec}`, `cgroup/memory/{current,max,used_percent,oom_kills_total,oom_total}`, `cgroup/<res>/pressure/<scope>_{avg10,total_us}` |
 | thermal / power (Linux) | `power` **(default off)** | `power/rapl/<zone>/watts`, `sensors/<chip>/<fan>/rpm`, `battery/<name>/{capacity,status}`, `system/entropy_avail` |
 
+Three notes on the hwmon families (`temperatures`, and `power`'s fans):
+
+* `<label>` comes from hwmon and is **not** unique by itself. Where a chip labels
+  several sensors identically (`dell_ddv` labels three `Ambient`), each gains its
+  input number — `Ambient_temp4`, `Ambient_temp6`, `Ambient_temp7` — so they do
+  not collapse onto one key. Unique labels are untouched. Chips that duplicate a
+  whole EC (`dell_smm` beside `dell_ddv`) are dropped via
+  `sysinfo.sensors.exclude_chips`; see [configuration.md](configuration.md).
+* A fan reading **0 RPM is published**, not skipped: laptops stop their fans at
+  idle, and a gap would make "idle" look like "dead".
+* `power/rapl/<zone>/watts` needs `/sys/class/powercap/*/energy_uj`, which is
+  **root-only** on most distros (CVE-2020-8694). An unprivileged sensor reports
+  fans, battery and entropy but no watts — silently, since a missing file is a
+  graceful skip.
+
 Additional Linux USE error/saturation collectors (all default on, all gated by
 their own flag — see [collectors.md](collectors.md)): `netstat` (TCP
 retransmits / listen-overflow / socket occupancy), `softnet` (backlog drops /

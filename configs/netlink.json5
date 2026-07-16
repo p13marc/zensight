@@ -55,7 +55,16 @@
       // Opt-in eBPF module (#114) — connect-latency gauges + retransmit
       // attribution (@rpc/netlink/retransmits) + tcplife records (@rpc/netlink/connections).
       // Needs a binary built with `--features ebpf` (nightly + bpf-linker) AND
-      // CAP_BPF/CAP_NET_ADMIN. No-op otherwise. Off by default.
+      // CAP_BPF + CAP_PERFMON (+ CAP_DAC_READ_SEARCH to resolve a tracepoint id
+      // under a 0700 tracefs). No-op otherwise. Off by default.
+      //
+      // KNOWN-BAD, do not enable yet: the connect-latency probe stamps a
+      // kretprobe on tcp_v4_connect(), which returns as soon as the SYN is sent
+      // — so it measures SYN-construction time (a few µs) no matter where the
+      // peer is, and never looks empty. tcplife's byte counters are also always
+      // zero (they need CO-RE). `just run` leaves this off; sysinfo's eBPF
+      // histograms are the ones the demo turns on. See the module docs in
+      // zensight-sensor-netlink-ebpf/src/main.rs.
       ebpf: false,
       // Socket→process attribution for the socket drill-down (#304): one
       // /proc/<pid>/fd walk per @rpc/netlink/sockets query joins each socket to its

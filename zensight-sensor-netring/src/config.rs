@@ -909,6 +909,52 @@ impl SensorConfig for NetringSensorConfig {
 mod tests {
     use super::*;
 
+    /// The shipped example config must physically spell out the opt-in detectors.
+    ///
+    /// Nothing here sets `deny_unknown_fields`, so an absent key parses clean and
+    /// silently takes the Rust default — which is how these detectors stayed
+    /// invisible. Asserting the parsed value would be vacuous (they ship `false`
+    /// and default `false`), so walk the raw tree and prove the key is present.
+    /// `gen-configs.sh` seds them on for the demo, and a sed can only flip a key
+    /// that is really there.
+    #[test]
+    fn shipped_config_spells_out_the_opt_in_detectors() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/netring.json5");
+        let text = std::fs::read_to_string(path).expect("configs/netring.json5");
+
+        // Typed parse: the file is valid and every key is well-typed.
+        let cfg: NetringSensorConfig = json5::from_str(&text).expect("configs/netring.json5");
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.netring.capture.to_disk.mode, CaptureDiskMode::Off);
+        assert!(cfg.netring.capture.to_disk.dir.is_none());
+
+        let raw: serde_json::Value = json5::from_str(&text).expect("json5");
+        let at = |path: &str| -> serde_json::Value {
+            let mut cur = &raw;
+            for seg in path.split('.') {
+                cur = cur
+                    .get(seg)
+                    .unwrap_or_else(|| panic!("configs/netring.json5 is missing `{path}`"));
+            }
+            cur.clone()
+        };
+
+        for flag in [
+            "netring.anomalies.beaconing",
+            "netring.anomalies.rita_beacon",
+            "netring.anomalies.dns_tunnel",
+            "netring.anomalies.nod",
+            "netring.anomalies.connection_flood",
+            "netring.anomalies.dga",
+            "netring.threat.reload",
+        ] {
+            assert_eq!(at(flag), false, "{flag} must ship opt-in (false)");
+        }
+        // `dir` must be a real key, not a comment: gen-configs.sh seds it to the
+        // demo's pcap path, and validation rejects `mode != off` without it.
+        assert!(at("netring.capture.to_disk.dir").is_null());
+    }
+
     #[test]
     fn parse_with_interface() {
         let cfg: NetringSensorConfig =

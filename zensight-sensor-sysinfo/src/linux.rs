@@ -15,7 +15,7 @@ use crate::map::{
     parse_softnet, parse_vmstat,
 };
 use procfs::{Current, CurrentSI};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
 /// CPU time breakdown in percentages.
@@ -77,6 +77,17 @@ pub struct Temperature {
     pub temp_celsius: f64,
     pub critical: Option<f64>,
     pub max: Option<f64>,
+}
+
+/// One `temp*_input` reading, before labels are disambiguated. `num` is the
+/// hwmon input number, kept only long enough to break a label collision.
+struct RawTemp {
+    chip: String,
+    num: String,
+    label: String,
+    temp_celsius: f64,
+    critical: Option<f64>,
+    max: Option<f64>,
 }
 
 /// TCP connection state counts.
@@ -282,12 +293,17 @@ impl LinuxMetrics {
     }
 
     /// Collect temperature sensor readings from hwmon.
-    pub fn collect_temperatures() -> Vec<Temperature> {
-        let mut temps = Vec::new();
+    ///
+    /// `exclude_chips` names hwmon chips to skip entirely — see
+    /// [`crate::config::SensorsConfig`] for when a board needs it.
+    pub fn collect_temperatures(exclude_chips: &[String]) -> Vec<Temperature> {
+        // Labels are only final once every chip has been walked — see
+        // `colliding_labels`.
+        let mut raw: Vec<RawTemp> = Vec::new();
 
         // Read from /sys/class/hwmon/hwmon*/
         let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
-            return temps;
+            return Vec::new();
         };
 
         for entry in entries.flatten() {
@@ -297,6 +313,10 @@ impl LinuxMetrics {
             let chip_name = std::fs::read_to_string(hwmon_path.join("name"))
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "unknown".to_string());
+
+            if exclude_chips.iter().any(|c| c == &chip_name) {
+                continue;
+            }
 
             // Find all temp*_input files
             let Ok(files) = std::fs::read_dir(&hwmon_path) else {
@@ -345,9 +365,10 @@ impl LinuxMetrics {
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .map(|v| v as f64 / 1000.0);
 
-                temps.push(Temperature {
-                    label,
+                raw.push(RawTemp {
                     chip: chip_name.clone(),
+                    num: sensor_num.to_string(),
+                    label,
                     temp_celsius,
                     critical,
                     max,
@@ -355,7 +376,16 @@ impl LinuxMetrics {
             }
         }
 
-        temps
+        let collisions = colliding_labels(raw.iter().map(|r| (r.chip.as_str(), r.label.as_str())));
+        raw.into_iter()
+            .map(|r| Temperature {
+                label: disambiguate(&collisions, &r.chip, r.label, "temp", &r.num),
+                chip: r.chip,
+                temp_celsius: r.temp_celsius,
+                critical: r.critical,
+                max: r.max,
+            })
+            .collect()
     }
 
     /// Collect TCP connection state counts.
@@ -772,17 +802,63 @@ pub fn collect_rapl() -> Vec<RaplDomain> {
     out
 }
 
+/// The `(chip, label)` pairs that hwmon reports more than once.
+///
+/// A chip may label several sensors identically — Dell's `dell_ddv` labels three
+/// separate sensors `Ambient`. `{label}` is the only thing separating them in the
+/// `sensors/{chip}/{label}/…` key, so undisambiguated they collapse onto one key
+/// and the last sample of each tick silently wins.
+fn colliding_labels<'a>(
+    pairs: impl Iterator<Item = (&'a str, &'a str)>,
+) -> HashSet<(String, String)> {
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for (chip, label) in pairs {
+        *counts
+            .entry((chip.to_string(), label.to_string()))
+            .or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(pair, _)| pair)
+        .collect()
+}
+
+/// Suffix a colliding label with the hwmon input it came from (`Ambient` →
+/// `Ambient_temp4`). Labels unique within their chip are returned untouched, so
+/// the common case keeps its clean name.
+fn disambiguate(
+    collisions: &HashSet<(String, String)>,
+    chip: &str,
+    label: String,
+    prefix: &str,
+    num: &str,
+) -> String {
+    if collisions.contains(&(chip.to_string(), label.clone())) {
+        format!("{label}_{prefix}{num}")
+    } else {
+        label
+    }
+}
+
 /// Read all hwmon `fan*_input` (RPM) readings. Mirrors the temperature walk.
-pub fn collect_fans() -> Vec<FanReading> {
-    let mut out = Vec::new();
+///
+/// `exclude_chips` names hwmon chips to skip entirely — see
+/// [`crate::config::SensorsConfig`] for when a board needs it.
+pub fn collect_fans(exclude_chips: &[String]) -> Vec<FanReading> {
+    // (chip, sensor number, label, rpm) — see `colliding_labels`.
+    let mut raw: Vec<(String, String, String, f64)> = Vec::new();
     let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
-        return out;
+        return Vec::new();
     };
     for entry in entries.flatten() {
         let hwmon = entry.path();
         let chip = std::fs::read_to_string(hwmon.join("name"))
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
+        if exclude_chips.iter().any(|c| c == &chip) {
+            continue;
+        }
         let Ok(files) = std::fs::read_dir(&hwmon) else {
             continue;
         };
@@ -801,21 +877,26 @@ pub fn collect_fans() -> Vec<FanReading> {
             else {
                 continue;
             };
-            // A zero reading is usually an unconnected header; skip the noise.
-            if rpm == 0.0 {
-                continue;
-            }
+            // 0 RPM is published, not skipped: a laptop genuinely stops its fans
+            // at idle, so dropping the sample would put a hole in the series and
+            // make "fan idle" indistinguishable from "fan dead". (Desktop
+            // Super-I/O boards do read 0 on an unconnected header — a chip that
+            // reports phantom fans belongs in `sensors.exclude_chips`.)
             let label = std::fs::read_to_string(hwmon.join(format!("fan{num}_label")))
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| format!("fan{num}"));
-            out.push(FanReading {
-                chip: chip.clone(),
-                label,
-                rpm,
-            });
+            raw.push((chip.clone(), num.to_string(), label, rpm));
         }
     }
-    out
+
+    let collisions = colliding_labels(raw.iter().map(|(c, _, l, _)| (c.as_str(), l.as_str())));
+    raw.into_iter()
+        .map(|(chip, num, label, rpm)| FanReading {
+            label: disambiguate(&collisions, &chip, label, "fan", &num),
+            chip,
+            rpm,
+        })
+        .collect()
 }
 
 /// Read battery / power-supply state from `/sys/class/power_supply/*` for
@@ -946,13 +1027,64 @@ mod tests {
 
     #[test]
     fn test_collect_temperatures() {
-        let temps = LinuxMetrics::collect_temperatures();
+        let temps = LinuxMetrics::collect_temperatures(&[]);
         // May be empty on systems without hwmon
         // Just verify it doesn't panic
-        for temp in temps {
+        for temp in &temps {
             assert!(!temp.chip.is_empty());
             assert!(!temp.label.is_empty());
         }
+
+        // Whatever this host exposes, the published key is `{chip}/{label}` — so
+        // the pair must be unique or one sensor silently overwrites another.
+        let mut keys: Vec<_> = temps.iter().map(|t| (&t.chip, &t.label)).collect();
+        let before = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(before, keys.len(), "(chip, label) pairs must be unique");
+    }
+
+    #[test]
+    fn test_excluded_chips_are_skipped() {
+        // Exclude every chip this host has; the walk must then yield nothing.
+        let all = LinuxMetrics::collect_temperatures(&[]);
+        let chips: Vec<String> = {
+            let mut c: Vec<String> = all.iter().map(|t| t.chip.clone()).collect();
+            c.sort();
+            c.dedup();
+            c
+        };
+        assert!(LinuxMetrics::collect_temperatures(&chips).is_empty());
+        assert!(collect_fans(&chips).is_empty());
+    }
+
+    #[test]
+    fn test_colliding_labels_are_disambiguated() {
+        // Dell's dell_ddv labels three separate sensors `Ambient`; a chip with a
+        // unique label must keep its clean name.
+        let collisions = colliding_labels(
+            [
+                ("dell_ddv", "Ambient"),
+                ("dell_ddv", "Ambient"),
+                ("dell_ddv", "CPU"),
+                ("coretemp", "Ambient"),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(
+            disambiguate(&collisions, "dell_ddv", "Ambient".into(), "temp", "4"),
+            "Ambient_temp4"
+        );
+        assert_eq!(
+            disambiguate(&collisions, "dell_ddv", "CPU".into(), "temp", "1"),
+            "CPU"
+        );
+        // Same label, different chip — no collision, so no suffix.
+        assert_eq!(
+            disambiguate(&collisions, "coretemp", "Ambient".into(), "temp", "1"),
+            "Ambient"
+        );
     }
 
     #[test]

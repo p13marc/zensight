@@ -59,6 +59,10 @@ pub struct SysinfoConfig {
     #[serde(default)]
     pub disk: DiskConfig,
 
+    /// hwmon chip filters for the temperature + fan collectors.
+    #[serde(default)]
+    pub sensors: SensorsConfig,
+
     /// Threshold-based alerting (OOM / PSI / disk / FD / thermal / swap).
     #[serde(default)]
     pub alerts: crate::alerts::AlertsConfig,
@@ -337,6 +341,21 @@ pub struct DiskConfig {
     pub exclude_pseudo: bool,
 }
 
+/// hwmon chip filtering for `collect.temperatures` and `collect.power`'s fans.
+///
+/// Some boards expose one physical embedded controller through two hwmon
+/// drivers — Dell laptops carry both the modern `dell_ddv` and the legacy
+/// `dell_smm`, which report identical temperatures and fans, one labelled and
+/// one not. Naming the redundant chip here drops it at the source instead of
+/// publishing everything twice.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SensorsConfig {
+    /// hwmon chip names (`/sys/class/hwmon/hwmon*/name`) to skip entirely.
+    /// Exact, case-sensitive matches. Empty (the default) collects every chip.
+    #[serde(default)]
+    pub exclude_chips: Vec<String>,
+}
+
 // Re-export LoggingConfig from the framework (they're compatible)
 pub use zensight_sensor_core::LoggingConfig;
 
@@ -508,12 +527,76 @@ mod tests {
         assert!(!config.sysinfo.collect.processes);
         // eBPF saturation histograms are opt-in (#99).
         assert!(!config.sysinfo.collect.ebpf);
+        // hwmon chip filtering is opt-in: collect every chip unless told not to.
+        assert!(config.sysinfo.sensors.exclude_chips.is_empty());
         // Alerting defaults: on, with thermal opted out (needs temperatures).
         assert!(config.sysinfo.alerts.enabled);
         assert!(config.sysinfo.alerts.oom.enabled);
         assert!(!config.sysinfo.alerts.thermal.enabled);
         assert_eq!(config.sysinfo.alerts.disk.warn_percent, 90.0);
         assert_eq!(config.sysinfo.alerts.fd.warn_percent, 80.0);
+    }
+
+    /// The shipped example config must physically contain every flag it claims,
+    /// at the right path.
+    ///
+    /// Nothing in the workspace sets `deny_unknown_fields`, so a key in the wrong
+    /// block — or missing entirely — parses clean and silently takes the Rust
+    /// default. That is exactly how `temperatures` / `power` stayed dark for so
+    /// long: real fields that no shipped config ever mentioned.
+    ///
+    /// Asserting the *parsed* value would be vacuous here, since every flag below
+    /// is spelled `false` and `false` is also the Rust default — the test would
+    /// pass with the keys deleted. So walk the raw JSON5 tree and assert the key
+    /// is really present at its path. `gen-configs.sh` seds these for the demo,
+    /// and a sed can only flip a key that is genuinely there.
+    #[test]
+    fn shipped_config_spells_out_the_opt_in_flags() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/sysinfo.json5");
+        let text = std::fs::read_to_string(path).expect("configs/sysinfo.json5");
+
+        // Typed parse first: proves the file is valid and every key is well-typed.
+        let config = SysinfoSensorConfig::load_from_file(path).expect("configs/sysinfo.json5");
+        assert!(config.sysinfo.sensors.exclude_chips.is_empty());
+        assert!(!config.sysinfo.alerts.thermal.enabled);
+
+        // Then the raw tree: proves the keys exist rather than defaulting.
+        let raw: serde_json::Value = json5::from_str(&text).expect("json5");
+        let at = |path: &str| -> serde_json::Value {
+            let mut cur = &raw;
+            for seg in path.split('.') {
+                cur = cur
+                    .get(seg)
+                    .unwrap_or_else(|| panic!("configs/sysinfo.json5 is missing `{path}`"));
+            }
+            cur.clone()
+        };
+
+        for flag in [
+            "sysinfo.collect.temperatures",
+            "sysinfo.collect.power",
+            "sysinfo.collect.cgroups",
+            "sysinfo.collect.tcp_states",
+            "sysinfo.collect.processes",
+            "sysinfo.collect.ebpf",
+        ] {
+            assert_eq!(at(flag), false, "{flag} must ship opt-in (false)");
+        }
+        assert_eq!(at("sysinfo.alerts.thermal.enabled"), false);
+        assert!(at("sysinfo.sensors.exclude_chips").is_array());
+    }
+
+    #[test]
+    fn test_parse_sensors_exclude_chips() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            sysinfo: {
+                sensors: { exclude_chips: ["dell_smm"] }
+            }
+        }"#;
+
+        let config: SysinfoSensorConfig = json5::from_str(json).unwrap();
+        assert_eq!(config.sysinfo.sensors.exclude_chips, vec!["dell_smm"]);
     }
 
     #[test]

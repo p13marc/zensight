@@ -20,12 +20,17 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
 
-# eBPF saturation histograms (issue #99) need CAP_BPF + CAP_PERFMON and a
-# binary built with `--features ebpf`. Uncomment ONLY for that build; leave
-# commented for the default unprivileged build. MemoryDenyWriteExecute would
-# break the BPF JIT, so it must stay off (it is, here).
-# AmbientCapabilities=CAP_BPF CAP_PERFMON
-# CapabilityBoundingSet=CAP_BPF CAP_PERFMON
+# eBPF saturation histograms (issue #99) need a binary built with
+# `--features ebpf`, plus CAP_BPF + CAP_PERFMON to load the tracing programs and
+# CAP_DAC_READ_SEARCH to resolve a tracepoint id: aya reads
+# <tracefs>/events/<cat>/<name>/id from userspace and /sys/kernel/tracing is mode
+# 0700 root:root, so every attach fails EACCES without it — even with CAP_BPF.
+# Note CAP_DAC_READ_SEARCH lets this unit read any file on the host; that is the
+# price of the panel. Uncomment ONLY for an eBPF build; leave commented for the
+# default unprivileged one. MemoryDenyWriteExecute would break the BPF JIT, so it
+# must stay off (it is, here).
+# AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
+# CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
 # ProtectKernelTunables=no
 
 [Install]

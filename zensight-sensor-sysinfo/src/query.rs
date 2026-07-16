@@ -111,9 +111,12 @@ pub async fn run(
 /// (issue #99).
 ///
 /// Reads the shared snapshot the eBPF poller maintains (runqlat + biolatency,
-/// never streamed) and replies it as JSON. Always declared when the feature is
-/// on so the GUI gets a clean reply even when the histograms are
-/// `available: false` (no caps / unsupported kernel).
+/// never streamed) and replies it as JSON.
+///
+/// Declared unconditionally — this module is not behind the `ebpf` feature, and
+/// `main` spawns it whatever the build — so the GUI can tell "no sensor replied"
+/// apart from a sensor replying `available: false` (binary built without the
+/// feature, `collect.ebpf` off, or load/attach failed).
 pub async fn run_latency(
     session: Arc<zenoh::Session>,
     producer: String,

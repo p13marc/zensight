@@ -108,19 +108,31 @@ async fn main() -> Result<()> {
         collector.run().await;
     });
 
-    // Opt-in eBPF saturation histograms (#99): load runqlat/biolatency, serve
-    // the snapshot on `@rpc/sysinfo/latency`. The queryable is always declared (so
-    // the GUI gets a clean reply) but the poller only runs if load+attach
-    // succeed; otherwise the report stays `available: false` and the
-    // unprivileged baseline is untouched.
+    // Opt-in eBPF saturation histograms (#99): load runqlat/biolatency and serve
+    // the snapshot on `@rpc/sysinfo/latency`.
+    //
+    // The queryable is declared UNCONDITIONALLY — outside both the feature gate
+    // and the config check — so the GUI can distinguish three states that matter:
+    //
+    //   * nothing replies            → no sysinfo sensor is running at all;
+    //   * `available: false`         → a sensor is here, but this binary has no
+    //                                  `ebpf` feature, or `collect.ebpf` is off,
+    //                                  or load/attach failed;
+    //   * a populated report         → real histograms.
+    //
+    // That distinction is load-bearing now that `just build` auto-detects the
+    // eBPF toolchain: on a machine without bpf-linker the demo silently gets a
+    // non-ebpf binary, and "not built with eBPF" must not look like "the sensor
+    // is dead". The poller only runs if load+attach succeed; the unprivileged
+    // baseline is untouched either way.
+    let latency_report = std::sync::Arc::new(std::sync::Mutex::new(
+        zensight_sensor_sysinfo::map::LatencyReport::default(),
+    ));
+
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
     if sysinfo_config.collect.ebpf {
-        use std::sync::{Arc, Mutex};
-        let report = Arc::new(Mutex::new(
-            zensight_sensor_sysinfo::map::LatencyReport::default(),
-        ));
         match zensight_sensor_sysinfo::ebpf::start(
-            report.clone(),
+            latency_report.clone(),
             sysinfo_config.poll_interval_secs,
         ) {
             Ok(handle) => {
@@ -132,25 +144,35 @@ async fn main() -> Result<()> {
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "eBPF latency collector unavailable (needs CAP_BPF/CAP_PERFMON); \
-                     streaming baseline unaffected"
+                    "eBPF latency collector unavailable (needs CAP_BPF + CAP_PERFMON, and \
+                     CAP_DAC_READ_SEARCH to read the tracepoint id under a 0700 tracefs; \
+                     a rootless container cannot load BPF at all). Streaming baseline \
+                     unaffected; @rpc/sysinfo/latency will reply available: false"
                 );
             }
         }
-        let q_session = runner.session().clone();
-        let q_producer = "sysinfo".to_string();
-        let q_source = source.clone();
-        runner.spawn(async move {
-            zensight_sensor_sysinfo::query::run_latency(q_session, q_producer, q_source, report)
-                .await;
-        });
     }
     #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
     if sysinfo_config.collect.ebpf {
         tracing::warn!(
             "collect.ebpf=true but this binary was built without the `ebpf` feature \
-             (or not on Linux); ignoring"
+             (or not on Linux); ignoring. @rpc/sysinfo/latency will reply available: false"
         );
+    }
+
+    {
+        let q_session = runner.session().clone();
+        let q_producer = "sysinfo".to_string();
+        let q_source = source.clone();
+        runner.spawn(async move {
+            zensight_sensor_sysinfo::query::run_latency(
+                q_session,
+                q_producer,
+                q_source,
+                latency_report,
+            )
+            .await;
+        });
     }
 
     // Build status metadata

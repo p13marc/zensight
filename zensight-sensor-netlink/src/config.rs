@@ -219,7 +219,9 @@ pub struct CollectConfig {
     /// Opt-in eBPF module (#114): connect-latency gauges + per-peer retransmit
     /// attribution (`@rpc/netlink/retransmits`) + tcplife connection records
     /// (`@rpc/netlink/connections`). OFF by default. NO-OP unless the binary was
-    /// built with `--features ebpf` AND holds CAP_BPF/CAP_NET_ADMIN.
+    /// built with `--features ebpf` AND holds CAP_BPF + CAP_PERFMON (loading a
+    /// tracing program needs those; CAP_NET_ADMIN gates *networking* program
+    /// types, which this module does not use).
     #[serde(default)]
     pub ebpf: bool,
     /// Socket→process attribution for the `@rpc/netlink/sockets` drill-down (#304):

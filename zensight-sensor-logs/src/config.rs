@@ -845,6 +845,40 @@ impl Default for SyslogConfig {
 mod tests {
     use super::*;
 
+    /// The shipped example config must physically spell out the opt-in analytics.
+    ///
+    /// No `deny_unknown_fields` anywhere, so an absent block parses clean and
+    /// silently takes the Rust default — which is how `novelty` and
+    /// `error_budget` stayed invisible. Asserting the parsed value would be
+    /// vacuous (both ship `false` and default `false`), so walk the raw tree and
+    /// prove the key is really present for `gen-configs.sh` to sed on.
+    #[test]
+    fn shipped_config_spells_out_the_opt_in_analytics() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/logs.json5");
+        let text = std::fs::read_to_string(path).expect("configs/logs.json5");
+
+        // Typed parse: the file is valid and every key is well-typed.
+        let cfg = SyslogSensorConfig::load_from_file(path).expect("configs/logs.json5");
+        assert!(!cfg.syslog.novelty.enabled);
+        assert!(!cfg.syslog.error_budget.enabled);
+        // novelty needs the template miner, which is on by default.
+        assert!(cfg.syslog.templating.enabled);
+
+        let raw: serde_json::Value = json5::from_str(&text).expect("json5");
+        let at = |path: &str| -> serde_json::Value {
+            let mut cur = &raw;
+            for seg in path.split('.') {
+                cur = cur
+                    .get(seg)
+                    .unwrap_or_else(|| panic!("configs/logs.json5 is missing `{path}`"));
+            }
+            cur.clone()
+        };
+
+        assert_eq!(at("syslog.novelty.enabled"), false);
+        assert_eq!(at("syslog.error_budget.enabled"), false);
+    }
+
     #[test]
     fn test_parse_minimal_config() {
         let json = r#"{

@@ -140,6 +140,38 @@
     anomalies: {
       port_scan: true,   // TRW port-scan detection -> alerts
 
+      // RITA-style beaconing / C2 (#17, ATT&CK T1071): periodic, size-consistent
+      // TCP flows scored by coefficient of variation against `beacon_threshold`.
+      // Coarser than `rita_beacon` below and independent of it. Needs
+      // collect.flows.
+      beaconing: false,
+
+      // Robust RITA beaconing (#118, ATT&CK T1071): Bowley skewness + MAD,
+      // bit-faithful to RITA — catches jittered C2 (e.g. Cobalt Strike's jitter)
+      // that the coarser `beaconing` detector misses. Uses
+      // `rita_beacon_threshold`. Needs collect.flows.
+      rita_beacon: false,
+
+      // DNS tunneling (#118, ATT&CK T1071.004): a (src, SLD) whose distinct
+      // subdomain-label cardinality crosses `dns_tunnel_distinct`, or any single
+      // query name at/above `dns_tunnel_qname_len` bytes. Needs collect.dns.
+      dns_tunnel: false,
+
+      // Newly-Observed-Domain (#118): an Info anomaly on first sight of an SLD,
+      // tracked in a bounded LRU. Needs collect.dns. NOTE on a workstation this
+      // fires once per newly-browsed domain — expect a burst after a cold start.
+      nod: false,
+
+      // Connection flood (#18): many TCP connections to a single (dst, port) in
+      // a short window — distinct from a port scan, which spans many ports.
+      // Needs collect.flows.
+      connection_flood: false,
+
+      // DGA scoring (#18, ATT&CK T1568.002): query SLDs whose bigram
+      // log-likelihood falls below `dga_threshold` (more negative = more
+      // random-looking). Needs collect.dns.
+      dga: false,
+
       // Encrypted-DNS bypass policy (#326, ATT&CK T1572): fire an
       // `encrypted_dns_bypass` anomaly when a DoT/DoQ/DoH session goes to a
       // resolver not on `dns_resolver_allowlist` (empty ⇒ fall back to netring's
@@ -173,6 +205,13 @@
     threat: {
       // Passive flow-risk scoring: obsolete TLS, cleartext HTTP credentials.
       flow_risk: true,
+
+      // Arm the runtime threat-intel reload channel (#328): always build the IOC
+      // (and YARA, with --features yara) matchers into the monitor even when the
+      // lists below start empty, so `@rpc/netring/threat_intel/set` can hot-swap
+      // indicators without a restart. Off => the matchers are armed only if this
+      // config already ships indicators, and a later `set` has nothing to fill.
+      reload: false,
       // Indicator-of-compromise matching (bad IPs / domains / JA3 / JA4).
       ioc: {
         ips: [],          // e.g. ["203.0.113.6"] — matched against flow src/dst
@@ -252,7 +291,8 @@
       // `dir` to the unit.
       to_disk: {
         mode: "off",                     // "off" | "rotating" | "triggered"
-        // dir: "/var/lib/zensight/captures",  // REQUIRED when mode != off
+        dir: null,                       // REQUIRED when mode != off, e.g.
+                                         // "/var/lib/zensight/captures"
         ring_bytes: 33554432,            // 32 MiB pre-trigger ring (triggered)
         max_file_bytes: 67108864,        // 64 MiB per file (rotation / trigger cap)
         rotate_secs: 0,                  // 0 = size-based rotation only (rotating)

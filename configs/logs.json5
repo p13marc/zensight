@@ -72,6 +72,27 @@
     derived: true,
     derived_interval_secs: 10,
     top_units: 10, // distinct per-unit series; the rest fold into `other`
+
+    // SLO error-budget burn-rate alerting. The `error_ratio` / `burn_rate`
+    // gauges are emitted regardless (cheap, bounded); `enabled` only controls
+    // whether a `log-error-budget` alert is ever raised. Needs `derived`.
+    error_budget: {
+      enabled: false,
+      target_ratio: 0.05,  // tolerated per-window error fraction (the SLO)
+      burn_rate: 2.0,      // fire above target_ratio * burn_rate
+      burn_windows: 3,     // consecutive over-budget windows (anti-flap)
+    },
+
+    // Log novelty + rate-spike anomalies, over the Drain3 template miner
+    // (`templating`, on by default). A template never seen before fires
+    // `log-novelty`; a known one running hot fires `log-rate-spike`.
+    // Templates first seen inside `warm_up_secs` are folded into the baseline,
+    // so a cold start isn't reported as all-novel.
+    novelty: {
+      enabled: false,
+      warm_up_secs: 300,
+      rate_spike_multiplier: 5.0,  // window rate vs. its EWMA baseline
+    },
   },
 
   logging: { level: "info" },

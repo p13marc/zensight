@@ -86,9 +86,18 @@ async fn main() -> Result<()> {
                 ebpf_state = Some(state);
             }
             Err(e) => {
-                tracing::warn!(error = %e, "eBPF load failed (needs CAP_BPF/CAP_NET_ADMIN); baseline unchanged");
+                tracing::warn!(error = %e, "eBPF load failed (needs CAP_BPF + CAP_PERFMON, plus CAP_DAC_READ_SEARCH for the tracepoints under a 0700 tracefs); baseline unchanged");
             }
         }
+    }
+    // Without the feature, `collect.ebpf: true` was silently ignored — the config
+    // said one thing and the binary did another with no way to tell. Say so, as
+    // sysinfo does.
+    #[cfg(not(feature = "ebpf"))]
+    if netlink_config.collect.ebpf {
+        tracing::warn!(
+            "collect.ebpf=true but this binary was built without the `ebpf` feature; ignoring"
+        );
     }
 
     // Alert reporter shared by the expectation sentinel (Pillar B) and the XFRM

@@ -46,6 +46,40 @@ relflag := if profile == "release" { "--release" } else { "" }
 # Run configs are generated here (gitignored), so committed examples stay clean.
 rundir := ".run"
 
+# eBPF collectors (#99): "auto" builds them iff this host has the toolchain, and
+# silently goes without otherwise, so `just run` stays portable. "1" forces them
+# on (the build fails loudly if the toolchain is missing); "0" forces them off.
+#   just ebpf=1 run   /   just ebpf=0 run
+ebpf := "auto"
+
+# aya-build shells out to `rustup run nightly cargo build -Z build-std=core`, so
+# it needs the *plain* `nightly` channel — a pinned nightly-YYYY-MM-DD does not
+# satisfy it, hence anchoring on the host triple rather than a bare `grep
+# nightly` — plus rust-src for build-std, plus bpf-linker for the link step.
+_ebpf_detected := ```
+    if command -v bpf-linker >/dev/null 2>&1 \
+       && rustup toolchain list 2>/dev/null \
+            | grep -q "^nightly-$(rustc -vV | awk '/^host:/{print $2}')" \
+       && rustup component list --toolchain nightly 2>/dev/null \
+            | grep -q '^rust-src.*(installed)'
+    then echo 1; else echo 0; fi
+```
+
+ebpf_on := if ebpf == "auto" { _ebpf_detected } else if ebpf == "1" { "1" } else if ebpf == "0" { "0" } else { error("ebpf must be auto|1|0, got '" + ebpf + "'") }
+
+# Only sysinfo. netlink's `ebpf` feature builds, but its connect-latency probe
+# measures the connect() call path rather than the SYN→SYN-ACK handshake, so it
+# would publish microseconds to any host on earth — a false gauge is worse than
+# an absent one. sysinfo's runqlat/biolatency are self-validating: each joins a
+# key written by one tracepoint against one read by another, so a bad offset
+# yields an empty histogram rather than a wrong one.
+#
+# Cargo merges every --features flag into ONE global set; `pkg/feature` is what
+# binds a feature to a package. (`-p a --features x -p b --features y` is NOT
+# positional — the flags do not attach to the preceding -p, despite how `build`
+# below reads.)
+ebpf_features := if ebpf_on == "1" { "--features zensight-sensor-sysinfo/ebpf" } else { "" }
+
 # Local Zenoh rendezvous: the GUI listens here and sensors connect to it, so the
 # pieces always find each other on loopback without relying on multicast peer
 # discovery (which is unreliable on hosts with a VPN or extra interfaces, e.g.
@@ -62,7 +96,14 @@ _default:
 # C++-free GUI.
 
 # Build the GUI + the sensors + the identity correlator.
+#
+# The eBPF note below carries NO backticks on purpose. Recipe lines are handed to
+# sh, which reads a backtick as command substitution — and a backticked
+# `just caps` there recurses through this recipe's own dependency and hangs the
+# build with no output whatsoever. (This comment lives out here rather than in the
+# recipe body because just echoes recipe lines, comments included.)
 build:
+    @echo '{{ if ebpf_on == "1" { "eBPF: ON (sysinfo runqlat/biolatency) — grant the caps with: just caps" } else { "eBPF: off — needs bpf-linker + nightly + rust-src; force with: just ebpf=1 build" } }}'
     cargo build {{relflag}} \
         -p zensight --features zensight/h264 \
         -p zensight-sensor-netring \
@@ -71,7 +112,8 @@ build:
         -p zensight-sensor-logs \
         -p zensight-sensor-systemd \
         -p zensight-sensor-parallax \
-        -p zensight-correlator
+        -p zensight-correlator \
+        {{ebpf_features}}
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -79,13 +121,46 @@ build:
 #   netring → CAP_NET_RAW,CAP_IPC_LOCK  (AF_PACKET/AF_XDP capture)
 #   netlink → CAP_NET_ADMIN             (optional nftables/conntrack + XFRM monitor)
 # netlink's baseline reads work without this; the cap only unlocks the extras.
-# (eBPF additionally needs a `--features ebpf` build + CAP_BPF/CAP_PERFMON.)
+#
+# With an eBPF build ({{ebpf_on}}=1), sysinfo also gets:
+#   CAP_BPF + CAP_PERFMON  — load tracing programs and perf_event_open. NOT
+#                            CAP_NET_ADMIN: that gates *networking* program types
+#                            (XDP, cgroup/skb), none of which we load.
+#   CAP_DAC_READ_SEARCH    — aya resolves a tracepoint by reading
+#                            <tracefs>/events/<cat>/<name>/id from userspace, and
+#                            /sys/kernel/tracing is mode 0700 root:root, so every
+#                            attach fails EACCES without it — even with CAP_BPF.
+#                            This is a broad grant (read any file on the host); it
+#                            buys the runqlat/biolatency panel. `just ebpf=0 caps`
+#                            skips it. The narrower alternative is chmod 755 on
+#                            /sys/kernel/tracing, which is worse: it exposes
+#                            tracing to every user and resets each boot.
 caps: build
-    @echo "Granting CAP_NET_RAW,CAP_IPC_LOCK to {{bindir}}/zensight-sensor-netring (sudo)…"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Granting CAP_NET_RAW,CAP_IPC_LOCK to {{bindir}}/zensight-sensor-netring (sudo)…"
     sudo setcap 'cap_net_raw,cap_ipc_lock=+ep' {{bindir}}/zensight-sensor-netring
-    @echo "Granting CAP_NET_ADMIN to {{bindir}}/zensight-sensor-netlink (sudo)…"
+    echo "Granting CAP_NET_ADMIN to {{bindir}}/zensight-sensor-netlink (sudo)…"
     sudo setcap 'cap_net_admin=+ep' {{bindir}}/zensight-sensor-netlink
-    @echo "sysinfo + logs + parallax need no capabilities."
+    if [[ "{{ebpf_on}}" == "1" ]]; then
+        echo "Granting CAP_BPF,CAP_PERFMON,CAP_DAC_READ_SEARCH to {{bindir}}/zensight-sensor-sysinfo (sudo)…"
+        sudo setcap 'cap_bpf,cap_perfmon,cap_dac_read_search=+ep' {{bindir}}/zensight-sensor-sysinfo
+        # A file capability only grants privilege in the user namespace that set
+        # it, but the kernel checks bpf_capable() against the *initial* userns —
+        # so inside a rootless container setcap is void and every load is EPERM.
+        # Say so here rather than let it surface as a mystery in the sensor log.
+        if [[ -e /run/.containerenv || -e /.dockerenv ]]; then
+            echo
+            echo "  WARNING: this is a rootless container. BPF loads are checked against the"
+            echo "  initial user namespace, so the caps above cannot take effect here and"
+            echo "  sysinfo will log 'eBPF latency collector unavailable'. The rest of the"
+            echo "  demo is unaffected. Run from a host terminal for the eBPF panel."
+            echo
+        fi
+        echo "logs + parallax need no capabilities."
+    else
+        echo "sysinfo + logs + parallax need no capabilities."
+    fi
 
 # Build + grant capabilities.
 setup: build caps
@@ -98,7 +173,9 @@ setup: build caps
 configure:
     scripts/gen-configs.sh --iface "{{iface}}" --outdir "{{rundir}}" \
         --configs-dir "{{justfile_directory()}}/configs" \
-        --snapshot-dir "{{justfile_directory()}}/docs"
+        --snapshot-dir "{{justfile_directory()}}/docs" \
+        --pcap-dir "{{justfile_directory()}}/{{rundir}}/pcap" \
+        {{ if ebpf_on == "1" { "--ebpf" } else { "" } }}
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
 

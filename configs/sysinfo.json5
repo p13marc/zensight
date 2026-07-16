@@ -74,6 +74,30 @@
       // System info (uptime, load averages)
       system: true,
 
+      // hwmon temperature sensors, per chip/label, with their critical/max trip
+      // points (sensors/{chip}/{label}/{temp,critical,max}). Linux + hwmon only;
+      // reads are unprivileged. No sensors => nothing published.
+      // Required by alerts.thermal below, which grades against the trip points —
+      // enable both together.
+      temperatures: false,
+
+      // TCP connection-state counts (ESTABLISHED, TIME_WAIT, ...) from
+      // /proc/net/tcp. Linux-only; a missing file is skipped gracefully.
+      tcp_states: false,
+
+      // cgroup-v2 container saturation: CPU throttling, memory limit/OOM kills,
+      // per-cgroup pressure. Reads /sys/fs/cgroup for the sensor's own cgroup
+      // plus anything in cgroup_paths. No cgroup-v2 => skipped gracefully.
+      cgroups: false,
+
+      // Thermal/power depth: hwmon fan RPM (sensors/{chip}/{label}/rpm), battery
+      // capacity/status, kernel entropy pool, and RAPL energy->watts.
+      // Hardware-specific and higher-cardinality; missing hardware is skipped
+      // gracefully. NOTE the RAPL arm reads /sys/class/powercap/*/energy_uj,
+      // which is root-only on most distros (CVE-2020-8694): an unprivileged
+      // sensor still reports fans/battery/entropy, but no watts.
+      power: false,
+
       // Top processes by CPU/memory (can be resource-intensive)
       processes: false,
 
@@ -82,11 +106,17 @@
 
       // eBPF saturation histograms (issue #99) — OFF by default.
       // Requires a binary built with `--features ebpf` (nightly + rust-src +
-      // bpf-linker) AND CAP_BPF/CAP_PERFMON at runtime. Serves runqlat
-      // (scheduler run-queue latency) and biolatency (block-I/O latency) log2
-      // histograms on @rpc/sysinfo/latency — never streamed.
-      // Ignored (graceful, baseline unaffected) if either prerequisite is
-      // missing.
+      // bpf-linker) AND, at runtime, CAP_BPF + CAP_PERFMON to load the tracing
+      // programs, plus CAP_DAC_READ_SEARCH because aya resolves a tracepoint by
+      // reading <tracefs>/events/<cat>/<name>/id and /sys/kernel/tracing is mode
+      // 0700. A rootless container cannot load BPF at all (the kernel checks the
+      // initial user namespace), whatever capabilities are set.
+      // Serves runqlat (scheduler run-queue latency) and biolatency (block-I/O
+      // latency) log2 histograms on @rpc/sysinfo/latency — never streamed.
+      // Ignored (graceful, baseline unaffected) if any prerequisite is missing:
+      // the queryable is still declared and replies `available: false`, so the
+      // GUI distinguishes "not built with eBPF" from "no sensor answered".
+      // `just run` flips this on automatically when it built an eBPF binary.
       ebpf: false,
     },
 
@@ -124,6 +154,17 @@
 
       // Exclude pseudo filesystems (tmpfs, sysfs, proc, etc.)
       exclude_pseudo: true,
+    },
+
+    // hwmon chip filtering for collect.temperatures and collect.power's fans.
+    sensors: {
+      // hwmon chip names (/sys/class/hwmon/hwmon*/name) to skip entirely.
+      // Exact, case-sensitive; empty = collect every chip.
+      // Some boards expose one physical embedded controller through two drivers
+      // — Dell laptops carry both the modern `dell_ddv` and the legacy
+      // `dell_smm`, reporting identical temperatures and fans, one labelled and
+      // one not. Name the redundant chip here to publish each reading once.
+      exclude_chips: [],
     },
 
     // Threshold-based alerting. Each poll tick the already-collected saturation

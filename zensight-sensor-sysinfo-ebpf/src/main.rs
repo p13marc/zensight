@@ -10,10 +10,28 @@
 //!   stamps a start time keyed by `(dev, sector)`; `block_rq_complete` measures
 //!   the delta.
 //!
-//! NOTE (blind implementation, #99): the tracepoint field OFFSETS below are the
-//! commonly-documented ones but ARE kernel-version dependent — they must be
-//! validated against `/sys/kernel/tracing/events/{sched,block}/*/format` on the
-//! target kernel (or switched to BTF/CO-RE field access). Flagged in the PR.
+//! ## Status: offsets validated (#99)
+//!
+//! The tracepoint field offsets below were validated against
+//! `/sys/kernel/btf/vmlinux` on 7.1.3-200.fc44 (2026-07-16) and all four were
+//! already correct. They remain **kernel-version dependent**, so the
+//! `btf_offsets` test in `zensight-sensor-sysinfo-ebpf-common` re-checks them
+//! against the running kernel's BTF. ("Switch to CO-RE", as an earlier note here
+//! suggested, is not available: CO-RE field relocations come from clang's
+//! `__builtin_preserve_access_index`, which rustc/bpf-linker do not emit. The
+//! portable fix would be `aya::EbpfLoader::set_global` offset injection.)
+//!
+//! Both histograms are **self-validating**, which is why this is the half we turn
+//! on by default: each joins a key written by one tracepoint against a key read
+//! by another (`pid` for runqlat, `(dev, sector)` for biolatency). A wrong offset
+//! makes the lookup miss, so the histogram comes out **empty** rather than
+//! plausibly wrong. A non-empty histogram is itself evidence the offsets are
+//! right.
+//!
+//! Fidelity note: runqlat only measures wakeup→switch. bcc's `runqlat` also
+//! stamps tasks preempted while still runnable (`prev_state == TASK_RUNNING` in
+//! `sched_switch`), so our tail reads lower than its under heavy CPU load. The
+//! numbers are not identical to `runqlat.py` by construction.
 #![cfg_attr(target_arch = "bpf", no_std)]
 #![cfg_attr(target_arch = "bpf", no_main)]
 
@@ -32,7 +50,12 @@ mod prog {
         maps::{HashMap, PerCpuArray},
         programs::TracePointContext,
     };
-    use zensight_sensor_sysinfo_ebpf_common::{log2_bucket, MAX_SLOTS};
+    // The tracepoint offsets live in the shared crate, not here: this module only
+    // compiles for the `bpf` target, so a constant declared here is invisible to
+    // the host test that checks it against the running kernel's BTF.
+    use zensight_sensor_sysinfo_ebpf_common::{
+        log2_bucket, MAX_SLOTS, OFF_BLK_DEV, OFF_BLK_SECTOR, OFF_SWITCH_NEXT_PID, OFF_WAKEUP_PID,
+    };
 
     // -- histograms (per-CPU → lock-free in-kernel; userspace sums across CPUs) -
     #[map]
@@ -48,14 +71,14 @@ mod prog {
     #[map]
     static BIO_START: HashMap<u64, u64> = HashMap::with_max_entries(10240, 0);
 
-    // -- tracepoint field offsets (VERIFY against the kernel's format files) --
-    // sched/sched_wakeup:  ... char comm[16]@8, pid_t pid@24
-    const OFF_WAKEUP_PID: usize = 24;
-    // sched/sched_switch:  ... next_comm[16]@40, pid_t next_pid@56
-    const OFF_SWITCH_NEXT_PID: usize = 56;
-    // block/block_rq_issue & block_rq_complete: dev_t dev@8, sector_t sector@16
-    const OFF_BLK_DEV: usize = 8;
-    const OFF_BLK_SECTOR: usize = 16;
+    // Field offsets: see `zensight-sensor-sysinfo-ebpf-common`, where they are
+    // declared and checked against the running kernel's BTF.
+    //
+    // One subtlety `bio_key()` below depends on: block_rq_issue and
+    // block_rq_complete carry DIFFERENT structs (trace_event_raw_block_rq, size
+    // 64, vs trace_event_raw_block_rq_completion, size 48). They agree on
+    // dev@8/sector@16 and diverge at 28 (`bytes` vs `error`), so one accessor is
+    // safe for these two fields and nothing past offset 24.
 
     #[inline(always)]
     fn record(hist: &PerCpuArray<u64>, delta_ns: u64) {

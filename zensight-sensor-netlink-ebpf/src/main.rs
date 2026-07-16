@@ -13,10 +13,34 @@
 //!   the transition into `TCP_ESTABLISHED` and, on `TCP_CLOSE`, submits a
 //!   `ConnRecord` (pid/comm/peer/duration) to a ring buffer.
 //!
-//! NOTE (blind implementation, #114): the tracepoint field OFFSETS below are the
-//! commonly-documented ones but ARE kernel-version dependent — validate against
-//! `/sys/kernel/tracing/events/{tcp,sock}/*/format` (or switch to BTF/CO-RE) on
-//! the target kernel. tcp_sock byte/seg fields are left 0 pending CO-RE.
+//! ## Status: offsets validated, connlat still wrong (#114)
+//!
+//! The tracepoint field offsets below were validated against
+//! `/sys/kernel/btf/vmlinux` on 7.1.3-200.fc44 (2026-07-16) — four of them were
+//! off by one and are now fixed; see the constants for the detail. They remain
+//! **kernel-version dependent**, so the `btf_offsets` test in
+//! `zensight-sensor-netlink-ebpf-common` re-checks them against the running
+//! kernel's BTF. ("Switch to CO-RE", as an earlier note here suggested, is not
+//! available: CO-RE field relocations come from clang's
+//! `__builtin_preserve_access_index`, which rustc/bpf-linker do not emit. The
+//! portable fix would be `aya::EbpfLoader::set_global` offset injection.)
+//!
+//! Two known defects remain, which is why `collect.ebpf` stays off for netlink
+//! while sysinfo's is on:
+//!
+//! * **connlat measures the wrong thing.** `tcp_v4_connect()` builds and sends
+//!   the SYN and returns immediately — the handshake wait happens in
+//!   `inet_stream_connect()` afterwards, and for a non-blocking socket there is
+//!   no wait at all. So the kretprobe delta is SYN-construction time: a few µs
+//!   regardless of whether the peer is on loopback or another continent. Unlike
+//!   a bad offset this never looks empty, it looks like a suspiciously fast
+//!   network. The fix is to drive connlat off `inet_sock_set_state` (stash on
+//!   CLOSE→SYN_SENT, which runs in `connect(2)` syscall context; measure on
+//!   →ESTABLISHED), which also fixes the pid attribution noted at `try_set_state`
+//!   and needs no new offsets.
+//! * **tcp_sock byte/seg fields are left 0** pending CO-RE, so `ConnRecord`'s
+//!   `tx_bytes`/`rx_bytes`/`segs_*` are always zero — which reads as "idle
+//!   connection", not "not measured".
 #![cfg_attr(target_arch = "bpf", no_std)]
 #![cfg_attr(target_arch = "bpf", no_main)]
 
@@ -65,19 +89,36 @@ mod prog {
     const AF_INET: u16 = 2;
     const AF_INET6: u16 = 10;
 
-    // inet_sock_set_state tracepoint offsets (VERIFY against the format file).
+    // `inet_sock_set_state` field offsets, validated against
+    // `struct trace_event_raw_inet_sock_set_state` (size 72) in
+    // /sys/kernel/btf/vmlinux on 7.1.3-200.fc44 (2026-07-16). BTF member offsets
+    // come from the same offsetof() the tracepoint's `format` file is generated
+    // from, and BTF is world-readable where tracefs is 0700 — so it validates
+    // unprivileged and in CI. See the `btf_offsets` test in -ebpf-common.
+    //
+    // The four address offsets were previously off by one (31/35/39/55): they
+    // encoded an older layout where `protocol` was a __u8. It is a __u16 at
+    // offset 30 here, so every field after it shifts up a byte. The bug was
+    // invisible rather than loud — reading saddr at 31 yields [0x00, s0, s1, s2]
+    // (protocol's high byte, little-endian), so 192.168.1.5 renders as
+    // 0.192.168.1 and a plausible-looking address is published.
     const SS_SKADDR: usize = 8;
     const SS_OLDSTATE: usize = 16;
     const SS_NEWSTATE: usize = 20;
     const SS_SPORT: usize = 24;
     const SS_DPORT: usize = 26;
     const SS_FAMILY: usize = 28;
-    const SS_SADDR_V4: usize = 31;
-    const SS_DADDR_V4: usize = 35;
-    const SS_SADDR_V6: usize = 39;
-    const SS_DADDR_V6: usize = 55;
+    const SS_SADDR_V4: usize = 32;
+    const SS_DADDR_V4: usize = 36;
+    const SS_SADDR_V6: usize = 40;
+    const SS_DADDR_V6: usize = 56;
 
-    // tcp_retransmit_skb tracepoint offsets (VERIFY against the format file).
+    // `tcp_retransmit_skb` field offsets, validated the same way against
+    // `struct trace_event_raw_tcp_retransmit_skb` (size 80) — note this event has
+    // its OWN struct rather than the shared `trace_event_raw_tcp_event_sk`
+    // template (which is also in BTF, and disagrees: family@20, daddr@26). These
+    // three happened to be right; they would have been badly wrong against the
+    // template.
     const RT_FAMILY: usize = 32;
     const RT_DADDR_V4: usize = 38;
     const RT_DADDR_V6: usize = 58;

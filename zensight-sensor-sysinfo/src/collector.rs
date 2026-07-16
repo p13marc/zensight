@@ -307,7 +307,7 @@ impl SystemCollector {
             }
             // Thermal trip points (only when temperature collection is enabled).
             if self.config.collect.temperatures {
-                for t in LinuxMetrics::collect_temperatures() {
+                for t in LinuxMetrics::collect_temperatures(&self.config.sensors.exclude_chips) {
                     raw.temps.push(crate::alerts::ThermalInput {
                         chip: t.chip,
                         label: t.label,
@@ -537,7 +537,7 @@ impl SystemCollector {
 
         let sample = crate::map::PowerSample {
             rapl_watts,
-            fans: crate::linux::collect_fans(),
+            fans: crate::linux::collect_fans(&self.config.sensors.exclude_chips),
             batteries: crate::linux::collect_batteries(),
             entropy_avail: crate::linux::collect_entropy(),
         };
@@ -1353,7 +1353,7 @@ impl SystemCollector {
     async fn collect_temperatures(&mut self, timestamp: i64) -> usize {
         let mut count = 0;
 
-        let temps = LinuxMetrics::collect_temperatures();
+        let temps = LinuxMetrics::collect_temperatures(&self.config.sensors.exclude_chips);
 
         for temp in temps {
             let chip_key = sanitize_key(&temp.chip);
