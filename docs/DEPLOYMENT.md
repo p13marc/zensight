@@ -1,10 +1,14 @@
 # Deploying ZenSight on multiple machines
 
 One machine runs the **GUI** (and the identity **correlator**); every machine
-you want to monitor runs one **sensors container** — the same 5 host sensors
+you want to monitor runs one **sensors container** — the five host sensors
 `just run` spawns locally (sysinfo, netlink, netring, logs, systemd) with the
 same demo-max defaults, bundled into a single image. The only thing you
 configure is the Zenoh endpoint the sensors connect to.
+
+> The parallax live-video sensor is **not** in the image (it is source-only as of
+> 0.8.0 — it compiles openh264 from C++ source). `just run` adds it locally when
+> its binary has been built; the container never has it.
 
 ```
 ┌─ GUI machine ──────────────────┐        ┌─ monitored machine (×N) ────────┐
@@ -14,11 +18,16 @@ configure is the Zenoh endpoint the sensors connect to.
 └─────────────────────────────────┘        └─────────────────────────────────┘
 ```
 
-Telemetry and per-instance state keys are host-scoped
-(`zensight/<protocol>/<source>/…` with `<source>` = the machine's hostname),
-so any number of machines coexist on the bus and the GUI shows one sensor
-card, one host entity, and one topology node per machine. See
+Every key is scoped by **origin** (`zensight/v1/<origin>/<class>/<producer>/…`,
+where `<origin>` is `h-<12hex>` derived from the machine's `/etc/machine-id`), so any
+number of machines coexist on the bus and the GUI shows one sensor card, one host
+entity, and one topology node per machine. The origin is the *host's*, not the
+container's — which is why each container mounts `/etc/machine-id` read-only. See
 [`KEYSPACE.md`](KEYSPACE.md).
+
+> **Mount `/etc/machine-id` or the deployment breaks silently.** Without it each
+> container start mints a fresh random origin, and the catalog fills with ghost hosts
+> that never resolve. `docker/docker-compose.yml` does this for you.
 
 ## 1. GUI machine
 

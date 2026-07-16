@@ -9,8 +9,9 @@
 //! rebuilds identical docs from the evidence caches with no local state.
 //!
 //! Telemetry keys are deliberately *not* re-keyed on entity ids (they stay
-//! `zensight/<protocol>/<source>/<metric>` with a human-readable source); the
-//! entity layer provides the join via `members[]`. See `docs/KEYSPACE.md`.
+//! `zensight/v1/<origin>/telemetry/<producer>/<subject...>`, scoped by the
+//! publishing origin); the entity layer provides the join via `members[]`. See
+//! `docs/KEYSPACE.md`.
 
 use serde::{Deserialize, Serialize};
 

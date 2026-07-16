@@ -129,8 +129,8 @@ jobs:
           fi
 
       # The legacy keyspace is retired (#465): every wire key rides
-      # zensight/@v1/... . Ban NEW legacy-shaped literals ("zensight/<x>" not
-      # followed by @v1) in non-test source so the old grammar cannot creep
+      # zensight/v1/... . Ban NEW legacy-shaped literals ("zensight/<x>" not
+      # followed by v1) in non-test source so the old grammar cannot creep
       # back. Comments and assertions are excluded — negative pins ("must
       # NOT match") and historical notes are legitimate.
       # Catches pre-v1 key literals (`"zensight/snmp/…"`). The version chunk is

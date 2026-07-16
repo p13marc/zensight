@@ -11,7 +11,7 @@ an Iced desktop frontend, correlates per-host identity, and exports to Prometheu
 authoritative reference for how that crate works. This file is the *contributor/agent* guide:
 build/test/lint commands, conventions, and a map into the per-crate docs. The cross-cutting
 contracts are the ratified **keyspace-v2 convention**
-([`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md), v1.0, enforced by
+([`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md), v1.2, enforced by
 `zensight-keyspace` — deployed-profile summary in [`docs/KEYSPACE.md`](docs/KEYSPACE.md))
 and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (system overview). Archived
 design rationale lives in [`docs/design/`](docs/design/).
@@ -97,7 +97,8 @@ flowchart LR
 - **Data model / conventions** (TelemetryPoint, alert/command model, CBOR-default serialization
   with first-byte sniff, QoS classes): `zensight-common/docs/`.
 - **Frontend** (view/state pattern, shell, overlays, redb local store): `zensight/docs/`.
-- **Large data** (report/snapshot/capture over `@/artifact`, blob/tree delivery): `zenoh-blob/`
+- **Large data** (report/snapshot/capture requested via `@rpc/<producer>/artifact/*`,
+  delivered on `@blob/{artifact,tree,store}`): `zenoh-blob/`
   + `zensight-sensor-core/docs/artifacts.md`.
 
 ## Feature Flags

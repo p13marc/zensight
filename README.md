@@ -37,17 +37,30 @@ each. The canonical cross-cutting references live in [`docs/`](docs/).
 
 ## Key expressions
 
-All sensors publish under a unified `zensight/` prefix. The full tree — telemetry,
-control-plane (`@/…`), metadata (`_meta/…`), media (`@media/…`), wildcards, and the
-key-builder helpers — is the authoritative contract in [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
+Everything rides the ratified **keyspace-v2 convention** (v1). `zensight` is the
+session namespace, not a key chunk; `<origin>` is `h-<12hex>`, derived from the host's
+machine-id.
 
 ```
-zensight/<protocol>/<source>/<metric>
-  zensight/snmp/router01/system/sysUpTime
-  zensight/logs/server01/daemon/warning
-  zensight/sysinfo/server01/cpu/usage
-  zensight/netring/host01/flow/red/p95_ms
+zensight/v1/<origin>/<class>/<producer>/<subject...>     data planes
+zensight/v1/<origin>/@rpc/<producer>/<procedure...>      request/reply
+zensight/v1/<origin>/@media/<producer>/<stream>/…        opaque video
+zensight/v1/<origin>/@blob/{artifact,tree,store}/…       bulk content
+zensight/v1/@catalog/…                                   the identity catalog
+
+  zensight/v1/h-9706b31ddad3/telemetry/sysinfo/cpu/usage
+  zensight/v1/h-9706b31ddad3/state/netlink/health
+  zensight/v1/h-9706b31ddad3/@rpc/netlink/sockets
 ```
+
+`<class>` is `telemetry` (periodic samples), `state` (LWW documents), or `events`
+(append-only). Commands are `@rpc` GETs, not publications. Never `format!` a key —
+use the typed builders in `zensight-keyspace`.
+
+The deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md); the normative
+spec is [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md). The machine-readable
+truth is [`zensight-keyspace/registry/*.toml`](zensight-keyspace/registry/) — or ask a
+running build: `zenctl topic list`.
 
 ## Quick start
 
@@ -62,7 +75,7 @@ just run
 
 # Or split the two halves:
 just gui listen=tcp/0.0.0.0:7447     # just the GUI (non-loopback for remote sensors)
-just sensors                         # just the 6 sensors (Ctrl-C stops them)
+just sensors                         # just the local sensors (Ctrl-C stops them)
 just sensors connect=tcp/<gui-host>:7447   # …feeding a GUI on another machine
 
 # One sensor at a time
@@ -72,6 +85,12 @@ just netring   # | netlink | sysinfo | logs | systemd | parallax
 `just run` / `just gui` build the GUI with H.264 live video for parallax streams
 (openh264 compiled from source → a C++ compiler is required); a plain
 `cargo build --workspace` stays codec-free (JPEG previews only).
+
+`just sensors` spawns five sensors — sysinfo, netlink, netring, logs, systemd — plus
+**parallax if its binary has been built** (it is skipped otherwise). As of 0.8.0
+parallax is **source-only**: it ships in no `.deb`/`.rpm`, is not in the sensors
+container image, and has no systemd unit. Build it with
+`cargo build --release -p zensight-sensor-parallax`.
 
 To monitor **multiple machines**, run the GUI (+ correlator) on one host and the
 all-in-one sensors container (`ghcr.io/p13marc/zensight-sensors`) on each of the

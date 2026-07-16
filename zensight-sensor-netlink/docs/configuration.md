@@ -18,9 +18,13 @@ each block; defaults are as parsed by `src/config.rs`.
 
 ## `netlink`
 
+> There is no `key_prefix` knob — it was retired in #465. The producer chunk
+> (`netlink`) is a constant of this crate and the origin is derived from the host's
+> machine-id, so keys land under `zensight/v1/<origin>/…/netlink/…` with nothing to
+> configure. A `key_prefix:` line left over from 0.7.0 is **silently ignored**.
+
 | Key | Default | Meaning |
 |---|---|---|
-| `key_prefix` | `"zensight/netlink"` | legacy-form prefix from which the v1 context derives (base `zensight`, producer `netlink` → keys under `zensight/v1/<origin>/…/netlink/…`) |
 | `source` | `"auto"` | telemetry `source` id (payload field — not part of the key); `"auto"` detects the hostname |
 | `poll_interval_secs` | `5` | poll cadence (config example uses `2`) |
 | `collect` | see below | per-collector toggles |
