@@ -297,6 +297,42 @@ from the day of the keyspace cutover and had no caller until #469:
   resolver is called out, because that is what a DNS tunnel looks like from the
   wire.
 
+## Zero, absent, and unreadable are three different things
+
+The latency panel above can say `available: false` because it *asks* a question
+and the sensor answers. Streamed telemetry has no such channel: a subject that
+stops publishing looks exactly like a subject that never could. The **Fans &
+power** panel (`view/specialized/sysinfo.rs`, #515) is where that bites, and it
+is worth stating how it resolves, because the naive rendering is wrong in both
+directions.
+
+- **A fan at 0 RPM is a reading.** Laptops stop their fans at idle, so the
+  collector publishes the zero deliberately rather than leaving a hole (a hole
+  would make "idle" indistinguishable from "dead"). The panel renders `0 RPM`
+  plainly — never hidden, never `-`, and never threshold-styled, since a muted or
+  red zero reads as absence. A fan pinned at 0 *under load* is the finding.
+- **Absent RAPL watts are not `0 W`.** `power/rapl/{zone}/watts` is usually
+  missing: `/sys/class/powercap/*/energy_uj` has been root-only since
+  CVE-2020-8694, so an unprivileged sensor reports fans, battery and entropy and
+  no watts. The panel says so in words instead of inventing a measurement, and it
+  names all three causes it cannot tell apart — no RAPL hardware, no permission,
+  or a sensor that has only just started (watts are a rate derived from an energy
+  delta, so the first poll interval legitimately has none).
+- **The panel opens on `system/entropy_avail`.** That coupling is load-bearing,
+  not incidental. Fans, batteries and RAPL are each hardware- or
+  permission-dependent and legitimately empty on a normal server; entropy is the
+  only subject the power collector publishes unconditionally, so it is the sole
+  on-wire evidence that the collector *ran*. Without it, the one host that most
+  needs the explanation — fanless, batteryless, `energy_uj` root-only — would
+  render no panel at all, which is indistinguishable from `collect.power: false`.
+
+Gates here parse the subject rather than matching a prefix. `has_temperatures`
+did the latter, and fans publish `sensors/{chip}/{label}/rpm` under the same
+`sensors/` prefix — so every host running `collect.power` without
+`collect.temperatures` grew a Temperatures card reading "No temperature sensors
+found". `ui_tests.rs` pins the fan-0 and RAPL-absent renderings in both
+directions.
+
 **Incidents** (`view/incident.rs`, `view/groups.rs`) — the unified Incident
 object: related alerts grouped into one incident with a timeline and evidence
 pivots.
