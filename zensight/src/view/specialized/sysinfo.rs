@@ -2,6 +2,8 @@
 //!
 //! Displays system metrics with gauges for CPU, memory, and disk usage.
 
+use std::collections::BTreeSet;
+
 use iced::widget::{Column, Row, button, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 
@@ -55,6 +57,9 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     if has_temperatures(state) {
         content = content.push(card(render_temperatures_section(state)));
+    }
+    if has_fans_or_power(state) {
+        content = content.push(card(render_fans_power_section(state)));
     }
 
     if has_tcp_states(state) {
@@ -589,8 +594,44 @@ fn render_disk_io_section(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// Check if temperature data is available.
+///
+/// Gated on a real `SensorsTemp` parse, not a `starts_with("sensors/")` prefix:
+/// fans publish `sensors/{chip}/{label}/rpm` under the same prefix, so the
+/// prefix form rendered an empty "No temperature sensors found" card on any host
+/// running `collect.power` without `collect.temperatures` (#515).
 fn has_temperatures(state: &DeviceDetailState) -> bool {
-    state.metrics.keys().any(|k| k.starts_with("sensors/"))
+    state
+        .metrics
+        .keys()
+        .any(|k| matches!(Subject::parse_metric(k), Some(Subject::SensorsTemp { .. })))
+}
+
+/// Whether the host publishes any of the `collect.power` families this panel
+/// renders: hwmon fans, battery, or RAPL zones (#515).
+///
+/// `system/entropy_avail` is a deliberate part of this gate, and the coupling is
+/// load-bearing rather than accidental. Fans, batteries and RAPL are each
+/// hardware- or permission-dependent and legitimately empty on a normal server;
+/// entropy is the only subject `map_power` publishes unconditionally whenever
+/// `collect.power` is on, so it is the sole on-wire evidence that the power
+/// collector *ran*. Without it, a fanless, batteryless host whose `energy_uj` is
+/// root-only renders no panel at all — indistinguishable from
+/// `collect.power: false`, which is precisely the confusion this panel exists to
+/// remove. Entropy keeps rendering under System health; here it only opens the
+/// card.
+fn has_fans_or_power(state: &DeviceDetailState) -> bool {
+    state.metrics.contains_key("system/entropy_avail")
+        || state.metrics.keys().any(|k| {
+            matches!(
+                Subject::parse_metric(k),
+                Some(
+                    Subject::SensorsRpm { .. }
+                        | Subject::BatteryCapacity { .. }
+                        | Subject::BatteryStatus { .. }
+                        | Subject::PowerRaplWatts { .. }
+                )
+            )
+        })
 }
 
 /// Render temperature sensors section (Linux-specific).
@@ -649,6 +690,164 @@ fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message
     }
 
     column![title, content].spacing(10).into()
+}
+
+/// The copy for "no RAPL watts", kept as a constant because it is the
+/// load-bearing distinction this panel makes and a UI test pins it.
+///
+/// It names all three causes rather than picking one: nothing on the wire tells
+/// them apart. `collect_rapl()` returns an empty `Vec` for a missing
+/// `/sys/class/powercap` *and* for `EACCES` on `energy_uj`, silently and with no
+/// log. The third is transient and would make a two-cause message an outright
+/// lie: watts are a rate derived from an energy delta, so the collector emits
+/// nothing until it holds two readings — a correctly-configured root sensor on
+/// real RAPL hardware shows this note for its first poll interval (5s by
+/// default).
+const RAPL_UNAVAILABLE: &str = "No RAPL zones are reporting. Either this CPU exposes none, or \
+                                the sensor cannot read them (/sys/class/powercap/*/energy_uj is \
+                                root-only since CVE-2020-8694), or it has just started and needs \
+                                two readings to derive a rate. This is not a reading of zero \
+                                watts.";
+
+/// Fans, battery and RAPL power — the `collect.power` families (#515).
+///
+/// Three renderings here are deliberate and easy to get wrong:
+///
+/// * **0 RPM is a reading, not a gap.** Laptops stop their fans at idle, and the
+///   collector publishes the zero on purpose (it used to drop it, which made
+///   "idle" look like "dead"). A fan pinned at 0 *under load* is the finding, so
+///   the zero must render as plainly as any other speed.
+/// * **"not available" is not "0 W".** RAPL watts are usually absent — see
+///   [`RAPL_UNAVAILABLE`] — and a panel that showed 0 W there would be inventing
+///   a measurement. Same doctrine as the eBPF latency panel's `available: false`.
+/// * **A missing battery is not a fault.** Servers have none; the block simply
+///   does not appear.
+fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("Fans & power").size(16)].spacing(8);
+    let mut col = Column::new().spacing(4).push(title);
+
+    // ── Fans ───────────────────────────────────────────────────────────────
+    let mut fans: Vec<(String, String, f64)> = Vec::new();
+    for key in state.metrics.keys() {
+        if let Some(Subject::SensorsRpm { chip, label }) = Subject::parse_metric(key)
+            && let Some(rpm) = get_metric_value(state, key)
+        {
+            fans.push((chip, label, rpm));
+        }
+    }
+    fans.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    if fans.is_empty() {
+        // Distinct from a fan reading 0: this host reports no fan at all.
+        col = col.push(sub_label("Fans"));
+        col = col.push(empty_state("No fans reported by hwmon", None));
+    } else {
+        col = col.push(sub_label("Fans"));
+        for (chip, label, rpm) in &fans {
+            col = col.push(
+                row![
+                    text(format!("{chip}/{label}"))
+                        .size(12)
+                        .width(Length::Fixed(220.0))
+                        .style(|t: &Theme| text::Style {
+                            color: Some(theme::colors(t).text_muted()),
+                        }),
+                    // No `{:.0}` styling games: 0 renders as "0 RPM".
+                    text(format!("{rpm:.0} RPM")).size(12),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+    }
+
+    // ── Battery ────────────────────────────────────────────────────────────
+    // Capacity and status are independently optional — `map_power` emits each
+    // only when sysfs offered it — so a name may have one, the other, or both.
+    // A `BTreeSet` dedups the name across the two key families and sorts in one
+    // pass. No battery at all => no block: servers have none, and that is not a
+    // fault worth a row.
+    let mut batteries: BTreeSet<String> = BTreeSet::new();
+    for key in state.metrics.keys() {
+        if let Some(Subject::BatteryCapacity { name } | Subject::BatteryStatus { name }) =
+            Subject::parse_metric(key)
+        {
+            batteries.insert(name);
+        }
+    }
+
+    if !batteries.is_empty() {
+        col = col.push(sub_label("Battery"));
+        for name in &batteries {
+            let capacity = get_metric_value(state, &format!("battery/{name}/capacity"));
+            let status = get_metric_text(state, &format!("battery/{name}/status"));
+            // Capacity and status are separate text widgets, not one joined
+            // string: the row reads the same, and each stays independently
+            // assertable.
+            let mut battery_row = row![
+                text(name.clone())
+                    .size(12)
+                    .width(Length::Fixed(220.0))
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    }),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if let Some(c) = capacity {
+                battery_row = battery_row.push(text(format!("{c:.0}%")).size(12));
+            }
+            if let Some(s) = status {
+                battery_row = battery_row.push(text(s).size(12));
+            }
+            col = col.push(battery_row);
+        }
+    }
+
+    // ── Power (RAPL) ───────────────────────────────────────────────────────
+    let mut zones: Vec<(String, String, f64)> = Vec::new();
+    for key in state.metrics.keys() {
+        if let Some(Subject::PowerRaplWatts { zone }) = Subject::parse_metric(key)
+            && let Some(watts) = get_metric_value(state, key)
+        {
+            // The friendly name ("package-0") rides as a label; the key carries
+            // the raw zone ("intel-rapl:0" — `sanitize_key` leaves colons
+            // alone). Prefer the name, fall back to the zone, so the row is
+            // meaningful even on the degraded path where labels are missing.
+            let display = get_metric_label(state, key, "name").unwrap_or_else(|| zone.clone());
+            zones.push((zone, display, watts));
+        }
+    }
+    // Sort on the zone from the key: stable, and present regardless of labels.
+    zones.sort_by(|a, b| a.0.cmp(&b.0));
+
+    col = col.push(sub_label("Power (RAPL)"));
+    if zones.is_empty() {
+        col = col.push(empty_state(RAPL_UNAVAILABLE, None));
+    } else {
+        for (_, display, watts) in &zones {
+            col = col.push(
+                row![
+                    text(display.clone())
+                        .size(12)
+                        .width(Length::Fixed(220.0))
+                        .style(|t: &Theme| text::Style {
+                            color: Some(theme::colors(t).text_muted()),
+                        }),
+                    text(format!("{watts:.1} W")).size(12),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+    }
+
+    col.into()
+}
+
+/// A sub-heading inside a card, for panels that group several families.
+fn sub_label<'a>(label: &'a str) -> Element<'a, Message> {
+    text(label).size(14).into()
 }
 
 /// Check if TCP states data is available.
@@ -1157,6 +1356,16 @@ fn get_metric_with_label(
             TelemetryValue::Gauge(v) => Some(*v),
             _ => None,
         })
+}
+
+/// Read a label off a metric's point. Labels ride with the point into
+/// `state.metrics`, so this is a lookup, not a scan (contrast
+/// [`get_metric_with_label`], which searches *by* a label's value).
+fn get_metric_label(state: &DeviceDetailState, metric: &str, label: &str) -> Option<String> {
+    state
+        .metrics
+        .get(metric)
+        .and_then(|point| point.labels.get(label).cloned())
 }
 
 fn format_bytes(bytes: f64) -> String {

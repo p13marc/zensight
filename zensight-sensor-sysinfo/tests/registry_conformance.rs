@@ -130,7 +130,10 @@ fn cgroup_metrics_are_registered() {
 #[test]
 fn power_metrics_are_registered() {
     let p = PowerSample {
-        rapl_watts: vec![("package-0".into(), "package".into(), 12.5)],
+        // `zone` is the powercap directory ("intel-rapl:0"), `name` the label
+        // inside it ("package-0") — not the other way round. The colon is the
+        // point: it survives `sanitize_key` into the published key.
+        rapl_watts: vec![("intel-rapl:0".into(), "package-0".into(), 12.5)],
         fans: vec![FanReading {
             chip: "nct6798".into(),
             label: "fan1".into(),

@@ -824,7 +824,135 @@ impl DemoSimulator {
                     ],
                 ));
             }
+
+            points.extend(self.generate_thermal_power(server, cpu, timestamp));
         }
+
+        points
+    }
+
+    /// Thermal / power depth (#515): the `collect.power` and
+    /// `collect.temperatures` families — hwmon temps and fans, battery, RAPL
+    /// zones, entropy.
+    ///
+    /// The real sensor gates these behind opt-in flags that `just run` turns on,
+    /// but `--demo` never runs a sensor at all, so anything the panel shows must
+    /// be fabricated here. Subjects and labels mirror `map_power`
+    /// (`zensight-sensor-sysinfo/src/map.rs`) and the collector's inline temp
+    /// publish exactly — the mock is only useful if it mirrors the real
+    /// contract, and `demo_sysinfo_keys_are_registered_subjects` pins that.
+    ///
+    /// `hwmon` values track `cpu` so the demo looks physical: a busy core runs
+    /// hot and spins its fan up.
+    fn generate_thermal_power(
+        &mut self,
+        server: &str,
+        cpu: f64,
+        timestamp: i64,
+    ) -> Vec<TelemetryPoint> {
+        let mut points = Vec::new();
+        let hwmon = |chip: &str, label: &str| {
+            vec![
+                ("chip".to_string(), chip.to_string()),
+                ("label".to_string(), label.to_string()),
+                ("unit".to_string(), "celsius".to_string()),
+            ]
+        };
+
+        // Temperatures: package tracks load, ambient drifts gently.
+        let package_temp = 38.0 + (cpu / 100.0) * 40.0 + self.rng.random_range(-2.0..2.0);
+        points.push(self.make_point_with_labels(
+            Protocol::Sysinfo,
+            server,
+            "sensors/coretemp/Package_id_0/temp",
+            TelemetryValue::Gauge(package_temp.clamp(20.0, 105.0)),
+            timestamp,
+            hwmon("coretemp", "Package id 0"),
+        ));
+        // The trip point the Temperatures panel grades against.
+        points.push(self.make_point_with_labels(
+            Protocol::Sysinfo,
+            server,
+            "sensors/coretemp/Package_id_0/critical",
+            TelemetryValue::Gauge(100.0),
+            timestamp,
+            hwmon("coretemp", "Package id 0"),
+        ));
+        let ambient = 28.0 + self.rng.random_range(-1.5..1.5);
+        points.push(self.make_point_with_labels(
+            Protocol::Sysinfo,
+            server,
+            "sensors/acpitz/Ambient/temp",
+            TelemetryValue::Gauge(ambient),
+            timestamp,
+            hwmon("acpitz", "Ambient"),
+        ));
+
+        // Fans. NOT oscillating_value(): it clamps to 0..100 and an RPM is
+        // ~3000. Derived from load and clamped here, as cpu/{n}/frequency does.
+        for (label, base) in [("CPU_Fan", 2400.0), ("Video_Fan", 2100.0)] {
+            let rpm = base + (cpu / 100.0) * 2600.0 + self.rng.random_range(-120.0..120.0);
+            points.push(self.make_point_with_labels(
+                Protocol::Sysinfo,
+                server,
+                &format!("sensors/dell_ddv/{label}/rpm"),
+                TelemetryValue::Gauge(rpm.clamp(0.0, 7500.0).round()),
+                timestamp,
+                hwmon("dell_ddv", label),
+            ));
+        }
+
+        // Battery. `capacity` is a percent gauge; `status` is the one Text
+        // point in this generator, mirroring map_power's Metric::text.
+        let capacity = self.oscillating_value(&format!("{server}/battery"), 82.0, 6.0);
+        points.push(self.make_point_with_labels(
+            Protocol::Sysinfo,
+            server,
+            "battery/BAT0/capacity",
+            TelemetryValue::Gauge(capacity),
+            timestamp,
+            vec![("name".to_string(), "BAT0".to_string())],
+        ));
+        points.push(self.make_point_with_labels(
+            Protocol::Sysinfo,
+            server,
+            "battery/BAT0/status",
+            TelemetryValue::Text(if capacity > 95.0 { "Full" } else { "Charging" }.to_string()),
+            timestamp,
+            vec![("name".to_string(), "BAT0".to_string())],
+        ));
+
+        // RAPL zones. The key carries the raw zone (sanitize_key leaves the
+        // colon alone); the friendly name rides as a label, which is what the
+        // panel prefers to display.
+        for (zone, name, base) in [
+            ("intel-rapl:0", "package-0", 14.0),
+            ("intel-rapl:0:0", "core", 9.0),
+        ] {
+            let watts = base * (0.35 + cpu / 100.0) + self.rng.random_range(-0.8..0.8);
+            points.push(self.make_point_with_labels(
+                Protocol::Sysinfo,
+                server,
+                &format!("power/rapl/{zone}/watts"),
+                TelemetryValue::Gauge(watts.max(0.0)),
+                timestamp,
+                vec![
+                    ("zone".to_string(), zone.to_string()),
+                    ("name".to_string(), name.to_string()),
+                ],
+            ));
+        }
+
+        // Published unconditionally by map_power whenever collect.power is on —
+        // and the marker has_fans_or_power() uses to open the panel.
+        let entropy = self.rng.random_range(200.0..256.0);
+        points.push(self.make_point(
+            Protocol::Sysinfo,
+            server,
+            "system/entropy_avail",
+            TelemetryValue::Gauge(entropy),
+            timestamp,
+        ));
 
         points
     }

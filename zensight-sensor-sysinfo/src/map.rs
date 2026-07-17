@@ -1713,7 +1713,10 @@ mod tests {
     #[test]
     fn test_map_power() {
         let s = PowerSample {
-            rapl_watts: vec![("package-0".to_string(), "package-0".to_string(), 12.5)],
+            // The real shapes: `zone` is the powercap directory name, `name` is
+            // the label read out of it. The colon matters — `sanitize_key`
+            // leaves it alone, so it reaches the key and the GUI parses it back.
+            rapl_watts: vec![("intel-rapl:0".to_string(), "package-0".to_string(), 12.5)],
             fans: vec![FanReading {
                 chip: "nct6798".to_string(),
                 label: "fan1".to_string(),
@@ -1727,12 +1730,18 @@ mod tests {
             entropy_avail: Some(3500),
         };
         let m = map_power(&s);
+        let rapl = m
+            .iter()
+            .find(|x| x.metric == "power/rapl/intel-rapl:0/watts")
+            .expect("the zone reaches the key verbatim, colon and all");
+        assert_eq!(rapl.value, TelemetryValue::Gauge(12.5));
+        // The friendly name rides as a label — it is what the GUI displays.
         assert_eq!(
-            m.iter()
-                .find(|x| x.metric == "power/rapl/package-0/watts")
-                .unwrap()
-                .value,
-            TelemetryValue::Gauge(12.5)
+            rapl.labels
+                .iter()
+                .find(|(k, _)| *k == "name")
+                .map(|(_, v)| v.as_str()),
+            Some("package-0")
         );
         assert_eq!(
             m.iter()

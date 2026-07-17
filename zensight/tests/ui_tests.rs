@@ -4489,6 +4489,30 @@ fn sysinfo_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDe
     state
 }
 
+/// A labelled telemetry point for [`sysinfo_state_labeled`]: `(metric, value,
+/// labels)`.
+type LabeledPoint<'a> = (
+    &'a str,
+    zensight_common::TelemetryValue,
+    &'a [(&'a str, &'a str)],
+);
+
+/// `sysinfo_state`'s sibling for the views that read a *label* off the point
+/// rather than the key — the RAPL rows prefer the `name` label ("package-0")
+/// over the key's raw zone ("intel-rapl:0").
+fn sysinfo_state_labeled(points: &[LabeledPoint<'_>]) -> DeviceDetailState {
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+    for (metric, value, labels) in points {
+        let mut point = sysinfo_point(metric, value.clone());
+        point.labels = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        state.update(point);
+    }
+    state
+}
+
 /// `disk/{mount}/used` + `/total` must produce a mount row. The mount is a slug
 /// (`/home` → `home`, `/` → `_`), and the row only renders when BOTH keys parse.
 #[test]
@@ -4576,8 +4600,7 @@ fn tier2_sysinfo_disk_io_rows_render() {
 }
 
 /// `sensors/{chip}/{label}/temp` — two variables — must produce a sensor row.
-/// `has_temperatures()` is a `starts_with("sensors/")` check, so this section
-/// renders its title with zero rows if the two-var parse breaks.
+/// If the two-var parse breaks, this section renders its title with zero rows.
 #[test]
 fn tier2_sysinfo_temperature_rows_render() {
     let state = sysinfo_state(&[(
@@ -4593,6 +4616,374 @@ fn tier2_sysinfo_temperature_rows_render() {
         ui.find("coretemp/core_0").is_ok(),
         "the Temperatures section must render the chip/label row, not an empty section"
     );
+}
+
+// ===========================================================================
+// Fans & power panel (#515).
+//
+// The sensor has published fan RPM, battery and RAPL watts since the v1
+// keyspace; nothing rendered them until this panel. Two renderings here are
+// easy to get wrong in opposite directions, and both are pinned below: a fan
+// reading 0 is REAL DATA that must not be hidden, and absent RAPL watts are NOT
+// a reading of zero.
+//
+// Note `Simulator::find` matches a text widget's content EXACTLY (iced_selector
+// `content == *self`), so `find("0 RPM")` cannot be satisfied by "1200 RPM" —
+// these assertions are sharp, provided each value stays its own text widget.
+// ===========================================================================
+
+/// A fan reading 0 RPM is a reading, not a gap: laptops stop their fans at idle,
+/// and the collector publishes the zero deliberately (it used to drop it, which
+/// made "idle" look like "dead"). A fan pinned at 0 *under load* is a dead fan —
+/// the interesting case — so the panel must show the zero and must not let it
+/// read as "no fan".
+#[test]
+fn sysinfo_fan_at_zero_rpm_renders_as_a_reading_not_absence() {
+    let state = sysinfo_state(&[(
+        "sensors/dell_ddv/CPU_Fan/rpm",
+        zensight_common::TelemetryValue::Gauge(0.0),
+    )]);
+
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("dell_ddv/CPU_Fan").is_ok(),
+        "a fan at 0 RPM must still render its chip/label row"
+    );
+    assert!(
+        ui.find("0 RPM").is_ok(),
+        "0 RPM must render as a reading, not be hidden or shown as '-'"
+    );
+    assert!(
+        ui.find("No fans reported by hwmon").is_err(),
+        "a fan reporting 0 is not the same as no fan being reported"
+    );
+}
+
+/// "The sensor cannot read this" and "the reading is zero" are different facts.
+/// RAPL watts are usually absent — `energy_uj` is root-only (CVE-2020-8694) —
+/// so the panel must say so rather than invent a 0 W measurement. Pinned in both
+/// directions: the note must not appear when watts really are 0.0.
+#[test]
+fn sysinfo_rapl_absent_is_distinct_from_zero_watts() {
+    // (a) Power collector running (fans present), but no RAPL zones reporting.
+    let absent = sysinfo_state(&[(
+        "sensors/dell_ddv/CPU_Fan/rpm",
+        zensight_common::TelemetryValue::Gauge(3000.0),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &absent,
+    ));
+    assert!(
+        ui.find(
+            "No RAPL zones are reporting. Either this CPU exposes none, or the sensor cannot \
+             read them (/sys/class/powercap/*/energy_uj is root-only since CVE-2020-8694), or \
+             it has just started and needs two readings to derive a rate. This is not a reading \
+             of zero watts."
+        )
+        .is_ok(),
+        "absent watts must be explained, not rendered as a measurement"
+    );
+    assert!(
+        ui.find("0.0 W").is_err(),
+        "absent watts must never be shown as 0.0 W — that is inventing a reading"
+    );
+
+    // (b) A zone genuinely reporting 0.0 W is a measurement, not an absence.
+    let zero = sysinfo_state(&[(
+        "power/rapl/intel-rapl:0/watts",
+        zensight_common::TelemetryValue::Gauge(0.0),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &zero,
+    ));
+    assert!(
+        ui.find("0.0 W").is_ok(),
+        "a zone reporting 0.0 W must render the reading"
+    );
+    assert!(
+        ui.find(
+            "No RAPL zones are reporting. Either this CPU exposes none, or the sensor cannot \
+             read them (/sys/class/powercap/*/energy_uj is root-only since CVE-2020-8694), or \
+             it has just started and needs two readings to derive a rate. This is not a reading \
+             of zero watts."
+        )
+        .is_err(),
+        "a real 0.0 W reading must not be reported as 'cannot read'"
+    );
+}
+
+/// The zone's friendly name (`package-0`) rides as a label; the key carries the
+/// raw zone (`intel-rapl:0` — `sanitize_key` leaves colons alone). Prefer the
+/// label, fall back to the key, so the row is meaningful on either path.
+#[test]
+fn sysinfo_rapl_zone_prefers_name_label_over_raw_zone() {
+    let labeled = sysinfo_state_labeled(&[(
+        "power/rapl/intel-rapl:0/watts",
+        zensight_common::TelemetryValue::Gauge(14.2),
+        &[("zone", "intel-rapl:0"), ("name", "package-0")],
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &labeled,
+    ));
+    assert!(
+        ui.find("package-0").is_ok(),
+        "the friendly zone name must be preferred when the label is present"
+    );
+    assert!(ui.find("14.2 W").is_ok());
+
+    // Degraded path: no labels. The colon must survive into the fallback.
+    let bare = sysinfo_state(&[(
+        "power/rapl/intel-rapl:0/watts",
+        zensight_common::TelemetryValue::Gauge(14.2),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &bare,
+    ));
+    assert!(
+        ui.find("intel-rapl:0").is_ok(),
+        "without the name label the row must fall back to the zone from the key"
+    );
+}
+
+/// `map_power` emits capacity and status under independent `if let Some`, so a
+/// battery may publish either alone. Neither case may blank the row.
+#[test]
+fn sysinfo_battery_capacity_and_status_are_independently_optional() {
+    let both = sysinfo_state(&[
+        (
+            "battery/BAT0/capacity",
+            zensight_common::TelemetryValue::Gauge(82.0),
+        ),
+        (
+            "battery/BAT0/status",
+            zensight_common::TelemetryValue::Text("Discharging".to_string()),
+        ),
+    ]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &both,
+    ));
+    assert!(ui.find("BAT0").is_ok());
+    assert!(ui.find("82%").is_ok());
+    assert!(
+        ui.find("Discharging").is_ok(),
+        "status is a Text value — get_metric_value would drop it"
+    );
+
+    let capacity_only = sysinfo_state(&[(
+        "battery/BAT0/capacity",
+        zensight_common::TelemetryValue::Gauge(82.0),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &capacity_only,
+    ));
+    assert!(ui.find("BAT0").is_ok());
+    assert!(ui.find("82%").is_ok());
+
+    let status_only = sysinfo_state(&[(
+        "battery/BAT0/status",
+        zensight_common::TelemetryValue::Text("Full".to_string()),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &status_only,
+    ));
+    assert!(ui.find("BAT0").is_ok());
+    assert!(ui.find("Full").is_ok());
+}
+
+/// Regression for the gate shipped in 6f24a89: `has_temperatures` was a
+/// `starts_with("sensors/")` prefix check, and fans publish
+/// `sensors/{chip}/{label}/rpm` under that same prefix. Any host running
+/// `collect.power` without `collect.temperatures` therefore grew a Temperatures
+/// card that said "No temperature sensors found".
+#[test]
+fn sysinfo_temperatures_card_is_hidden_when_only_fans_are_present() {
+    let state = sysinfo_state(&[(
+        "sensors/dell_ddv/CPU_Fan/rpm",
+        zensight_common::TelemetryValue::Gauge(3000.0),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("No temperature sensors found").is_err(),
+        "a fans-only host must not render an empty Temperatures card"
+    );
+    assert!(
+        ui.find("Temperatures").is_err(),
+        "fans share the sensors/ prefix but are not temperatures"
+    );
+}
+
+/// `system/entropy_avail` opens the panel on its own, and the coupling is
+/// deliberate. It is the only subject `map_power` publishes unconditionally, so
+/// it is the sole on-wire evidence the power collector ran: without it, a
+/// fanless, batteryless host whose `energy_uj` is root-only renders no panel at
+/// all — indistinguishable from `collect.power: false`, which is exactly the
+/// confusion this panel exists to remove.
+#[test]
+fn sysinfo_power_panel_opens_on_entropy_alone() {
+    let state = sysinfo_state(&[(
+        "system/entropy_avail",
+        zensight_common::TelemetryValue::Gauge(256.0),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("Fans & power").is_ok(),
+        "entropy alone proves collect.power ran; the panel must open to report what it found"
+    );
+    assert!(
+        ui.find("No fans reported by hwmon").is_ok(),
+        "a host that reports no fan must say so"
+    );
+}
+
+/// Every sysinfo subject the demo fabricates must be a subject the real sensor
+/// could publish.
+///
+/// The demo is the only telemetry source that reaches the GUI without passing a
+/// registry check: `Metric::new`'s conformance assert lives in the sensor, and
+/// `--demo` never runs one. So a typo'd mock key ("…/rpms") fails *silently* —
+/// the panel's gate returns false, the card vanishes, and nothing goes red. That
+/// is precisely how a mock drifts away from the contract it exists to mirror,
+/// and it is the same class of bug as the `starts_with("sensors/")` gate this
+/// panel had to fix.
+///
+/// `is_registered_telemetry` is non-vacuous for sysinfo: its telemetry tree is
+/// registered as real subject families, not a `{metric...}` catch-all.
+#[test]
+fn demo_sysinfo_keys_are_registered_subjects() {
+    let mut simulator = zensight::demo::DemoSimulator::new();
+    let points = simulator.tick(0);
+
+    let sysinfo: Vec<_> = points
+        .iter()
+        .filter(|p| p.protocol == Protocol::Sysinfo)
+        .collect();
+    assert!(
+        !sysinfo.is_empty(),
+        "the demo must emit sysinfo telemetry or this guard is vacuous"
+    );
+
+    for point in sysinfo {
+        assert!(
+            zensight_keyspace::registry::is_registered_telemetry("sysinfo", &point.metric),
+            "demo emits unregistered sysinfo subject {:?} — it cannot come from a real sensor, \
+             so nothing will render it. Register it in zensight-keyspace/registry/sysinfo.toml \
+             or fix the mock to match the contract.",
+            point.metric
+        );
+    }
+}
+
+/// The demo must exercise the families the Fans & power panel renders (#515) —
+/// otherwise `just demo` shows an empty card and the mock has silently drifted
+/// from what `just run` puts on the bus.
+#[test]
+fn demo_emits_the_fans_power_families() {
+    let mut simulator = zensight::demo::DemoSimulator::new();
+    let points = simulator.tick(0);
+    let metrics: Vec<&str> = points
+        .iter()
+        .filter(|p| p.protocol == Protocol::Sysinfo)
+        .map(|p| p.metric.as_str())
+        .collect();
+
+    // Suffix-matched, not `contains`: a "/rpm" substring probe is satisfied by a
+    // typo'd "/rpms", which is exactly the drift this is meant to catch.
+    for (family, suffix) in [
+        ("fans", "/rpm"),
+        ("temperatures", "/temp"),
+        ("battery capacity", "battery/BAT0/capacity"),
+        ("battery status", "battery/BAT0/status"),
+        ("entropy", "system/entropy_avail"),
+    ] {
+        assert!(
+            metrics.iter().any(|m| m.ends_with(suffix)),
+            "the demo emits no {family} points ({suffix}) — the panel will be empty in --demo"
+        );
+    }
+    assert!(
+        metrics.iter().any(|m| m.starts_with("power/rapl/")),
+        "the demo emits no RAPL points — the panel will show 'not available' in --demo"
+    );
+}
+
+/// End-to-end for the `--demo` path: the simulator's own points, fed through the
+/// real view, must actually render the panel.
+///
+/// The two guards above check the demo's keys in isolation; this one closes the
+/// loop. A mock can emit perfectly registered subjects and still render nothing
+/// — wrong value type, missing label, a gate that disagrees — and `just demo`
+/// would show an empty card with every other test green.
+#[test]
+fn demo_points_render_the_fans_power_panel() {
+    let mut simulator = zensight::demo::DemoSimulator::new();
+    let points = simulator.tick(0);
+
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+    for point in points
+        .into_iter()
+        .filter(|p| p.protocol == Protocol::Sysinfo && p.source == "server01")
+    {
+        state.update(point);
+    }
+
+    let mut ui = simulator_for(&state);
+    assert!(
+        ui.find("Fans & power").is_ok(),
+        "the demo must open the Fans & power panel"
+    );
+    assert!(
+        ui.find("dell_ddv/CPU_Fan").is_ok(),
+        "the demo must render a fan row"
+    );
+    assert!(
+        ui.find("BAT0").is_ok(),
+        "the demo must render a battery row"
+    );
+
+    // The demo mocks readable RAPL, so the panel shows watts rather than the
+    // not-available note — the note is pinned separately against real absence.
+    let mut ui = simulator_for(&state);
+    assert!(
+        ui.find("package-0").is_ok(),
+        "the demo's RAPL zone must display its friendly name label"
+    );
+    let mut ui = simulator_for(&state);
+    assert!(
+        ui.find(
+            "No RAPL zones are reporting. Either this CPU exposes none, or the sensor cannot \
+             read them (/sys/class/powercap/*/energy_uj is root-only since CVE-2020-8694), or \
+             it has just started and needs two readings to derive a rate. This is not a reading \
+             of zero watts."
+        )
+        .is_err(),
+        "the demo publishes watts, so it must not show the unavailable note"
+    );
+
+    // The Temperatures card shares the sensors/ prefix with fans — the demo
+    // mocks temps too, so it must be populated rather than empty.
+    // The row is built from the *key*, so it shows the sanitized label
+    // (`Package_id_0`), not the raw hwmon label carried alongside it.
+    let mut ui = simulator_for(&state);
+    assert!(
+        ui.find("coretemp/Package_id_0").is_ok(),
+        "the demo must populate the Temperatures card it opens"
+    );
+    let mut ui = simulator_for(&state);
+    assert!(ui.find("No temperature sensors found").is_err());
+}
+
+fn simulator_for(
+    state: &DeviceDetailState,
+) -> iced_test::Simulator<'_, zensight::message::Message> {
+    simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        state,
+    ))
 }
 
 fn netlink_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDetailState {
