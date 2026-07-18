@@ -494,7 +494,7 @@ impl ArtifactProducer for CaptureProducer {
 mod tests {
     use super::*;
     use std::io::Read;
-    use zenoh_blob::CancelToken;
+    use zblob::CancelToken;
 
     fn cfg(allow_filter: bool, snaplen_max: u32) -> CaptureOnDemandConfig {
         CaptureOnDemandConfig {

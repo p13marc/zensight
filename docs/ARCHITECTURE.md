@@ -75,7 +75,7 @@ host's stable `h-<12hex>` id. The bus carries:
 ```mermaid
 flowchart BT
     subgraph Shared["Shared Libraries"]
-        Keyspace["zensight-keyspace<br/>v1 key grammar, V1Context,<br/>registry codegen"]
+        Keyspace["zenkey (external)<br/>v1 key grammar, V1Context,<br/>registry codegen"]
         Common["zensight-common<br/>TelemetryPoint, TelemetryValue,<br/>Protocol, DeviceStatus, HealthSnapshot,<br/>keyexpr selectors, config, serialization"]
         Core["zensight-sensor-core<br/>SensorRunner, Publisher, health,<br/>AlertReporter, RPC, identity, artifacts"]
     end
@@ -170,8 +170,8 @@ zensight/v1/
 ```
 
 **[KEYSPACE.md](KEYSPACE.md) is the one-screen summary of the deployed profile**;
-the normative spec is the RFC set in [rfcs/keyspace-v2/](rfcs/keyspace-v2/00-index.md),
-enforced by the `zensight-keyspace` registry + typed builders. This is only a sketch.
+the normative spec is the RFC set in the [zenkey repo](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md),
+enforced by the `zenkey` registry + typed builders. This is only a sketch.
 
 ## Zenoh Transport & Pub/Sub Model
 
@@ -429,19 +429,18 @@ zensight/                            # Workspace root
 │   ├── README.md                    # docs index / hub
 │   ├── ARCHITECTURE.md              # this file
 │   ├── KEYSPACE.md                  # deployed keyspace profile (one screen)
-│   ├── rfcs/keyspace-v2/            # normative keyspace-v2 RFC (ratified v1.0)
 │   └── design/                      # archived design rationale
 │
 ├── zensight/                        # Iced frontend            (see zensight/docs/)
 ├── zensight-common/                 # shared model             (see zensight-common/docs/)
-├── zensight-keyspace/               # v1 key grammar + registry codegen
+├── (zenkey)                         # keyspace RFC + grammar/registry crate + zenctl — external repo: https://github.com/p13marc/zenkey
 ├── zensight-sensor-core/            # sensor framework         (see zensight-sensor-core/docs/)
 ├── zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/   # protocol sensors
 ├── zensight-sensor-{netlink,netring,systemd}/                 # Linux / wire / systemd sensors
 ├── zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/          # opt-in eBPF programs
 ├── zensight-correlator/             # identity correlator      (see zensight-correlator/docs/)
 ├── zensight-exporter-{prometheus,otel}/   # exporters
-├── zenoh-blob/                      # large-data transfer      (see zenoh-blob/docs/)
+├── (zblob)                          # large-data transfer — external repo: https://github.com/p13marc/zblob
 │
 ├── configs/                         # one example JSON5 config per crate
 └── packaging/                       # .deb/.rpm + hardened systemd units

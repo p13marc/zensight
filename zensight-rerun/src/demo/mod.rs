@@ -13,6 +13,7 @@ pub mod metrics;
 
 use std::sync::Arc;
 
+use zenkey::V1Context;
 use zensight_common::PublisherRegistry;
 use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
@@ -22,7 +23,6 @@ use zensight_common::keyexpr::entity_key;
 use zensight_common::qos::QosClass;
 use zensight_common::serialization::Format;
 use zensight_common::telemetry::TelemetryPoint;
-use zensight_keyspace::V1Context;
 
 /// The v1 key context for one demo producer. The origin is this machine's
 /// minted `h-` id — demo *payloads* keep their synthetic sources; consumers

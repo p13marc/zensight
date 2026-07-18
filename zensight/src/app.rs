@@ -3802,8 +3802,7 @@ impl ZenSight {
         };
         Some(Task::future(async move {
             if let Some((bp, dir)) = blob {
-                let client =
-                    zenoh_blob::BlobClient::new(session.clone(), bp, zenoh_blob::Format::Json);
+                let client = zblob::BlobClient::new(session.clone(), bp, zblob::Format::Json);
                 client.delete_partial(&id, &dir).await;
             }
             // Best-effort hint to the sensor (free the TTL'd artifact now) —
@@ -3824,10 +3823,10 @@ impl ZenSight {
     /// The local content store backing Tier-2 downloads (the redb `chunks` table,
     /// so chunks dedup across snapshots and survive restart). Falls back to an
     /// in-memory store when there is no persistent store (e.g. demo mode).
-    fn content_store(&self) -> std::sync::Arc<dyn zenoh_blob::ContentStore> {
+    fn content_store(&self) -> std::sync::Arc<dyn zblob::ContentStore> {
         match self.store.persistent() {
             Some(p) => std::sync::Arc::new(crate::store::RedbContentStore::new(p)),
-            None => std::sync::Arc::new(zenoh_blob::MemoryStore::new()),
+            None => std::sync::Arc::new(zblob::MemoryStore::new()),
         }
     }
 
@@ -4862,7 +4861,7 @@ impl ZenSight {
             let mut saw = false;
             for metric in device_state.metrics.keys() {
                 // sysinfo `network/{iface}/{rx,tx}_bytes`, via the registry (#475).
-                use zensight_keyspace::registry::sysinfo::Subject as SysSubject;
+                use zenkey::registry::sysinfo::Subject as SysSubject;
                 let is_rx = match SysSubject::parse_metric(metric) {
                     Some(SysSubject::NetworkRxBytes { .. }) => true,
                     Some(SysSubject::NetworkTxBytes { .. }) => false,
@@ -5755,7 +5754,7 @@ impl ZenSight {
             )));
         };
 
-        let keys: Vec<(String, String)> = zensight_keyspace::registry::REGISTRIES
+        let keys: Vec<(String, String)> = zenkey::registry::REGISTRIES
             .iter()
             .map(|(name, _)| {
                 let key = if *name == "catalog" {
@@ -5829,7 +5828,7 @@ impl ZenSight {
                     continue;
                 };
                 // systemd `unit/{unit}/ip_{egress,ingress}_bps`, via the registry (#475).
-                use zensight_keyspace::registry::systemd::Subject as SystemdSubject;
+                use zenkey::registry::systemd::Subject as SystemdSubject;
                 match SystemdSubject::parse_metric(metric) {
                     Some(SystemdSubject::UnitIpEgressBps { unit }) => {
                         units.entry(unit).or_default().0 = v;

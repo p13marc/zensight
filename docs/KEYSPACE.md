@@ -4,9 +4,9 @@
 (v1.1 made the version chunk a plain `v1` — a wire break, already deployed.
 v1.2 is doc-only: it amends the convention with the lessons of the migration
 and changes no key.) The normative reference is the RFC set in
-[`docs/rfcs/keyspace-v2/`](rfcs/keyspace-v2/00-index.md); ZenSight's concrete
+[the zenkey repo](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md); ZenSight's concrete
 profile (constants, per-sensor worked examples, the mapping of every shipped
-key family) is [chapter 11](rfcs/keyspace-v2/11-zensight-profile.md). The
+key family) is [chapter 11](https://github.com/p13marc/zenkey/blob/main/rfcs/11-zensight-profile.md). The
 migration was executed under epic
 [#453](https://github.com/p13marc/zensight/issues/453); the pre-v1 keyspace
 this file used to document is retired — no shipped component publishes or
@@ -14,7 +14,7 @@ subscribes to it.
 
 ## The deployed profile in one screen
 
-Grammar (RFC [03](rfcs/keyspace-v2/03-grammar.md)):
+Grammar (RFC [03](https://github.com/p13marc/zenkey/blob/main/rfcs/03-grammar.md)):
 
 ```
 zensight/v1/<origin>/<class>/<producer>/<subject...>     data planes
@@ -25,21 +25,21 @@ zensight/v1/@catalog/…                                   the identity catalog
 ```
 
 - `<origin>` = `h-<12hex>` (sha256 of machine-id + salt, RFC
-  [06](rfcs/keyspace-v2/06-identity.md)); the catalog service publishes under
+  [06](https://github.com/p13marc/zenkey/blob/main/rfcs/06-identity.md)); the catalog service publishes under
   the verbatim `@catalog` origin.
 - `<class>` = `telemetry` (periodic samples) · `state` (LWW documents:
   health, errors, alerts, evidence, expectations, stream/artifact docs) ·
   `events` (append-only records). Classes are disjoint by construction; the
   planes (`@rpc`/`@media`/`@blob`) are verbatim chunks no data selector can
-  reach (RFC [04](rfcs/keyspace-v2/04-planes.md),
-  [07](rfcs/keyspace-v2/07-bulk-planes.md)).
+  reach (RFC [04](https://github.com/p13marc/zenkey/blob/main/rfcs/04-planes.md),
+  [07](https://github.com/p13marc/zenkey/blob/main/rfcs/07-bulk-planes.md)).
 - Presence = liveliness tokens at `…/state/<producer>/alive` (+
   `…/state/<producer>/device/<device>/alive`,
   `…/@catalog/state/alive`). Alive ⇒ callable: RPC queryables are declared
   before the token.
 - Commands do not exist: writes are GETs on `…/@rpc/<producer>/<topic>/set`,
   reads on `…/@rpc/<producer>/<topic>` (RFC
-  [05](rfcs/keyspace-v2/05-control-rpc.md)). Fleet callers select
+  [05](https://github.com/p13marc/zenkey/blob/main/rfcs/05-control-rpc.md)). Fleet callers select
   `zensight/v1/*/@rpc/…` with query target `All`.
 - Late joiners seed with a plain GET on the same state selectors (state is
   its own seed; storage-shaped queryables answer one reply per concrete key).
@@ -47,8 +47,8 @@ zensight/v1/@catalog/…                                   the identity catalog
 ## Where the machine-readable truth lives
 
 - **Registry** (per-producer subjects/procedures, QoS entitlements, lints):
-  [`zensight-keyspace/registry/*.toml`](../zensight-keyspace/registry/) —
-  compiled by `zensight-keyspace`'s `build.rs` into typed builders/parsers;
+  [`zenkey/registry/*.toml`](https://github.com/p13marc/zenkey/tree/main/zenkey/registry) —
+  compiled by `zenkey`'s `build.rs` into typed builders/parsers;
   registry violations are build errors. Sensors serve their compiled slice at
   `…/@rpc/<producer>/introspect` — and the GUI's **Fleet** view calls it, parsing
   the reply into a `zensight_keyspace::RegistrySlice` and diffing it against the
@@ -71,15 +71,15 @@ zensight/v1/@catalog/…                                   the identity catalog
   registry file and fails if a declared type does not resolve. It found one that
   did not — `parallax` declared `StreamDoc` for a subject whose payload is a
   `StreamStatus`, a name that existed nowhere else in the workspace.
-- **Bus explorer**: [`zenctl`](../zenctl/README.md) is the `busctl`/`d-feet`
+- **Bus explorer**: [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) is the `busctl`/`d-feet`
   equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
   `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply
   against this build's slice, print the findings).
-- **Key builders**: `zensight-keyspace::V1Context` (producer-side),
+- **Key builders**: `zenkey::V1Context` (producer-side),
   `zensight_common::keyexpr` (consumer-side selectors + fleet/origin RPC
   keys), `zensight_common::command` (topic/artifact procedure keys). New code
   MUST build keys through these — never ad-hoc `format!`.
-- **Guard tests**: `zensight-keyspace/tests/guard.rs` pins the D1–D6
+- **Guard tests**: `zenkey/tests/guard.rs` (zenkey repo) pins the D1–D6
   disjointness algebra; consumer crates pin their own selector shapes.
 
 ## The version chunk is plain (`v1`), not verbatim
@@ -105,10 +105,10 @@ it: they are different literal chunks.
 **Consequence:** `zensight/**` now *does* match v1 keys. `cutover_e2e` and
 `v1_probe` therefore check that nothing appears **outside** `zensight/v1/`,
 rather than relying on key algebra to hide us. Pinned by
-`zensight-keyspace/tests/adv_token.rs` (the token must parse),
+`zenkey/tests/adv_token.rs` (zenkey repo) (the token must parse),
 `guard.rs::d1_version_isolation`, and
 `zensight-sensor-core/tests/adv_publisher_detection.rs` (no warning, end to end).
-RFC: [03 §1.2](rfcs/keyspace-v2/03-grammar.md), [12 §7](rfcs/keyspace-v2/12-open-questions.md).
+RFC: [03 §1.2](https://github.com/p13marc/zenkey/blob/main/rfcs/03-grammar.md), [12 §7](https://github.com/p13marc/zenkey/blob/main/rfcs/12-open-questions.md).
 
 ## The base is the session namespace, not a chunk anyone types
 
@@ -154,7 +154,7 @@ beyond its explicit endpoints; gossip stays on — it only propagates within
 the connected graph).
 
 Session config, storage recipes (latest/catalog/timeseries/pdns), ACL, and
-constrained-link profiles: RFC [09](rfcs/keyspace-v2/09-operations.md).
+constrained-link profiles: RFC [09](https://github.com/p13marc/zenkey/blob/main/rfcs/09-operations.md).
 Shipped router configs: [`configs/router-evidence-storage.json5`](../configs/router-evidence-storage.json5)
 (state seed store), [`configs/router-blob-storage.json5`](../configs/router-blob-storage.json5)
 (@blob tiers), [`configs/router-pdns-influxdb-storage.json5`](../configs/router-pdns-influxdb-storage.json5)

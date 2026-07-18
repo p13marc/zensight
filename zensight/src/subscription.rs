@@ -4,12 +4,12 @@ use iced::keyboard::{self, Key, key};
 use zenoh::sample::SampleKind;
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 
+use zenkey::{Class, ClassOrPlane, CommonState, Origin};
 use zensight_common::keyexpr::{parse_key, refine_key};
 use zensight_common::{
     Alert, ErrorReport, HealthSnapshot, HostEntity, LinkProfile, SensorInfo, TelemetryPoint,
     ZenohConfig, all_entity_wildcard, all_telemetry_wildcard, decode_auto, entities_query_key,
 };
-use zensight_keyspace::{Class, ClassOrPlane, CommonState, Origin};
 
 use crate::message::{Message, Reading};
 

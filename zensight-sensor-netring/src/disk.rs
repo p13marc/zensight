@@ -36,7 +36,7 @@ use std::time::Duration;
 use netring::packet::Timestamp;
 use netring::pcap_rotate::{FileNaming, RotatingConfig, RotatingPcapWriter};
 use tokio::sync::mpsc;
-use zenoh_blob::{BlobServer, FileBlobSource, FixedSizeChunker, Manifest, Sha256Digest};
+use zblob::{BlobServer, FileBlobSource, FixedSizeChunker, Manifest, Sha256Digest};
 use zensight_common::query_detail::CaptureRecord;
 use zensight_common::{AlertSeverity, TelemetryPoint};
 

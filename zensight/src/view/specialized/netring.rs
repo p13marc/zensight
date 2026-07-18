@@ -8,7 +8,7 @@ use iced::widget::{Column, button, column, container, row, scrollable, text};
 use iced::{Length, Theme};
 use zensight_common::TelemetryValue;
 
-use zensight_keyspace::registry::netring::Subject;
+use zenkey::registry::netring::Subject;
 
 use crate::message::Message;
 use crate::view::chart;

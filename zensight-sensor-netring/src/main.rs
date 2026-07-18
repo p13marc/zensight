@@ -143,10 +143,10 @@ async fn main() -> Result<()> {
         let handle = disk::CaptureDiskHandle::new(ctl_tx, disk_stats.clone());
         let index: disk::CaptureIndex =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        let blob = zenoh_blob::BlobServer::new(
+        let blob = zblob::BlobServer::new(
             runner.session().clone(),
             zensight_common::artifact_blob_prefix(&producer),
-            zenoh_blob::Format::Json,
+            zblob::Format::Json,
         );
         {
             let blob = blob.clone();

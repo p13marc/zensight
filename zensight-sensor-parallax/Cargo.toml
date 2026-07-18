@@ -14,7 +14,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 

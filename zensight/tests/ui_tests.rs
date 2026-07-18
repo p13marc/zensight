@@ -4870,9 +4870,9 @@ fn demo_sysinfo_keys_are_registered_subjects() {
 
     for point in sysinfo {
         assert!(
-            zensight_keyspace::registry::is_registered_telemetry("sysinfo", &point.metric),
+            zenkey::registry::is_registered_telemetry("sysinfo", &point.metric),
             "demo emits unregistered sysinfo subject {:?} — it cannot come from a real sensor, \
-             so nothing will render it. Register it in zensight-keyspace/registry/sysinfo.toml \
+             so nothing will render it. Register it in zenkey/registry/ (zenkey repo)sysinfo.toml \
              or fix the mock to match the contract.",
             point.metric
         );
@@ -5303,7 +5303,7 @@ fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
 fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
     use zensight::view::fleet::{FleetReply, FleetState, fleet_view};
 
-    let sysinfo_slice = zensight_keyspace::registry::REGISTRIES
+    let sysinfo_slice = zenkey::registry::REGISTRIES
         .iter()
         .find(|(n, _)| *n == "sysinfo")
         .map(|(_, t)| (*t).to_string())

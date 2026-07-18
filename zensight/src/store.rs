@@ -553,7 +553,7 @@ impl PersistentStore {
     }
 }
 
-/// A redb-backed [`zenoh_blob::ContentStore`] (#199): the durable, dedup-and-resume
+/// A redb-backed [`zblob::ContentStore`] (#199): the durable, dedup-and-resume
 /// substrate for Tier-2 directory sync. Wraps a [`PersistentStore`] so chunks share
 /// the one metrics/logs database. The trait is sync; each call is a short blocking
 /// redb transaction, so drive `TreeClient::download_tree` off the UI thread.
@@ -569,21 +569,21 @@ impl RedbContentStore {
     }
 }
 
-impl zenoh_blob::ContentStore for RedbContentStore {
-    fn has(&self, hash: &zenoh_blob::Hash) -> bool {
+impl zblob::ContentStore for RedbContentStore {
+    fn has(&self, hash: &zblob::Hash) -> bool {
         self.store
             .has_chunk(&format!("sha256/{hash}"))
             .unwrap_or(false)
     }
 
-    fn get(&self, hash: &zenoh_blob::Hash) -> Option<Vec<u8>> {
+    fn get(&self, hash: &zblob::Hash) -> Option<Vec<u8>> {
         self.store
             .read_chunk(&format!("sha256/{hash}"))
             .ok()
             .flatten()
     }
 
-    fn put(&self, hash: &zenoh_blob::Hash, bytes: &[u8]) -> std::io::Result<()> {
+    fn put(&self, hash: &zblob::Hash, bytes: &[u8]) -> std::io::Result<()> {
         self.store
             .write_chunk(&format!("sha256/{hash}"), bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))
@@ -1387,7 +1387,7 @@ mod tests {
 
     #[test]
     fn chunk_store_round_trip_and_persists() {
-        use zenoh_blob::{ContentStore, Digest, Sha256Digest};
+        use zblob::{ContentStore, Digest, Sha256Digest};
 
         let path = temp_db_path("chunks");
         let persistent = PersistentStore::open(&path).expect("open");

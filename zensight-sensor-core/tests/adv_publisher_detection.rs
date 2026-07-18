@@ -1,6 +1,6 @@
 //! The advanced tier's publisher detection must actually work — end to end.
 //!
-//! `zensight-keyspace/tests/adv_token.rs` pins the *reason* (a verbatim version
+//! `zenkey/tests/adv_token.rs` pins the *reason* (a verbatim version
 //! chunk makes zenoh-ext's `@adv` token unparseable, because `**` never crosses
 //! an `@`). This test pins the *symptom*: it wires a real
 //! [`AdvancedPublisherRegistry`] — the exact path every sensor publishes
@@ -128,6 +128,6 @@ async fn late_publisher_detection_does_not_warn() {
         !logs.contains("malformed liveliness token"),
         "zenoh-ext cannot parse our @adv tokens — publisher detection is dead and \
          the logs are filling up. Did the version chunk become verbatim again? \
-         See zensight_keyspace::grammar::VERSION_CHUNK.\n\n{logs}"
+         See zenkey::grammar::VERSION_CHUNK.\n\n{logs}"
     );
 }

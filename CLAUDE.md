@@ -11,8 +11,9 @@ an Iced desktop frontend, correlates per-host identity, and exports to Prometheu
 authoritative reference for how that crate works. This file is the *contributor/agent* guide:
 build/test/lint commands, conventions, and a map into the per-crate docs. The cross-cutting
 contracts are the ratified **keyspace-v2 convention**
-([`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md), v1.2, enforced by
-`zensight-keyspace` — deployed-profile summary in [`docs/KEYSPACE.md`](docs/KEYSPACE.md))
+(normative spec + enforcement crate + `zenctl` live in the external
+[zenkey repo](https://github.com/p13marc/zenkey); deployed-profile summary in
+[`docs/KEYSPACE.md`](docs/KEYSPACE.md))
 and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (system overview). Archived
 design rationale lives in [`docs/design/`](docs/design/).
 
@@ -21,9 +22,9 @@ design rationale lives in [`docs/design/`](docs/design/).
 | Crate | What it is |
 |-------|-----------|
 | `zensight/` | Iced 0.14 frontend — views/state, testing, design system, local store |
-| `zenctl/` | bus explorer CLI (RFC 08 §6): `topic list/info/echo`, `node list`, `service list/call`, `doctor` |
+| [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) | bus explorer CLI (RFC 08 §6) — external, in the zenkey repo |
 | `zensight-common/` | shared model: telemetry, alert/command, identity/evidence/entity, artifact, QoS, keyexpr, payload type table |
-| `zensight-keyspace/` | v1 key grammar + registry codegen: `V1Context`, origin minting, guard tests |
+| [`zenkey`](https://github.com/p13marc/zenkey) | v1 key grammar + registry codegen (`V1Context`, origin minting) — external repo, was in-tree `zensight-keyspace/` |
 | `zensight-sensor-core/` | sensor framework: runner, publishers (declared, QoS), health, alerting, identity, artifacts |
 | `zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/` | protocol pollers/receivers |
 | `zensight-sensor-netlink/` | kernel net telemetry (RTNETLINK/sock_diag) + sentinel + optional eBPF |
@@ -32,7 +33,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline) |
 | `zensight-correlator/` | fuses identity evidence → one `HostEntity` per host |
 | `zensight-exporter-{prometheus,otel}/` | forward telemetry/alerts to external systems |
-| `zenoh-blob/` | resumable content-addressed large-data transfer |
+| [`zblob`](https://github.com/p13marc/zblob) | resumable content-addressed large-data transfer (external repo, was in-tree `zenoh-blob/`) |
 | `zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/` | opt-in eBPF programs (compile to host stubs) |
 
 ## Build Commands
@@ -87,9 +88,9 @@ flowchart LR
   `zensight/v1/<origin>/<class>/<producer>/<subject...>` with classes
   `telemetry`/`state`/`events`, verbatim planes `@rpc`/`@media`/`@blob`, and the
   `@catalog` identity service; commands are `@rpc` GETs, not publications. The
-  registry + typed builders live in `zensight-keyspace/`; contract summary:
+  registry + typed builders live in the external [`zenkey`](https://github.com/p13marc/zenkey) crate; contract summary:
   [`docs/KEYSPACE.md`](docs/KEYSPACE.md), normative spec:
-  [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md).
+  [the zenkey repo](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md).
 - **Sensors** self-report a stable `host_id` and (with `evidence` on) republish observed
   hosts/names; the **correlator** fuses them (union-find over ranked identity rules) into one
   `HostEntity` per host. See `zensight-common/docs/identity-evidence.md` and
@@ -98,7 +99,8 @@ flowchart LR
   with first-byte sniff, QoS classes): `zensight-common/docs/`.
 - **Frontend** (view/state pattern, shell, overlays, redb local store): `zensight/docs/`.
 - **Large data** (report/snapshot/capture requested via `@rpc/<producer>/artifact/*`,
-  delivered on `@blob/{artifact,tree,store}`): `zenoh-blob/`
+  delivered on `@blob/{artifact,tree,store}`): the external
+  [`zblob`](https://github.com/p13marc/zblob) crate
   + `zensight-sensor-core/docs/artifacts.md`.
 
 ## Feature Flags
@@ -127,7 +129,7 @@ JSON5 in [`configs/`](configs/), one per crate. Shared Zenoh block, overridable 
 
 - Rust edition 2024; Iced 0.14 (tokio, canvas, svg); Zenoh 1.9 (`unstable`); tokio async runtime.
 - Conventional commits (`feat:`/`fix:`/`chore:`/`docs:`). Key expressions: v1 grammar via
-  `zensight-keyspace`/`zensight-common` builders (never ad-hoc `format!`). Each view uses a
+  `zenkey`/`zensight-common` builders (never ad-hoc `format!`). Each view uses a
   per-view state struct; UI tests use `iced_test::simulator` (see `zensight/docs/testing.md`).
 - When you change a crate's behavior, update **that crate's `docs/`** and, if the wire contract
   moves, [`docs/KEYSPACE.md`](docs/KEYSPACE.md).

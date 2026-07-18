@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
-use zensight_keyspace::grammar::{self, Class, ClassOrPlane};
+use zenkey::grammar::{self, Class, ClassOrPlane};
 
 fn warned() -> &'static Mutex<HashSet<String>> {
     static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -35,7 +35,7 @@ pub fn check_telemetry_key(key: &str) {
     // while the publisher put keys somewhere nothing is listening. Fail on it
     // instead: a full key reaching a publisher is a bug in the caller.
     debug_assert!(
-        !key.starts_with(zensight_keyspace::DEFAULT_BASE),
+        !key.starts_with(zenkey::DEFAULT_BASE),
         "the publish path was handed a FULL key {key:?} — application keys are base-relative \
          (#466) and the session namespace supplies the base"
     );
@@ -49,9 +49,7 @@ pub fn check_telemetry_key(key: &str) {
         return;
     };
     let tail: Vec<&str> = parsed.subject.iter().map(String::as_str).collect();
-    if zensight_keyspace::registry::parse_subject(producer.name(), Class::Telemetry, &tail)
-        .is_some()
-    {
+    if zenkey::registry::parse_subject(producer.name(), Class::Telemetry, &tail).is_some() {
         return;
     }
 
@@ -60,7 +58,7 @@ pub fn check_telemetry_key(key: &str) {
     debug_assert!(
         false,
         "unregistered telemetry subject {metric:?} — add it to \
-         zensight-keyspace/registry/{name}.toml (RFC 08 §5, issue #468)"
+         zenkey/registry/ (zenkey repo){name}.toml (RFC 08 §5, issue #468)"
     );
     let mut seen = warned().lock().unwrap_or_else(|e| e.into_inner());
     if seen.insert(format!("{name}/{metric}")) {

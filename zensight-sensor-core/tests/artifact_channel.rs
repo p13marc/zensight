@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ulid::Ulid;
-use zenoh_blob::{BlobClient, CancelToken, Format, MemoryStore, TreeClient};
+use zblob::{BlobClient, CancelToken, Format, MemoryStore, TreeClient};
 use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert,
 };

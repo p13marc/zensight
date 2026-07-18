@@ -15,7 +15,7 @@ ebpf = ["dep:aya", "dep:aya-log", "dep:aya-build", "dep:libc"]
 
 [dependencies]
 zensight-common = { path = "../zensight-common" }
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
 # Shared kernel<->user eBPF types (MAX_SLOTS, log2_bucket). Plain no_std lib —

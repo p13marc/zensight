@@ -26,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-pub use zenoh_blob::{Entry, Manifest, TreeIndex};
+pub use zblob::{Entry, Manifest, TreeIndex};
 
 /// What to produce. The variant carries the kind-specific parameters; the
 /// discriminant is serialized under a `kind` tag (`report` / `snapshot` /
@@ -127,7 +127,7 @@ pub struct TreeSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "delivery", rename_all = "snake_case")]
 pub enum Delivery {
-    /// Tier-1 whole-blob: download with `zenoh_blob::BlobClient` from
+    /// Tier-1 whole-blob: download with `zblob::BlobClient` from
     /// `blob_prefix` using `manifest.id`.
     Blob {
         /// Whole-blob manifest (size, chunking, SHA-256, filename).
@@ -135,7 +135,7 @@ pub enum Delivery {
         /// Key prefix of the `zenoh-blob` server serving this blob.
         blob_prefix: String,
     },
-    /// Tier-2 tree: download with `zenoh_blob::TreeClient` — fetch the index
+    /// Tier-2 tree: download with `zblob::TreeClient` — fetch the index
     /// `tree_id` from `tree_prefix`, chunks from `store_prefix`.
     Tree {
         /// The `TreeIndex` id to GET (a single key segment under `tree_prefix`).
@@ -342,7 +342,7 @@ mod tests {
                     chunk_size: 512,
                     chunk_count: 2,
                     hash_algo: "sha256".into(),
-                    hash: zenoh_blob::Hash([0u8; 32]),
+                    hash: zblob::Hash([0u8; 32]),
                     created_ms: 1,
                 },
                 blob_prefix: "v1/h-3fa9c2d41b7e/@blob/artifact".into(),

@@ -42,7 +42,7 @@ pub fn var(vars: &[(&'static str, String)], name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zensight_keyspace::registry::netlink::Subject;
+    use zenkey::registry::netlink::Subject;
 
     #[test]
     fn leaf_is_the_registered_measurement_name() {

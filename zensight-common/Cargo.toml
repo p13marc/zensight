@@ -6,7 +6,7 @@ license.workspace = true
 description = "Common types and utilities for ZenSight observability sensors"
 
 [dependencies]
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 zenoh.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -17,7 +17,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 ulid = { workspace = true }
-zenoh-blob = { workspace = true }
+zblob = { workspace = true }
 
 [dev-dependencies]
 # router_storage.rs gives each zenohd run a fresh ZENOH_BACKEND_FS_ROOT, so a

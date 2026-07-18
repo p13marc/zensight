@@ -55,7 +55,7 @@ fn default_mode() -> String {
 }
 
 fn default_namespace() -> String {
-    zensight_keyspace::DEFAULT_BASE.to_string()
+    zenkey::DEFAULT_BASE.to_string()
 }
 
 impl Default for ZenohConfig {

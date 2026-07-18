@@ -52,7 +52,14 @@ trap cleanup EXIT
 # zenctl stays un-namespaced by design: it sees the wire as it really is, which
 # is the only way to check that what the container *claims* and what it *sends*
 # agree. Scouting is off by default — it will not wander onto your fleet.
-zenctl() { cargo run --quiet --release -p zenctl -- "$@" --connect "$HUB"; }
+#
+# zenctl lives in the zenkey repo now (https://github.com/p13marc/zenkey).
+# Install it (`cargo install --git https://github.com/p13marc/zenkey zenctl`)
+# or point ZENCTL at a binary / a `cargo run` wrapper of your checkout.
+ZENCTL="${ZENCTL:-zenctl}"
+command -v "${ZENCTL%% *}" >/dev/null 2>&1 \
+  || die "zenctl not found — cargo install --git https://github.com/p13marc/zenkey zenctl (or set ZENCTL)"
+zenctl() { $ZENCTL "$@" --connect "$HUB"; }
 
 # The origins holding a liveliness token. `node list` prints each origin on its
 # own line with its producers indented beneath.

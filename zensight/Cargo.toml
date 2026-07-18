@@ -14,12 +14,12 @@ name = "zensight"
 path = "src/main.rs"
 
 [dependencies]
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 zensight-common.workspace = true
 zenoh.workspace = true
 zenoh-ext.workspace = true
 # Large-data (debug-report) download client (#197).
-zenoh-blob.workspace = true
+zblob.workspace = true
 ulid.workspace = true
 # Decompress a saved `.pcap.zst` capture back to `.pcap` on save (#333).
 zstd.workspace = true

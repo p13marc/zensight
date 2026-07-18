@@ -7,7 +7,7 @@ description = "Zenoh sensor for systemd unit/service state and boot performance 
 license = "Apache-2.0"
 
 [dependencies]
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 hostname = "0.4"

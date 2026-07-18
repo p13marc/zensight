@@ -11,7 +11,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
-use zensight_keyspace::registry::netlink::Subject;
+use zenkey::registry::netlink::Subject;
 
 #[derive(Default)]
 struct NetlinkAgg {
