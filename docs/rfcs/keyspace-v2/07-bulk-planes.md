@@ -164,6 +164,38 @@ by a fetch from one chosen origin's literal key. On the data classes
 (`telemetry` / `state` / `events`) a wildcard origin is ordinary and
 expected; it is what a fleet view *is*.
 
+**Carve-out — a registered service origin publishing on behalf of a target
+(normative).** The publisher-side rule assumes the publishing identity and
+the *subject* of the data are the same host. One case breaks that
+assumption honestly: a controller publishing **durable desired-state** a
+target must converge on. Such a publisher is not lying about identity — it
+is asserting *its own* service identity as the author of an instruction —
+so it does not need a `*`, and MUST NOT use one.
+
+> A **registered service origin** (a verbatim origin minted for a service,
+> e.g. `@tcdesired`) MAY publish desired-state on behalf of a target host.
+> When it does, it MUST place the **target host id as the first subject
+> chunk**, exactly as a proxy producer places its observed device
+> ([03-grammar.md §1.6](03-grammar.md), "the observed device as the first
+> subject chunk"). The origin remains the service's own concrete identity;
+> the target is subject matter, never the origin.
+
+```
+<base>/v1/@tcdesired/state/h-3fa9c2d41b7e/config/eth0/desired
+```
+
+This is grammar-legal with **zero new mechanism**: it is the §1.6
+proxy-producer rule (origin = the machine that publishes; observed subject
+= first chunk) applied to a *desired-state author* rather than a device
+observer. It is the concrete spelling of the escape hatch decided in
+[12-open-questions.md §3](12-open-questions.md), reachable over RPC from
+[05-control-rpc.md §3](05-control-rpc.md), and it is the one sanctioned
+exception to the "data planes are strictly producer→consumer" rule
+([04-planes.md §2 R6](04-planes.md)): the *producer* here is a controller,
+the *consumer* the target that reconciles. Its ACL grant is a single
+put/delete rule on the service origin's own subtree
+([09-operations.md §3](09-operations.md)).
+
 ## 4. Why planes and not payloads
 
 The alternative — riding bulk/media on the data classes with a "big"

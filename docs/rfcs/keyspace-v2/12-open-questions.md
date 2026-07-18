@@ -71,6 +71,21 @@ is durable pub/sub *commands* — fire-and-forget imperatives with no
 convergence semantics. If durability is ever wanted, it must arrive as
 desired state.
 
+**Concrete form (v1.4).** When a controller authors desired-state for a
+target it does not run, it publishes under a **registered service origin**
+with the target host as the first subject chunk:
+
+```
+<base>/v1/@tcdesired/state/h-3fa9c2d41b7e/config/eth0/desired
+```
+
+This is grammar-legal with **zero new mechanism** — it is the
+proxy-producer rule ([03-grammar.md §1.6](03-grammar.md)) applied to a
+desired-state author instead of a device observer, and the normative
+carve-out lives in [07-bulk-planes.md §3](07-bulk-planes.md). The target
+reconciles on (re)connect; the ACL cost is a single put/delete grant on
+the service origin's subtree ([09-operations.md §3](09-operations.md)).
+
 **Revisit trigger.** A control path whose miss is unacceptable *and*
 whose semantics cannot be expressed as convergence on desired state.
 

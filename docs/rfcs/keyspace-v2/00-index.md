@@ -1,8 +1,30 @@
 # Zenoh Semantic Convention RFC — Index
 
-**Status: v1.3 — RATIFIED** (v1.0 2026-07-12; adopted for ZenSight, migration
+**Status: v1.4 — RATIFIED** (v1.0 2026-07-12; adopted for ZenSight, migration
 tracked in [#453](https://github.com/p13marc/zensight/issues/453) with the
 enforcement crate `zensight-keyspace`).
+
+> **v1.4 (2026-07-18, actuator-adoption amendments, issue
+> [tcgui#43](https://github.com/p13marc/tcgui/issues/43))** — six additive
+> amendments from migrating a *side-effecting actuator* (a tc/netem
+> traffic-control agent) onto v1.3: the first **writer of shared kernel state**
+> to adopt the convention, which surfaced gaps every read-only sensor had left
+> latent. Each was fact-checked against the ratified chapter text before it was
+> kept.
+>
+> | | Chapter | What |
+> |---|---|---|
+> | **G1** | [07 §3](07-bulk-planes.md) (+ [12 §3](12-open-questions.md), [05 §3](05-control-rpc.md), [04 §2](04-planes.md), [09 §3](09-operations.md)) | **Service-origin escape hatch for desired-state.** A *registered service origin* (e.g. `@tcdesired`) MAY publish durable desired-state on behalf of a target, and MUST place the **target host as the first subject chunk** — the proxy-producer rule ([03 §1.6](03-grammar.md)) applied to the origin position. Grammar-legal, zero new mechanism; the ratified escape hatch (12 §3) had never been spelled as a concrete key. |
+> | **G2** | [08 §2](08-registry.md), [05 §2.1](05-control-rpc.md) | **Read vs write fan-out.** Procedures gain a `fanout = forbidden \| allowed` field (default `forbidden` for `kind = "write"`); a `*`-origin fan-out call to a forbidden-fanout write **MUST** be refused (builder, registry, or ACL). Fan-in was safe to broadcast for *reads*; broadcasting a *write* actuates the whole fleet. |
+> | **G3** | [03 §1.5](03-grammar.md) | **Exclusivity is off-bus.** Liveliness/claim tokens are **presence, never a lock**; a side-effecting producer **MUST** enforce single-writer exclusivity *outside* the bus (file lock / systemd unit / netlink), because convergence can reconcile a state *document* but cannot undo a *side effect*. |
+> | **G4** | [03 §2](03-grammar.md) | **Grammar erratum.** The `_xNN_` escape can itself emit a leading `_` (infinite regress on `_myns`); the slug MUST guarantee an **alphanumeric first character**. And case-sensitive identifier domains (Linux interface names, `eth0` ≠ `ETH0`) are **exempt** from the lowercasing MUST — the injectivity MUST in the same section wins. |
+> | **G5** | [08 §1.1](08-registry.md) | **Typed origin MUST for writes.** The origin-kind SHOULD-be-a-type is upgraded to **MUST** for `kind = "write"` builders (a mis-typed origin actuates the wrong — or one's own — host); it stays SHOULD for read-only builders. |
+> | **G6** | [09 §3](09-operations.md) | **Sub-host ACL needs the resource in the path.** ACL matches keyexpr *inclusion* and cannot match selector parameters, so sub-host authority ("may shape `eth1`, not the management NIC") requires the actuated resource to be a **path chunk** (`@rpc/<producer>/config/{ns}/{if}/set`), never a `?if=` selector. Bounded interface populations make this grammar-legal. |
+>
+> **What did *not* change.** No wire change and **no grammar change** — every
+> amendment is prose that makes an existing rule bind a new caller class
+> (writers/actuators). Position count, version chunk, and all payloads are
+> untouched; all six are additive.
 
 > **v1.3 (2026-07-15) — `@media` tiers; wire-breaking payloads, key grammar
 > unchanged** ([#494](https://github.com/p13marc/zensight/issues/494)). The

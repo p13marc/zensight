@@ -263,6 +263,7 @@ only for principals on the advanced tier):
 | console | `ops-own-token` (adv) | `**/@adv/**` | in | liveliness_token |
 | console | `ops-recv` | all planes (each named) | out | put, delete, reply, liveliness_token |
 | console | `no-remote-actions` | `*/@rpc/systemd/action` | both | **deny** query |
+| svc-origin | `desired-author` | `@tcdesired/state/**` (its own subtree only) | in | put, delete |
 
 Sketch (structure verified against the Zenoh 1.9 schema; validate against
 a live `zenohd` before deploying):
@@ -348,6 +349,17 @@ access_control: {
     { id: "no-remote-actions", permission: "deny",
       messages: ["query"],
       key_exprs: ["zensight/v1/*/@rpc/systemd/action"] },
+
+    // ---- desired-state service origin (07 §3 carve-out) ----
+    // a controller that authors desired-state on behalf of a target
+    // (07-bulk-planes §3) needs EXACTLY ONE ingress put/delete grant, on
+    // ITS OWN service-origin subtree — never on any host origin. Absent
+    // this rule it is refused ingress-put by default-deny; present, it can
+    // still only write under @tcdesired, so it cannot forge a host's own
+    // state (the target host id is the first SUBJECT chunk, not the origin):
+    { id: "desired-author", permission: "allow", flows: ["ingress"],
+      messages: ["put", "delete"],
+      key_exprs: ["zensight/v1/@tcdesired/state/**"] },
   ],
 
   subjects: [
@@ -355,6 +367,8 @@ access_control: {
     { id: "host-3fa9", cert_common_names: ["h-3fa9c2d41b7e"] },
     { id: "catalog",   cert_common_names: ["zensight-catalog"] },
     { id: "console",   cert_common_names: ["zensight-console"] },
+    // service origin @tcdesired enrolls like any principal (03-grammar §4 D6)
+    { id: "tcdesired", cert_common_names: ["zensight-tcdesired"] },
   ],
 
   policies: [
@@ -364,6 +378,7 @@ access_control: {
               "catalog-intake-recv"],                        subjects: ["catalog"] },
     { rules: ["ops-sub", "ops-recv", "ops-own-token"],       subjects: ["console"] },
     { rules: ["no-remote-actions"],                          subjects: ["console"] },
+    { rules: ["desired-author"],                             subjects: ["tcdesired"] },
   ],
 }
 ```
@@ -376,6 +391,24 @@ thumb: a rule's `key_exprs`
 must **include** (⊇) the consumer's declared selector, not merely
 intersect it — allow `zensight/v1/**` does not admit a `zensight/**`
 subscriber.
+
+**Sub-host authority needs the resource in the path (v1.4).** Because ACL
+matching is keyexpr *inclusion* (fact 1) and a rule **cannot** discriminate
+on *selector parameters* — a `?if=eth1` on a query is invisible to the
+allow/deny decision — any authority *below* the host granularity ("this
+principal may shape `eth1` but not the management NIC") requires the
+actuated resource to be a **path chunk**, never a selector. The write
+procedure MUST therefore be keyed
+`@rpc/<producer>/config/{ns}/{if}/set`, so a rule can allow
+`…/@rpc/tc/config/*/eth1/set` and deny `…/config/*/mgmt0/set`; a design
+that instead spelled it `@rpc/tc/config/set?if=eth1` collapses to a single
+`…/config/set` keyexpr the ACL can only allow or deny *wholesale*, and the
+sub-host distinction is unenforceable. This is grammar-legal because the
+actuated population — network interfaces — is **bounded**: the
+per-message-data ban ([03-grammar.md §2](03-grammar.md)) does not bite
+(an interface is an observed-population chunk, not a request id), and
+[08 §2](08-registry.md)'s cardinality budget covers it. Put the discriminator
+where the ACL can see it: in the key.
 
 ## 4. Constrained links
 

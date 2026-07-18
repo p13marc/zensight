@@ -72,6 +72,15 @@ discipline does, and fleet callers MUST follow it:
   roster (`<base>/v1/*/state/*/alive`, [04-planes.md §5](04-planes.md)) to
   attribute non-replies — the reply set alone cannot say who *should* have
   answered.
+- **Write fan-out.** A fan-out (`*`-origin) call to a `kind = "write"` /
+  `fanout = "forbidden"` procedure MUST be refused — by the builder (no
+  `FleetSelector` overload is generated for it), by the registry (admission
+  rejects the shape), or by the ACL, in that order of preference. Fan-in is
+  safe for *reads* — collect every host's answer — but a broadcast *write*
+  is a fleet-wide side effect, and one mistargeted `*` actuates every host
+  at once. The `*` origin stays legal only for `read`/`long-running` and for
+  writes explicitly marked `fanout = "allowed"`
+  ([08-registry.md §2](08-registry.md)).
 
 Checklist, because every one of these has been shipped wrong at least once:
 
@@ -154,8 +163,14 @@ call, and the caller can *determine* that it did (§3.1). If a deployment
 ever needs "instruction that survives producer downtime", the escape hatch
 is desired-state reconciliation — the controller publishes
 `state/<producer>/desired/<topic>` and the producer converges on
-(re)connect. No current channel needs it; decided (RPC-only, escape hatch
-sanctioned) in [12-open-questions.md §3](12-open-questions.md).
+(re)connect. When the controller does **not** run on the target host, it
+authors that desired-state under a **registered service origin** with the
+target as the first subject chunk
+(`<base>/v1/@tcdesired/state/h-xxx/config/<if>/desired`) — the
+service-origin carve-out in [07-bulk-planes.md §3](07-bulk-planes.md),
+grammar-legal with zero new mechanism. No current channel needs it; decided
+(RPC-only, escape hatch sanctioned) in
+[12-open-questions.md §3](12-open-questions.md).
 
 ### 3.1 What silence means (normative honesty)
 

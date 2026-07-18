@@ -62,7 +62,9 @@ drill-down in the product down at once ([06 §6.3](06-identity.md)).
 So the codegen contract is **build/parse × local/remote**, and:
 
 > Generated builders **MUST** make the origin an explicit argument, and
-> **SHOULD** make its kind a **type**, not a convention.
+> **SHOULD** make its kind a **type**, not a convention — strengthened to
+> **MUST** for builders of a `kind = "write"` procedure
+> ([08 §2](#2-entry-format), [05 §3](05-control-rpc.md)).
 
 With a type (`LocalOrigin` vs `RemoteOrigin`, and an explicit
 `FleetSelector` for the deliberate `*`), "I built a key for my own host by
@@ -70,6 +72,14 @@ accident" stops being a runtime timeout and becomes a compile error. That
 is the whole promise of generating this code instead of formatting
 strings, and it is cheap: the origin is *already* a value at every call
 site — it is only stringly-typed because nobody said not to.
+
+The typing stays a SHOULD for read-only builders (a mis-typed origin on a
+read is a wasted query — a timeout, recoverable), but is a **MUST** for
+write builders (v1.4): a mis-typed origin on a *write* does not time out —
+it **actuates the wrong host, or one's own**, before anyone notices. A
+side-effecting write has no safe failure mode for a stringly-typed origin,
+so the compile-time distinction that is merely prudent for reads is
+mandatory for writes.
 
 A `*` origin **MUST** be reachable only by asking for it by name. It is a
 fleet selector, it pairs with query target **All**
@@ -129,6 +139,7 @@ kind        = "write"                       # read | write | long-running
 request     = "CaptureTrigger"
 reply       = "Ack"
 idempotent  = false
+fanout      = "forbidden"                    # forbidden | allowed; default forbidden for kind="write" (§2, 05 §2.1)
 since       = "1.0"
 description = "fire the pre-trigger ring / rotate the spool"
 
@@ -201,6 +212,30 @@ data-class concepts; `@media` QoS is fixed by RFC 07 §1
 (best-effort · drop · interactive-high) and is not a per-entry knob. Media key
 builders are generated from these entries the same way subject/procedure
 builders are, so a hand-written `media_*_key()` cannot drift from the registry.
+
+`[[procedure]]` entries (the `@rpc` plane, RFC 05) are the third shape and,
+like `[[media]]`, carry request/reply *types* rather than a class payload, so
+they too have their own normative field table:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `path` | pattern string | yes | procedure sub-path after `@rpc/<producer>/`; same variable rules as `[[subject]]` |
+| `kind` | enum `read \| write \| long-running` | yes | procedure idiom ([05-control-rpc.md §3](05-control-rpc.md)) |
+| `request` | type-table name | no (empty-body reads) | payload type of the query body; CI-resolved against the shared type table ([§5](#5-ownership-and-process)) |
+| `reply` | type-table name | yes | payload type of a success reply (errors ride `reply_err`, 05 §3) |
+| `idempotent` | bool | `write`/`long-running` only | whether a retried call is safe; documented per 05 §3 |
+| `fanout` | enum `forbidden \| allowed` | no (default: `write` → `forbidden`, `read`/`long-running` → `allowed`) | may a `*`-origin fan-out call target this procedure? A `write` that broadcasts actuates the whole fleet, so `forbidden` is the default and the only sound value for a side-effecting write ([05-control-rpc.md §2.1](05-control-rpc.md)) |
+| `cardinality` | integer | yes if `path` has any `{var}` | key-population bound, budget-reviewed — same rule as `[[subject]]` |
+| `since` / `gone` / `replaced_by` | registry versions / path | `since` yes | lifecycle (§3) |
+| `description` | string | yes | one line, human |
+
+The `fanout` field (added v1.4) is what lets the builder/registry/ACL refuse a
+fleet-wide *write*: a fan-in `*` origin is safe and expected for a `read`
+(collect every host's answer), but a broadcast `write` is a fleet-wide side
+effect. `fanout = "forbidden"` on a `kind = "write"` procedure makes the
+`*`-origin call a build-time or admission error, not a runtime surprise
+([05-control-rpc.md §2.1](05-control-rpc.md)). Procedure key builders are
+generated from these entries exactly as subject/media builders are.
 
 Variable rules:
 

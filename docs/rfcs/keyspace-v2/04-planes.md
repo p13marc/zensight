@@ -135,7 +135,11 @@ The class of a subject is fixed by the registry, decided with these rules:
 - **R5 — Is it bulk bytes with an identity (file, tree, chunk)?** → `@blob`.
 - **R6 — Is it a question or an instruction?** → `@rpc`. Nothing under the
   data classes is ever a command; the data planes are strictly
-  producer→consumer.
+  producer→consumer. (The one sanctioned exception is durable **desired
+  state** authored by a registered service origin on behalf of a target,
+  which the target then reconciles — still a `state` document, not a
+  command; [07-bulk-planes.md §3](07-bulk-planes.md),
+  [12-open-questions.md §3](12-open-questions.md).)
 
 A corollary worth stating: **the bus is low-cardinality by budget.**
 Everything high-cardinality is pull-only (`@rpc`), content-addressed
