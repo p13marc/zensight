@@ -6,7 +6,7 @@ use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 /// Every metric name this sensor emits funnels through here (RFC 08 §5, issue
 /// #468): in debug builds — which is every unit test — an unregistered metric
 /// name panics. Adding a metric without registering it in
-/// `zenkey/registry/ (zenkey repo)parallax.toml` fails the existing tests.
+/// `zensight-common/registry/parallax.toml` fails the existing tests.
 pub(crate) fn checked_point(
     source: &str,
     metric: impl Into<String>,
@@ -14,9 +14,9 @@ pub(crate) fn checked_point(
 ) -> TelemetryPoint {
     let metric = metric.into();
     debug_assert!(
-        zenkey::registry::is_registered_telemetry("parallax", &metric),
+        zensight_common::registry::is_registered_telemetry("parallax", &metric),
         "unregistered parallax telemetry subject {metric:?} — add it to \
-         zenkey/registry/ (zenkey repo)parallax.toml (RFC 08 §5, issue #468)"
+         zensight-common/registry/parallax.toml (RFC 08 §5, issue #468)"
     );
     TelemetryPoint::new(source, Protocol::Parallax, metric, value)
 }

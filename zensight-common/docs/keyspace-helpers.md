@@ -69,8 +69,8 @@ Producers (sensors) build their own keys through `V1Context` (re-exported as
 (`zensight/v1/<origin>/telemetry/<producer>`), `state_key(&[…])`, `health_key`,
 `errors_key`, `sensor_info_key`, `evidence_self_key`, `evidence_device_key`,
 `device_liveness_key`, `alive_key`, `device_alive_key`, `rpc_key(&[…])`,
-`media_video_key` / `media_preview_key`, and `blob_prefix(tier)`. Registry
-violations are build errors (`zensight-keyspace/registry/*.toml`).
+`media_video_key` / `media_key(&[…])`, and `blob_prefix(tier)`. Registry
+violations are build errors (`zensight-common/registry/*.toml`).
 
 Two producer-side evidence builders live in `keyexpr.rs` because non-sensor code
 uses them too (both mint the **local** origin):

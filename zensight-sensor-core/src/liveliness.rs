@@ -164,7 +164,7 @@ mod tests {
     fn test_key_format() {
         // Token keys mirror the v1 state grammar; origin-scoped so two hosts
         // running the same producer never collide (RFC 04 §5).
-        let ctx = crate::v1::V1Context::for_producer("snmp");
+        let ctx = crate::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp");
         let sensor_key = ctx.alive_key();
         assert!(sensor_key.starts_with("v1/h-"), "{sensor_key}");
         assert!(sensor_key.ends_with("/state/snmp/alive"), "{sensor_key}");

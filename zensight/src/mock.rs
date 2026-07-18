@@ -997,7 +997,7 @@ pub mod fleet {
     use crate::view::fleet::FleetReply;
 
     fn slice(name: &str) -> String {
-        zenkey::registry::REGISTRIES
+        zensight_common::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, t)| (*t).to_string())

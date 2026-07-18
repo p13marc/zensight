@@ -111,10 +111,12 @@ aya-build = "0.1"
 # Internal crates
 zensight-common = { path = "zensight-common" }
 # The keyspace convention crate — external since the zenkey extraction (RFC set
-# + zenctl live there too). Switch to a crates.io version dep once published (#517).
-zenkey = { git = "https://github.com/p13marc/zenkey" }
+# + zenctl live there too). crates.io dep (#517); registry TOMLs live in-repo
+# (zensight-common/registry/), compiled at build time by zenkey-build.
+zenkey = "0.2.0"
+zenkey-build = "0.2.0"
 zensight-sensor-core = { path = "zensight-sensor-core" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # graduated from in-tree `zenoh-blob/` — epic #193; renamed on extraction).
-# Switch to a crates.io version dep once 0.1.0 is published.
-zblob = { git = "https://github.com/p13marc/zblob" }
+zblob = "0.1.0"
+

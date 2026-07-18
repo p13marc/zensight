@@ -47,8 +47,9 @@ zensight/v1/@catalog/…                                   the identity catalog
 ## Where the machine-readable truth lives
 
 - **Registry** (per-producer subjects/procedures, QoS entitlements, lints):
-  [`zenkey/registry/*.toml`](https://github.com/p13marc/zenkey/tree/main/zenkey/registry) —
-  compiled by `zenkey`'s `build.rs` into typed builders/parsers;
+  [`zensight-common/registry/*.toml`](../zensight-common/registry/) —
+  compiled by `zenkey-build` from `zensight-common/build.rs` into typed
+  builders/parsers;
   registry violations are build errors. Sensors serve their compiled slice at
   `…/@rpc/<producer>/introspect` — and the GUI's **Fleet** view calls it, parsing
   the reply into a `zensight_keyspace::RegistrySlice` and diffing it against the

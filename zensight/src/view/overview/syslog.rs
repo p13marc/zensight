@@ -153,7 +153,7 @@ fn collect_messages(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<LogMessag
             // the rollup names redundantly repeated the producer name (#470);
             // with that gone, the string test would have silently let every
             // rollup through as a log line.
-            if zenkey::registry::logs::Subject::parse_metric(key).is_some() {
+            if zensight_common::registry::logs::Subject::parse_metric(key).is_some() {
                 continue;
             }
             let TelemetryValue::Text(message) = &point.value else {

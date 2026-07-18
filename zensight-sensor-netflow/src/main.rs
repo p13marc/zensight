@@ -67,7 +67,8 @@ async fn main() -> Result<()> {
     tracing::info!("NetFlow listeners started");
 
     let key_prefix =
-        zensight_sensor_core::v1::V1Context::for_producer("netflow").telemetry_prefix();
+        zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "netflow")
+            .telemetry_prefix();
     let publish_flows = netflow_config.publish_flows;
     let publish_stats = netflow_config.publish_stats;
     // Rollup cadence: `aggregation_interval_secs`, defaulting to 30 s when

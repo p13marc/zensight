@@ -12,9 +12,12 @@ use std::sync::{Arc, RwLock};
 
 /// App-scoped salt for the machine-id hash (the `sd_id128_get_machine_app_specific`
 /// spirit). Fixed — not configurable — so every sensor on a host agrees.
-/// The application salt lives in zenkey (RFC 06 §1); re-exported
-/// here for the doc trail. The wire `host_id` IS the v1 origin id.
-const HOST_ID_SALT: &str = zenkey::origin::ZENSIGHT_SALT;
+/// The application salt lives in ZenSight's [`zensight_common::PROFILE`]
+/// (RFC 06 §1); routed through here for the doc trail. The wire `host_id`
+/// IS the v1 origin id.
+fn host_id_salt() -> &'static str {
+    zensight_common::PROFILE.salt()
+}
 
 /// The identity envelope for the local host.
 #[derive(Debug, Clone, Default)]
@@ -104,7 +107,7 @@ pub(crate) fn hash_machine_id(raw: &str) -> Option<String> {
     // The v1 origin id (RFC 06 §1): payload host_id == key origin == entity
     // id, so consumers group without a correlation join (epic #453).
     Some(
-        zenkey::origin::HostId::from_machine_id(trimmed, HOST_ID_SALT)
+        zenkey::origin::HostId::from_machine_id(trimmed, host_id_salt())
             .as_str()
             .to_string(),
     )
@@ -194,7 +197,7 @@ mod tests {
     use super::*;
 
     const FIXTURE_MACHINE_ID: &str = "0123456789abcdef0123456789abcdef";
-    /// `h-` + first 12 hex of sha256(FIXTURE_MACHINE_ID + HOST_ID_SALT) — the
+    /// `h-` + first 12 hex of sha256(FIXTURE_MACHINE_ID + host_id_salt()) — the
     /// v1 origin id (RFC 06 §1), pinned so any change to the hashing scheme
     /// (which would silently re-identify every host) fails loudly.
     const FIXTURE_HOST_ID: &str = "h-4631a192d7bd";

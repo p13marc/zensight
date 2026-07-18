@@ -1,0 +1,22 @@
+# Append-only deprecation ledger (RFC 08 §3/§5).
+# One line per retired subject: <producer>\t<path>. Lines are never removed;
+# build.rs fails if a ledger line loses its [[deprecated]] entry or a
+# [[deprecated]] entry is missing from the ledger.
+logs	logs/ingest/received_total
+logs	logs/ingest/parsed_total
+logs	logs/ingest/parse_failed_total
+logs	logs/ingest/dropped_total
+logs	logs/by_severity/{severity}
+logs	logs/errors_total
+logs	logs/warnings_total
+logs	logs/units_in_failure
+logs	logs/journald/read_total
+logs	logs/journald/published_total
+logs	logs/journald/dropped_total
+logs	logs/journald/sampled_out_total
+logs	logs/by_unit/{unit}/messages_total
+logs	logs/by_unit/{unit}/errors_total
+logs	logs/by_unit/{unit}/error_ratio
+logs	logs/by_unit/{unit}/burn_rate
+logs	logs/by_template/{template}/count_total
+logs	logs/by_template/{template}/errors_total

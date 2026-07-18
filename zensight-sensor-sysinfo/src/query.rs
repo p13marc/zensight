@@ -142,7 +142,7 @@ pub async fn run_latency(
 /// Serialize `records` as JSON and reply on the query's own key.
 /// Small helper: the v1 context for one producer.
 fn zensight_keyspace_ctx(producer: &str) -> zensight_sensor_core::v1::V1Context {
-    zensight_sensor_core::v1::V1Context::for_producer(producer)
+    zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, producer)
 }
 
 /// Reply on the queryable's **concrete** key (RFC 05 §2.1), never the

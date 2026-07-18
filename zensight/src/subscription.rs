@@ -5,6 +5,7 @@ use zenoh::sample::SampleKind;
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 
 use zenkey::{Class, ClassOrPlane, CommonState, Origin};
+use zensight_common::ZensightState;
 use zensight_common::keyexpr::{parse_key, refine_key};
 use zensight_common::{
     Alert, ErrorReport, HealthSnapshot, HostEntity, LinkProfile, SensorInfo, TelemetryPoint,
@@ -645,39 +646,51 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         };
     }
 
-    match subject.common_state()? {
-        CommonState::Health => decode!(HealthSnapshot, Message::HealthSnapshotReceived),
-        CommonState::Errors => decode!(ErrorReport, |report| Message::ErrorReportReceived(
-            protocol,
-            Some(origin),
-            report
-        )),
-        CommonState::Sensor => decode!(SensorInfo, Message::SensorInfoReceived),
-        CommonState::Alert { .. } => decode!(Alert, Message::AlertReceived),
-        CommonState::Stream { .. } => decode!(zensight_common::stream::StreamStatus, |status| {
-            Message::ParallaxStreamStatus {
-                source: origin,
-                status,
-            }
-        }),
-        CommonState::CatalogEntity { .. } => decode!(HostEntity, Message::EntityReceived),
+    match ZensightState::of(&subject)? {
+        ZensightState::Common(CommonState::Health) => {
+            decode!(HealthSnapshot, Message::HealthSnapshotReceived)
+        }
+        ZensightState::Common(CommonState::Errors) => {
+            decode!(ErrorReport, |report| Message::ErrorReportReceived(
+                protocol,
+                Some(origin),
+                report
+            ))
+        }
+        ZensightState::Common(CommonState::Sensor) => {
+            decode!(SensorInfo, Message::SensorInfoReceived)
+        }
+        ZensightState::Common(CommonState::Alert { .. }) => decode!(Alert, Message::AlertReceived),
+        ZensightState::Stream { .. } => {
+            decode!(zensight_common::stream::StreamStatus, |status| {
+                Message::ParallaxStreamStatus {
+                    source: origin,
+                    status,
+                }
+            })
+        }
+        ZensightState::Common(CommonState::CatalogEntity { .. }) => {
+            decode!(HostEntity, Message::EntityReceived)
+        }
         // An alias re-points a retired entity id at its successor. The GUI must
         // consume it (RFC 06 §5.1 step 1, #486): the retired id's entity doc is
         // gone, so without the alias an operator's merge simply makes a host
         // vanish for anyone holding the old id.
-        CommonState::CatalogAlias { .. } => {
+        ZensightState::Common(CommonState::CatalogAlias { .. }) => {
             decode!(zensight_common::AliasRecord, Message::AliasReceived)
         }
         // Evidence is the catalog's input, not the GUI's; artifact progress is
         // polled over @rpc; pdns is resolved on demand over @rpc/names; an
         // assertion is the *operator's* input to the catalog — the GUI reads its
         // consequences (entities + aliases), not the instruction.
-        CommonState::EvidenceSelf
-        | CommonState::EvidenceDevice { .. }
-        | CommonState::EvidenceNames { .. }
-        | CommonState::Artifact { .. }
-        | CommonState::CatalogAssertion { .. }
-        | CommonState::CatalogPdns { .. } => None,
+        ZensightState::Common(
+            CommonState::EvidenceSelf
+            | CommonState::EvidenceDevice { .. }
+            | CommonState::EvidenceNames { .. }
+            | CommonState::CatalogPdns { .. },
+        )
+        | ZensightState::Artifact { .. }
+        | ZensightState::CatalogAssertion { .. } => None,
     }
 }
 

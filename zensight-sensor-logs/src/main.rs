@@ -303,7 +303,8 @@ async fn main() -> Result<()> {
         let health = runner.health();
         let registry_tick = registry.clone();
         let v1_prefix_tick =
-            zensight_sensor_core::v1::V1Context::for_producer("logs").telemetry_prefix();
+            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "logs")
+                .telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let drop_alert_ratio = syslog_config.ingest.drop_alert_ratio;
         let source = source.clone();
@@ -385,7 +386,8 @@ async fn main() -> Result<()> {
     if let Some(agg) = aggregator.clone() {
         let registry_tick = registry.clone();
         let v1_prefix_tick =
-            zensight_sensor_core::v1::V1Context::for_producer("logs").telemetry_prefix();
+            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "logs")
+                .telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let stats_tick = journald_stats.clone();
         let budget_reporter = budget_alerts_on.then(|| alert_reporter.clone()).flatten();
@@ -453,7 +455,8 @@ async fn main() -> Result<()> {
     if let Some(tagg) = template_agg.clone() {
         let registry_tick = registry.clone();
         let v1_prefix_tick =
-            zensight_sensor_core::v1::V1Context::for_producer("logs").telemetry_prefix();
+            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "logs")
+                .telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let source = source.clone();
         runner.spawn(async move {

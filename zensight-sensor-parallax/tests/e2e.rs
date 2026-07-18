@@ -164,7 +164,7 @@ async fn spawn_sensor_with_config(
 /// The sensor runs in-process, so the test's v1 context (same global host
 /// origin) yields exactly the keys the sensor publishes on (epic #453).
 fn v1ctx() -> zensight_sensor_core::v1::V1Context {
-    zensight_sensor_core::v1::V1Context::for_producer("parallax")
+    zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "parallax")
 }
 
 async fn query_catalogue(viewer: &zenoh::Session, _host_prefix: &str) -> Vec<StreamDescriptor> {
@@ -246,7 +246,7 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     let handle = spawn_sensor(sensor.clone(), source).await;
 
     // Subscribe FIRST so the very first published frame is observed.
-    let preview_key = v1ctx().media_preview_key("test0");
+    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
     let sub = viewer
         .declare_subscriber(&preview_key)
         .await
@@ -728,7 +728,7 @@ async fn stats_ticker_publishes_fps_telemetry() {
         .expect("declare stats subscriber");
 
     // Keep a media viewer subscribed so the 1 s idle reaper never fires.
-    let preview_key = v1ctx().media_preview_key("test0");
+    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
     let media_sub = viewer
         .declare_subscriber(&preview_key)
         .await
@@ -806,7 +806,7 @@ async fn close_and_idle_reaper_tear_stream_down() {
     let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
-    let preview_key = v1ctx().media_preview_key("test0");
+    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
     let sub = viewer
         .declare_subscriber(&preview_key)
         .await

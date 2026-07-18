@@ -59,7 +59,7 @@ use the typed builders in `zensight-keyspace`.
 
 The deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md); the normative
 spec is [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md). The machine-readable
-truth is [`zensight-keyspace/registry/*.toml`](zensight-keyspace/registry/) — or ask a
+truth is [`zensight-common/registry/*.toml`](zensight-common/registry/) — or ask a
 running build: `zenctl topic list`.
 
 ## Quick start

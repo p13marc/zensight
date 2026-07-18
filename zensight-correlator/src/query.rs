@@ -296,7 +296,7 @@ pub async fn serve_introspect(
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key = catalog_rpc_key("introspect");
-    let slice = zenkey::registry::registry_toml("catalog")
+    let slice = zensight_common::registry::registry_toml("catalog")
         .ok_or_else(|| anyhow::anyhow!("catalog registry slice missing from the build"))?;
     let queryable = session
         .declare_queryable(&key)

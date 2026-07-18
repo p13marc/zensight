@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn types_are_total() {
         let mut checked = 0usize;
-        for (producer, toml_src) in zenkey::registry::REGISTRIES {
+        for (producer, toml_src) in crate::registry::REGISTRIES {
             let slice = zenkey::parse_slice(toml_src)
                 .unwrap_or_else(|e| panic!("{producer}: registry slice does not parse: {e}"));
             for subject in &slice.subjects {

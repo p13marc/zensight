@@ -64,7 +64,8 @@ pub async fn run_drains(
     // Cached publishers so late-joining consumers get current values on connect.
     let registry = AdvancedPublisherRegistry::new(
         session,
-        zensight_sensor_core::v1::V1Context::for_producer(&producer).telemetry_prefix(),
+        zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, &producer)
+            .telemetry_prefix(),
         format,
         AdvancedPublisherConfig::default(),
     );

@@ -11,7 +11,7 @@ use iced_anim::widget::button;
 
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
-use zenkey::registry::logs::Subject as LogsSubject;
+use zensight_common::registry::logs::Subject as LogsSubject;
 
 use crate::message::Message;
 use crate::view::components::{Sparkline, card};

@@ -304,7 +304,10 @@ impl SessionManager {
         alerts: Option<Arc<ParallaxAlerts>>,
     ) -> SessionHandle {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let state_ctx = zensight_sensor_core::v1::V1Context::for_producer("parallax");
+        let state_ctx = zensight_sensor_core::v1::V1Context::for_producer(
+            &zensight_common::PROFILE,
+            "parallax",
+        );
         let manager = SessionManager {
             catalog,
             config,
@@ -699,7 +702,7 @@ impl SessionManager {
             let ctx = self.publisher.v1();
             match profile {
                 Profile::Video(idx) => ctx.media_video_key(stream, "h264", self.tier_name(idx)),
-                Profile::Preview => ctx.media_preview_key(stream),
+                Profile::Preview => ctx.media_key(&[stream, "preview", "jpeg"]),
             }
         };
         let media = match self.publisher.raw_media_publisher(key.clone()).await {

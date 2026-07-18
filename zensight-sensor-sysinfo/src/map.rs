@@ -27,7 +27,7 @@ impl Metric {
     ///
     /// In debug builds — which is every unit test — an unregistered name panics.
     /// That is what makes the ~57 mapper tests below a *conformance suite*: adding
-    /// a metric without registering it in `zenkey/registry/ (zenkey repo)sysinfo.toml`
+    /// a metric without registering it in `zensight-common/registry/sysinfo.toml`
     /// fails tests that already exist, rather than shipping a subject the registry
     /// has never heard of and `introspect` cannot describe.
     ///
@@ -38,9 +38,9 @@ impl Metric {
     fn new(metric: impl Into<String>, value: TelemetryValue) -> Self {
         let metric = metric.into();
         debug_assert!(
-            zenkey::registry::is_registered_telemetry("sysinfo", &metric),
+            zensight_common::registry::is_registered_telemetry("sysinfo", &metric),
             "unregistered sysinfo telemetry subject {metric:?} — add it to \
-             zenkey/registry/ (zenkey repo)sysinfo.toml (RFC 08 §5, issue #468)"
+             zensight-common/registry/sysinfo.toml (RFC 08 §5, issue #468)"
         );
         Self {
             metric,

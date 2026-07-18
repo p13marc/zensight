@@ -25,10 +25,12 @@ pub mod payload;
 pub mod publisher_registry;
 pub mod qos;
 pub mod query_detail;
+pub mod registry;
 pub mod rpc;
 pub mod semconv;
 pub mod serialization;
 pub mod session;
+pub mod state;
 pub mod stream;
 pub mod telemetry;
 
@@ -86,11 +88,26 @@ pub use rpc::{
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
+pub use state::ZensightState;
 pub use stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
 /// The registry's *parse* direction, re-exported so consumers get it without a
 /// direct `zenkey` dependency (RFC 08 §1, issue #475).
 pub use zenkey::CommonState;
+
+/// ZenSight's application profile (RFC 11 §1): the application name and the
+/// RFC 06 §1 origin salt, plus the once-per-process host-origin mint. The
+/// deployment *base* is deliberately separate — see [`DEFAULT_BASE`].
+pub static PROFILE: zenkey::AppProfile = zenkey::AppProfile::new("zensight", "zensight-host-id-v1");
+
+/// The default deployment base (session namespace, RFC 03 §1.1).
+///
+/// Keys built through `zenkey` are base-relative (they start at `v1`); the
+/// base is added on egress and stripped on ingress by the Zenoh session
+/// namespace. Only session configuration, router artifacts, and un-namespaced
+/// debug tools may read this — application code building keys never spells
+/// the base.
+pub const DEFAULT_BASE: &str = "zensight";
 
 /// Initialize tracing with the given configuration.
 ///

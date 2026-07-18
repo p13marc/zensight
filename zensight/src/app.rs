@@ -4861,7 +4861,7 @@ impl ZenSight {
             let mut saw = false;
             for metric in device_state.metrics.keys() {
                 // sysinfo `network/{iface}/{rx,tx}_bytes`, via the registry (#475).
-                use zenkey::registry::sysinfo::Subject as SysSubject;
+                use zensight_common::registry::sysinfo::Subject as SysSubject;
                 let is_rx = match SysSubject::parse_metric(metric) {
                     Some(SysSubject::NetworkRxBytes { .. }) => true,
                     Some(SysSubject::NetworkTxBytes { .. }) => false,
@@ -5754,7 +5754,7 @@ impl ZenSight {
             )));
         };
 
-        let keys: Vec<(String, String)> = zenkey::registry::REGISTRIES
+        let keys: Vec<(String, String)> = zensight_common::registry::REGISTRIES
             .iter()
             .map(|(name, _)| {
                 let key = if *name == "catalog" {
@@ -5828,7 +5828,7 @@ impl ZenSight {
                     continue;
                 };
                 // systemd `unit/{unit}/ip_{egress,ingress}_bps`, via the registry (#475).
-                use zenkey::registry::systemd::Subject as SystemdSubject;
+                use zensight_common::registry::systemd::Subject as SystemdSubject;
                 match SystemdSubject::parse_metric(metric) {
                     Some(SystemdSubject::UnitIpEgressBps { unit }) => {
                         units.entry(unit).or_default().0 = v;

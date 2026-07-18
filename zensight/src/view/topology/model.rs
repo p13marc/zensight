@@ -249,7 +249,7 @@ impl Node {
                 }
                 _ => {
                     // sysinfo network counters, via the registry (#475).
-                    use zenkey::registry::sysinfo::Subject as SysSubject;
+                    use zensight_common::registry::sysinfo::Subject as SysSubject;
                     if matches!(
                         SysSubject::parse_metric(name),
                         Some(SysSubject::NetworkRxBytes { .. })

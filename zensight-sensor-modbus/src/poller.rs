@@ -50,8 +50,11 @@ impl ModbusPoller {
         Self {
             device,
             registers,
-            telemetry_prefix: zensight_sensor_core::v1::V1Context::for_producer("modbus")
-                .telemetry_prefix(),
+            telemetry_prefix: zensight_sensor_core::v1::V1Context::for_producer(
+                &zensight_common::PROFILE,
+                "modbus",
+            )
+            .telemetry_prefix(),
             register_names: config.register_names.clone(),
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,

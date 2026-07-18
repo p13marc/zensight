@@ -160,7 +160,7 @@ pub fn build_rows(replies: Vec<FleetReply>, alive: &[AliveProducer]) -> Vec<Flee
         // The slice this build compiled in, for the same producer. A producer
         // we have never heard of has nothing to diff against — it is newer than
         // us, which is exactly the skew we want reported, not hidden.
-        let local = zenkey::registry::REGISTRIES
+        let local = zensight_common::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == reply.producer)
             .and_then(|(_, t)| parse_slice(t).ok());
@@ -387,7 +387,7 @@ mod tests {
     /// view should be able to give at a glance.
     #[test]
     fn a_matching_build_is_in_sync() {
-        let (_, local) = zenkey::registry::REGISTRIES
+        let (_, local) = zensight_common::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == "sysinfo")
             .unwrap();
@@ -444,7 +444,7 @@ mod tests {
     /// Worst first: a drifting host must not sort below ten healthy ones.
     #[test]
     fn rows_sort_worst_first() {
-        let (_, sysinfo) = zenkey::registry::REGISTRIES
+        let (_, sysinfo) = zensight_common::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == "sysinfo")
             .unwrap();
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn renders_a_populated_table() {
-        let (_, sysinfo) = zenkey::registry::REGISTRIES
+        let (_, sysinfo) = zensight_common::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == "sysinfo")
             .unwrap();

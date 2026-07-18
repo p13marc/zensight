@@ -1,0 +1,191 @@
+# Subject registry: parallax (live video). RFC 08 §2; migration epic #453.
+# Telemetry is registered as real subjects, not a `{metric...}` catch-all
+# (issue #468) — see registry/sysinfo.toml for the rule and why.
+# Source: src/stats.rs.
+#
+# `{stream}/stats/{metric}` has a *variable* head chunk — there is no literal
+# prefix — so it structurally matches anything whose 2nd chunk is `stats`. A
+# stream named `streams` would shadow `streams/advertised`; literal-first
+# precedence keeps the literal winning, so the shadow costs the stream, not the
+# gauge.
+
+[registry]
+version = "1.3"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "parallax"
+description = "live video (V4L2/RTSP/test) -> H.264 + JPEG previews on @media"
+
+[[subject]]
+path = "streams/advertised"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "streams in this host's catalogue"
+
+[[subject]]
+path = "{stream}/stats/fps"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "frames per second"
+
+[[subject]]
+path = "{stream}/stats/kbps"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "encoded bitrate"
+
+[[subject]]
+path = "{stream}/stats/drops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "dropped frames"
+
+[[subject]]
+path = "{stream}/stats/viewers"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "subscribers on the @media plane"
+
+[[subject]]
+path = "{stream}/stats/encode_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "encode time per frame"
+
+[[subject]]
+path = "stream/{stream}"
+class = "state"
+type = "StreamStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.0"
+description = "stream catalogue + status doc (open?, viewers, profile); tombstone on removal from config, NOT on close (RFC 05 §5)"
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework; absorbs the legacy @/status running flag)"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "alerts; firing->resolved on one key, delete = tombstone"
+
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.1"
+description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "artifact/request"
+kind = "write"
+request = "ArtifactRequest"
+reply = "ArtifactAck"
+since = "1.0"
+description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+
+[[procedure]]
+path = "artifact/cancel"
+kind = "write"
+reply = "Ack"
+since = "1.0"
+description = "free an in-flight/ready artifact early (?id=<ulid>)"
+
+[[procedure]]
+path = "artifact/status"
+kind = "read"
+reply = "ArtifactStatus"
+idempotent = true
+since = "1.0"
+description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+[[procedure]]
+path = "streams"
+kind = "read"
+reply = "Vec<StreamDescriptor>"
+idempotent = true
+since = "1.0"
+description = "the configured stream catalogue (descriptors incl. open state)"
+[[procedure]]
+path = "stream/set"
+kind = "write"
+request = "Command<StreamControl>"
+reply = "Ack"
+idempotent = false
+since = "1.0"
+description = "stream control: open_stream / close_stream / request_keyframe"
+# `{tier}` is a named bandwidth rung (low/medium/high) the viewer subscribes to
+# exactly (RFC 07 §1, keyspace v1.3). It replaced the undefined `{profile}` chunk.
+# cardinality: ~streams(16) × codecs(2) × tiers(3), rounded up.
+[[media]]
+path = "{stream}/video/{codec}/{tier}"
+encoding = "video/*"
+attachment = "FrameMeta"
+cardinality = 128
+since = "1.3"
+[[media]]
+path = "{stream}/preview/jpeg"
+encoding = "image/jpeg"
+attachment = "FrameMeta"
+cardinality = 16
+since = "1.0"

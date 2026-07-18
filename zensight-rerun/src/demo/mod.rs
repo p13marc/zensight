@@ -29,7 +29,7 @@ use zensight_common::telemetry::TelemetryPoint;
 /// read source/protocol from the payload, and the class selectors match any
 /// origin.
 fn v1ctx(producer: &str) -> V1Context {
-    V1Context::for_producer(producer)
+    V1Context::for_producer(&zensight_common::PROFILE, producer)
 }
 
 /// A demo publishing context over one isolated session.

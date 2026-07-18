@@ -204,7 +204,11 @@ mod tests {
         let session = Arc::new(zenoh::open(cfg).await.unwrap());
         let publisher = zensight_sensor_core::Publisher::new(session, "parallax", Format::Json);
         let media = publisher
-            .raw_media_publisher(publisher.v1().media_preview_key("watchdog-test"))
+            .raw_media_publisher(
+                publisher
+                    .v1()
+                    .media_key(&["watchdog-test", "preview", "jpeg"]),
+            )
             .await
             .unwrap();
 

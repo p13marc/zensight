@@ -328,7 +328,7 @@ impl<C: SensorConfig> SensorRunner<C> {
         {
             let ctx = self.publisher.v1().clone();
             let producer_name = ctx.producer().name().to_string();
-            if let Some(toml) = zenkey::registry::registry_toml(&producer_name) {
+            if let Some(toml) = zensight_common::registry::registry_toml(&producer_name) {
                 match crate::rpc::serve_introspect(self.session.clone(), &ctx, toml).await {
                     Ok(task) => self.tasks.push(task),
                     Err(e) => tracing::warn!(error = %e, "failed to serve introspect"),

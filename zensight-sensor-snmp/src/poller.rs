@@ -42,7 +42,8 @@ impl SnmpPoller {
         format: Format,
     ) -> Self {
         let telemetry_prefix =
-            zensight_sensor_core::v1::V1Context::for_producer("snmp").telemetry_prefix();
+            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
+                .telemetry_prefix();
 
         let oids = device.all_oids(oid_groups);
         let walks = device.all_walks(oid_groups);

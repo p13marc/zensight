@@ -24,7 +24,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight/` | Iced 0.14 frontend — views/state, testing, design system, local store |
 | [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) | bus explorer CLI (RFC 08 §6) — external, in the zenkey repo |
 | `zensight-common/` | shared model: telemetry, alert/command, identity/evidence/entity, artifact, QoS, keyexpr, payload type table |
-| [`zenkey`](https://github.com/p13marc/zenkey) | v1 key grammar + registry codegen (`V1Context`, origin minting) — external repo, was in-tree `zensight-keyspace/` |
+| [`zenkey`](https://github.com/p13marc/zenkey) | v1 key grammar (`V1Context`, `AppProfile`, origin minting) — external repo (crates.io dep, like `zblob`), was in-tree `zensight-keyspace/`; registry TOMLs live in `zensight-common/registry/`, compiled by `zenkey-build` |
 | `zensight-sensor-core/` | sensor framework: runner, publishers (declared, QoS), health, alerting, identity, artifacts |
 | `zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/` | protocol pollers/receivers |
 | `zensight-sensor-netlink/` | kernel net telemetry (RTNETLINK/sock_diag) + sentinel + optional eBPF |
@@ -88,7 +88,9 @@ flowchart LR
   `zensight/v1/<origin>/<class>/<producer>/<subject...>` with classes
   `telemetry`/`state`/`events`, verbatim planes `@rpc`/`@media`/`@blob`, and the
   `@catalog` identity service; commands are `@rpc` GETs, not publications. The
-  registry + typed builders live in the external [`zenkey`](https://github.com/p13marc/zenkey) crate; contract summary:
+  registry TOMLs live in `zensight-common/registry/`, compiled by `zenkey-build`
+  into typed builders (`zensight_common::registry`) over the external
+  [`zenkey`](https://github.com/p13marc/zenkey) grammar crate; contract summary:
   [`docs/KEYSPACE.md`](docs/KEYSPACE.md), normative spec:
   [the zenkey repo](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md).
 - **Sensors** self-report a stable `host_id` and (with `evidence` on) republish observed

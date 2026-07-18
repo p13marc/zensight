@@ -12724,7 +12724,8 @@ dependencies = [
 [[package]]
 name = "zblob"
 version = "0.1.0"
-source = "git+https://github.com/p13marc/zblob#caa221cc196cd2629e7e85d03d0ce3b22f36fd95"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d051265af4a29a18ea2b4a020402d4db7a00232a8d91356f2440120ee8145f98"
 dependencies = [
  "ciborium",
  "fastcdc",
@@ -12800,8 +12801,9 @@ dependencies = [
 
 [[package]]
 name = "zenkey"
-version = "0.1.0"
-source = "git+https://github.com/p13marc/zenkey#dc159420b9501c42b45f68f89f2868faa74dcdae"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8064b16922689a66eac3b5953534930e6e26863bb8819b0e2deb177840bd7981"
 dependencies = [
  "dirs 5.0.1",
  "sha2",
@@ -12809,7 +12811,17 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "zenoh",
- "zenoh-keyexpr",
+]
+
+[[package]]
+name = "zenkey-build"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14322bee4d588a06a9b274f5b4cf4117e7f3fa1ed6834d51b1391bc8623893a5"
+dependencies = [
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "zenkey",
 ]
 
 [[package]]
@@ -13398,6 +13410,7 @@ dependencies = [
  "ulid",
  "zblob",
  "zenkey",
+ "zenkey-build",
  "zenoh",
 ]
 

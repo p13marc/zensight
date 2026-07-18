@@ -1,7 +1,7 @@
 use crate::telemetry::Protocol;
 
+use crate::registry::{self, AnySubject};
 use zenkey::grammar::{self, Class, ClassOrPlane, Origin, StructuralKey};
-use zenkey::registry::{self, AnySubject};
 
 // ---------------------------------------------------------------------------
 // Parsing: base-relative for applications, full-key for un-namespaced tools.
@@ -97,7 +97,7 @@ pub fn is_telemetry_key(key: &str) -> bool {
 ///
 /// That is the failure this rejects at startup, where it is still legible.
 pub fn validate_relative_selector(ke: &str) -> std::result::Result<(), String> {
-    let base = zenkey::DEFAULT_BASE;
+    let base = crate::DEFAULT_BASE;
     if let Some(rel) = grammar::strip_base(base, ke) {
         return Err(format!(
             "key expression {ke:?} spells the deployment base. Since #466 the session sets \
@@ -180,7 +180,7 @@ pub fn all_health_wildcard() -> String {
 pub fn host_evidence_key(sensor: &str, device: &str) -> String {
     format!(
         "v1/{}/state/{}/evidence/device/{}",
-        zenkey::context::host_id().as_str(),
+        crate::PROFILE.host_id().as_str(),
         sensor,
         zenkey::slug::chunk_slug(device)
     )
@@ -207,7 +207,7 @@ pub fn all_evidence_wildcard() -> String {
 pub fn name_observation_key(sensor: &str, ip_slug: &str) -> String {
     format!(
         "v1/{}/state/{}/evidence/names/{}",
-        zenkey::context::host_id().as_str(),
+        crate::PROFILE.host_id().as_str(),
         sensor,
         ip_slug
     )

@@ -40,7 +40,7 @@ pub struct Publisher {
 impl Publisher {
     /// Create a new publisher for one producer on this host.
     pub fn new(session: Arc<zenoh::Session>, producer: impl AsRef<str>, format: Format) -> Self {
-        let v1 = V1Context::for_producer(producer.as_ref());
+        let v1 = V1Context::for_producer(&zensight_common::PROFILE, producer.as_ref());
         let telemetry_prefix = v1.telemetry_prefix();
         let control = Arc::new(zensight_common::PublisherRegistry::new(session.clone()));
         Self {
@@ -294,7 +294,7 @@ mod tests {
     fn test_telemetry_prefix_is_the_v1_telemetry_prefix() {
         // The publisher's key root is the v1 telemetry prefix for its
         // producer on THIS host (origin-scoped, RFC 04).
-        let prefix = V1Context::for_producer("test").telemetry_prefix();
+        let prefix = V1Context::for_producer(&zensight_common::PROFILE, "test").telemetry_prefix();
         assert!(prefix.starts_with("v1/h-"), "{prefix}");
         assert!(prefix.ends_with("/telemetry/test"), "{prefix}");
         assert_eq!(

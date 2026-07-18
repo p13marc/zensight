@@ -55,7 +55,7 @@ fn default_mode() -> String {
 }
 
 fn default_namespace() -> String {
-    zenkey::DEFAULT_BASE.to_string()
+    crate::DEFAULT_BASE.to_string()
 }
 
 impl Default for ZenohConfig {

@@ -19,6 +19,10 @@ thiserror.workspace = true
 ulid = { workspace = true }
 zblob = { workspace = true }
 
+[build-dependencies]
+# Compiles registry/*.toml into the typed subject registry (RFC 08 §5).
+zenkey-build = { workspace = true }
+
 [dev-dependencies]
 # router_storage.rs gives each zenohd run a fresh ZENOH_BACKEND_FS_ROOT, so a
 # test cannot pass on the previous run's stored data.

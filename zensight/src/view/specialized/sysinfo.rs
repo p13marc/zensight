@@ -7,11 +7,11 @@ use std::collections::BTreeSet;
 use iced::widget::{Column, Row, button, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 
+use zensight_common::TelemetryValue;
 /// The registry's parse direction for this producer (RFC 08 §1, issue #475).
 /// `TelemetryPoint::metric` **is** the telemetry subject tail, verbatim, so a
 /// metric name refines straight into a typed subject with its variables named.
-use zenkey::registry::sysinfo::Subject;
-use zensight_common::TelemetryValue;
+use zensight_common::registry::sysinfo::Subject;
 
 use crate::message::Message;
 use crate::view::components::card;

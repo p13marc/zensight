@@ -106,8 +106,11 @@ impl TrapReceiver {
         Self {
             bind_addr: bind_addr.to_string(),
             registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh)),
-            telemetry_prefix: zensight_sensor_core::v1::V1Context::for_producer("snmp")
-                .telemetry_prefix(),
+            telemetry_prefix: zensight_sensor_core::v1::V1Context::for_producer(
+                &zensight_common::PROFILE,
+                "snmp",
+            )
+            .telemetry_prefix(),
             mib_resolver,
             format,
         }

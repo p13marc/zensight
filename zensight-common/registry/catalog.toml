@@ -1,0 +1,90 @@
+# Subject registry: @catalog (identity/ontology service). RFC 06, RFC 08 §2.
+#
+# `@catalog/state/claim/{zid}` is deliberately NOT registered, and that is not an
+# oversight. It is a **liveliness token** — the correlator declares it with
+# `session.liveliness().declare_token()` (zensight-correlator/src/guard.rs), so it
+# carries no payload and is never `put`. The registry describes *data subjects*: a
+# subject exists to say what a key's payload is and who may write it. A presence
+# token has neither, which is why `alive` is a reserved leaf that build.rs refuses
+# as a subject chunk at all. Registering `claim` would advertise a data surface that
+# nothing serves — the mirror image of the advertised-but-unserved finding in #467.
+
+[registry]
+version = "1.1"
+app = "zensight"
+convention = 1
+
+[service]
+name = "catalog"
+origin = "@catalog"
+description = "identity/ontology service (zensight-correlator); single writer via the RFC 06 §5.3 claim protocol"
+
+[[subject]]
+path = "entity/{entity_id}"
+common = "entity"
+class = "state"
+type = "HostEntity"
+cardinality = 10000
+ttl_s = 900
+since = "1.0"
+description = "merged entity document (LWW, tombstoned on retire/merge)"
+
+[[subject]]
+path = "alias/{old_id}"
+common = "alias"
+class = "state"
+type = "AliasRecord"
+cardinality = 1000
+ttl_s = 31536000
+since = "1.0"
+description = "old-id -> entity-id re-pointing on merges/upgrades; operator-retained (RFC 06 §5.4)"
+
+[[subject]]
+path = "pdns/{ip_slug}"
+common = "pdns"
+class = "state"
+type = "PdnsRecord"
+cardinality = 100000
+ttl_s = 86400
+since = "1.0"
+description = "accumulated IP<->name record; history = storage capture (RFC 06 §5.2; population-budgeted)"
+
+[[subject]]
+path = "assertion/{id}"
+class = "state"
+type = "OperatorAssertion"
+cardinality = 1000
+ttl_s = 0
+since = "1.1"
+description = "operator identity assertion (link/unlink, RFC 06 §5.4); operator evidence — strong, never ages out"
+
+[[procedure]]
+path = "link"
+kind = "write"
+reply = "OperatorAssertion"
+idempotent = true
+since = "1.1"
+description = "assert two origins are one host (?old=...;new=...); gated (RFC 06 §5.4)"
+
+[[procedure]]
+path = "unlink"
+kind = "write"
+reply = "OperatorAssertion"
+idempotent = true
+since = "1.1"
+description = "assert two origins are NOT one host, retiring any link (?old=...;new=...); gated"
+
+[[procedure]]
+path = "names"
+kind = "read"
+reply = "Vec<NameVal>"
+idempotent = true
+since = "1.0"
+description = "on-demand name resolution (?ip=...)"
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
