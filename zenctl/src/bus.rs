@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use zenoh::Session;
 use zenoh::query::{ConsolidationMode, QueryTarget};
 use zensight_keyspace::grammar::with_base;
+use zensight_keyspace::{RegistrySlice, parse_slice};
 
 /// How a producer answered a procedure call.
 pub enum Answer {
@@ -150,6 +151,51 @@ fn origin_of(base: &str, key: &str) -> String {
     zensight_common::keyexpr::parse_full_key(base, key)
         .map(|k| k.origin.chunk().to_string())
         .unwrap_or_else(|| "?".to_string())
+}
+
+/// Discover every live producer's registry slice **from the bus**, with nothing
+/// compiled in (RFC 08 §6: "generic explorer tooling … needs no compiled-in
+/// registry").
+///
+/// Every producer MUST serve its registry slice as TOML on
+/// `@rpc/<producer>/introspect`. This fans one wildcard-producer `introspect`
+/// GET across the fleet — `<base>/v1/*/@rpc/*/introspect` — and parses each
+/// reply. It is the same introspect+`parse_slice` path `doctor` walks, minus
+/// the compiled-in diff: here the served slice *is* the answer.
+///
+/// A reply that does not parse is reported to stderr and skipped, never fatal:
+/// one malformed producer must not blind the tool to every other producer's
+/// slice. The tuple's first element is the producer (or service) base name the
+/// slice declares (`slice.name`), matching the compiled path's producer column.
+///
+/// Note: a verbatim service origin (`@catalog`) is unmatchable by the `*` of a
+/// fleet selector (grammar property D4), so pure-producer discovery does not
+/// enumerate services — `doctor` asks those by name.
+pub async fn fleet_registry(
+    session: &Session,
+    base: &str,
+    timeout: Duration,
+) -> Result<Vec<(String, RegistrySlice)>> {
+    // This session is un-namespaced on purpose (#466, RFC 09 §5), so it must
+    // spell the base itself — exactly as `service call` composes its full key.
+    let key = with_base(base, &zensight_common::fleet_rpc_key("*", "introspect"));
+    let answers = fleet_get(session, base, &key, None, timeout).await?;
+
+    let mut slices = Vec::new();
+    for answer in answers {
+        let Answer::Value(bytes) = answer.answer else {
+            continue;
+        };
+        let served_toml = String::from_utf8_lossy(&bytes);
+        match parse_slice(&served_toml) {
+            Ok(slice) => slices.push((slice.name.clone(), slice)),
+            Err(e) => eprintln!(
+                "warning: {}: introspect reply did not parse, skipping: {e}",
+                answer.origin
+            ),
+        }
+    }
+    Ok(slices)
 }
 
 /// The fleet-presence roster: who is up, and what they run.

@@ -7,9 +7,28 @@
 
 use anyhow::{Result, anyhow};
 use zensight_keyspace::registry::REGISTRIES;
+use zensight_keyspace::{RegistrySlice, parse_slice};
 
-/// `topic list` — every registered subject, from the registry this build
-/// compiled against.
+/// The offline default source: the registry slices this binary compiled
+/// against, parsed. Both the offline commands and `doctor` share the same
+/// [`REGISTRIES`] table; here it becomes the same `&[RegistrySlice]` shape the
+/// bus-sourced path ([`crate::bus::fleet_registry`]) returns, so one renderer
+/// serves both.
+pub fn compiled_slices() -> Result<Vec<RegistrySlice>> {
+    REGISTRIES
+        .iter()
+        .map(|(name, toml_src)| {
+            parse_slice(toml_src)
+                .map_err(|e| anyhow!("registry slice for {name} does not parse: {e}"))
+        })
+        .collect()
+}
+
+/// `topic list` — every registered subject in the given slices.
+///
+/// The slices come from either the compiled-in registry ([`compiled_slices`])
+/// or the live bus ([`crate::bus::fleet_registry`]); the rendering is identical,
+/// which is the point — a slice is a slice regardless of where it was read.
 ///
 /// **Declared, not observed.** A pattern with a trailing rest-variable
 /// (`{path...}`) stands for a whole family whose real members only exist on the
@@ -17,7 +36,7 @@ use zensight_keyspace::registry::REGISTRIES;
 /// `{device}/{path...}` by design, because their metric tree belongs to the
 /// polled device, not to us. For those, this command can only tell you the
 /// shape. `zenctl topic echo` is what tells you the members.
-pub fn topic_list(producer: Option<&str>, class: Option<&str>) -> Result<()> {
+pub fn topic_list(slices: &[RegistrySlice], producer: Option<&str>, class: Option<&str>) -> Result<()> {
     if let Some(c) = class
         && !["telemetry", "state", "events"].contains(&c)
     {
@@ -29,12 +48,11 @@ pub fn topic_list(producer: Option<&str>, class: Option<&str>) -> Result<()> {
     let mut total = 0usize;
     let mut open_ended = 0usize;
 
-    for (name, toml_src) in REGISTRIES {
-        if producer.is_some_and(|p| p != *name) {
+    for slice in slices {
+        let name = &slice.name;
+        if producer.is_some_and(|p| p != name) {
             continue;
         }
-        let slice = zensight_keyspace::parse_slice(toml_src)
-            .map_err(|e| anyhow!("registry slice for {name} does not parse: {e}"))?;
 
         let subjects: Vec<_> = slice
             .subjects
@@ -146,15 +164,134 @@ pub fn topic_info(base: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// `service list` — every registered procedure on the `@rpc` plane.
-pub fn service_list(producer: Option<&str>) -> Result<()> {
+/// `topic info`, sourced from a live fleet's introspect slices instead of the
+/// compiled-in registry (used under `--base <other-app>`).
+///
+/// The compiled path ([`topic_info`]) refines the key through *this* build's
+/// registry grammar, which only knows this app's subjects. Against a foreign app
+/// we cannot, so we parse the key **structurally** (grammar only, no registry)
+/// and match its subject tail against the producer's served slice. A served
+/// [`SubjectDecl`](zensight_keyspace::slice::SubjectDecl) carries less than a
+/// compiled subject — no unit/qos/ttl/rate — which is the honest limit of what a
+/// slice off the wire says.
+pub fn topic_info_bus(base: &str, key: &str, slices: &[RegistrySlice]) -> Result<()> {
+    use zensight_keyspace::grammar::ClassOrPlane;
+
+    let Some(parsed) = zensight_common::keyexpr::parse_full_key(base, key) else {
+        return Err(anyhow!(
+            "not a v1 key. Expected <base>/v1/<origin>/<class>/<producer>/<subject...> (RFC 03 §1)."
+        ));
+    };
+    let class = match &parsed.class {
+        ClassOrPlane::Class(c) => *c,
+        ClassOrPlane::Plane(p) => {
+            return Err(anyhow!(
+                "key is on the {} plane, not a data class — topic info describes \
+                 telemetry/state/events subjects (RFC 03 §1.5).",
+                p.chunk()
+            ));
+        }
+    };
+    let Some(producer) = parsed.producer.as_ref().map(|p| p.name().to_string()) else {
+        return Err(anyhow!(
+            "no producer chunk — topic info needs <origin>/<class>/<producer>/<subject...>."
+        ));
+    };
+    let tail: Vec<&str> = parsed.subject.iter().map(String::as_str).collect();
+
+    let Some(slice) = slices.iter().find(|s| s.name == producer) else {
+        return Err(anyhow!(
+            "no live producer {producer:?} served an introspect slice — \
+             `zenctl node list --base {base}` says who is up."
+        ));
+    };
+
+    let hit = slice.subjects.iter().find_map(|s| {
+        if s.class != class.chunk() {
+            return None;
+        }
+        match_subject(&s.path, &tail).map(|vars| (s, vars))
+    });
+    let Some((subject, vars)) = hit else {
+        return Err(anyhow!(
+            "producer {producer:?} serves no {} subject matching {:?} — a subject that is not \
+             registered does not exist (RFC 08). `zenctl topic list --base {base}` lists what it \
+             does serve.",
+            class.chunk(),
+            tail.join("/")
+        ));
+    };
+
+    println!("key       {key}");
+    println!("origin    {}", parsed.origin.chunk());
+    println!("producer  {producer}");
+    println!("class     {}", subject.class);
+    println!("subject   {}", subject.path);
+    if !vars.is_empty() {
+        println!("variables");
+        for (name, value) in &vars {
+            println!("  {name} = {value}");
+        }
+    }
+    println!("payload   {}", subject.type_name);
+    match zensight_common::schema_location(&subject.type_name) {
+        Some(loc) => println!("  defined at {loc}"),
+        // Honest about the generic-explorer limit: a foreign app's type has no
+        // entry in this build's RFC 08 §5 table, so we cannot point at a schema.
+        None => println!("  (foreign type — not in this build's type table)"),
+    }
+    if let Some(since) = &subject.since {
+        println!("since     {since}");
+    }
+    if let Some(desc) = &subject.description {
+        println!("note      {desc}");
+    }
+    Ok(())
+}
+
+/// Match a concrete subject tail against a registry pattern, binding variables.
+///
+/// `{var}` matches exactly one chunk; a trailing `{var...}` matches the whole
+/// remainder (RFC 03 §1.4's rest-variable). Returns the bindings on a match, or
+/// `None` if the shapes disagree — the slice-level equivalent of the compiled
+/// registry's parse direction, done without a compiled subject.
+fn match_subject(pattern: &str, tail: &[&str]) -> Option<Vec<(String, String)>> {
+    let pchunks: Vec<&str> = pattern.split('/').collect();
+    let mut vars = Vec::new();
+    let mut ti = 0usize;
+    for (pi, pc) in pchunks.iter().enumerate() {
+        if let Some(var) = pc.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+            if let Some(name) = var.strip_suffix("...") {
+                // A rest-variable is legal only as the final chunk; it swallows
+                // whatever is left (possibly nothing).
+                if pi != pchunks.len() - 1 {
+                    return None;
+                }
+                vars.push((name.to_string(), tail[ti..].join("/")));
+                return Some(vars);
+            }
+            let chunk = tail.get(ti)?;
+            vars.push((var.to_string(), (*chunk).to_string()));
+            ti += 1;
+        } else {
+            if tail.get(ti) != Some(pc) {
+                return None;
+            }
+            ti += 1;
+        }
+    }
+    (ti == tail.len()).then_some(vars)
+}
+
+/// `service list` — every registered procedure on the `@rpc` plane, from the
+/// given slices (compiled-in or bus-sourced — same rendering).
+pub fn service_list(slices: &[RegistrySlice], producer: Option<&str>) -> Result<()> {
     let mut total = 0usize;
-    for (name, toml_src) in REGISTRIES {
-        if producer.is_some_and(|p| p != *name) {
+    for slice in slices {
+        let name = &slice.name;
+        if producer.is_some_and(|p| p != name) {
             continue;
         }
-        let slice = zensight_keyspace::parse_slice(toml_src)
-            .map_err(|e| anyhow!("registry slice for {name} does not parse: {e}"))?;
         if slice.procedures.is_empty() {
             continue;
         }
@@ -242,8 +379,9 @@ mod tests {
     /// a session, it hangs here rather than in someone's terminal.
     #[test]
     fn offline_commands_need_no_bus() {
-        topic_list(Some("sysinfo"), Some("telemetry")).unwrap();
-        service_list(Some("netlink")).unwrap();
+        let slices = compiled_slices().unwrap();
+        topic_list(&slices, Some("sysinfo"), Some("telemetry")).unwrap();
+        service_list(&slices, Some("netlink")).unwrap();
         interface_list().unwrap();
         interface_show("TelemetryPoint").unwrap();
     }
@@ -282,8 +420,93 @@ mod tests {
 
     #[test]
     fn unknown_class_is_rejected() {
-        let err = topic_list(None, Some("alerts")).unwrap_err();
+        let slices = compiled_slices().unwrap();
+        let err = topic_list(&slices, None, Some("alerts")).unwrap_err();
         assert!(err.to_string().contains("unknown class"), "got: {err}");
+    }
+
+    /// A tcgui-style registry slice — a *foreign* app, read as if off the wire —
+    /// must parse and render without any of tcgui compiled in. This is the whole
+    /// point of the app-agnostic path (tcgui#45): the extra `fanout` field tcgui
+    /// carries is unknown to this build, and `parse_slice` must tolerate it (RFC
+    /// 08 §6 forward-compat), then `topic list` / `service list` / `topic info`
+    /// render sane rows from the parsed slice.
+    const TCGUI_SLICE: &str = r#"
+        [registry]
+        version = "0.3"
+        app = "tcgui"
+        convention = 1
+
+        [producer]
+        name = "tc"
+        description = "traffic-control netem shaper"
+
+        [[subject]]
+        path = "iface/{iface}/state"
+        class = "state"
+        type = "NetworkInterface"
+        fanout = "per-iface"
+        since = "0.1"
+        description = "current netem config on an interface"
+
+        [[subject]]
+        path = "health"
+        class = "state"
+        type = "BackendHealthStatus"
+        since = "0.1"
+
+        [[procedure]]
+        path = "iface/{iface}/set"
+        kind = "write"
+        reply = "Ack"
+        fanout = "one"
+        since = "0.2"
+        description = "apply a netem config"
+    "#;
+
+    #[test]
+    fn foreign_tcgui_slice_parses_and_renders() {
+        // parse_slice tolerates the unknown `fanout` field (forward-compat).
+        let slice = parse_slice(TCGUI_SLICE).unwrap();
+        assert_eq!(slice.name, "tc");
+        assert_eq!(slice.app, "tcgui");
+        assert_eq!(slice.subjects.len(), 2);
+        assert_eq!(slice.procedures.len(), 1);
+        assert_eq!(slice.subjects[0].type_name, "NetworkInterface");
+        assert_eq!(slice.procedures[0].kind, "write");
+
+        let slices = vec![slice];
+
+        // The shared renderers accept a bus-sourced slice with no tcgui compiled
+        // in — same code path as `--base tcgui` would drive.
+        topic_list(&slices, None, None).unwrap();
+        topic_list(&slices, Some("tc"), Some("state")).unwrap();
+        service_list(&slices, Some("tc")).unwrap();
+
+        // A concrete foreign key refines against the served slice, binding the
+        // `{iface}` variable, even though `NetworkInterface` is not in this
+        // build's type table.
+        topic_info_bus(
+            "tcgui",
+            "tcgui/v1/h-3fa9c2d41b7e/state/tc/iface/eth0/state",
+            &slices,
+        )
+        .unwrap();
+    }
+
+    /// The subject-tail matcher binds `{var}` and trailing `{var...}`, and
+    /// rejects shape mismatches — the slice-level parse direction.
+    #[test]
+    fn subject_matcher_binds_and_rejects() {
+        let vars = match_subject("iface/{iface}/state", &["iface", "eth0", "state"]).unwrap();
+        assert_eq!(vars, vec![("iface".to_string(), "eth0".to_string())]);
+
+        let rest = match_subject("dev/{path...}", &["dev", "a", "b", "c"]).unwrap();
+        assert_eq!(rest, vec![("path".to_string(), "a/b/c".to_string())]);
+
+        // Literal chunk mismatch and length mismatch both fail.
+        assert!(match_subject("health", &["health", "extra"]).is_none());
+        assert!(match_subject("iface/{iface}/state", &["iface", "eth0"]).is_none());
     }
 
     #[test]
