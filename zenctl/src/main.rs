@@ -58,7 +58,12 @@ enum Command {
 
 #[derive(Subcommand)]
 enum TopicCmd {
-    /// List registered subjects (offline — from the compiled-in registry).
+    /// List registered subjects.
+    ///
+    /// Sources from the compiled-in registry by default (offline, fast). When
+    /// `--base` names an app other than this build's, or `--from-bus` is set, it
+    /// instead reads each producer's served introspect slice off the live bus —
+    /// so it works against *any* keyspace-v2 fleet (RFC 08 §6).
     List {
         /// Only this producer.
         #[arg(long)]
@@ -66,18 +71,28 @@ enum TopicCmd {
         /// Only this class: telemetry, state, or events.
         #[arg(long)]
         class: Option<String>,
+        /// Read slices from the live bus instead of the compiled-in registry.
+        /// Auto-enabled when `--base` names a non-default app.
+        #[arg(long)]
+        from_bus: bool,
+        #[command(flatten)]
+        bus: BusArgs,
     },
-    /// Describe one key or subject pattern (offline).
+    /// Describe one key or subject pattern.
     ///
     /// Accepts a full wire key (`zensight/v1/h-abc.../telemetry/sysinfo/cpu/usage`)
-    /// and refines it through the registry's parse direction.
+    /// and refines it through the registry's parse direction. Uses the compiled-in
+    /// registry by default; against a foreign `--base` (or with `--from-bus`) it
+    /// refines against the producer's served slice instead.
     Info {
         /// A concrete wire key, as it appears on the bus.
         key: String,
-        /// The deployment base (#466) — the key you paste in carries it,
-        /// because what you copied off the wire is the FULL key.
-        #[arg(long, default_value = zensight_keyspace::DEFAULT_BASE)]
-        base: String,
+        /// Read the slice from the live bus instead of the compiled-in registry.
+        /// Auto-enabled when `--base` names a non-default app.
+        #[arg(long)]
+        from_bus: bool,
+        #[command(flatten)]
+        bus: BusArgs,
     },
     /// Subscribe and print decoded samples (on-bus).
     Echo {
@@ -103,11 +118,20 @@ enum NodeCmd {
 
 #[derive(Subcommand)]
 enum ServiceCmd {
-    /// List registered procedures (offline).
+    /// List registered procedures.
+    ///
+    /// Compiled-in registry by default; a foreign `--base` (or `--from-bus`)
+    /// reads each producer's served introspect slice off the live bus instead.
     List {
         /// Only this producer.
         #[arg(long)]
         producer: Option<String>,
+        /// Read slices from the live bus instead of the compiled-in registry.
+        /// Auto-enabled when `--base` names a non-default app.
+        #[arg(long)]
+        from_bus: bool,
+        #[command(flatten)]
+        bus: BusArgs,
     },
     /// Call a procedure (on-bus).
     Call {
@@ -195,10 +219,23 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Topic(TopicCmd::List { producer, class }) => {
-            offline::topic_list(producer.as_deref(), class.as_deref())
+        Command::Topic(TopicCmd::List {
+            producer,
+            class,
+            from_bus,
+            bus,
+        }) => {
+            let slices = registry_slices(from_bus, &bus).await?;
+            offline::topic_list(&slices, producer.as_deref(), class.as_deref())
         }
-        Command::Topic(TopicCmd::Info { key, base }) => offline::topic_info(&base, &key),
+        Command::Topic(TopicCmd::Info { key, from_bus, bus }) => {
+            if wants_bus(from_bus, &bus.base) {
+                let slices = registry_slices(from_bus, &bus).await?;
+                offline::topic_info_bus(&bus.base, &key, &slices)
+            } else {
+                offline::topic_info(&bus.base, &key)
+            }
+        }
         Command::Topic(TopicCmd::Echo {
             selector,
             raw,
@@ -206,8 +243,13 @@ async fn main() -> Result<()> {
             bus,
         }) => cmd_echo(&selector, raw, count, &bus).await,
         Command::Node(NodeCmd::List(bus)) => cmd_node_list(&bus).await,
-        Command::Service(ServiceCmd::List { producer }) => {
-            offline::service_list(producer.as_deref())
+        Command::Service(ServiceCmd::List {
+            producer,
+            from_bus,
+            bus,
+        }) => {
+            let slices = registry_slices(from_bus, &bus).await?;
+            offline::service_list(&slices, producer.as_deref())
         }
         Command::Service(ServiceCmd::Call {
             origin,
@@ -230,6 +272,41 @@ async fn main() -> Result<()> {
         Command::Interface(InterfaceCmd::List) => offline::interface_list(),
         Command::Interface(InterfaceCmd::Show { type_name }) => offline::interface_show(&type_name),
         Command::Doctor(bus) => cmd_doctor(&bus).await,
+    }
+}
+
+/// Should this command source registry slices from the live bus rather than the
+/// compiled-in registry?
+///
+/// Yes when the operator asks (`--from-bus`), and yes automatically when
+/// `--base` names an app other than the one this build compiled in: a foreign
+/// app's subjects are not in [`REGISTRIES`](zensight_keyspace::registry), so the
+/// only honest source is what that fleet introspects (RFC 08 §6).
+fn wants_bus(from_bus: bool, base: &str) -> bool {
+    from_bus || base != zensight_keyspace::DEFAULT_BASE
+}
+
+/// Registry slices from whichever source the flags select. The bus path fans a
+/// wildcard `introspect` GET across the fleet ([`bus::fleet_registry`]); the
+/// offline path parses the compiled-in registry ([`offline::compiled_slices`]).
+/// Both yield the same `&[RegistrySlice]`, so every renderer is source-agnostic.
+async fn registry_slices(
+    from_bus: bool,
+    args: &BusArgs,
+) -> Result<Vec<zensight_keyspace::RegistrySlice>> {
+    if wants_bus(from_bus, &args.base) {
+        let session = args.session().await?;
+        let pairs = bus::fleet_registry(&session, &args.base, args.timeout()).await?;
+        if pairs.is_empty() {
+            eprintln!(
+                "no introspect slices on base {:?} — an empty set is not a verdict (RFC 05 §3.1); \
+                 `zenctl node list --base {}` says who is actually up.",
+                args.base, args.base
+            );
+        }
+        Ok(pairs.into_iter().map(|(_, slice)| slice).collect())
+    } else {
+        offline::compiled_slices()
     }
 }
 
@@ -299,9 +376,26 @@ async fn cmd_echo(selector: &str, raw: bool, count: usize, args: &BusArgs) -> Re
 fn render(base: &str, key: &str, bytes: &[u8]) -> std::result::Result<String, String> {
     let (_, _, subject) = zensight_common::keyexpr::refine_full_key(base, key)
         .ok_or_else(|| "unregistered subject — not in this build's registry".to_string())?;
-    let value = zensight_common::decode_payload(subject.payload_type(), bytes)
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::to_string(&value).unwrap_or_default())
+    let type_name = subject.payload_type();
+    match zensight_common::decode_payload(type_name, bytes) {
+        Ok(value) => Ok(serde_json::to_string(&value).unwrap_or_default()),
+        // A generic explorer cannot synthesize a foreign app's Rust types
+        // (RFC 08 §5 keeps schema definitions in the owning crates), so a type
+        // this build has no arm for is the honest limit — not an error. Show the
+        // bytes as they are, tagged with the type they *claim* to be.
+        Err(_) => Ok(undecoded(type_name, bytes)),
+    }
+}
+
+/// Best-effort rendering of a payload this build cannot decode: valid UTF-8 as
+/// text, otherwise hex, always tagged with the declared type and byte length so
+/// the reader knows exactly what they are looking at.
+fn undecoded(type_name: &str, bytes: &[u8]) -> String {
+    let body = match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => hex(bytes),
+    };
+    format!("<undecoded {type_name}: {} bytes> {body}", bytes.len())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -460,4 +554,27 @@ async fn cmd_doctor(args: &BusArgs) -> Result<()> {
         println!("{findings} finding(s).");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wants_bus_switches_on_foreign_base() {
+        assert!(!wants_bus(false, zensight_keyspace::DEFAULT_BASE));
+        assert!(wants_bus(true, zensight_keyspace::DEFAULT_BASE));
+        assert!(wants_bus(false, "tcgui"));
+    }
+
+    #[test]
+    fn undecoded_prefers_utf8_then_hex() {
+        // Valid UTF-8 → shown as text, tagged with the foreign type name.
+        let text = undecoded("NetworkInterface", b"eth0 up");
+        assert_eq!(text, "<undecoded NetworkInterface: 7 bytes> eth0 up");
+
+        // Non-UTF-8 → hex, still tagged.
+        let bin = undecoded("BackendHealthStatus", &[0xff, 0x00, 0x9c]);
+        assert_eq!(bin, "<undecoded BackendHealthStatus: 3 bytes> ff 00 9c");
+    }
 }

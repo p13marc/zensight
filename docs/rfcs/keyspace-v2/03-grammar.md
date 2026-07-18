@@ -259,6 +259,24 @@ verbatim hermeticity ([10-prior-art.md §4](10-prior-art.md)).
   RPC can mint an artifact id; a hash is a hash); the tier tokens are listed
   in §3 and MUST NOT be used as producer names.
 
+**Presence is not a lock (normative).** The anti-twin probe above is a
+liveliness *presence* check, not mutual exclusion — Zenoh does not enforce
+liveliness-token uniqueness ([04-planes.md §5](04-planes.md)), and the
+claim protocol for `@catalog` gives only *eventual* single-writer, not
+fencing ([06-identity.md §5.3](06-identity.md)). That is sufficient for a
+producer whose output is a **state document**: a second writer's
+conclusions are detectable and a later full recompute converges over the
+merged evidence. It is **not** sufficient for a **side-effecting
+producer** — one that mutates shared OS/kernel state (a tc/netem qdisc, a
+firewall table, a mounted volume). Convergence can reconcile a document
+after the fact; it cannot *un-apply* a side effect two writers already
+committed. Therefore a side-effecting producer MUST enforce single-writer
+exclusivity **outside the bus** — a file lock, a `systemd` unit's
+one-instance guarantee, or the kernel's own netlink exclusivity — and MUST
+NOT rely on a liveliness or claim token as its interlock. The token is
+presence for *observers*; the lock is exclusivity for *actuators*, and the
+two live in different layers.
+
 ### 1.6 `<subject...>` — meaning path
 
 - Open-ended, ≥ 1 chunk. The subject is the only part of the key whose
@@ -288,7 +306,15 @@ This convention narrows it:
   Identifiers whose canonical text form is uppercase MUST be lowercased at
   key-build time — in particular **ULIDs are key-encoded in lowercase**
   (Crockford base32 decodes case-insensitively; payloads MAY carry the
-  canonical uppercase form).
+  canonical uppercase form). **Exemption (v1.4):** an identifier drawn from
+  a **case-sensitive domain** — where two spellings differing only in case
+  are two *distinct* values, e.g. a Linux interface name (`eth0` ≠ `ETH0`)
+  or a case-sensitive filesystem path — MUST NOT be lowercased, because
+  lowercasing would collapse distinct values and break the injectivity MUST
+  in the next bullet, which wins. Such a value is instead **slugged** (any
+  charset-illegal character escaped, below) and travels canonically in the
+  payload. Lowercasing applies only where the domain is case-*insensitive*
+  and uppercase is merely a display form (ULIDs, hex).
 - Verbatim chunks MUST match `@[a-z0-9][a-z0-9_-]*` (plus the `@v<int>`
   version form).
 - Values that contain characters outside this charset MUST be **slugged**
@@ -306,6 +332,20 @@ This convention narrows it:
     escaped losslessly as `_xNN_` (lowercase hex of the byte) — plain `-`
     substitution is forbidden because it is not injective (`foo@1.service`
     and `foo-1.service` must not share a key).
+
+  **Erratum (v1.4) — escaping must converge to an alphanumeric first
+  character.** The charset requires a chunk to *start* alphanumeric, but the
+  `_xNN_` escape itself begins with `_`. An input whose first byte is
+  charset-illegal (e.g. a namespace literal `_myns`, or any value starting
+  with `@`, `.`, or `_`) therefore escapes to a chunk that *still* fails the
+  leading-alphanumeric rule — and a naive "re-escape the illegal leading
+  char" loops forever. A conformant slug MUST guarantee an **alphanumeric
+  first character** so escaping terminates: prefix a reserved alphanumeric
+  marker before escaping (the reference slugger prepends `x` to any value
+  whose escaped form would lead with `_`, e.g. `_myns` → `x_x5f_myns`),
+  making the leading `_` interior and the chunk legal in one pass. The
+  marker is part of the injective encoding, so the original still round-trips
+  from the payload.
 - Wildcards (`*`, `**`) and the sub-chunk wildcard `$*` are **selector**
   syntax and MUST NOT appear in published keys. Published keys and selectors
   MUST be in Zenoh canon form.
