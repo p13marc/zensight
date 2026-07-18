@@ -24,7 +24,7 @@
 use iced::widget::{button, column, text};
 use iced::{Element, Length};
 
-use zensight_keyspace::slice::{SliceFinding, parse_slice};
+use zenkey::slice::{SliceFinding, parse_slice};
 
 use crate::message::Message;
 use crate::view::components::{
@@ -160,14 +160,14 @@ pub fn build_rows(replies: Vec<FleetReply>, alive: &[AliveProducer]) -> Vec<Flee
         // The slice this build compiled in, for the same producer. A producer
         // we have never heard of has nothing to diff against — it is newer than
         // us, which is exactly the skew we want reported, not hidden.
-        let local = zensight_keyspace::registry::REGISTRIES
+        let local = zenkey::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == reply.producer)
             .and_then(|(_, t)| parse_slice(t).ok());
 
         let (status, findings) = match &local {
             Some(local) => {
-                let findings = zensight_keyspace::slice::diff(&served, local);
+                let findings = zenkey::slice::diff(&served, local);
                 let status = if findings.is_empty() {
                     FleetStatus::InSync
                 } else if findings
@@ -387,7 +387,7 @@ mod tests {
     /// view should be able to give at a glance.
     #[test]
     fn a_matching_build_is_in_sync() {
-        let (_, local) = zensight_keyspace::registry::REGISTRIES
+        let (_, local) = zenkey::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == "sysinfo")
             .unwrap();
@@ -444,7 +444,7 @@ mod tests {
     /// Worst first: a drifting host must not sort below ten healthy ones.
     #[test]
     fn rows_sort_worst_first() {
-        let (_, sysinfo) = zensight_keyspace::registry::REGISTRIES
+        let (_, sysinfo) = zenkey::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == "sysinfo")
             .unwrap();
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn renders_a_populated_table() {
-        let (_, sysinfo) = zensight_keyspace::registry::REGISTRIES
+        let (_, sysinfo) = zenkey::registry::REGISTRIES
             .iter()
             .find(|(n, _)| *n == "sysinfo")
             .unwrap();

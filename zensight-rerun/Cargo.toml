@@ -17,7 +17,7 @@ rust-version = "1.92"
 [dependencies]
 # Internal crates
 zensight-common = { path = "../zensight-common" }
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 
 # Zenoh
 zenoh.workspace = true

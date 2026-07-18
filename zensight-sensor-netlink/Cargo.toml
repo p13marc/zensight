@@ -29,7 +29,7 @@ ebpf = [
 
 [dependencies]
 zensight-common = { path = "../zensight-common" }
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
 # Netlink (Linux kernel networking) — reads are unprivileged.

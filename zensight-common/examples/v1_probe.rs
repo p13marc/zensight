@@ -48,7 +48,7 @@ async fn main() {
     // Anything on the deployment root that is NOT under v1 is a leak. The
     // "not v1" test lives in the callback because the version chunk is plain:
     // `**` reaches it, so the selector alone can no longer exclude our own
-    // traffic (see `zensight_keyspace::grammar::VERSION_CHUNK`).
+    // traffic (see `zenkey::grammar::VERSION_CHUNK`).
     let legacy_log = legacy.clone();
     let _legacy_sub = session
         .declare_subscriber("zensight/**")
@@ -91,12 +91,10 @@ async fn main() {
             // for "v1/" with a substring search — which would also match a base
             // that happened to contain it (#466).
             if let Some(parsed) =
-                zensight_common::keyexpr::parse_full_key(zensight_keyspace::DEFAULT_BASE, key)
+                zensight_common::keyexpr::parse_full_key(zenkey::DEFAULT_BASE, key)
                 && matches!(
                     parsed.class,
-                    zensight_keyspace::grammar::ClassOrPlane::Class(
-                        zensight_keyspace::grammar::Class::Telemetry
-                    )
+                    zenkey::grammar::ClassOrPlane::Class(zenkey::grammar::Class::Telemetry)
                 )
                 && let Some(producer) = parsed.producer.as_ref()
             {
@@ -105,9 +103,9 @@ async fn main() {
                     .lock()
                     .unwrap()
                     .insert(format!("{}/{}", producer.name(), tail.join("/")));
-                if zensight_keyspace::registry::parse_subject(
+                if zenkey::registry::parse_subject(
                     producer.name(),
-                    zensight_keyspace::grammar::Class::Telemetry,
+                    zenkey::grammar::Class::Telemetry,
                     &tail,
                 )
                 .is_none()

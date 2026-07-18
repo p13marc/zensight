@@ -89,8 +89,8 @@ pub use session::connect;
 pub use stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
 /// The registry's *parse* direction, re-exported so consumers get it without a
-/// direct `zensight-keyspace` dependency (RFC 08 §1, issue #475).
-pub use zensight_keyspace::CommonState;
+/// direct `zenkey` dependency (RFC 08 §1, issue #475).
+pub use zenkey::CommonState;
 
 /// Initialize tracing with the given configuration.
 ///

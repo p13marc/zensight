@@ -1,5 +1,5 @@
 // zenohd (router) configuration that turns a Zenoh router into the fleet-wide
-// Tier-2 content store for zenoh-blob (#201). With this running, sensors can PUT
+// Tier-2 content store for zblob (#201). With this running, sensors can PUT
 // content-addressed chunks + tree indexes into the router and then exit; GUIs GET
 // them by hash. Chunks are deduplicated across all producers and survive any one
 // sensor restarting, because the bytes live on the router, not the sensor.

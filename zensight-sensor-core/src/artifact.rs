@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 use ulid::Ulid;
-use zenoh_blob::{
+use zblob::{
     BlobServer, CancelToken, ContentStore, FastCdcChunker, FileBlobSource, FixedSizeChunker,
     Format, Hash, Manifest, MemoryStore, Sha256Digest, TreeIndex, TreeServer, build_tree,
 };

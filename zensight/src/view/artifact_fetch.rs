@@ -13,10 +13,8 @@ use iced::futures::Stream;
 use iced::widget::{Row, button, checkbox, column, row, text, text_input};
 use iced::{Alignment, Element, Length};
 use ulid::Ulid;
+use zblob::{BlobClient, CancelToken, ContentStore, Format, Progress, ProgressSink, TreeClient};
 use zenoh::Session;
-use zenoh_blob::{
-    BlobClient, CancelToken, ContentStore, Format, Progress, ProgressSink, TreeClient,
-};
 use zensight_common::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
     fleet_rpc_key,

@@ -258,7 +258,7 @@ fn build_assertion(
     // changes*, so an assertion keyed on one would dangle the instant it took
     // effect. An origin id is minted by the host and never moves.
     for id in [&old, &new] {
-        if !zensight_keyspace::grammar::is_valid_host_origin(id) {
+        if !zenkey::grammar::is_valid_host_origin(id) {
             return Err(RpcError::invalid_args(format!(
                 "`{id}` is not a host origin id (expected `h-<12hex>`). Operator \
                  assertions name origins, not the evidence-derived entity ids that \
@@ -296,7 +296,7 @@ pub async fn serve_introspect(
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key = catalog_rpc_key("introspect");
-    let slice = zensight_keyspace::registry::registry_toml("catalog")
+    let slice = zenkey::registry::registry_toml("catalog")
         .ok_or_else(|| anyhow::anyhow!("catalog registry slice missing from the build"))?;
     let queryable = session
         .declare_queryable(&key)

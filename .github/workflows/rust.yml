@@ -112,14 +112,14 @@ jobs:
       # records and @blob chunk seeding — still ride the registry modules, so
       # the ban stands as-is; commands no longer publish at all (they are
       # @rpc GETs, RFC 05). Bans `<session-like>.put(` / `.delete(` outside
-      # the registry modules, tests, and zenoh-blob (an external-bound crate
-      # with its own transport).
+      # the registry modules and tests. (zblob — formerly in-tree zenoh-blob —
+      # and zenkey now live in their own repos and are not scanned.)
       - name: declared-publishers only (R5 guard)
         run: |
           hits=$(grep -rnE '(session[a-z_]*|zenoh)\.(put|delete)\(' \
             zensight/src zensight-common/src zensight-correlator/src \
             zensight-sensor-core/src zensight-sensor-*/src zensight-exporter-*/src \
-            zensight-rerun/src zensight-keyspace/src \
+            zensight-rerun/src \
             --include='*.rs' \
             | grep -vE 'publisher_registry\.rs|/tests/|_test\.rs|mod tests' || true)
           if [ -n "$hits" ]; then
@@ -137,7 +137,7 @@ jobs:
       # a plain `v1`, so a legal key literal now *also* starts with a lowercase
       # letter — `zensight/v1/` is the one allowed spelling, and everything else
       # under `"zensight/<lowercase>` is a legacy key that must be built through
-      # zensight-keyspace instead. (It whitelisted `zensight/@v1` while the
+      # zenkey (the external keyspace crate) instead. (It whitelisted `zensight/@v1` while the
       # version chunk was verbatim; see grammar::VERSION_CHUNK for why it is not.)
       - name: application code never spells the deployment base (#466)
         run: |
@@ -152,9 +152,9 @@ jobs:
           # It no longer does, and that is the enforcement that keeps the base
           # out of the vocabulary permanently.
           #
-          # Not scanned, deliberately: zenctl and zensight-common/examples are
-          # the sanctioned UN-namespaced debug tools (RFC 09 §5) and MUST spell
-          # full keys. Router-side configs likewise.
+          # Not scanned, deliberately: zensight-common/examples are sanctioned
+          # UN-namespaced debug tools (RFC 09 §5) and MUST spell full keys.
+          # Router-side configs likewise. (zenctl is external now — zenkey repo.)
           #
           # `#[cfg(test)]` modules are stripped rather than grepped around: a
           # test legitimately pins the FULL wire key (that is what it is
@@ -165,14 +165,14 @@ jobs:
           AWK
           SRC="zensight/src zensight-common/src zensight-correlator/src
                zensight-sensor-core/src zensight-sensor-*/src
-               zensight-exporter-*/src zensight-rerun/src zensight-keyspace/src"
+               zensight-exporter-*/src zensight-rerun/src"
           hits=$(find $SRC -name '*.rs' -print0 \
             | xargs -0 -I{} awk -f /tmp/strip_tests.awk {} \
             | grep -E '"zensight/' \
             | grep -vE 'journald\.cursor|zensight/host-id' \
             | grep -vE ':[0-9]+: *//' || true)
           if [ -n "$hits" ]; then
-            echo "::error::A key literal spells the deployment base. Keys are base-relative (#466) — the session namespace adds 'zensight/'. Build them through zensight-keyspace/zensight-common:"
+            echo "::error::A key literal spells the deployment base. Keys are base-relative (#466) — the session namespace adds 'zensight/'. Build them through zenkey/zensight-common:"
             echo "$hits"
             exit 1
           fi
@@ -188,8 +188,8 @@ jobs:
           #
           # zensight-rerun/src/session.rs opens directly, but its config comes
           # FROM build_config (it only adds the isolate delta), so it is
-          # sanctioned. zenctl and the examples are deliberately un-namespaced
-          # debug tools (RFC 09 §5) and are not scanned.
+          # sanctioned. The examples are deliberately un-namespaced debug
+          # tools (RFC 09 §5) and are not scanned. (zenctl is external now.)
           cat > /tmp/strip_tests.awk <<'AWK'
           /^#\[cfg\(test\)\]/ { intest=1 }
           { if (!intest) print FILENAME ":" FNR ":" $0 }
@@ -203,20 +203,6 @@ jobs:
             | grep -vE 'zensight-common/src/session.rs|zensight-rerun/src/session.rs' || true)
           if [ -n "$hits" ]; then
             echo "::error::Raw zenoh::open — open sessions via zensight_common::session::{connect,build_config}. It is the only place the deployment namespace (#466) is set:"
-            echo "$hits"
-            exit 1
-          fi
-
-      # zenoh-blob is a generic crate meant to graduate to its own repo +
-      # crates.io (#202). It must stay free of ZenSight types and path deps so
-      # the switch to the published crate is a one-line change. Guard the
-      # [dependencies] / [dev-dependencies] section of its Cargo.toml.
-      - name: zenoh-blob boundary guard
-        run: |
-          deps=$(awk '/^\[(dev-)?dependencies\]/{f=1;next} /^\[/{f=0} f' zenoh-blob/Cargo.toml)
-          hits=$(echo "$deps" | grep -nE 'zensight|path *=' || true)
-          if [ -n "$hits" ]; then
-            echo "::error::zenoh-blob must not depend on ZenSight crates or path deps (it graduates to crates.io):"
             echo "$hits"
             exit 1
           fi

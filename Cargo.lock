@@ -12722,6 +12722,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zblob"
+version = "0.1.0"
+source = "git+https://github.com/p13marc/zblob#caa221cc196cd2629e7e85d03d0ce3b22f36fd95"
+dependencies = [
+ "ciborium",
+ "fastcdc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "zenoh",
+]
+
+[[package]]
 name = "zbus"
 version = "5.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12784,17 +12799,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "zenctl"
-version = "0.8.0"
+name = "zenkey"
+version = "0.1.0"
+source = "git+https://github.com/p13marc/zenkey#dc159420b9501c42b45f68f89f2868faa74dcdae"
 dependencies = [
- "anyhow",
- "clap",
- "serde_json",
- "tokio",
- "tracing-subscriber",
+ "dirs 5.0.1",
+ "sha2",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tracing",
  "zenoh",
- "zensight-common",
- "zensight-keyspace",
+ "zenoh-keyexpr",
 ]
 
 [[package]]
@@ -12852,21 +12867,6 @@ dependencies = [
  "zenoh-task",
  "zenoh-transport",
  "zenoh-util",
-]
-
-[[package]]
-name = "zenoh-blob"
-version = "0.8.0"
-dependencies = [
- "ciborium",
- "fastcdc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "zenoh",
 ]
 
 [[package]]
@@ -13374,11 +13374,11 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "zblob",
+ "zenkey",
  "zenoh",
- "zenoh-blob",
  "zenoh-ext",
  "zensight-common",
- "zensight-keyspace",
  "zstd",
 ]
 
@@ -13396,9 +13396,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "zblob",
+ "zenkey",
  "zenoh",
- "zenoh-blob",
- "zensight-keyspace",
 ]
 
 [[package]]
@@ -13417,10 +13417,10 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zenkey",
  "zenoh",
  "zenoh-ext",
  "zensight-common",
- "zensight-keyspace",
 ]
 
 [[package]]
@@ -13475,19 +13475,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zensight-keyspace"
-version = "0.8.0"
-dependencies = [
- "dirs 5.0.1",
- "sha2",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "tracing",
- "zenoh",
- "zenoh-keyexpr",
-]
-
-[[package]]
 name = "zensight-rerun"
 version = "0.8.0"
 dependencies = [
@@ -13504,9 +13491,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zenkey",
  "zenoh",
  "zensight-common",
- "zensight-keyspace",
 ]
 
 [[package]]
@@ -13532,11 +13519,11 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "zblob",
+ "zenkey",
  "zenoh",
- "zenoh-blob",
  "zenoh-ext",
  "zensight-common",
- "zensight-keyspace",
  "zstd",
 ]
 
@@ -13587,9 +13574,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zenkey",
  "zenoh",
  "zensight-common",
- "zensight-keyspace",
  "zensight-sensor-core",
 ]
 
@@ -13654,9 +13641,9 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+ "zenkey",
  "zenoh",
  "zensight-common",
- "zensight-keyspace",
  "zensight-sensor-core",
  "zensight-sensor-netlink-ebpf-common",
 ]
@@ -13697,10 +13684,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "zblob",
+ "zenkey",
  "zenoh",
- "zenoh-blob",
  "zensight-common",
- "zensight-keyspace",
  "zensight-sensor-core",
  "zstd",
 ]
@@ -13720,9 +13707,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zenkey",
  "zenoh",
  "zensight-common",
- "zensight-keyspace",
  "zensight-sensor-core",
 ]
 
@@ -13769,9 +13756,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zenkey",
  "zenoh",
  "zensight-common",
- "zensight-keyspace",
  "zensight-sensor-core",
  "zensight-sensor-sysinfo-ebpf-common",
 ]
@@ -13808,9 +13795,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zbus",
+ "zenkey",
  "zenoh",
  "zensight-common",
- "zensight-keyspace",
  "zensight-sensor-core",
 ]
 

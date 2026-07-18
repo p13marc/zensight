@@ -12,9 +12,9 @@ use std::sync::{Arc, RwLock};
 
 /// App-scoped salt for the machine-id hash (the `sd_id128_get_machine_app_specific`
 /// spirit). Fixed — not configurable — so every sensor on a host agrees.
-/// The application salt lives in zensight-keyspace (RFC 06 §1); re-exported
+/// The application salt lives in zenkey (RFC 06 §1); re-exported
 /// here for the doc trail. The wire `host_id` IS the v1 origin id.
-const HOST_ID_SALT: &str = zensight_keyspace::origin::ZENSIGHT_SALT;
+const HOST_ID_SALT: &str = zenkey::origin::ZENSIGHT_SALT;
 
 /// The identity envelope for the local host.
 #[derive(Debug, Clone, Default)]
@@ -104,7 +104,7 @@ pub(crate) fn hash_machine_id(raw: &str) -> Option<String> {
     // The v1 origin id (RFC 06 §1): payload host_id == key origin == entity
     // id, so consumers group without a correlation join (epic #453).
     Some(
-        zensight_keyspace::origin::HostId::from_machine_id(trimmed, HOST_ID_SALT)
+        zenkey::origin::HostId::from_machine_id(trimmed, HOST_ID_SALT)
             .as_str()
             .to_string(),
     )

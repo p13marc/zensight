@@ -31,7 +31,7 @@ use crate::{Error, Result};
 /// Decode `bytes` as the registry payload type named `type_name`, into a
 /// serde_json [`Value`].
 ///
-/// `type_name` is what [`zensight_keyspace::AnySubject::payload_type`] returns
+/// `type_name` is what [`zenkey::AnySubject::payload_type`] returns
 /// for a key, so the caller never needs to know which producer it is talking
 /// to. The wire encoding is sniffed (CBOR by default, JSON tolerated) by
 /// [`decode_auto`] — the registry says *what* the payload is, not how it is
@@ -128,8 +128,8 @@ mod tests {
     #[test]
     fn types_are_total() {
         let mut checked = 0usize;
-        for (producer, toml_src) in zensight_keyspace::registry::REGISTRIES {
-            let slice = zensight_keyspace::parse_slice(toml_src)
+        for (producer, toml_src) in zenkey::registry::REGISTRIES {
+            let slice = zenkey::parse_slice(toml_src)
                 .unwrap_or_else(|e| panic!("{producer}: registry slice does not parse: {e}"));
             for subject in &slice.subjects {
                 let ty = &subject.type_name;

@@ -45,7 +45,7 @@ ja4plus = ["netring/ja4plus"]
 ipfix = ["netring/ipfix", "flowscope/serde"]
 
 [dependencies]
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
@@ -83,7 +83,7 @@ async-trait = { workspace = true }
 # Triggered-capture artifact serving (#327): the capture-to-disk engine registers
 # finished trigger files on its own Tier-1 `BlobServer` (same `@blob/artifact`
 # prefix as the artifact channel) with TTL'd manifests.
-zenoh-blob = { workspace = true }
+zblob = { workspace = true }
 # Artifact ids for triggered-capture blobs (#327).
 ulid = { workspace = true }
 

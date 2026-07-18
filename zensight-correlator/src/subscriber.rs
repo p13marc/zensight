@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::{info, trace, warn};
+use zenkey::grammar::{Class, ClassOrPlane};
 use zenoh::Session;
 use zenoh::sample::{Sample, SampleKind};
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
@@ -22,7 +23,6 @@ use zensight_common::{
     HostEvidence, NameObservation, OperatorAssertion, all_assertion_wildcard,
     all_evidence_wildcard, all_name_evidence_wildcard,
 };
-use zensight_keyspace::grammar::{Class, ClassOrPlane};
 
 use crate::engine::EvidenceMsg;
 

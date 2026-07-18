@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /build
 
 # Copy the whole workspace. cargo needs every member's manifest to resolve the
-# workspace (e.g. zenoh-blob and the opt-in eBPF member crates), so enumerating
+# workspace (e.g. the opt-in eBPF member crates), so enumerating
 # crates here is fragile — a missing member fails `cargo build`. `.dockerignore`
 # at the repo root keeps the context small (target/, .git/, …).
 COPY . .

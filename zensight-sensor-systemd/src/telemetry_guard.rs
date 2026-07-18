@@ -6,7 +6,7 @@ use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 /// Every metric name this sensor emits funnels through here (RFC 08 §5, issue
 /// #468): in debug builds — which is every unit test — an unregistered metric
 /// name panics. Adding a metric without registering it in
-/// `zensight-keyspace/registry/systemd.toml` fails the existing tests.
+/// `zenkey/registry/ (zenkey repo)systemd.toml` fails the existing tests.
 pub(crate) fn checked_point(
     source: &str,
     metric: impl Into<String>,
@@ -14,9 +14,9 @@ pub(crate) fn checked_point(
 ) -> TelemetryPoint {
     let metric = metric.into();
     debug_assert!(
-        zensight_keyspace::registry::is_registered_telemetry("systemd", &metric),
+        zenkey::registry::is_registered_telemetry("systemd", &metric),
         "unregistered systemd telemetry subject {metric:?} — add it to \
-         zensight-keyspace/registry/systemd.toml (RFC 08 §5, issue #468)"
+         zenkey/registry/ (zenkey repo)systemd.toml (RFC 08 §5, issue #468)"
     );
     TelemetryPoint::new(source, Protocol::Systemd, metric, value)
 }

@@ -10,7 +10,7 @@ description = "Cross-sensor identity correlation service for ZenSight — the si
 [dependencies]
 # Internal crates
 zensight-common = { path = "../zensight-common" }
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 
 # Zenoh
 zenoh.workspace = true

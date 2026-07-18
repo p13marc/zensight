@@ -14,7 +14,7 @@
 //! catches the metric names built inline in `collector.rs` when a sensor
 //! actually runs; this test is the CI-time half that needs no Zenoh session.
 
-use zensight_keyspace::registry::is_registered_telemetry;
+use zenkey::registry::is_registered_telemetry;
 use zensight_sensor_sysinfo::map::*;
 
 #[track_caller]
@@ -28,7 +28,7 @@ fn assert_all_registered(what: &str, metrics: &[Metric]) {
         assert!(
             is_registered_telemetry("sysinfo", &m.metric),
             "{what}: metric {:?} is not a registered sysinfo subject — \
-             add it to zensight-keyspace/registry/sysinfo.toml (RFC 08 §5)",
+             add it to zenkey/registry/ (zenkey repo)sysinfo.toml (RFC 08 §5)",
             m.metric
         );
     }
@@ -297,7 +297,7 @@ fn collector_inline_families_are_registered() {
 /// generated parser must resolve each to its own entry.
 #[test]
 fn overlapping_families_resolve_to_the_right_entry() {
-    use zensight_keyspace::registry::sysinfo::Subject;
+    use zenkey::registry::sysinfo::Subject;
 
     // Host aggregate vs per-core: same literal head, different arity.
     assert_eq!(Subject::parse_metric("cpu/usage"), Some(Subject::CpuUsage));

@@ -10,8 +10,8 @@
 //! callers use [`crate::keyexpr::fleet_rpc_key`]/[`crate::keyexpr::origin_rpc_key`].
 
 use serde::{Deserialize, Serialize};
-use zensight_keyspace::V1Context;
-use zensight_keyspace::grammar::BlobTier;
+use zenkey::V1Context;
+use zenkey::grammar::BlobTier;
 
 /// The write procedure for a control topic: `…/@rpc/<producer>/<topic>/set`.
 ///

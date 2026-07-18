@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 # Workspace dependencies
 zensight-common = { workspace = true }
-zensight-keyspace = { workspace = true }
+zenkey = { workspace = true }
 dirs = { workspace = true }
 # `internal` gates the per-publication `.encoding()` / `.attachment()` builder
 # methods used by the raw media-plane publisher (#359). zenoh-ext already pulls
@@ -30,7 +30,7 @@ json5 = { workspace = true }
 chrono = "0.4"
 
 # Debug-report transfer + bundling (#196)
-zenoh-blob = { workspace = true }
+zblob = { workspace = true }
 ulid = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }

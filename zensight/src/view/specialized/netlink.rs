@@ -9,7 +9,7 @@ use iced::widget::{Column, button, column, container, row, scrollable, text, tex
 use iced::{Element, Length, Theme};
 use zensight_common::{NeighborRecord, RouteRecord, SocketRecord, TelemetryValue};
 
-use zensight_keyspace::registry::netlink::Subject;
+use zenkey::registry::netlink::Subject;
 
 use crate::message::Message;
 use crate::view::components::{

@@ -1,5 +1,6 @@
 > **Archived design doc.** Historical rationale, implemented in 0.7.0 as `zenoh-blob` +
-> the `@/artifact` channel. For current documentation see [`zenoh-blob/`](../../zenoh-blob/)
+> the `@/artifact` channel; the crate has since graduated and been renamed **zblob**
+> (https://github.com/p13marc/zblob). For current documentation see that repo
 > and [`docs/KEYSPACE.md`](../KEYSPACE.md).
 
 # ZenSight — Large-Data Transfer (debug reports) & a zenoh-fs evaluation
