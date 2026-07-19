@@ -160,10 +160,15 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
 
             let (sensor_liveliness_expr, device_liveliness_expr) = liveliness_exprs(&config);
 
-            // Subscribe to sensor liveliness tokens
+            // Subscribe to sensor liveliness tokens. `history(true)` delivers
+            // the currently-alive tokens through this same subscriber (#520):
+            // the initial state and live transitions share one ordered path,
+            // so the old seed-GET's blocking timeout and its token-appears-
+            // between-get-and-subscribe ordering hazard are both gone.
             let sensor_liveliness = match session
                 .liveliness()
                 .declare_subscriber(sensor_liveliness_expr.as_str())
+                .history(true)
                 .await
             {
                 Ok(sub) => Some(sub),
@@ -173,10 +178,11 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
             };
 
-            // Subscribe to device liveliness tokens
+            // Subscribe to device liveliness tokens (same history(true) seed).
             let device_liveliness = match session
                 .liveliness()
                 .declare_subscriber(device_liveliness_expr.as_str())
+                .history(true)
                 .await
             {
                 Ok(sub) => Some(sub),
@@ -186,50 +192,19 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
             };
 
-            // Query existing liveliness tokens to get current state. The seed
-            // queries are bounded to a short timeout: they run before telemetry
-            // drains, so a dead/slow sensor must not hold up the whole GUI for
-            // zenoh's default 10s.
+            // The remaining one-shot seeds are bounded to a short timeout:
+            // they run before telemetry drains, so a dead/slow responder must
+            // not hold up the whole GUI for zenoh's default 10s.
             let seed_timeout = std::time::Duration::from_secs(3);
-            for expr in [sensor_liveliness_expr.as_str()] {
-                if let Ok(replies) = session
-                    .liveliness()
-                    .get(expr)
-                    .timeout(seed_timeout)
-                    .await
-                {
-                    while let Ok(reply) = replies.recv_async().await {
-                        if let Ok(sample) = reply.result()
-                            && let Some(msg) = parse_sensor_liveliness(sample.key_expr().as_str(), true)
-                        {
-                            yield msg;
-                        }
-                    }
-                }
-            }
-
-            for expr in [device_liveliness_expr.as_str()] {
-                if let Ok(replies) = session
-                    .liveliness()
-                    .get(expr)
-                    .timeout(seed_timeout)
-                    .await
-                {
-                    while let Ok(reply) = replies.recv_async().await {
-                        if let Ok(sample) = reply.result()
-                            && let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), true)
-                        {
-                            yield msg;
-                        }
-                    }
-                }
-            }
 
             // Late-joiner alert seed (v1, RFC 05 §4): a plain GET on the alert
             // state selector, answered storage-shaped — one firing alert per
             // reply on its concrete key — by producers and/or a router
             // storage. (The state subscriber above is already declared, so an
-            // alert firing during this get is not lost.)
+            // alert firing during this get is not lost.) This GET stays a GET
+            // (#520): alerts/entities are durable, storage/queryable-backed
+            // state (RFC 04 §3.5/H7) — the queryable is authoritative for
+            // them, unlike liveliness, which zenoh itself can replay.
             if let Ok(replies) = session
                 .get(alerts_selector(&config))
                 .target(zenoh::query::QueryTarget::All)
