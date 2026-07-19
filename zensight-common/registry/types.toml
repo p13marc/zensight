@@ -198,6 +198,10 @@ kind = "json-schema"
 [types."Vec<XfrmRecord>"]
 kind = "json-schema"
 
+# The `describe` reply's own envelope (RFC 08 §7).
+[types.SchemaSet]
+kind = "json-schema"
+
 # The `introspect` raw-TOML reply sentinel (RFC 08 §6) — text, not a
 # schema'd payload.
 [types.toml]

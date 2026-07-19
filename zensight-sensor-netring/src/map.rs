@@ -2370,7 +2370,10 @@ mod tests {
         let p = anomaly_count_point("host01", "BeaconRita", 7);
         assert_eq!(p.metric, "anomaly/beacon_rita/total");
         assert_eq!(detector_chunk("DnsTunnel"), "dns_tunnel");
-        assert_eq!(detector_chunk("NewlyObservedDomain"), "newly_observed_domain");
+        assert_eq!(
+            detector_chunk("NewlyObservedDomain"),
+            "newly_observed_domain"
+        );
         assert_eq!(detector_chunk("port_unreachable"), "port_unreachable");
         assert_eq!(p.value, TelemetryValue::Counter(7));
         assert_eq!(p.source, "host01");

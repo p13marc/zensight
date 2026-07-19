@@ -65,7 +65,8 @@ impl SystemCollector {
                 &zensight_common::PROFILE,
                 "sysinfo",
             )
-            .telemetry_prefix().into(),
+            .telemetry_prefix()
+            .into(),
             source,
             config,
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),

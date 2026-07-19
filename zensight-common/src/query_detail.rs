@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One row of the routing table.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RouteRecord {
     /// IP family: 4 or 6.
     pub family: u8,
@@ -25,7 +25,7 @@ pub struct RouteRecord {
 }
 
 /// One ARP/NDP neighbor entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NeighborRecord {
     pub family: u8,
     pub ip: Option<String>,
@@ -39,7 +39,7 @@ pub struct NeighborRecord {
 /// hostname a client actually used to reach an IP, tagged with where the
 /// binding came from so a drill-down can weigh it (a forward DNS answer
 /// outranks a reverse PTR guess).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NameInfo {
     /// Canonical name — lowercased, no trailing dot.
     pub name: String,
@@ -51,7 +51,7 @@ pub struct NameInfo {
 /// One recent network flow (netring), served on demand from a bounded ring of
 /// the most-recently-ended flows. The 5-tuple + volume + lifetime + close reason
 /// — the NetFlow/IPFIX-style detail behind the streamed flow aggregates.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FlowRecord {
     /// Initiator endpoint `ip:port`.
     pub src: String,
@@ -102,7 +102,7 @@ pub struct FlowRecord {
 /// One observed TLS client fingerprint (passive asset inventory from netring's
 /// ClientHello parsing) — SNI + JA3/JA4 + negotiated ALPN, with how many
 /// handshakes matched it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct TlsRecord {
     pub sni: Option<String>,
     pub alpn: Option<String>,
@@ -123,7 +123,7 @@ pub struct TlsRecord {
 /// hostname (SNI) and ALPN in the *unprotected* Initial ClientHello, so this is
 /// the QUIC analogue of TLS SNI visibility — for the growing share of HTTPS that
 /// has moved off TCP+TLS onto QUIC/h3. Served on demand from `@rpc/netring/quic`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct QuicRecord {
     /// Server Name Indication from the ClientHello (the dialed hostname).
     pub sni: Option<String>,
@@ -151,7 +151,7 @@ pub struct QuicRecord {
 /// HASSH (client) / HASSHServer fingerprints the SSH implementation from its
 /// KEXINIT algorithm lists — fleet fingerprinting + rogue-client detection
 /// without touching the (encrypted) session. Served on demand from `@rpc/netring/ssh`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct SshRecord {
     /// HASSH / HASSHServer fingerprint (lowercase-hex MD5).
     pub hassh: String,
@@ -176,7 +176,7 @@ pub struct SshRecord {
 /// License 1.1) and `collect.http_fp` is set. Note: JA4SSH is not yet available
 /// upstream (flowscope 0.19 / netring 0.27 fingerprint SSH via HASSH — see
 /// [`SshRecord`]).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Ja4hRecord {
     /// JA4H fingerprint (`a_b_c_d` FoxIO format).
     pub ja4h: String,
@@ -195,7 +195,7 @@ pub struct Ja4hRecord {
 /// *source IP* with a rolling **bytes-per-second** rate over the last 60 s window
 /// (netring `BandwidthByKey`), replacing the old per-*destination* cumulative
 /// byte/packet/flow histogram. "Who is generating the most traffic right now?"
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TalkerRecord {
     /// Source host IP.
     pub src: String,
@@ -213,7 +213,7 @@ pub struct TalkerRecord {
 /// `aggregate()` pair state. This is the service-map data — "who talks to whom,
 /// and how fast" — distinct from the per-source [`TalkerRecord`]. **Breaking
 /// change (#369):** rate replaces the old cumulative byte/packet/flow counters.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MatrixRecord {
     pub src: String,
     pub dst: String,
@@ -226,7 +226,7 @@ pub struct MatrixRecord {
 
 /// One recent elephant (large) flow (netring), served on demand from a bounded
 /// ring of the biggest recently-ended flows. "What were the biggest transfers?"
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ElephantRecord {
     pub src: String,
     pub dst: String,
@@ -252,7 +252,7 @@ pub struct ElephantRecord {
 /// anomaly that fired it plus (while it lives) the artifact id to download the
 /// bytes through the `@blob/artifact` path; a `rotating`-mode file is a local
 /// spool entry (metadata only — retrieval needs host filesystem access).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct CaptureRecord {
     /// File name (not the full host path — only metadata rides the bus).
     pub filename: String,
@@ -291,7 +291,7 @@ pub struct CaptureRecord {
 /// One observed DNS second-level domain (netring), served on demand. Carries the
 /// query count and an NXDOMAIN tally — the high-cardinality detail behind the
 /// streamed DNS RED aggregates (top SLDs / top-NXDOMAIN).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DnsRecord {
     /// Second-level domain (e.g. `example` for `example.com`), lowercased.
     pub domain: String,
@@ -304,7 +304,7 @@ pub struct DnsRecord {
 /// `@rpc/netring/encrypted_dns`. Encrypted DNS (DoT/DoQ/DoH) hides resolution from
 /// passive DNS RED and can tunnel/exfiltrate past a network resolver policy; this
 /// surfaces where it's going and whether the resolver is a known/sanctioned one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct EncryptedDnsRecord {
     /// Transport slug: `dot` (DNS-over-TLS), `doq` (DNS-over-QUIC), or `doh`
     /// (DNS-over-HTTPS).
@@ -320,7 +320,7 @@ pub struct EncryptedDnsRecord {
 
 /// One observed HTTP host (netring, cleartext), served on demand. Carries request
 /// count and an error tally — the detail behind the streamed HTTP RED aggregates.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HttpHostRecord {
     pub host: String,
     pub requests: u64,
@@ -334,7 +334,7 @@ pub struct HttpHostRecord {
 /// any active probing, so it covers hosts that emit no ZenSight telemetry of
 /// their own. The high-cardinality detail is pulled on demand (principle P2),
 /// never streamed; only an aggregate asset count rides the telemetry bus.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct AssetRecord {
     /// L2 address (the inventory's primary key), e.g. `"aa:bb:cc:dd:ee:ff"`.
     pub mac: String,
@@ -399,7 +399,7 @@ pub struct AssetRecord {
 /// (`@rpc/sysinfo/processes?sort=cpu|mem|io&top=N`). The high-cardinality per-pid
 /// firehose behind the streamed `system/processes_{total,zombie}` aggregates —
 /// never streamed as per-pid metric series (principle P2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProcessRecord {
     pub pid: i32,
     pub name: String,
@@ -450,7 +450,7 @@ pub struct ProcessRecord {
 /// The richer fields (congestion control, congestion window, socket-memory
 /// buffers) are populated when the sensor requests the sockdiag mem/congestion
 /// extensions; they default to absent/zero for older producers (issue #11).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SocketRecord {
     pub local: String,
     pub remote: String,
@@ -548,7 +548,7 @@ pub struct SocketRecord {
 
 /// One systemd unit inventory row (#274), served on demand from `@rpc/systemd/units`
 /// / `@rpc/systemd/failed`. High-cardinality (hundreds per host) → never streamed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UnitRecord {
     pub name: String,
     pub description: String,
@@ -564,7 +564,7 @@ pub struct UnitRecord {
 /// the inventory fields plus resource accounting, the unit file path, and the
 /// dependency edges. Resource fields are `None` when accounting is off / the unit
 /// isn't a service.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UnitDetail {
     pub name: String,
     pub description: String,
@@ -614,7 +614,7 @@ pub struct UnitDetail {
 }
 
 /// One systemd `.timer` unit row (#279), served on demand from `@rpc/systemd/timers`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TimerRecord {
     pub name: String,
     pub active_state: String,
@@ -628,7 +628,7 @@ pub struct TimerRecord {
 
 /// One node of the systemd cgroup-v2 tree (#280), served from `@rpc/systemd/cgroups`.
 /// A point-in-time snapshot keyed by `path` (transient scopes churn).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CgroupNode {
     /// Path relative to the cgroup root, e.g. `system.slice/sshd.service`.
     pub path: String,
@@ -659,7 +659,7 @@ pub struct CgroupNode {
 }
 
 /// A process member of a cgroup node (#280).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CgroupPid {
     pub pid: u32,
     pub comm: String,
@@ -672,7 +672,7 @@ pub struct CgroupPid {
 ///
 /// Selector parameters: `since=<epoch_ms>` (inclusive lower bound),
 /// `max=<n>` (reply cap, default 500), `host=<name>`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LogRecord {
     /// Time-sortable event uid: `<13-digit ts_ms><12-digit seq>` (#104).
     pub uid: String,
@@ -795,7 +795,7 @@ impl LogRecord {
 /// exporter's template says it is (v9/IPFIX templates are defined by the
 /// device, not by us), which is the same reason netflow keeps a `{metric...}`
 /// rest-var in the registry while the six host producers do not.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NetflowRecord {
     /// Exporter IP address.
     pub exporter_ip: String,
@@ -810,7 +810,7 @@ pub struct NetflowRecord {
 }
 
 /// A NetFlow field value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum NetflowFieldValue {
     Uint(u64),
     Int(i64),
@@ -844,7 +844,7 @@ impl NetflowRecord {
 
 /// One log2 histogram bucket: count of samples with latency `< le_us` µs that
 /// did not fall in a lower bucket.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistBucket {
     /// Upper bound of this bucket, in microseconds.
     pub le_us: u64,
@@ -853,7 +853,7 @@ pub struct HistBucket {
 }
 
 /// A latency histogram with derived percentiles (all µs).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Histogram {
     pub unit: String,
     pub buckets: Vec<HistBucket>,
@@ -877,7 +877,7 @@ pub struct Histogram {
 /// The type lives here, not in the sensor, because a reply type only a producer
 /// can name is a reply nobody can read — which is how this procedure went
 /// unconsumed from the day it was written (#469).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LatencyReport {
     /// False when the eBPF collector could not load (no caps / unsupported
     /// kernel / not built with `--features ebpf`). The histograms are empty.

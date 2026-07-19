@@ -135,6 +135,16 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
+    let describe_task = {
+        let s = session.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_describe(s, sh).await {
+                error!(error = %e, "describe queryable error");
+            }
+        })
+    };
+
     // Operator identity assertions (#473): link/unlink. Served whether or not
     // they are enabled — a gated procedure that *replies* "gated" tells an
     // operator the feature exists; one that isn't declared just times out.
@@ -180,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = entities_task.await;
         let _ = names_task.await;
         let _ = introspect_task.await;
+        let _ = describe_task.await;
         let _ = assertion_task.await;
     })
     .await;

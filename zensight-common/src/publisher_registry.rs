@@ -79,7 +79,31 @@ impl PublisherRegistry {
         Ok(())
     }
 
-    /// Publish a serialized value on `key` (encode with `format`, then [`Self::put`]).
+    /// Publish `payload` on `key`, stamping the sample [`Encoding`] so
+    /// consumers resolve the payload from metadata rather than sniffing
+    /// (RFC 08 §7). Use [`crate::serialization::Format::encoding`] for
+    /// format-encoded payloads.
+    pub async fn put_encoded(
+        &self,
+        key: &str,
+        payload: Vec<u8>,
+        qos: QosClass,
+        encoding: zenoh::bytes::Encoding,
+    ) -> Result<()> {
+        crate::metric_guard::check_telemetry_key(key);
+        self.ensure(key, qos).await?;
+        let publishers = self.publishers.read().await;
+        publishers
+            .get(key)
+            .expect("publisher just ensured")
+            .put(payload)
+            .encoding(encoding)
+            .await?;
+        Ok(())
+    }
+
+    /// Publish a serialized value on `key` (encode with `format`, stamp its
+    /// [`Encoding`], then put).
     pub async fn put_serializable<T: serde::Serialize>(
         &self,
         key: &str,
@@ -88,7 +112,7 @@ impl PublisherRegistry {
         qos: QosClass,
     ) -> Result<()> {
         let payload = crate::serialization::encode(value, format)?;
-        self.put(key, payload, qos).await
+        self.put_encoded(key, payload, qos, format.encoding()).await
     }
 
     /// Delete (tombstone) `key` via its declared publisher.

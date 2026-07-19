@@ -330,7 +330,9 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
         .metrics
         .iter()
         .filter_map(|(m, p)| match Subject::parse_metric(m) {
-            Some(Subject::SocketsTcpByCong { algo }) => Some((algo.to_string(), num(Some(&p.value)))),
+            Some(Subject::SocketsTcpByCong { algo }) => {
+                Some((algo.to_string(), num(Some(&p.value))))
+            }
             _ => None,
         })
         .collect();
@@ -1369,7 +1371,9 @@ fn neighbor_state_mix(state: &DeviceDetailState) -> Vec<(String, f64)> {
         .metrics
         .iter()
         .filter_map(|(m, p)| match Subject::parse_metric(m) {
-            Some(Subject::NeighborsByState { state }) => Some((state.to_string(), tv_num(&p.value)?)),
+            Some(Subject::NeighborsByState { state }) => {
+                Some((state.to_string(), tv_num(&p.value)?))
+            }
             _ => None,
         })
         .collect();

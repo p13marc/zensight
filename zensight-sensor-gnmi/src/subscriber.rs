@@ -401,7 +401,8 @@ mod tests {
         let subscriber = GnmiSubscriber::new(
             target,
             zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "gnmi")
-                .telemetry_prefix().into(),
+                .telemetry_prefix()
+                .into(),
             SerializationFormat::Json,
         );
 
@@ -426,7 +427,8 @@ mod tests {
         let subscriber = GnmiSubscriber::new(
             target,
             zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "gnmi")
-                .telemetry_prefix().into(),
+                .telemetry_prefix()
+                .into(),
             SerializationFormat::Json,
         );
 
@@ -450,7 +452,8 @@ mod tests {
         let subscriber = GnmiSubscriber::new(
             target,
             zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "gnmi")
-                .telemetry_prefix().into(),
+                .telemetry_prefix()
+                .into(),
             SerializationFormat::Json,
         );
 
@@ -493,7 +496,8 @@ mod tests {
         GnmiSubscriber::new(
             target,
             zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "gnmi")
-                .telemetry_prefix().into(),
+                .telemetry_prefix()
+                .into(),
             SerializationFormat::Json,
         )
     }

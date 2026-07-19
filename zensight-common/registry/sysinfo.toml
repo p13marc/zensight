@@ -22,7 +22,7 @@
 # Sources: src/collector.rs (the `publish` helper) and src/map.rs.
 
 [registry]
-version = "1.1"
+version = "1.2"
 app = "zensight"
 convention = 1
 
@@ -972,6 +972,15 @@ reply = "RegistrySlice"
 idempotent = true
 since = "1.0"
 description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.2"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
 
 [[procedure]]
 path = "artifact/request"

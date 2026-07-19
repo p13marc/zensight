@@ -12805,7 +12805,11 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e85b419ed0230600f5ef355296524dc9dfabe314f54b80cdb90b522e9269a11"
 dependencies = [
+ "base64",
  "dirs 5.0.1",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "toml 0.8.23",
@@ -13401,6 +13405,7 @@ version = "0.8.0"
 dependencies = [
  "ciborium",
  "json5",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",

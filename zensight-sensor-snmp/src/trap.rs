@@ -110,7 +110,8 @@ impl TrapReceiver {
                 &zensight_common::PROFILE,
                 "snmp",
             )
-            .telemetry_prefix().into(),
+            .telemetry_prefix()
+            .into(),
             mib_resolver,
             format,
         }

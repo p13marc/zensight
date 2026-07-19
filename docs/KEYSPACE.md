@@ -62,16 +62,25 @@ zensight/v1/@catalog/…                                   the identity catalog
   catch-all makes the lint vacuously true (issue #468). `snmp`/`modbus`/`gnmi`/
   `netflow` keep a rest-var by design: their metric tree belongs to the polled
   device, not to us.
-- **Type table** (RFC 08 §5): [`zensight_common::payload`](../zensight-common/src/payload.rs)
-  maps each registry `type` name to its Rust definition, and `decode_payload()`
-  turns a name into a decoder. This is what makes `type = "TelemetryPoint"`
-  resolvable outside the producer's own crate — a consumer can now go wire key →
-  subject → type → value with nothing producer-specific compiled in. The
-  `types_are_total` test is the CI enforcement the RFC asks for ("a `type` name
-  not present in the type table fails CI"): it walks every subject of every
-  registry file and fails if a declared type does not resolve. It found one that
-  did not — `parallax` declared `StreamDoc` for a subject whose payload is a
-  `StreamStatus`, a name that existed nowhere else in the workspace.
+- **Type table + self-description** (RFC 08 §5/§7):
+  [`zensight-common/registry/types.toml`](../zensight-common/registry/types.toml)
+  is the RFC 08 §5 type table — a registry `type`/`request`/`reply` name with no
+  entry fails the build (`zenkey-build` lint). At run time,
+  [`zensight_common::schema::SCHEMAS`](../zensight-common/src/schema.rs) serves
+  the same table as JSON Schemas on `…/@rpc/<producer>/describe` (every sensor
+  via its runner, the catalog via the correlator), `build_verified` against the
+  generated `TYPE_NAMES` so a gap aborts rather than serving a partial table. A
+  consumer goes wire key → subject → type → schema → value with nothing
+  producer-specific compiled in (`zenkey-fleet`'s `SchemaStore`/`decode_sample`).
+  Every producer put also stamps the sample `Encoding`
+  (`application/cbor`/`application/json` from `Format::encoding()`), so
+  consumers resolve payloads from metadata before falling back to sniffing.
+- **Fleet-wide writes are explicit** (RFC 05 amendment G2): a write procedure
+  is origin-scoped unless its registry entry says `fanout = "allowed"`. The
+  nine operator-console fleet pushes (logs filter, systemd action/expectations,
+  netlink expectations, netring capture/detectors/filter/threat-intel,
+  parallax stream) carry that marker deliberately; everything else refuses a
+  wildcard origin at the type level.
 - **Bus explorer**: [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) is the `busctl`/`d-feet`
   equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
   `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply

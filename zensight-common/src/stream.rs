@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 /// This is the tier *definition* — the sensor owns the numbers; the wire and
 /// the key carry the *name*. It appears in [`StreamDescriptor::tiers`] (the
 /// catalogue) and in the `tiers/set` admin command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TierSpec {
     /// Tier name — the `<tier>` key chunk (`low` / `medium` / `high`).
     pub name: String,
@@ -50,7 +50,7 @@ pub struct TierSpec {
 /// to*, not by a command (#494). These commands manage a stream's lifecycle and
 /// keyframes; redefining what a tier *means* is a separate `tiers/set` admin
 /// command ([`TierSpec`]), the only global knob.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamControl {
     /// Open (start publishing) one tier of a stream. The sensor declares the
@@ -103,7 +103,9 @@ pub enum StreamControl {
 /// telemetry envelope (`TelemetryPoint`/`Format` never appear on `@media`),
 /// just a small struct serialized compactly. `None` timing fields are omitted
 /// on the wire (the encoder had no clock for them).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 pub struct FrameMeta {
     /// Whether this frame is independently decodable (H.264 IDR / any JPEG).
     pub keyframe: bool,
@@ -133,7 +135,7 @@ pub struct FrameMeta {
 /// dimensions); `codecs` reflects the real per-source capability, not a
 /// hardcoded pair.
 // No `Eq`: `fps` is an `f32` (native framerate), which is only `PartialEq`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StreamDescriptor {
     /// Stream identifier (the `<stream>` key chunk).
     pub stream: String,
@@ -162,7 +164,7 @@ pub struct StreamDescriptor {
 /// The **applied** parameters of one running tier — actual, not requested (a
 /// hardware encoder may silently ignore a knob, and the scaler even-aligns
 /// dimensions). This is what the GUI should render as the tile's real state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TierApplied {
     /// Encoded width in pixels (post-scale, even-aligned).
     pub width: u32,
@@ -175,7 +177,7 @@ pub struct TierApplied {
 }
 
 /// State of one running tier, reported inside [`StreamStatus`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TierStatus {
     /// Tier name (the `<tier>` key chunk).
     pub tier: String,
@@ -190,7 +192,7 @@ pub struct TierStatus {
 /// **Per-tier** (#497): a stream can have several tiers live at once, each with
 /// its own applied params and viewer count. A single `Option<profile>` could
 /// not express two live tiers — this is a `Vec`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StreamStatus {
     /// Stream identifier.
     pub stream: String,

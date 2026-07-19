@@ -106,7 +106,7 @@ async fn main() {
                 if zensight_common::registry::parse_subject(
                     producer.name(),
                     zenkey::grammar::Class::Telemetry,
-                    &tail,
+                    tail,
                 )
                 .is_none()
                 {

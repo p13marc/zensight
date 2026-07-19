@@ -254,7 +254,9 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     // Subscribe to the per-stream status doc BEFORE opening (v1 state has no
     // storage in this harness; LWW without a seed means catch-the-transition).
     let status_sub = viewer
-        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(v1ctx().state_key(&["stream", "test0"])))
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx().state_key(&["stream", "test0"]),
+        ))
         .await
         .expect("declare status sub");
 
@@ -360,7 +362,9 @@ async fn open_h264_video_streams_with_keyframe_control() {
         .await
         .expect("declare video subscriber");
     let status_sub = viewer
-        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(v1ctx().state_key(&["stream", "test0"])))
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx().state_key(&["stream", "test0"]),
+        ))
         .await
         .expect("declare status sub");
 
@@ -568,7 +572,9 @@ async fn two_viewers_on_distinct_tiers_stream_independently() {
         .await
         .expect("declare high-tier subscriber");
     let status_sub = viewer
-        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(v1ctx().state_key(&["stream", "test0"])))
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx().state_key(&["stream", "test0"]),
+        ))
         .await
         .expect("declare status sub");
 
@@ -892,7 +898,9 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
 
     // Watch the status transitions BEFORE opening.
     let status_sub = viewer
-        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(v1ctx().state_key(&["stream", "deadcam"])))
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx().state_key(&["stream", "deadcam"]),
+        ))
         .await
         .expect("declare status subscriber");
 

@@ -28,7 +28,18 @@ use crate::telemetry::current_timestamp_millis;
 /// Plain (no `iced` dependency) so it lives in `zensight-common`; the frontend
 /// maps it 1:1 onto its display `Severity`.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize, Hash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    Hash,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum AlertSeverity {
@@ -55,7 +66,7 @@ impl std::fmt::Display for AlertSeverity {
 }
 
 /// What produced the alert.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertKind {
     /// Pillar A — a netring detector (port scan, beacon, DGA, ...).
@@ -77,7 +88,9 @@ impl AlertKind {
 }
 
 /// Firing vs resolved. Drives auto-clear in the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Hash, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AlertState {
     #[default]
@@ -87,7 +100,7 @@ pub enum AlertState {
 
 /// A fully-formed, sensor-decided alert. The wire type published as LWW
 /// state on `zensight/v1/<origin>/state/<producer>/alert/<alert_key>`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct Alert {
     /// Unix epoch millis of the latest state transition.
     pub timestamp: i64,

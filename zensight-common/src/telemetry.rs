@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A single telemetry data point emitted by sensors.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TelemetryPoint {
     /// Unix epoch milliseconds when the measurement was taken.
     pub timestamp: i64,
@@ -57,7 +57,7 @@ impl TelemetryPoint {
 }
 
 /// Typed telemetry value.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "type", content = "value")]
 pub enum TelemetryValue {
     /// Counter (monotonically increasing).
@@ -128,7 +128,19 @@ impl From<Vec<u8>> for TelemetryValue {
 }
 
 /// Protocol identifier for telemetry sources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Snmp,
