@@ -113,8 +113,9 @@ zensight-common = { path = "zensight-common" }
 # The keyspace convention crate — external since the zenkey extraction (RFC set
 # + zenctl live there too). crates.io dep (#517); registry TOMLs live in-repo
 # (zensight-common/registry/), compiled at build time by zenkey-build.
-zenkey = "0.2.0"
-zenkey-build = "0.2.0"
+zenkey = "0.3.1"
+zenkey-build = "0.3.1"
+schemars = "1"
 zensight-sensor-core = { path = "zensight-sensor-core" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # graduated from in-tree `zenoh-blob/` — epic #193; renamed on extraction).

@@ -5831,10 +5831,10 @@ impl ZenSight {
                 use zensight_common::registry::systemd::Subject as SystemdSubject;
                 match SystemdSubject::parse_metric(metric) {
                     Some(SystemdSubject::UnitIpEgressBps { unit }) => {
-                        units.entry(unit).or_default().0 = v;
+                        units.entry(unit.to_string()).or_default().0 = v;
                     }
                     Some(SystemdSubject::UnitIpIngressBps { unit }) => {
-                        units.entry(unit).or_default().1 = v;
+                        units.entry(unit.to_string()).or_default().1 = v;
                     }
                     _ => {}
                 }

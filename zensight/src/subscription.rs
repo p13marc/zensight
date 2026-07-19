@@ -547,12 +547,12 @@ fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     let [device_head, device_id, alive] = parsed.subject.as_slice() else {
         return None;
     };
-    if device_head != "device" || alive != "alive" {
+    if *device_head != "device" || *alive != "alive" {
         return None;
     }
     let protocol = parsed.producer?.name().to_string();
     let origin = parsed.origin.chunk().to_string();
-    let device = device_id.clone();
+    let device = device_id.to_string();
     if is_alive {
         tracing::debug!(protocol = %protocol, origin = %origin, device = %device, "Device came online");
         Some(Message::DeviceOnline {

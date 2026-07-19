@@ -28,7 +28,7 @@ use zenkey::grammar::{self, Class, ClassOrPlane, Origin, StructuralKey};
 /// Consumers should reach for this instead of hand-rolling `split('/')`:
 /// positional re-parsing of keys is exactly what the registry was built to
 /// delete (RFC 08 §1, issue #475).
-pub fn parse_key(key: &str) -> Option<StructuralKey> {
+pub fn parse_key(key: &str) -> Option<StructuralKey<'_>> {
     grammar::parse(key).ok()
 }
 
@@ -38,7 +38,7 @@ pub fn parse_key(key: &str) -> Option<StructuralKey> {
 ///
 /// `None` when the key is not a v1 data key, or when the subject is not
 /// registered — "a subject that is not registered does not exist".
-pub fn refine_key(key: &str) -> Option<(StructuralKey, String, AnySubject)> {
+pub fn refine_key(key: &str) -> Option<(StructuralKey<'_>, String, AnySubject)> {
     let parsed = parse_key(key)?;
     let ClassOrPlane::Class(class) = parsed.class else {
         return None;
@@ -53,8 +53,7 @@ pub fn refine_key(key: &str) -> Option<(StructuralKey, String, AnySubject)> {
             Origin::Host(_) => return None,
         },
     };
-    let tail: Vec<&str> = parsed.subject.iter().map(String::as_str).collect();
-    let subject = registry::parse_subject(&name, class, &tail)?;
+    let subject = registry::parse_subject(&name, class, &parsed.subject)?;
     Some((parsed, name, subject))
 }
 
@@ -66,12 +65,15 @@ pub fn refine_key(key: &str) -> Option<(StructuralKey, String, AnySubject)> {
 ///
 /// `None` when the key belongs to another deployment (a different base), which
 /// for an observer is the meaningful answer rather than an error.
-pub fn parse_full_key(base: &str, key: &str) -> Option<StructuralKey> {
+pub fn parse_full_key<'k>(base: &str, key: &'k str) -> Option<StructuralKey<'k>> {
     parse_key(grammar::strip_base(base, key)?)
 }
 
 /// [`refine_key`] over a full wire key. See [`parse_full_key`].
-pub fn refine_full_key(base: &str, key: &str) -> Option<(StructuralKey, String, AnySubject)> {
+pub fn refine_full_key<'k>(
+    base: &str,
+    key: &'k str,
+) -> Option<(StructuralKey<'k>, String, AnySubject)> {
     refine_key(grammar::strip_base(base, key)?)
 }
 

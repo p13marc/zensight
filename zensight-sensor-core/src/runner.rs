@@ -333,6 +333,18 @@ impl<C: SensorConfig> SensorRunner<C> {
                     Ok(task) => self.tasks.push(task),
                     Err(e) => tracing::warn!(error = %e, "failed to serve introspect"),
                 }
+                // `describe` rides next to `introspect` (RFC 08 §7): the
+                // schema table for every payload type the fleet references.
+                match crate::rpc::serve_describe(
+                    self.session.clone(),
+                    &ctx,
+                    zensight_common::schema::DESCRIBE_JSON.as_str(),
+                )
+                .await
+                {
+                    Ok(task) => self.tasks.push(task),
+                    Err(e) => tracing::warn!(error = %e, "failed to serve describe"),
+                }
             } else {
                 tracing::debug!(producer = %producer_name, "no registry slice; introspect not served");
             }

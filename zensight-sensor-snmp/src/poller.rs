@@ -51,7 +51,7 @@ impl SnmpPoller {
         Self {
             device,
             registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh)),
-            telemetry_prefix,
+            telemetry_prefix: telemetry_prefix.into(),
             mib_resolver,
             format,
             oids,

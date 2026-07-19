@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// images/snapshots duplicate machine-ids, but a cloud control plane never
 /// hands out the same instance id twice, so this pair merges evidence almost
 /// as strongly as `host_id`. `region`/`account` are descriptive extras.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CloudFacts {
     /// Provider slug: `"aws"`, `"gcp"`, `"azure"`.
     pub provider: String,
@@ -35,7 +35,7 @@ pub struct CloudFacts {
 /// One host-identity claim, published origin-scoped on
 /// `state/<sensor>/evidence/self` (self claim) or
 /// `state/<sensor>/evidence/device/<device>` (observed device).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostEvidence {
     /// Publishing sensor (e.g. `"sysinfo"`, `"netring"`).
     pub sensor: String,
@@ -91,7 +91,7 @@ pub struct HostEvidence {
 /// hostnames/FQDNs to entities that emit no telemetry of their own. Like
 /// [`HostEvidence`], stale records (past the evidence TTL) are ignored, so the
 /// publisher refreshes live bindings periodically.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NameObservation {
     /// Observing sensor (e.g. `"netring"`).
     pub observer: String,

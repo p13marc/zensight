@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Sensor health status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
     /// Sensor is fully operational, all devices healthy.
@@ -40,7 +42,9 @@ impl std::fmt::Display for HealthStatus {
 }
 
 /// Device availability status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceStatus {
     /// Device is responding normally.
@@ -66,7 +70,7 @@ impl std::fmt::Display for DeviceStatus {
 }
 
 /// Health snapshot from a sensor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HealthSnapshot {
     /// Sensor name.
     pub sensor: String,
@@ -97,7 +101,7 @@ pub struct HealthSnapshot {
 }
 
 /// Device liveness information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeviceLiveness {
     /// Device identifier.
     pub device: String,
@@ -113,7 +117,9 @@ pub struct DeviceLiveness {
 }
 
 /// Error type classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorType {
     /// Connection timeout.
@@ -136,7 +142,7 @@ pub enum ErrorType {
 }
 
 /// Error report from a sensor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ErrorReport {
     /// Timestamp (millis since epoch).
     pub timestamp: i64,
@@ -154,7 +160,7 @@ pub struct ErrorReport {
 /// Sensor registration/discovery record, published by every sensor's runner on
 /// the registration doc `state/<producer>/sensor` (identity envelope, #301).
 /// Health and device counts live on `state/<producer>/health`, not here.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SensorInfo {
     /// Sensor name (e.g., "sysinfo", "netlink").
     pub name: String,

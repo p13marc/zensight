@@ -56,6 +56,7 @@ pub async fn run(
                 };
                 match session
                     .put(&key, payload)
+                    .encoding(format.encoding())
                     .congestion_control(q.congestion_control())
                     .priority(q.priority())
                     .express(q.express())

@@ -4,7 +4,7 @@
 # src/map.rs (every metric name), src/events.rs, src/route_history.rs.
 
 [registry]
-version = "1.1"
+version = "1.2"
 app = "zensight"
 convention = 1
 
@@ -888,6 +888,15 @@ since = "1.0"
 description = "the registry slice this build serves (RFC 08 §6)"
 
 [[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.2"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
+
+[[procedure]]
 path = "artifact/request"
 kind = "write"
 request = "ArtifactRequest"
@@ -920,6 +929,7 @@ description = "current expectations configuration (sentinel expectations hot-swa
 [[procedure]]
 path = "expectations/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "ExpectationCommand"
 reply = "Ack"
 since = "1.0"

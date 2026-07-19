@@ -1011,16 +1011,36 @@ pub fn asset_count_point(sensor_id: &str, discovered: u64) -> TelemetryPoint {
 }
 
 /// Per-detector anomaly count (#254): a monotonic `Counter` of how many anomaly
-/// alerts a detector (`kind`, e.g. `RitaBeacon` / `DnsTunnel` / `NewlyObservedDomain`)
+/// alerts a detector (`kind`, e.g. `BeaconRita` / `DnsTunnel` / `NewlyObservedDomain`)
 /// has fired since sensor start, published as `anomaly/<kind>/total`. Lets the GUI
 /// Overview anomaly strip roll up per-detector activity without a Security-view
-/// round-trip; the same slug is the alert `rule`, so the two correlate.
+/// round-trip; the key chunk is `detector_chunk(rule)`, a deterministic function
+/// of the alert `rule`, so the two correlate.
 pub fn anomaly_count_point(sensor_id: &str, kind: &str, count: u64) -> TelemetryPoint {
     point(
         sensor_id,
-        format!("anomaly/{kind}/total"),
+        format!("anomaly/{}/total", detector_chunk(kind)),
         TelemetryValue::Counter(count),
     )
+}
+
+/// Keyify a flowscope detector slug into a grammar-legal chunk (RFC 03 §2):
+/// upstream slugs are CamelCase (`BeaconRita`), key chunks must be lowercase —
+/// insert `_` at case boundaries and fold (`beacon_rita`). Already-snake slugs
+/// pass through unchanged.
+pub fn detector_chunk(kind: &str) -> String {
+    let mut out = String::with_capacity(kind.len() + 4);
+    for (i, c) in kind.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ─── ICMP error telemetry (issue #15) ───────────────────────────────────────
@@ -2348,7 +2368,13 @@ mod tests {
     #[test]
     fn anomaly_count_point_is_counter_with_slug_path() {
         let p = anomaly_count_point("host01", "BeaconRita", 7);
-        assert_eq!(p.metric, "anomaly/BeaconRita/total");
+        assert_eq!(p.metric, "anomaly/beacon_rita/total");
+        assert_eq!(detector_chunk("DnsTunnel"), "dns_tunnel");
+        assert_eq!(
+            detector_chunk("NewlyObservedDomain"),
+            "newly_observed_domain"
+        );
+        assert_eq!(detector_chunk("port_unreachable"), "port_unreachable");
         assert_eq!(p.value, TelemetryValue::Counter(7));
         assert_eq!(p.source, "host01");
         assert_eq!(p.protocol, Protocol::Netring);

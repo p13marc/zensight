@@ -86,7 +86,7 @@ impl AlertReporter {
     fn alert_key_expr(&self, alert_key: &str) -> String {
         // v1 (RFC 04 §1.2): alerts are LWW state under the producer, keyed by
         // the origin — the legacy protocol-shared channel is gone.
-        self.publisher.v1().state_key(&["alert", alert_key])
+        self.publisher.v1().state_key(&["alert", alert_key]).into()
     }
 
     /// Report that `alert` is currently violated. Publishes a `Put(Firing)` once

@@ -10,7 +10,7 @@
 # gauge.
 
 [registry]
-version = "1.3"
+version = "1.4"
 app = "zensight"
 convention = 1
 
@@ -138,6 +138,15 @@ since = "1.0"
 description = "the registry slice this build serves (RFC 08 §6)"
 
 [[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.4"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
+
+[[procedure]]
 path = "artifact/request"
 kind = "write"
 request = "ArtifactRequest"
@@ -169,6 +178,7 @@ description = "the configured stream catalogue (descriptors incl. open state)"
 [[procedure]]
 path = "stream/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "Command<StreamControl>"
 reply = "Ack"
 idempotent = false

@@ -4,7 +4,7 @@
 # Source: src/map.rs, src/collector.rs (boot/manager/units), src/events.rs.
 
 [registry]
-version = "1.1"
+version = "1.2"
 app = "zensight"
 convention = 1
 
@@ -357,6 +357,15 @@ since = "1.0"
 description = "the registry slice this build serves (RFC 08 §6)"
 
 [[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.2"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
+
+[[procedure]]
 path = "artifact/request"
 kind = "write"
 request = "ArtifactRequest"
@@ -389,6 +398,7 @@ description = "current expectations configuration (sentinel expectations hot-swa
 [[procedure]]
 path = "expectations/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "ExpectationsConfig"
 reply = "Ack"
 since = "1.0"
@@ -403,6 +413,7 @@ description = "gated-action switch state + last action outcome"
 [[procedure]]
 path = "action/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "ServiceAction"
 reply = "Ack"
 idempotent = false

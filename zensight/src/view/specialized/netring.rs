@@ -1869,7 +1869,9 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         .metrics
         .iter()
         .filter_map(|(metric, point)| match Subject::parse_metric(metric) {
-            Some(Subject::BandwidthBytesPerSec { app }) => Some((app, value_f64(&point.value))),
+            Some(Subject::BandwidthBytesPerSec { app }) => {
+                Some((app.to_string(), value_f64(&point.value)))
+            }
             _ => None,
         })
         .collect();

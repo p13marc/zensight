@@ -359,7 +359,7 @@ fn render_disk_section(state: &DeviceDetailState) -> Element<'_, Message> {
         .metrics
         .keys()
         .filter_map(|k| match Subject::parse_metric(k) {
-            Some(Subject::DiskUsed { mount }) => Some(mount),
+            Some(Subject::DiskUsed { mount }) => Some(mount.to_string()),
             _ => None,
         })
         .collect();
@@ -411,7 +411,7 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
         .metrics
         .keys()
         .filter_map(|k| match Subject::parse_metric(k) {
-            Some(Subject::NetworkRxBytes { iface }) => Some(iface),
+            Some(Subject::NetworkRxBytes { iface }) => Some(iface.to_string()),
             _ => None,
         })
         .collect();
@@ -551,7 +551,7 @@ fn render_disk_io_section(state: &DeviceDetailState) -> Element<'_, Message> {
         .keys()
         .filter_map(|k| match Subject::parse_metric(k) {
             // `disk/{device}/io/read_rate` — the device was `parts[1]`.
-            Some(Subject::DiskIoReadRate { device }) => Some(device),
+            Some(Subject::DiskIoReadRate { device }) => Some(device.to_string()),
             _ => None,
         })
         .collect();
@@ -652,7 +652,7 @@ fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message
             && let Some(temp) = get_metric_value(state, key)
         {
             let critical = get_metric_value(state, &format!("sensors/{chip}/{label}/critical"));
-            sensors.push((chip, label, temp, critical));
+            sensors.push((chip.to_string(), label.to_string(), temp, critical));
         }
     }
 
@@ -732,7 +732,7 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
         if let Some(Subject::SensorsRpm { chip, label }) = Subject::parse_metric(key)
             && let Some(rpm) = get_metric_value(state, key)
         {
-            fans.push((chip, label, rpm));
+            fans.push((chip.to_string(), label.to_string(), rpm));
         }
     }
     fans.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -772,7 +772,7 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
         if let Some(Subject::BatteryCapacity { name } | Subject::BatteryStatus { name }) =
             Subject::parse_metric(key)
         {
-            batteries.insert(name);
+            batteries.insert(name.to_string());
         }
     }
 
@@ -814,8 +814,8 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
             // the raw zone ("intel-rapl:0" — `sanitize_key` leaves colons
             // alone). Prefer the name, fall back to the zone, so the row is
             // meaningful even on the degraded path where labels are missing.
-            let display = get_metric_label(state, key, "name").unwrap_or_else(|| zone.clone());
-            zones.push((zone, display, watts));
+            let display = get_metric_label(state, key, "name").unwrap_or_else(|| zone.to_string());
+            zones.push((zone.to_string(), display, watts));
         }
     }
     // Sort on the zone from the key: stable, and present regardless of labels.

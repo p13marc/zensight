@@ -21,12 +21,12 @@ pub mod evidence;
 pub mod health;
 pub mod keyexpr;
 pub mod metric_guard;
-pub mod payload;
 pub mod publisher_registry;
 pub mod qos;
 pub mod query_detail;
 pub mod registry;
 pub mod rpc;
+pub mod schema;
 pub mod semconv;
 pub mod serialization;
 pub mod session;
@@ -72,7 +72,6 @@ pub use keyexpr::{
     media_preview_key, media_video_key, name_observation_key, names_query_key, origin_rpc_key,
     parse_full_key, parse_key, pdns_key, refine_full_key, refine_key, validate_relative_selector,
 };
-pub use payload::{PAYLOAD_TYPES, decode_payload, schema_location};
 pub use publisher_registry::PublisherRegistry;
 pub use qos::QosClass;
 pub use query_detail::{

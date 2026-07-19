@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// [`NameObservation`](crate::NameObservation): the correlator accumulates
 /// *multiple* names per IP into these, since #307 publishes only one
 /// observation per IP key (last-writer-wins on the wire).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NameVal {
     /// The canonical name (lowercased, no trailing dot).
     pub name: String,
@@ -47,7 +47,7 @@ pub struct NameVal {
 /// `zensight/v1/@catalog/state/alias/<old_id>` when a merge/upgrade retires
 /// an entity id. Long-TTL so a consumer holding a stale id can re-point after
 /// arbitrarily long offline periods.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AliasRecord {
     /// The retired entity id.
     pub old_id: String,
@@ -58,7 +58,7 @@ pub struct AliasRecord {
 }
 
 /// What an operator asserted about two origins (#473, RFC 06 §5.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AssertionKind {
     /// "These are the same host." The canonical case is a **reinstall**: the
@@ -89,7 +89,7 @@ pub enum AssertionKind {
 /// evidence-derived entity ids: an entity id computed from a hostname or MAC
 /// changes when the set it names changes, so an assertion keyed on one would
 /// dangle the moment it took effect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OperatorAssertion {
     /// Stable key chunk, derived from the pair — see [`OperatorAssertion::id`].
     pub id: String,
@@ -118,7 +118,7 @@ impl OperatorAssertion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PdnsRecord {
     /// The IP these names are bound to (canonical, *un*-slugified — the key is
     /// slugged, the payload keeps the real address).
@@ -135,7 +135,7 @@ pub struct PdnsRecord {
 /// correlator merged into an entity, the rule that bound it, and how confident
 /// that binding is. Un-merging is dropping a claim — `DeviceId`s are never
 /// rewritten.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemberClaim {
     /// The publishing sensor of the merged evidence (e.g. `"sysinfo"`).
     pub sensor: String,
@@ -154,7 +154,7 @@ pub struct MemberClaim {
 /// A resolved host entity, published on
 /// `zensight/v1/@catalog/state/entity/<entity_id>` by the correlator (cached,
 /// re-emitted ~60 s, tombstoned on retire/merge).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostEntity {
     /// Stable id `"h_<12hex>"`: the 12-hex prefix of the host's hashed
     /// machine-id when known, else of `sha256(best evidence key)`. Prior ids

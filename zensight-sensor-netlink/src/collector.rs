@@ -1426,10 +1426,13 @@ fn selector_str(sel: &TrafficSelector) -> String {
 /// Decompose an nlink [`WgPeer`] into the pure [`WgPeerView`] (computes the
 /// handshake age relative to now and a short, stable peer id from the pubkey).
 fn wg_peer_view(peer: &WgPeer, labels: &std::collections::HashMap<[u8; 32], String>) -> WgPeerView {
-    // Short id: first 8 chars of the base64 public key (bounded-cardinality
-    // label that still distinguishes peers).
-    let b64 = base64_encode(&peer.public_key);
-    let id: String = b64.chars().take(8).collect();
+    // Short id: lowercase hex of the pubkey's first 6 bytes — same 48 bits as
+    // the former 8-char base64 prefix, but always a grammar-legal key chunk
+    // (RFC 03 §2; base64 mixes case and can emit `+`/`/`).
+    let id: String = peer.public_key[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let handshake_age_s = peer.last_handshake.and_then(|t| {
         std::time::SystemTime::now()
             .duration_since(t)
@@ -1491,30 +1494,6 @@ pub fn load_wg_labels(paths: &[String]) -> std::collections::HashMap<[u8; 32], S
         }
     }
     map
-}
-
-/// Minimal standard-base64 of a 32-byte key (no external dep), for a short peer
-/// id label.
-fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
-        out.push(ALPHABET[(n >> 18 & 63) as usize] as char);
-        out.push(ALPHABET[(n >> 12 & 63) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[(n >> 6 & 63) as usize] as char);
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[(n & 63) as usize] as char);
-        }
-    }
-    out
 }
 
 /// Read `nf_conntrack_max` from procfs (the table capacity). `None` if the file

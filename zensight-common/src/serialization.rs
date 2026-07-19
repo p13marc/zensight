@@ -18,6 +18,19 @@ pub enum Format {
 }
 
 impl Format {
+    /// The sample [`Encoding`](zenoh::bytes::Encoding) for payloads encoded in
+    /// this format. Producers stamp it on every put so consumers resolve the
+    /// payload from metadata (RFC 08 §7: sample encoding > registry > sniff)
+    /// instead of first-byte sniffing.
+    pub fn encoding(self) -> zenoh::bytes::Encoding {
+        match self {
+            Format::Json => zenoh::bytes::Encoding::APPLICATION_JSON,
+            Format::Cbor => zenoh::bytes::Encoding::APPLICATION_CBOR,
+        }
+    }
+}
+
+impl Format {
     /// Get the MIME type for this format.
     pub fn mime_type(&self) -> &'static str {
         match self {

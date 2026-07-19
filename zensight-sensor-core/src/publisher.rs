@@ -45,7 +45,7 @@ impl Publisher {
         let control = Arc::new(zensight_common::PublisherRegistry::new(session.clone()));
         Self {
             session,
-            telemetry_prefix,
+            telemetry_prefix: telemetry_prefix.into(),
             format,
             v1,
             control,
@@ -99,7 +99,13 @@ impl Publisher {
                 key: key.to_string(),
                 message: e.to_string(),
             })?;
-        self.publish_raw(key, payload, QosClass::Telemetry).await
+        self.control
+            .put_encoded(key, payload, QosClass::Telemetry, self.format.encoding())
+            .await
+            .map_err(|e| SensorError::Publish {
+                key: key.to_string(),
+                message: e.to_string(),
+            })
     }
 
     /// Publish a batch of telemetry points.
@@ -147,7 +153,13 @@ impl Publisher {
         qos: QosClass,
     ) -> Result<()> {
         let payload = serde_json::to_vec(value)?;
-        self.publish_raw(key, payload, qos).await
+        self.control
+            .put_encoded(key, payload, qos, zenoh::bytes::Encoding::APPLICATION_JSON)
+            .await
+            .map_err(|e| SensorError::Publish {
+                key: key.to_string(),
+                message: e.to_string(),
+            })
     }
 
     /// Delete (tombstone) a key with an explicit QoS class — used to clear keyed,

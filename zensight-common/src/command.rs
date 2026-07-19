@@ -23,13 +23,17 @@ use zenkey::grammar::BlobTier;
 /// assert!(k.ends_with("/@rpc/logs/filter/set"));
 /// ```
 pub fn command_key(producer: &str, topic: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).rpc_key(&[topic, "set"])
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&[topic, "set"])
+        .into()
 }
 
 /// The read procedure for a control topic: `…/@rpc/<producer>/<topic>`
 /// (the reply carries the topic's current configuration/status).
 pub fn status_key(producer: &str, topic: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).rpc_key(&[topic])
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&[topic])
+        .into()
 }
 
 /// The on-demand detail-read procedure: `…/@rpc/<producer>/<topic>`.
@@ -37,45 +41,59 @@ pub fn status_key(producer: &str, topic: &str) -> String {
 /// request, never streamed onto the telemetry bus (RFC 04 R3). Same key
 /// shape as [`status_key`] — reads are reads (RFC 05 §5).
 pub fn query_key(producer: &str, topic: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).rpc_key(&[topic])
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&[topic])
+        .into()
 }
 
 /// The artifact-request write procedure (RFC 05 §3 long-running pattern).
 pub fn artifact_request_key(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).rpc_key(&["artifact", "request"])
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&["artifact", "request"])
+        .into()
 }
 
 /// The artifact-status read procedure. (Residual: the RFC's ideal is the
 /// observable `state/<producer>/artifact/<kind>` document; the read
 /// procedure remains for the transition.)
 pub fn artifact_status_key(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).rpc_key(&["artifact", "status"])
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&["artifact", "status"])
+        .into()
 }
 
 /// The artifact-cancel write procedure (`?id=<ulid>`).
 pub fn artifact_cancel_key(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).rpc_key(&["artifact", "cancel"])
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&["artifact", "cancel"])
+        .into()
 }
 
 /// Tier-1 blob prefix: `<base>/v1/<origin>/@blob/artifact` — a produced
 /// artifact's manifest + chunks live under `…/artifact/<id>/**` (RFC 07 §2).
 pub fn artifact_blob_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).blob_prefix(BlobTier::Artifact)
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .blob_prefix(BlobTier::Artifact)
+        .into()
 }
 
 /// Tier-2 content-store prefix: `<base>/v1/<origin>/@blob/store` — chunks
 /// at `…/store/<algo>/<hash>`, immutable ⇒ cacheable fleet-wide.
 pub fn artifact_store_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).blob_prefix(BlobTier::Store)
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .blob_prefix(BlobTier::Store)
+        .into()
 }
 
 /// Tier-2 tree-index prefix: `<base>/v1/<origin>/@blob/tree`.
 pub fn artifact_tree_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer).blob_prefix(BlobTier::Tree)
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .blob_prefix(BlobTier::Tree)
+        .into()
 }
 
 /// Optional envelope carrying a correlation id alongside a command body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Command<T> {
     /// Optional correlation id, echoed in a reply for request/response matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]

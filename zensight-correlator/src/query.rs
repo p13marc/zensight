@@ -320,6 +320,40 @@ pub async fn serve_introspect(
     Ok(())
 }
 
+/// Serve `describe` — the RFC 08 §7 SchemaSet, next to `introspect` (the
+/// catalog serves the same fleet-wide superset every sensor serves).
+pub async fn serve_describe(
+    session: Arc<Session>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = catalog_rpc_key("describe");
+    let json = zensight_common::schema::DESCRIBE_JSON.as_str();
+    let queryable = session
+        .declare_queryable(&key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare describe queryable: {e}"))?;
+    info!(key = %key, "describe queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                if let Err(e) = query
+                    .reply(key.as_str(), json.as_bytes())
+                    .encoding(zenoh::bytes::Encoding::APPLICATION_JSON)
+                    .await
+                {
+                    warn!(error = %e, "describe reply failed");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use zensight_common::{HostEntity, MemberClaim, NameVal};

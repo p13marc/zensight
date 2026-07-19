@@ -66,8 +66,10 @@ impl EntityPublisher {
     async fn upsert(&mut self, entity: &HostEntity) -> anyhow::Result<()> {
         let payload =
             encode(entity, self.format).map_err(|e| anyhow::anyhow!("encode entity: {e}"))?;
+        let encoding = self.format.encoding();
         let pubr = self.publisher_for(&entity.entity_id).await?;
         pubr.put(payload)
+            .encoding(encoding)
             .await
             .map_err(|e| anyhow::anyhow!("put entity {}: {e}", entity.entity_id))?;
         for old_id in &entity.aliases {
@@ -97,6 +99,7 @@ impl EntityPublisher {
                 .map_err(|e| anyhow::anyhow!("declare alias publisher {key}: {e}"))?;
             alias_pub
                 .put(payload)
+                .encoding(self.format.encoding())
                 .await
                 .map_err(|e| anyhow::anyhow!("put alias {old_id}: {e}"))?;
             self.aliases_published
@@ -178,6 +181,7 @@ pub async fn publish_assertion(
         .await
         .map_err(|e| anyhow::anyhow!("declare assertion publisher {key}: {e}"))?;
     pubr.put(payload)
+        .encoding(format.encoding())
         .await
         .map_err(|e| anyhow::anyhow!("put assertion {key}: {e}"))?;
     info!(key = %key, kind = ?assertion.kind, "published operator assertion");

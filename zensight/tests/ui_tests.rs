@@ -2454,10 +2454,10 @@ fn test_netlink_conntrack_wireguard_sections() {
         ("conntrack/utilization", TelemetryValue::Gauge(0.75)),
         ("wireguard/wg0/peers", TelemetryValue::Gauge(1.0)),
         (
-            "wireguard/wg0/AbCd1234/rx_bytes",
+            "wireguard/wg0/abcd1234/rx_bytes",
             TelemetryValue::Counter(1000),
         ),
-        ("wireguard/wg0/AbCd1234/up", TelemetryValue::Boolean(true)),
+        ("wireguard/wg0/abcd1234/up", TelemetryValue::Boolean(true)),
     ] {
         state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
     }
@@ -2545,10 +2545,10 @@ fn test_netlink_wireguard_tab() {
     for (m, v) in [
         ("wireguard/wg0/peers", TelemetryValue::Gauge(1.0)),
         (
-            "wireguard/wg0/AbCd1234/last_handshake_age_s",
+            "wireguard/wg0/abcd1234/last_handshake_age_s",
             TelemetryValue::Gauge(30.0),
         ),
-        ("wireguard/wg0/AbCd1234/up", TelemetryValue::Boolean(true)),
+        ("wireguard/wg0/abcd1234/up", TelemetryValue::Boolean(true)),
     ] {
         state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
     }
@@ -2557,7 +2557,7 @@ fn test_netlink_wireguard_tab() {
         TelemetryPoint::new(
             "gw01",
             Protocol::Netlink,
-            "wireguard/wg0/AbCd1234/rx_bytes",
+            "wireguard/wg0/abcd1234/rx_bytes",
             TelemetryValue::Counter(1000),
         )
         .with_labels(HashMap::from([(
@@ -4499,7 +4499,7 @@ type LabeledPoint<'a> = (
 
 /// `sysinfo_state`'s sibling for the views that read a *label* off the point
 /// rather than the key — the RAPL rows prefer the `name` label ("package-0")
-/// over the key's raw zone ("intel-rapl:0").
+/// over the key's sanitized zone ("intel-rapl_0").
 fn sysinfo_state_labeled(points: &[LabeledPoint<'_>]) -> DeviceDetailState {
     let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
     for (metric, value, labels) in points {
@@ -4640,7 +4640,7 @@ fn tier2_sysinfo_temperature_rows_render() {
 #[test]
 fn sysinfo_fan_at_zero_rpm_renders_as_a_reading_not_absence() {
     let state = sysinfo_state(&[(
-        "sensors/dell_ddv/CPU_Fan/rpm",
+        "sensors/dell_ddv/cpu_fan/rpm",
         zensight_common::TelemetryValue::Gauge(0.0),
     )]);
 
@@ -4648,7 +4648,7 @@ fn sysinfo_fan_at_zero_rpm_renders_as_a_reading_not_absence() {
         &state,
     ));
     assert!(
-        ui.find("dell_ddv/CPU_Fan").is_ok(),
+        ui.find("dell_ddv/cpu_fan").is_ok(),
         "a fan at 0 RPM must still render its chip/label row"
     );
     assert!(
@@ -4669,7 +4669,7 @@ fn sysinfo_fan_at_zero_rpm_renders_as_a_reading_not_absence() {
 fn sysinfo_rapl_absent_is_distinct_from_zero_watts() {
     // (a) Power collector running (fans present), but no RAPL zones reporting.
     let absent = sysinfo_state(&[(
-        "sensors/dell_ddv/CPU_Fan/rpm",
+        "sensors/dell_ddv/cpu_fan/rpm",
         zensight_common::TelemetryValue::Gauge(3000.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
@@ -4692,7 +4692,7 @@ fn sysinfo_rapl_absent_is_distinct_from_zero_watts() {
 
     // (b) A zone genuinely reporting 0.0 W is a measurement, not an absence.
     let zero = sysinfo_state(&[(
-        "power/rapl/intel-rapl:0/watts",
+        "power/rapl/intel-rapl_0/watts",
         zensight_common::TelemetryValue::Gauge(0.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
@@ -4715,12 +4715,12 @@ fn sysinfo_rapl_absent_is_distinct_from_zero_watts() {
 }
 
 /// The zone's friendly name (`package-0`) rides as a label; the key carries the
-/// raw zone (`intel-rapl:0` — `sanitize_key` leaves colons alone). Prefer the
+/// sanitized zone (`intel-rapl_0` — the colon is grammar-illegal). Prefer the
 /// label, fall back to the key, so the row is meaningful on either path.
 #[test]
 fn sysinfo_rapl_zone_prefers_name_label_over_raw_zone() {
     let labeled = sysinfo_state_labeled(&[(
-        "power/rapl/intel-rapl:0/watts",
+        "power/rapl/intel-rapl_0/watts",
         zensight_common::TelemetryValue::Gauge(14.2),
         &[("zone", "intel-rapl:0"), ("name", "package-0")],
     )]);
@@ -4733,16 +4733,16 @@ fn sysinfo_rapl_zone_prefers_name_label_over_raw_zone() {
     );
     assert!(ui.find("14.2 W").is_ok());
 
-    // Degraded path: no labels. The colon must survive into the fallback.
+    // Degraded path: no labels. The sanitized zone is the fallback.
     let bare = sysinfo_state(&[(
-        "power/rapl/intel-rapl:0/watts",
+        "power/rapl/intel-rapl_0/watts",
         zensight_common::TelemetryValue::Gauge(14.2),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &bare,
     ));
     assert!(
-        ui.find("intel-rapl:0").is_ok(),
+        ui.find("intel-rapl_0").is_ok(),
         "without the name label the row must fall back to the zone from the key"
     );
 }
@@ -4753,18 +4753,18 @@ fn sysinfo_rapl_zone_prefers_name_label_over_raw_zone() {
 fn sysinfo_battery_capacity_and_status_are_independently_optional() {
     let both = sysinfo_state(&[
         (
-            "battery/BAT0/capacity",
+            "battery/bat0/capacity",
             zensight_common::TelemetryValue::Gauge(82.0),
         ),
         (
-            "battery/BAT0/status",
+            "battery/bat0/status",
             zensight_common::TelemetryValue::Text("Discharging".to_string()),
         ),
     ]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &both,
     ));
-    assert!(ui.find("BAT0").is_ok());
+    assert!(ui.find("bat0").is_ok());
     assert!(ui.find("82%").is_ok());
     assert!(
         ui.find("Discharging").is_ok(),
@@ -4772,23 +4772,23 @@ fn sysinfo_battery_capacity_and_status_are_independently_optional() {
     );
 
     let capacity_only = sysinfo_state(&[(
-        "battery/BAT0/capacity",
+        "battery/bat0/capacity",
         zensight_common::TelemetryValue::Gauge(82.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &capacity_only,
     ));
-    assert!(ui.find("BAT0").is_ok());
+    assert!(ui.find("bat0").is_ok());
     assert!(ui.find("82%").is_ok());
 
     let status_only = sysinfo_state(&[(
-        "battery/BAT0/status",
+        "battery/bat0/status",
         zensight_common::TelemetryValue::Text("Full".to_string()),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &status_only,
     ));
-    assert!(ui.find("BAT0").is_ok());
+    assert!(ui.find("bat0").is_ok());
     assert!(ui.find("Full").is_ok());
 }
 
@@ -4800,7 +4800,7 @@ fn sysinfo_battery_capacity_and_status_are_independently_optional() {
 #[test]
 fn sysinfo_temperatures_card_is_hidden_when_only_fans_are_present() {
     let state = sysinfo_state(&[(
-        "sensors/dell_ddv/CPU_Fan/rpm",
+        "sensors/dell_ddv/cpu_fan/rpm",
         zensight_common::TelemetryValue::Gauge(3000.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
@@ -4897,8 +4897,8 @@ fn demo_emits_the_fans_power_families() {
     for (family, suffix) in [
         ("fans", "/rpm"),
         ("temperatures", "/temp"),
-        ("battery capacity", "battery/BAT0/capacity"),
-        ("battery status", "battery/BAT0/status"),
+        ("battery capacity", "battery/bat0/capacity"),
+        ("battery status", "battery/bat0/status"),
         ("entropy", "system/entropy_avail"),
     ] {
         assert!(
@@ -4938,11 +4938,11 @@ fn demo_points_render_the_fans_power_panel() {
         "the demo must open the Fans & power panel"
     );
     assert!(
-        ui.find("dell_ddv/CPU_Fan").is_ok(),
+        ui.find("dell_ddv/cpu_fan").is_ok(),
         "the demo must render a fan row"
     );
     assert!(
-        ui.find("BAT0").is_ok(),
+        ui.find("bat0").is_ok(),
         "the demo must render a battery row"
     );
 
@@ -4968,10 +4968,10 @@ fn demo_points_render_the_fans_power_panel() {
     // The Temperatures card shares the sensors/ prefix with fans — the demo
     // mocks temps too, so it must be populated rather than empty.
     // The row is built from the *key*, so it shows the sanitized label
-    // (`Package_id_0`), not the raw hwmon label carried alongside it.
+    // (`package_id_0`), not the raw hwmon label carried alongside it.
     let mut ui = simulator_for(&state);
     assert!(
-        ui.find("coretemp/Package_id_0").is_ok(),
+        ui.find("coretemp/package_id_0").is_ok(),
         "the demo must populate the Temperatures card it opens"
     );
     let mut ui = simulator_for(&state);
@@ -5310,7 +5310,7 @@ fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
         .expect("sysinfo registry");
 
     // edge01 serves a bumped registry version; server01 serves ours.
-    let skewed = sysinfo_slice.replacen("version = \"1.1\"", "version = \"1.0\"", 1);
+    let skewed = sysinfo_slice.replacen("version = \"1.2\"", "version = \"1.0\"", 1);
     assert_ne!(skewed, sysinfo_slice, "the fixture must actually differ");
 
     let mut state = FleetState::default();

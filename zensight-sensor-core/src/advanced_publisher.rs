@@ -226,27 +226,9 @@ impl AdvancedPublisherRegistry {
     /// The publisher for this key is created on first use and cached.
     pub async fn publish(&self, key_suffix: &str, point: &TelemetryPoint) -> Result<()> {
         let key = self.build_key(key_suffix);
-
-        // Ensure publisher exists
-        self.get_or_create_publisher(&key).await?;
-
-        // Encode the payload
         let payload =
             encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
-
-        // Publish through the cached publisher
-        let publishers = self.publishers.read().await;
-        if let Some(publisher) = publishers.get(&key) {
-            publisher
-                .put(payload)
-                .await
-                .map_err(|e| SensorError::Publish {
-                    key: key.clone(),
-                    message: e.to_string(),
-                })?;
-        }
-
-        Ok(())
+        self.put_raw(&key, payload).await
     }
 
     /// Publish a telemetry point to a full key (bypassing the prefix), via an
@@ -273,13 +255,31 @@ impl AdvancedPublisherRegistry {
         self.put_raw(key, payload).await
     }
 
-    /// Shared put path: ensure the cached publisher for `key` exists, then put.
+    /// Shared put path. Fast path: one read-lock hit on the cached publisher
+    /// (the steady state — every publish used to take the write lock first).
+    /// Miss: create, then put under a fresh read lock. Every sample carries
+    /// the format's [`Encoding`] (RFC 08 §7: metadata beats sniffing).
     async fn put_raw(&self, key: &str, payload: Vec<u8>) -> Result<()> {
+        let encoding = self.format.encoding();
+        {
+            let publishers = self.publishers.read().await;
+            if let Some(publisher) = publishers.get(key) {
+                return publisher
+                    .put(payload)
+                    .encoding(encoding)
+                    .await
+                    .map_err(|e| SensorError::Publish {
+                        key: key.to_string(),
+                        message: e.to_string(),
+                    });
+            }
+        }
         self.get_or_create_publisher(key).await?;
         let publishers = self.publishers.read().await;
         if let Some(publisher) = publishers.get(key) {
             publisher
                 .put(payload)
+                .encoding(encoding)
                 .await
                 .map_err(|e| SensorError::Publish {
                     key: key.to_string(),

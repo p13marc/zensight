@@ -50,7 +50,7 @@ where
             .declare_queryable(key.as_str())
             .await
             .map_err(|e| SensorError::Publish {
-                key: key.clone(),
+                key: key.clone().into(),
                 message: format!("failed to declare procedure queryable: {e}"),
             })?;
     tracing::info!(key = %key, "procedure ready");
@@ -126,6 +126,21 @@ pub async fn serve_introspect(
 ) -> Result<tokio::task::JoinHandle<()>> {
     serve(session, ctx, &["introspect"], move |_req| async move {
         Ok(registry_toml.as_bytes().to_vec())
+    })
+    .await
+}
+
+/// Serve `describe` — the RFC 08 §7 payload self-description (the SchemaSet
+/// JSON for every type the registry references). Pass
+/// `zensight_common::schema::DESCRIBE_JSON.as_str()`; serving the fleet-wide
+/// superset from every producer is legal (RFC 08 §7).
+pub async fn serve_describe(
+    session: Arc<Session>,
+    ctx: &V1Context,
+    schema_json: &'static str,
+) -> Result<tokio::task::JoinHandle<()>> {
+    serve(session, ctx, &["describe"], move |_req| async move {
+        Ok(schema_json.as_bytes().to_vec())
     })
     .await
 }

@@ -81,7 +81,7 @@ pub async fn run(
     scrub: ProcessScrubConfig,
 ) {
     let key = zensight_keyspace_ctx(&producer).rpc_key(&["processes"]);
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match session.declare_queryable(key.as_keyexpr()).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare processes failed");
@@ -124,7 +124,7 @@ pub async fn run_latency(
     report: Arc<std::sync::Mutex<crate::map::LatencyReport>>,
 ) {
     let key = zensight_keyspace_ctx(&producer).rpc_key(&["latency"]);
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match session.declare_queryable(key.as_keyexpr()).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare latency failed");

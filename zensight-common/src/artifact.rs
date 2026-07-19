@@ -31,7 +31,7 @@ pub use zblob::{Entry, Manifest, TreeIndex};
 /// What to produce. The variant carries the kind-specific parameters; the
 /// discriminant is serialized under a `kind` tag (`report` / `snapshot` /
 /// `capture`), so `ArtifactRequest` flattens it onto the request object.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArtifactKind {
     /// A sosreport-style debug bundle: redacted config + health + counters.
@@ -87,7 +87,7 @@ impl ArtifactKind {
 
 /// Operator-supplied options common to every kind. The sensor clamps params to
 /// its configured limits regardless.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactOptions {
     /// Restrict production to one host/source. The control plane is per-protocol
     /// (shared by every host running that protocol), so this disambiguates which
@@ -98,9 +98,10 @@ pub struct ArtifactOptions {
 
 /// Payload of the `artifact/request` write procedure — the single
 /// authorization trigger.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactRequest {
     /// Client-chosen id correlating the request, status, and delivery.
+    #[schemars(with = "String")]
     pub id: Ulid,
     /// What to produce (flattened: the `kind` tag rides on this object).
     #[serde(flatten)]
@@ -112,7 +113,7 @@ pub struct ArtifactRequest {
 
 /// A lightweight summary of a built directory tree, shown before it is fetched.
 /// (Formerly `SnapshotSummary`.)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TreeSummary {
     /// Number of regular files in the tree.
     pub file_count: u64,
@@ -124,13 +125,14 @@ pub struct TreeSummary {
 
 /// How a `Ready` artifact is delivered — the client picks its transfer client
 /// (whole-blob vs content-addressed tree) off this tag.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "delivery", rename_all = "snake_case")]
 pub enum Delivery {
     /// Tier-1 whole-blob: download with `zblob::BlobClient` from
     /// `blob_prefix` using `manifest.id`.
     Blob {
         /// Whole-blob manifest (size, chunking, SHA-256, filename).
+        #[schemars(with = "serde_json::Value")]
         manifest: Manifest,
         /// Key prefix of the `zenoh-blob` server serving this blob.
         blob_prefix: String,
@@ -150,13 +152,14 @@ pub enum Delivery {
 }
 
 /// The lifecycle of one artifact, reported per kind by the status queryable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ArtifactState {
     /// The artifact is being produced. `detail`/`progress` let a long-running
     /// producer (e.g. a multi-second capture) report incremental progress.
     Generating {
         /// The artifact id.
+        #[schemars(with = "String")]
         id: Ulid,
         /// The kind slug (see [`ArtifactKind::slug`]).
         kind: String,
@@ -170,6 +173,7 @@ pub enum ArtifactState {
     /// Ready to download via `delivery`; available until `expires_ms`.
     Ready {
         /// The artifact id.
+        #[schemars(with = "String")]
         id: Ulid,
         /// The kind slug.
         kind: String,
@@ -181,6 +185,7 @@ pub enum ArtifactState {
     /// Production failed (or was cancelled mid-flight).
     Failed {
         /// The artifact id.
+        #[schemars(with = "String")]
         id: Ulid,
         /// The kind slug.
         kind: String,
@@ -191,6 +196,7 @@ pub enum ArtifactState {
     /// bytes are gone.
     Expired {
         /// The artifact id.
+        #[schemars(with = "String")]
         id: Ulid,
         /// The kind slug.
         kind: String,
@@ -222,7 +228,7 @@ impl ArtifactState {
 /// Per-kind capabilities the sensor advertises so the GUI can render the right
 /// request affordance (a button, a per-dir list, a capture form). Unknown kinds
 /// are hidden by the GUI.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind_advert", rename_all = "snake_case")]
 pub enum KindAdvert {
     /// A debug bundle can be requested (no parameters).
@@ -248,7 +254,7 @@ pub enum KindAdvert {
 
 /// The status of one artifact kind on a sensor (one entry per registered
 /// producer), reported by the status queryable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct KindStatus {
     /// The kind slug (`report` / `snapshot` / `capture`).
     pub kind: String,
@@ -268,7 +274,7 @@ pub struct KindStatus {
 /// Reply of the `artifact/status` read procedure: one entry per kind the
 /// sensor produces. Busy/cooldown/current are per kind, so a slow capture never
 /// blocks a quick debug bundle.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactStatus {
     /// The artifact kinds this sensor produces and their per-kind state.
     #[serde(default)]

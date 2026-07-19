@@ -48,8 +48,8 @@ pub fn check_telemetry_key(key: &str) {
     let Some(producer) = parsed.producer.as_ref() else {
         return;
     };
-    let tail: Vec<&str> = parsed.subject.iter().map(String::as_str).collect();
-    if crate::registry::parse_subject(producer.name(), Class::Telemetry, &tail).is_some() {
+    let tail: &[&str] = &parsed.subject;
+    if crate::registry::parse_subject(producer.name(), Class::Telemetry, tail).is_some() {
         return;
     }
 
