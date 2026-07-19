@@ -260,6 +260,7 @@ description = "current filter configuration (dynamic message filters)"
 [[procedure]]
 path = "filter/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "TopicConfig"
 reply = "Ack"
 since = "1.0"

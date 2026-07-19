@@ -71,8 +71,16 @@ impl Metric {
     }
 }
 
-/// Sanitize a string for use in a Zenoh key expression: collapse runs of
-/// reserved characters into a single `_`, then trim leading/trailing `_`.
+/// Sanitize a foreign value (mount, iface, hwmon chip/label, RAPL zone,
+/// battery name) into a grammar-legal key chunk (RFC 03 §2 charset:
+/// `[a-z0-9._-]`, alnum at the boundaries): lowercase, collapse runs of
+/// excluded characters into a single `_`, trim illegal boundary bytes.
+///
+/// Readable and lossy by choice — the friendly original rides as a payload
+/// label (`name`/`label`/`zone`), the key chunk is only an identifier. The
+/// typed registry refinement (`Subject::parse_metric`) rejects illegal
+/// chunks, so anything laxer than the grammar here silently drops the
+/// family from every consumer.
 ///
 /// An input that reduces to the empty string (notably the root mount `"/"`)
 /// would produce an empty key chunk, which Zenoh rejects (`disk//total`), so it
@@ -80,16 +88,14 @@ impl Metric {
 pub fn sanitize_key(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
-        match c {
-            '/' | ' ' | '#' | '?' | '*' => {
-                if !result.ends_with('_') && !result.is_empty() {
-                    result.push('_');
-                }
-            }
-            _ => result.push(c),
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-' {
+            result.push(c);
+        } else if !result.ends_with('_') && !result.is_empty() {
+            result.push('_');
         }
     }
-    let trimmed = result.trim_matches('_');
+    let trimmed = result.trim_matches(|c| !matches!(c, 'a'..='z' | '0'..='9'));
     if trimmed.is_empty() {
         "root".to_string()
     } else {
@@ -1360,6 +1366,14 @@ mod tests {
         assert_eq!(sanitize_key("/home/user"), "home_user");
         assert_eq!(sanitize_key("eth0"), "eth0");
         assert_eq!(sanitize_key("my interface"), "my_interface");
+        // Grammar-illegal bytes (RFC 03 §2): uppercase folds, others map to `_`.
+        assert_eq!(sanitize_key("CPU_Fan"), "cpu_fan");
+        assert_eq!(sanitize_key("intel-rapl:0"), "intel-rapl_0");
+        assert_eq!(sanitize_key("BAT0"), "bat0");
+        assert_eq!(sanitize_key("Package id 0"), "package_id_0");
+        // Boundary bytes must be alnum.
+        assert_eq!(sanitize_key(".hidden-"), "hidden");
+        assert_eq!(sanitize_key("_"), "root");
     }
 
     #[test]
@@ -1714,8 +1728,9 @@ mod tests {
     fn test_map_power() {
         let s = PowerSample {
             // The real shapes: `zone` is the powercap directory name, `name` is
-            // the label read out of it. The colon matters — `sanitize_key`
-            // leaves it alone, so it reaches the key and the GUI parses it back.
+            // the label read out of it. The colon is grammar-illegal (RFC 03
+            // §2), so `sanitize_key` maps it to `_`; the raw zone rides as the
+            // `zone` label and the friendly name as `name`.
             rapl_watts: vec![("intel-rapl:0".to_string(), "package-0".to_string(), 12.5)],
             fans: vec![FanReading {
                 chip: "nct6798".to_string(),
@@ -1732,8 +1747,8 @@ mod tests {
         let m = map_power(&s);
         let rapl = m
             .iter()
-            .find(|x| x.metric == "power/rapl/intel-rapl:0/watts")
-            .expect("the zone reaches the key verbatim, colon and all");
+            .find(|x| x.metric == "power/rapl/intel-rapl_0/watts")
+            .expect("the zone reaches the key sanitized (colon is grammar-illegal)");
         assert_eq!(rapl.value, TelemetryValue::Gauge(12.5));
         // The friendly name rides as a label — it is what the GUI displays.
         assert_eq!(
@@ -1752,14 +1767,14 @@ mod tests {
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "battery/BAT0/capacity")
+                .find(|x| x.metric == "battery/bat0/capacity")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(87.0)
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "battery/BAT0/status")
+                .find(|x| x.metric == "battery/bat0/status")
                 .unwrap()
                 .value,
             TelemetryValue::Text("Discharging".to_string())

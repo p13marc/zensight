@@ -274,7 +274,7 @@ fn collector_inline_families_are_registered() {
         // sensors/*
         "sensors/coretemp/core_0/temp",
         "sensors/coretemp/core_0/critical",
-        "sensors/dell_ddv/CPU_Fan/rpm",
+        "sensors/dell_ddv/cpu_fan/rpm",
         // process/{rank}/* — the `collect.processes` top-N stream. Absent from
         // this list until 2026-07-16, which is how it shipped unregistered: the
         // flag defaults off, so nothing exercised it and only the runtime

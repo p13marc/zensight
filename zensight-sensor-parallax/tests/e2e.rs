@@ -248,13 +248,13 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     // Subscribe FIRST so the very first published frame is observed.
     let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
     let sub = viewer
-        .declare_subscriber(&preview_key)
+        .declare_subscriber(preview_key.as_keyexpr())
         .await
         .expect("declare preview subscriber");
     // Subscribe to the per-stream status doc BEFORE opening (v1 state has no
     // storage in this harness; LWW without a seed means catch-the-transition).
     let status_sub = viewer
-        .declare_subscriber(v1ctx().state_key(&["stream", "test0"]))
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(v1ctx().state_key(&["stream", "test0"])))
         .await
         .expect("declare status sub");
 
@@ -356,11 +356,11 @@ async fn open_h264_video_streams_with_keyframe_control() {
     // (asserted below via the status doc).
     let video_key = v1ctx().media_video_key("test0", "h264", "medium");
     let sub = viewer
-        .declare_subscriber(&video_key)
+        .declare_subscriber(video_key.as_keyexpr())
         .await
         .expect("declare video subscriber");
     let status_sub = viewer
-        .declare_subscriber(v1ctx().state_key(&["stream", "test0"]))
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(v1ctx().state_key(&["stream", "test0"])))
         .await
         .expect("declare status sub");
 
@@ -560,15 +560,15 @@ async fn two_viewers_on_distinct_tiers_stream_independently() {
     let low_key = v1ctx().media_video_key("test0", "h264", "low");
     let high_key = v1ctx().media_video_key("test0", "h264", "high");
     let low_sub = viewer
-        .declare_subscriber(&low_key)
+        .declare_subscriber(low_key.as_keyexpr())
         .await
         .expect("declare low-tier subscriber");
     let high_sub = viewer
-        .declare_subscriber(&high_key)
+        .declare_subscriber(high_key.as_keyexpr())
         .await
         .expect("declare high-tier subscriber");
     let status_sub = viewer
-        .declare_subscriber(v1ctx().state_key(&["stream", "test0"]))
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(v1ctx().state_key(&["stream", "test0"])))
         .await
         .expect("declare status sub");
 
@@ -730,7 +730,7 @@ async fn stats_ticker_publishes_fps_telemetry() {
     // Keep a media viewer subscribed so the 1 s idle reaper never fires.
     let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
     let media_sub = viewer
-        .declare_subscriber(&preview_key)
+        .declare_subscriber(preview_key.as_keyexpr())
         .await
         .expect("declare preview subscriber");
 
@@ -808,7 +808,7 @@ async fn close_and_idle_reaper_tear_stream_down() {
 
     let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
     let sub = viewer
-        .declare_subscriber(&preview_key)
+        .declare_subscriber(preview_key.as_keyexpr())
         .await
         .expect("declare preview subscriber");
 
@@ -892,7 +892,7 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
 
     // Watch the status transitions BEFORE opening.
     let status_sub = viewer
-        .declare_subscriber(v1ctx().state_key(&["stream", "deadcam"]))
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(v1ctx().state_key(&["stream", "deadcam"])))
         .await
         .expect("declare status subscriber");
 

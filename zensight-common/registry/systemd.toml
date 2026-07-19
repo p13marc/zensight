@@ -389,6 +389,7 @@ description = "current expectations configuration (sentinel expectations hot-swa
 [[procedure]]
 path = "expectations/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "ExpectationsConfig"
 reply = "Ack"
 since = "1.0"
@@ -403,6 +404,7 @@ description = "gated-action switch state + last action outcome"
 [[procedure]]
 path = "action/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "ServiceAction"
 reply = "Ack"
 idempotent = false

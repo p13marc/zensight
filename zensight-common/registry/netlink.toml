@@ -920,6 +920,7 @@ description = "current expectations configuration (sentinel expectations hot-swa
 [[procedure]]
 path = "expectations/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "ExpectationCommand"
 reply = "Ack"
 since = "1.0"

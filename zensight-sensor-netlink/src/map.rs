@@ -46,7 +46,8 @@ pub struct RouteSummary {
 /// mapping is unit-testable without a live WG device).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WgPeerView {
-    /// Short peer identifier (e.g. first chars of the base64 public key).
+    /// Short peer identifier (lowercase hex of the pubkey's first bytes —
+    /// always a grammar-legal key chunk).
     pub id: String,
     pub endpoint: Option<String>,
     /// Seconds since the last successful handshake; `None` if it never happened.
@@ -1377,7 +1378,7 @@ mod tests {
     fn wireguard_points_shape() {
         let peers = vec![
             WgPeerView {
-                id: "AbCd1234".into(),
+                id: "abcd1234".into(),
                 endpoint: Some("203.0.113.5:51820".into()),
                 handshake_age_s: Some(30),
                 rx_bytes: 1000,
@@ -1385,7 +1386,7 @@ mod tests {
                 allowed_ips: Some("10.8.0.2/32".into()),
             },
             WgPeerView {
-                id: "Zz99".into(),
+                id: "zz99".into(),
                 endpoint: None,
                 handshake_age_s: None, // never handshaked → down
                 rx_bytes: 0,
@@ -1400,25 +1401,25 @@ mod tests {
             TelemetryValue::Gauge(2.0)
         );
         assert_eq!(
-            find("wireguard/wg0/AbCd1234/rx_bytes").value,
+            find("wireguard/wg0/abcd1234/rx_bytes").value,
             TelemetryValue::Counter(1000)
         );
         assert_eq!(
-            find("wireguard/wg0/AbCd1234/up").value,
+            find("wireguard/wg0/abcd1234/up").value,
             TelemetryValue::Boolean(true)
         );
         assert_eq!(
-            find("wireguard/wg0/Zz99/up").value,
+            find("wireguard/wg0/zz99/up").value,
             TelemetryValue::Boolean(false)
         );
         // The never-handshaked peer has no age point.
         assert!(
             pts.iter()
-                .all(|p| p.metric != "wireguard/wg0/Zz99/last_handshake_age_s")
+                .all(|p| p.metric != "wireguard/wg0/zz99/last_handshake_age_s")
         );
         // wg-quick AllowedIPs enrichment (#268) rides on the peer's rx_bytes point.
         assert_eq!(
-            find("wireguard/wg0/AbCd1234/rx_bytes")
+            find("wireguard/wg0/abcd1234/rx_bytes")
                 .labels
                 .get("allowed_ips")
                 .map(String::as_str),

@@ -64,7 +64,7 @@ impl LivelinessManager {
 
         let sensor_token = session
             .liveliness()
-            .declare_token(&sensor_key)
+            .declare_token(sensor_key.as_keyexpr())
             .await
             .map_err(|e| {
                 SensorError::liveliness(format!("Failed to declare sensor token: {}", e))
@@ -100,7 +100,7 @@ impl LivelinessManager {
         let token = self
             .session
             .liveliness()
-            .declare_token(&device_key)
+            .declare_token(device_key.as_keyexpr())
             .await
             .map_err(|e| {
                 SensorError::liveliness(format!(

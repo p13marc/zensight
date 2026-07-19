@@ -98,7 +98,7 @@ async fn main() {
                 )
                 && let Some(producer) = parsed.producer.as_ref()
             {
-                let tail: Vec<&str> = parsed.subject.iter().map(String::as_str).collect();
+                let tail: &[&str] = &parsed.subject;
                 seen_log
                     .lock()
                     .unwrap()

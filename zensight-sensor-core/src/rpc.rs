@@ -50,7 +50,7 @@ where
             .declare_queryable(key.as_str())
             .await
             .map_err(|e| SensorError::Publish {
-                key: key.clone(),
+                key: key.clone().into(),
                 message: format!("failed to declare procedure queryable: {e}"),
             })?;
     tracing::info!(key = %key, "procedure ready");

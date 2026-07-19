@@ -1,0 +1,204 @@
+# RFC 08 §5 type table (v1.5/H6): every type/request/reply/attachment name
+# across the registry set must resolve here — the zenkey-build lint fails
+# the build otherwise. `kind` names the schema-document kind served by
+# `describe` (RFC 08 §7).
+
+[types.Ack]
+kind = "json-schema"
+
+[types.ActionStatus]
+kind = "json-schema"
+
+[types.Alert]
+kind = "json-schema"
+
+[types.AliasRecord]
+kind = "json-schema"
+
+[types.ArtifactAck]
+kind = "json-schema"
+
+[types.ArtifactRequest]
+kind = "json-schema"
+
+[types.ArtifactStatus]
+kind = "json-schema"
+
+[types.CaptureDiskCommand]
+kind = "json-schema"
+
+[types.CaptureDiskStatus]
+kind = "json-schema"
+
+[types.CgroupNode]
+kind = "json-schema"
+
+[types.CollectionConfig]
+kind = "json-schema"
+
+[types."Command<StreamControl>"]
+kind = "json-schema"
+
+[types.DetectorConfig]
+kind = "json-schema"
+
+[types.ErrorReport]
+kind = "json-schema"
+
+[types.ExpectationCommand]
+kind = "json-schema"
+
+[types.ExpectationsConfig]
+kind = "json-schema"
+
+[types.FilterConfig]
+kind = "json-schema"
+
+[types.FrameMeta]
+kind = "json-schema"
+
+[types.HealthSnapshot]
+kind = "json-schema"
+
+[types.HostEntity]
+kind = "json-schema"
+
+[types.HostEvidence]
+kind = "json-schema"
+
+[types.LatencyReport]
+kind = "json-schema"
+
+[types.NameObservation]
+kind = "json-schema"
+
+[types.OperatorAssertion]
+kind = "json-schema"
+
+[types.PdnsRecord]
+kind = "json-schema"
+
+[types.RegistrySlice]
+kind = "json-schema"
+
+[types.SensorInfo]
+kind = "json-schema"
+
+[types.ServiceAction]
+kind = "json-schema"
+
+[types.StreamStatus]
+kind = "json-schema"
+
+[types.TelemetryPoint]
+kind = "json-schema"
+
+[types.ThreatIntelConfig]
+kind = "json-schema"
+
+[types.TopicConfig]
+kind = "json-schema"
+
+[types.TopicStatus]
+kind = "json-schema"
+
+[types.UnitDetail]
+kind = "json-schema"
+
+[types."Vec<AddressRecord>"]
+kind = "json-schema"
+
+[types."Vec<AssetRecord>"]
+kind = "json-schema"
+
+[types."Vec<BandwidthRecord>"]
+kind = "json-schema"
+
+[types."Vec<CaptureRecord>"]
+kind = "json-schema"
+
+[types."Vec<ConnectionRecord>"]
+kind = "json-schema"
+
+[types."Vec<DnsRecord>"]
+kind = "json-schema"
+
+[types."Vec<EncryptedDnsRecord>"]
+kind = "json-schema"
+
+[types."Vec<EventRecord>"]
+kind = "json-schema"
+
+[types."Vec<FlowRecord>"]
+kind = "json-schema"
+
+[types."Vec<HttpRecord>"]
+kind = "json-schema"
+
+[types."Vec<IpfixRecord>"]
+kind = "json-schema"
+
+[types."Vec<Ja4hRecord>"]
+kind = "json-schema"
+
+[types."Vec<LogRecord>"]
+kind = "json-schema"
+
+[types."Vec<MatrixRecord>"]
+kind = "json-schema"
+
+[types."Vec<NameVal>"]
+kind = "json-schema"
+
+[types."Vec<NeighborRecord>"]
+kind = "json-schema"
+
+[types."Vec<NftRecord>"]
+kind = "json-schema"
+
+[types."Vec<ProcessRecord>"]
+kind = "json-schema"
+
+[types."Vec<QuicRecord>"]
+kind = "json-schema"
+
+[types."Vec<RetransmitRecord>"]
+kind = "json-schema"
+
+[types."Vec<RouteChangeRecord>"]
+kind = "json-schema"
+
+[types."Vec<RouteRecord>"]
+kind = "json-schema"
+
+[types."Vec<SocketRecord>"]
+kind = "json-schema"
+
+[types."Vec<SshRecord>"]
+kind = "json-schema"
+
+[types."Vec<StreamDescriptor>"]
+kind = "json-schema"
+
+[types."Vec<TalkerRecord>"]
+kind = "json-schema"
+
+[types."Vec<TcRecord>"]
+kind = "json-schema"
+
+[types."Vec<TimerRecord>"]
+kind = "json-schema"
+
+[types."Vec<TlsRecord>"]
+kind = "json-schema"
+
+[types."Vec<UnitRecord>"]
+kind = "json-schema"
+
+[types."Vec<XfrmRecord>"]
+kind = "json-schema"
+
+# The `introspect` raw-TOML reply sentinel (RFC 08 §6) — text, not a
+# schema'd payload.
+[types.toml]
+kind = "raw"

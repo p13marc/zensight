@@ -139,9 +139,9 @@ fn parse_host_evidence_key(key: &str) -> Option<(String, String)> {
     let sensor = parsed.producer.as_ref()?.name().to_string();
     match parsed.subject.as_slice() {
         [evidence, device_kw, device]
-            if evidence == "evidence" && device_kw == "device" && !device.is_empty() =>
+            if *evidence == "evidence" && *device_kw == "device" && !device.is_empty() =>
         {
-            Some((sensor, device.clone()))
+            Some((sensor, device.to_string()))
         }
         _ => None,
     }

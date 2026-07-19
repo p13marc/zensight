@@ -638,6 +638,7 @@ description = "capture-to-disk status (mode, ring occupancy, retention, last eve
 [[procedure]]
 path = "capture_disk/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "CaptureDiskCommand"
 reply = "Ack"
 since = "1.0"
@@ -653,6 +654,7 @@ description = "current detectors configuration (runtime detection tuning)"
 [[procedure]]
 path = "detectors/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "DetectorConfig"
 reply = "Ack"
 since = "1.0"
@@ -668,6 +670,7 @@ description = "current capture_filter configuration (reloadable packet-tier BPF 
 [[procedure]]
 path = "capture_filter/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "FilterConfig"
 reply = "Ack"
 since = "1.0"
@@ -683,6 +686,7 @@ description = "current threat_intel configuration (IOC/YARA hot-reload)"
 [[procedure]]
 path = "threat_intel/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "ThreatIntelConfig"
 reply = "Ack"
 since = "1.0"

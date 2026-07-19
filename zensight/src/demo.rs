@@ -730,28 +730,28 @@ impl DemoSimulator {
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "disk/_/total",
+                "disk/root/total",
                 TelemetryValue::Counter(total_disk),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "disk/_/used",
+                "disk/root/used",
                 TelemetryValue::Counter(used_disk),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "disk/_/available",
+                "disk/root/available",
                 TelemetryValue::Counter(available_disk),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "disk/_/usage_percent",
+                "disk/root/usage_percent",
                 TelemetryValue::Gauge(disk_pct.clamp(0.0, 99.0)),
                 timestamp,
             ));
@@ -864,7 +864,7 @@ impl DemoSimulator {
         points.push(self.make_point_with_labels(
             Protocol::Sysinfo,
             server,
-            "sensors/coretemp/Package_id_0/temp",
+            "sensors/coretemp/package_id_0/temp",
             TelemetryValue::Gauge(package_temp.clamp(20.0, 105.0)),
             timestamp,
             hwmon("coretemp", "Package id 0"),
@@ -873,7 +873,7 @@ impl DemoSimulator {
         points.push(self.make_point_with_labels(
             Protocol::Sysinfo,
             server,
-            "sensors/coretemp/Package_id_0/critical",
+            "sensors/coretemp/package_id_0/critical",
             TelemetryValue::Gauge(100.0),
             timestamp,
             hwmon("coretemp", "Package id 0"),
@@ -882,7 +882,7 @@ impl DemoSimulator {
         points.push(self.make_point_with_labels(
             Protocol::Sysinfo,
             server,
-            "sensors/acpitz/Ambient/temp",
+            "sensors/acpitz/ambient/temp",
             TelemetryValue::Gauge(ambient),
             timestamp,
             hwmon("acpitz", "Ambient"),
@@ -890,12 +890,15 @@ impl DemoSimulator {
 
         // Fans. NOT oscillating_value(): it clamps to 0..100 and an RPM is
         // ~3000. Derived from load and clamped here, as cpu/{n}/frequency does.
-        for (label, base) in [("CPU_Fan", 2400.0), ("Video_Fan", 2100.0)] {
+        for (chunk, label, base) in [
+            ("cpu_fan", "CPU_Fan", 2400.0),
+            ("video_fan", "Video_Fan", 2100.0),
+        ] {
             let rpm = base + (cpu / 100.0) * 2600.0 + self.rng.random_range(-120.0..120.0);
             points.push(self.make_point_with_labels(
                 Protocol::Sysinfo,
                 server,
-                &format!("sensors/dell_ddv/{label}/rpm"),
+                &format!("sensors/dell_ddv/{chunk}/rpm"),
                 TelemetryValue::Gauge(rpm.clamp(0.0, 7500.0).round()),
                 timestamp,
                 hwmon("dell_ddv", label),
@@ -908,7 +911,7 @@ impl DemoSimulator {
         points.push(self.make_point_with_labels(
             Protocol::Sysinfo,
             server,
-            "battery/BAT0/capacity",
+            "battery/bat0/capacity",
             TelemetryValue::Gauge(capacity),
             timestamp,
             vec![("name".to_string(), "BAT0".to_string())],
@@ -916,24 +919,24 @@ impl DemoSimulator {
         points.push(self.make_point_with_labels(
             Protocol::Sysinfo,
             server,
-            "battery/BAT0/status",
+            "battery/bat0/status",
             TelemetryValue::Text(if capacity > 95.0 { "Full" } else { "Charging" }.to_string()),
             timestamp,
             vec![("name".to_string(), "BAT0".to_string())],
         ));
 
-        // RAPL zones. The key carries the raw zone (sanitize_key leaves the
-        // colon alone); the friendly name rides as a label, which is what the
-        // panel prefers to display.
-        for (zone, name, base) in [
-            ("intel-rapl:0", "package-0", 14.0),
-            ("intel-rapl:0:0", "core", 9.0),
+        // RAPL zones. The key carries the sanitized zone (the colon is
+        // grammar-illegal, so `sanitize_key` maps it to `_`); the raw zone and
+        // the friendly name ride as labels — the panel prefers the name.
+        for (key_zone, zone, name, base) in [
+            ("intel-rapl_0", "intel-rapl:0", "package-0", 14.0),
+            ("intel-rapl_0_0", "intel-rapl:0:0", "core", 9.0),
         ] {
             let watts = base * (0.35 + cpu / 100.0) + self.rng.random_range(-0.8..0.8);
             points.push(self.make_point_with_labels(
                 Protocol::Sysinfo,
                 server,
-                &format!("power/rapl/{zone}/watts"),
+                &format!("power/rapl/{key_zone}/watts"),
                 TelemetryValue::Gauge(watts.max(0.0)),
                 timestamp,
                 vec![

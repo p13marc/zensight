@@ -330,7 +330,7 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
         .metrics
         .iter()
         .filter_map(|(m, p)| match Subject::parse_metric(m) {
-            Some(Subject::SocketsTcpByCong { algo }) => Some((algo, num(Some(&p.value)))),
+            Some(Subject::SocketsTcpByCong { algo }) => Some((algo.to_string(), num(Some(&p.value)))),
             _ => None,
         })
         .collect();
@@ -1369,7 +1369,7 @@ fn neighbor_state_mix(state: &DeviceDetailState) -> Vec<(String, f64)> {
         .metrics
         .iter()
         .filter_map(|(m, p)| match Subject::parse_metric(m) {
-            Some(Subject::NeighborsByState { state }) => Some((state, tv_num(&p.value)?)),
+            Some(Subject::NeighborsByState { state }) => Some((state.to_string(), tv_num(&p.value)?)),
             _ => None,
         })
         .collect();
@@ -1604,7 +1604,7 @@ fn event_family_totals(state: &DeviceDetailState) -> Vec<(String, f64)> {
         if let Some(Subject::Events { family, .. }) = Subject::parse_metric(m)
             && let Some(v) = tv_num(&p.value)
         {
-            *map.entry(family).or_default() += v;
+            *map.entry(family.to_string()).or_default() += v;
         }
     }
     let mut v: Vec<(String, f64)> = map.into_iter().collect();

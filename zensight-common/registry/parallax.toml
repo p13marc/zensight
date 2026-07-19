@@ -169,6 +169,7 @@ description = "the configured stream catalogue (descriptors incl. open state)"
 [[procedure]]
 path = "stream/set"
 kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
 request = "Command<StreamControl>"
 reply = "Ack"
 idempotent = false

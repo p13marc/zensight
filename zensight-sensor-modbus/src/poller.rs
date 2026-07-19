@@ -54,7 +54,7 @@ impl ModbusPoller {
                 &zensight_common::PROFILE,
                 "modbus",
             )
-            .telemetry_prefix(),
+            .telemetry_prefix().into(),
             register_names: config.register_names.clone(),
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,
