@@ -11,10 +11,11 @@
 // standard zenohd build): zenoh-plugin-storage-manager, zenoh-backend-fs.
 //
 // KEYS HERE ARE **FULL**, AND THAT IS CORRECT (#466, RFC 09 §0).
-// Applications set the deployment base (`zensight`) as their Zenoh session
-// `namespace` and never spell it — but a *router* has no namespace, so what
-// reaches these storages is the full `zensight/v1/...` key. Do not "fix" these
-// selectors to be base-relative: they would match nothing.
+// A *router* has no namespace, so what reaches these storages is the full
+// wire key. This example assumes the default base-less deployment (no session
+// namespace set — RFC 03 §1.1 amended), where the full key starts at `v1/…`.
+// If your deployment sets a base (`zenoh.namespace`, e.g. `zensight`), prefix
+// every `key_expr`/`strip_prefix` below with it (`zensight/v1/…`).
 {
   mode: "router",
 
@@ -52,8 +53,8 @@
         // errors, alerts, evidence, expectations, stream/device docs. LWW per
         // key; DELETE tombstones retire a doc.
         "zensight-latest": {
-          key_expr: "zensight/v1/*/state/**",
-          strip_prefix: "zensight/v1",
+          key_expr: "v1/*/state/**",
+          strip_prefix: "v1",
           volume: { id: "fs", dir: "latest" },
           // Tombstone lifetime (RFC 09 §2.3): prune storage metadata —
           // including deletion tombstones — after 24 h. Must be ≥ the longest
@@ -64,8 +65,8 @@
         // The catalog service origin: entity/alias docs, claims, pdns. Named
         // explicitly — the `*` in the selector above cannot match `@catalog`.
         "zensight-catalog": {
-          key_expr: "zensight/v1/@catalog/state/**",
-          strip_prefix: "zensight/v1/@catalog",
+          key_expr: "v1/@catalog/state/**",
+          strip_prefix: "v1/@catalog",
           volume: { id: "fs", dir: "catalog" },
           garbage_collection: { period: 3600, lifespan: 86400 },
         },

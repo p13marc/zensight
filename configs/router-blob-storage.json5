@@ -11,16 +11,17 @@
 //
 // The two key ranges below cover the v1 `@blob` plane tiers (RFC 07 §2):
 // every host's Tier-2 store/tree prefixes
-// (`zensight/v1/<origin>/@blob/{store,tree}` — what
+// (`v1/<origin>/@blob/{store,tree}` on the wire — what
 // `zensight_common::command::artifact_{store,tree}_prefix` derive). Chunks
 // dedupe per origin; the Tier-1 `@blob/artifact` chunks are deliberately NOT
 // stored — they are one-shot deliveries owned by the artifact channel.
 //
 // KEYS HERE ARE **FULL**, AND THAT IS CORRECT (#466, RFC 09 §0).
-// Applications set the deployment base (`zensight`) as their Zenoh session
-// `namespace` and never spell it — but a *router* has no namespace, so what
-// reaches these storages is the full `zensight/v1/...` key. Do not "fix" these
-// selectors to be base-relative: they would match nothing.
+// A *router* has no namespace, so what reaches these storages is the full
+// wire key. This example assumes the default base-less deployment (no session
+// namespace set — RFC 03 §1.1 amended), where the full key starts at `v1/…`.
+// If your deployment sets a base (`zenoh.namespace`, e.g. `zensight`), prefix
+// every `key_expr`/`strip_prefix` below with it (`zensight/v1/…`).
 {
   mode: "router",
 
@@ -47,14 +48,14 @@
         // default last-writer-wins reconciliation is a no-op and re-PUTs are
         // idempotent — no timestamping concerns.
         "zensight-blob-chunks": {
-          key_expr: "zensight/v1/*/@blob/store/**",
-          strip_prefix: "zensight/v1",
+          key_expr: "v1/*/@blob/store/**",
+          strip_prefix: "v1",
           volume: { id: "fs", dir: "zensight-blob-chunks" },
         },
         // Tree indexes: .../@blob/tree/<id> -> encoded TreeIndex.
         "zensight-blob-trees": {
-          key_expr: "zensight/v1/*/@blob/tree/**",
-          strip_prefix: "zensight/v1",
+          key_expr: "v1/*/@blob/tree/**",
+          strip_prefix: "v1",
           volume: { id: "fs", dir: "zensight-blob-trees" },
         },
       },

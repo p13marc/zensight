@@ -186,7 +186,7 @@ pub enum OtlpProtocol {
 pub struct FilterConfig {
     /// Zenoh subscription key expression for telemetry (R6/#357). Defaults to the
     /// full telemetry class selector; narrow it (e.g.
-    /// `zensight/v1/*/telemetry/netring/**`) to tame the
+    /// `v1/*/telemetry/netring/**`) to tame the
     /// firehose at the *subscription* — unwanted protocols never reach this
     /// exporter over the wire, and the state plane / non-telemetry classes
     /// can't match the telemetry class selector by construction. The

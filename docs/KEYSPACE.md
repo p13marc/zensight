@@ -122,14 +122,20 @@ RFC: [03 §1.2](https://github.com/p13marc/zenkey/blob/main/rfcs/03-grammar.md),
 
 ## The base is the session namespace, not a chunk anyone types
 
-Application code **never spells `zensight`**. The base is set once, as the Zenoh
-session `namespace` (`zenoh.namespace`, default `zensight`, override
-`ZENSIGHT_ZENOH_NAMESPACE`), and the runtime prefixes it onto every keyexpr the
-session emits, strips it on delivery, and **filters ingress from outside it**
-(RFC 03 §1.1, 09 §0 — issue #466).
+Application code **never spells the base**. The base names the *deployment*,
+not the software, and is **optional — empty by default** (RFC 03 §1.1 as
+amended): with no `zenoh.namespace` set, no session namespace is set either
+(Zenoh's own default) and the deployment's full wire keys start at `v1/…`.
+Setting a base (`zenoh.namespace`, override `ZENSIGHT_ZENOH_NAMESPACE`) is the
+opt-in isolation knob for running several deployments on one Zenoh
+infrastructure: the runtime prefixes it onto every keyexpr the session emits,
+strips it on delivery, and **filters ingress from outside it** (RFC 09 §0 —
+issue #466). All participants of one deployment must agree on it — a
+mismatched base (empty vs. named, or two different names) partitions them.
 
 So there are two views of every key, and which one you are in is a property of
-the *session*, not the key:
+the *session*, not the key (wire keys shown for a deployment with base
+`zensight`; in the default base-less deployment the two views coincide):
 
 | | sees | builds keys with |
 |---|---|---|
@@ -145,8 +151,9 @@ for.
 Two CI guards keep this true: application source may not contain a `"zensight/`
 literal at all, and only `zensight_common::session` may call `zenoh::open` —
 because the namespace is per-session, and a component that hand-rolls its own
-`zenoh::Config` would silently publish at the bus root and go deaf with no error.
-(There were five such builders before #466. There is one now.)
+`zenoh::Config` would silently miss the deployment's configured base and go
+deaf with no error. (There were five such builders before #466. There is one
+now.)
 
 The wire is unchanged by all of this: `zensight-sensor-core/tests/cutover_e2e.rs`
 pins it with a namespaced sensor and an **un-namespaced** observer, so the same
@@ -156,7 +163,9 @@ key is asserted in both spellings at once.
 
 Isolated verification: `cargo run -p zensight-common --example v1_probe` opens
 a multicast-scouting-off listener, watches the bus, exercises the @rpc plane,
-and fails if the retired legacy bus (`zensight/**`) carries anything. Point
+and fails if the deployment root carries non-v1 traffic (the retired legacy
+bus). It observes the base-less wire by default; set
+`ZENSIGHT_ZENOH_NAMESPACE` to probe a based deployment. Point
 sensors at it with `ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17471
 ZENSIGHT_ZENOH_SCOUTING=false` (the `zenoh.scouting` config knob / env
 override disables multicast discovery so a session can never join a mesh

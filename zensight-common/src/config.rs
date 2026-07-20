@@ -38,11 +38,14 @@ pub struct ZenohConfig {
     /// string convention. Two independent deployments on one Zenoh network
     /// use different bases and cannot see each other.
     ///
-    /// **This is the only place an application spells the base.** Multi-chunk
-    /// bases are legal (`acme/fleet-a`); wildcards are not.
-    ///
-    /// Override with `ZENSIGHT_ZENOH_NAMESPACE`.
-    #[serde(default = "default_namespace")]
+    /// **Optional — empty by default.** The base names a *deployment*, not
+    /// the software, so there is no software default: unset/empty means no
+    /// session namespace is set (Zenoh's own default) and the deployment's
+    /// keys live at the bus root (`v1/…`). Set it — here or via
+    /// `ZENSIGHT_ZENOH_NAMESPACE` — to isolate deployments sharing one Zenoh
+    /// infrastructure; all participants of one deployment must agree on it.
+    /// Multi-chunk bases are legal (`acme/fleet-a`); wildcards are not.
+    #[serde(default)]
     pub namespace: String,
 }
 
@@ -54,10 +57,6 @@ fn default_mode() -> String {
     "peer".to_string()
 }
 
-fn default_namespace() -> String {
-    crate::DEFAULT_BASE.to_string()
-}
-
 impl Default for ZenohConfig {
     fn default() -> Self {
         Self {
@@ -65,7 +64,10 @@ impl Default for ZenohConfig {
             connect: Vec::new(),
             listen: Vec::new(),
             scouting: true,
-            namespace: default_namespace(),
+            // Deliberately empty: the base is per-deployment configuration
+            // with no software default — empty means no session namespace
+            // (keys at the bus root), which is Zenoh's own default.
+            namespace: String::new(),
         }
     }
 }
@@ -145,8 +147,20 @@ mod zenoh_env_tests {
             &[("ZENSIGHT_ZENOH_NAMESPACE", " acme/fleet-a ")],
         );
         assert_eq!(out.namespace, "acme/fleet-a");
-        // Unset leaves the default in place.
-        assert_eq!(over(ZenohConfig::default(), &[]).namespace, "zensight");
+        // Unset leaves the (empty) config value untouched — there is no
+        // default to fall back to.
+        assert_eq!(over(ZenohConfig::default(), &[]).namespace, "");
+    }
+
+    /// The base names a deployment, not the software: neither the Default
+    /// impl nor the serde path (used by binaries with `#[serde(default)]` on
+    /// their whole zenoh block) may invent one — empty (= no session
+    /// namespace) is the default.
+    #[test]
+    fn the_namespace_has_no_default() {
+        assert!(ZenohConfig::default().namespace.is_empty());
+        let parsed: ZenohConfig = json5::from_str("{}").expect("empty zenoh block parses");
+        assert!(parsed.namespace.is_empty());
     }
 
     #[test]

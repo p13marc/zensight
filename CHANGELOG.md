@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **`zenoh.namespace` no longer defaults to `zensight` — the empty base is the
+  legal default** (RFC 03 §1.1 as amended). The base names a *deployment*, not
+  the software, so the software ships no default: unset/empty now means **no
+  session namespace is set** (Zenoh's own default) and the deployment's full
+  wire keys start at `v1/…`. Setting a base (`zenoh.namespace` /
+  `ZENSIGHT_ZENOH_NAMESPACE`) is the opt-in isolation knob for running several
+  deployments on one Zenoh infrastructure. **Migration:** a deployment that
+  relied on the old implicit `zensight` default must now set it explicitly
+  (`zenoh: { namespace: "zensight" }` on every participant, or
+  `ZENSIGHT_ZENOH_NAMESPACE=zensight`) — otherwise its wire moves from
+  `zensight/v1/…` to `v1/…` on upgrade, and mixed old/new fleets cannot see
+  each other. Router storage example configs (`configs/router-*.json5`) and
+  the `v1_probe` example now assume the base-less wire; prefix their selectors
+  with your base if you set one. `zensight_common::DEFAULT_BASE` is renamed to
+  `CONVENTIONAL_BASE` (diagnostics-only — no longer a default).
+
 ## [0.8.0] - 2026-07-16
 
 The v1 keyspace. Every key on the bus moves to the ratified keyspace-v2 grammar

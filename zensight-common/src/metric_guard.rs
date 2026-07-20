@@ -33,9 +33,10 @@ pub fn check_telemetry_key(key: &str) {
     // base. A full key here would still *parse* if we searched for "v1/" —
     // which is how this guard used to work, and would mean it kept passing
     // while the publisher put keys somewhere nothing is listening. Fail on it
-    // instead: a full key reaching a publisher is a bug in the caller.
+    // instead: a full key reaching a publisher is a bug in the caller. The
+    // check is heuristic — it only catches the conventional base spelling.
     debug_assert!(
-        !key.starts_with(crate::DEFAULT_BASE),
+        !key.starts_with(crate::CONVENTIONAL_BASE),
         "the publish path was handed a FULL key {key:?} — application keys are base-relative \
          (#466) and the session namespace supplies the base"
     );

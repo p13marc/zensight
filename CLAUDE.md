@@ -120,12 +120,17 @@ Netring detector features are documented in `zensight-sensor-netring/docs/detect
 ## Configuration
 
 JSON5 in [`configs/`](configs/), one per crate. Shared Zenoh block, overridable via
-`ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN}`:
+`ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING,NAMESPACE}`:
 
 ```json5
 { zenoh: { mode: "peer", connect: ["tcp/localhost:7447"], listen: [] },
   serialization: "cbor" }   // "json" or "cbor" (cbor is the default)
 ```
+
+The optional `zenoh.namespace` is the deployment base (RFC 03 §1.1): **empty by
+default** (no session namespace — keys at the bus root, Zenoh's own default);
+set it to isolate deployments sharing one Zenoh infrastructure. All
+participants of one deployment must agree on it.
 
 ## Development Notes
 
