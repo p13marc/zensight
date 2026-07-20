@@ -15,12 +15,12 @@ Resource attributes: `service.name` (default `zensight`), optional
 
 Two subscribers, same split as the Prometheus exporter:
 
-- **Telemetry** on `filters.key_expr` (default `zensight/v1/*/telemetry/**`,
+- **Telemetry** on `filters.key_expr` (default `v1/*/telemetry/**`,
   the v1 telemetry class selector — the class chunk *is* the filter, so state
   and the `@rpc`/`@media`/`@blob` planes never arrive and nothing is discarded
-  client-side); narrow it — e.g. `zensight/v1/*/telemetry/netring/**` — to
+  client-side); narrow it — e.g. `v1/*/telemetry/netring/**` — to
   tame the firehose at the subscription.
-- **Alerts** on `zensight/v1/*/state/*/alert/*` (when `export_alerts` or
+- **Alerts** on `v1/*/state/*/alert/*` (when `export_alerts` or
   `traces.enabled`) — alerts are state-class keys the telemetry selector
   cannot see.
 

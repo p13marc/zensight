@@ -69,11 +69,14 @@ sudo podman run -d --name zensight-sensors \
   ghcr.io/p13marc/zensight-sensors:latest
 ```
 
-`ZENSIGHT_ZENOH_CONNECT` is the **only supported knob** and it is required —
-the container exits immediately with a usage message without it. (For a
-single-host demo with `--net=host`, `tcp/127.0.0.1:7447` reaches a local
-`just gui`.) `ZENSIGHT_ZENOH_MODE`/`ZENSIGHT_ZENOH_LISTEN` technically pass
-through to the sensors but are unsupported for this image.
+`ZENSIGHT_ZENOH_CONNECT` is the **only required knob** — the container exits
+immediately with a usage message without it. (For a single-host demo with
+`--net=host`, `tcp/127.0.0.1:7447` reaches a local `just gui`.)
+`ZENSIGHT_ZENOH_NAMESPACE` also passes through and is supported: it sets the
+deployment base (empty by default — no session namespace), for isolating
+several deployments on one Zenoh infrastructure; it must match the rest of the
+fleet. `ZENSIGHT_ZENOH_MODE`/`ZENSIGHT_ZENOH_LISTEN` technically pass through
+to the sensors but are unsupported for this image.
 
 ### Why each flag
 

@@ -96,17 +96,23 @@ pub use zenkey::CommonState;
 
 /// ZenSight's application profile (RFC 11 §1): the application name and the
 /// RFC 06 §1 origin salt, plus the once-per-process host-origin mint. The
-/// deployment *base* is deliberately separate — see [`DEFAULT_BASE`].
+/// deployment *base* is deliberately not an application constant — it names
+/// the deployment, not the software, and is optional session configuration
+/// (`zenoh.namespace` / `ZENSIGHT_ZENOH_NAMESPACE`; see [`CONVENTIONAL_BASE`]).
 pub static PROFILE: zenkey::AppProfile = zenkey::AppProfile::new("zensight", "zensight-host-id-v1");
 
-/// The default deployment base (session namespace, RFC 03 §1.1).
+/// The *conventional example* base (session namespace, RFC 03 §1.1).
 ///
+/// **Not a default.** The base names a deployment; the default is *empty* —
+/// no session namespace, keys at the bus root, Zenoh's own default — and a
+/// deployment sets one (`zenoh.namespace` in config, or
+/// `ZENSIGHT_ZENOH_NAMESPACE`) to isolate itself on shared infrastructure.
 /// Keys built through `zenkey` are base-relative (they start at `v1`); the
 /// base is added on egress and stripped on ingress by the Zenoh session
-/// namespace. Only session configuration, router artifacts, and un-namespaced
-/// debug tools may read this — application code building keys never spells
-/// the base.
-pub const DEFAULT_BASE: &str = "zensight";
+/// namespace. Only heuristic diagnostics (which can catch nothing but the
+/// conventional spelling) and un-namespaced debug tools may read this —
+/// application code building keys never spells the base.
+pub const CONVENTIONAL_BASE: &str = "zensight";
 
 /// Initialize tracing with the given configuration.
 ///

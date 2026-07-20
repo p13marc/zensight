@@ -1,5 +1,8 @@
 {
   // Zenoh connection settings
+  // The deployment base (#466) is OPTIONAL: empty by default (keys at the bus
+  // root). Set `namespace` (or ZENSIGHT_ZENOH_NAMESPACE) to isolate this
+  // deployment on shared Zenoh infrastructure.
   zenoh: { mode: "peer" },
 
   // On-demand artifact channel (@rpc artifact/request + @blob delivery) —

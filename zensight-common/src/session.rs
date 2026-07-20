@@ -35,34 +35,30 @@ pub fn build_config(config: &ZenohConfig) -> Result<zenoh::Config> {
 
     // The deployment base as the session namespace (RFC 03 §1.1, 09 §0).
     //
-    // An empty namespace is not "no base" — it is a session that publishes
-    // base-relative keys (`v1/…`) at the *bus root*, which is a different
-    // keyspace from `zensight/v1/…`, invisible to every other participant, and
-    // silent about it. That failure has no error and no symptom except missing
-    // data, so it is rejected here instead.
+    // The base names a *deployment*, not the software, so there is no
+    // software default. An empty/unset namespace is the legal default and
+    // matches Zenoh's own: no session namespace is set and the deployment's
+    // keys live at the bus root (`v1/…`). Setting a base is the opt-in
+    // isolation knob for running several deployments on one Zenoh
+    // infrastructure — a mismatched base (empty vs. named, or two different
+    // names) is the same partition either way: the sessions cannot see each
+    // other.
     let ns = config.namespace.trim();
-    if ns.is_empty() {
-        return Err(Error::Config(
-            "zenoh.namespace must not be empty — it is the deployment base (default \"zensight\"). \
-             An empty namespace publishes base-relative keys at the bus root, where nothing is \
-             listening. Debug tools that want the un-namespaced wire view do not use this helper \
-             (RFC 09 §5)."
-                .into(),
-        ));
+    if !ns.is_empty() {
+        // Zenoh requires a non-wild keyexpr. A wildcard here would be accepted
+        // by `insert_json5` and fail later, at declare time, as a session that
+        // matches nothing.
+        let parsed = KeyExpr::try_from(ns)
+            .map_err(|e| Error::Config(format!("invalid zenoh.namespace {ns:?}: {e}")))?;
+        if parsed.is_wild() {
+            return Err(Error::Config(format!(
+                "zenoh.namespace must not contain wildcards: {ns:?}"
+            )));
+        }
+        zenoh_config
+            .insert_json5("namespace", &format!("{ns:?}"))
+            .map_err(|e| Error::Config(format!("Failed to set namespace: {}", e)))?;
     }
-    // Zenoh requires a non-wild keyexpr. A wildcard here would be accepted by
-    // `insert_json5` and fail later, at declare time, as a session that matches
-    // nothing.
-    let parsed = KeyExpr::try_from(ns)
-        .map_err(|e| Error::Config(format!("invalid zenoh.namespace {ns:?}: {e}")))?;
-    if parsed.is_wild() {
-        return Err(Error::Config(format!(
-            "zenoh.namespace must not contain wildcards: {ns:?}"
-        )));
-    }
-    zenoh_config
-        .insert_json5("namespace", &format!("{ns:?}"))
-        .map_err(|e| Error::Config(format!("Failed to set namespace: {}", e)))?;
 
     // Set connect endpoints
     if !config.connect.is_empty() {
@@ -160,16 +156,19 @@ mod tests {
         assert_eq!(json["namespace"], "acme/fleet-a");
     }
 
-    /// An empty namespace would publish `v1/…` at the bus root — a different
-    /// keyspace, invisible to everyone, with no error at declare or publish
-    /// time. Refuse it at startup, where it is still debuggable.
+    /// The empty base is the legal default (RFC 03 §1.1 as amended): no
+    /// session namespace is set — matching Zenoh's own default — and the
+    /// deployment's keys live at the bus root. Pin that nothing sneaks a
+    /// namespace in.
     #[test]
-    fn an_empty_namespace_is_refused() {
-        let err = build_config(&cfg("   ")).expect_err("empty namespace must not build");
-        assert!(
-            err.to_string().contains("must not be empty"),
-            "unhelpful error: {err}"
-        );
+    fn an_empty_namespace_sets_no_session_namespace() {
+        for empty in ["", "   "] {
+            let c = build_config(&cfg(empty)).expect("empty namespace is the legal default");
+            let json: serde_json::Value = serde_json::from_str(&c.to_string()).unwrap();
+            assert_eq!(json["namespace"], serde_json::Value::Null, "for {empty:?}");
+        }
+        // The unset (Default) path is the same thing.
+        build_config(&ZenohConfig::default()).expect("default config builds");
     }
 
     /// A wildcard namespace is accepted by `insert_json5` and only fails later,

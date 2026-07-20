@@ -4,6 +4,11 @@
     // Mode: "client", "peer", or "router"
     mode: "peer",
 
+    // OPTIONAL — the deployment base (#466), empty by default (no session
+    // namespace; keys at the bus root). Set it — or ZENSIGHT_ZENOH_NAMESPACE —
+    // to isolate this deployment on shared Zenoh infrastructure.
+    // namespace: "my-deployment",
+
     // Endpoints to connect to (for client mode)
     // connect: ["tcp/localhost:7447"],
 
