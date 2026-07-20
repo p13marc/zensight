@@ -98,12 +98,15 @@ pub fn is_telemetry_key(key: &str) -> bool {
 /// perfectly healthy-looking session and an empty dashboard.
 ///
 /// That is the failure this rejects at startup, where it is still legible.
+/// The check is heuristic: it can only catch the *conventional* base spelling
+/// (it has no access to the deployment's actual namespace).
 pub fn validate_relative_selector(ke: &str) -> std::result::Result<(), String> {
-    let base = crate::DEFAULT_BASE;
+    let base = crate::CONVENTIONAL_BASE;
     if let Some(rel) = grammar::strip_base(base, ke) {
         return Err(format!(
             "key expression {ke:?} spells the deployment base. Since #466 the session sets \
-             {base:?} as its Zenoh namespace and every key is base-relative — write {rel:?}."
+             the configured base as its Zenoh namespace and every key is base-relative — \
+             write {rel:?}."
         ));
     }
     zenoh::key_expr::KeyExpr::try_from(ke)

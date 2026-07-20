@@ -559,6 +559,9 @@ mod tests {
         let config = SysinfoSensorConfig::load_from_file(path).expect("configs/sysinfo.json5");
         assert!(config.sysinfo.sensors.exclude_chips.is_empty());
         assert!(!config.sysinfo.alerts.thermal.enabled);
+        // The base is optional and empty by default — the shipped example
+        // deliberately leaves it unset (bus-root deployment).
+        assert_eq!(config.zenoh.namespace, "");
 
         // Then the raw tree: proves the keys exist rather than defaulting.
         let raw: serde_json::Value = json5::from_str(&text).expect("json5");

@@ -2,6 +2,7 @@
   // Zenoh connection settings
   zenoh: {
     mode: "peer",                    // "client", "peer", or "router"
+    // namespace: "my-deployment",  // OPTIONAL deployment base (#466); empty = bus root
     // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
     // listen: ["tcp/0.0.0.0:7448"],    // Listen endpoints (if peer/router)
     // serialization: "json",           // "json" or "cbor"

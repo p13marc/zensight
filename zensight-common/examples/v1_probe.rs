@@ -3,8 +3,8 @@
 //! Opens an ISOLATED listening session (scouting off — it can never join a
 //! mesh beyond the sensors explicitly connecting to it), watches the bus for
 //! a few seconds, then exercises the @rpc plane. Exits non-zero when the
-//! retired legacy bus (`zensight/**`) carries anything or the v1 bus stays
-//! silent.
+//! deployment root carries non-v1 traffic (the retired legacy bus) or the v1
+//! bus stays silent.
 //!
 //! ```bash
 //! PROBE_LISTEN=tcp/127.0.0.1:17471 PROBE_SECS=10 \
@@ -13,6 +13,11 @@
 //!
 //! Point sensors at it with
 //! `ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17471 ZENSIGHT_ZENOH_SCOUTING=false`.
+//!
+//! The probe spells full wire keys (a debug tool sees the un-namespaced wire,
+//! RFC 09 §5). It takes the deployment base from `ZENSIGHT_ZENOH_NAMESPACE` —
+//! empty by default, the base-less bus-root deployment (RFC 03 §1.1) whose
+//! full keys start at `v1/`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -27,6 +32,18 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
+    // The deployment base being observed. Empty (the default) is the base-less
+    // bus-root deployment; `with_base`/`strip_base` are identities for it.
+    let base = std::env::var("ZENSIGHT_ZENOH_NAMESPACE")
+        .map(|b| b.trim().to_string())
+        .unwrap_or_default();
+    let full = |rel: &str| zenkey::grammar::with_base(&base, rel);
+    // Chunk count the base adds in front of every wire key (0 when empty).
+    let base_depth = if base.is_empty() {
+        0
+    } else {
+        base.split('/').count()
+    };
 
     let mut config = zenoh::Config::default();
     // Multicast OFF: the probe can never join a mesh beyond the sensors that
@@ -48,14 +65,25 @@ async fn main() {
     // Anything on the deployment root that is NOT under v1 is a leak. The
     // "not v1" test lives in the callback because the version chunk is plain:
     // `**` reaches it, so the selector alone can no longer exclude our own
-    // traffic (see `zenkey::grammar::VERSION_CHUNK`).
+    // traffic (see `zenkey::grammar::VERSION_CHUNK`). For the base-less
+    // deployment the root is the whole bus (`**`) — the probe is isolated, so
+    // only its own spokes' traffic arrives.
     let legacy_log = legacy.clone();
+    let v1_prefix = format!("{}/", full("v1"));
+    let legacy_selector = if base.is_empty() {
+        "**".to_string()
+    } else {
+        format!("{base}/**")
+    };
     let _legacy_sub = session
-        .declare_subscriber("zensight/**")
-        .callback(move |s| {
-            let key = s.key_expr().as_str();
-            if !key.starts_with("zensight/v1/") {
-                legacy_log.lock().unwrap().push(key.to_string());
+        .declare_subscriber(&legacy_selector)
+        .callback({
+            let v1_prefix = v1_prefix.clone();
+            move |s| {
+                let key = s.key_expr().as_str();
+                if !key.starts_with(&v1_prefix) {
+                    legacy_log.lock().unwrap().push(key.to_string());
+                }
             }
         })
         .await
@@ -72,14 +100,16 @@ async fn main() {
     let v1_log = v1.clone();
     let unreg_log = unregistered.clone();
     let seen_log = telemetry_seen.clone();
+    let v1_selector = full("v1/**");
+    let parse_base = base.clone();
     let _v1_sub = session
-        .declare_subscriber("zensight/v1/**")
+        .declare_subscriber(&v1_selector)
         .callback(move |s| {
             let key = s.key_expr().as_str();
-            // producer = chunk 5 for data classes, chunk 4 origin for planes.
+            // class/producer sit right after the base and version chunks.
             let chunks: Vec<&str> = key.split('/').collect();
-            let bucket = if chunks.len() > 4 {
-                format!("{}/{}", chunks[3], chunks[4])
+            let bucket = if chunks.len() > base_depth + 3 {
+                format!("{}/{}", chunks[base_depth + 2], chunks[base_depth + 3])
             } else {
                 key.to_string()
             };
@@ -90,8 +120,7 @@ async fn main() {
             // point of it), so it strips the base explicitly rather than hunting
             // for "v1/" with a substring search — which would also match a base
             // that happened to contain it (#466).
-            if let Some(parsed) =
-                zensight_common::keyexpr::parse_full_key(zensight_common::DEFAULT_BASE, key)
+            if let Some(parsed) = zensight_common::keyexpr::parse_full_key(&parse_base, key)
                 && matches!(
                     parsed.class,
                     zenkey::grammar::ClassOrPlane::Class(zenkey::grammar::Class::Telemetry)
@@ -127,7 +156,7 @@ async fn main() {
     let origins: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let origins_log = origins.clone();
     let _health_sub = session
-        .declare_subscriber("zensight/v1/*/state/*/health")
+        .declare_subscriber(&full("v1/*/state/*/health"))
         .callback(move |s| {
             if let Ok(snapshot) = decode_auto::<HealthSnapshot>(&s.payload().to_bytes())
                 && let (Some(hid), Some(src)) = (snapshot.host_id, snapshot.source)
@@ -201,23 +230,23 @@ async fn main() {
         if producer.starts_with('@') {
             continue;
         }
-        let n = probe(format!("zensight/v1/*/@rpc/{producer}/introspect")).await;
+        let n = probe(full(&format!("v1/*/@rpc/{producer}/introspect"))).await;
         if n == 0 {
             eprintln!("  !! no introspect reply from {producer}");
             rpc_fail = true;
         }
     }
     if producers.contains("logs") {
-        probe("zensight/v1/*/@rpc/logs/events?max=5".into()).await;
+        probe(full("v1/*/@rpc/logs/events?max=5")).await;
     }
     if producers.contains("systemd") {
-        probe("zensight/v1/*/@rpc/systemd/units".into()).await;
+        probe(full("v1/*/@rpc/systemd/units")).await;
     }
     if producers.contains("parallax") {
-        probe("zensight/v1/*/@rpc/parallax/streams".into()).await;
+        probe(full("v1/*/@rpc/parallax/streams")).await;
     }
-    probe("zensight/v1/*/state/*/alert/*".into()).await;
-    probe("zensight/v1/@catalog/state/entity/*".into()).await;
+    probe(full("v1/*/state/*/alert/*")).await;
+    probe(full("v1/@catalog/state/entity/*")).await;
 
     // == GUI-shaped drill-down phase: origin-scoped GETs, exactly what the
     // device detail tabs send (the fleet probes above cannot catch a broken
@@ -232,7 +261,7 @@ async fn main() {
     for (source, origin) in &origin_map {
         println!("  {source} -> {origin}");
         let drill =
-            |producer: &str, tail: &str| format!("zensight/v1/{origin}/@rpc/{producer}/{tail}");
+            |producer: &str, tail: &str| full(&format!("v1/{origin}/@rpc/{producer}/{tail}"));
         let mut want = Vec::new();
         if producers.contains("sysinfo") {
             want.push(drill("sysinfo", "processes?sort=cpu&top=5"));
@@ -260,7 +289,7 @@ async fn main() {
         // procedure, expect a JPEG preview frame on the concrete media key,
         // then close it — the full GUI tile lifecycle.
         if producers.contains("parallax") {
-            match parallax_tile_roundtrip(&session, origin).await {
+            match parallax_tile_roundtrip(&session, &base, origin).await {
                 Ok(stream) => println!("  parallax tile round-trip on '{stream}' ✓"),
                 Err(e) => {
                     println!("FAIL: parallax tile round-trip: {e}");
@@ -295,8 +324,13 @@ async fn main() {
 
 /// Open the first advertised parallax stream (mjpeg), await one preview frame
 /// on the concrete `@media` key, close the stream. Mirrors the GUI tile.
-async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Result<String, String> {
-    let streams_key = format!("zensight/v1/{origin}/@rpc/parallax/streams");
+async fn parallax_tile_roundtrip(
+    session: &zenoh::Session,
+    base: &str,
+    origin: &str,
+) -> Result<String, String> {
+    let full = |rel: &str| zenkey::grammar::with_base(base, rel);
+    let streams_key = full(&format!("v1/{origin}/@rpc/parallax/streams"));
     let replies = session
         .get(&streams_key)
         .timeout(Duration::from_secs(5))
@@ -314,7 +348,9 @@ async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Resu
         .map(|d| d.stream.clone())
         .ok_or("empty stream catalogue")?;
 
-    let preview_key = format!("zensight/v1/{origin}/@media/parallax/{stream}/preview/jpeg");
+    let preview_key = full(&format!(
+        "v1/{origin}/@media/parallax/{stream}/preview/jpeg"
+    ));
     let sub = session
         .declare_subscriber(&preview_key)
         .await
@@ -325,7 +361,7 @@ async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Resu
         codec: Some("mjpeg".into()),
         tier: None,
     });
-    let set_key = format!("zensight/v1/{origin}/@rpc/parallax/stream/set");
+    let set_key = full(&format!("v1/{origin}/@rpc/parallax/stream/set"));
     let body = serde_json::to_vec(&open).map_err(|e| e.to_string())?;
     let replies = session
         .get(&set_key)

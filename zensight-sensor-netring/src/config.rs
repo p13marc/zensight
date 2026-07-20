@@ -927,6 +927,9 @@ mod tests {
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.netring.capture.to_disk.mode, CaptureDiskMode::Off);
         assert!(cfg.netring.capture.to_disk.dir.is_none());
+        // The base is optional and empty by default — the shipped example
+        // deliberately leaves it unset (bus-root deployment).
+        assert_eq!(cfg.zenoh.namespace, "");
 
         let raw: serde_json::Value = json5::from_str(&text).expect("json5");
         let at = |path: &str| -> serde_json::Value {

@@ -2,13 +2,13 @@
   // Zenoh connection settings
   zenoh: {
     mode: "peer",
-    // namespace: "zensight",       // the deployment base (#466). Set as the Zenoh
-                                    // session namespace: the runtime prefixes it onto
-                                    // every key, strips it on ingress, and filters
-                                    // traffic from other deployments. App code never
-                                    // spells it. Change it only to isolate a second
-                                    // deployment on one network (or via
-                                    // ZENSIGHT_ZENOH_NAMESPACE).
+    // namespace: "my-deployment",  // OPTIONAL — the deployment base (#466), empty
+                                    // by default (no session namespace; keys at the
+                                    // bus root, Zenoh's own default). Set it — or
+                                    // ZENSIGHT_ZENOH_NAMESPACE — to isolate this
+                                    // deployment on shared Zenoh infrastructure: the
+                                    // runtime prefixes it onto every key, strips it
+                                    // on ingress, and filters other deployments' traffic.
                     // "client", "peer", or "router"
     // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
     serialization: "cbor",           // "json" or "cbor"

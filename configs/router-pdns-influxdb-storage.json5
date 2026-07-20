@@ -1,5 +1,5 @@
 // zenohd (router) configuration that captures the ZenSight historical
-// passive-DNS tier (`zensight/v1/@catalog/state/pdns/**`, #310 / RFC 09 §2)
+// passive-DNS tier (`v1/@catalog/state/pdns/**` on the wire, #310 / RFC 09 §2)
 // into an InfluxDB time-series bucket. The catalog publishes a PdnsRecord (an
 // IP's full accumulated name set) on `…/state/pdns/<ip-slug>` every time it
 // learns/updates names for an IP; an InfluxDB-backed storage subscribed on
@@ -26,10 +26,11 @@
 // └──────────────────────────────────────────────────────────────────────────┘
 //
 // KEYS HERE ARE **FULL**, AND THAT IS CORRECT (#466, RFC 09 §0).
-// Applications set the deployment base (`zensight`) as their Zenoh session
-// `namespace` and never spell it — but a *router* has no namespace, so what
-// reaches these storages is the full `zensight/v1/...` key. Do not "fix" these
-// selectors to be base-relative: they would match nothing.
+// A *router* has no namespace, so what reaches these storages is the full
+// wire key. This example assumes the default base-less deployment (no session
+// namespace set — RFC 03 §1.1 amended), where the full key starts at `v1/…`.
+// If your deployment sets a base (`zenoh.namespace`, e.g. `zensight`), prefix
+// every `key_expr`/`strip_prefix` below with it (`zensight/v1/…`).
 {
   mode: "router",
 
@@ -72,8 +73,8 @@
         // common head so each IP's records key on just its ip-slug (the
         // InfluxDB measurement/series), keeping the time series tidy.
         "zensight-pdns": {
-          key_expr: "zensight/v1/@catalog/state/pdns/**",
-          strip_prefix: "zensight/v1/@catalog/state/pdns",
+          key_expr: "v1/@catalog/state/pdns/**",
+          strip_prefix: "v1/@catalog/state/pdns",
           volume: {
             id: "influxdb",
             db: "zensight_pdns",
@@ -85,8 +86,8 @@
 
         // --- v2.x storage variant (UNVERIFIED) ---
         // "zensight-pdns": {
-        //   key_expr: "zensight/v1/@catalog/state/pdns/**",
-        //   strip_prefix: "zensight/v1/@catalog/state/pdns",
+        //   key_expr: "v1/@catalog/state/pdns/**",
+        //   strip_prefix: "v1/@catalog/state/pdns",
         //   volume: {
         //     id: "influxdb2",
         //     db: "zensight_pdns",           // v2 bucket

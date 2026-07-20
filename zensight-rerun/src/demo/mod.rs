@@ -48,7 +48,10 @@ impl DemoContext {
             listen: vec![],
             scouting: false,
             ..Default::default()
-        };
+        }
+        // The base has no default: `ZENSIGHT_ZENOH_NAMESPACE` must name the
+        // same deployment as the adapter's config (matches main.rs).
+        .with_env_overrides();
         let session = Arc::new(crate::session::open_session(&config, true).await?);
         let registry = PublisherRegistry::new(session.clone());
         Ok(Self { session, registry })

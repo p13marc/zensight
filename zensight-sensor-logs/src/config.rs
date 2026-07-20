@@ -861,6 +861,9 @@ mod tests {
         let cfg = SyslogSensorConfig::load_from_file(path).expect("configs/logs.json5");
         assert!(!cfg.syslog.novelty.enabled);
         assert!(!cfg.syslog.error_budget.enabled);
+        // The base is optional and empty by default — the shipped example
+        // deliberately leaves it unset (bus-root deployment).
+        assert_eq!(cfg.zenoh.namespace, "");
         // novelty needs the template miner, which is on by default.
         assert!(cfg.syslog.templating.enabled);
 

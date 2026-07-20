@@ -10,15 +10,15 @@ this page is the mapping/behavior reference.
 
 Two independent subscribers:
 
-- **Telemetry** on `filters.key_expr` (default `zensight/v1/*/telemetry/**`,
+- **Telemetry** on `filters.key_expr` (default `v1/*/telemetry/**`,
   the v1 telemetry class selector). The class chunk *is* the filter — state
   documents and the verbatim `@rpc`/`@media`/`@blob` planes structurally never
   match, so nothing is discarded client-side. Narrow it — e.g.
-  `zensight/v1/*/telemetry/netring/**` — to tame the firehose at the
+  `v1/*/telemetry/netring/**` — to tame the firehose at the
   *subscription*, so unwanted producers never reach the exporter over the wire
   (a structural v1 check, `is_telemetry_key`, stays as belt-and-braces for
   narrowed overrides).
-- **Alerts** on `zensight/v1/*/state/*/alert/*` (only when `export_alerts` is
+- **Alerts** on `v1/*/state/*/alert/*` (only when `export_alerts` is
   on). Alerts are state-class keys, so the telemetry class selector cannot see
   them — alert export needs its own subscriber.
 
