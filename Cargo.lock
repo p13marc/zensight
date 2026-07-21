@@ -12775,9 +12775,9 @@ dependencies = [
 
 [[package]]
 name = "zenkey"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e85b419ed0230600f5ef355296524dc9dfabe314f54b80cdb90b522e9269a11"
+checksum = "17df3ae0dcd72e13e06693ed89ae58406e6940ddb312ec5f97b3ea61e5d29fd5"
 dependencies = [
  "base64",
  "dirs 5.0.1",
@@ -12794,9 +12794,9 @@ dependencies = [
 
 [[package]]
 name = "zenkey-build"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab9c91d3d65ba561c6877cffd001afb9442e414d296e5f2e386cf64511417bad"
+checksum = "5db36ce6ae39b696b8ca5f7c4e6f2adb5e58613c65f92676d81b4deeeea0a39c"
 dependencies = [
  "thiserror 2.0.19",
  "toml 0.8.23",
