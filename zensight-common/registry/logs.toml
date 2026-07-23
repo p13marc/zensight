@@ -295,7 +295,7 @@ kind = "read"
 reply = "Vec<LogRecord>"
 idempotent = true
 since = "1.0"
-description = "bounded log history, newest first. Recent (ring): ?since=;max=;source=. Durable (store, #544): ?from=;to=;after_uid=;limit= — time window + cursor pagination across restarts (source filters the observed device)"
+description = "bounded log history, newest first. Recent (ring): ?since=;max=;source=. Durable (store, #544): ?from=;to=;after_uid=;limit= — time window + cursor pagination across restarts. Search (#553): ?pattern=<regex>;severity_min=;unit=;app=;facility= — server-side content filter over ring+store (source filters the observed device)"
 [[procedure]]
 path = "filter"
 kind = "read"

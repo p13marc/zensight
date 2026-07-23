@@ -30,6 +30,7 @@ pub mod parser;
 /// the integration harness (#548) can drive socket→ring→query round-trips.
 pub mod query;
 pub mod receiver;
+pub mod search;
 pub mod sentinel;
 pub mod store;
 pub(crate) mod telemetry_guard;

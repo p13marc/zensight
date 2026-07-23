@@ -58,18 +58,26 @@ pub fn push(ring: &EventRing, capacity: usize, record: LogRecord) {
     }
 }
 
-/// Pure reply builder: newest-first, `since`/`host` filtered, capped at `max`.
+/// Cap on records scanned by a single content search over the durable store
+/// (#553) — bounds cost over a huge range; beyond it a page is partial and the
+/// client paginates on.
+const MAX_SEARCH_SCAN: usize = 500_000;
+
+/// Pure reply builder: newest-first, `since`/`host` + content-matcher filtered,
+/// capped at `max` matches.
 fn filter_ring(
     records: &VecDeque<LogRecord>,
     since: Option<i64>,
     host: Option<&str>,
     max: usize,
+    matcher: &crate::search::LogMatcher,
 ) -> Vec<LogRecord> {
     records
         .iter()
         .rev()
         .filter(|r| since.is_none_or(|s| r.ts >= s))
         .filter(|r| host.is_none_or(|h| r.host == h))
+        .filter(|r| matcher.matches(r))
         .take(max)
         .cloned()
         .collect()
@@ -117,6 +125,25 @@ pub async fn run_events(
         let after_uid = params.get("after_uid").map(str::to_string);
         let durable_query = from.is_some() || to.is_some() || after_uid.is_some();
 
+        // Content-search selectors (#553): compile once per query. A bad/oversized
+        // regex is rejected here rather than pinning a core.
+        let matcher = match crate::search::LogMatcher::new(
+            params.get("pattern"),
+            params.get("severity_min"),
+            params.get("unit"),
+            params.get("app"),
+            params.get("facility"),
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                let err = zensight_sensor_core::rpc::RpcError::invalid_args(e);
+                let _ = query
+                    .reply_err(serde_json::to_vec(&err).unwrap_or_default())
+                    .await;
+                continue;
+            }
+        };
+
         let records: Vec<LogRecord> = if durable_query && store.is_some() {
             // Durable, paginated path — blocking redb range walk off the runtime.
             let store = store.clone().expect("checked is_some");
@@ -124,9 +151,19 @@ pub async fn run_events(
             let (from_ms, to_ms) = (from.unwrap_or(i64::MIN), to.unwrap_or(i64::MAX));
             let after = after_uid.clone();
             tokio::task::spawn_blocking(move || {
-                store
-                    .query(from_ms, to_ms, after.as_deref(), max)
-                    .unwrap_or_default()
+                let page = if matcher.is_trivial() {
+                    store.query(from_ms, to_ms, after.as_deref(), max)
+                } else {
+                    store.search(
+                        from_ms,
+                        to_ms,
+                        after.as_deref(),
+                        max,
+                        &matcher,
+                        MAX_SEARCH_SCAN,
+                    )
+                };
+                page.unwrap_or_default()
                     .into_iter()
                     .filter(|r| host_f.as_deref().is_none_or(|h| r.host == h))
                     .collect::<Vec<_>>()
@@ -136,7 +173,7 @@ pub async fn run_events(
         } else {
             // Hot path — snapshot the ring under the lock, reply outside it.
             match ring.lock() {
-                Ok(r) => filter_ring(&r, since, host.as_deref(), max),
+                Ok(r) => filter_ring(&r, since, host.as_deref(), max, &matcher),
                 Err(_) => Vec::new(),
             }
         };
@@ -175,7 +212,8 @@ mod tests {
         let ring: VecDeque<LogRecord> = (0..5)
             .map(|i| rec(&format!("u{i}"), 100 + i, "web01", "m"))
             .collect();
-        let out = filter_ring(&ring, Some(102), None, 100);
+        let m = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
+        let out = filter_ring(&ring, Some(102), None, 100, &m);
         assert_eq!(
             out.iter().map(|r| r.ts).collect::<Vec<_>>(),
             vec![104, 103, 102],
@@ -190,7 +228,8 @@ mod tests {
             let host = if i % 2 == 0 { "web01" } else { "db01" };
             ring.push_back(rec(&format!("u{i}"), i, host, "m"));
         }
-        let out = filter_ring(&ring, None, Some("web01"), 3);
+        let m = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
+        let out = filter_ring(&ring, None, Some("web01"), 3, &m);
         assert_eq!(out.len(), 3);
         assert!(out.iter().all(|r| r.host == "web01"));
         assert_eq!(out[0].ts, 8, "newest matching first");

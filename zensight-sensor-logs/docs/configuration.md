@@ -287,6 +287,14 @@ window; `after_uid=<uid>` is a pagination cursor (pass the previous page's
 last/oldest uid) and `limit=<n>` caps the page. Pages are newest-first. The
 legacy `since`/`max` ring selectors keep working.
 
+**Server-side search** (#553): `pattern=<regex>` (message; a
+metacharacter-free pattern takes a substring fast path), `severity_min=<slug|n>`
+(worse-or-equal), `unit=`, `app=`, `facility=` — applied at the sensor over both
+the ring and the store, so a content search spans days of history without
+shipping it all to the client. A bad or oversized regex is rejected (the `regex`
+engine is linear-time; the compiled size is capped); a long-range scan is bounded
+(a partial page you paginate on). Cheap field prefilters run before the regex.
+
 ### `syslog.files` (#549, file tailing — none by default)
 
 Tail log files into the same pipeline as the network/journald sources (so

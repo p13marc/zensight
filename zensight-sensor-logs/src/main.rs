@@ -19,6 +19,7 @@ mod novelty;
 mod parser;
 mod query;
 mod receiver;
+mod search;
 mod sentinel;
 mod store;
 mod telemetry_guard;

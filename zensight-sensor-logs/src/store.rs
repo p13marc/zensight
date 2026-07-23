@@ -115,6 +115,53 @@ impl LogStore {
         Ok(out)
     }
 
+    /// Search persisted records (#553): like [`query`](Self::query) but applies
+    /// `matcher` while scanning, filling up to `limit` *matches*. Bounds cost
+    /// over a long range with `max_scan` — after scanning that many records it
+    /// stops (a partial page); the caller paginates from the last returned uid.
+    /// Blocking I/O.
+    pub fn search(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        after_uid: Option<&str>,
+        limit: usize,
+        matcher: &crate::search::LogMatcher,
+        max_scan: usize,
+    ) -> Result<Vec<LogRecord>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(LOGS_TABLE)?;
+        let mut out = Vec::new();
+        let mut scanned = 0usize;
+        let iter = match after_uid {
+            Some(cursor) => table.range::<&str>(..cursor)?.rev(),
+            None => table.range::<&str>(..)?.rev(),
+        };
+        for entry in iter {
+            let (_key, value) = entry?;
+            let Ok(rec) = serde_json::from_slice::<LogRecord>(value.value()) else {
+                continue;
+            };
+            if rec.ts > to_ms {
+                continue;
+            }
+            if rec.ts < from_ms {
+                break;
+            }
+            scanned += 1;
+            if matcher.matches(&rec) {
+                out.push(rec);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+            if scanned >= max_scan {
+                break; // partial page — bound the walk over huge ranges
+            }
+        }
+        Ok(out)
+    }
+
     /// Prune by age then size (#544): drop everything older than `max_age_ms`
     /// before `now_ms`, then, if still over `keep_max` rows, drop the oldest
     /// excess. Returns the number removed. Blocking I/O.
@@ -319,6 +366,27 @@ mod tests {
         assert_eq!(removed2, 3);
         assert_eq!(s.stats().unwrap().records, 2);
         assert_eq!(s.stats().unwrap().oldest_ts, Some(3008));
+    }
+
+    #[test]
+    fn search_filters_while_scanning() {
+        let (s, _d) = tmp_store();
+        let recs: Vec<LogRecord> = (0..20)
+            .map(|i| {
+                let mut r = rec(&uid(5000 + i, i as u64), 5000 + i, "m");
+                // Even ts carry "boom", odd carry "ok".
+                r.message = if i % 2 == 0 { "boom here" } else { "ok" }.into();
+                r
+            })
+            .collect();
+        s.write_batch(&recs).unwrap();
+
+        let m = crate::search::LogMatcher::new(Some("boom"), None, None, None, None).unwrap();
+        // limit 3 matches → the 3 newest "boom" records, filtered while scanning.
+        let hits = s.search(i64::MIN, i64::MAX, None, 3, &m, 100_000).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert!(hits.iter().all(|r| r.message.contains("boom")));
+        assert_eq!(hits[0].ts, 5018, "newest matching first");
     }
 
     #[test]
