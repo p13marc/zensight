@@ -21,72 +21,11 @@ use crate::view::icons::{self, IconSize};
 use crate::view::theme;
 use crate::view::tokens::space;
 
-/// Syslog severity levels (RFC 5424).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SyslogSeverity {
-    Emergency = 0,
-    Alert = 1,
-    Critical = 2,
-    Error = 3,
-    Warning = 4,
-    Notice = 5,
-    Informational = 6,
-    Debug = 7,
-}
-
-impl SyslogSeverity {
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "emerg" | "emergency" => Some(SyslogSeverity::Emergency),
-            "alert" => Some(SyslogSeverity::Alert),
-            "crit" | "critical" => Some(SyslogSeverity::Critical),
-            "err" | "error" => Some(SyslogSeverity::Error),
-            "warning" | "warn" => Some(SyslogSeverity::Warning),
-            "notice" => Some(SyslogSeverity::Notice),
-            "info" | "informational" => Some(SyslogSeverity::Informational),
-            "debug" => Some(SyslogSeverity::Debug),
-            _ => None,
-        }
-    }
-
-    fn from_value(val: u64) -> Self {
-        match val {
-            0 => SyslogSeverity::Emergency,
-            1 => SyslogSeverity::Alert,
-            2 => SyslogSeverity::Critical,
-            3 => SyslogSeverity::Error,
-            4 => SyslogSeverity::Warning,
-            5 => SyslogSeverity::Notice,
-            6 => SyslogSeverity::Informational,
-            7 => SyslogSeverity::Debug,
-            _ => SyslogSeverity::Debug,
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            SyslogSeverity::Emergency => "EMERG",
-            SyslogSeverity::Alert => "ALERT",
-            SyslogSeverity::Critical => "CRIT",
-            SyslogSeverity::Error => "ERR",
-            SyslogSeverity::Warning => "WARN",
-            SyslogSeverity::Notice => "NOTICE",
-            SyslogSeverity::Informational => "INFO",
-            SyslogSeverity::Debug => "DEBUG",
-        }
-    }
-
-    fn color(&self) -> iced::Color {
-        match self {
-            SyslogSeverity::Emergency | SyslogSeverity::Alert => theme::SYSLOG_EMERGENCY,
-            SyslogSeverity::Critical | SyslogSeverity::Error => theme::SYSLOG_ERROR,
-            SyslogSeverity::Warning => theme::SYSLOG_WARNING,
-            SyslogSeverity::Notice => theme::SYSLOG_NOTICE,
-            SyslogSeverity::Informational => theme::SYSLOG_INFO,
-            SyslogSeverity::Debug => theme::SYSLOG_DEBUG,
-        }
-    }
-}
+/// Syslog severity — the one canonical model (#557), re-exported under the name
+/// this view has always used. `from_slug`/`from_value`/`label` are its methods;
+/// the badge color is [`theme::severity_color`] (a shared helper, since a
+/// `Color` can't live in the wire crate).
+pub use zensight_common::LogSeverity as SyslogSeverity;
 
 /// Parsed syslog message. Built from a `TelemetryPoint` via
 /// [`syslog_message_from_point`]; the app keeps a rolling buffer of these for
@@ -964,7 +903,7 @@ fn render_severity_summary<'a>(
     for sev in severities {
         let count = counts.get(&(sev as u8)).copied().unwrap_or(0);
         if count > 0 || sev as u8 <= SyslogSeverity::Warning as u8 {
-            let color = sev.color();
+            let color = theme::severity_color(sev);
             let label = text(format!("{}: {}", sev.label(), count))
                 .size(12)
                 .style(move |_theme: &Theme| text::Style { color: Some(color) });
@@ -975,17 +914,19 @@ fn render_severity_summary<'a>(
     // Show total and filtered count
     let total_count = messages.len();
     let filtered_count = filtered_messages.len();
+    // These counts are derived from the *local* recent-lines buffer, not the
+    // sensor's lifetime rollup counters below (#557 stats honesty) — label them
+    // so the two denominators aren't confused.
     let count_label = if total_count != filtered_count {
         text(format!(
-            "Showing {} of {} messages",
-            filtered_count, total_count
+            "Showing {filtered_count} of {total_count} (local buffer)"
         ))
         .size(12)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         })
     } else {
-        text(format!("{} messages", total_count))
+        text(format!("{total_count} messages (local buffer)"))
             .size(12)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
@@ -1120,7 +1061,7 @@ fn render_log_stream<'a>(
     for msg in sorted_messages {
         let key = msg.row_key();
         let expanded = filter_state.expanded_row.as_deref() == Some(key.as_str());
-        let severity_color = msg.severity.color();
+        let severity_color = theme::severity_color(msg.severity);
         let message_text = if msg.message.chars().count() > 100 {
             let head: String = msg.message.chars().take(97).collect();
             format!("{head}...")
@@ -1288,7 +1229,7 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
                 point
                     .labels
                     .get("severity")
-                    .and_then(|s| SyslogSeverity::from_str(s))
+                    .and_then(|s| SyslogSeverity::from_slug(s))
             });
         match (fac_label, sev_label) {
             (Some(fac), Some(sev)) => (fac, sev),
@@ -1305,7 +1246,7 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
                 let sev = sev_opt
                     .or_else(|| {
                         (parts.len() >= 2)
-                            .then(|| SyslogSeverity::from_str(parts[1]))
+                            .then(|| SyslogSeverity::from_slug(parts[1]))
                             .flatten()
                     })
                     .unwrap_or(SyslogSeverity::Informational);
@@ -1769,17 +1710,20 @@ mod tests {
 
     #[test]
     fn test_severity_from_str() {
-        assert_eq!(SyslogSeverity::from_str("err"), Some(SyslogSeverity::Error));
         assert_eq!(
-            SyslogSeverity::from_str("ERROR"),
+            SyslogSeverity::from_slug("err"),
             Some(SyslogSeverity::Error)
         );
         assert_eq!(
-            SyslogSeverity::from_str("warning"),
+            SyslogSeverity::from_slug("ERROR"),
+            Some(SyslogSeverity::Error)
+        );
+        assert_eq!(
+            SyslogSeverity::from_slug("warning"),
             Some(SyslogSeverity::Warning)
         );
         assert_eq!(
-            SyslogSeverity::from_str("info"),
+            SyslogSeverity::from_slug("info"),
             Some(SyslogSeverity::Informational)
         );
     }

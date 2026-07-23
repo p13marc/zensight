@@ -99,75 +99,10 @@ impl Facility {
 }
 
 /// Syslog severity levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum Severity {
-    Emergency = 0,
-    Alert = 1,
-    Critical = 2,
-    Error = 3,
-    Warning = 4,
-    Notice = 5,
-    Informational = 6,
-    Debug = 7,
-}
-
-impl Severity {
-    /// Parse severity from numeric code.
-    pub fn from_code(code: u8) -> Option<Self> {
-        match code {
-            0 => Some(Self::Emergency),
-            1 => Some(Self::Alert),
-            2 => Some(Self::Critical),
-            3 => Some(Self::Error),
-            4 => Some(Self::Warning),
-            5 => Some(Self::Notice),
-            6 => Some(Self::Informational),
-            7 => Some(Self::Debug),
-            _ => None,
-        }
-    }
-
-    /// Get the string name of the severity.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Emergency => "emerg",
-            Self::Alert => "alert",
-            Self::Critical => "crit",
-            Self::Error => "err",
-            Self::Warning => "warning",
-            Self::Notice => "notice",
-            Self::Informational => "info",
-            Self::Debug => "debug",
-        }
-    }
-
-    /// OTel `severity_number` (1–24) for this syslog severity (#104), per the
-    /// OpenTelemetry logs data model's syslog mapping.
-    pub fn otel_severity_number(&self) -> u8 {
-        match self {
-            Self::Emergency => 24,    // FATAL4
-            Self::Alert => 23,        // FATAL3
-            Self::Critical => 22,     // FATAL2
-            Self::Error => 17,        // ERROR
-            Self::Warning => 13,      // WARN
-            Self::Notice => 10,       // INFO2
-            Self::Informational => 9, // INFO
-            Self::Debug => 5,         // DEBUG
-        }
-    }
-
-    /// OTel `severity_text` short level name (#104): the coarse OTel band.
-    pub fn otel_severity_text(&self) -> &'static str {
-        match self {
-            Self::Emergency | Self::Alert | Self::Critical => "FATAL",
-            Self::Error => "ERROR",
-            Self::Warning => "WARN",
-            Self::Notice | Self::Informational => "INFO",
-            Self::Debug => "DEBUG",
-        }
-    }
-}
+/// Syslog severity — the one canonical model lives in `zensight-common` (#557);
+/// re-exported here so the sensor's `Severity` is that single type (`from_code`
+/// / `as_str` / `otel_severity_number` / `otel_severity_text` are its methods).
+pub use zensight_common::LogSeverity as Severity;
 
 /// Parsed syslog message.
 #[derive(Debug, Clone)]

@@ -269,6 +269,17 @@ with a MESSAGE_ID catalog, follow/pause, and a boot lens. Seeds from the cold
 store on open (`Message::LogHistoryLoaded`; see [`local-store.md`](local-store.md)).
 Supports local filtering (severity, facility, patterns) via `SyslogFilterState`.
 
+*Severity model (#557):* one canonical `zensight_common::LogSeverity` (RFC 5424
+0–7 + slug/label/OTel mappings) is the single severity type — consumed by the
+sensor parser, the wire `LogRecord`, both log views (`view/specialized/syslog.rs`,
+`view/overview/syslog.rs`, re-exported under their old names), and the OTel
+exporter. The severity→badge-color mapping is the shared `theme::severity_color`
+(a `Color` can't live in the wire crate). The severity summary + rate sparkline
+are derived from the *local recent-lines buffer* (labeled "local buffer"),
+distinct from the sensor's lifetime rollup counters shown alongside. A future
+event feed (e.g. the SNMP trap feed, #536) should reuse `theme::severity_color`
+and this labeling convention rather than forking a fifth severity model.
+
 **Inventory** (`view/inventory.rs`) — a passive asset inventory and fingerprint
 explorer (JA3/JA4/JA4H/SNI/HASSH), joined against correlated host entities.
 
