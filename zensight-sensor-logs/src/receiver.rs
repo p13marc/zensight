@@ -27,7 +27,9 @@ pub struct ReceivedMessage {
     pub message: SyslogMessage,
     /// Source address (for network protocols) or path (for Unix socket).
     pub source: MessageSource,
-    /// Resolved hostname (from aliases or reverse DNS).
+    /// Resolved hostname: `hostname_aliases` override, else the message's own
+    /// hostname header, else the peer IP. (Reverse-DNS enrichment, when enabled,
+    /// happens off this path in the evidence tracker — #552.)
     pub resolved_hostname: String,
 }
 

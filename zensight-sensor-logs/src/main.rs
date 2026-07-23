@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod dedup;
 mod derived;
+mod evidence;
 mod file_source;
 mod filter;
 mod ingest;
@@ -663,8 +664,60 @@ async fn main() -> Result<()> {
         log_store.clone(),
     ));
 
+    // Observer evidence (#552): track remote senders and publish a HostEvidence
+    // claim per device on `evidence/device/*` (Evidence QoS, cache-1 for late
+    // correlator joins) so they reach the entity catalog. No-op without network
+    // sources (only Network peers are "observed devices").
+    let has_network = syslog_config
+        .listeners
+        .iter()
+        .any(|l| !matches!(l.protocol, config::ListenerProtocol::Unix));
+    let evidence_tracker = (syslog_config.evidence.enabled && has_network).then(|| {
+        let tracker = Arc::new(evidence::EvidenceTracker::new(
+            syslog_config.evidence.clone(),
+        ));
+        let ev_registry = Arc::new(
+            zensight_sensor_core::AdvancedPublisherRegistry::new(
+                session.clone(),
+                zensight_sensor_core::v1::V1Context::for_producer(
+                    &zensight_common::PROFILE,
+                    "logs",
+                )
+                .telemetry_prefix(),
+                format,
+                zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            )
+            .with_qos(zensight_common::QosClass::Evidence),
+        );
+        let refresh = std::time::Duration::from_secs(syslog_config.evidence.refresh_secs.max(1));
+        let t = tracker.clone();
+        runner.spawn(async move {
+            let mut tick = tokio::time::interval(refresh);
+            loop {
+                tick.tick().await;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let t2 = t.clone();
+                // Reverse-DNS (if enabled) blocks → build claims off the runtime.
+                let claims =
+                    match tokio::task::spawn_blocking(move || t2.build_claims(now_ms)).await {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                for (device, claim) in claims {
+                    let key = zensight_common::host_evidence_key("logs", &device);
+                    if let Err(e) = ev_registry.publish_serializable(&key, &claim).await {
+                        tracing::warn!(device = %device, error = %e, "evidence publish failed");
+                    }
+                }
+            }
+        });
+        tracing::info!("observer evidence enabled");
+        tracker
+    });
+
     // Spawn the message processing task
     let publish_health = runner.health();
+    let evidence_loop = evidence_tracker.clone();
     let aggregator_loop = aggregator.clone();
     let template_loop = template_agg.clone();
     let novelty_loop = novelty.clone();
@@ -690,6 +743,13 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 Some(received) = rx.recv() => {
+                    // Observer evidence (#552): record the sender before filtering
+                    // (a device whose logs are filtered still exists). Pure map
+                    // update — no I/O on the hot path.
+                    if let Some(ev) = &evidence_loop {
+                        ev.observe(&received, chrono::Utc::now().timestamp_millis());
+                    }
+
                     // Sentinel rules (#543) run before filtering so a coredump,
                     // unit failure, or operator-declared pattern still alerts even
                     // when the line is filtered from the telemetry stream.

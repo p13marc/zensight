@@ -58,6 +58,7 @@ from missing telemetry.
 | `sentinel` | empty | log sentinel pattern→alert rules (#543) — see [alerting.md](alerting.md) |
 | `store` | off | durable per-line history (#544) — see below |
 | `files` | none | file-tailing sources (#549) — see below |
+| `evidence` | on | observer evidence for remote senders (#552) — see below |
 
 ### `syslog.listeners[]`
 
@@ -319,6 +320,28 @@ rename+recreate keeps draining the rotated-away inode to EOF before switching
 **Offsets** are persisted atomically (same scheme as the journald cursor) so a
 restart resumes without re-ingesting or skipping. File sources share the
 network ingest stats + rate limiter (`ingest.max_eps`/`overflow`).
+
+### `syslog.evidence` (#552, observer evidence — on by default)
+
+A central collector publishes a `HostEvidence` claim per remote syslog sender on
+`state/logs/evidence/device/<host>` (`observer = "logs"`), so those devices reach
+the correlator's entity catalog and fuse with SNMP / netring observations of the
+same gear. Names come from the message header / `hostname_aliases` / mTLS peer CN
+— no DNS on the intake path.
+
+```json5
+evidence: {
+  enabled: true,        // publish observer evidence for remote senders
+  refresh_secs: 300,    // re-publish + prune cadence
+  expire_secs: 21600,   // drop a sender silent this long (6h)
+  max_senders: 4096,    // cardinality cap (bounds the key space)
+  reverse_dns: false,   // opt-in PTR FQDN enrichment (cached, off the hot path)
+}
+```
+
+No-op without a network/TLS listener (only remote peers are "observed"). With
+`reverse_dns`, PTR lookups run only in the publish tick and are cached per IP, so
+they never block ingestion.
 
 ### `syslog.multiline` (#107, on by default)
 
