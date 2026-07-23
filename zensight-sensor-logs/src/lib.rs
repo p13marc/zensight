@@ -24,6 +24,7 @@ pub mod filter;
 pub mod ingest;
 #[cfg(feature = "journald")]
 pub mod journald;
+pub mod logbundle;
 pub mod multiline;
 pub mod parser;
 /// The bounded per-line event ring + `@rpc/logs/events` queryable. Public so

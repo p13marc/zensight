@@ -14,6 +14,7 @@ mod filter;
 mod ingest;
 #[cfg(feature = "journald")]
 mod journald;
+mod logbundle;
 mod multiline;
 mod novelty;
 mod parser;
@@ -61,27 +62,10 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Enable status publishing
-
-    // On-demand debug-report (the artifact channel): bundle redacted config + health +
-    // counters. No-op unless `report.enabled` is set in the config.
-    let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
-        "logs",
-        source.clone(),
-        runner.config().clone(),
-        runner.health(),
-    ));
-    // Tier-2 directory snapshots (the artifact channel). No-op unless `snapshot.enabled`.
-    let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_identity().with_artifacts(vec![
-        std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
-            report_source,
-            &artifacts.report,
-        )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-        std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
-            &artifacts.snapshot,
-        )),
-    ]);
+    // Enable status publishing. Artifact producers are registered later
+    // (`with_artifacts`), once the log store + ring the `logbundle` producer
+    // (#555) reads from exist — see below.
+    let runner = runner.with_identity();
 
     // Get session and config for the receiver
     let session = runner.session().clone();
@@ -664,6 +648,33 @@ async fn main() -> Result<()> {
         event_ring.clone(),
         log_store.clone(),
     ));
+
+    // Register artifact producers now that the store + ring exist (#555). The
+    // `logbundle` producer reads from both; report/snapshot need only the runner.
+    {
+        let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
+            "logs",
+            source.clone(),
+            runner.config().clone(),
+            runner.health(),
+        ));
+        let artifacts = runner.config().artifact_limits();
+        runner = runner.with_artifacts(vec![
+            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+                report_source,
+                &artifacts.report,
+            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+                &artifacts.snapshot,
+            )),
+            std::sync::Arc::new(logbundle::LogBundleProducer::new(
+                &syslog_config.logbundle,
+                source.clone(),
+                log_store.clone(),
+                event_ring.clone(),
+            )),
+        ]);
+    }
 
     // Observer evidence (#552): track remote senders and publish a HostEvidence
     // claim per device on `evidence/device/*` (Evidence QoS, cache-1 for late

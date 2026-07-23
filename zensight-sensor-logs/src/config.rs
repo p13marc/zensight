@@ -169,6 +169,79 @@ pub struct SyslogConfig {
     /// correlator's entity catalog. On by default; no-op without network sources.
     #[serde(default)]
     pub evidence: EvidenceConfig,
+
+    /// Log-bundle export artifact limits (#555). Producers own their limits (per
+    /// the artifact framework), so the `logbundle` kind's policy lives here, not
+    /// in the shared `artifacts` block. Disabled by default.
+    #[serde(default)]
+    pub logbundle: LogBundleLimits,
+}
+
+/// `logbundle` artifact limits (#555) — a filtered log export over `@blob`.
+/// Disabled by default (64 MiB / 1M lines / 30 s cooldown / 600 s TTL).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogBundleLimits {
+    /// Whether the sensor serves log-bundle export requests at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hard cap on the compressed bundle size; production stops + flags
+    /// truncation past this.
+    #[serde(default = "default_logbundle_max_bytes")]
+    pub max_bytes: u64,
+    /// Hard cap on lines included; production stops + flags truncation past this.
+    #[serde(default = "default_logbundle_max_lines")]
+    pub max_lines: u64,
+    /// Minimum gap between successive exports, seconds.
+    #[serde(default = "default_logbundle_cooldown")]
+    pub cooldown_secs: u64,
+    /// How long a produced bundle stays available before the reaper drops it.
+    #[serde(default = "default_logbundle_ttl")]
+    pub ttl_secs: u64,
+    /// Blob transfer chunk size (clamped to 256 KiB–1 MiB).
+    #[serde(default = "default_logbundle_chunk_size")]
+    pub chunk_size: u32,
+}
+
+impl Default for LogBundleLimits {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_bytes: default_logbundle_max_bytes(),
+            max_lines: default_logbundle_max_lines(),
+            cooldown_secs: default_logbundle_cooldown(),
+            ttl_secs: default_logbundle_ttl(),
+            chunk_size: default_logbundle_chunk_size(),
+        }
+    }
+}
+
+impl LogBundleLimits {
+    /// The shared bounds view used by the artifact channel.
+    pub fn common(&self) -> zensight_common::CommonArtifactLimits {
+        zensight_common::CommonArtifactLimits {
+            enabled: self.enabled,
+            max_bytes: self.max_bytes,
+            cooldown_secs: self.cooldown_secs,
+            ttl_secs: self.ttl_secs,
+            chunk_size: self.chunk_size,
+        }
+    }
+}
+
+fn default_logbundle_max_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+fn default_logbundle_max_lines() -> u64 {
+    1_000_000
+}
+fn default_logbundle_cooldown() -> u64 {
+    30
+}
+fn default_logbundle_ttl() -> u64 {
+    600
+}
+fn default_logbundle_chunk_size() -> u32 {
+    512 * 1024
 }
 
 /// Observer-evidence configuration (#552).
@@ -1305,6 +1378,7 @@ impl Default for SyslogConfig {
             store: LogStoreConfig::default(),
             files: FileTailingConfig::default(),
             evidence: EvidenceConfig::default(),
+            logbundle: LogBundleLimits::default(),
         }
     }
 }
