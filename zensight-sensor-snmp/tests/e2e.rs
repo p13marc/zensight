@@ -1467,3 +1467,87 @@ async fn trap_community_filter_rejects() {
     let got = tokio::time::timeout(Duration::from_secs(2), rig.event_sub.recv_async()).await;
     assert!(got.is_err(), "mismatched community must not publish");
 }
+
+// ---------------------------------------------------------------------------
+// Identity evidence (#537)
+// ---------------------------------------------------------------------------
+
+/// Polling a device publishes an observer-role `HostEvidence` claim with
+/// sysName/vendor/MACs/IPs on `state/snmp/evidence/device/<device>`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn polled_device_publishes_identity_evidence() {
+    let mib = base_mib();
+    mib.set(
+        &format!("{IF_TABLE}.6.1"),
+        Value::OctetString(bytes::Bytes::from_static(&[
+            0xde, 0xad, 0xbe, 0xef, 0x00, 0x07,
+        ])),
+    );
+    mib.set(
+        "1.3.6.1.2.1.4.20.1.1.10.0.0.9",
+        Value::IpAddress([10, 0, 0, 9]),
+    );
+    let agent = SimAgent::start(mib).await;
+    let mut device = v2c_device("router01", agent.addr());
+    device.oids = vec![
+        format!("{SYSTEM}.1.0"),
+        format!("{SYSTEM}.2.0"),
+        format!("{SYSTEM}.5.0"),
+    ];
+    device.walks = vec![format!("{IF_TABLE}.6"), "1.3.6.1.2.1.4.20.1.1".to_string()];
+
+    let mut rig = rig(device).await;
+    let evidence_sub = rig
+        .session
+        .declare_subscriber("v1/*/state/snmp/evidence/device/*")
+        .await
+        .expect("evidence subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    rig.poller.with_evidence(
+        std::sync::Arc::new(
+            zensight_sensor_core::AdvancedPublisherRegistry::new(
+                rig.session.clone(),
+                zensight_sensor_core::v1::V1Context::for_producer(
+                    &zensight_common::PROFILE,
+                    "snmp",
+                )
+                .telemetry_prefix(),
+                zensight_common::Format::Json,
+                zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            )
+            .with_qos(zensight_common::QosClass::Evidence),
+        ),
+        10,
+    );
+
+    rig.poller.poll_once().await.expect("poll");
+
+    let sample = tokio::time::timeout(Duration::from_secs(5), evidence_sub.recv_async())
+        .await
+        .expect("evidence timed out")
+        .expect("evidence recv");
+    assert!(
+        sample
+            .key_expr()
+            .as_str()
+            .ends_with("state/snmp/evidence/device/router01"),
+        "{}",
+        sample.key_expr()
+    );
+    let claim: zensight_common::HostEvidence =
+        zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode evidence");
+    assert_eq!(claim.sensor, "snmp");
+    assert_eq!(claim.source, "router01");
+    assert_eq!(claim.observer.as_deref(), Some("snmp"));
+    assert_eq!(claim.host_id, None);
+    assert_eq!(claim.hostname.as_deref(), Some("sim-device"));
+    assert_eq!(claim.vendor.as_deref(), Some("enterprise-99999"));
+    assert!(claim.macs.contains(&"de:ad:be:ef:00:07".to_string()));
+    assert!(claim.ips.contains(&"10.0.0.9".to_string()));
+    assert!(
+        !claim.ips.contains(&"127.0.0.1".to_string()),
+        "loopback polled address is filtered: {:?}",
+        claim.ips
+    );
+}

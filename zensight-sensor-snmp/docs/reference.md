@@ -32,6 +32,7 @@ Standard sensor metadata is published by the shared runner:
 - `zensight/v1/<origin>/@rpc/snmp/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/snmp/artifact/<kind>` status document
 - `zensight/v1/<origin>/state/snmp/sensor` — sensor registration (`SensorInfo`)
 - `zensight/v1/<origin>/state/snmp/evidence/self` — self-reported host evidence (`with_identity`)
+- `zensight/v1/<origin>/state/snmp/evidence/device/<device>` — observed-device identity claim (#537): `HostEvidence` with `observer: "snmp"` — hostname ← sysName, platform ← sysDescr, vendor ← the sysObjectID enterprise arc, MACs ← ifPhysAddress, IPs ← ipAdEntAddr + the polled address. Refreshed on the first successful cycle then every `evidence.refresh_cycles` (default 10); the correlator fuses these with netring/netlink observations of the same MAC/IP into one `HostEntity`. `host_id` stays unset (observed devices have no hashed machine-id; MAC/IP rules do the merging). Disable with `snmp.evidence.enabled: false`. |
 - `zensight/v1/<origin>/state/snmp/alert/<key>` — threshold alerts (see below)
 - `zensight/v1/<origin>/state/snmp/alive` — sensor liveliness token
 - `zensight/v1/<origin>/@rpc/snmp/introspect` — the registry slice this build serves
@@ -108,6 +109,8 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `devices[]` | array | Devices to poll (see below). |
 | `oid_groups` | map | Named, reusable `{ oids, walks }` sets referenced by `device.oid_group`. |
 | `oid_names` | map | OID→metric-name map; `{index}` is substituted with the table index. |
+| `evidence.enabled` | bool | Publish observed-device identity claims (#537, default true). |
+| `evidence.refresh_cycles` | u32 | Claim refresh cadence in poll cycles (default 10). |
 | `mib.load_builtin` | bool | Load bundled MIB definitions. |
 | `mib.files` | string[] | **Deprecated** (#532): legacy JSON pseudo-MIBs, honored one more release. Use `mib.dirs`. |
 | `mib.dirs` | string[] | Directories of **standard SMI** `.mib`/`.txt` files (vendor MIBs drop in unmodified); parsed with a real SMI parser, malformed modules fail startup. |
