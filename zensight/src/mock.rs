@@ -120,6 +120,20 @@ pub mod snmp {
         }
     }
 
+    /// A translated trap record (#536).
+    pub fn trap_event(device: &str, kind: &str, ulid: &str) -> zensight_common::EventRecord {
+        zensight_common::EventRecord {
+            id: ulid.to_string(),
+            timestamp: 1_719_999_123_000,
+            source: device.to_string(),
+            protocol: Protocol::Snmp,
+            kind: kind.to_string(),
+            severity: zensight_common::AlertSeverity::Warning,
+            summary: format!("{device}: {kind}"),
+            fields: [("if_index".to_string(), "3".to_string())].into(),
+        }
+    }
+
     /// Generate mock router telemetry.
     pub fn router(name: &str) -> Vec<TelemetryPoint> {
         vec![

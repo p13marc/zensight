@@ -294,7 +294,18 @@ quantity with **unbounded cardinality** is a record you pull from an `@rpc`
 procedure, never a key you publish. Three of these were served by the sensors
 from the day of the keyspace cutover and had no caller until #469:
 
-- **SNMP fleet overview** (`view/overview/snmp.rs`, #533) — fleet-wide
+- **SNMP trap/event feed** (#536) — the GUI subscribes to the events plane
+(`v1/*/events/**`, narrowed under focus) with a startup GET on the same
+selector that backfills history when a Zenoh storage is aligned on the
+events tree. Decoded `EventRecord`s land newest-first (ULID-ordered,
+deduped) in a fleet ring (`DashboardState::snmp_events`, cap 500) and the
+open SNMP device's own ring; the device view renders an Events card
+(time, severity-colored kind, translated varbind fields) and the fleet
+overview shows a Recent Traps section with the loudest senders (trap-storm
+spotting). Local redb persistence of events is a follow-up — restart
+continuity currently comes from the storage backfill.
+
+**SNMP fleet overview** (`view/overview/snmp.rs`, #533) — fleet-wide
 aggregation over the typed `InterfaceTable` docs (stored per device in
 `DashboardState::snmp_interfaces`): top talkers ranked by *current* in+out
 rate with utilization coloring, an admin-up/oper-down hotlist, error

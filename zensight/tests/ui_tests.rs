@@ -5486,7 +5486,8 @@ fn test_snmp_overview_rate_based() {
     );
 
     let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
-    let mut ui = simulator(snmp_overview(&devices, &docs));
+    let events = std::collections::VecDeque::new();
+    let mut ui = simulator(snmp_overview(&devices, &docs, &events));
 
     // Top talker is router01's busiest interface (rates, humanized).
     assert!(ui.find("1.").is_ok());
@@ -5507,6 +5508,78 @@ fn test_snmp_overview_empty() {
 
     let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
     let docs = HashMap::new();
-    let mut ui = simulator(snmp_overview(&devices, &docs));
+    let events = std::collections::VecDeque::new();
+    let mut ui = simulator(snmp_overview(&devices, &docs, &events));
     assert!(ui.find("No SNMP devices available").is_ok());
+}
+
+/// SNMP device view shows the trap/event feed (#536).
+#[test]
+fn test_snmp_device_event_feed() {
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+    state.snmp_detail.events.push_back(mock::snmp::trap_event(
+        "router01",
+        "trap/link_down",
+        "01aaa",
+    ));
+    state.snmp_detail.events.push_back(mock::snmp::trap_event(
+        "router01",
+        "trap/cold_start",
+        "01aab",
+    ));
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+    assert!(ui.find("Events").is_ok());
+    assert!(ui.find("trap/link_down").is_ok());
+    assert!(ui.find("if_index=3").is_ok(), "fields render");
+}
+
+/// Fleet overview shows the recent-trap feed with top emitters (#536).
+#[test]
+fn test_snmp_overview_trap_feed() {
+    use std::collections::HashMap;
+    use zensight::view::overview::snmp::snmp_overview;
+
+    let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
+    let mut docs = HashMap::new();
+    docs.insert(
+        "router01".to_string(),
+        mock::snmp::interface_table("router01", 1),
+    );
+    let mut events = std::collections::VecDeque::new();
+    events.push_back(mock::snmp::trap_event(
+        "router01",
+        "trap/link_down",
+        "01aac",
+    ));
+    events.push_back(mock::snmp::trap_event("router01", "trap/link_up", "01aad"));
+    events.push_back(mock::snmp::trap_event("sw02", "trap/cold_start", "01aae"));
+
+    let mut ui = simulator(snmp_overview(&devices, &docs, &events));
+    assert!(
+        ui.find("Recent Traps (3) — top: router01 (2), sw02 (1)")
+            .is_ok()
+    );
+    assert!(ui.find("trap/cold_start").is_ok());
+}
+
+/// The fleet event ring dedups by ULID and keeps newest-first order (#536).
+#[test]
+fn test_snmp_event_ring_dedup_and_order() {
+    use zensight::view::dashboard::DashboardState;
+
+    let mut dash = DashboardState::default();
+    dash.push_snmp_event(mock::snmp::trap_event("r1", "trap/a", "01aaa"));
+    dash.push_snmp_event(mock::snmp::trap_event("r1", "trap/b", "01aac"));
+    dash.push_snmp_event(mock::snmp::trap_event("r1", "trap/c", "01aab")); // out of order
+    dash.push_snmp_event(mock::snmp::trap_event("r1", "trap/b", "01aac")); // duplicate
+
+    let ids: Vec<&str> = dash.snmp_events.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["01aac", "01aab", "01aaa"],
+        "newest first, deduped"
+    );
 }

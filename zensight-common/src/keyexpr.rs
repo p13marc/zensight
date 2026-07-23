@@ -164,6 +164,11 @@ pub fn all_state_wildcard() -> String {
     "v1/*/state/**".to_string()
 }
 
+/// Build a wildcard key expression for the whole fleet events plane (#536).
+pub fn all_events_wildcard() -> String {
+    "v1/*/events/**".to_string()
+}
+
 /// Build a wildcard key expression for all sensor health data.
 ///
 /// Matches: `<base>/v1/<origin>/state/<producer>/health`
@@ -404,6 +409,11 @@ pub fn origin_state_wildcard(origin: &str) -> String {
 /// One host's firing alerts (the late-joiner seed GET).
 pub fn origin_alerts_wildcard(origin: &str) -> String {
     format!("v1/{origin}/state/*/alert/*")
+}
+
+/// One host's events plane (#536).
+pub fn origin_events_wildcard(origin: &str) -> String {
+    format!("v1/{origin}/events/**")
 }
 
 /// One host's sensor liveliness tokens.

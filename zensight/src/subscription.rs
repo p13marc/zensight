@@ -68,6 +68,14 @@ fn state_selector(config: &LinkConfig) -> String {
     }
 }
 
+/// The events-plane selector (#536): one origin under focus, else fleet.
+fn events_selector(config: &LinkConfig) -> String {
+    match &config.focus {
+        Some(origin) => zensight_common::keyexpr::origin_events_wildcard(origin),
+        None => zensight_common::keyexpr::all_events_wildcard(),
+    }
+}
+
 /// The alert seed selector: one origin under focus, the fleet otherwise.
 fn alerts_selector(config: &LinkConfig) -> String {
     match &config.focus {
@@ -141,6 +149,43 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 .ok();
             if control.is_none() {
                 tracing::warn!("Failed to create state-plane subscriber (health/alerts)");
+            }
+
+            // Events plane (#536): append-only records (SNMP traps today).
+            // A startup GET on the same selector backfills history when a
+            // Zenoh storage is aligned on the events tree; live records then
+            // stream through the subscriber.
+            let events_sub = session
+                .declare_subscriber(&events_selector(&config))
+                .with(flume::unbounded())
+                .await
+                .ok();
+            if events_sub.is_none() {
+                tracing::warn!("Failed to create events subscriber");
+            }
+            let event_backfill: Vec<Message> = match session
+                .get(&events_selector(&config))
+                .timeout(std::time::Duration::from_secs(3))
+                .await
+            {
+                Ok(replies) => {
+                    let mut msgs = Vec::new();
+                    while let Ok(reply) = replies.recv_async().await {
+                        if let Ok(sample) = reply.result() {
+                            let payload = sample.payload().to_bytes();
+                            if let Some(msg) =
+                                decode_sample(sample.key_expr().as_str(), &payload)
+                            {
+                                msgs.push(msg);
+                            }
+                        }
+                    }
+                    msgs
+                }
+                Err(_) => Vec::new(),
+            };
+            for msg in event_backfill {
+                yield msg;
             }
 
             // Entity subscriber (#306): catalog host-entity docs live under
@@ -434,6 +479,23 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         }
                     }
 
+                    // Events plane (#536): append-only records, puts only.
+                    result = async {
+                        match &events_sub {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result
+                            && sample.kind() != SampleKind::Delete
+                        {
+                            let payload = sample.payload().to_bytes();
+                            if let Some(msg) = decode_sample(sample.key_expr().as_str(), &payload) {
+                                yield msg;
+                            }
+                        }
+                    }
+
                     // Entity plane (#306): host-entity docs. Delete = tombstone
                     // → EntityRemoved; Put = HostEntity doc → EntityReceived.
                     result = async {
@@ -606,6 +668,22 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
     }
 
     let (_, protocol, subject) = refine_key(key)?;
+
+    // Events class (#536): append-only records — SNMP trap records today.
+    if matches!(parsed.class, ClassOrPlane::Class(Class::Events)) {
+        return match subject {
+            zensight_common::registry::AnySubject::Snmp(
+                zensight_common::registry::snmp::Subject::Trap { .. },
+            ) => match decode_auto::<zensight_common::EventRecord>(payload) {
+                Ok(record) => Some(Message::SnmpEventReceived(record)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode EventRecord");
+                    None
+                }
+            },
+            _ => None,
+        };
+    }
 
     // One typed match over the framework state set, instead of a string match
     // on the subject head. A registry move is now a compile error here.

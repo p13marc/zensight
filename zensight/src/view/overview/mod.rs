@@ -66,6 +66,7 @@ pub fn overview_section<'a>(
     state: &'a OverviewState,
     devices: &'a HashMap<DeviceId, DeviceState>,
     snmp_interfaces: &'a HashMap<String, zensight_common::InterfaceTable>,
+    snmp_events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
 ) -> Element<'a, Message> {
     // Count devices by protocol
     let protocol_counts = count_devices_by_protocol(devices);
@@ -111,7 +112,7 @@ pub fn overview_section<'a>(
             .collect();
 
         match protocol {
-            Protocol::Snmp => snmp::snmp_overview(&protocol_devices, snmp_interfaces),
+            Protocol::Snmp => snmp::snmp_overview(&protocol_devices, snmp_interfaces, snmp_events),
             Protocol::Sysinfo => sysinfo::sysinfo_overview(&protocol_devices),
             Protocol::Logs => syslog::syslog_overview(&protocol_devices),
             Protocol::Netflow => netflow::netflow_overview(&protocol_devices),
