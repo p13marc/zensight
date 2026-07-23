@@ -988,3 +988,87 @@ async fn interfaces_doc_without_ifx_table() {
     assert!(e.alias.is_none());
     assert_eq!(e.counters.in_octets, Some(0)); // 32-bit counter
 }
+
+// ---------------------------------------------------------------------------
+// Device profiles (#531)
+// ---------------------------------------------------------------------------
+
+use harness::rig_with_profiles;
+
+/// A device configured with only name+address gets system + interface
+/// metrics automatically from the default profiles, and the applied set is
+/// observable as `system/profile`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bare_device_polls_via_default_profiles() {
+    let agent = SimAgent::start(base_mib()).await;
+    // No oids, no walks — profiles only.
+    let device = v2c_device("bare01", agent.addr());
+
+    let rig = rig_with_profiles(device).await;
+    rig.poller.poll_once().await.expect("poll");
+
+    let points = collect_points(&rig, IDLE).await;
+    // generic-device scalars…
+    assert_eq!(
+        points["system/name"].value,
+        TelemetryValue::Text("sim-device".into())
+    );
+    assert!(points.contains_key("system/uptime"));
+    // …and network-interfaces walks (both tables).
+    assert!(points.contains_key("if/1/in_octets"));
+    assert!(points.contains_key("ifx/1/hc_in_octets"));
+    // The applied profile set is published.
+    let applied = &points["system/profile"];
+    let TelemetryValue::Text(applied) = &applied.value else {
+        panic!("system/profile must be text");
+    };
+    assert!(applied.contains("generic-device"), "{applied}");
+    assert!(applied.contains("network-interfaces"), "{applied}");
+    assert!(!applied.contains("host-resources"), "{applied}");
+}
+
+/// Pinning `host-resources` adds its tables on top of the defaults, and
+/// configured walks still merge in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pinned_profile_merges_with_defaults_and_config() {
+    let mib = base_mib().with_host_resources();
+    let agent = SimAgent::start(mib).await;
+    let mut device = v2c_device("srv01", agent.addr());
+    device.profile = Some("host-resources".to_string());
+    device.oids = vec![format!("{SYSTEM}.1.0")]; // configured scalar merges on top
+
+    let rig = rig_with_profiles(device).await;
+    rig.poller.poll_once().await.expect("poll");
+
+    let points = collect_points(&rig, IDLE).await;
+    assert!(points.contains_key("storage/1/used"), "{:?}", points.keys());
+    assert!(points.contains_key("cpu/1/load"));
+    assert!(points.contains_key("system/descr")); // configured oid
+    assert!(points.contains_key("if/1/in_octets")); // defaults still apply
+    let TelemetryValue::Text(applied) = &points["system/profile"].value else {
+        panic!("system/profile must be text");
+    };
+    assert!(applied.contains("host-resources"), "{applied}");
+}
+
+/// Profile selection defers while the device is unreachable and applies on
+/// the first answering cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_selection_defers_until_device_answers() {
+    let agent = SimAgent::start(base_mib()).await;
+    let proxy = FlakyProxy::start(agent.addr()).await;
+    let device = v2c_device("late01", proxy.addr());
+
+    let rig = rig_with_profiles(device).await;
+
+    proxy.set_blackhole(true);
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    assert!(points.is_empty());
+
+    proxy.set_blackhole(false);
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    assert!(points.contains_key("system/name"));
+    assert!(points.contains_key("if/1/in_octets"));
+}

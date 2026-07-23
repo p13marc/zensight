@@ -44,6 +44,10 @@ pub struct SnmpPoller {
     /// Interface state-doc publishing (#529): the shared advanced-publisher
     /// registry (cached, late-join seed) and this device's doc key.
     interfaces_doc: Option<(Arc<zensight_sensor_core::AdvancedPublisherRegistry>, String)>,
+    /// Device profiles (#531): the shared loaded set, and this device's
+    /// selection once sysObjectID has been read successfully.
+    profiles: Option<Arc<crate::profile::ProfileSet>>,
+    selection: std::sync::Mutex<Option<crate::profile::Selection>>,
 }
 
 impl SnmpPoller {
@@ -74,7 +78,21 @@ impl SnmpPoller {
             rate: std::sync::Mutex::new(RateTracker::new()),
             alerts: None,
             interfaces_doc: None,
+            profiles: None,
+            selection: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Enable profile-driven polling (#531): on the first cycle that reads
+    /// sysObjectID, the matching profiles' OID sets extend the configured
+    /// ones.
+    pub fn with_profiles(&mut self, profiles: Arc<crate::profile::ProfileSet>) {
+        self.profiles = Some(profiles);
+    }
+
+    /// Swap the OID→name resolver (tests compose custom + profile tables).
+    pub fn set_resolver(&mut self, resolver: Arc<MibResolver>) {
+        self.mib_resolver = resolver;
     }
 
     /// Publish the joined `InterfaceTable` state doc each cycle (#529).
@@ -222,8 +240,13 @@ impl SnmpPoller {
         }
         let mut seen_counters = std::collections::HashSet::new();
 
+        // Profile selection (#531): once, on the first cycle that can read
+        // sysObjectID (a device offline at startup selects when it answers).
+        self.ensure_profile_selection().await;
+        let (oids, walks) = self.effective_sets();
+
         // Poll individual OIDs with GET
-        for oid_str in &self.oids {
+        for oid_str in &oids {
             requests += 1;
             match self.snmp_get(oid_str).await {
                 Ok(Some((oid, value))) => {
@@ -244,7 +267,7 @@ impl SnmpPoller {
         }
 
         // Walk OID subtrees (GETBULK on v2c/v3, GETNEXT on v1)
-        for subtree in &self.walks {
+        for subtree in &walks {
             requests += 1;
             match self.snmp_walk(subtree).await {
                 Ok(entries) => {
@@ -301,6 +324,90 @@ impl SnmpPoller {
         }
 
         Ok(())
+    }
+
+    /// Run profile selection once (#531): read sysObjectID, match, remember.
+    async fn ensure_profile_selection(&self) {
+        let Some(profiles) = &self.profiles else {
+            return;
+        };
+        if self.selection.lock().unwrap().is_some() {
+            return;
+        }
+        // sysObjectID.0 — selection also proceeds (defaults only) when the
+        // device answers but doesn't serve it.
+        let sys_object_id = match self.snmp_get("1.3.6.1.2.1.1.2.0").await {
+            Ok(Some((_, Value::ObjectIdentifier(oid)))) => Some(oid.to_string()),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(device = %self.device.name, error = %e, "sysObjectID probe failed — deferring profile selection");
+                return;
+            }
+        };
+
+        match profiles.select(sys_object_id.as_deref(), self.device.profile.as_deref()) {
+            Ok(selection) => {
+                tracing::info!(
+                    device = %self.device.name,
+                    sys_object_id = sys_object_id.as_deref().unwrap_or("-"),
+                    applied = %selection.applied.join(","),
+                    "device profiles applied"
+                );
+                self.publish_point(
+                    "1.3.6.1.2.1.1.2.0",
+                    "system/profile",
+                    TelemetryValue::Text(selection.applied.join(",")),
+                    None,
+                )
+                .await;
+                *self.selection.lock().unwrap() = Some(selection);
+            }
+            Err(e) => {
+                // Only a bad pin can fail here; it will not fix itself.
+                tracing::error!(device = %self.device.name, error = %e, "profile selection failed");
+                *self.selection.lock().unwrap() = Some(crate::profile::Selection::default());
+            }
+        }
+    }
+
+    /// The cycle's polling sets: configured OIDs/walks plus the profile
+    /// selection, deduplicated (a walk covered by a broader walk is
+    /// dropped).
+    fn effective_sets(&self) -> (Vec<String>, Vec<String>) {
+        let selection = self.selection.lock().unwrap();
+        let extra = selection.as_ref();
+
+        let mut oids = self.oids.clone();
+        for oid in extra.map(|s| s.oids.as_slice()).unwrap_or_default() {
+            if !oids.contains(oid) {
+                oids.push(oid.clone());
+            }
+        }
+
+        let mut walks = self.walks.clone();
+        for walk in extra.map(|s| s.walks.as_slice()).unwrap_or_default() {
+            if !walks.contains(walk) {
+                walks.push(walk.clone());
+            }
+        }
+        // Drop any walk strictly covered by another (dot-boundary prefix).
+        let covered: Vec<bool> = walks
+            .iter()
+            .map(|w| {
+                walks.iter().any(|other| {
+                    other != w
+                        && w.strip_prefix(other.as_str())
+                            .is_some_and(|r| r.starts_with('.'))
+                })
+            })
+            .collect();
+        let walks = walks
+            .into_iter()
+            .zip(covered)
+            .filter_map(|(w, c)| (!c).then_some(w))
+            .collect();
+
+        (oids, walks)
     }
 
     /// Read sysUpTime for reset detection; best-effort (None on any failure).

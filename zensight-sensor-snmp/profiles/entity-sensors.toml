@@ -1,0 +1,19 @@
+# ENTITY-SENSOR-MIB physical sensors (temperatures, fans, PSUs) (#531).
+# Not a default — extend or pin it for gear that serves entPhySensorTable.
+name = "entity-sensors"
+
+
+walks = [
+  "1.3.6.1.2.1.99.1.1.1.1", # entPhySensorType
+  "1.3.6.1.2.1.99.1.1.1.2", # entPhySensorScale
+  "1.3.6.1.2.1.99.1.1.1.4", # entPhySensorValue
+  "1.3.6.1.2.1.99.1.1.1.5", # entPhySensorOperStatus
+]
+
+[oid_names]
+"1.3.6.1.2.1.99.1.1.1.1" = "sensor/{index}/type"
+"1.3.6.1.2.1.99.1.1.1.2" = "sensor/{index}/scale"
+"1.3.6.1.2.1.99.1.1.1.4" = "sensor/{index}/value"
+"1.3.6.1.2.1.99.1.1.1.5" = "sensor/{index}/oper_status"
+[match]
+default = false

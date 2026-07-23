@@ -9,5 +9,6 @@ pub mod interfaces;
 pub mod mib;
 pub mod oid;
 pub mod poller;
+pub mod profile;
 pub mod rate;
 pub mod trap;

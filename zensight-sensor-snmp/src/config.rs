@@ -68,6 +68,10 @@ pub struct SnmpConfig {
     /// whatever IF-MIB columns each cycle walks. On by default.
     #[serde(default = "default_true")]
     pub publish_interfaces: bool,
+
+    /// Device profiles (#531): curated OID sets matched by sysObjectID.
+    #[serde(default)]
+    pub profiles: ProfilesConfig,
 }
 
 /// MIB loading configuration.
@@ -184,6 +188,34 @@ pub struct DeviceConfig {
     /// block for this device when present.
     #[serde(default)]
     pub alerts: Option<crate::alerts::SnmpAlertsConfig>,
+
+    /// Pin a specific device profile by name (#531) instead of sysObjectID
+    /// matching. Default profiles still apply.
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+/// Device-profile configuration (#531).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfilesConfig {
+    /// Apply profiles at all (default true). Off restores explicit-only
+    /// polling from `oids`/`walks`/`oid_group`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Extra profile directories (`*.toml`); same-name profiles override
+    /// the shipped ones. Bad files fail startup loudly.
+    #[serde(default)]
+    pub dirs: Vec<String>,
+}
+
+impl Default for ProfilesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dirs: Vec::new(),
+        }
+    }
 }
 
 fn default_community() -> String {
@@ -535,6 +567,7 @@ mod tests {
             walks: vec![],
             oid_group: Some("system_info".to_string()),
             alerts: None,
+            profile: None,
         };
 
         let all_oids = device.all_oids(&groups);

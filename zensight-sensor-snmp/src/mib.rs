@@ -152,6 +152,52 @@ impl MibResolver {
             .sort_by_key(|b| std::cmp::Reverse(b.0.len()));
     }
 
+    /// Add profile mappings (#531): names with `{index}` placeholders plus
+    /// SMI SYNTAX hints, e.g. from shipped/user profile TOMLs. Names win
+    /// over earlier entries with the same OID only in the exact table;
+    /// prefix matches keep longest-prefix-first order.
+    pub fn add_profile_mappings(
+        &mut self,
+        names: &HashMap<String, String>,
+        syntax: &HashMap<String, String>,
+    ) {
+        for (oid, name) in names {
+            let is_table_entry = name.contains("{index}");
+            let entry = OidEntry {
+                name: name.clone(),
+                module: Some("profile".to_string()),
+                description: None,
+                syntax: syntax.get(oid).cloned(),
+                is_table_entry,
+            };
+            if is_table_entry {
+                self.prefix_mappings.push((oid.clone(), entry));
+            } else {
+                // Earlier mappings (builtins, config `oid_names`) win.
+                self.exact_mappings.entry(oid.clone()).or_insert(entry);
+            }
+        }
+        // Syntax hints for OIDs without a name mapping still matter (rate
+        // eligibility). A prefix entry covers both shapes: a table column
+        // resolves to `<oid>.<index>` (the dotted form) and a scalar falls
+        // through to the dotted OID — while `syntax()` finds the hint.
+        for (oid, syn) in syntax {
+            if names.contains_key(oid) {
+                continue;
+            }
+            let entry = OidEntry {
+                name: oid.clone(),
+                module: Some("profile".to_string()),
+                description: None,
+                syntax: Some(syn.clone()),
+                is_table_entry: true,
+            };
+            self.prefix_mappings.push((oid.clone(), entry));
+        }
+        self.prefix_mappings
+            .sort_by_key(|b| std::cmp::Reverse(b.0.len()));
+    }
+
     /// Resolve an OID to a human-readable name.
     ///
     /// Returns the mapped name if found, otherwise returns the original OID.

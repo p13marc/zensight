@@ -137,6 +137,54 @@ comes back with a **different** engine identity (agent replaced/reset), the
 poller notices the all-auth-failure cycle and rebuilds its client to force
 rediscovery — no sensor restart needed.
 
+## Device profiles (#531)
+
+Onboarding needs only `name` + `address` + credentials: profiles supply the
+OID sets. Four base profiles ship **embedded in the binary**:
+
+| Profile | Match | Polls |
+|---------|-------|-------|
+| `generic-device` | default | SNMPv2-MIB system group |
+| `network-interfaces` | default | IF-MIB ifTable + ifXTable |
+| `host-resources` | extend/pin | hrStorage descr/units/size/used + hrProcessorLoad |
+| `entity-sensors` | extend/pin | entPhySensorTable type/scale/value/status |
+
+Selection per device runs once, on the first cycle that reads
+`sysObjectID.0` (deferred while the device is unreachable): every `default`
+profile applies, plus the non-default profile with the longest matching
+`sys_object_id` prefix — including its `extends` chain. `devices[].profile`
+pins a profile by name instead of prefix matching (defaults still apply);
+an unknown pin, malformed profile file, or dangling `extends` fails startup.
+Configured `oids`/`walks`/`oid_group` merge on top; walks covered by a
+broader walk are deduplicated. The applied set is logged and published as
+the `system/profile` text metric.
+
+### Authoring a profile
+
+TOML in a directory listed under `snmp.profiles.dirs` (same-name overrides a
+shipped profile). Top-level keys **before** the `[match]` table:
+
+```toml
+name = "acme-switch"
+extends = ["network-interfaces"]
+oids  = ["1.3.6.1.4.1.4242.1.1.0"]
+walks = ["1.3.6.1.4.1.4242.1.2"]
+
+[match]
+sys_object_id = ["1.3.6.1.4.1.4242.1."]  # or: default = true
+
+[oid_names]  # lowercase, chunk-grammar-valid; {index} for table columns
+"1.3.6.1.4.1.4242.1.1.0" = "acme/fan_rpm"
+"1.3.6.1.4.1.4242.1.2"   = "acme/{index}/port_errors"
+
+[oid_syntax] # rate eligibility for the counter tracker
+"1.3.6.1.4.1.4242.1.2" = "Counter32"
+```
+
+Naming/SYNTAX tables from all loaded profiles feed the shared resolver
+(fleet-wide); built-in MIB names and config `oid_names` win on collisions.
+Disable everything with `snmp.profiles.enabled: false`.
+
 ## Testing
 
 `tests/e2e.rs` drives real UDP round-trips against an **in-process SNMP agent**
