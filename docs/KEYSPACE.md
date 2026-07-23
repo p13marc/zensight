@@ -43,6 +43,18 @@ zensight/v1/@catalog/…                                   the identity catalog
   `zensight/v1/*/@rpc/…` with query target `All`.
 - Late joiners seed with a plain GET on the same state selectors (state is
   its own seed; storage-shaped queryables answer one reply per concrete key).
+- The `events` class is instantiated (#534): append-only records ride
+  `v1/<origin>/events/<producer>/<subject...>/<id>` where `<id>` is the
+  record's lowercase ULID — one key per record, nothing overwrites. The
+  shared envelope is `zensight_common::EventRecord` (id, timestamp, source,
+  protocol, kind, severity, summary, fields), published through
+  `zensight_sensor_core::EventPublisher` with `QosClass::Event`
+  (reliable + block: a dropped event is unrecoverable). Registry entries use
+  `class = "events"` with the RFC 08 §5 `rate = rare|low|burst(n/h)`
+  annotation; the first real subjects are the SNMP trap records (#535).
+  Retention is the deployment's choice: point a Zenoh storage at
+  `**/events/**` to keep the log (events are durable in transit, not stored
+  by the bus itself).
 - Telemetry payloads (`TelemetryPoint`) carry an optional UCUM-style `unit`
   field (serde-defaulted, absent when unknown). Proxy pollers with counter
   metrics (today: `snmp`, #527) publish a derived per-second sibling under

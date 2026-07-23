@@ -57,6 +57,9 @@ kind = "json-schema"
 [types.FrameMeta]
 kind = "json-schema"
 
+[types.EventRecord]
+kind = "json-schema"
+
 [types.HealthSnapshot]
 kind = "json-schema"
 

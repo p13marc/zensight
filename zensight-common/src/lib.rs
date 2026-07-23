@@ -17,6 +17,7 @@ pub mod comparison;
 pub mod config;
 pub mod entity;
 pub mod error;
+pub mod event;
 pub mod evidence;
 pub mod health;
 pub mod interfaces;
@@ -59,6 +60,7 @@ pub use entity::{
     AliasRecord, AssertionKind, HostEntity, MemberClaim, NameVal, OperatorAssertion, PdnsRecord,
 };
 pub use error::{Error, Result};
+pub use event::EventRecord;
 pub use evidence::{CloudFacts, HostEvidence, NameObservation};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
