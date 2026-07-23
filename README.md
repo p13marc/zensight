@@ -161,7 +161,7 @@ pub struct TelemetryPoint {
 
 ```bash
 cargo test --workspace          # all tests
-cargo test -p <crate>           # one crate (snmp/gnmi need openssl-devel/protoc; systemd needs systemd-devel)
+cargo test -p <crate>           # one crate (gnmi needs protoc; systemd needs systemd-devel)
 cargo fmt --all                 # CI enforces rustfmt + clippy -D warnings + a design-system color guard
 cargo clippy --workspace
 ```

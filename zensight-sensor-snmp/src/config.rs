@@ -145,6 +145,18 @@ pub struct DeviceConfig {
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
 
+    /// Per-request timeout in seconds (per attempt, not per poll cycle).
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Retransmissions after a timed-out request (0 = single attempt).
+    #[serde(default = "default_retries")]
+    pub retries: u32,
+
+    /// GETBULK max-repetitions for table walks (v2c/v3).
+    #[serde(default = "default_max_repetitions")]
+    pub max_repetitions: u32,
+
     /// Individual OIDs to poll with GET.
     #[serde(default)]
     pub oids: Vec<String>,
@@ -168,6 +180,18 @@ fn default_version() -> SnmpVersion {
 
 fn default_poll_interval() -> u64 {
     30
+}
+
+fn default_timeout_secs() -> u64 {
+    5
+}
+
+fn default_retries() -> u32 {
+    2
+}
+
+fn default_max_repetitions() -> u32 {
+    20
 }
 
 /// SNMP protocol version.
@@ -401,6 +425,37 @@ mod tests {
         assert_eq!(config.snmp.devices[0].version, SnmpVersion::V2c);
         assert_eq!(config.snmp.oid_groups.len(), 1);
         assert!(config.snmp.oid_groups.contains_key("system_info"));
+
+        // Transport tuning fields default when absent (config compatibility).
+        assert_eq!(config.snmp.devices[0].timeout_secs, 5);
+        assert_eq!(config.snmp.devices[0].retries, 2);
+        assert_eq!(config.snmp.devices[0].max_repetitions, 20);
+    }
+
+    #[test]
+    fn test_parse_transport_tuning() {
+        let json5 = r#"
+        {
+            zenoh: { mode: "peer" },
+            snmp: {
+                devices: [
+                    {
+                        name: "slow01",
+                        address: "192.168.1.9:161",
+                        timeout_secs: 10,
+                        retries: 4,
+                        max_repetitions: 50,
+                    },
+                ],
+            },
+            logging: { level: "info" },
+        }
+        "#;
+
+        let config = SnmpSensorConfig::parse(json5).unwrap();
+        assert_eq!(config.snmp.devices[0].timeout_secs, 10);
+        assert_eq!(config.snmp.devices[0].retries, 4);
+        assert_eq!(config.snmp.devices[0].max_repetitions, 50);
     }
 
     #[test]
@@ -421,6 +476,9 @@ mod tests {
             version: SnmpVersion::V2c,
             security: None,
             poll_interval_secs: 30,
+            timeout_secs: 5,
+            retries: 2,
+            max_repetitions: 20,
             oids: vec!["1.3.6.1.2.1.1.3.0".to_string()],
             walks: vec![],
             oid_group: Some("system_info".to_string()),

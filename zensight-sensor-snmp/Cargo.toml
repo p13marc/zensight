@@ -22,8 +22,11 @@ serde_json.workspace = true
 anyhow.workspace = true
 json5.workspace = true
 
-# SNMP client (async with tokio, v3 for SNMPv3/USM support)
-snmp2 = { version = "0.4", features = ["tokio", "v3"] }
+# SNMP client — pure Rust (tokio, v1/v2c/v3 USM, GETBULK, tooBig recovery).
+# Pre-1.0: pinned exactly. The `agent` feature (in-process test agent) is
+# dev-only so the release binary stays lean.
+async-snmp = { version = "=0.16.0", default-features = false, features = ["crypto-rustcrypto"] }
+bytes = "1"
 
 # SNMP PDU decoding (for trap parsing)
 rasn = "0.22"
@@ -31,9 +34,7 @@ rasn-smi = "0.22"
 rasn-snmp = "0.22"
 
 [dev-dependencies]
-async-snmp = "=0.16.0"
-bytes = "1.12.1"
-futures = "0.3.33"
+async-snmp = { version = "=0.16.0", features = ["agent"] }
 
 # =============================================================================
 # Package metadata for cargo-deb

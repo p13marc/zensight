@@ -223,6 +223,7 @@ pub struct FlakyProxy {
     drop_next: Arc<AtomicUsize>,
     blackhole: Arc<AtomicBool>,
     backend: Arc<Mutex<SocketAddr>>,
+    forwarded: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -235,11 +236,13 @@ impl FlakyProxy {
         let drop_next = Arc::new(AtomicUsize::new(0));
         let blackhole = Arc::new(AtomicBool::new(false));
         let backend = Arc::new(Mutex::new(backend));
+        let forwarded = Arc::new(AtomicUsize::new(0));
 
         let task = tokio::spawn({
             let drop_next = drop_next.clone();
             let blackhole = blackhole.clone();
             let backend = backend.clone();
+            let forwarded = forwarded.clone();
             async move {
                 let mut client: Option<SocketAddr> = None;
                 let mut fwd_buf = [0u8; 65536];
@@ -258,6 +261,7 @@ impl FlakyProxy {
                                 continue;
                             }
                             let to = *backend.lock().unwrap();
+                            forwarded.fetch_add(1, Ordering::SeqCst);
                             let _ = relay.send_to(&fwd_buf[..len], to).await;
                         }
                         Ok((len, _)) = relay.recv_from(&mut back_buf) => {
@@ -278,8 +282,14 @@ impl FlakyProxy {
             drop_next,
             blackhole,
             backend,
+            forwarded,
             task,
         }
+    }
+
+    /// Client→agent datagrams forwarded so far (request count).
+    pub fn forwarded(&self) -> usize {
+        self.forwarded.load(Ordering::SeqCst)
     }
 
     /// The stable front address to configure as the device address.
@@ -328,6 +338,9 @@ pub fn isolated_zenoh_config() -> zenoh::Config {
 }
 
 /// A v2c device config pointing at `addr` (community `public`).
+///
+/// Timeout/retry default to fast-fail (1 s, no retries) so loss-injection
+/// tests stay quick; raise per test where retry behavior is the subject.
 pub fn v2c_device(name: &str, addr: SocketAddr) -> DeviceConfig {
     DeviceConfig {
         name: name.to_string(),
@@ -336,6 +349,9 @@ pub fn v2c_device(name: &str, addr: SocketAddr) -> DeviceConfig {
         version: zensight_sensor_snmp::config::SnmpVersion::V2c,
         security: None,
         poll_interval_secs: 1,
+        timeout_secs: 1,
+        retries: 0,
+        max_repetitions: 20,
         oids: Vec::new(),
         walks: Vec::new(),
         oid_group: None,

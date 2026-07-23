@@ -1,17 +1,14 @@
 use anyhow::{Result, anyhow};
-use snmp2::Oid;
+use async_snmp::Oid;
 
-/// Parse an OID string (e.g., "1.3.6.1.2.1.1.3.0") into an snmp2::Oid.
-pub fn parse_oid(oid_str: &str) -> Result<Oid<'static>> {
-    oid_str
-        .parse::<Oid>()
-        .map_err(|e| anyhow!("Failed to parse OID '{}': {:?}", oid_str, e))
-        .map(|oid| oid.to_owned())
+/// Parse an OID string (e.g., "1.3.6.1.2.1.1.3.0") into an OID.
+pub fn parse_oid(oid_str: &str) -> Result<Oid> {
+    Oid::parse(oid_str).map_err(|e| anyhow!("Failed to parse OID '{}': {}", oid_str, e))
 }
 
-/// Convert an snmp2::Oid back to a dotted string representation.
+/// Convert an OID back to a dotted string representation.
 pub fn oid_to_string(oid: &Oid) -> String {
-    oid.to_id_string()
+    oid.to_string()
 }
 
 /// Check if an OID is a child of (or equal to) a parent OID.
