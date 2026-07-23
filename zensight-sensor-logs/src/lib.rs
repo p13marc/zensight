@@ -24,5 +24,8 @@ pub mod ingest;
 pub mod journald;
 pub mod multiline;
 pub mod parser;
+/// The bounded per-line event ring + `@rpc/logs/events` queryable. Public so
+/// the integration harness (#548) can drive socket→ring→query round-trips.
+pub mod query;
 pub mod receiver;
 pub(crate) mod telemetry_guard;
