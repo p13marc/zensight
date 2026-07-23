@@ -213,10 +213,10 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Spawn trap receiver if enabled
+    // Spawn trap receiver if enabled (#535): durable events + alert mapping.
     if snmp_config.trap_listener.enabled {
         let mut trap_receiver = TrapReceiver::new(
-            &snmp_config.trap_listener.bind,
+            snmp_config.trap_listener.clone(),
             session.clone(),
             mib_resolver.clone(),
             serialization,
@@ -224,10 +224,18 @@ async fn main() -> Result<()> {
         if let Some(smi) = &smi {
             trap_receiver.with_smi(smi.clone());
         }
+        if let Some(reporter) = &alert_reporter {
+            trap_receiver.with_alerts(reporter.clone());
+        }
 
         runner.spawn(async move {
-            if let Err(e) = trap_receiver.run().await {
-                tracing::error!(error = %e, "Trap receiver failed");
+            match trap_receiver.bind().await {
+                Ok(bound) => {
+                    if let Err(e) = bound.run().await {
+                        tracing::error!(error = %e, "Trap receiver failed");
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, "Trap listener bind failed"),
             }
         });
     }

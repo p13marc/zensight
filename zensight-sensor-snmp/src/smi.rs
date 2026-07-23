@@ -127,7 +127,7 @@ impl SmiResolver {
 }
 
 /// `ifInOctets` → `if_in_octets`; already-lowercase names pass through.
-fn snake_case(name: &str) -> String {
+pub(crate) fn snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     let mut prev_lower = false;
     for c in name.chars() {

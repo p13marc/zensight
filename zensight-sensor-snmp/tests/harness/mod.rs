@@ -206,6 +206,11 @@ impl SimAgent {
         self.agent.local_addr()
     }
 
+    /// The underlying agent (trap/inform sending in the #535 tests).
+    pub fn agent(&self) -> &Agent {
+        &self.agent
+    }
+
     pub fn shutdown(&self) {
         self.agent.cancel().cancel();
         self.task.abort();

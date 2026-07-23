@@ -121,16 +121,38 @@ impl SnmpConfig {
     }
 }
 
-/// SNMP trap listener configuration.
+/// SNMP trap listener configuration (#535).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrapListenerConfig {
     /// Enable trap listener.
     #[serde(default)]
     pub enabled: bool,
 
-    /// Address to bind (e.g., "0.0.0.0:162").
+    /// Address to bind (e.g., "0.0.0.0:162"). Binding 162 needs privileges
+    /// (or CAP_NET_BIND_SERVICE); an unprivileged deployment binds 1162 and
+    /// redirects — see docs/reference.md.
     #[serde(default = "default_trap_bind")]
     pub bind: String,
+
+    /// Accepted v1/v2c communities. Empty (default) accepts any community —
+    /// the pre-#535 behavior.
+    #[serde(default)]
+    pub communities: Vec<String>,
+
+    /// SNMPv3 notification users (traps + informs). Same schema as device
+    /// `security`; `engine_id` is ignored here (the receiver is
+    /// authoritative and generates its own).
+    #[serde(default)]
+    pub users: Vec<SnmpV3Security>,
+
+    /// Trap → alert mappings: a `fire` trap OID raises the alert, the
+    /// optional `resolve` OID clears it (per device + interface).
+    #[serde(default)]
+    pub alerts: Vec<TrapAlertRule>,
+
+    /// Include the built-in linkDown/linkUp mapping (default true).
+    #[serde(default = "default_true")]
+    pub builtin_rules: bool,
 }
 
 fn default_trap_bind() -> String {
@@ -142,8 +164,48 @@ impl Default for TrapListenerConfig {
         Self {
             enabled: false,
             bind: default_trap_bind(),
+            communities: Vec::new(),
+            users: Vec::new(),
+            alerts: Vec::new(),
+            builtin_rules: true,
         }
     }
+}
+
+impl TrapListenerConfig {
+    /// The effective alert-mapping rules: configured ones plus (unless
+    /// disabled) the built-in linkDown/linkUp pair.
+    pub fn effective_rules(&self) -> Vec<TrapAlertRule> {
+        let mut rules = self.alerts.clone();
+        if self.builtin_rules {
+            rules.push(TrapAlertRule {
+                rule: "trap_link_down".to_string(),
+                fire: "1.3.6.1.6.3.1.1.5.3".to_string(),
+                resolve: Some("1.3.6.1.6.3.1.1.5.4".to_string()),
+                severity: "warning".to_string(),
+            });
+        }
+        rules
+    }
+}
+
+/// One trap → alert mapping (#535).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrapAlertRule {
+    /// Stable rule slug (alert `rule` field).
+    pub rule: String,
+    /// Trap OID that fires the alert.
+    pub fire: String,
+    /// Trap OID that resolves it (same device + interface labels).
+    #[serde(default)]
+    pub resolve: Option<String>,
+    /// `info` / `warning` / `critical` (default warning).
+    #[serde(default = "default_severity")]
+    pub severity: String,
+}
+
+fn default_severity() -> String {
+    "warning".to_string()
 }
 
 /// Configuration for a single SNMP device.

@@ -1129,16 +1129,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitvec-nom2"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d988fcc40055ceaa85edc55875a08f8abd29018582647fd82ad6128dba14a5f0"
-dependencies = [
- "bitvec",
- "nom 7.1.3",
-]
-
-[[package]]
 name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4265,15 +4255,6 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -6904,7 +6885,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools",
  "log",
  "multimap",
  "once_cell",
@@ -6924,7 +6905,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -6937,7 +6918,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -7010,7 +6991,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "cfg-if",
- "itertools 0.14.0",
+ "itertools",
  "parking_lot",
 ]
 
@@ -7324,73 +7305,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rasn"
-version = "0.22.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c1d1ed06b066a36d0492d65daaa5f40b7101c24a1228e0af2709712ef1a86e1"
-dependencies = [
- "bitvec",
- "bitvec-nom2",
- "bytes",
- "chrono",
- "either",
- "hashbrown 0.14.5",
- "nom 7.1.3",
- "num-bigint",
- "num-integer",
- "num-traits",
- "once_cell",
- "rasn-derive",
- "serde_json",
- "snafu",
-]
-
-[[package]]
-name = "rasn-derive"
-version = "0.22.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f35fecd68ee4d5850baa37ee4520456bbae761fdd42a7fcb95701c268500a93"
-dependencies = [
- "proc-macro2",
- "rasn-derive-impl",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "rasn-derive-impl"
-version = "0.22.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "355eedbab62312d9474e1c2e7963ce5fad99bded7e9abd42ae4f040762a2c5f6"
-dependencies = [
- "either",
- "itertools 0.13.0",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "uuid",
-]
-
-[[package]]
-name = "rasn-smi"
-version = "0.22.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8442e2b0291898814ff6d37e72449eefa4197adfd97d7e977a0f283169dc1848"
-dependencies = [
- "chrono",
- "rasn",
-]
-
-[[package]]
-name = "rasn-snmp"
-version = "0.22.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98a3842cf667090324f643a460d0598a3713125c265635335880c29fb2851e35"
-dependencies = [
- "rasn",
- "rasn-smi",
-]
-
-[[package]]
 name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7468,7 +7382,7 @@ dependencies = [
  "arrow",
  "comfy-table",
  "half",
- "itertools 0.14.0",
+ "itertools",
  "re_log",
  "re_tracing",
  "re_tuid",
@@ -7613,7 +7527,7 @@ dependencies = [
  "crossbeam",
  "document-features",
  "half",
- "itertools 0.14.0",
+ "itertools",
  "nohash-hasher",
  "rand 0.9.5",
  "re_arrow_util",
@@ -7641,7 +7555,7 @@ dependencies = [
  "arrow",
  "document-features",
  "indent",
- "itertools 0.14.0",
+ "itertools",
  "nohash-hasher",
  "parking_lot",
  "re_arrow_util",
@@ -7671,7 +7585,7 @@ dependencies = [
  "document-features",
  "emath",
  "indexmap 2.14.0",
- "itertools 0.14.0",
+ "itertools",
  "nohash-hasher",
  "poll-promise",
  "re_arrow_util",
@@ -7710,7 +7624,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db9793ceb32d0943ea4fdbadb99e8cc3f74366a0b0c2339e7e2a0432b502c72a"
 dependencies = [
  "half",
- "itertools 0.14.0",
+ "itertools",
  "num-traits",
  "re_log",
 ]
@@ -7775,7 +7689,7 @@ checksum = "50ebc7aad107ffc4fb5e405951d8866bdffa3bbfcab83b96f38378c1d256bf1e"
 dependencies = [
  "ahash",
  "arrow",
- "itertools 0.14.0",
+ "itertools",
  "nohash-hasher",
  "re_arrow_util",
  "re_byte_size",
@@ -7833,7 +7747,7 @@ dependencies = [
  "arrow",
  "bytes",
  "crossbeam",
- "itertools 0.14.0",
+ "itertools",
  "lz4_flex 0.13.1",
  "parking_lot",
  "re_arrow_util",
@@ -7869,7 +7783,7 @@ dependencies = [
  "document-features",
  "fixed",
  "half",
- "itertools 0.14.0",
+ "itertools",
  "jiff",
  "natord",
  "nohash-hasher",
@@ -7904,7 +7818,7 @@ dependencies = [
  "ahash",
  "backtrace",
  "crossbeam",
- "itertools 0.14.0",
+ "itertools",
  "memory-stats",
  "nohash-hasher",
  "parking_lot",
@@ -7954,7 +7868,7 @@ checksum = "cc4b9722ba8815a81f67adbc43b099fe3d116e5e501e24a7f56754ae7a151a5e"
 dependencies = [
  "arrow",
  "http",
- "itertools 0.14.0",
+ "itertools",
  "jiff",
  "lz4_flex 0.13.1",
  "opentelemetry",
@@ -7990,7 +7904,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "indent",
- "itertools 0.14.0",
+ "itertools",
  "nohash-hasher",
  "parking_lot",
  "paste",
@@ -8033,7 +7947,7 @@ dependencies = [
  "futures",
  "http",
  "http-body",
- "itertools 0.14.0",
+ "itertools",
  "jiff",
  "opentelemetry",
  "opentelemetry-proto",
@@ -8086,7 +8000,7 @@ dependencies = [
  "const_format",
  "crossbeam",
  "document-features",
- "itertools 0.14.0",
+ "itertools",
  "libc",
  "nohash-hasher",
  "parking_lot",
@@ -8123,7 +8037,7 @@ dependencies = [
  "emath",
  "half",
  "infer",
- "itertools 0.14.0",
+ "itertools",
  "mime_guess2",
  "ndarray",
  "nohash-hasher",
@@ -8150,7 +8064,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3779c99433e8c50c8a6745100a6139625c2d25500005428ab09a87de07e73e6e"
 dependencies = [
  "arrow",
- "itertools 0.14.0",
+ "itertools",
  "nohash-hasher",
  "re_arrow_util",
  "re_byte_size",
@@ -8227,7 +8141,7 @@ dependencies = [
  "bytemuck",
  "document-features",
  "half",
- "itertools 0.14.0",
+ "itertools",
  "nohash-hasher",
  "quiver",
  "re_arrow_util",
@@ -8275,7 +8189,7 @@ dependencies = [
  "getrandom 0.3.4",
  "h264-reader",
  "image",
- "itertools 0.14.0",
+ "itertools",
  "js-sys",
  "poll-promise",
  "re_byte_size",
@@ -8541,7 +8455,7 @@ dependencies = [
  "document-features",
  "indexmap 2.14.0",
  "indicatif",
- "itertools 0.14.0",
+ "itertools",
  "parking_lot",
  "puffin",
  "rayon",
@@ -9699,27 +9613,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "snafu"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e84b3f4eacbf3a1ce05eac6763b4d629d60cbc94d632e4092c54ade71f1e1a2"
-dependencies = [
- "snafu-derive",
-]
-
-[[package]]
-name = "snafu-derive"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -11497,7 +11390,7 @@ dependencies = [
  "cranelift-frontend",
  "cranelift-native",
  "gimli 0.33.0",
- "itertools 0.14.0",
+ "itertools",
  "log",
  "object 0.38.1",
  "pulley-interpreter",
@@ -12773,7 +12666,7 @@ dependencies = [
  "indexmap 2.14.0",
  "intaglio",
  "inventory",
- "itertools 0.14.0",
+ "itertools",
  "js-sys",
  "memchr",
  "memmap2",
@@ -12818,7 +12711,7 @@ dependencies = [
  "bitflags 2.13.1",
  "bstr",
  "indexmap 2.14.0",
- "itertools 0.14.0",
+ "itertools",
  "logos",
  "num-traits",
  "rowan",
@@ -12994,7 +12887,7 @@ dependencies = [
  "flume",
  "futures",
  "git-version",
- "itertools 0.14.0",
+ "itertools",
  "json5",
  "lazy_static",
  "nonempty-collections",
@@ -13887,9 +13780,6 @@ dependencies = [
  "hostname",
  "json5",
  "mib-rs",
- "rasn",
- "rasn-smi",
- "rasn-snmp",
  "serde",
  "serde_json",
  "tokio",

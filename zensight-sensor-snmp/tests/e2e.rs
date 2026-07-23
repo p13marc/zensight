@@ -1207,3 +1207,263 @@ async fn vendor_mib_dir_names_enums_and_units() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Trap pipeline (#535)
+// ---------------------------------------------------------------------------
+
+use zensight_common::{AlertState as EvAlertState, EventRecord};
+use zensight_sensor_snmp::config::TrapListenerConfig;
+use zensight_sensor_snmp::trap::TrapReceiver;
+
+const LINK_DOWN: &str = "1.3.6.1.6.3.1.1.5.3";
+const LINK_UP: &str = "1.3.6.1.6.3.1.1.5.4";
+const IF_INDEX_1: &str = "1.3.6.1.2.1.2.2.1.1.1";
+
+struct TrapRig {
+    session: std::sync::Arc<zenoh::Session>,
+    event_sub:
+        zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    reporter: std::sync::Arc<zensight_sensor_core::AlertReporter>,
+    addr: std::net::SocketAddr,
+    _task: tokio::task::JoinHandle<()>,
+}
+
+/// A running trap receiver on 127.0.0.1:0 over an isolated peer, with an
+/// events subscriber and a shared alert reporter attached.
+async fn trap_rig(config: TrapListenerConfig) -> TrapRig {
+    let session = std::sync::Arc::new(
+        zenoh::open(harness::isolated_zenoh_config())
+            .await
+            .expect("open zenoh"),
+    );
+    let event_sub = session
+        .declare_subscriber("v1/*/events/snmp/**")
+        .await
+        .expect("events subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut resolver = zensight_sensor_snmp::mib::MibResolver::new();
+    resolver.add_custom_mappings(&harness::test_oid_names());
+    let reporter = std::sync::Arc::new(zensight_sensor_core::AlertReporter::new(
+        zensight_sensor_core::Publisher::new(
+            session.clone(),
+            "snmp",
+            zensight_common::Format::Json,
+        ),
+        zensight_common::Protocol::Snmp,
+        zensight_common::Format::Json,
+    ));
+
+    let mut receiver = TrapReceiver::new(
+        config,
+        session.clone(),
+        std::sync::Arc::new(resolver),
+        zensight_common::Format::Json,
+    );
+    receiver.with_alerts(reporter.clone());
+    let bound = receiver.bind().await.expect("bind trap listener");
+    let addr = bound.local_addr();
+    let task = tokio::spawn(async move {
+        let _ = bound.run().await;
+    });
+
+    TrapRig {
+        session,
+        event_sub,
+        reporter,
+        addr,
+        _task: task,
+    }
+}
+
+async fn next_event(rig: &TrapRig) -> (String, EventRecord) {
+    let sample = tokio::time::timeout(Duration::from_secs(5), rig.event_sub.recv_async())
+        .await
+        .expect("event timed out")
+        .expect("event recv");
+    let record = zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode event");
+    (sample.key_expr().to_string(), record)
+}
+
+/// A v2c trap becomes a durable event record with translated fields and a
+/// telemetry counter; linkDown fires an alert and linkUp resolves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trap_v2c_event_alert_lifecycle() {
+    let rig = trap_rig(TrapListenerConfig {
+        enabled: true,
+        bind: "127.0.0.1:0".to_string(),
+        communities: vec!["public".to_string()],
+        ..Default::default()
+    })
+    .await;
+    let alert_sub = rig
+        .session
+        .declare_subscriber("v1/*/state/snmp/alert/*")
+        .await
+        .expect("alert subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // A sim agent that sends notifications at our listener.
+    let agent = SimAgent::start_with(SimMib::new(), |b| {
+        b.community(b"public")
+            .trap_sink(rig.addr.to_string(), async_snmp::Auth::v2c("public"))
+    })
+    .await;
+
+    let varbinds = vec![async_snmp::VarBind::new(
+        harness::oid(IF_INDEX_1),
+        Value::Integer(1),
+    )];
+    agent
+        .agent()
+        .send_trap(&harness::oid(LINK_DOWN), 4200, varbinds.clone())
+        .await
+        .expect("send linkDown");
+
+    let (key, event) = next_event(&rig).await;
+    assert!(key.contains("/events/snmp/127-0-0-1/trap/"), "{key}");
+    assert!(key.ends_with(&event.id), "ULID is the last chunk: {key}");
+    assert_eq!(event.kind, "trap/1.3.6.1.6.3.1.1.5.3"); // no MIB entry in rig
+    assert_eq!(event.fields["trap_oid"], LINK_DOWN);
+    assert_eq!(event.fields["confirmed"], "false");
+    assert_eq!(event.severity, zensight_common::AlertSeverity::Warning);
+
+    // linkDown fired the built-in alert with device + interface labels.
+    let sample = tokio::time::timeout(Duration::from_secs(5), alert_sub.recv_async())
+        .await
+        .expect("alert timed out")
+        .expect("alert recv");
+    let alert: zensight_common::Alert =
+        zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode alert");
+    assert_eq!(alert.rule, "trap_link_down");
+    assert_eq!(alert.state, EvAlertState::Firing);
+    assert_eq!(alert.labels["device"], "127-0-0-1");
+    assert_eq!(alert.labels["if_index"], "1");
+
+    // linkUp resolves exactly that alert.
+    agent
+        .agent()
+        .send_trap(&harness::oid(LINK_UP), 4300, varbinds)
+        .await
+        .expect("send linkUp");
+    let (_, up_event) = next_event(&rig).await;
+    assert_eq!(up_event.kind, "trap/1.3.6.1.6.3.1.1.5.4");
+
+    let mut resolved = false;
+    while let Ok(Ok(sample)) =
+        tokio::time::timeout(Duration::from_secs(5), alert_sub.recv_async()).await
+    {
+        match sample.kind() {
+            zenoh::sample::SampleKind::Put => {
+                let alert: zensight_common::Alert =
+                    zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode");
+                if alert.state == EvAlertState::Resolved {
+                    resolved = true;
+                    break;
+                }
+            }
+            zenoh::sample::SampleKind::Delete => {
+                resolved = true;
+                break;
+            }
+        }
+    }
+    assert!(resolved, "linkUp must resolve the linkDown alert");
+    assert_eq!(rig.reporter.firing_alerts().len(), 0);
+}
+
+/// An inform round-trip: `send_inform` only returns Ok once the receiver's
+/// automatic acknowledgement arrives (no retransmit), and the record notes
+/// it was confirmed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inform_v2c_is_acknowledged() {
+    let rig = trap_rig(TrapListenerConfig {
+        enabled: true,
+        bind: "127.0.0.1:0".to_string(),
+        ..Default::default()
+    })
+    .await;
+
+    let agent = SimAgent::start_with(SimMib::new(), |b| {
+        b.community(b"public")
+            .trap_sink(rig.addr.to_string(), async_snmp::Auth::v2c("public"))
+            .inform_timeout(Duration::from_secs(2))
+    })
+    .await;
+
+    agent
+        .agent()
+        .send_inform(&harness::oid(LINK_DOWN), 100, Vec::new())
+        .await
+        .expect("inform must be acknowledged (no retransmit timeout)");
+
+    let (_, event) = next_event(&rig).await;
+    assert_eq!(event.fields["confirmed"], "true");
+}
+
+/// A v3 authPriv trap decodes end-to-end through the configured user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trap_v3_authpriv_end_to_end() {
+    let user = zensight_sensor_snmp::config::SnmpV3Security {
+        username: "trapuser".to_string(),
+        auth_protocol: AuthProtocol::Sha256,
+        auth_password: Some("authpass123".to_string()),
+        priv_protocol: PrivProtocol::Aes128,
+        priv_password: Some("privpass123".to_string()),
+        engine_id: None,
+    };
+    let rig = trap_rig(TrapListenerConfig {
+        enabled: true,
+        bind: "127.0.0.1:0".to_string(),
+        users: vec![user],
+        ..Default::default()
+    })
+    .await;
+
+    let sink_auth: async_snmp::Auth = async_snmp::Auth::usm("trapuser")
+        .auth(AgentAuth::Sha256, "authpass123")
+        .privacy(AgentPriv::Aes128, "privpass123")
+        .into();
+    let agent = SimAgent::start_with(SimMib::new(), |b| {
+        b.community(b"public")
+            .trap_sink(rig.addr.to_string(), sink_auth)
+    })
+    .await;
+
+    agent
+        .agent()
+        .send_trap(&harness::oid(LINK_DOWN), 7, Vec::new())
+        .await
+        .expect("send v3 trap");
+
+    let (_, event) = next_event(&rig).await;
+    assert_eq!(event.fields["trap_oid"], LINK_DOWN);
+    assert_eq!(event.fields["snmp_version"], "V3");
+}
+
+/// A community filter rejects mismatched senders (no event published).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trap_community_filter_rejects() {
+    let rig = trap_rig(TrapListenerConfig {
+        enabled: true,
+        bind: "127.0.0.1:0".to_string(),
+        communities: vec!["secret".to_string()],
+        ..Default::default()
+    })
+    .await;
+
+    let agent = SimAgent::start_with(SimMib::new(), |b| {
+        b.community(b"public")
+            .trap_sink(rig.addr.to_string(), async_snmp::Auth::v2c("wrong"))
+    })
+    .await;
+    agent
+        .agent()
+        .send_trap(&harness::oid(LINK_DOWN), 1, Vec::new())
+        .await
+        .expect("send");
+
+    let got = tokio::time::timeout(Duration::from_secs(2), rig.event_sub.recv_async()).await;
+    assert!(got.is_err(), "mismatched community must not publish");
+}
