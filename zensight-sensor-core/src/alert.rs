@@ -154,6 +154,44 @@ impl AlertReporter {
         self.apply("", action).await
     }
 
+    /// Like [`reconcile`](Self::reconcile), but scoped to alerts carrying
+    /// `label_key == label_value` — for proxy sensors (snmp, modbus, gnmi)
+    /// where several observed devices share one reporter and each device's
+    /// sweep must not resolve the others' firing alerts.
+    pub async fn reconcile_labeled(
+        &self,
+        rule: &str,
+        label_key: &str,
+        label_value: &str,
+        still_firing: &[String],
+    ) -> Result<()> {
+        let action = {
+            let mut active = self.active.lock().unwrap();
+            let to_resolve: Vec<String> = active
+                .iter()
+                .filter(|(k, a)| {
+                    a.rule == rule
+                        && a.published
+                        && a.last.labels.get(label_key).map(String::as_str) == Some(label_value)
+                        && !still_firing.contains(k)
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            let mut payloads = Vec::new();
+            for k in to_resolve {
+                if let Some(a) = active.remove(&k) {
+                    payloads.push(a.last.resolved());
+                }
+            }
+            if payloads.is_empty() {
+                Action::None
+            } else {
+                Action::Resolve(payloads)
+            }
+        };
+        self.apply("", action).await
+    }
+
     /// Resolve and tombstone every active alert (graceful shutdown).
     pub async fn resolve_all(&self) -> Result<()> {
         let payloads = {

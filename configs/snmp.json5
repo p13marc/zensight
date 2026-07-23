@@ -81,6 +81,21 @@
       // },
     ],
 
+    // Threshold alerting (#528) — on by default with these values; every rule
+    // is individually disableable, and a device can carry its own `alerts`
+    // block to replace this one.
+    // alerts: {
+    //   enabled: true,
+    //   for_secs: 0,                   // continuous-violation debounce
+    //   unreachable: { enabled: true, cycles: 3 },
+    //   interface_down: { enabled: true },
+    //   interface_errors: { enabled: true, per_sec: 1.0 },
+    //   utilization: { enabled: true, percent: 90.0 },
+    //   reboot: { enabled: true, hold_secs: 300 },
+    //   storage: { enabled: true, percent: 90.0 },    // needs an hrStorage walk
+    //   processor: { enabled: true, percent: 90.0 },  // needs an hrProcessorLoad walk
+    // },
+
     // Predefined OID groups (reusable across devices)
     oid_groups: {
       system_info: {
