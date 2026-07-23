@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.1"
+version = "1.2"
 app = "zensight"
 convention = 1
 
@@ -53,6 +53,17 @@ type = "HostEvidence"
 ttl_s = 900
 since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.2"
+description = "threshold alerts for polled devices (#528): unreachable, interface down/errors/utilization, reboot, host resources"
 
 [[subject]]
 path = "artifact/{kind}"

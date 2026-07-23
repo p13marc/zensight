@@ -39,6 +39,8 @@ pub struct SnmpPoller {
     /// Counter→rate state (#527). Std mutex: locked only for synchronous
     /// bookkeeping, never across an await.
     rate: std::sync::Mutex<RateTracker>,
+    /// Threshold alerting (#528), when enabled for this device.
+    alerts: Option<tokio::sync::Mutex<crate::alerts::AlertEvaluator>>,
 }
 
 impl SnmpPoller {
@@ -67,7 +69,28 @@ impl SnmpPoller {
             walks,
             client: tokio::sync::RwLock::new(None),
             rate: std::sync::Mutex::new(RateTracker::new()),
+            alerts: None,
         }
+    }
+
+    /// Attach threshold alerting (#528). When the interface rules are on,
+    /// the IF-MIB columns they read are added to the walk set unless an
+    /// existing walk already covers them.
+    pub fn with_alerts(&mut self, evaluator: crate::alerts::AlertEvaluator) {
+        if evaluator.wants_interface_columns() {
+            for column in crate::alerts::INTERFACE_RULE_COLUMNS {
+                let covered = self.walks.iter().any(|w| {
+                    column == w
+                        || column
+                            .strip_prefix(w.as_str())
+                            .is_some_and(|r| r.starts_with('.'))
+                });
+                if !covered {
+                    self.walks.push(column.to_string());
+                }
+            }
+        }
+        self.alerts = Some(tokio::sync::Mutex::new(evaluator));
     }
 
     /// Build the persistent SNMP client for this device.
@@ -167,6 +190,8 @@ impl SnmpPoller {
         let mut requests = 0usize;
         let mut failures = 0usize;
         let mut auth_failures = 0usize;
+        let mut transport_failures = 0usize;
+        let mut observation = crate::alerts::CycleObservation::default();
 
         // Read sysUpTime up front: it anchors reset detection for every
         // counter this cycle (a reboot must suppress the whole interval).
@@ -185,7 +210,8 @@ impl SnmpPoller {
             requests += 1;
             match self.snmp_get(oid_str).await {
                 Ok(Some((oid, value))) => {
-                    self.publish(&oid, &value, &mut seen_counters).await;
+                    let rate = self.publish(&oid, &value, &mut seen_counters).await;
+                    observation.ingest(&oid, &value, rate);
                 }
                 Ok(None) => {
                     tracing::debug!(device = %self.device.name, oid = %oid_str, "No value returned");
@@ -193,6 +219,7 @@ impl SnmpPoller {
                 Err(e) => {
                     failures += 1;
                     auth_failures += usize::from(is_auth_error(&e));
+                    transport_failures += usize::from(is_transport_error(&e));
                     tracing::warn!(device = %self.device.name, oid = %oid_str, error = %e, "GET failed");
                 }
             }
@@ -204,12 +231,14 @@ impl SnmpPoller {
             match self.snmp_walk(subtree).await {
                 Ok(entries) => {
                     for (oid, value) in entries {
-                        self.publish(&oid, &value, &mut seen_counters).await;
+                        let rate = self.publish(&oid, &value, &mut seen_counters).await;
+                        observation.ingest(&oid, &value, rate);
                     }
                 }
                 Err(e) => {
                     failures += 1;
                     auth_failures += usize::from(is_auth_error(&e));
+                    transport_failures += usize::from(is_transport_error(&e));
                     tracing::warn!(device = %self.device.name, subtree = %subtree, error = %e, "WALK failed");
                 }
             }
@@ -220,6 +249,14 @@ impl SnmpPoller {
         // doesn't wipe baselines that just happened to go unobserved.
         if requests > 0 && failures == 0 {
             self.rate.lock().unwrap().retain(&seen_counters);
+        }
+
+        // Threshold alerting (#528) on what this cycle saw.
+        if let Some(evaluator) = &self.alerts {
+            observation.all_transport_failed =
+                requests > 0 && failures == requests && transport_failures == failures;
+            observation.reset_detected = device_reset;
+            evaluator.lock().await.tick(&observation).await;
         }
 
         // A whole v3 cycle failing authentication usually means the device's
@@ -300,13 +337,11 @@ impl SnmpPoller {
         oid_str: &str,
         value: &Value,
         seen_counters: &mut std::collections::HashSet<String>,
-    ) {
+    ) -> Option<f64> {
         let metric_name = self.mib_resolver.resolve(oid_str);
         let syntax = self.mib_resolver.syntax(oid_str);
 
-        let Some((telemetry_value, unit)) = snmp_value_to_telemetry(value) else {
-            return;
-        };
+        let (telemetry_value, unit) = snmp_value_to_telemetry(value)?;
         self.publish_point(oid_str, &metric_name, telemetry_value, unit)
             .await;
 
@@ -322,9 +357,7 @@ impl SnmpPoller {
             }
             _ => None,
         };
-        let Some((counter_value, is_32bit)) = counter else {
-            return;
-        };
+        let (counter_value, is_32bit) = counter?;
 
         seen_counters.insert(oid_str.to_string());
         let rate = self.rate.lock().unwrap().observe(
@@ -344,6 +377,7 @@ impl SnmpPoller {
             )
             .await;
         }
+        rate
     }
 
     async fn publish_point(
@@ -399,6 +433,20 @@ fn rate_unit_for(metric_name: &str) -> &'static str {
 fn is_auth_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<Box<async_snmp::Error>>()
         .is_some_and(|e| matches!(e.as_ref(), async_snmp::Error::Auth { .. }))
+}
+
+/// Whether an error is transport-level (device not answering at all) as
+/// opposed to an SNMP-level reply — feeds the device-unreachable rule.
+fn is_transport_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Box<async_snmp::Error>>()
+        .is_some_and(|e| {
+            matches!(
+                e.as_ref(),
+                async_snmp::Error::Timeout { .. }
+                    | async_snmp::Error::Network { .. }
+                    | async_snmp::Error::Closed { .. }
+            )
+        })
 }
 
 /// Convert an SNMP wire value to a `TelemetryValue` + optional unit (#527):

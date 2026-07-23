@@ -31,6 +31,7 @@ Standard sensor metadata is published by the shared runner:
 - `zensight/v1/<origin>/@rpc/snmp/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/snmp/artifact/<kind>` status document
 - `zensight/v1/<origin>/state/snmp/sensor` — sensor registration (`SensorInfo`)
 - `zensight/v1/<origin>/state/snmp/evidence/self` — self-reported host evidence (`with_identity`)
+- `zensight/v1/<origin>/state/snmp/alert/<key>` — threshold alerts (see below)
 - `zensight/v1/<origin>/state/snmp/alive` — sensor liveliness token
 - `zensight/v1/<origin>/@rpc/snmp/introspect` — the registry slice this build serves
 
@@ -59,8 +60,33 @@ See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contr
   instrument unit; the Prometheus exporter exports rates as gauges named
   `..._rate` (dots/slashes sanitized to `_`) without unit annotation.
 
-> Note: this sensor does not currently emit `state/snmp/alert/*`; it has no
-> threshold/alert engine of its own.
+## Threshold alerts (#528)
+
+The sensor drives sensor-core's `AlertReporter`: firing/resolved alerts ride
+`zensight/v1/<origin>/state/snmp/alert/<key>` (reliable QoS, tombstone on
+resolve; late joiners seed via the standard alert selector GET). One shared
+reporter serves all devices; reconciliation is scoped by the `device` label,
+so one device's recovery never resolves another's alerts.
+
+| Rule | Fires when | Severity |
+|------|-----------|----------|
+| `device_unreachable` | N consecutive poll cycles failed entirely at the transport level (default N=3) | critical |
+| `interface_down` | `ifOperStatus != up` while `ifAdminStatus == up` | warning |
+| `interface_errors` | error/discard rate above `per_sec` (default 1/s), per direction+kind | warning |
+| `interface_utilization` | octet rate ×8 vs `ifHighSpeed`/`ifSpeed` above `percent` (default 90) | warning |
+| `device_rebooted` | sysUpTime went backwards; holds `hold_secs` (default 300) then auto-resolves | info |
+| `storage_usage` | `hrStorageUsed/hrStorageSize` above `percent` (default 90) — only when hrStorage is walked | warning |
+| `processor_load` | `hrProcessorLoad` above `percent` (default 90) — only when walked | warning |
+
+Config: a `snmp.alerts` block — `enabled` (default true), `for_secs`
+(continuous-violation debounce, default 0), and one sub-block per rule, each
+individually disableable. `devices[].alerts` replaces the whole block for
+that device. When the interface rules are on, the sensor auto-adds the
+IF-MIB columns they read (status, speed, octet/error/discard counters incl.
+HC) to the walk set unless an existing walk already covers them; the
+HOST-RESOURCES rules evaluate only tables you explicitly walk. An
+unanswering device keeps its interface/storage alert state (no false
+resolves) until it responds again.
 
 ## Configuration
 

@@ -9,7 +9,9 @@ mod harness;
 use std::time::Duration;
 
 use async_snmp::{AuthProtocol as AgentAuth, PrivProtocol as AgentPriv, Value};
-use harness::{FlakyProxy, IF_TABLE, SYSTEM, SimAgent, SimMib, collect_points, rig, v2c_device};
+use harness::{
+    FlakyProxy, IF_TABLE, IF_X_TABLE, SYSTEM, SimAgent, SimMib, collect_points, rig, v2c_device,
+};
 use zensight_common::TelemetryValue;
 use zensight_sensor_snmp::config::{AuthProtocol, PrivProtocol, SnmpV3Security, SnmpVersion};
 
@@ -609,4 +611,286 @@ async fn v3_configured_engine_id_polls() {
     })
     .await;
     assert!(ok, "pre-seeded engine id must poll successfully");
+}
+
+// ---------------------------------------------------------------------------
+// Threshold alerts (#528)
+// ---------------------------------------------------------------------------
+
+use harness::{collect_alerts, rig_with_alerts};
+use zensight_common::AlertState;
+use zensight_sensor_snmp::alerts::SnmpAlertsConfig;
+
+fn firing<'a>(
+    events: &'a [(zenoh::sample::SampleKind, Option<zensight_common::Alert>)],
+    rule: &str,
+) -> Vec<&'a zensight_common::Alert> {
+    events
+        .iter()
+        .filter_map(|(kind, alert)| match (kind, alert) {
+            (zenoh::sample::SampleKind::Put, Some(a))
+                if a.rule == rule && a.state == AlertState::Firing =>
+            {
+                Some(a)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn resolved<'a>(
+    events: &'a [(zenoh::sample::SampleKind, Option<zensight_common::Alert>)],
+    rule: &str,
+) -> Vec<&'a zensight_common::Alert> {
+    events
+        .iter()
+        .filter_map(|(kind, alert)| match (kind, alert) {
+            (zenoh::sample::SampleKind::Put, Some(a))
+                if a.rule == rule && a.state == AlertState::Resolved =>
+            {
+                Some(a)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Killing the device fires `device_unreachable` after N cycles; recovery
+/// resolves it (Put(Resolved) + Delete tombstone).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreachable_alert_fires_and_resolves() {
+    let agent = SimAgent::start(base_mib()).await;
+    let proxy = FlakyProxy::start(agent.addr()).await;
+    let mut device = v2c_device("dead01", proxy.addr());
+    device.oids = vec![format!("{SYSTEM}.5.0")];
+
+    let mut cfg = SnmpAlertsConfig::default();
+    cfg.unreachable.cycles = 2;
+    // Only the rule under test — the interface rules would auto-add walks.
+    cfg.interface_down.enabled = false;
+    cfg.interface_errors.enabled = false;
+    cfg.utilization.enabled = false;
+    let ar = rig_with_alerts(device, cfg).await;
+
+    proxy.set_blackhole(true);
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert!(
+        firing(&events, "device_unreachable").is_empty(),
+        "one failed cycle must not fire yet"
+    );
+
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    let f = firing(&events, "device_unreachable");
+    assert_eq!(f.len(), 1, "second failed cycle fires");
+    assert_eq!(f[0].labels["device"], "dead01");
+
+    // Recovery: resolve + tombstone.
+    proxy.set_blackhole(false);
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert_eq!(resolved(&events, "device_unreachable").len(), 1);
+    assert!(
+        events
+            .iter()
+            .any(|(kind, _)| *kind == zenoh::sample::SampleKind::Delete),
+        "resolve must tombstone the alert key"
+    );
+}
+
+/// ifOperStatus down while admin-up fires `interface_down`; link recovery
+/// resolves it. The needed IF-MIB columns are auto-walked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interface_down_alert_lifecycle() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let device = v2c_device("edge01", agent.addr());
+
+    let ar = rig_with_alerts(device, SnmpAlertsConfig::default()).await;
+
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert!(firing(&events, "interface_down").is_empty(), "links are up");
+
+    // eth0 goes oper-down.
+    mib.set(&format!("{IF_TABLE}.8.1"), Value::Integer(2));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    let f = firing(&events, "interface_down");
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].labels["if_index"], "1");
+    assert_eq!(f[0].labels["if_name"], "eth0");
+
+    // Link recovers.
+    mib.set(&format!("{IF_TABLE}.8.1"), Value::Integer(1));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert_eq!(resolved(&events, "interface_down").len(), 1);
+}
+
+/// A fast-growing error counter fires `interface_errors` once its rate
+/// crosses the threshold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interface_error_rate_alert() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let device = v2c_device("noisy01", agent.addr());
+
+    let ar = rig_with_alerts(device, SnmpAlertsConfig::default()).await;
+    ar.rig.poller.poll_once().await.expect("poll");
+    let _ = collect_alerts(&ar, IDLE).await;
+
+    // Thousands of input errors between cycles: rate >> 1/s.
+    mib.set(&format!("{IF_TABLE}.14.1"), Value::Counter32(50_000));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    let f = firing(&events, "interface_errors");
+    assert!(!f.is_empty(), "error burst must fire");
+    assert_eq!(f[0].labels["direction"], "in");
+    assert_eq!(f[0].labels["kind"], "errors");
+}
+
+/// Saturating the link (octet rate vs ifHighSpeed) fires
+/// `interface_utilization`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interface_utilization_alert() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let device = v2c_device("hot01", agent.addr());
+
+    let ar = rig_with_alerts(device, SnmpAlertsConfig::default()).await;
+    ar.rig.poller.poll_once().await.expect("poll");
+    let _ = collect_alerts(&ar, IDLE).await;
+
+    // A giant octet delta on the HC input counter: rate far above 90% of
+    // the 100 Mb/s ifHighSpeed.
+    mib.set(&format!("{IF_X_TABLE}.6.1"), Value::Counter64(500_000_000));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    let f = firing(&events, "interface_utilization");
+    assert!(!f.is_empty(), "saturated link must fire");
+    assert_eq!(f[0].labels["direction"], "in");
+}
+
+/// sysUpTime going backwards fires the informational `device_rebooted`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reboot_alert_fires() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("boot01", agent.addr());
+    device.oids = vec![format!("{SYSTEM}.5.0")];
+
+    let mut cfg = SnmpAlertsConfig::default();
+    cfg.interface_down.enabled = false;
+    cfg.interface_errors.enabled = false;
+    cfg.utilization.enabled = false;
+    let ar = rig_with_alerts(device, cfg).await;
+
+    ar.rig.poller.poll_once().await.expect("poll");
+    let _ = collect_alerts(&ar, IDLE).await;
+
+    mib.set(&format!("{SYSTEM}.3.0"), Value::TimeTicks(10));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert_eq!(firing(&events, "device_rebooted").len(), 1);
+}
+
+/// A disabled rule stays silent even when its condition holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_rule_stays_silent() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let device = v2c_device("quiet01", agent.addr());
+
+    let mut cfg = SnmpAlertsConfig::default();
+    cfg.interface_down.enabled = false;
+    let ar = rig_with_alerts(device, cfg).await;
+
+    mib.set(&format!("{IF_TABLE}.8.1"), Value::Integer(2));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert!(firing(&events, "interface_down").is_empty());
+}
+
+/// Debounce: with `for_secs` set, a single violating cycle publishes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debounce_suppresses_first_violation() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let device = v2c_device("flap01", agent.addr());
+
+    let cfg = SnmpAlertsConfig {
+        for_secs: 3600,
+        ..SnmpAlertsConfig::default()
+    };
+    let ar = rig_with_alerts(device, cfg).await;
+
+    mib.set(&format!("{IF_TABLE}.8.1"), Value::Integer(2));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert!(
+        firing(&events, "interface_down").is_empty(),
+        "debounce must suppress the first violation"
+    );
+}
+
+/// Two devices share one reporter: one device's sweep must not resolve the
+/// other's firing alerts (label-scoped reconcile).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_devices_do_not_stomp_each_other() {
+    let mib_a = base_mib();
+    let agent_a = SimAgent::start(mib_a.clone()).await;
+    let mib_b = base_mib();
+    let agent_b = SimAgent::start(mib_b).await;
+
+    // Shared session + reporter, one poller per device (as in main.rs).
+    let session = std::sync::Arc::new(
+        zenoh::open(harness::isolated_zenoh_config())
+            .await
+            .expect("open zenoh"),
+    );
+    let publisher = zensight_sensor_core::Publisher::new(
+        session.clone(),
+        "snmp",
+        zensight_common::Format::Json,
+    );
+    let reporter = std::sync::Arc::new(zensight_sensor_core::AlertReporter::new(
+        publisher,
+        zensight_common::Protocol::Snmp,
+        zensight_common::Format::Json,
+    ));
+
+    let mut resolver = zensight_sensor_snmp::mib::MibResolver::new();
+    resolver.add_custom_mappings(&harness::test_oid_names());
+    let resolver = std::sync::Arc::new(resolver);
+
+    let mut pollers = Vec::new();
+    for (name, addr) in [("dev-a", agent_a.addr()), ("dev-b", agent_b.addr())] {
+        let mut poller = zensight_sensor_snmp::poller::SnmpPoller::new(
+            v2c_device(name, addr),
+            session.clone(),
+            resolver.clone(),
+            &std::collections::HashMap::new(),
+            zensight_common::Format::Json,
+        );
+        poller.with_alerts(zensight_sensor_snmp::alerts::AlertEvaluator::new(
+            name.to_string(),
+            SnmpAlertsConfig::default(),
+            reporter.clone(),
+        ));
+        poller.init().await.expect("init");
+        pollers.push(poller);
+    }
+
+    // dev-a's eth0 goes down; dev-b stays healthy.
+    mib_a.set(&format!("{IF_TABLE}.8.1"), Value::Integer(2));
+    pollers[0].poll_once().await.expect("poll a");
+    assert_eq!(reporter.firing_alerts().len(), 1);
+
+    // dev-b's clean sweep must NOT resolve dev-a's alert.
+    pollers[1].poll_once().await.expect("poll b");
+    let still = reporter.firing_alerts();
+    assert_eq!(still.len(), 1, "dev-b's sweep stomped dev-a's alert");
+    assert_eq!(still[0].labels["device"], "dev-a");
 }

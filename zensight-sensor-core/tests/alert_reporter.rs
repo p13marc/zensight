@@ -126,3 +126,49 @@ async fn debounce_suppresses_first_observe() {
     );
     assert_eq!(reporter.active_count(), 0);
 }
+
+/// `reconcile_labeled` resolves only alerts carrying the matching label —
+/// the proxy-sensor case (snmp/modbus/gnmi) where several observed devices
+/// share one reporter and each device sweeps independently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconcile_labeled_scopes_to_the_label() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+    let alert_a = sample_alert(&source).with_label("device", "dev-a");
+    let alert_b = sample_alert(&source).with_label("device", "dev-b");
+    reporter
+        .observe(alert_a.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe a");
+    reporter
+        .observe(alert_b, Some(Duration::ZERO))
+        .await
+        .expect("observe b");
+    assert_eq!(reporter.active_count(), 2);
+
+    // dev-b's clean sweep: only dev-b's alert resolves.
+    reporter
+        .reconcile_labeled("ssh-listening", "device", "dev-b", &[])
+        .await
+        .expect("reconcile b");
+    let firing = reporter.firing_alerts();
+    assert_eq!(firing.len(), 1);
+    assert_eq!(firing[0].labels["device"], "dev-a");
+
+    // dev-a's sweep with its key still firing keeps it.
+    reporter
+        .reconcile_labeled("ssh-listening", "device", "dev-a", &[alert_a.alert_key()])
+        .await
+        .expect("reconcile a keep");
+    assert_eq!(reporter.active_count(), 1);
+
+    // dev-a recovered: now empty.
+    reporter
+        .reconcile_labeled("ssh-listening", "device", "dev-a", &[])
+        .await
+        .expect("reconcile a clear");
+    assert_eq!(reporter.active_count(), 0);
+}

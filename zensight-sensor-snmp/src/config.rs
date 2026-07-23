@@ -57,6 +57,12 @@ pub struct SnmpConfig {
     /// MIB configuration.
     #[serde(default)]
     pub mib: MibConfig,
+
+    /// Threshold alerting (#528). On by default; individual rules and the
+    /// whole engine can be disabled, and any device can carry a full
+    /// replacement block in `devices[].alerts`.
+    #[serde(default)]
+    pub alerts: crate::alerts::SnmpAlertsConfig,
 }
 
 /// MIB loading configuration.
@@ -168,6 +174,11 @@ pub struct DeviceConfig {
     /// Reference to a predefined OID group.
     #[serde(default)]
     pub oid_group: Option<String>,
+
+    /// Per-device alerting override: replaces the global `snmp.alerts`
+    /// block for this device when present.
+    #[serde(default)]
+    pub alerts: Option<crate::alerts::SnmpAlertsConfig>,
 }
 
 fn default_community() -> String {
@@ -433,6 +444,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_alerts_block() {
+        let json5 = r#"
+        {
+            zenoh: { mode: "peer" },
+            snmp: {
+                alerts: {
+                    for_secs: 30,
+                    unreachable: { cycles: 5 },
+                    utilization: { percent: 80.0 },
+                    interface_errors: { enabled: false },
+                },
+                devices: [
+                    {
+                        name: "quiet01",
+                        address: "192.168.1.7:161",
+                        alerts: { enabled: false },
+                    },
+                ],
+            },
+            logging: { level: "info" },
+        }
+        "#;
+
+        let config = SnmpSensorConfig::parse(json5).unwrap();
+        let alerts = &config.snmp.alerts;
+        assert!(alerts.enabled);
+        assert_eq!(alerts.for_secs, 30);
+        assert_eq!(alerts.unreachable.cycles, 5);
+        assert_eq!(alerts.utilization.percent, 80.0);
+        assert!(!alerts.interface_errors.enabled);
+        assert!(alerts.interface_down.enabled); // untouched default
+        let dev = &config.snmp.devices[0];
+        assert!(!dev.alerts.as_ref().unwrap().enabled);
+    }
+
+    #[test]
     fn test_parse_transport_tuning() {
         let json5 = r#"
         {
@@ -482,6 +529,7 @@ mod tests {
             oids: vec!["1.3.6.1.2.1.1.3.0".to_string()],
             walks: vec![],
             oid_group: Some("system_info".to_string()),
+            alerts: None,
         };
 
         let all_oids = device.all_oids(&groups);

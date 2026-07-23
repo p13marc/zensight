@@ -355,6 +355,7 @@ pub fn v2c_device(name: &str, addr: SocketAddr) -> DeviceConfig {
         oids: Vec::new(),
         walks: Vec::new(),
         oid_group: None,
+        alerts: None,
     }
 }
 
@@ -444,6 +445,68 @@ pub async fn rig(device: DeviceConfig) -> TestRig {
         sub,
         poller,
     }
+}
+
+/// [`rig`] plus threshold alerting: a shared `AlertReporter` wired into the
+/// poller and a subscriber on the device's alert state keys.
+pub struct AlertRig {
+    pub rig: TestRig,
+    pub alert_sub:
+        zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    pub reporter: Arc<zensight_sensor_core::AlertReporter>,
+}
+
+/// Build a poller with alerting enabled (`cfg`) over an isolated Zenoh peer.
+pub async fn rig_with_alerts(
+    device: DeviceConfig,
+    cfg: zensight_sensor_snmp::alerts::SnmpAlertsConfig,
+) -> AlertRig {
+    let device_name = device.name.clone();
+    let mut rig = rig(device).await;
+    let alert_sub = rig
+        .session
+        .declare_subscriber("v1/*/state/snmp/alert/*")
+        .await
+        .expect("declare alert subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let publisher = zensight_sensor_core::Publisher::new(rig.session.clone(), "snmp", Format::Json);
+    let reporter = Arc::new(
+        zensight_sensor_core::AlertReporter::new(
+            publisher,
+            zensight_common::Protocol::Snmp,
+            Format::Json,
+        )
+        .with_debounce(Duration::from_secs(cfg.for_secs)),
+    );
+    let evaluator =
+        zensight_sensor_snmp::alerts::AlertEvaluator::new(device_name, cfg, reporter.clone());
+    rig.poller.with_alerts(evaluator);
+
+    AlertRig {
+        rig,
+        alert_sub,
+        reporter,
+    }
+}
+
+/// Collect alert samples until `idle` elapses with no new one:
+/// `(SampleKind, decoded Alert for Puts)`.
+pub async fn collect_alerts(
+    rig: &AlertRig,
+    idle: Duration,
+) -> Vec<(zenoh::sample::SampleKind, Option<zensight_common::Alert>)> {
+    let mut out = Vec::new();
+    while let Ok(Ok(sample)) = tokio::time::timeout(idle, rig.alert_sub.recv_async()).await {
+        let alert = match sample.kind() {
+            zenoh::sample::SampleKind::Put => {
+                Some(decode_auto(&sample.payload().to_bytes()).expect("decode alert"))
+            }
+            _ => None,
+        };
+        out.push((sample.kind(), alert));
+    }
+    out
 }
 
 /// Collect telemetry points until `deadline` elapses with no new sample.
