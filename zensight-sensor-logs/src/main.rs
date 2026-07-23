@@ -18,6 +18,7 @@ mod parser;
 mod query;
 mod receiver;
 mod sentinel;
+mod store;
 mod telemetry_guard;
 mod template;
 
@@ -600,13 +601,64 @@ async fn main() -> Result<()> {
         tracing::info!("log novelty / rate-spike detection enabled");
     }
 
+    // Durable log store (#544): a disk-backed history behind the hot ring, so
+    // `@rpc/logs/events` can serve days back across restarts. Opt-in. The intake
+    // loop only pushes to `store_tx`; a dedicated writer task batches to disk so
+    // a slow disk never adds latency to ingestion.
+    let store_cfg = &syslog_config.store;
+    let (log_store, store_tx, store_counters) = if store_cfg.enabled {
+        match store::resolve_store_path(store_cfg.path.as_deref()) {
+            Some(path) => match store::LogStore::open(&path) {
+                Ok(s) => {
+                    let store = Arc::new(s);
+                    let counters = Arc::new(store::StoreCounters::default());
+                    let (tx, rx) = tokio::sync::mpsc::channel::<zensight_common::LogRecord>(
+                        store_cfg.queue_capacity.max(1),
+                    );
+                    // Writer task: batch-append off the hot path.
+                    runner.spawn(store_writer_loop(
+                        store.clone(),
+                        rx,
+                        counters.clone(),
+                        store_cfg.batch_size.max(1),
+                        std::time::Duration::from_secs(store_cfg.flush_interval_secs.max(1)),
+                    ));
+                    // Prune + health task.
+                    runner.spawn(store_maintenance_loop(
+                        store.clone(),
+                        counters.clone(),
+                        registry.clone(),
+                        source.clone(),
+                        format,
+                        store_cfg.clone(),
+                    ));
+                    tracing::info!(path = %path.display(), "durable log store enabled");
+                    (Some(store), Some(tx), Some(counters))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, path = %path.display(), "failed to open log store; disabling");
+                    (None, None, None)
+                }
+            },
+            None => {
+                tracing::warn!("log store enabled but no state dir resolved; disabling");
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
     // Per-line event ring + on-demand query channel (#358): log lines are
-    // served from `@rpc/logs/events`, never streamed on the telemetry bus.
+    // served from `@rpc/logs/events`, never streamed on the telemetry bus. When
+    // the durable store is on, historical (`from`/`to`/`after_uid`) queries are
+    // answered from it; recent ones from the ring.
     let (event_ring, event_ring_capacity) = query::new_ring(syslog_config.events_ring_capacity);
     runner.spawn(query::run_events(
         session.clone(),
         "logs".to_string(),
         event_ring.clone(),
+        log_store.clone(),
     ));
 
     // Spawn the message processing task
@@ -620,6 +672,8 @@ async fn main() -> Result<()> {
         .is_some()
         .then(|| alert_reporter.clone())
         .flatten();
+    let store_tx_loop = store_tx.clone();
+    let store_counters_loop = store_counters.clone();
     // Repeat collapse (#546): fold consecutive identical lines into one record +
     // `repeat_count`. Opt-in; `None` = pass every line straight through.
     let mut collapser = syslog_config.ingest.collapse_repeats.then(|| {
@@ -668,6 +722,7 @@ async fn main() -> Result<()> {
                         emit_line(
                             &record, count, include_raw, &template_loop, &novelty_loop,
                             &novelty_reporter, &event_ring, event_ring_capacity, &publish_health,
+                            &store_tx_loop, &store_counters_loop,
                         ).await;
                     }
                 }
@@ -678,6 +733,7 @@ async fn main() -> Result<()> {
                         emit_line(
                             &record, count, include_raw, &template_loop, &novelty_loop,
                             &novelty_reporter, &event_ring, event_ring_capacity, &publish_health,
+                            &store_tx_loop, &store_counters_loop,
                         ).await;
                     }
                 }
@@ -709,6 +765,8 @@ async fn emit_line(
     event_ring: &query::EventRing,
     event_ring_capacity: usize,
     health: &Arc<zensight_sensor_core::SensorHealth>,
+    store_tx: &Option<tokio::sync::mpsc::Sender<zensight_common::LogRecord>>,
+    store_counters: &Option<Arc<store::StoreCounters>>,
 ) {
     use std::sync::atomic::Ordering;
 
@@ -749,8 +807,146 @@ async fn emit_line(
     }
 
     if let Some(record) = zensight_common::LogRecord::from_point(&point) {
+        // Durable store (#544): hand a copy to the writer task off the hot path.
+        // A full writer queue drops + counts rather than back-pressuring intake.
+        if let Some(tx) = store_tx
+            && tx.try_send(record.clone()).is_err()
+            && let Some(c) = store_counters
+        {
+            store::StoreCounters::inc(&c.dropped);
+        }
         query::push(event_ring, event_ring_capacity, record);
         health.record_metrics_published(1);
+    }
+}
+
+/// Durable-store writer task (#544): drain the intake channel, batch, and write
+/// on a blocking thread so disk I/O never touches the hot loop.
+async fn store_writer_loop(
+    store: Arc<store::LogStore>,
+    mut rx: tokio::sync::mpsc::Receiver<zensight_common::LogRecord>,
+    counters: Arc<store::StoreCounters>,
+    batch_size: usize,
+    flush_interval: std::time::Duration,
+) {
+    let mut batch: Vec<zensight_common::LogRecord> = Vec::with_capacity(batch_size);
+    let mut tick = tokio::time::interval(flush_interval);
+    loop {
+        tokio::select! {
+            got = rx.recv() => match got {
+                Some(rec) => {
+                    batch.push(rec);
+                    if batch.len() >= batch_size {
+                        flush_store_batch(&store, &mut batch, &counters).await;
+                    }
+                }
+                None => {
+                    // Channel closed (shutdown): final flush and stop.
+                    flush_store_batch(&store, &mut batch, &counters).await;
+                    break;
+                }
+            },
+            _ = tick.tick() => flush_store_batch(&store, &mut batch, &counters).await,
+        }
+    }
+}
+
+/// Write and clear `batch` (no-op if empty), updating counters.
+async fn flush_store_batch(
+    store: &Arc<store::LogStore>,
+    batch: &mut Vec<zensight_common::LogRecord>,
+    counters: &Arc<store::StoreCounters>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let recs = std::mem::take(batch);
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.write_batch(&recs)).await {
+        Ok(Ok(n)) => store::StoreCounters::add(&counters.written, n as u64),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "log store: batch write failed");
+            store::StoreCounters::inc(&counters.errors);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "log store: writer task panicked");
+            store::StoreCounters::inc(&counters.errors);
+        }
+    }
+}
+
+/// Durable-store maintenance task (#544): periodic prune + store health gauges
+/// (`store/records`, `store/oldest_age_secs`, `store/write_drops_total`).
+async fn store_maintenance_loop(
+    store: Arc<store::LogStore>,
+    counters: Arc<store::StoreCounters>,
+    registry: Arc<zensight_common::PublisherRegistry>,
+    source: String,
+    format: zensight_common::serialization::Format,
+    cfg: config::LogStoreConfig,
+) {
+    use std::sync::atomic::Ordering;
+    let prefix =
+        zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "logs")
+            .telemetry_prefix();
+    let max_age_ms = (cfg.max_age_days as i64).saturating_mul(86_400_000);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+        cfg.prune_interval_secs.max(1),
+    ));
+    loop {
+        tick.tick().await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        let s = store.clone();
+        let keep = cfg.max_records;
+        match tokio::task::spawn_blocking(move || s.prune(now_ms, max_age_ms, keep)).await {
+            Ok(Ok(n)) if n > 0 => tracing::info!(pruned = n, "log store: pruned old records"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "log store: prune failed"),
+            _ => {}
+        }
+
+        let s = store.clone();
+        let stats = match tokio::task::spawn_blocking(move || s.stats()).await {
+            Ok(Ok(st)) => st,
+            _ => continue,
+        };
+        let oldest_age = stats
+            .oldest_ts
+            .map(|t| (now_ms - t).max(0) / 1000)
+            .unwrap_or(0);
+        let points = [
+            telemetry_guard::checked_point(
+                &source,
+                "store/records",
+                zensight_common::telemetry::TelemetryValue::Gauge(stats.records as f64),
+            ),
+            telemetry_guard::checked_point(
+                &source,
+                "store/oldest_age_secs",
+                zensight_common::telemetry::TelemetryValue::Gauge(oldest_age as f64),
+            ),
+            telemetry_guard::checked_point(
+                &source,
+                "store/write_drops_total",
+                zensight_common::telemetry::TelemetryValue::Counter(
+                    counters.dropped.load(Ordering::Relaxed),
+                ),
+            ),
+        ];
+        for point in points {
+            let key = format!("{}/{}", prefix, point.metric);
+            match encode(&point, format) {
+                Ok(payload) => {
+                    if let Err(e) = registry
+                        .put(&key, payload, zensight_common::QosClass::Telemetry)
+                        .await
+                    {
+                        tracing::warn!(error = %e, key, "failed to publish store metric");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to encode store metric"),
+            }
+        }
     }
 }
 

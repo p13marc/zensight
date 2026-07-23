@@ -56,6 +56,7 @@ from missing telemetry.
 | `multiline` | on | stack-trace joining on stream listeners — see below |
 | `events_ring_capacity` | `10000` | in-memory ring served on `@rpc/logs/events` (min 100, ≈3 MB) |
 | `sentinel` | empty | log sentinel pattern→alert rules (#543) — see [alerting.md](alerting.md) |
+| `store` | off | durable per-line history (#544) — see below |
 
 ### `syslog.listeners[]`
 
@@ -220,6 +221,35 @@ exhaust the ring one copy at a time. A run is emitted once a *different* line
 arrives or no matching line has for `collapse_window_ms` (also the max added
 latency for a line with no follow-up, which is why it's opt-in). The collapsed
 count still feeds the rollup counters, so totals stay honest.
+
+### `syslog.store` (#544, durable history — off by default)
+
+A disk-backed redb store behind the hot ring, so `@rpc/logs/events` can serve
+**days** of history across restarts. The ring stays the hot cache; the store
+answers `from`/`to`/`after_uid` queries.
+
+```json5
+store: {
+  enabled: false,           // opt-in
+  path: null,               // null = $STATE_DIRECTORY / XDG state / ~/.local/state
+  max_age_days: 7,          // prune by age
+  max_records: 2000000,     // and by size, whichever first
+  batch_size: 500,          // flush a batch at this many queued records
+  flush_interval_secs: 2,   // ...or at least this often
+  prune_interval_secs: 300, // prune + health cadence
+  queue_capacity: 100000,   // writer-channel bound; full → drop + count (never block intake)
+}
+```
+
+Writes are batched on a dedicated thread **off the hot intake loop** — a slow
+disk drops (counted as `store/write_drops_total`) rather than adding ingest
+latency. Health gauges: `store/records`, `store/oldest_age_secs`,
+`store/write_drops_total`.
+
+**Query** (`@rpc/logs/events`): `from=<ms>`/`to=<ms>` select an inclusive time
+window; `after_uid=<uid>` is a pagination cursor (pass the previous page's
+last/oldest uid) and `limit=<n>` caps the page. Pages are newest-first. The
+legacy `since`/`max` ring selectors keep working.
 
 ### `syslog.multiline` (#107, on by default)
 

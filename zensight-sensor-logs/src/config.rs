@@ -152,6 +152,87 @@ pub struct SyslogConfig {
     /// known-event rules ride on `journald.detect_events`.
     #[serde(default)]
     pub sentinel: crate::sentinel::LogRulesConfig,
+
+    /// Durable per-line history (#544): a disk-backed redb store behind the hot
+    /// ring, so `@rpc/logs/events` can serve days back across restarts.
+    /// Disabled by default (opt-in, like the other retention features).
+    #[serde(default)]
+    pub store: LogStoreConfig,
+}
+
+/// Durable log store configuration (#544).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogStoreConfig {
+    /// Persist retained lines to disk. Off by default.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Store file path. `None` resolves the systemd `STATE_DIRECTORY` / XDG
+    /// state location (same scheme as the journald cursor).
+    #[serde(default)]
+    pub path: Option<std::path::PathBuf>,
+
+    /// Retain history at most this many days (pruned by age). Default 7.
+    #[serde(default = "default_store_max_age_days")]
+    pub max_age_days: u64,
+
+    /// Hard cap on stored records regardless of age (pruned by size). Default
+    /// 2 000 000 (~a few hundred MB).
+    #[serde(default = "default_store_max_records")]
+    pub max_records: usize,
+
+    /// Flush a batch once this many records are queued. Default 500.
+    #[serde(default = "default_store_batch_size")]
+    pub batch_size: usize,
+
+    /// Flush at least this often even if the batch isn't full (seconds).
+    /// Default 2.
+    #[serde(default = "default_store_flush_secs")]
+    pub flush_interval_secs: u64,
+
+    /// Prune + health-report cadence (seconds). Default 300.
+    #[serde(default = "default_store_prune_secs")]
+    pub prune_interval_secs: u64,
+
+    /// Bound on the writer channel; when full, records are dropped and counted
+    /// (`store/write_drops_total`) rather than back-pressuring intake. Default
+    /// 100 000.
+    #[serde(default = "default_store_queue_capacity")]
+    pub queue_capacity: usize,
+}
+
+impl Default for LogStoreConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: None,
+            max_age_days: default_store_max_age_days(),
+            max_records: default_store_max_records(),
+            batch_size: default_store_batch_size(),
+            flush_interval_secs: default_store_flush_secs(),
+            prune_interval_secs: default_store_prune_secs(),
+            queue_capacity: default_store_queue_capacity(),
+        }
+    }
+}
+
+fn default_store_max_age_days() -> u64 {
+    7
+}
+fn default_store_max_records() -> usize {
+    2_000_000
+}
+fn default_store_batch_size() -> usize {
+    500
+}
+fn default_store_flush_secs() -> u64 {
+    2
+}
+fn default_store_prune_secs() -> u64 {
+    300
+}
+fn default_store_queue_capacity() -> usize {
+    100_000
 }
 
 /// Multiline / stacktrace joining configuration (#107, C6).
@@ -1014,6 +1095,7 @@ impl Default for SyslogConfig {
             multiline: MultilineConfig::default(),
             events_ring_capacity: default_events_ring_capacity(),
             sentinel: crate::sentinel::LogRulesConfig::default(),
+            store: LogStoreConfig::default(),
         }
     }
 }

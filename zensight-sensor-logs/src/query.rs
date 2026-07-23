@@ -10,13 +10,23 @@
 //! Selector parameters (zenoh `Parameters`, `;`-separated — e.g.
 //! `…/@rpc/logs/events?since=1719999000000;max=500`):
 //! - `since=<epoch_ms>` — only records with `ts >= since` (inclusive);
-//! - `max=<n>` — reply cap (default 500, clamped to the ring);
-//! - `host=<name>` — only records from one originating host.
+//! - `max=<n>` / `limit=<n>` — reply cap (default 500);
+//! - `source=<name>` (alias `host=`) — only records from one originating host.
+//!
+//! Durable-store selectors (#544, served from the disk store when configured):
+//! - `from=<epoch_ms>` / `to=<epoch_ms>` — inclusive time window;
+//! - `after_uid=<uid>` — pagination cursor: records strictly older than this
+//!   uid (pass the previous page's last/oldest uid). Newest-first pages.
+//!
+//! A query using any of `from`/`to`/`after_uid` is answered from the durable
+//! store (days of history, survives restart); otherwise from the hot ring.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use zensight_common::LogRecord;
+
+use crate::store::LogStore;
 
 /// Default reply cap when no `?max=` selector is supplied.
 pub const DEFAULT_EVENTS_REPLY_MAX: usize = 500;
@@ -66,8 +76,15 @@ fn filter_ring(
 }
 
 /// Run the log-event query channel until the session closes. Replies with
-/// filtered records (most-recent first) as JSON `Vec<LogRecord>`.
-pub async fn run_events(session: Arc<zenoh::Session>, producer: String, ring: EventRing) {
+/// filtered records (most-recent first) as JSON `Vec<LogRecord>`. When `store`
+/// is `Some`, `from`/`to`/`after_uid` queries are answered from the durable
+/// store (#544); recent queries always come from the hot ring.
+pub async fn run_events(
+    session: Arc<zenoh::Session>,
+    producer: String,
+    ring: EventRing,
+    store: Option<Arc<LogStore>>,
+) {
     let key = zensight_common::command::query_key(&producer, "events");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
@@ -87,14 +104,37 @@ pub async fn run_events(session: Arc<zenoh::Session>, producer: String, ring: Ev
             .get("source")
             .or_else(|| params.get("host"))
             .map(str::to_string);
+        // `limit=` is the paginated alias of `max=`.
         let max = params
             .get("max")
+            .or_else(|| params.get("limit"))
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_EVENTS_REPLY_MAX);
 
-        // Snapshot under the lock, reply outside it.
-        let records: Vec<LogRecord> = {
+        let from = params.get("from").and_then(|v| v.parse::<i64>().ok());
+        let to = params.get("to").and_then(|v| v.parse::<i64>().ok());
+        let after_uid = params.get("after_uid").map(str::to_string);
+        let durable_query = from.is_some() || to.is_some() || after_uid.is_some();
+
+        let records: Vec<LogRecord> = if durable_query && store.is_some() {
+            // Durable, paginated path — blocking redb range walk off the runtime.
+            let store = store.clone().expect("checked is_some");
+            let host_f = host.clone();
+            let (from_ms, to_ms) = (from.unwrap_or(i64::MIN), to.unwrap_or(i64::MAX));
+            let after = after_uid.clone();
+            tokio::task::spawn_blocking(move || {
+                store
+                    .query(from_ms, to_ms, after.as_deref(), max)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| host_f.as_deref().is_none_or(|h| r.host == h))
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            // Hot path — snapshot the ring under the lock, reply outside it.
             match ring.lock() {
                 Ok(r) => filter_ring(&r, since, host.as_deref(), max),
                 Err(_) => Vec::new(),
@@ -184,7 +224,7 @@ mod tests {
                 rec(&format!("u{i}"), 100 + i, "web01", "m"),
             );
         }
-        tokio::spawn(run_events(session.clone(), prefix.clone(), ring));
+        tokio::spawn(run_events(session.clone(), prefix.clone(), ring, None));
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         // zenoh selector params are `;`-separated (Parameters), not `&`.

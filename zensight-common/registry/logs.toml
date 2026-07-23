@@ -16,7 +16,7 @@
 # it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "2.2"
+version = "2.3"
 app = "zensight"
 convention = 1
 
@@ -58,6 +58,27 @@ class = "telemetry"
 type = "TelemetryPoint"
 since = "2.2"
 description = "windowed dropped fraction (gauge, 0.0..=1.0); nonzero while ingest is shedding (#546)"
+
+[[subject]]
+path = "store/records"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.3"
+description = "durable log store row count (gauge, #544)"
+
+[[subject]]
+path = "store/oldest_age_secs"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.3"
+description = "age of the oldest stored log record in seconds (gauge, #544)"
+
+[[subject]]
+path = "store/write_drops_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.3"
+description = "log records dropped before the durable store (writer queue full, #544)"
 
 [[subject]]
 path = "by_severity/{severity}"
@@ -264,7 +285,7 @@ kind = "read"
 reply = "Vec<LogRecord>"
 idempotent = true
 since = "1.0"
-description = "bounded log ring, newest first (?since=;max=;source= — source filters the observed device, a central receiver holds many)"
+description = "bounded log history, newest first. Recent (ring): ?since=;max=;source=. Durable (store, #544): ?from=;to=;after_uid=;limit= — time window + cursor pagination across restarts (source filters the observed device)"
 [[procedure]]
 path = "filter"
 kind = "read"
