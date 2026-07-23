@@ -1,0 +1,21 @@
+# HOST-RESOURCES-MIB storage + processor load (#531). Not a default —
+# extend or pin it for servers/appliances that serve these tables.
+name = "host-resources"
+
+
+walks = [
+  "1.3.6.1.2.1.25.2.3.1.3", # hrStorageDescr
+  "1.3.6.1.2.1.25.2.3.1.4", # hrStorageAllocationUnits
+  "1.3.6.1.2.1.25.2.3.1.5", # hrStorageSize
+  "1.3.6.1.2.1.25.2.3.1.6", # hrStorageUsed
+  "1.3.6.1.2.1.25.3.3.1.2", # hrProcessorLoad
+]
+
+[oid_names]
+"1.3.6.1.2.1.25.2.3.1.3" = "storage/{index}/descr"
+"1.3.6.1.2.1.25.2.3.1.4" = "storage/{index}/allocation_units"
+"1.3.6.1.2.1.25.2.3.1.5" = "storage/{index}/size"
+"1.3.6.1.2.1.25.2.3.1.6" = "storage/{index}/used"
+"1.3.6.1.2.1.25.3.3.1.2" = "cpu/{index}/load"
+[match]
+default = false

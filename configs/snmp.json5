@@ -81,6 +81,14 @@
       // },
     ],
 
+    // Device profiles (#531): curated OID sets matched by sysObjectID. On by
+    // default — a device with only name+address gets system + interface
+    // metrics from the shipped profiles; pin more via devices[].profile.
+    // profiles: {
+    //   enabled: true,
+    //   dirs: ["/etc/zensight/snmp-profiles"],  // user profiles (*.toml)
+    // },
+
     // Joined per-device InterfaceTable state doc (#529), on by default.
     // publish_interfaces: true,
 

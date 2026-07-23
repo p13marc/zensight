@@ -88,6 +88,25 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Device profiles (#531): shipped base set + user dirs. A malformed or
+    // dangling profile is a startup error — never a silently-thinner fleet.
+    let profiles = if snmp_config.profiles.enabled {
+        let mut set = zensight_sensor_snmp::profile::ProfileSet::builtin();
+        for dir in &snmp_config.profiles.dirs {
+            let loaded = set
+                .load_dir(std::path::Path::new(dir))
+                .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+            tracing::info!(dir = %dir, loaded, "Loaded user device profiles");
+        }
+        set.validate().map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        // Profile naming/SYNTAX tables are fleet-wide; config `oid_names`
+        // and builtins added above take precedence on collisions.
+        mib_resolver.add_profile_mappings(&set.all_oid_names(), &set.all_oid_syntax());
+        Some(Arc::new(set))
+    } else {
+        None
+    };
+
     let mib_resolver = Arc::new(mib_resolver);
 
     // Threshold alerting (#528): one shared reporter, one evaluator per
@@ -153,6 +172,10 @@ async fn main() -> Result<()> {
 
         if let Some(registry) = &interfaces_registry {
             poller.with_interfaces_doc(registry.clone());
+        }
+
+        if let Some(profiles) = &profiles {
+            poller.with_profiles(profiles.clone());
         }
 
         // Initialize poller (required for SNMPv3 to discover engine ID)

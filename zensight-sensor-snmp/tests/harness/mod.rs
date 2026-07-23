@@ -91,6 +91,16 @@ impl SimMib {
         self
     }
 
+    /// A couple of HOST-RESOURCES rows (storage index 1, processor 1).
+    pub fn with_host_resources(self) -> Self {
+        self.set("1.3.6.1.2.1.25.2.3.1.3.1", text("/var"));
+        self.set("1.3.6.1.2.1.25.2.3.1.4.1", Value::Integer(4096));
+        self.set("1.3.6.1.2.1.25.2.3.1.5.1", Value::Integer(1_000_000));
+        self.set("1.3.6.1.2.1.25.2.3.1.6.1", Value::Integer(400_000));
+        self.set("1.3.6.1.2.1.25.3.3.1.2.1", Value::Integer(17));
+        self
+    }
+
     /// Synthetic IF-MIB ifTable + ifXTable with `n` interfaces (indexes 1..=n).
     ///
     /// Interfaces come up admin-up/oper-up at 100 Mb/s with zeroed counters;
@@ -359,6 +369,7 @@ pub fn v2c_device(name: &str, addr: SocketAddr) -> DeviceConfig {
         walks: Vec::new(),
         oid_group: None,
         alerts: None,
+        profile: None,
     }
 }
 
@@ -459,6 +470,21 @@ pub async fn rig(device: DeviceConfig) -> TestRig {
         sub,
         poller,
     }
+}
+
+/// [`rig`] plus device profiles (#531): shipped base profiles are loaded,
+/// their naming/SYNTAX tables feed the resolver, and selection runs on the
+/// first cycle that reads sysObjectID.
+pub async fn rig_with_profiles(device: DeviceConfig) -> TestRig {
+    let mut rig = rig(device).await;
+    let set = zensight_sensor_snmp::profile::ProfileSet::builtin();
+    // Rebuild the resolver with profile names on top of the test names.
+    let mut resolver = MibResolver::new();
+    resolver.add_custom_mappings(&test_oid_names());
+    resolver.add_profile_mappings(&set.all_oid_names(), &set.all_oid_syntax());
+    rig.poller.set_resolver(Arc::new(resolver));
+    rig.poller.with_profiles(Arc::new(set));
+    rig
 }
 
 /// [`rig`] plus threshold alerting: a shared `AlertReporter` wired into the
