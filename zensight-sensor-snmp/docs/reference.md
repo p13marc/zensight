@@ -105,7 +105,8 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `oid_groups` | map | Named, reusable `{ oids, walks }` sets referenced by `device.oid_group`. |
 | `oid_names` | map | OID→metric-name map; `{index}` is substituted with the table index. |
 | `mib.load_builtin` | bool | Load bundled MIB definitions. |
-| `mib.files` | string[] | Extra MIB files to load for OID resolution. |
+| `mib.files` | string[] | **Deprecated** (#532): legacy JSON pseudo-MIBs, honored one more release. Use `mib.dirs`. |
+| `mib.dirs` | string[] | Directories of **standard SMI** `.mib`/`.txt` files (vendor MIBs drop in unmodified); parsed with a real SMI parser, malformed modules fail startup. |
 
 ### `devices[]`
 
@@ -184,6 +185,25 @@ sys_object_id = ["1.3.6.1.4.1.4242.1."]  # or: default = true
 Naming/SYNTAX tables from all loaded profiles feed the shared resolver
 (fleet-wide); built-in MIB names and config `oid_names` win on collisions.
 Disable everything with `snmp.profiles.enabled: false`.
+
+## SMI MIBs (#532)
+
+`mib.dirs` loads standard SMI modules (mib-rs; SNMPv2-SMI/-TC base modules
+are built in). The SMI layer is the **naming fallback** behind the explicit
+tables (built-ins, config `oid_names`, profiles): where nothing explicit
+matches, a polled OID resolves to `snake_case(object)` for scalars and
+`snake_case(object)/<index>` for table instances (chunk-grammar-valid),
+instead of the dotted OID. MIB metadata also feeds:
+
+- **enum decode** — INTEGER named-values ride an `enum` label
+  (`ifOperStatus` publishes `2` with `enum: "down"`); the numeric value
+  stays numeric for thresholds and plots;
+- **units** — the UNITS clause fills `TelemetryPoint.unit` unless the value
+  conversion set one (TimeTicks seconds);
+- **typing** — the SMI base type (Counter32/64) backs rate eligibility like
+  the hand-maintained SYNTAX hints;
+- **trap translation** — notification OIDs resolve to snake-case names in
+  trap keys (`link_down`, vendor notifications) via the same loaded set.
 
 ## Testing
 

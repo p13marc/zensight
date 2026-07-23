@@ -11,4 +11,5 @@ pub mod oid;
 pub mod poller;
 pub mod profile;
 pub mod rate;
+pub mod smi;
 pub mod trap;

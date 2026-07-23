@@ -81,6 +81,10 @@
       // },
     ],
 
+    // Standard SMI MIB directories (#532): drop vendor .mib files in and their
+    // OIDs resolve by name; enums decode onto the `enum` label; UNITS apply.
+    // mib: { dirs: ["/usr/share/snmp/mibs"] },
+
     // Device profiles (#531): curated OID sets matched by sysObjectID. On by
     // default — a device with only name+address gets system + interface
     // metrics from the shipped profiles; pin more via devices[].profile.
