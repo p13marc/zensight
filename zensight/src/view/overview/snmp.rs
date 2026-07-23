@@ -82,6 +82,7 @@ impl FleetIface<'_> {
 pub fn snmp_overview<'a>(
     devices: &HashMap<&DeviceId, &DeviceState>,
     interfaces: &'a HashMap<String, InterfaceTable>,
+    events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
 ) -> Element<'a, Message> {
     if devices.is_empty() && interfaces.is_empty() {
         return empty_state("No SNMP devices available", None);
@@ -117,10 +118,79 @@ pub fn snmp_overview<'a>(
     let top_talkers = render_top_talkers(&fleet);
     let down_hotlist = render_down_hotlist(&fleet);
     let error_hotspots = render_error_hotspots(&fleet);
+    let trap_feed = render_trap_feed(events);
 
-    column![summary_row, top_talkers, down_hotlist, error_hotspots]
-        .spacing(space::MD)
-        .width(Length::Fill)
+    column![
+        summary_row,
+        top_talkers,
+        down_hotlist,
+        error_hotspots,
+        trap_feed
+    ]
+    .spacing(space::MD)
+    .width(Length::Fill)
+    .into()
+}
+
+/// Fleet trap feed (#536): recent translated records + the loudest senders.
+fn render_trap_feed<'a>(
+    events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
+) -> Element<'a, Message> {
+    if events.is_empty() {
+        return text("No trap/event records")
+            .size(font::CAPTION)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            })
+            .into();
+    }
+
+    // Top trap emitters (helps spot trap storms).
+    let mut per_device: HashMap<&str, usize> = HashMap::new();
+    for record in events {
+        *per_device.entry(record.source.as_str()).or_default() += 1;
+    }
+    let mut emitters: Vec<(&str, usize)> = per_device.into_iter().collect();
+    emitters.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let emitters = emitters
+        .iter()
+        .take(3)
+        .map(|(device, count)| format!("{device} ({count})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let title = text(format!("Recent Traps ({}) — top: {emitters}", events.len()))
+        .size(font::CAPTION)
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
+        });
+
+    let rows: Vec<Element<'a, Message>> = events
+        .iter()
+        .take(5)
+        .map(|record| {
+            let severity = record.severity;
+            row![
+                text(crate::view::formatting::format_timestamp(record.timestamp))
+                    .size(10)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    }),
+                text(record.source.clone()).size(font::CAPTION),
+                text(record.kind.clone())
+                    .size(font::CAPTION)
+                    .style(move |t: &Theme| text::Style {
+                        color: Some(theme::colors(t).alert_severity(severity)),
+                    }),
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center)
+            .into()
+        })
+        .collect();
+
+    column![title, Column::with_children(rows).spacing(2)]
+        .spacing(space::SM)
         .into()
 }
 

@@ -547,6 +547,8 @@ pub enum Message {
         device: String,
         table: zensight_common::InterfaceTable,
     },
+    /// A durable SNMP trap/inform record off the events plane (#536).
+    SnmpEventReceived(zensight_common::EventRecord),
     /// SNMP device view: interface-table sort/filter/paging (#530).
     SnmpTableSort(usize),
     SnmpTableFilter(String),

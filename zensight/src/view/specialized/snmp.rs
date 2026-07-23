@@ -36,7 +36,12 @@ pub struct SnmpDetailState {
     pub rows: Vec<IfaceRow>,
     /// Sort/filter/paging state of the interface table.
     pub table: TableState,
+    /// This device's recent trap/event records (#536), newest first.
+    pub events: std::collections::VecDeque<zensight_common::EventRecord>,
 }
+
+/// Cap on the per-device event ring (#536).
+pub const DEVICE_EVENT_RING: usize = 100;
 
 impl SnmpDetailState {
     /// Store a fresh doc (LWW) and rebuild the table rows. `metrics` is the
@@ -82,6 +87,7 @@ pub fn snmp_device_view(state: &DeviceDetailState) -> Element<'_, Message> {
         header,
         card(system_info),
         card(interfaces),
+        card(render_events(state)),
         card(system_metrics),
     ]
     .spacing(space::MD)
@@ -445,6 +451,65 @@ fn iface_columns<'a>(state: &'a DeviceDetailState) -> Vec<DataColumn<'a, IfaceRo
             None => text("").size(font::CAPTION).into(),
         }),
     ]
+}
+
+/// Render the trap/event feed for this device (#536): reverse-chronological
+/// translated records off the events plane.
+fn render_events(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![
+        icons::chart(IconSize::Medium),
+        text("Events").size(font::EMPHASIS)
+    ]
+    .spacing(space::SM)
+    .align_y(Alignment::Center);
+
+    let events = &state.snmp_detail.events;
+    if events.is_empty() {
+        return column![title, empty_state("No trap/event records yet", None)]
+            .spacing(space::SM)
+            .into();
+    }
+
+    let rows: Vec<Element<'_, Message>> = events
+        .iter()
+        .take(20)
+        .map(|record| {
+            let severity = record.severity;
+            let when = crate::view::formatting::format_timestamp(record.timestamp);
+            let mut fields: Vec<String> = record
+                .fields
+                .iter()
+                .filter(|(k, _)| !matches!(k.as_str(), "trap_oid" | "snmp_version" | "confirmed"))
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            fields.sort();
+            let detail = fields.join("  ");
+            row![
+                text(when).size(font::CAPTION).style(|t: &Theme| {
+                    text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    }
+                }),
+                text(record.kind.clone())
+                    .size(font::CAPTION)
+                    .style(move |t: &Theme| text::Style {
+                        color: Some(theme::colors(t).alert_severity(severity)),
+                    }),
+                text(detail).size(font::CAPTION).style(|t: &Theme| {
+                    text::Style {
+                        color: Some(theme::colors(t).text_dimmed()),
+                    }
+                }),
+            ]
+            .spacing(space::MD)
+            .align_y(Alignment::Center)
+            .into()
+        })
+        .collect();
+
+    column![title, WColumn::with_children(rows).spacing(space::XS)]
+        .spacing(space::SM)
+        .into()
 }
 
 /// Render system metrics section (CPU, storage, temperatures) with

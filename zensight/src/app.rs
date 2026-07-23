@@ -1564,6 +1564,24 @@ impl ZenSight {
                     snmp_detail.apply_interfaces(table, metrics);
                 }
             }
+            Message::SnmpEventReceived(record) => {
+                // Selected SNMP device gets its own ring for the Events card.
+                if let Some(selected) = self.selected_device.as_mut()
+                    && selected.device_id.protocol == zensight_common::Protocol::Snmp
+                    && selected.device_id.source == record.source
+                {
+                    let events = &mut selected.snmp_detail.events;
+                    if !events.iter().any(|e| e.id == record.id) {
+                        let pos = events
+                            .iter()
+                            .position(|e| e.id < record.id)
+                            .unwrap_or(events.len());
+                        events.insert(pos, record.clone());
+                        events.truncate(crate::view::specialized::snmp::DEVICE_EVENT_RING);
+                    }
+                }
+                self.dashboard.push_snmp_event(record);
+            }
             Message::SnmpTableSort(col) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.snmp_detail.table.toggle_sort(col);

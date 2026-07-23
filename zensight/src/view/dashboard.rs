@@ -178,6 +178,9 @@ pub struct DashboardState {
     /// LWW off `state/snmp/<device>/interfaces`, feeding the SNMP overview's
     /// rate-based rankings.
     pub snmp_interfaces: HashMap<String, zensight_common::InterfaceTable>,
+    /// Recent SNMP trap/event records off the events plane (#536), newest
+    /// first, deduped by ULID, capped.
+    pub snmp_events: std::collections::VecDeque<zensight_common::EventRecord>,
 }
 
 impl Default for DashboardState {
@@ -196,7 +199,30 @@ impl Default for DashboardState {
             view_mode: DashboardViewMode::default(),
             status_filter: None,
             snmp_interfaces: HashMap::new(),
+            snmp_events: std::collections::VecDeque::new(),
         }
+    }
+}
+
+/// Cap on the fleet-wide SNMP event ring (#536).
+pub const SNMP_EVENT_RING: usize = 500;
+
+impl DashboardState {
+    /// Insert an SNMP event newest-first, deduped by ULID (backfill overlaps
+    /// the live subscriber), capped at [`SNMP_EVENT_RING`].
+    pub fn push_snmp_event(&mut self, record: zensight_common::EventRecord) {
+        if self.snmp_events.iter().any(|e| e.id == record.id) {
+            return;
+        }
+        // ULIDs sort chronologically; records arrive roughly ordered, so a
+        // front-insert with a positional fix keeps newest-first cheaply.
+        let pos = self
+            .snmp_events
+            .iter()
+            .position(|e| e.id < record.id)
+            .unwrap_or(self.snmp_events.len());
+        self.snmp_events.insert(pos, record);
+        self.snmp_events.truncate(SNMP_EVENT_RING);
     }
 }
 
@@ -471,7 +497,12 @@ pub fn dashboard_view<'a>(
     let sensor_summary = render_sensor_health_summary(sensor_health);
     let filters = render_protocol_filters(state, &filtered);
     let group_filters = group_filter_bar(groups);
-    let overview_panel = overview_section(overview, &state.devices, &state.snmp_interfaces);
+    let overview_panel = overview_section(
+        overview,
+        &state.devices,
+        &state.snmp_interfaces,
+        &state.snmp_events,
+    );
     let devices = render_device_grid(
         state,
         groups,
