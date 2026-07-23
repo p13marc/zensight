@@ -51,6 +51,11 @@ pub struct SnmpPoller {
     /// Loaded SMI MIBs (#532): the naming/typing fallback behind the
     /// explicit resolver tables, plus enum labels and UNITS.
     smi: Option<Arc<crate::smi::SmiResolver>>,
+    /// Observed-device identity evidence (#537): the shared Evidence-QoS
+    /// advanced registry + refresh cadence in cycles.
+    evidence: Option<(Arc<zensight_sensor_core::AdvancedPublisherRegistry>, u32)>,
+    /// Completed poll cycles (drives the evidence cadence).
+    cycles: std::sync::atomic::AtomicU64,
 }
 
 impl SnmpPoller {
@@ -84,7 +89,19 @@ impl SnmpPoller {
             profiles: None,
             selection: std::sync::Mutex::new(None),
             smi: None,
+            evidence: None,
+            cycles: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Publish observed-device `HostEvidence` (#537) every `refresh_cycles`
+    /// successful cycles (and on the first).
+    pub fn with_evidence(
+        &mut self,
+        registry: Arc<zensight_sensor_core::AdvancedPublisherRegistry>,
+        refresh_cycles: u32,
+    ) {
+        self.evidence = Some((registry, refresh_cycles.max(1)));
     }
 
     /// Attach loaded SMI MIBs (#532).
@@ -236,6 +253,7 @@ impl SnmpPoller {
         let mut transport_failures = 0usize;
         let mut observation = crate::alerts::CycleObservation::default();
         let mut table = crate::interfaces::TableBuilder::new();
+        let mut identity = crate::evidence::EvidenceCollector::new();
 
         // Read sysUpTime up front: it anchors reset detection for every
         // counter this cycle (a reboot must suppress the whole interval).
@@ -262,6 +280,7 @@ impl SnmpPoller {
                     let rate = self.publish(&oid, &value, &mut seen_counters).await;
                     observation.ingest(&oid, &value, rate);
                     table.ingest(&oid, &value, rate);
+                    identity.ingest(&oid, &value);
                 }
                 Ok(None) => {
                     tracing::debug!(device = %self.device.name, oid = %oid_str, "No value returned");
@@ -284,6 +303,7 @@ impl SnmpPoller {
                         let rate = self.publish(&oid, &value, &mut seen_counters).await;
                         observation.ingest(&oid, &value, rate);
                         table.ingest(&oid, &value, rate);
+                        identity.ingest(&oid, &value);
                     }
                 }
                 Err(e) => {
@@ -310,6 +330,25 @@ impl SnmpPoller {
             let doc = table.build(&self.device.name);
             if let Err(e) = registry.publish_serializable(key, &doc).await {
                 tracing::warn!(device = %self.device.name, error = %e, "interfaces doc publish failed");
+            }
+        }
+
+        // Observed-device identity evidence (#537): first successful cycle,
+        // then every Nth (claims refresh within the correlator's TTL).
+        if let Some((registry, refresh)) = &self.evidence
+            && requests > 0
+            && failures < requests
+        {
+            let cycle = self
+                .cycles
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if cycle.is_multiple_of(u64::from(*refresh)) && !identity.is_empty() {
+                identity.note_polled_address(&self.device.address);
+                let claim = identity.build(&self.device.name);
+                let key = zensight_common::host_evidence_key("snmp", &self.device.name);
+                if let Err(e) = registry.publish_serializable(&key, &claim).await {
+                    tracing::warn!(device = %self.device.name, error = %e, "evidence publish failed");
+                }
             }
         }
 

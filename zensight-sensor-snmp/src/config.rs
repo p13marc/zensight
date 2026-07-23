@@ -72,6 +72,10 @@ pub struct SnmpConfig {
     /// Device profiles (#531): curated OID sets matched by sysObjectID.
     #[serde(default)]
     pub profiles: ProfilesConfig,
+
+    /// Observed-device identity evidence (#537).
+    #[serde(default)]
+    pub evidence: EvidenceConfig,
 }
 
 /// MIB loading configuration.
@@ -266,6 +270,32 @@ pub struct DeviceConfig {
     /// matching. Default profiles still apply.
     #[serde(default)]
     pub profile: Option<String>,
+}
+
+/// Observed-device evidence configuration (#537).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    /// Publish per-device `HostEvidence` claims (default true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Refresh cadence in poll cycles (default 10; the first successful
+    /// cycle always publishes).
+    #[serde(default = "default_evidence_refresh")]
+    pub refresh_cycles: u32,
+}
+
+fn default_evidence_refresh() -> u32 {
+    10
+}
+
+impl Default for EvidenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_cycles: default_evidence_refresh(),
+        }
+    }
 }
 
 /// Device-profile configuration (#531).

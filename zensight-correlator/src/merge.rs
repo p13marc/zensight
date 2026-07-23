@@ -775,6 +775,33 @@ mod tests {
     }
 
     #[test]
+    fn snmp_observer_claim_fuses_with_netring_by_mac_ip() {
+        // #537 acceptance: a polled switch observed by the SNMP sensor and
+        // the same device seen on the wire by netring resolve to ONE entity
+        // via the mac_ip rule — no machine-id involved.
+        let mut snmp = ev("snmp", "core-sw-1");
+        snmp.observer = Some("snmp".into());
+        snmp.hostname = Some("core-sw-1".into());
+        snmp.vendor = Some("cisco".into());
+        snmp.macs = vec!["de:ad:be:ef:00:07".into()];
+        snmp.ips = vec!["10.0.0.9".into()];
+
+        let mut netring = ev("netring", "10.0.0.9");
+        netring.observer = Some("netring".into());
+        netring.macs = vec!["DE:AD:BE:EF:00:07".into()]; // case-insensitive
+        netring.ips = vec!["10.0.0.9".into()];
+
+        let ents = correlate(
+            &[snmp, netring],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        assert_eq!(ents.len(), 1, "must fuse into one entity");
+        assert_eq!(ents[0].members.len(), 2);
+        assert!(ents[0].members.iter().all(|m| m.rule == "mac_ip"));
+    }
+
+    #[test]
     fn cloud_instance_rule_bridges() {
         // Same (provider, instance_id) merges even without any machine-id —
         // the cloned-image case: evidence lacking host_id still binds.

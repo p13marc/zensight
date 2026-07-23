@@ -161,6 +161,24 @@ async fn main() -> Result<()> {
         )
     });
 
+    // Observed-device evidence (#537): shared Evidence-QoS advanced registry
+    // (cache 1 → the correlator seeds current claims on late join).
+    let evidence_registry = snmp_config.evidence.enabled.then(|| {
+        Arc::new(
+            zensight_sensor_core::AdvancedPublisherRegistry::new(
+                session.clone(),
+                zensight_sensor_core::v1::V1Context::for_producer(
+                    &zensight_common::PROFILE,
+                    "snmp",
+                )
+                .telemetry_prefix(),
+                serialization,
+                zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            )
+            .with_qos(zensight_common::QosClass::Evidence),
+        )
+    });
+
     // Spawn device pollers
     for device in snmp_config.devices.clone() {
         let mut poller = SnmpPoller::new(
@@ -196,6 +214,10 @@ async fn main() -> Result<()> {
 
         if let Some(smi) = &smi {
             poller.with_smi(smi.clone());
+        }
+
+        if let Some(registry) = &evidence_registry {
+            poller.with_evidence(registry.clone(), snmp_config.evidence.refresh_cycles);
         }
 
         // Initialize poller (required for SNMPv3 to discover engine ID)
