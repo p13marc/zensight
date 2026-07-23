@@ -93,6 +93,10 @@ impl SyslogSeverity {
 /// the top-level [`logs_view`].
 #[derive(Debug, Clone)]
 pub struct SyslogMessage {
+    /// Time-sortable per-line event uid (`<13-ts_ms><12-seq>`, #104) — unique per
+    /// record. The buffer-merge dedup + sort tie-break key (#556); empty for
+    /// legacy points without a `log.record.uid` label.
+    uid: String,
     timestamp: i64,
     severity: SyslogSeverity,
     facility: String,
@@ -141,6 +145,12 @@ impl SyslogMessage {
     /// Event time (Unix epoch ms) — for ordering the merged buffer (#107, C9).
     pub fn timestamp(&self) -> i64 {
         self.timestamp
+    }
+
+    /// The unique, time-sortable record uid (#556). Empty for legacy points that
+    /// carried no `log.record.uid` label.
+    pub fn uid(&self) -> &str {
+        &self.uid
     }
 
     /// The message text — used to de-duplicate cold-store search-back against the
@@ -1360,7 +1370,15 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
         })
         .collect();
 
+    // The per-line uid (#104/#556) — carried as the `log.record.uid` label.
+    let uid = point
+        .labels
+        .get("log.record.uid")
+        .cloned()
+        .unwrap_or_default();
+
     SyslogMessage {
+        uid,
         timestamp: point.timestamp,
         severity,
         facility,
@@ -1475,6 +1493,7 @@ mod tests {
     /// Build a bare [`SyslogMessage`] at `ts` (ms) for rate-series tests.
     fn msg_at(ts: i64) -> SyslogMessage {
         SyslogMessage {
+            uid: format!("{ts:013}{:012}", 0),
             timestamp: ts,
             severity: SyslogSeverity::Informational,
             facility: "daemon".into(),

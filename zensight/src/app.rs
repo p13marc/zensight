@@ -6440,23 +6440,30 @@ impl ZenSight {
         self.merge_log_messages(msgs);
     }
 
-    /// Shared log-buffer merge (#107/#358): drop rows already present (by
-    /// time+message — also de-dups within the incoming batch, so overlapping
-    /// `since=` fetch windows are idempotent), then keep the newest
-    /// [`MAX_RECENT_LOGS`] across the union, time-ordered.
+    /// Shared log-buffer merge (#107/#358): drop rows already present, then keep
+    /// the newest [`MAX_RECENT_LOGS`] across the union, time-ordered.
+    ///
+    /// Dedup keys on the record **uid** (#556): the old `(timestamp_ms, message)`
+    /// key collided two genuinely distinct lines with identical text in the same
+    /// millisecond — exactly a repeated-error burst — silently dropping the
+    /// second. The uid (`<ts_ms><seq>`) is unique per record; legacy points
+    /// without one fall back to the old key so they still de-dup.
     fn merge_log_messages(&mut self, msgs: Vec<crate::view::specialized::SyslogMessage>) {
         if msgs.is_empty() {
             return;
         }
         use std::collections::HashSet;
-        let mut seen: HashSet<(i64, String)> = self
-            .recent_logs
-            .iter()
-            .map(|m| (m.timestamp(), m.message().to_string()))
-            .collect();
+        let key = |m: &crate::view::specialized::SyslogMessage| -> String {
+            if m.uid().is_empty() {
+                format!("{}|{}", m.timestamp(), m.message())
+            } else {
+                m.uid().to_string()
+            }
+        };
+        let mut seen: HashSet<String> = self.recent_logs.iter().map(key).collect();
         let mut merged: Vec<crate::view::specialized::SyslogMessage> = Vec::new();
         for msg in msgs {
-            if seen.insert((msg.timestamp(), msg.message().to_string())) {
+            if seen.insert(key(&msg)) {
                 merged.push(msg);
             }
         }
@@ -6464,7 +6471,13 @@ impl ZenSight {
             return;
         }
         merged.extend(self.recent_logs.drain(..));
-        merged.sort_by_key(|m| m.timestamp());
+        // Newest-first ordering with a uid tie-break so same-ms records keep a
+        // stable, meaningful order (#556).
+        merged.sort_by(|a, b| {
+            a.timestamp()
+                .cmp(&b.timestamp())
+                .then_with(|| a.uid().cmp(b.uid()))
+        });
         let start = merged.len().saturating_sub(MAX_RECENT_LOGS);
         self.recent_logs = merged.split_off(start).into();
     }
@@ -7391,10 +7404,40 @@ mod log_fetch_tests {
             rec("u3", 3000, "third"),
         ])));
         assert_eq!(a.last_log_event_ms, Some(3000));
-        assert_eq!(a.recent_logs.len(), 3, "overlap de-dups by (ts, message)");
+        assert_eq!(a.recent_logs.len(), 3, "overlap de-dups by uid");
         // Time-ordered after merge.
         let ts: Vec<i64> = a.recent_logs.iter().map(|m| m.timestamp()).collect();
         assert_eq!(ts, vec![1000, 2000, 3000]);
+    }
+
+    /// #556: two distinct records in the same millisecond with identical text
+    /// (a repeated-error burst) both survive — the old `(ts, message)` dedup key
+    /// collided them and dropped the second. The same record fetched twice → one.
+    #[test]
+    fn same_ms_identical_text_distinct_uid_both_survive() {
+        let mut a = app();
+        a.log_fetch_inflight = true;
+        let _ = a.update(Message::LogEventsLoaded(Ok(vec![
+            rec("0000000001000000000001", 1000, "connection refused"),
+            rec("0000000001000000000002", 1000, "connection refused"),
+        ])));
+        assert_eq!(
+            a.recent_logs.len(),
+            2,
+            "same-ms identical lines with distinct uids must both render"
+        );
+
+        // Refetching the same two records de-dups by uid → still 2, not 4.
+        a.log_fetch_inflight = true;
+        let _ = a.update(Message::LogEventsLoaded(Ok(vec![
+            rec("0000000001000000000001", 1000, "connection refused"),
+            rec("0000000001000000000002", 1000, "connection refused"),
+        ])));
+        assert_eq!(
+            a.recent_logs.len(),
+            2,
+            "a record fetched twice de-dups to one"
+        );
     }
 
     #[test]
