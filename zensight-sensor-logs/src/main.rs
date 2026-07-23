@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod dedup;
 mod derived;
+mod file_source;
 mod filter;
 mod ingest;
 #[cfg(feature = "journald")]

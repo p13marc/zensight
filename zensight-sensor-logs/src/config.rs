@@ -158,6 +158,111 @@ pub struct SyslogConfig {
     /// Disabled by default (opt-in, like the other retention features).
     #[serde(default)]
     pub store: LogStoreConfig,
+
+    /// File tailing sources (#549): tail `/var/log/*.log`-style files into the
+    /// same intake pipeline. Empty by default (no file sources).
+    #[serde(default)]
+    pub files: FileTailingConfig,
+}
+
+/// File-tailing configuration (#549).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTailingConfig {
+    /// Sources to tail. Empty = file tailing disabled.
+    #[serde(default)]
+    pub sources: Vec<FileSourceConfig>,
+
+    /// How often (seconds) to re-expand globs and pick up newly-created files.
+    /// Default 15.
+    #[serde(default = "default_files_rescan_secs")]
+    pub rescan_secs: u64,
+
+    /// How often (ms) to poll tracked files for new bytes. Default 500.
+    #[serde(default = "default_files_poll_ms")]
+    pub poll_ms: u64,
+
+    /// Path of the offsets state file (atomic JSON, same scheme as the journald
+    /// cursor). `None` resolves the `$STATE_DIRECTORY` / XDG state location.
+    #[serde(default)]
+    pub offsets_path: Option<std::path::PathBuf>,
+
+    /// Hard cap on one joined line's bytes; a longer line is truncated. Default
+    /// 1 MiB.
+    #[serde(default = "default_files_max_line_bytes")]
+    pub max_line_bytes: usize,
+}
+
+impl Default for FileTailingConfig {
+    fn default() -> Self {
+        Self {
+            sources: Vec::new(),
+            rescan_secs: default_files_rescan_secs(),
+            poll_ms: default_files_poll_ms(),
+            offsets_path: None,
+            max_line_bytes: default_files_max_line_bytes(),
+        }
+    }
+}
+
+fn default_files_rescan_secs() -> u64 {
+    15
+}
+fn default_files_poll_ms() -> u64 {
+    500
+}
+fn default_files_max_line_bytes() -> usize {
+    1024 * 1024
+}
+
+/// One file-tailing source: a set of globs + how to interpret their lines.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileSourceConfig {
+    /// Glob patterns to tail (e.g. `["/var/log/app/*.log"]`).
+    pub paths: Vec<String>,
+
+    /// Static labels attached to every line from this source (as `sd.file.*`).
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+
+    /// Attribute lines to this unit (flows like the journald `unit` field, so
+    /// per-unit rollups/SLO apply).
+    #[serde(default)]
+    pub unit: Option<String>,
+
+    /// Attribute lines to this app / program name.
+    #[serde(default)]
+    pub app: Option<String>,
+
+    /// Line format: `plain` (whole line is the message) or `syslog` (run the
+    /// RFC 3164/5424 parser, e.g. files that contain `<PRI>` lines). Default
+    /// `plain`.
+    #[serde(default)]
+    pub format: FileFormat,
+
+    /// Default severity slug for `plain` lines (`emerg`..`debug`). Default
+    /// `info`.
+    #[serde(default)]
+    pub severity: Option<String>,
+
+    /// Optional regex whose first capture group (or a `severity` named group)
+    /// extracts a level word (`ERROR`/`WARN`/…) per line, overriding `severity`.
+    #[serde(default)]
+    pub severity_regex: Option<String>,
+
+    /// Join multi-line records (stack traces) per file. On by default.
+    #[serde(default = "default_true")]
+    pub multiline: bool,
+}
+
+/// How to interpret a tailed file's lines (#549).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileFormat {
+    /// The whole line is the message; severity/app/unit come from config.
+    #[default]
+    Plain,
+    /// Run the syslog parser over each line (`<PRI>…`), falling back to plain.
+    Syslog,
 }
 
 /// Durable log store configuration (#544).
@@ -1096,6 +1201,7 @@ impl Default for SyslogConfig {
             events_ring_capacity: default_events_ring_capacity(),
             sentinel: crate::sentinel::LogRulesConfig::default(),
             store: LogStoreConfig::default(),
+            files: FileTailingConfig::default(),
         }
     }
 }
