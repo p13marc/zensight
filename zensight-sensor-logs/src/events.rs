@@ -218,6 +218,7 @@ mod tests {
             message: "the quick brown fox".into(),
             raw: String::new(),
             version: SyslogVersion::Rfc5424,
+            ts_source: crate::parser::TsSource::Sender,
         }
     }
 
@@ -281,6 +282,7 @@ mod tests {
             message: "Process 4242 (nginx) dumped core".into(),
             raw: String::new(),
             version: SyslogVersion::Rfc5424,
+            ts_source: crate::parser::TsSource::Sender,
         };
         let a = detect_alert(&m, "host1", &HashMap::new()).unwrap();
         assert_eq!(

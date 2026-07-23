@@ -1,9 +1,17 @@
 //! Syslog sensor configuration.
 
 use crate::filter::SyslogFilterConfig;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zensight_common::config::ZenohConfig;
+
+/// Parse an IANA timezone name (e.g. `"Europe/Paris"`) into a [`chrono_tz::Tz`],
+/// erroring with the offending name so a typo fails startup loudly (#545).
+pub fn parse_tz(name: &str) -> anyhow::Result<chrono_tz::Tz> {
+    name.parse::<chrono_tz::Tz>()
+        .map_err(|_| anyhow::anyhow!("unknown IANA timezone: {name:?}"))
+}
 
 // Re-export LoggingConfig from the framework for compatibility
 pub use zensight_sensor_core::LoggingConfig;
@@ -51,6 +59,14 @@ pub struct SyslogConfig {
     /// Hostname overrides for source identification.
     #[serde(default)]
     pub hostname_aliases: std::collections::HashMap<String, String>,
+
+    /// Per-sender RFC 3164 timezone overrides (#545), keyed by sender IP — the
+    /// same key space as `hostname_aliases`. Takes precedence over a listener's
+    /// `timezone` for that sender, so a mixed fleet (some gear in UTC, some in
+    /// local time) is stamped correctly. Values are IANA names
+    /// (e.g. `"America/New_York"`).
+    #[serde(default)]
+    pub host_timezones: std::collections::HashMap<String, String>,
 
     /// Whether to include raw message in labels.
     #[serde(default)]
@@ -708,6 +724,14 @@ pub struct ListenerConfig {
     /// datagram is always exactly one frame). Default `auto`.
     #[serde(default)]
     pub framing: Framing,
+
+    /// IANA timezone (e.g. `"Europe/Paris"`) that RFC 3164 senders on this
+    /// listener express their yearless, zoneless timestamps in (#545). Applies
+    /// DST via the tz database. `None` (the default) means UTC. Overridden
+    /// per-sender by `syslog.host_timezones`. Has no effect on RFC 5424, which
+    /// carries its own explicit offset.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 fn default_max_message_size() -> usize {
@@ -817,6 +841,16 @@ impl SyslogSensorConfig {
                     // Just check it's not empty (already done above)
                 }
             }
+
+            // Fail fast on a bad IANA timezone rather than silently falling
+            // back to UTC at runtime (#545).
+            if let Some(tz) = &listener.timezone {
+                parse_tz(tz).with_context(|| format!("listener {i} timezone"))?;
+            }
+        }
+
+        for (host, tz) in &self.syslog.host_timezones {
+            parse_tz(tz).with_context(|| format!("host_timezones[{host}]"))?;
         }
 
         Ok(())
@@ -918,8 +952,10 @@ impl Default for SyslogConfig {
                 socket_mode: default_socket_mode(),
                 remove_existing_socket: default_true(),
                 framing: Framing::default(),
+                timezone: None,
             }],
             hostname_aliases: std::collections::HashMap::new(),
+            host_timezones: std::collections::HashMap::new(),
             include_raw_message: false,
             filter: SyslogFilterConfig::default(),
             enable_dynamic_filters: false,
@@ -1037,6 +1073,36 @@ mod tests {
             SyslogSensorConfig::load_from_file(&path)
                 .unwrap_or_else(|e| panic!("{path} must load strict: {e}"));
         }
+    }
+
+    /// A bad IANA timezone fails validation loudly at load (#545) rather than
+    /// silently falling back to UTC at runtime.
+    #[test]
+    fn bad_timezone_fails_validation() {
+        let bad = MINIMAL.replace(
+            r#"bind: "0.0.0.0:514""#,
+            r#"bind: "0.0.0.0:514", timezone: "Mars/Olympus""#,
+        );
+        let err = SyslogSensorConfig::parse_strict(&bad).expect_err("bad tz must fail");
+        // `{:#}` walks the anyhow context chain (context + source).
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Mars/Olympus"),
+            "error must name the bad zone, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn good_timezone_validates() {
+        let ok = MINIMAL.replace(
+            r#"bind: "0.0.0.0:514""#,
+            r#"bind: "0.0.0.0:514", timezone: "Europe/Paris""#,
+        );
+        let cfg = SyslogSensorConfig::parse_strict(&ok).expect("valid tz");
+        assert_eq!(
+            cfg.syslog.listeners[0].timezone.as_deref(),
+            Some("Europe/Paris")
+        );
     }
 
     #[test]
