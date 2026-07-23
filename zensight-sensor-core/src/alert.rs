@@ -192,6 +192,39 @@ impl AlertReporter {
         self.apply("", action).await
     }
 
+    /// Resolve every published alert under `rule` whose labels contain ALL
+    /// of `labels` — the event-driven counterpart to the sweep-style
+    /// [`reconcile`](Self::reconcile): a linkUp trap resolves exactly the
+    /// linkDown alert(s) for that device+interface, nothing else.
+    pub async fn resolve_matching(&self, rule: &str, labels: &[(&str, &str)]) -> Result<()> {
+        let action = {
+            let mut active = self.active.lock().unwrap();
+            let to_resolve: Vec<String> = active
+                .iter()
+                .filter(|(_, a)| {
+                    a.rule == rule
+                        && a.published
+                        && labels
+                            .iter()
+                            .all(|(k, v)| a.last.labels.get(*k).map(String::as_str) == Some(*v))
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            let mut payloads = Vec::new();
+            for k in to_resolve {
+                if let Some(a) = active.remove(&k) {
+                    payloads.push(a.last.resolved());
+                }
+            }
+            if payloads.is_empty() {
+                Action::None
+            } else {
+                Action::Resolve(payloads)
+            }
+        };
+        self.apply("", action).await
+    }
+
     /// Resolve and tombstone every active alert (graceful shutdown).
     pub async fn resolve_all(&self) -> Result<()> {
         let payloads = {

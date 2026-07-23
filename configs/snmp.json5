@@ -39,6 +39,8 @@
     // source: "agent-host-01",
 
     // SNMP trap receiver (optional)
+    // Traps (#535): durable events + alert mapping. communities/users filter
+    // senders; builtin_rules maps linkDown/linkUp to alerts out of the box.
     trap_listener: {
       enabled: false,
       bind: "0.0.0.0:162",

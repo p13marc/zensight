@@ -16,8 +16,8 @@ observed device is the first subject chunk after the producer.
 | `zensight/v1/<origin>/telemetry/snmp/<device>/<metric>` | Polled OID value. `<metric>` is the MIB-/map-resolved name, e.g. `system/sysUpTime`, `if/1/ifInOctets`. Unmapped OIDs fall back to the raw dotted OID. The `oid` label carries the source OID. |
 | `zensight/v1/<origin>/telemetry/snmp/<device>/<metric>.rate` | Derived per-second rate for counter OIDs (`Gauge`, unit `By/s` for octet counters, else `1/s`), published alongside the raw counter from the second poll cycle on. See *Counter semantics*. |
 | `zensight/v1/<origin>/state/snmp/<device>/interfaces` | Joined ifTable/ifXTable doc (`InterfaceTable`, #529): per interface — ifName/ifDescr/ifAlias, decoded admin/oper status, speed (ifHighSpeed preferred), MAC, HC-preferred octet/packet/error/discard counters and their derived rates. LWW state, refreshed each poll cycle from whatever IF-MIB columns are walked; cached for late joiners. Disable with `snmp.publish_interfaces: false`. |
-| `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>` | Received trap (when `trap_listener.enabled`). `<trap_id>` is the enterprise/generic trap OID; `<sender>` is the slugged sender IP (`.`/`:` → `-`). |
-| `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>/<varbind>` | Per-varbind value from the trap PDU. |
+| `zensight/v1/<origin>/events/snmp/<sender>/trap/<ulid>` | Durable trap/inform record (#535): an `EventRecord` with the translated trap name (`kind: "trap/link_down"`), severity, and translated varbinds in `fields`. Reliable QoS, one key per record — point a Zenoh storage at `**/events/**` to retain history. `<sender>` is the slugged source IP (`.`/`:` → `-`). |
+| `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>` | Lightweight cumulative counter per (sender, trap type) for dashboards. `<trap_id>` is the snake_case-translated notification name (or dotted OID). |
 
 `<device>` comes from each device's `name`. The point `source` payload field
 defaults to the local hostname unless `snmp.source` is set.
@@ -101,6 +101,10 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `source` | string? | Override the agent-host source id in payloads (default: local hostname; v1 keys are origin-scoped, so it no longer appears in key expressions). |
 | `trap_listener.enabled` | bool | Enable the SNMP trap receiver. |
 | `trap_listener.bind` | string | Trap listen address (default `0.0.0.0:162`). |
+| `trap_listener.communities` | string[] | Accepted v1/v2c communities; empty = accept any. |
+| `trap_listener.users` | object[] | SNMPv3 notification users (same schema as device `security`; `engine_id` ignored — the receiver is authoritative). |
+| `trap_listener.alerts` | object[] | Trap → alert rules: `{ rule, fire: <OID>, resolve?: <OID>, severity }`. |
+| `trap_listener.builtin_rules` | bool | Include the built-in linkDown/linkUp mapping (default true). |
 | `devices[]` | array | Devices to poll (see below). |
 | `oid_groups` | map | Named, reusable `{ oids, walks }` sets referenced by `device.oid_group`. |
 | `oid_names` | map | OID→metric-name map; `{index}` is substituted with the table index. |
@@ -231,8 +235,18 @@ built-in MIB names currently violate the chunk grammar — see issue #559.
 
 - The SNMP stack ([`async-snmp`](https://docs.rs/async-snmp), pinned pre-1.0)
   is pure Rust — no OpenSSL / net-snmp headers needed to build.
-- **Trap listener:** binding UDP 162 requires elevated privileges (or a
-  `CAP_NET_BIND_SERVICE` capability / higher bind port). Polling itself is
-  unprivileged.
+- **Trap listener:** binding UDP 162 requires elevated privileges. Options:
+  `setcap cap_net_bind_service=+ep` on the binary (or
+  `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit), or bind an
+  unprivileged port (`bind: "0.0.0.0:1162"`) and redirect with
+  `nft add rule ip nat prerouting udp dport 162 redirect to 1162` (or the
+  iptables equivalent). Polling itself is unprivileged.
+- **Traps end-to-end (#535):** the receiver (async-snmp) accepts v1 traps,
+  v2c traps/informs, and v3 traps/informs (USM); **informs are acknowledged
+  automatically**, so senders stop retransmitting. Each notification becomes
+  a durable events-class record + a telemetry counter, and matching
+  `fire`/`resolve` rules drive alerts through the shared reporter (labels:
+  `device`, `if_index` when an ifIndex varbind is present). Trap alert
+  mapping requires `snmp.alerts.enabled` (the shared reporter).
 - MIB resolution is best-effort: unresolved OIDs are published under their raw
   dotted-OID metric name.
