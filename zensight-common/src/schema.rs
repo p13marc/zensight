@@ -56,6 +56,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::SensorInfo>("SensorInfo")
         .json::<crate::ArtifactStatus>("ArtifactStatus")
         .json::<crate::ArtifactRequest>("ArtifactRequest")
+        .json::<crate::DiscoveryReport>("DiscoveryReport")
         .json::<crate::EventRecord>("EventRecord")
         .json::<crate::HostEvidence>("HostEvidence")
         .json::<crate::InterfaceTable>("InterfaceTable")

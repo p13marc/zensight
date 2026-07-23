@@ -39,6 +39,10 @@
     // source: "agent-host-01",
 
     // SNMP trap receiver (optional)
+    // Subnet discovery (#541): OPT-IN, propose-only (state/snmp/discovery
+    // doc; nothing is auto-added). No block = no scanning, ever.
+    // discovery: { subnets: ["192.168.1.0/24"], credentials: ["readonly-v2c"] },
+
     // Resilience (#539): defaults shown — backoff to 10x, probe-only after
     // 3 dead cycles, 10% scheduling jitter.
     // resilience: { backoff_cap: 10, breaker_after: 3, jitter_percent: 10 },

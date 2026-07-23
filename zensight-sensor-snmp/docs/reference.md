@@ -148,6 +148,39 @@ comes back with a **different** engine identity (agent replaced/reset), the
 poller notices the all-auth-failure cycle and rebuilds its client to force
 rediscovery — no sensor restart needed.
 
+## Subnet discovery (#541)
+
+**Opt-in, propose-only.** No `snmp.discovery` block ⇒ no scanning, ever.
+With one, the sensor sweeps the configured IPv4 CIDRs every
+`interval_secs` (default 3600) with bounded concurrency
+(`max_concurrency`, default 8) and fast-fail probes (1 s, no retries),
+trying the named credential sets in order (plain `public` if none). A
+responder is identified by sysObjectID/sysName/sysDescr, matched against
+the device profiles (#531), and published — **never auto-added** — in a
+`DiscoveryReport` state doc on `state/snmp/discovery` with a
+copy-pasteable `devices[]` snippet per device.
+
+```json5
+discovery: {
+  subnets: ["192.168.1.0/24"],
+  credentials: ["readonly-v2c"],  // named sets (#538), tried in order
+  // interval_secs: 3600, port: 161, max_concurrency: 8,
+}
+```
+
+Safety and dedup decisions (the issue's research questions):
+
+- The combined sweep size is hard-capped at 4096 addresses — a typo'd `/8`
+  fails startup instead of scanning.
+- **Never re-proposed**: configured device addresses, plus every IP the
+  pollers' identity evidence (#537) has observed — so a configured device
+  answering on a second interface is recognized once its ipAddrTable has
+  been walked, without any extra config.
+- `auto_add` is deliberately **not** implemented: proposal is the only
+  mode. Adopting a device stays an operator action (paste the snippet).
+- An SNMP sweep can trip IDS in some environments — keep it scoped to
+  networks you operate.
+
 ## Resilience (#539)
 
 Error handling adapts instead of hammering dead devices:
