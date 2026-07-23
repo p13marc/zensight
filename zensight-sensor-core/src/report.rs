@@ -105,6 +105,8 @@ const REDACT_CONTAINS: &[&str] = &[
 /// Config field names redacted on an exact (lowercased) match.
 const REDACT_EXACT: &[&str] = &[
     "community",
+    // Plural form: the SNMP trap listener's accepted-communities list (#538).
+    "communities",
     "auth",
     "authorization",
     "private_key",

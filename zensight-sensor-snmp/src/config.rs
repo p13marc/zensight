@@ -76,6 +76,33 @@ pub struct SnmpConfig {
     /// Observed-device identity evidence (#537).
     #[serde(default)]
     pub evidence: EvidenceConfig,
+
+    /// Named credential sets (#538): one place to rotate a shared community
+    /// or v3 user, referenced per device via `devices[].credentials`.
+    #[serde(default)]
+    pub credentials: HashMap<String, CredentialSet>,
+}
+
+/// One named credential set (#538). Either kind (or both) may be present;
+/// values support `${ENV}` / `file:/path` indirection.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CredentialSet {
+    /// v1/v2c community.
+    #[serde(default)]
+    pub community: Option<String>,
+
+    /// SNMPv3 USM credentials.
+    #[serde(default)]
+    pub security: Option<SnmpV3Security>,
+}
+
+impl std::fmt::Debug for CredentialSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialSet")
+            .field("community", &self.community.as_ref().map(|_| "<redacted>"))
+            .field("security", &self.security)
+            .finish()
+    }
 }
 
 /// MIB loading configuration.
@@ -115,6 +142,55 @@ impl Default for MibConfig {
 }
 
 impl SnmpConfig {
+    /// Apply named credential sets and resolve `${ENV}` / `file:` secret
+    /// indirection (#538). Called once at startup; unknown set names and
+    /// missing env/files are hard errors.
+    pub fn resolve_credentials(&mut self) -> Result<(), zensight_sensor_core::SensorError> {
+        use zensight_sensor_core::SensorError;
+        use zensight_sensor_core::secret::{resolve_secret, resolve_secret_opt};
+
+        // Resolve indirection inside the sets themselves first.
+        for set in self.credentials.values_mut() {
+            resolve_secret_opt(&mut set.community)?;
+            if let Some(sec) = &mut set.security {
+                resolve_secret_opt(&mut sec.auth_password)?;
+                resolve_secret_opt(&mut sec.priv_password)?;
+            }
+        }
+
+        for device in &mut self.devices {
+            if let Some(name) = &device.credentials {
+                let set = self.credentials.get(name).ok_or_else(|| {
+                    SensorError::Config(format!(
+                        "device {:?}: unknown credential set {name:?}",
+                        device.name
+                    ))
+                })?;
+                if let Some(community) = &set.community {
+                    device.community = community.clone();
+                }
+                if let Some(security) = &set.security {
+                    device.security = Some(security.clone());
+                }
+            }
+            // Inline values may use indirection too.
+            device.community = resolve_secret(&device.community)?;
+            if let Some(sec) = &mut device.security {
+                resolve_secret_opt(&mut sec.auth_password)?;
+                resolve_secret_opt(&mut sec.priv_password)?;
+            }
+        }
+
+        for user in &mut self.trap_listener.users {
+            resolve_secret_opt(&mut user.auth_password)?;
+            resolve_secret_opt(&mut user.priv_password)?;
+        }
+        for community in &mut self.trap_listener.communities {
+            *community = resolve_secret(community)?;
+        }
+        Ok(())
+    }
+
     /// The agent host's unified source id: the `source` override, else the hostname.
     pub fn resolved_source(&self) -> String {
         self.source.clone().unwrap_or_else(|| {
@@ -213,7 +289,7 @@ fn default_severity() -> String {
 }
 
 /// Configuration for a single SNMP device.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
     /// Device name (used in key expressions).
     pub name: String,
@@ -270,6 +346,11 @@ pub struct DeviceConfig {
     /// matching. Default profiles still apply.
     #[serde(default)]
     pub profile: Option<String>,
+
+    /// Reference a named `snmp.credentials` set (#538): its community and/or
+    /// v3 security replace this device's own; rotate once, apply everywhere.
+    #[serde(default)]
+    pub credentials: Option<String>,
 }
 
 /// Observed-device evidence configuration (#537).
@@ -321,6 +402,22 @@ impl Default for ProfilesConfig {
     }
 }
 
+impl std::fmt::Debug for DeviceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The community string is a credential (#538).
+        f.debug_struct("DeviceConfig")
+            .field("name", &self.name)
+            .field("address", &self.address)
+            .field("community", &"<redacted>")
+            .field("version", &self.version)
+            .field("security", &self.security)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("credentials", &self.credentials)
+            .field("profile", &self.profile)
+            .finish_non_exhaustive()
+    }
+}
+
 fn default_community() -> String {
     "public".to_string()
 }
@@ -358,7 +455,7 @@ pub enum SnmpVersion {
 }
 
 /// SNMPv3 security configuration (USM - User Security Model).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SnmpV3Security {
     /// SNMPv3 username.
     pub username: String,
@@ -383,6 +480,26 @@ pub struct SnmpV3Security {
     /// If not provided, will be discovered automatically.
     #[serde(default)]
     pub engine_id: Option<String>,
+}
+
+impl std::fmt::Debug for SnmpV3Security {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Passwords never reach logs, even at trace level (#538).
+        f.debug_struct("SnmpV3Security")
+            .field("username", &self.username)
+            .field("auth_protocol", &self.auth_protocol)
+            .field(
+                "auth_password",
+                &self.auth_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("priv_protocol", &self.priv_protocol)
+            .field(
+                "priv_password",
+                &self.priv_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("engine_id", &self.engine_id)
+            .finish()
+    }
 }
 
 /// SNMPv3 authentication protocol.
@@ -584,6 +701,134 @@ mod tests {
     }
 
     #[test]
+    fn test_credential_sets_and_indirection() {
+        // SAFETY: test-local variable, single-threaded use.
+        unsafe { std::env::set_var("ZENSIGHT_TEST_SNMP_PW", "envpass-538") };
+        let dir = std::env::temp_dir().join(format!("zensight-cred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let community_file = dir.join("community");
+        std::fs::write(&community_file, "filepass-538\n").unwrap();
+
+        let json5 = format!(
+            r#"
+        {{
+            zenoh: {{ mode: "peer" }},
+            snmp: {{
+                credentials: {{
+                    "readonly-v2c": {{ community: "file:{}" }},
+                    "netops-v3": {{
+                        security: {{
+                            username: "netops",
+                            auth_protocol: "SHA256",
+                            auth_password: "${{ZENSIGHT_TEST_SNMP_PW}}",
+                        }},
+                    }},
+                }},
+                devices: [
+                    {{ name: "sw1", address: "10.0.0.1:161", credentials: "readonly-v2c" }},
+                    {{ name: "r1", address: "10.0.0.2:161", version: "v3", credentials: "netops-v3" }},
+                    {{ name: "inline1", address: "10.0.0.3:161", community: "${{ZENSIGHT_TEST_SNMP_PW}}" }},
+                ]
+            }},
+            logging: {{ level: "info" }},
+        }}
+        "#,
+            community_file.display()
+        );
+
+        let mut config = SnmpSensorConfig::parse(&json5).unwrap();
+        config.snmp.resolve_credentials().unwrap();
+
+        // Named set + file indirection.
+        assert_eq!(config.snmp.devices[0].community, "filepass-538");
+        // Named v3 set + env indirection.
+        let sec = config.snmp.devices[1].security.as_ref().unwrap();
+        assert_eq!(sec.username, "netops");
+        assert_eq!(sec.auth_password.as_deref(), Some("envpass-538"));
+        // Inline env indirection (the escape hatch keeps working).
+        assert_eq!(config.snmp.devices[2].community, "envpass-538");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_unknown_credential_set_fails_loudly() {
+        let json5 = r#"
+        {
+            zenoh: { mode: "peer" },
+            snmp: {
+                devices: [
+                    { name: "sw1", address: "10.0.0.1:161", credentials: "nope" },
+                ]
+            },
+            logging: { level: "info" },
+        }
+        "#;
+        let mut config = SnmpSensorConfig::parse(json5).unwrap();
+        let err = config.snmp.resolve_credentials().unwrap_err();
+        assert!(err.to_string().contains("unknown credential set"), "{err}");
+    }
+
+    /// #538 scrubbing audit: neither Debug formatting nor the redacted
+    /// debug-bundle transform may leak a configured secret.
+    #[test]
+    fn test_secrets_never_leak() {
+        const SECRETS: [&str; 3] = ["hunter2-community", "hunter2-auth", "hunter2-priv"];
+        let json5 = r#"
+        {
+            zenoh: { mode: "peer" },
+            snmp: {
+                credentials: {
+                    "set-a": { community: "hunter2-community" },
+                },
+                trap_listener: {
+                    enabled: true,
+                    communities: ["hunter2-community"],
+                    users: [{ username: "u", auth_protocol: "SHA256",
+                              auth_password: "hunter2-auth",
+                              priv_protocol: "AES", priv_password: "hunter2-priv" }],
+                },
+                devices: [
+                    {
+                        name: "r1", address: "10.0.0.1:161",
+                        community: "hunter2-community",
+                        version: "v3",
+                        security: {
+                            username: "monitor",
+                            auth_protocol: "SHA256", auth_password: "hunter2-auth",
+                            priv_protocol: "AES", priv_password: "hunter2-priv",
+                        },
+                    },
+                ]
+            },
+            logging: { level: "info" },
+        }
+        "#;
+        let config = SnmpSensorConfig::parse(json5).unwrap();
+
+        // Debug formatting (what a stray `{:?}` log line would print).
+        let debugged = format!("{:?} {:?}", config.snmp.devices, config.snmp.credentials);
+        for secret in SECRETS {
+            assert!(
+                !debugged.contains(secret),
+                "Debug leaked {secret}: {debugged}"
+            );
+        }
+
+        // The debug-report bundle's redaction transform, applied to the full
+        // serialized config exactly as build_debug_bundle does.
+        let mut json = serde_json::to_value(&config).unwrap();
+        zensight_sensor_core::redact(&mut json, &[]);
+        let bundle = serde_json::to_string(&json).unwrap();
+        for secret in SECRETS {
+            assert!(!bundle.contains(secret), "bundle leaked {secret}");
+        }
+        // Non-secrets survive redaction (the report stays useful).
+        assert!(bundle.contains("10.0.0.1:161"));
+        assert!(bundle.contains("monitor"));
+    }
+
+    #[test]
     fn test_parse_alerts_block() {
         let json5 = r#"
         {
@@ -671,6 +916,7 @@ mod tests {
             oid_group: Some("system_info".to_string()),
             alerts: None,
             profile: None,
+            credentials: None,
         };
 
         let all_oids = device.all_oids(&groups);

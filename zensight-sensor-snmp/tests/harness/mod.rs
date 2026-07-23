@@ -375,6 +375,7 @@ pub fn v2c_device(name: &str, addr: SocketAddr) -> DeviceConfig {
         oid_group: None,
         alerts: None,
         profile: None,
+        credentials: None,
     }
 }
 

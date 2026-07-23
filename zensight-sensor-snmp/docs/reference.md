@@ -145,6 +145,51 @@ comes back with a **different** engine identity (agent replaced/reset), the
 poller notices the all-auth-failure cycle and rebuilds its client to force
 rediscovery — no sensor restart needed.
 
+## Credentials (#538)
+
+Credentials never need to sit in plaintext config. Every credential value —
+`community`, `auth_password`, `priv_password`, trap-listener communities and
+users — accepts **secret indirection**:
+
+- `"${SNMP_AUTH_PW}"` → the environment variable (systemd `Environment=`,
+  container env);
+- `"file:/run/credentials/snmp/community"` → the file's contents, trailing
+  whitespace trimmed (systemd `LoadCredential=`, Kubernetes secrets);
+- anything else is the literal value (inline stays the escape hatch).
+
+A missing variable or unreadable file **fails startup** — a sensor silently
+polling with an empty community would be worse.
+
+**Named credential sets** put a shared credential in one place:
+
+```json5
+credentials: {
+  "readonly-v2c": { community: "file:/run/credentials/snmp/community" },
+  "netops-v3": {
+    security: { username: "netops", auth_protocol: "SHA256",
+                auth_password: "${SNMP_AUTH_PW}",
+                priv_protocol: "AES", priv_password: "${SNMP_PRIV_PW}" },
+  },
+},
+devices: [
+  { name: "sw1", address: "10.0.0.1:161", credentials: "readonly-v2c" },
+  { name: "r1", address: "10.0.0.2:161", version: "v3", credentials: "netops-v3" },
+]
+```
+
+Rotating a set (new file/env value + sensor restart) updates every
+referencing device; a device's `credentials` reference replaces its inline
+community/security. Unknown set names fail startup.
+
+**Scrubbing guarantees** (audited by `test_secrets_never_leak`): the Debug
+impls of `DeviceConfig`/`SnmpV3Security`/`CredentialSet` redact credential
+fields, so stray `{:?}` log lines can't leak; the on-demand debug-report
+bundle redacts every credential key (including the plural
+`trap_listener.communities`) before packaging; `introspect`/`describe`
+serve the registry/schemas only — never config. Recommendation for a mixed
+fleet: prefer v3 authPriv (SHA-256/AES-128 or better) wherever the gear
+supports it and keep v2c communities in files, not inline.
+
 ## Device profiles (#531)
 
 Onboarding needs only `name` + `address` + credentials: profiles supply the
