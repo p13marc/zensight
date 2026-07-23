@@ -94,6 +94,69 @@ async fn backpressure_drops_are_counted() {
     );
 }
 
+/// Raising `channel_capacity` measurably reduces drops for the same burst
+/// (#546). Both rigs park the intake (never drain), so the only difference is
+/// how many messages the channel can hold before `drop_newest` sheds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn larger_channel_capacity_reduces_drops() {
+    async fn drops_for_capacity(cap: usize) -> u64 {
+        let port = free_tcp_port();
+        let rig = RigBuilder::tcp(port, Framing::Auto)
+            .overflow(OverflowPolicy::DropNewest)
+            .channel_capacity(cap)
+            .no_drain()
+            .start()
+            .await;
+        let msgs: Vec<String> = (0..3000)
+            .map(|i| format!("<34>Oct 11 22:14:15 h su: line {i}"))
+            .collect();
+        let refs: Vec<&str> = msgs.iter().map(String::as_str).collect();
+        send_tcp_octet(port, &refs).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        rig.ingest_stats.snapshot().dropped
+    }
+
+    let small = drops_for_capacity(100).await;
+    let large = drops_for_capacity(5000).await;
+    assert!(
+        large < small,
+        "a larger channel must drop fewer of the same burst (small={small}, large={large})"
+    );
+}
+
+/// Repeat collapse (#546): a burst of identical lines folds into one ring
+/// record carrying `repeat_count = N`; a following different line lands
+/// separately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identical_lines_collapse_with_repeat_count() {
+    let port = free_udp_port();
+    let rig = RigBuilder::udp(port)
+        .collapse(Duration::from_millis(300))
+        .start()
+        .await;
+
+    for _ in 0..50 {
+        send_udp(port, "<34>Oct 11 22:14:15 h app: disk full").await;
+    }
+    // A different line closes the run and lands on its own.
+    send_udp(port, "<34>Oct 11 22:14:15 h app: all clear").await;
+
+    let records = rig.events_until(2, DEADLINE).await;
+    let collapsed = records
+        .iter()
+        .find(|r| r.message.contains("disk full"))
+        .expect("collapsed record present");
+    assert_eq!(
+        collapsed.labels.get("repeat_count").map(String::as_str),
+        Some("50"),
+        "the burst folds into one record counting all copies"
+    );
+    assert!(
+        records.iter().any(|r| r.message.contains("all clear")),
+        "the trailing different line lands separately"
+    );
+}
+
 /// Multiline idle-flush: a single line buffered by the joiner is emitted after
 /// an idle gap past `flush_timeout_ms` — without closing the connection. This
 /// is the `select!` idle-flush arm in `handle_stream_connection` (previously
@@ -144,9 +207,11 @@ async fn dynamic_filter_set_changes_what_lands() {
     use zensight_sensor_logs::commands::FilterCommand;
     use zensight_sensor_logs::filter::SyslogFilterConfig;
 
-    let port = free_udp_port();
-    let rig = RigBuilder::udp(port).start().await;
-    rig.serve_filters();
+    // TCP (ordered, lossless) so the assertion can't flake on a dropped or
+    // reordered UDP datagram — the filter behavior is what's under test.
+    let port = free_tcp_port();
+    let rig = RigBuilder::tcp(port, Framing::Auto).start().await;
+    rig.serve_filters().await;
 
     // Push a Warning-and-above dynamic filter (min_severity=4 keeps 0..=4).
     rig.set_filter(&FilterCommand::AddFilter {
@@ -160,8 +225,15 @@ async fn dynamic_filter_set_changes_what_lands() {
 
     // <20> = facility 2, severity 4 (warning) — kept.
     // <23> = facility 2, severity 7 (debug)   — dropped.
-    send_udp(port, "<20>Oct 11 22:14:15 h app: warned").await;
-    send_udp(port, "<23>Oct 11 22:14:15 h app: debugged").await;
+    // One connection, in order: the debug line arrives no later than the warning.
+    send_tcp_octet(
+        port,
+        &[
+            "<20>Oct 11 22:14:15 h app: warned",
+            "<23>Oct 11 22:14:15 h app: debugged",
+        ],
+    )
+    .await;
 
     // Wait for the kept line, then settle so a (wrongly) passed debug line
     // would have arrived too.

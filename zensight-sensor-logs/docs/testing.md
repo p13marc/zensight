@@ -15,7 +15,8 @@ over localhost, with no external services and no root.
   `main.rs`) and the `@rpc/logs/events` queryable on an in-process session,
   under a unique per-rig producer prefix so parallel rigs don't share keys.
   `.no_drain()` parks the intake so the channel back-pressures (drop accounting);
-  `.overflow(...)` selects the policy.
+  `.overflow(...)` selects the policy; `.channel_capacity(n)` sizes the intake
+  queue and `.collapse(window)` enables ingest repeat collapse (#546).
 - `LogRig::events(params)` / `events_until(min, deadline)` — GET the events
   queryable; `serve_filters()` + `set_filter(cmd)` drive the live
   `filter`/`filter/set` path.
@@ -26,7 +27,9 @@ over localhost, with no external services and no root.
 ## Coverage (`tests/e2e.rs`)
 
 UDP/TCP-octet/Unix round-trips; `events` `since`/`max` selectors; backpressure
-(a parked channel under `DropNewest` counts drops); the multiline `select!`
+(a parked channel under `DropNewest` counts drops); a larger `channel_capacity`
+measurably reducing drops for the same burst (#546); ingest repeat collapse
+folding a burst into one `repeat_count` record (#546); the multiline `select!`
 idle-flush arm; and the dynamic-filter live path (`filter/set` narrows the ring).
 
 The harness is the named safety net for the durable-store (#544), TLS (#550),

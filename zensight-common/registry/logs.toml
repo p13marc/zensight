@@ -16,7 +16,7 @@
 # it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "2.1"
+version = "2.2"
 app = "zensight"
 convention = 1
 
@@ -51,6 +51,13 @@ class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "lines dropped"
+
+[[subject]]
+path = "ingest/dropped_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.2"
+description = "windowed dropped fraction (gauge, 0.0..=1.0); nonzero while ingest is shedding (#546)"
 
 [[subject]]
 path = "by_severity/{severity}"

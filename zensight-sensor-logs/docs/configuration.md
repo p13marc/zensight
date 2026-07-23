@@ -195,11 +195,30 @@ ingest: {
   sample_ratio: 100,        // keep 1-in-N over budget
   overflow: "drop_newest",  // drop_newest | block (full telemetry channel)
   drop_alert_ratio: 0.01,   // ErrorReport once windowed dropped fraction exceeds this
+  channel_capacity: 1000,   // intake channel slots (#546); raise to absorb bursts
+  collapse_repeats: false,  // fold consecutive identical lines (#546); off by default
+  collapse_window_ms: 1000, // idle gap that closes a run of identical lines
 }
 ```
 
 Safe defaults (rate limit off, generous channel) so normal traffic is never
-dropped. Emits `logs/ingest/*_total` counters.
+dropped. Emits `logs/ingest/*_total` counters plus a windowed
+`logs/ingest/dropped_ratio` gauge (#546). Sustained-loss reporting is
+level-triggered: it re-reports periodically while loss persists and emits an
+explicit recovery report when it clears.
+
+**Channel capacity** (`channel_capacity`) sizes the intake queue between the
+listeners and the processing loop; under a burst larger than this, `drop_newest`
+sheds before the (optional) rate limiter engages — raise it to trade memory
+(one parsed message per slot) for burst absorption.
+
+**Repeat collapse** (`collapse_repeats`) folds consecutive identical
+`(source, message)` lines into a single record carrying a `repeat_count` label —
+syslog's classic "last message repeated N times" — so a screaming line doesn't
+exhaust the ring one copy at a time. A run is emitted once a *different* line
+arrives or no matching line has for `collapse_window_ms` (also the max added
+latency for a line with no follow-up, which is why it's opt-in). The collapsed
+count still feeds the rollup counters, so totals stay honest.
 
 ### `syslog.multiline` (#107, on by default)
 

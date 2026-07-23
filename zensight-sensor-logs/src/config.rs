@@ -227,6 +227,30 @@ pub struct IngestConfig {
     /// (0.0..=1.0) — "not silently dropping your logs". Default 0.01 (1%).
     #[serde(default = "default_drop_alert_ratio")]
     pub drop_alert_ratio: f64,
+
+    /// Capacity of the central intake channel between the listeners and the
+    /// processing loop (#546). Under a burst larger than this, `drop_newest`
+    /// sheds before the (optional) rate limiter engages; raise it to trade
+    /// memory for burst absorption (each slot holds one parsed message).
+    /// Default 1000, clamped to ≥1.
+    #[serde(default = "default_channel_capacity")]
+    pub channel_capacity: usize,
+
+    /// Collapse consecutive identical `(source, message)` lines into one record
+    /// carrying a `repeat_count` label (#546) — syslog's classic "last message
+    /// repeated N times", done at the receiver so a screaming line doesn't
+    /// exhaust the ring, rate budget, and attention one copy at a time.
+    /// **Disabled by default** to preserve exact streams; the collapsed count
+    /// still feeds the rollup counters so totals stay honest.
+    #[serde(default)]
+    pub collapse_repeats: bool,
+
+    /// Idle gap (ms) that closes a run of identical lines when `collapse_repeats`
+    /// is on (#546): a run is emitted once no matching line has arrived for this
+    /// long, or a different line arrives. Also the max added latency for a line
+    /// with no follow-up. Default 1000ms, clamped to ≥1.
+    #[serde(default = "default_collapse_window_ms")]
+    pub collapse_window_ms: u64,
 }
 
 impl Default for IngestConfig {
@@ -236,8 +260,19 @@ impl Default for IngestConfig {
             sample_ratio: default_sample_ratio(),
             overflow: OverflowPolicy::default(),
             drop_alert_ratio: default_drop_alert_ratio(),
+            channel_capacity: default_channel_capacity(),
+            collapse_repeats: false,
+            collapse_window_ms: default_collapse_window_ms(),
         }
     }
+}
+
+fn default_channel_capacity() -> usize {
+    1000
+}
+
+fn default_collapse_window_ms() -> u64 {
+    1000
 }
 
 /// TCP/Unix stream framing mode (RFC 6587, #106).
