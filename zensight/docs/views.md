@@ -294,7 +294,15 @@ quantity with **unbounded cardinality** is a record you pull from an `@rpc`
 procedure, never a key you publish. Three of these were served by the sensors
 from the day of the keyspace cutover and had no caller until #469:
 
-- **NetFlow** (`view/specialized/netflow.rs`) — `flows_total` / `bytes_total` /
+- **SNMP fleet overview** (`view/overview/snmp.rs`, #533) — fleet-wide
+aggregation over the typed `InterfaceTable` docs (stored per device in
+`DashboardState::snmp_interfaces`): top talkers ranked by *current* in+out
+rate with utilization coloring, an admin-up/oper-down hotlist, error
+hotspots by error/discard rate, and headline tiles (devices, interfaces,
+UP/DOWN, erroring, total throughput). The old lifetime-counter rankings and
+`if/<index>/<column>` string parsing are gone.
+
+**NetFlow** (`view/specialized/netflow.rs`) — `flows_total` / `bytes_total` /
   `by_proto/{proto}/flows` stream; individual flows come from
   `@rpc/netflow/flows`. Until this was wired, the view *reconstructed* flows
   from telemetry labels the sensor does not emit (it publishes

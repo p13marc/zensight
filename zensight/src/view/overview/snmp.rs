@@ -1,161 +1,127 @@
-//! SNMP network overview - aggregates interface status and traffic across all devices.
+//! SNMP network overview (#533) — fleet-wide aggregation over the typed
+//! `InterfaceTable` docs (#529) and their derived rates (#527).
+//!
+//! Rankings are **rate-based**: top talkers by current in+out throughput
+//! (with utilization against link speed), a hotlist of admin-up/oper-down
+//! interfaces, and error hotspots by error/discard *rate* — not the
+//! lifetime-counter rankings this view used to compute from hand-parsed
+//! `if/<index>/<column>` metric strings (a freshly rebooted device with tiny
+//! lifetime counters but a saturated uplink now ranks first).
 
 use std::collections::HashMap;
 
 use iced::widget::{Column, column, row, text};
 use iced::{Alignment, Element, Length, Theme};
 
-use zensight_common::TelemetryValue;
+use zensight_common::{IfStatus, InterfaceEntry, InterfaceTable};
 
 use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState, empty_state};
 use crate::view::dashboard::DeviceState;
-use crate::view::formatting::format_bytes;
+use crate::view::formatting::format_rate;
 use crate::view::theme;
+use crate::view::tokens::{font, space};
 
-/// Interface summary data.
-#[derive(Debug)]
-struct InterfaceSummary {
-    device: String,
-    name: String,
-    is_up: bool,
-    in_octets: u64,
-    out_octets: u64,
-    errors: u64,
+/// One interface, flattened across the fleet.
+struct FleetIface<'a> {
+    device: &'a str,
+    entry: &'a InterfaceEntry,
+}
+
+impl FleetIface<'_> {
+    fn name(&self) -> String {
+        self.entry
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("if{}", self.entry.index))
+    }
+
+    /// Current in+out throughput in bytes/s.
+    fn total_rate(&self) -> f64 {
+        self.entry.rates.in_octets_per_sec.unwrap_or(0.0)
+            + self.entry.rates.out_octets_per_sec.unwrap_or(0.0)
+    }
+
+    /// Combined error+discard rate per second.
+    fn error_rate(&self) -> f64 {
+        [
+            self.entry.rates.in_errors_per_sec,
+            self.entry.rates.out_errors_per_sec,
+            self.entry.rates.in_discards_per_sec,
+            self.entry.rates.out_discards_per_sec,
+        ]
+        .iter()
+        .flatten()
+        .sum()
+    }
+
+    /// Utilization of the busier direction vs link speed, when knowable.
+    fn util_pct(&self) -> Option<f64> {
+        let speed = self.entry.speed_bits.filter(|s| *s > 0)? as f64;
+        let max_rate = self
+            .entry
+            .rates
+            .in_octets_per_sec
+            .unwrap_or(0.0)
+            .max(self.entry.rates.out_octets_per_sec.unwrap_or(0.0));
+        Some(max_rate * 8.0 / speed * 100.0)
+    }
+
+    fn is_up(&self) -> bool {
+        self.entry.oper_status.is_some_and(IfStatus::is_up)
+    }
+
+    /// Admin-up but oper-down: somebody expects this link to work.
+    fn is_unexpectedly_down(&self) -> bool {
+        self.entry.admin_status.is_some_and(IfStatus::is_up)
+            && self.entry.oper_status.is_some_and(|s| !s.is_up())
+    }
 }
 
 /// Render the SNMP network overview.
-pub fn snmp_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<'a, Message> {
-    if devices.is_empty() {
+pub fn snmp_overview<'a>(
+    devices: &HashMap<&DeviceId, &DeviceState>,
+    interfaces: &'a HashMap<String, InterfaceTable>,
+) -> Element<'a, Message> {
+    if devices.is_empty() && interfaces.is_empty() {
         return empty_state("No SNMP devices available", None);
     }
 
-    // Collect all interfaces across all devices
-    let interfaces = collect_interfaces(devices);
+    let fleet: Vec<FleetIface<'a>> = interfaces
+        .values()
+        .flat_map(|doc| {
+            doc.interfaces.iter().map(|entry| FleetIface {
+                device: &doc.device,
+                entry,
+            })
+        })
+        .collect();
 
-    let total_interfaces = interfaces.len();
-    let up_count = interfaces.iter().filter(|i| i.is_up).count();
-    let down_count = total_interfaces - up_count;
-    let error_count = interfaces.iter().filter(|i| i.errors > 0).count();
+    let total_interfaces = fleet.len();
+    let up_count = fleet.iter().filter(|i| i.is_up()).count();
+    let down_count = fleet.iter().filter(|i| i.is_unexpectedly_down()).count();
+    let erroring = fleet.iter().filter(|i| i.error_rate() > 0.0).count();
+    let throughput: f64 = fleet.iter().map(|i| i.total_rate()).sum();
 
-    // Total traffic
-    let total_in: u64 = interfaces.iter().map(|i| i.in_octets).sum();
-    let total_out: u64 = interfaces.iter().map(|i| i.out_octets).sum();
-
-    // Summary row
     let summary_row = row![
-        render_stat("Devices", devices.len().to_string()),
+        render_stat("Devices", devices.len().max(interfaces.len()).to_string()),
         render_stat("Interfaces", total_interfaces.to_string()),
         render_status_stat("UP", up_count, StatusLedState::Active),
         render_status_stat("DOWN", down_count, StatusLedState::Inactive),
-        render_stat("With Errors", error_count.to_string()),
-        render_stat("Total In", format_bytes(total_in as f64)),
-        render_stat("Total Out", format_bytes(total_out as f64)),
+        render_stat("Erroring", erroring.to_string()),
+        render_stat("Throughput", format_rate(throughput)),
     ]
-    .spacing(25)
+    .spacing(space::LG)
     .align_y(Alignment::Center);
 
-    // Top interfaces by traffic
-    let top_interfaces = render_top_interfaces(&interfaces);
+    let top_talkers = render_top_talkers(&fleet);
+    let down_hotlist = render_down_hotlist(&fleet);
+    let error_hotspots = render_error_hotspots(&fleet);
 
-    // Error hotspots
-    let error_interfaces = render_error_interfaces(&interfaces);
-
-    column![summary_row, top_interfaces, error_interfaces]
-        .spacing(15)
+    column![summary_row, top_talkers, down_hotlist, error_hotspots]
+        .spacing(space::MD)
         .width(Length::Fill)
         .into()
-}
-
-/// Collect all interfaces from all devices.
-///
-/// **Hand-parsed by design — not a gap in the #475 conversion.** snmp keeps a
-/// `{device}/{metric...}` rest-var in the registry on purpose: its metric tree is
-/// whatever OIDs the polled device exposes, not something we define. There is no
-/// typed subject to parse `if/{index}/…` into, and inventing one would be claiming
-/// knowledge of a device's MIB that we do not have. The same applies to
-/// `view/specialized/snmp.rs::parse_interfaces`.
-fn collect_interfaces(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<InterfaceSummary> {
-    let mut interfaces = Vec::new();
-
-    for (device_id, state) in devices {
-        // Find all interface indices
-        let mut if_indices: Vec<u32> = state
-            .metrics
-            .keys()
-            .filter_map(|k| {
-                if k.starts_with("if/") {
-                    let parts: Vec<&str> = k.split('/').collect();
-                    if parts.len() >= 2 {
-                        parts[1].parse().ok()
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if_indices.sort();
-        if_indices.dedup();
-
-        for idx in if_indices {
-            let name = get_text_metric(state, &format!("if/{}/ifName", idx))
-                .or_else(|| get_text_metric(state, &format!("if/{}/ifDescr", idx)))
-                .unwrap_or_else(|| format!("if{}", idx));
-
-            let oper_status = get_numeric_metric(state, &format!("if/{}/ifOperStatus", idx));
-            let is_up = oper_status.map(|v| v == 1.0).unwrap_or(false);
-
-            let in_octets = get_numeric_metric(state, &format!("if/{}/ifInOctets", idx))
-                .or_else(|| get_numeric_metric(state, &format!("if/{}/ifHCInOctets", idx)))
-                .unwrap_or(0.0) as u64;
-
-            let out_octets = get_numeric_metric(state, &format!("if/{}/ifOutOctets", idx))
-                .or_else(|| get_numeric_metric(state, &format!("if/{}/ifHCOutOctets", idx)))
-                .unwrap_or(0.0) as u64;
-
-            let in_errors =
-                get_numeric_metric(state, &format!("if/{}/ifInErrors", idx)).unwrap_or(0.0) as u64;
-            let out_errors =
-                get_numeric_metric(state, &format!("if/{}/ifOutErrors", idx)).unwrap_or(0.0) as u64;
-
-            interfaces.push(InterfaceSummary {
-                device: device_id.source.clone(),
-                name,
-                is_up,
-                in_octets,
-                out_octets,
-                errors: in_errors + out_errors,
-            });
-        }
-    }
-
-    interfaces
-}
-
-/// Get a numeric metric from device state.
-fn get_numeric_metric(state: &DeviceState, metric: &str) -> Option<f64> {
-    state
-        .metrics
-        .get(metric)
-        .and_then(|point| match &point.value {
-            TelemetryValue::Counter(v) => Some(*v as f64),
-            TelemetryValue::Gauge(v) => Some(*v),
-            _ => None,
-        })
-}
-
-/// Get a text metric from device state.
-fn get_text_metric(state: &DeviceState, metric: &str) -> Option<String> {
-    state
-        .metrics
-        .get(metric)
-        .and_then(|point| match &point.value {
-            TelemetryValue::Text(s) => Some(s.clone()),
-            _ => None,
-        })
 }
 
 /// Render a stat label and value.
@@ -164,7 +130,7 @@ fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
         text(label).size(10).style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         }),
-        text(value).size(16)
+        text(value).size(font::EMPHASIS)
     ]
     .spacing(2)
     .into()
@@ -182,117 +148,169 @@ fn render_status_stat<'a>(
         text(label).size(10).style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         }),
-        row![led.view(), text(count.to_string()).size(16)]
-            .spacing(6)
+        row![led.view(), text(count.to_string()).size(font::EMPHASIS)]
+            .spacing(space::XS)
             .align_y(Alignment::Center)
     ]
     .spacing(2)
     .into()
 }
 
-/// Render top interfaces by traffic.
-fn render_top_interfaces<'a>(interfaces: &[InterfaceSummary]) -> Element<'a, Message> {
-    let title = text("Top Interfaces by Traffic")
-        .size(12)
+/// Top talkers by current in+out rate, with utilization.
+fn render_top_talkers<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
+    let title = text("Top Talkers (current rate)")
+        .size(font::CAPTION)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         });
 
-    // Sort by total traffic
-    let mut sorted: Vec<&InterfaceSummary> = interfaces.iter().collect();
-    sorted.sort_by(|a, b| {
-        let a_total = a.in_octets + a.out_octets;
-        let b_total = b.in_octets + b.out_octets;
-        b_total.cmp(&a_total)
-    });
+    let mut busy: Vec<&FleetIface<'a>> = fleet.iter().filter(|i| i.total_rate() > 0.0).collect();
+    busy.sort_by(|a, b| b.total_rate().total_cmp(&a.total_rate()));
 
-    let rows: Vec<Element<'a, Message>> = sorted
-        .iter()
-        .take(5)
-        .enumerate()
-        .map(|(i, iface)| render_interface_row(i + 1, iface))
-        .collect();
-
-    if rows.is_empty() {
-        return column![title, empty_state("No interface data", None)]
-            .spacing(4)
+    if busy.is_empty() {
+        return column![title, empty_state("No traffic observed yet", None)]
+            .spacing(space::XS)
             .into();
     }
 
-    column![title, Column::with_children(rows).spacing(4)]
-        .spacing(8)
+    let rows: Vec<Element<'a, Message>> = busy
+        .iter()
+        .take(5)
+        .enumerate()
+        .map(|(i, iface)| {
+            let util: Element<'a, Message> = match iface.util_pct() {
+                Some(pct) => text(format!("{pct:.0}%"))
+                    .size(10)
+                    .style(move |t: &Theme| text::Style {
+                        color: Some(if pct > 90.0 {
+                            theme::colors(t).danger()
+                        } else if pct > 70.0 {
+                            theme::colors(t).warning()
+                        } else {
+                            theme::colors(t).text_muted()
+                        }),
+                    })
+                    .into(),
+                None => text("").size(10).into(),
+            };
+            row![
+                text(format!("{}.", i + 1))
+                    .size(10)
+                    .width(Length::Fixed(20.0)),
+                StatusLed::new(if iface.is_up() {
+                    StatusLedState::Active
+                } else {
+                    StatusLedState::Inactive
+                })
+                .with_size(8.0)
+                .view(),
+                text(format!("{}/{}", iface.device, iface.name()))
+                    .size(font::CAPTION)
+                    .width(Length::Fixed(180.0)),
+                text(format!(
+                    "In: {}",
+                    format_rate(iface.entry.rates.in_octets_per_sec.unwrap_or(0.0))
+                ))
+                .size(10),
+                text(format!(
+                    "Out: {}",
+                    format_rate(iface.entry.rates.out_octets_per_sec.unwrap_or(0.0))
+                ))
+                .size(10),
+                util,
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center)
+            .into()
+        })
+        .collect();
+
+    column![title, Column::with_children(rows).spacing(space::XS)]
+        .spacing(space::SM)
         .into()
 }
 
-/// Render error interfaces.
-fn render_error_interfaces<'a>(interfaces: &[InterfaceSummary]) -> Element<'a, Message> {
-    let error_ifaces: Vec<&InterfaceSummary> = interfaces.iter().filter(|i| i.errors > 0).collect();
+/// Admin-up interfaces that are oper-down, fleet-wide.
+fn render_down_hotlist<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
+    let mut down: Vec<&FleetIface<'a>> =
+        fleet.iter().filter(|i| i.is_unexpectedly_down()).collect();
 
-    if error_ifaces.is_empty() {
-        return text("No interface errors")
-            .size(11)
+    if down.is_empty() {
+        return text("No unexpectedly-down interfaces")
+            .size(font::CAPTION)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).success()),
             })
             .into();
     }
+    down.sort_by_key(|i| (i.device.to_string(), i.entry.index));
 
-    let title = text(format!("Interfaces with Errors ({})", error_ifaces.len()))
-        .size(12)
+    let title = text(format!("Down Interfaces ({})", down.len()))
+        .size(font::CAPTION)
         .style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).warning()),
+            color: Some(theme::colors(t).danger()),
         });
 
-    let rows: Vec<Element<'a, Message>> = error_ifaces
+    let rows: Vec<Element<'a, Message>> = down
         .iter()
         .take(5)
         .map(|iface| {
             row![
-                text(format!("{}/{}", iface.device, iface.name)).size(11),
-                text(format!("{} errors", iface.errors))
-                    .size(11)
-                    .style(|t: &Theme| text::Style {
-                        color: Some(theme::colors(t).danger()),
-                    })
+                StatusLed::new(StatusLedState::Inactive)
+                    .with_size(8.0)
+                    .view(),
+                text(format!("{}/{}", iface.device, iface.name())).size(font::CAPTION),
             ]
-            .spacing(15)
+            .spacing(space::SM)
+            .align_y(Alignment::Center)
             .into()
         })
         .collect();
 
     column![title, Column::with_children(rows).spacing(2)]
-        .spacing(8)
+        .spacing(space::SM)
         .into()
 }
 
-/// Render a single interface row.
-fn render_interface_row<'a>(rank: usize, iface: &InterfaceSummary) -> Element<'a, Message> {
-    let status = StatusLed::new(if iface.is_up {
-        StatusLedState::Active
-    } else {
-        StatusLedState::Inactive
-    })
-    .with_size(8.0);
+/// Error hotspots by current error/discard rate.
+fn render_error_hotspots<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
+    let mut erroring: Vec<&FleetIface<'a>> =
+        fleet.iter().filter(|i| i.error_rate() > 0.0).collect();
 
-    let total = iface.in_octets + iface.out_octets;
-
-    row![
-        text(format!("{}.", rank))
-            .size(10)
-            .width(Length::Fixed(20.0)),
-        status.view(),
-        text(format!("{}/{}", iface.device, iface.name))
-            .size(11)
-            .width(Length::Fixed(180.0)),
-        text(format!("In: {}", format_bytes(iface.in_octets as f64))).size(10),
-        text(format!("Out: {}", format_bytes(iface.out_octets as f64))).size(10),
-        text(format!("Total: {}", format_bytes(total as f64)))
-            .size(10)
+    if erroring.is_empty() {
+        return text("No interface errors")
+            .size(font::CAPTION)
             .style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).primary()),
-            }),
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center)
-    .into()
+                color: Some(theme::colors(t).success()),
+            })
+            .into();
+    }
+    erroring.sort_by(|a, b| b.error_rate().total_cmp(&a.error_rate()));
+
+    let title = text(format!("Error Hotspots ({})", erroring.len()))
+        .size(font::CAPTION)
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).warning()),
+        });
+
+    let rows: Vec<Element<'a, Message>> = erroring
+        .iter()
+        .take(5)
+        .map(|iface| {
+            row![
+                text(format!("{}/{}", iface.device, iface.name())).size(font::CAPTION),
+                text(format!("{:.1} errs/s", iface.error_rate()))
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).danger()),
+                    })
+            ]
+            .spacing(space::MD)
+            .into()
+        })
+        .collect();
+
+    column![title, Column::with_children(rows).spacing(2)]
+        .spacing(space::SM)
+        .into()
 }
