@@ -5,6 +5,7 @@
 
 pub mod alerts;
 pub mod config;
+pub mod interfaces;
 pub mod mib;
 pub mod oid;
 pub mod poller;

@@ -15,6 +15,7 @@ observed device is the first subject chunk after the producer.
 |-----|---------|
 | `zensight/v1/<origin>/telemetry/snmp/<device>/<metric>` | Polled OID value. `<metric>` is the MIB-/map-resolved name, e.g. `system/sysUpTime`, `if/1/ifInOctets`. Unmapped OIDs fall back to the raw dotted OID. The `oid` label carries the source OID. |
 | `zensight/v1/<origin>/telemetry/snmp/<device>/<metric>.rate` | Derived per-second rate for counter OIDs (`Gauge`, unit `By/s` for octet counters, else `1/s`), published alongside the raw counter from the second poll cycle on. See *Counter semantics*. |
+| `zensight/v1/<origin>/state/snmp/<device>/interfaces` | Joined ifTable/ifXTable doc (`InterfaceTable`, #529): per interface — ifName/ifDescr/ifAlias, decoded admin/oper status, speed (ifHighSpeed preferred), MAC, HC-preferred octet/packet/error/discard counters and their derived rates. LWW state, refreshed each poll cycle from whatever IF-MIB columns are walked; cached for late joiners. Disable with `snmp.publish_interfaces: false`. |
 | `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>` | Received trap (when `trap_listener.enabled`). `<trap_id>` is the enterprise/generic trap OID; `<sender>` is the slugged sender IP (`.`/`:` → `-`). |
 | `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>/<varbind>` | Per-varbind value from the trap PDU. |
 

@@ -81,6 +81,9 @@
       // },
     ],
 
+    // Joined per-device InterfaceTable state doc (#529), on by default.
+    // publish_interfaces: true,
+
     // Threshold alerting (#528) — on by default with these values; every rule
     // is individually disableable, and a device can carry its own `alerts`
     // block to replace this one.

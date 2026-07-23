@@ -63,6 +63,11 @@ pub struct SnmpConfig {
     /// replacement block in `devices[].alerts`.
     #[serde(default)]
     pub alerts: crate::alerts::SnmpAlertsConfig,
+
+    /// Publish the joined per-device `InterfaceTable` state doc (#529) from
+    /// whatever IF-MIB columns each cycle walks. On by default.
+    #[serde(default = "default_true")]
+    pub publish_interfaces: bool,
 }
 
 /// MIB loading configuration.

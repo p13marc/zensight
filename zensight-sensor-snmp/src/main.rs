@@ -108,6 +108,24 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Shared advanced-publisher registry for the per-device InterfaceTable
+    // state docs (#529): cache 1 → late joiners seed the current doc.
+    let interfaces_registry = snmp_config.publish_interfaces.then(|| {
+        Arc::new(
+            zensight_sensor_core::AdvancedPublisherRegistry::new(
+                session.clone(),
+                zensight_sensor_core::v1::V1Context::for_producer(
+                    &zensight_common::PROFILE,
+                    "snmp",
+                )
+                .telemetry_prefix(),
+                serialization,
+                zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            )
+            .with_qos(zensight_common::QosClass::HealthLiveness),
+        )
+    });
+
     // Spawn device pollers
     for device in snmp_config.devices.clone() {
         let mut poller = SnmpPoller::new(
@@ -131,6 +149,10 @@ async fn main() -> Result<()> {
                 );
                 poller.with_alerts(evaluator);
             }
+        }
+
+        if let Some(registry) = &interfaces_registry {
+            poller.with_interfaces_doc(registry.clone());
         }
 
         // Initialize poller (required for SNMPv3 to discover engine ID)
