@@ -81,9 +81,19 @@ pub struct MibConfig {
     #[serde(default = "default_true")]
     pub load_builtin: bool,
 
-    /// Additional MIB files to load (JSON format).
+    /// Additional MIB files to load (legacy JSON pseudo-MIB format).
+    ///
+    /// Deprecated (#532): put standard SMI `.mib`/`.txt` files in `dirs`
+    /// instead. Still honored for one release; a startup warning points
+    /// here.
     #[serde(default)]
     pub files: Vec<String>,
+
+    /// Directories of standard SMI MIB files (`.mib`/`.txt`, vendor files
+    /// drop in unmodified). Parsed with a real SMI parser (#532); malformed
+    /// modules fail startup.
+    #[serde(default)]
+    pub dirs: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -95,6 +105,7 @@ impl Default for MibConfig {
         Self {
             load_builtin: true,
             files: Vec::new(),
+            dirs: Vec::new(),
         }
     }
 }

@@ -92,6 +92,9 @@ pub struct TrapReceiver {
     registry: Arc<zensight_common::PublisherRegistry>,
     telemetry_prefix: String,
     mib_resolver: Arc<MibResolver>,
+    /// Loaded SMI MIBs (#532): translates trap OIDs (linkDown, vendor
+    /// notifications) the explicit tables don't know.
+    smi: Option<Arc<crate::smi::SmiResolver>>,
     format: Format,
 }
 
@@ -113,8 +116,27 @@ impl TrapReceiver {
             .telemetry_prefix()
             .into(),
             mib_resolver,
+            smi: None,
             format,
         }
+    }
+
+    /// Attach loaded SMI MIBs for trap/varbind translation (#532).
+    pub fn with_smi(&mut self, smi: Arc<crate::smi::SmiResolver>) {
+        self.smi = Some(smi);
+    }
+
+    /// Trap OID → name: explicit tables, then SMI notifications, then the
+    /// dotted OID.
+    fn resolve_trap_oid(&self, oid: &str) -> String {
+        let name = self.mib_resolver.resolve(oid);
+        if name != oid {
+            return name;
+        }
+        self.smi
+            .as_ref()
+            .and_then(|s| s.notification_name(oid))
+            .unwrap_or(name)
     }
 
     /// Bind and run the trap receiver.
@@ -180,7 +202,7 @@ impl TrapReceiver {
         // Determine trap identifier for the key expression
         let trap_id = if let Some(ref trap_oid) = trap.trap_oid {
             // v2: use the trap OID
-            self.mib_resolver.resolve(trap_oid)
+            self.resolve_trap_oid(trap_oid)
         } else if let Some(generic) = trap.generic_trap {
             // v1: use generic trap name
             if generic == GenericTrap::EnterpriseSpecific {

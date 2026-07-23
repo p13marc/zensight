@@ -70,7 +70,13 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Load additional MIB files
+    // Load additional MIB files (legacy JSON pseudo-MIBs; deprecated #532)
+    if !snmp_config.mib.files.is_empty() {
+        tracing::warn!(
+            "snmp.mib.files (JSON pseudo-MIBs) is deprecated — move standard SMI \
+             .mib files into snmp.mib.dirs; JSON support goes away next release"
+        );
+    }
     for mib_file in &snmp_config.mib.files {
         if let Err(e) = mib_resolver.load_file(mib_file) {
             tracing::warn!(file = %mib_file, error = %e, "Failed to load MIB file");
@@ -78,6 +84,16 @@ async fn main() -> Result<()> {
             tracing::info!(file = %mib_file, "Loaded MIB file");
         }
     }
+
+    // Real SMI MIBs (#532): vendor files drop into mib.dirs unmodified.
+    let smi = if snmp_config.mib.dirs.is_empty() {
+        None
+    } else {
+        let resolver = zensight_sensor_snmp::smi::SmiResolver::load_dirs(&snmp_config.mib.dirs)
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        tracing::info!(dirs = ?snmp_config.mib.dirs, "Loaded SMI MIB modules");
+        Some(Arc::new(resolver))
+    };
 
     // Add custom OID mappings from config
     if !snmp_config.oid_names.is_empty() {
@@ -178,6 +194,10 @@ async fn main() -> Result<()> {
             poller.with_profiles(profiles.clone());
         }
 
+        if let Some(smi) = &smi {
+            poller.with_smi(smi.clone());
+        }
+
         // Initialize poller (required for SNMPv3 to discover engine ID)
         if let Err(e) = poller.init().await {
             tracing::error!(
@@ -195,12 +215,15 @@ async fn main() -> Result<()> {
 
     // Spawn trap receiver if enabled
     if snmp_config.trap_listener.enabled {
-        let trap_receiver = TrapReceiver::new(
+        let mut trap_receiver = TrapReceiver::new(
             &snmp_config.trap_listener.bind,
             session.clone(),
             mib_resolver.clone(),
             serialization,
         );
+        if let Some(smi) = &smi {
+            trap_receiver.with_smi(smi.clone());
+        }
 
         runner.spawn(async move {
             if let Err(e) = trap_receiver.run().await {

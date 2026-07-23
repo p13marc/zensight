@@ -1072,3 +1072,138 @@ async fn profile_selection_defers_until_device_answers() {
     assert!(points.contains_key("system/name"));
     assert!(points.contains_key("if/1/in_octets"));
 }
+
+// ---------------------------------------------------------------------------
+// Real SMI MIBs (#532)
+// ---------------------------------------------------------------------------
+
+const VENDOR_MIB: &str = r#"
+ZENTEST-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, Counter64, Integer32, enterprises
+        FROM SNMPv2-SMI;
+
+zentest MODULE-IDENTITY
+    LAST-UPDATED "202601010000Z"
+    ORGANIZATION "zensight"
+    CONTACT-INFO "test"
+    DESCRIPTION  "test module"
+    ::= { enterprises 4242 }
+
+zenTemp OBJECT-TYPE
+    SYNTAX      Integer32
+    UNITS       "Cel"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "chassis temperature"
+    ::= { zentest 1 }
+
+zenPortTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF ZenPortEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "ports"
+    ::= { zentest 2 }
+
+zenPortEntry OBJECT-TYPE
+    SYNTAX      ZenPortEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "port row"
+    INDEX       { zenPortIndex }
+    ::= { zenPortTable 1 }
+
+ZenPortEntry ::= SEQUENCE {
+    zenPortIndex   Integer32,
+    zenPortState   INTEGER,
+    zenPortOctets  Counter64
+}
+
+zenPortIndex OBJECT-TYPE
+    SYNTAX      Integer32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "index"
+    ::= { zenPortEntry 1 }
+
+zenPortState OBJECT-TYPE
+    SYNTAX      INTEGER { up(1), down(2), degraded(3) }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "state"
+    ::= { zenPortEntry 2 }
+
+zenPortOctets OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "octets"
+    ::= { zenPortEntry 3 }
+
+END
+"#;
+
+/// A stock vendor MIB dropped into a directory resolves polled OIDs to
+/// names, decodes enums onto the `enum` label, and applies UNITS — with no
+/// code changes (only `mib.dirs` config).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vendor_mib_dir_names_enums_and_units() {
+    // "Drop the file in a directory" — the acceptance path.
+    let dir = std::env::temp_dir().join(format!("zensight-smi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mib dir");
+    std::fs::write(dir.join("ZENTEST-MIB.mib"), VENDOR_MIB).expect("write mib");
+    let smi =
+        zensight_sensor_snmp::smi::SmiResolver::load_dirs(&[dir.to_string_lossy().into_owned()])
+            .expect("load mib dir");
+
+    let mib = SimMib::new();
+    mib.set("1.3.6.1.4.1.4242.1.0", Value::Integer(42));
+    mib.set("1.3.6.1.4.1.4242.2.1.2.7", Value::Integer(3));
+    mib.set("1.3.6.1.4.1.4242.2.1.3.7", Value::Counter64(1_000));
+    let agent = SimAgent::start_with(mib.clone(), |b| {
+        b.community(b"public").handler(
+            harness::oid("1.3.6.1.4.1"),
+            std::sync::Arc::new(mib.clone()),
+        )
+    })
+    .await;
+
+    let mut device = v2c_device("vendor01", agent.addr());
+    device.oids = vec!["1.3.6.1.4.1.4242.1.0".to_string()];
+    device.walks = vec!["1.3.6.1.4.1.4242.2".to_string()];
+
+    let mut rig = rig(device).await;
+    rig.poller.with_smi(std::sync::Arc::new(smi));
+    rig.poller.poll_once().await.expect("poll");
+
+    let points = collect_points(&rig, IDLE).await;
+    // Scalar: SMI name + UNITS clause.
+    let temp = &points["zen_temp"];
+    assert_eq!(temp.value, TelemetryValue::Gauge(42.0));
+    assert_eq!(temp.unit.as_deref(), Some("Cel"));
+    // Enum column: numeric value stays, label decodes.
+    let state = &points["zen_port_state/7"];
+    assert_eq!(state.value, TelemetryValue::Gauge(3.0));
+    assert_eq!(
+        state.labels.get("enum").map(String::as_str),
+        Some("degraded")
+    );
+    // Counter column named via SMI.
+    assert_eq!(
+        points["zen_port_octets/7"].value,
+        TelemetryValue::Counter(1_000)
+    );
+
+    // Second cycle: the SMI-typed counter rates like any other.
+    mib.set("1.3.6.1.4.1.4242.2.1.3.7", Value::Counter64(90_000));
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    assert!(
+        points.contains_key("zen_port_octets/7.rate"),
+        "{:?}",
+        points.keys()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

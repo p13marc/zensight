@@ -48,6 +48,9 @@ pub struct SnmpPoller {
     /// selection once sysObjectID has been read successfully.
     profiles: Option<Arc<crate::profile::ProfileSet>>,
     selection: std::sync::Mutex<Option<crate::profile::Selection>>,
+    /// Loaded SMI MIBs (#532): the naming/typing fallback behind the
+    /// explicit resolver tables, plus enum labels and UNITS.
+    smi: Option<Arc<crate::smi::SmiResolver>>,
 }
 
 impl SnmpPoller {
@@ -80,7 +83,13 @@ impl SnmpPoller {
             interfaces_doc: None,
             profiles: None,
             selection: std::sync::Mutex::new(None),
+            smi: None,
         }
+    }
+
+    /// Attach loaded SMI MIBs (#532).
+    pub fn with_smi(&mut self, smi: Arc<crate::smi::SmiResolver>) {
+        self.smi = Some(smi);
     }
 
     /// Enable profile-driven polling (#531): on the first cycle that reads
@@ -358,6 +367,7 @@ impl SnmpPoller {
                     "system/profile",
                     TelemetryValue::Text(selection.applied.join(",")),
                     None,
+                    None,
                 )
                 .await;
                 *self.selection.lock().unwrap() = Some(selection);
@@ -475,12 +485,50 @@ impl SnmpPoller {
         value: &Value,
         seen_counters: &mut std::collections::HashSet<String>,
     ) -> Option<f64> {
-        let metric_name = self.mib_resolver.resolve(oid_str);
-        let syntax = self.mib_resolver.syntax(oid_str);
+        // Naming: explicit tables (builtins/config/profiles) first; loaded
+        // SMI MIBs fill the gaps; unresolvable stays the dotted OID (#532).
+        let mut metric_name = self.mib_resolver.resolve(oid_str);
+        if metric_name == oid_str
+            && let Some(name) = self.smi.as_ref().and_then(|s| s.metric_name(oid_str))
+        {
+            metric_name = name;
+        }
+        let syntax = self
+            .mib_resolver
+            .syntax(oid_str)
+            .map(str::to_string)
+            .or_else(|| {
+                self.smi
+                    .as_ref()
+                    .and_then(|s| s.syntax(oid_str))
+                    .map(str::to_string)
+            });
+        let syntax = syntax.as_deref();
 
         let (telemetry_value, unit) = snmp_value_to_telemetry(value)?;
-        self.publish_point(oid_str, &metric_name, telemetry_value, unit)
-            .await;
+        // Unit: wire-derived (TimeTicks seconds) wins; else the UNITS clause.
+        let smi_unit = if unit.is_none() {
+            self.smi.as_ref().and_then(|s| s.unit(oid_str))
+        } else {
+            None
+        };
+        let unit = unit.map(str::to_string).or(smi_unit);
+        // Enum decode: named INTEGER values ride an `enum` label (#532).
+        let enum_label = match value {
+            Value::Integer(n) => self
+                .smi
+                .as_ref()
+                .and_then(|s| s.enum_label(oid_str, i64::from(*n))),
+            _ => None,
+        };
+        self.publish_point(
+            oid_str,
+            &metric_name,
+            telemetry_value,
+            unit.as_deref(),
+            enum_label,
+        )
+        .await;
 
         // Counter → rate. The wire tag decides; MIB SYNTAX backs it up for
         // agents that mis-tag counters as Gauge32/Unsigned32.
@@ -511,6 +559,7 @@ impl SnmpPoller {
                 &rate_metric,
                 TelemetryValue::Gauge(rate),
                 Some(unit),
+                None,
             )
             .await;
         }
@@ -523,11 +572,15 @@ impl SnmpPoller {
         metric_name: &str,
         value: TelemetryValue,
         unit: Option<&str>,
+        enum_label: Option<String>,
     ) {
         let mut point = TelemetryPoint::new(&self.device.name, Protocol::Snmp, metric_name, value)
             .with_label("oid", oid_str);
         if let Some(unit) = unit {
             point = point.with_unit(unit);
+        }
+        if let Some(label) = enum_label {
+            point = point.with_label("enum", label);
         }
 
         let key = format!(
