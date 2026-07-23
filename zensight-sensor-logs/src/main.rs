@@ -22,6 +22,7 @@ mod sentinel;
 mod store;
 mod telemetry_guard;
 mod template;
+mod tls;
 
 use anyhow::Result;
 use commands::{FilterCommand, FilterStatus};

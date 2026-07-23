@@ -89,6 +89,12 @@ impl RigBuilder {
             path.to_string_lossy().into_owned(),
         ))
     }
+    /// A TLS listener (#550) with the given cert/key material.
+    pub fn tls(port: u16, tls: zensight_sensor_logs::config::TlsListenerConfig) -> Self {
+        let mut l = listener(ListenerProtocol::Tls, format!("127.0.0.1:{port}"));
+        l.tls = Some(tls);
+        Self::with(l)
+    }
 
     fn with(listener: ListenerConfig) -> Self {
         Self {
@@ -392,6 +398,7 @@ fn listener(protocol: ListenerProtocol, bind: String) -> ListenerConfig {
         remove_existing_socket: true,
         framing: Framing::Auto,
         timezone: None,
+        tls: None,
     }
 }
 

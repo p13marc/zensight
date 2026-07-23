@@ -73,7 +73,7 @@ listeners: [
 
 | Field | Default | Applies to | Meaning |
 |---|---|---|---|
-| `protocol` | — | all | `udp` \| `tcp` \| `unix` |
+| `protocol` | — | all | `udp` \| `tcp` \| `unix` \| `tls` |
 | `bind` | — | all | `host:port` (UDP/TCP) or socket path (unix) |
 | `max_message_size` | `65535` | UDP | max datagram bytes |
 | `max_connections` | `1000` | TCP/unix | concurrent connections |
@@ -82,6 +82,36 @@ listeners: [
 | `remove_existing_socket` | `true` | unix | unlink before binding |
 | `framing` | `auto` | TCP/unix | RFC 6587 framing: `auto` (leading digit ⇒ octet-counting, else LF), `lf`, `octet` |
 | `timezone` | `null` (UTC) | all | IANA zone RFC 3164 senders on this listener use (#545); DST-correct via the tz database. No effect on RFC 5424 |
+| `tls` | `null` | tls | TLS cert/key config (#550) — required for `protocol: "tls"`; see below |
+
+### `tls` (RFC 5425 TLS listener, #550)
+
+`protocol: "tls"` is TLS over TCP with octet-counting framing (rustls, `ring`
+provider — no OpenSSL). Cleartext connections to a TLS port are rejected.
+
+```json5
+{ protocol: "tls", bind: "0.0.0.0:6514",
+  tls: {
+    cert_file: "/etc/zensight/server.crt",   // PEM chain
+    key_file:  "/etc/zensight/server.key",   // PEM key; paths accept ${ENV}/file: (#538)
+    client_ca_file: "/etc/zensight/ca.crt",  // optional: require + verify client certs (mTLS)
+    min_version: "1.3",                       // "1.3" (default) | "1.2"
+  } }
+```
+
+Key material is referenced **by path only** (never inline PEM). With
+`client_ca_file` set, clients must present a certificate verified against it and
+its CN is attached as `sd.tls.peer_cn`. Certs are **hot-reloaded** on mtime
+change (rotation needs no restart). `max_connections` / `connection_timeout_secs`
+apply as for TCP.
+
+Generate a quick self-signed server cert for testing:
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.crt \
+  -days 365 -subj "/CN=logs.example.com"
+```
+Point an rsyslog sender at it with `omfwd` (`StreamDriver="ossl"`,
+`StreamDriverMode="1"`), or test with `openssl s_client -connect host:6514`.
 
 ### RFC 3164 timestamps (#545)
 
