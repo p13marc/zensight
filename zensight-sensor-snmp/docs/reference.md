@@ -109,6 +109,9 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `devices[]` | array | Devices to poll (see below). |
 | `oid_groups` | map | Named, reusable `{ oids, walks }` sets referenced by `device.oid_group`. |
 | `oid_names` | map | OID→metric-name map; `{index}` is substituted with the table index. |
+| `resilience.backoff_cap` | u32 | Max poll-interval multiplier under failure (default 10). |
+| `resilience.breaker_after` | u32 | Fully-failed cycles before probe-only polling (default 3). |
+| `resilience.jitter_percent` | u8 | Per-cycle scheduling jitter (default 10). |
 | `evidence.enabled` | bool | Publish observed-device identity claims (#537, default true). |
 | `evidence.refresh_cycles` | u32 | Claim refresh cadence in poll cycles (default 10). |
 | `mib.load_builtin` | bool | Load bundled MIB definitions. |
@@ -144,6 +147,27 @@ address (hostnames fall back to auto-discovery, the default). If a device
 comes back with a **different** engine identity (agent replaced/reset), the
 poller notices the all-auth-failure cycle and rebuilds its client to force
 rediscovery — no sensor restart needed.
+
+## Resilience (#539)
+
+Error handling adapts instead of hammering dead devices:
+
+- **Backoff**: consecutive fully-failed cycles double the poll interval
+  (2×, 4×, …) up to `resilience.backoff_cap` × base (default 10×); the
+  first success snaps back to the base cadence.
+- **Circuit breaker**: after `resilience.breaker_after` fully-failed cycles
+  (default 3) the poller sends only a cheap sysUpTime probe per cycle
+  instead of the full OID set; one successful probe closes the breaker and
+  the next cycle polls fully. Pairs with the `device_unreachable` alert.
+- **Jitter**: each device's start phase is randomized across its interval
+  and every cycle gets ±`resilience.jitter_percent`% scheduling jitter
+  (default 10), so a fleet never fires synchronized bursts.
+- **No dropped devices**: a device whose client cannot be built at startup
+  is retried by the poll loop with the same backoff — it starts working
+  when it comes online, no sensor restart.
+- **Health accuracy**: every cycle records per-device success/failure and
+  poll duration into the health doc (`devices_responding`/`devices_failed`,
+  consecutive-failure counts, last-seen), visible in the GUI sensors view.
 
 ## Credentials (#538)
 

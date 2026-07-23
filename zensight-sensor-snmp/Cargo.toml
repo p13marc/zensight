@@ -30,6 +30,7 @@ bytes = "1"
 
 toml = "1.1.3"
 mib-rs = "0.8"
+rand = "0.9"
 
 [dev-dependencies]
 async-snmp = { version = "=0.16.0", features = ["agent"] }
