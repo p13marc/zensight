@@ -1,6 +1,7 @@
 # zensight-sensor-snmp — reference
 
-Polls SNMP agents (v1/v2c/v3) with GET and WALK, and optionally listens for SNMP
+Polls SNMP agents (v1/v2c/v3) with GET and WALK — GETBULK on v2c/v3, GETNEXT
+on v1, one persistent UDP socket per device — and optionally listens for SNMP
 traps. OIDs are resolved to metric names through the configured `oid_names` map
 (with `{index}` placeholders for table columns) and optional built-in/loaded MIBs.
 
@@ -65,14 +66,25 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `version` | enum | `v1`, `v2c`, or `v3`. |
 | `security` | object? | v3 auth/priv (see below). |
 | `poll_interval_secs` | u64 | Polling cadence. |
+| `timeout_secs` | u64 | Per-request timeout, per attempt (default 5). |
+| `retries` | u32 | Retransmissions after a timed-out request (default 2; also budgets SNMPv3 report/resync flows). |
+| `max_repetitions` | u32 | GETBULK max-repetitions for walks on v2c/v3 (default 20). |
 | `oids` | string[] | Individual OIDs polled with GET. |
-| `walks` | string[] | OID subtrees polled with WALK (GETNEXT). |
+| `walks` | string[] | OID subtrees polled with WALK (GETBULK on v2c/v3, GETNEXT on v1; tooBig responses are recovered by bisection). |
 | `oid_group` | string? | Reference a predefined `oid_groups` entry instead of inline `oids`/`walks`. |
 
 ### `security` (SNMPv3)
 
-`username`, `auth_protocol` (`MD5`/`SHA`/`SHA256`), `auth_password`,
-`priv_protocol` (`DES`/`AES`/`AES256`), `priv_password`, optional `engine_id`.
+`username`, `auth_protocol` (`MD5`/`SHA`/`SHA224`/`SHA256`/`SHA384`/`SHA512`),
+`auth_password`, `priv_protocol` (`DES`/`AES`/`AES192`/`AES256`),
+`priv_password`, optional `engine_id`.
+
+A configured `engine_id` (hex, `0x`/`:` tolerated) pre-seeds the engine cache
+and skips the discovery round-trip; it requires a literal `ip:port` device
+address (hostnames fall back to auto-discovery, the default). If a device
+comes back with a **different** engine identity (agent replaced/reset), the
+poller notices the all-auth-failure cycle and rebuilds its client to force
+rediscovery — no sensor restart needed.
 
 ## Testing
 
@@ -95,14 +107,11 @@ harness lives in `tests/harness/mod.rs`:
 
 The harness maps OIDs through lowercase `oid_names` (grammar-valid chunks);
 built-in MIB names currently violate the chunk grammar — see issue #559.
-Two tests are `#[ignore]`d until the async-snmp client migration (#526):
-noAuthNoPriv (snmp2 panics on an empty password) and engine re-discovery
-after an agent restart.
 
 ## Build / run notes & caveats
 
-- **Build dependency:** the SNMP stack needs OpenSSL / net-snmp headers at build
-  time (`openssl-devel` / `libssl-dev`). Missing headers cause a build failure.
+- The SNMP stack ([`async-snmp`](https://docs.rs/async-snmp), pinned pre-1.0)
+  is pure Rust — no OpenSSL / net-snmp headers needed to build.
 - **Trap listener:** binding UDP 162 requires elevated privileges (or a
   `CAP_NET_BIND_SERVICE` capability / higher bind port). Polling itself is
   unprivileged.

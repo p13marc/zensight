@@ -101,6 +101,27 @@ async fn walk_large_table_is_complete() {
     assert!(points.contains_key("if/64/in_octets"));
 }
 
+/// Table walks ride GETBULK on v2c: 64 rows must take a handful of
+/// round-trips, not one per row (the old GETNEXT loop's 65 requests).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v2c_walk_uses_getbulk() {
+    let agent = SimAgent::start(SimMib::new().with_if_table(64)).await;
+    let proxy = FlakyProxy::start(agent.addr()).await;
+    let mut device = v2c_device("bulk01", proxy.addr());
+    device.walks = vec![format!("{IF_TABLE}.10")]; // ifInOctets column
+
+    let rig = rig(device).await;
+    rig.poller.poll_once().await.expect("poll");
+
+    let points = collect_points(&rig, IDLE).await;
+    assert_eq!(points.len(), 64);
+    let requests = proxy.forwarded();
+    assert!(
+        requests <= 8,
+        "expected GETBULK round-trips for 64 rows, saw {requests} requests"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutated_values_show_up_next_cycle() {
     let mib = base_mib();
@@ -155,24 +176,51 @@ async fn unreachable_device_then_recovery() {
     );
 }
 
+/// With retries configured, dropped datagrams are retransmitted and the SAME
+/// poll cycle succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dropped_datagram_recovers_by_next_cycle() {
+async fn retries_recover_within_one_cycle() {
     let agent = SimAgent::start(base_mib()).await;
     let proxy = FlakyProxy::start(agent.addr()).await;
     let mut device = v2c_device("flaky02", proxy.addr());
     device.oids = vec![format!("{SYSTEM}.5.0")];
+    device.retries = 2;
 
     let rig = rig(device).await;
 
-    // One lost request. The current client has no within-request retry, so
-    // this cycle may come up empty — but the next cycle must succeed.
-    // (#526 tightens this: with retries configured, the SAME cycle succeeds.)
-    proxy.drop_next(1);
+    // Two lost requests, two retries: the third attempt lands.
+    proxy.drop_next(2);
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    assert_eq!(
+        points["system/name"].value,
+        TelemetryValue::Text("sim-device".into())
+    );
+}
+
+/// More losses than retries: that cycle publishes nothing, the next recovers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhausted_retries_recover_by_next_cycle() {
+    let agent = SimAgent::start(base_mib()).await;
+    let proxy = FlakyProxy::start(agent.addr()).await;
+    let mut device = v2c_device("flaky03", proxy.addr());
+    device.oids = vec![format!("{SYSTEM}.5.0")];
+    device.retries = 1;
+
+    let rig = rig(device).await;
+
+    // Two lost requests against a single retry: attempts 1 and 2 both die.
+    proxy.drop_next(2);
     rig.poller
         .poll_once()
         .await
         .expect("poll cycle must survive");
-    let _ = collect_points(&rig, IDLE).await;
+    let points = collect_points(&rig, IDLE).await;
+    assert!(
+        points.is_empty(),
+        "cycle with exhausted retries published: {:?}",
+        points.keys()
+    );
 
     rig.poller.poll_once().await.expect("poll");
     let points = collect_points(&rig, IDLE).await;
@@ -197,6 +245,9 @@ async fn v3_roundtrip(
     device.version = SnmpVersion::V3;
     device.security = Some(security);
     device.oids = vec![format!("{SYSTEM}.5.0")];
+    // v3 report flows (time-sync, engine resync) consume a retry attempt
+    // before the request proper — a retry budget is part of normal operation.
+    device.retries = 1;
 
     let session = std::sync::Arc::new(
         zenoh::open(harness::isolated_zenoh_config())
@@ -247,10 +298,8 @@ fn v3_security(
     }
 }
 
-/// snmp2 0.4.14 panics (index out of bounds, `v3.rs:121`) building the USM
-/// key from an empty password, so a noAuthNoPriv v3 device crashes the
-/// current sensor outright.
-#[ignore = "snmp2 panics on noAuthNoPriv (empty password) — enabled by the #526 migration"]
+/// noAuthNoPriv used to crash the sensor outright: snmp2 0.4.14 panicked
+/// (index out of bounds) building the USM key from an empty password.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v3_no_auth_no_priv() {
     let ok = v3_roundtrip(
@@ -387,8 +436,7 @@ async fn v3_wrong_priv_password_yields_nothing() {
 }
 
 /// Engine re-discovery after the agent restarts with a fresh engine identity.
-/// The snmp2 persistent v3 session cannot resynchronize; async-snmp can.
-#[ignore = "requires client-side engine resync — enabled by the #526 migration"]
+/// The snmp2 persistent v3 session could not resynchronize; async-snmp can.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v3_engine_rediscovery_after_agent_restart() {
     let provision = |engine: &'static [u8]| {
@@ -409,6 +457,7 @@ async fn v3_engine_rediscovery_after_agent_restart() {
         None,
     ));
     device.oids = vec![format!("{SYSTEM}.5.0")];
+    device.retries = 1;
 
     let rig = rig(device).await;
     rig.poller.poll_once().await.expect("poll");
@@ -430,4 +479,27 @@ async fn v3_engine_rediscovery_after_agent_restart() {
         }
     }
     assert!(recovered, "poller never recovered after engine change");
+}
+
+/// A configured `engine_id` pre-seeds the engine cache (no discovery
+/// round-trip) and the first authenticated exchange time-syncs normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v3_configured_engine_id_polls() {
+    const ENGINE: &[u8] = b"\x80\x00\x00\x00\x01engineC";
+    let engine_hex: String = ENGINE.iter().map(|b| format!("{b:02x}")).collect();
+
+    let mut security = v3_security(
+        AuthProtocol::Sha256,
+        Some("authpass123"),
+        PrivProtocol::None,
+        None,
+    );
+    security.engine_id = Some(engine_hex);
+
+    let ok = v3_roundtrip(security, |b| {
+        b.engine_id(ENGINE.to_vec())
+            .usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123"))
+    })
+    .await;
+    assert!(ok, "pre-seeded engine id must poll successfully");
 }

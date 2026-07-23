@@ -55,8 +55,8 @@ cargo test -p zensight-sensor-netring      # one crate
 cargo test -p zensight test_dashboard_empty  # one test
 ```
 
-Sandbox note: `zensight-sensor-snmp` needs openssl-devel, `zensight-sensor-gnmi` needs protoc,
-`zensight-sensor-systemd` needs systemd-devel. If a toolbox/container has them, run the full
+Sandbox note: `zensight-sensor-gnmi` needs protoc, `zensight-sensor-systemd` needs
+systemd-devel. If a toolbox/container has them, run the full
 workspace there; otherwise `--exclude` those crates and say so.
 
 ## Linting and Formatting

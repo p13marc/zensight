@@ -60,10 +60,15 @@
           "1.3.6.1.2.1.1.5.0",         // sysName
         ],
 
-        // OID subtrees to poll with WALK (GETNEXT)
+        // OID subtrees to poll with WALK (GETBULK on v2c/v3, GETNEXT on v1)
         walks: [
           "1.3.6.1.2.1.2.2.1",         // ifTable
         ],
+
+        // Transport tuning (all optional)
+        // timeout_secs: 5,             // per-request timeout, per attempt
+        // retries: 2,                  // retransmissions after a timeout
+        // max_repetitions: 20,         // GETBULK rows per round-trip (v2c/v3)
       },
       // Add more devices here
       // {
