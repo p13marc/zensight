@@ -20,6 +20,8 @@ pub enum ZensightState<'a> {
     Artifact { kind: &'a str },
     /// Catalog `state/assertion/{id}` — operator identity assertion.
     CatalogAssertion { id: &'a str },
+    /// SNMP `state/snmp/{device}/interfaces` — joined interface table (#529).
+    SnmpInterfaces { device: &'a str },
 }
 
 impl<'a> ZensightState<'a> {
@@ -34,6 +36,9 @@ impl<'a> ZensightState<'a> {
             }
             AnySubject::Catalog(registry::catalog::Subject::Assertion { id }) => {
                 Some(ZensightState::CatalogAssertion { id })
+            }
+            AnySubject::Snmp(registry::snmp::Subject::Interfaces { device }) => {
+                Some(ZensightState::SnmpInterfaces { device })
             }
             AnySubject::Gnmi(registry::gnmi::Subject::Artifact { kind })
             | AnySubject::Logs(registry::logs::Subject::Artifact { kind })

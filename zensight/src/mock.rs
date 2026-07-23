@@ -55,6 +55,70 @@ fn now_ms() -> i64 {
 /// Mock SNMP device data.
 pub mod snmp {
     use super::*;
+    use zensight_common::{
+        IfStatus, InterfaceCounters, InterfaceEntry, InterfaceRates, InterfaceTable,
+    };
+
+    /// A joined `InterfaceTable` doc (#529) with `n` interfaces: eth0 is
+    /// up and busy (HC rates, alias), the last interface is admin-up but
+    /// oper-down.
+    pub fn interface_table(device: &str, n: u32) -> InterfaceTable {
+        InterfaceTable {
+            timestamp: 1_719_999_000_000,
+            device: device.to_string(),
+            interfaces: (1..=n)
+                .map(|i| InterfaceEntry {
+                    index: i,
+                    name: Some(format!("eth{}", i - 1)),
+                    descr: Some(format!("Ethernet interface {}", i - 1)),
+                    alias: (i == 1).then(|| "uplink to core".to_string()),
+                    admin_status: Some(IfStatus::Up),
+                    oper_status: Some(if i == n && n > 1 {
+                        IfStatus::Down
+                    } else {
+                        IfStatus::Up
+                    }),
+                    speed_bits: Some(1_000_000_000),
+                    mac: Some(format!("02:42:ac:11:00:{i:02x}")),
+                    counters: InterfaceCounters {
+                        in_octets: Some(5_000_000_000),
+                        out_octets: Some(2_000_000_000),
+                        in_errors: Some(if i == 2 { 4_200 } else { 0 }),
+                        ..Default::default()
+                    },
+                    rates: InterfaceRates {
+                        in_octets_per_sec: Some(12_500_000.0 * i as f64), // 100 Mb/s × i
+                        out_octets_per_sec: Some(2_500_000.0),
+                        in_errors_per_sec: (i == 2).then_some(3.5),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    /// Like [`interface_table`] but from a device without ifXTable: no
+    /// alias, ifSpeed-derived speed, no rates yet (first cycle).
+    pub fn interface_table_no_hc(device: &str) -> InterfaceTable {
+        InterfaceTable {
+            timestamp: 1_719_999_000_000,
+            device: device.to_string(),
+            interfaces: vec![InterfaceEntry {
+                index: 1,
+                name: Some("eth0".to_string()),
+                descr: Some("legacy port".to_string()),
+                admin_status: Some(IfStatus::Up),
+                oper_status: Some(IfStatus::Up),
+                speed_bits: Some(10_000_000),
+                counters: InterfaceCounters {
+                    in_octets: Some(123_456),
+                    out_octets: Some(654_321),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        }
+    }
 
     /// Generate mock router telemetry.
     pub fn router(name: &str) -> Vec<TelemetryPoint> {

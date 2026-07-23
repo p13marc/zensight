@@ -541,6 +541,16 @@ pub enum Message {
         source: String,
         status: zensight_common::stream::StreamStatus,
     },
+    /// The joined SNMP interface doc from `state/snmp/<device>/interfaces`
+    /// (#529/#530) — LWW; replaces the previous doc for that device.
+    SnmpInterfaceTable {
+        device: String,
+        table: zensight_common::InterfaceTable,
+    },
+    /// SNMP device view: interface-table sort/filter/paging (#530).
+    SnmpTableSort(usize),
+    SnmpTableFilter(String),
+    SnmpTableMore,
     /// Open a live H.264 video tile (#409) on a specific `tier`: sends
     /// `open_stream` (codec `h264`, that tier) and spawns the decoding
     /// subscriber on the exact tier key. Fired by the per-tier buttons — each

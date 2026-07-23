@@ -102,6 +102,9 @@ pub struct DeviceDetailState {
     /// On-demand sysinfo process explorer, fetched lazily from
     /// `@rpc/sysinfo/processes` (#47).
     pub sysinfo_detail: crate::view::specialized::sysinfo_detail::SysinfoDetailState,
+    /// SNMP device detail (#530): the joined `InterfaceTable` state doc
+    /// (LWW off the bus) + interface-table UI state.
+    pub snmp_detail: crate::view::specialized::snmp::SnmpDetailState,
     /// Whether the chart panel is expanded to a taller height (#36).
     pub chart_expanded: bool,
     /// Text-input buffer for the custom relative window in minutes (#36).
@@ -151,6 +154,7 @@ impl DeviceDetailState {
             netflow_detail: Default::default(),
             parallax_detail: Default::default(),
             sysinfo_detail: Default::default(),
+            snmp_detail: Default::default(),
             chart_expanded: false,
             chart_custom_input: String::new(),
             chart_from_input: String::new(),

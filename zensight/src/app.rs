@@ -1545,6 +1545,37 @@ impl ZenSight {
                     device.parallax_detail.apply_stream_status(&status);
                 }
             }
+            Message::SnmpInterfaceTable { device, table } => {
+                // LWW: replace the doc for the currently-open SNMP device
+                // (#530); docs for other devices are re-served to late
+                // joiners by the sensor's cached publisher on selection.
+                if let Some(selected) = self.selected_device.as_mut()
+                    && selected.device_id.protocol == zensight_common::Protocol::Snmp
+                    && selected.device_id.source == device
+                {
+                    let DeviceDetailState {
+                        snmp_detail,
+                        metrics,
+                        ..
+                    } = selected;
+                    snmp_detail.apply_interfaces(table, metrics);
+                }
+            }
+            Message::SnmpTableSort(col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.snmp_detail.table.toggle_sort(col);
+                }
+            }
+            Message::SnmpTableFilter(q) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.snmp_detail.table.set_filter(q);
+                }
+            }
+            Message::SnmpTableMore => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.snmp_detail.table.load_more();
+                }
+            }
             Message::ParallaxOpenVideoTile { stream, tier } => {
                 return ControlFlow::Break(self.open_parallax_video_tile(stream, tier));
             }

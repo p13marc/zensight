@@ -212,6 +212,21 @@ backing flows with per-flow process attribution (#309 join,
 `AttributionTarget::Topology`), and community-id copy. Both pivot to the
 netring flow table and device detail.
 
+**SNMP device detail** (`view/specialized/snmp.rs`, #530) — built on the
+typed `InterfaceTable` state doc the sensor publishes per device on
+`state/snmp/<device>/interfaces` (#529); the old `if/<index>/<column>`
+metric-string parsing is gone. The doc arrives on the state subscriber
+(`Message::SnmpInterfaceTable`, LWW into `DeviceDetailState::snmp_detail`,
+rows pre-joined for borrowing). The interface table is a shared `DataTable`
+(sortable: status/name/speed/in/out/util/errs-per-s) showing per-second
+rates (#527) humanized via `format_rate`, utilization % against link speed
+(warning >70, danger >90), decoded RFC 2863 status LEDs, and a sparkline
+per interface; clicking an interface name opens the history chart on its
+best raw-tree octet metric (rate preferred, any naming scheme). System
+metrics render processor/storage gauges from profile (`cpu/<i>/load`,
+`storage/<i>/…`) or legacy names, with sparklines. Uptime under ten minutes
+flags "rebooted recently".
+
 **Parallax live video** (`view/specialized/parallax.rs` +
 `parallax_detail.rs`, #408) — the media-plane viewer for a parallax device.
 The stream catalogue is fetched on open with a GET on the single-host `@rpc`
