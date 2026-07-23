@@ -99,6 +99,12 @@ kind = "json-schema"
 [types.StreamStatus]
 kind = "json-schema"
 
+[types.LogRulesConfig]
+kind = "json-schema"
+
+[types.RulesStatus]
+kind = "json-schema"
+
 [types.TelemetryPoint]
 kind = "json-schema"
 

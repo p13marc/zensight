@@ -55,6 +55,7 @@ from missing telemetry.
 | `ingest` | safe | network-path rate-limit + loss accounting — see below |
 | `multiline` | on | stack-trace joining on stream listeners — see below |
 | `events_ring_capacity` | `10000` | in-memory ring served on `@rpc/logs/events` (min 100, ≈3 MB) |
+| `sentinel` | empty | log sentinel pattern→alert rules (#543) — see [alerting.md](alerting.md) |
 
 ### `syslog.listeners[]`
 

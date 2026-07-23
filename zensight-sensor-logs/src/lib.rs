@@ -18,7 +18,6 @@
 pub mod commands;
 pub mod config;
 pub mod dedup;
-pub mod events;
 pub mod filter;
 pub mod ingest;
 #[cfg(feature = "journald")]
@@ -29,4 +28,5 @@ pub mod parser;
 /// the integration harness (#548) can drive socket→ring→query round-trips.
 pub mod query;
 pub mod receiver;
+pub mod sentinel;
 pub(crate) mod telemetry_guard;
