@@ -5,6 +5,7 @@
 
 pub mod alerts;
 pub mod config;
+pub mod discovery;
 pub mod evidence;
 pub mod interfaces;
 pub mod mib;

@@ -189,6 +189,22 @@ async fn main() -> Result<()> {
         .health()
         .set_devices_total(snmp_config.devices.len() as u64);
 
+    // Fleet-known IPs (#541): configured addresses now, evidence-observed
+    // IPs as pollers learn them. Discovery never re-proposes any of these.
+    let known_ips = Arc::new(std::sync::RwLock::new(
+        snmp_config
+            .devices
+            .iter()
+            .filter_map(|d| {
+                d.address
+                    .rsplit_once(':')
+                    .map(|(host, _)| host.trim_start_matches('[').trim_end_matches(']'))
+                    .filter(|h| h.parse::<std::net::IpAddr>().is_ok())
+                    .map(str::to_string)
+            })
+            .collect::<std::collections::HashSet<_>>(),
+    ));
+
     // Spawn device pollers
     for device in snmp_config.devices.clone() {
         let mut poller = SnmpPoller::new(
@@ -232,6 +248,7 @@ async fn main() -> Result<()> {
 
         poller.with_resilience(snmp_config.resilience);
         poller.with_health(runner.health());
+        poller.with_known_ips(known_ips.clone());
 
         // Initialize the client. A failure no longer drops the device
         // (#539): the poll loop keeps retrying with backoff, so a device
@@ -246,6 +263,75 @@ async fn main() -> Result<()> {
 
         runner.spawn(async move {
             poller.run().await;
+        });
+    }
+
+    // Subnet auto-discovery (#541): opt-in, propose-only.
+    if let Some(discovery_config) = snmp_config.discovery.clone() {
+        let credentials: Vec<(String, zensight_sensor_snmp::config::CredentialSet)> =
+            discovery_config
+                .credentials
+                .iter()
+                .map(|name| {
+                    snmp_config
+                        .credentials
+                        .get(name)
+                        .cloned()
+                        .map(|set| (name.clone(), set))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("discovery references unknown credential set {name:?}")
+                        })
+                })
+                .collect::<Result<_>>()?;
+
+        let interval = std::time::Duration::from_secs(discovery_config.interval_secs.max(60));
+        let mut discovery = zensight_sensor_snmp::discovery::Discovery::new(
+            discovery_config,
+            credentials,
+            known_ips.clone(),
+        );
+        if let Some(profiles) = &profiles {
+            discovery.with_profiles(profiles.clone());
+        }
+        // Startup validation: an over-broad CIDR fails loudly, never scans.
+        let addresses = discovery
+            .addresses()
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        tracing::info!(
+            addresses = addresses.len(),
+            interval_secs = interval.as_secs(),
+            "SNMP subnet discovery enabled (propose-only)"
+        );
+
+        let report_registry = zensight_sensor_core::AdvancedPublisherRegistry::new(
+            session.clone(),
+            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
+                .telemetry_prefix(),
+            serialization,
+            zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+        )
+        .with_qos(zensight_common::QosClass::HealthLiveness);
+        let report_key: String =
+            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
+                .state_key(&["discovery"])
+                .into();
+
+        runner.spawn(async move {
+            loop {
+                let report = discovery.sweep(&addresses).await;
+                tracing::info!(
+                    scanned = report.scanned,
+                    discovered = report.discovered.len(),
+                    "discovery sweep complete"
+                );
+                if let Err(e) = report_registry
+                    .publish_serializable(&report_key, &report)
+                    .await
+                {
+                    tracing::warn!(error = %e, "discovery report publish failed");
+                }
+                tokio::time::sleep(interval).await;
+            }
         });
     }
 

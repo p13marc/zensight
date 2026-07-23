@@ -1658,3 +1658,84 @@ async fn uninitialized_client_is_built_by_the_cycle() {
             .contains("/telemetry/snmp/late02/")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Subnet discovery (#541)
+// ---------------------------------------------------------------------------
+
+use zensight_sensor_snmp::config::CredentialSet;
+use zensight_sensor_snmp::discovery::{Discovery, DiscoveryConfig};
+
+/// Sweeping addresses proposes unconfigured responders with sysObjectID
+/// identity, matched profiles and a config snippet — and never re-proposes
+/// known devices or dead addresses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovery_proposes_unconfigured_responders() {
+    // Two live agents; one will be "already configured".
+    let agent_new = SimAgent::start(base_mib()).await;
+    let agent_known = SimAgent::start(base_mib()).await;
+    let dead: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+    let known_ips = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::from([
+        "127.0.0.1".to_string(),
+    ])));
+    // With loopback in known_ips everything is filtered — first prove the
+    // dedup, then clear and prove the proposal path.
+    let config = DiscoveryConfig {
+        subnets: vec![],
+        credentials: vec!["lab".to_string()],
+        interval_secs: 3600,
+        port: 161,
+        max_concurrency: 4,
+        probe_timeout_secs: 1,
+    };
+    let credentials = vec![(
+        "lab".to_string(),
+        CredentialSet {
+            community: Some("public".to_string()),
+            security: None,
+        },
+    )];
+    let mut discovery = Discovery::new(config, credentials, known_ips.clone());
+    discovery.with_profiles(std::sync::Arc::new(
+        zensight_sensor_snmp::profile::ProfileSet::builtin(),
+    ));
+
+    let addresses = vec![agent_new.addr(), agent_known.addr(), dead];
+
+    // Everything on a known IP is skipped entirely.
+    let report = discovery.sweep(&addresses).await;
+    assert_eq!(report.scanned, 0);
+    assert!(report.discovered.is_empty());
+
+    // Un-know the IP: both agents answer, the dead port doesn't.
+    known_ips.write().unwrap().clear();
+    let report = discovery.sweep(&addresses).await;
+    assert_eq!(report.scanned, 3);
+    assert_eq!(report.discovered.len(), 2, "{report:?}");
+
+    let found = report
+        .discovered
+        .iter()
+        .find(|d| d.address == agent_new.addr().to_string())
+        .expect("new agent proposed");
+    assert_eq!(found.credentials.as_deref(), Some("lab"));
+    assert_eq!(
+        found.sys_object_id.as_deref(),
+        Some("1.3.6.1.4.1.99999.1.1")
+    );
+    assert_eq!(found.sys_name.as_deref(), Some("sim-device"));
+    assert!(
+        found
+            .matched_profiles
+            .contains(&"generic-device".to_string()),
+        "{:?}",
+        found.matched_profiles
+    );
+    assert!(
+        found.suggested.contains(&found.address),
+        "{}",
+        found.suggested
+    );
+    assert!(found.suggested.contains("credentials: \"lab\""));
+}

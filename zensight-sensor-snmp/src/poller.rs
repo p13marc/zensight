@@ -61,6 +61,9 @@ pub struct SnmpPoller {
     consecutive_failures: std::sync::atomic::AtomicU32,
     /// Per-device health recording, when wired (#539).
     health: Option<Arc<zensight_sensor_core::SensorHealth>>,
+    /// Fleet-known-IP sink (#541): evidence-observed IPs feed discovery's
+    /// never-re-propose set.
+    known_ips: Option<Arc<std::sync::RwLock<std::collections::HashSet<String>>>>,
 }
 
 /// What one full poll cycle saw (#539) — feeds backoff/breaker/health.
@@ -125,7 +128,16 @@ impl SnmpPoller {
             resilience: crate::config::ResilienceConfig::default(),
             consecutive_failures: std::sync::atomic::AtomicU32::new(0),
             health: None,
+            known_ips: None,
         }
+    }
+
+    /// Feed evidence-observed IPs into the fleet known-IP set (#541).
+    pub fn with_known_ips(
+        &mut self,
+        known: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    ) {
+        self.known_ips = Some(known);
     }
 
     /// Apply resilience tuning (#539).
@@ -402,6 +414,10 @@ impl SnmpPoller {
             if cycle.is_multiple_of(u64::from(*refresh)) && !identity.is_empty() {
                 identity.note_polled_address(&self.device.address);
                 let claim = identity.build(&self.device.name);
+                if let Some(known) = &self.known_ips {
+                    let mut known = known.write().unwrap();
+                    known.extend(claim.ips.iter().cloned());
+                }
                 let key = zensight_common::host_evidence_key("snmp", &self.device.name);
                 if let Err(e) = registry.publish_serializable(&key, &claim).await {
                     tracing::warn!(device = %self.device.name, error = %e, "evidence publish failed");
@@ -802,6 +818,18 @@ fn rate_unit_for(metric_name: &str) -> &'static str {
     } else {
         "1/s"
     }
+}
+
+/// Build a lightweight client for a discovery probe (#541): same auth
+/// mapping as the poller, no engine seeding.
+pub(crate) async fn build_probe_client(device: &DeviceConfig) -> Result<Client<UdpHandle>> {
+    let auth = build_auth(device)?;
+    Client::builder(device.address.as_str(), auth)
+        .timeout(Duration::from_secs(device.timeout_secs))
+        .retry(Retry::none())
+        .connect()
+        .await
+        .map_err(|e| anyhow!("probe client: {e}"))
 }
 
 /// 2^failures, saturating, capped at `cap` (>=1).

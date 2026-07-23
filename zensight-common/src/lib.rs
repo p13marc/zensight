@@ -15,6 +15,7 @@ pub mod bandwidth;
 pub mod command;
 pub mod comparison;
 pub mod config;
+pub mod discovery;
 pub mod entity;
 pub mod error;
 pub mod event;
@@ -56,6 +57,7 @@ pub use config::{
     IdentityConfig, LinkProfile, LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config,
     parse_config,
 };
+pub use discovery::{DiscoveredDevice, DiscoveryReport};
 pub use entity::{
     AliasRecord, AssertionKind, HostEntity, MemberClaim, NameVal, OperatorAssertion, PdnsRecord,
 };

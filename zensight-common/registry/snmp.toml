@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.5"
+version = "1.6"
 app = "zensight"
 convention = 1
 
@@ -72,6 +72,14 @@ cardinality = 64
 ttl_s = 900
 since = "1.5"
 description = "observed-device identity claim (#537): sysName/sysDescr/sysObjectID + MAC/IP walks, observer role (RFC 06 §4)"
+
+[[subject]]
+path = "discovery"
+class = "state"
+type = "DiscoveryReport"
+ttl_s = 7200
+since = "1.6"
+description = "subnet-discovery report (#541): unconfigured SNMP responders, proposed for onboarding (opt-in sweep)"
 
 [[subject]]
 path = "{device}/trap/{id}"

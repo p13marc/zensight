@@ -85,6 +85,10 @@ pub struct SnmpConfig {
     /// Resilience tuning (#539): backoff, circuit breaker, jitter.
     #[serde(default)]
     pub resilience: ResilienceConfig,
+
+    /// Subnet auto-discovery (#541). Absent = no scanning, ever.
+    #[serde(default)]
+    pub discovery: Option<crate::discovery::DiscoveryConfig>,
 }
 
 /// Resilience configuration (#539).
