@@ -5,7 +5,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_snmp::{Auth, Client, EngineCache, Retry, UdpHandle, Value, v3::EngineState};
 use bytes::Bytes;
-use tokio::time::interval;
 use zenoh::Session as ZenohSession;
 
 use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, encode};
@@ -56,6 +55,38 @@ pub struct SnmpPoller {
     evidence: Option<(Arc<zensight_sensor_core::AdvancedPublisherRegistry>, u32)>,
     /// Completed poll cycles (drives the evidence cadence).
     cycles: std::sync::atomic::AtomicU64,
+    /// Resilience tuning (#539) + circuit-breaker state (consecutive
+    /// fully-failed cycles).
+    resilience: crate::config::ResilienceConfig,
+    consecutive_failures: std::sync::atomic::AtomicU32,
+    /// Per-device health recording, when wired (#539).
+    health: Option<Arc<zensight_sensor_core::SensorHealth>>,
+}
+
+/// What one full poll cycle saw (#539) — feeds backoff/breaker/health.
+#[derive(Debug, Clone, Copy)]
+pub struct CycleOutcome {
+    pub requests: usize,
+    pub failures: usize,
+    pub transport_failures: usize,
+}
+
+impl CycleOutcome {
+    /// The device answered nothing at the transport level.
+    pub fn all_transport_failed(&self) -> bool {
+        self.requests > 0
+            && self.failures == self.requests
+            && self.transport_failures == self.failures
+    }
+}
+
+/// One scheduling turn of the poller (#539).
+#[derive(Debug)]
+pub enum CycleKind {
+    /// A full poll ran.
+    Full(CycleOutcome),
+    /// The breaker was open: only the cheap sysUpTime probe ran.
+    Probe { ok: bool },
 }
 
 impl SnmpPoller {
@@ -91,7 +122,20 @@ impl SnmpPoller {
             smi: None,
             evidence: None,
             cycles: std::sync::atomic::AtomicU64::new(0),
+            resilience: crate::config::ResilienceConfig::default(),
+            consecutive_failures: std::sync::atomic::AtomicU32::new(0),
+            health: None,
         }
+    }
+
+    /// Apply resilience tuning (#539).
+    pub fn with_resilience(&mut self, resilience: crate::config::ResilienceConfig) {
+        self.resilience = resilience;
+    }
+
+    /// Record per-device success/failure into the sensor health doc (#539).
+    pub fn with_health(&mut self, health: Arc<zensight_sensor_core::SensorHealth>) {
+        self.health = Some(health);
     }
 
     /// Publish observed-device `HostEvidence` (#537) every `refresh_cycles`
@@ -215,10 +259,13 @@ impl SnmpPoller {
         }
     }
 
-    /// Run the polling loop.
+    /// Run the polling loop (#539): randomized initial phase, ±jitter per
+    /// cycle, exponential backoff while the device fails, probe-only cycles
+    /// while the breaker is open.
     pub async fn run(self) {
-        let poll_interval = Duration::from_secs(self.device.poll_interval_secs);
-        let mut ticker = interval(poll_interval);
+        use rand::Rng;
+
+        let base = Duration::from_secs(self.device.poll_interval_secs.max(1));
 
         tracing::info!(
             device = %self.device.name,
@@ -229,16 +276,26 @@ impl SnmpPoller {
             "Starting SNMP poller"
         );
 
-        loop {
-            ticker.tick().await;
+        // De-synchronize device start phases across the fleet.
+        let phase = rand::rng().random_range(0.0..1.0f64);
+        tokio::time::sleep(base.mul_f64(phase)).await;
 
-            if let Err(e) = self.poll_once().await {
-                tracing::warn!(
+        loop {
+            self.cycle().await;
+
+            let backoff = self.backoff_multiplier();
+            let jitter_span = f64::from(self.resilience.jitter_percent) / 100.0;
+            let jitter = 1.0 + rand::rng().random_range(-jitter_span..=jitter_span);
+            let delay = base.mul_f64(f64::from(backoff) * jitter.max(0.1));
+            if backoff > 1 {
+                tracing::debug!(
                     device = %self.device.name,
-                    error = %e,
-                    "SNMP poll failed"
+                    backoff,
+                    delay_secs = delay.as_secs_f64(),
+                    "backing off"
                 );
             }
+            tokio::time::sleep(delay).await;
         }
     }
 
@@ -246,7 +303,7 @@ impl SnmpPoller {
     ///
     /// Public so integration tests can drive individual cycles against an
     /// in-process agent without the endless [`run`](Self::run) loop.
-    pub async fn poll_once(&self) -> Result<()> {
+    pub async fn poll_once(&self) -> Result<CycleOutcome> {
         let mut requests = 0usize;
         let mut failures = 0usize;
         let mut auth_failures = 0usize;
@@ -371,7 +428,97 @@ impl SnmpPoller {
             self.rebuild_client().await;
         }
 
-        Ok(())
+        Ok(CycleOutcome {
+            requests,
+            failures,
+            transport_failures,
+        })
+    }
+
+    /// One scheduling turn (#539): a full poll normally; only the cheap
+    /// sysUpTime probe while the circuit breaker is open. Updates the
+    /// consecutive-failure counter and per-device health.
+    pub async fn cycle(&self) -> CycleKind {
+        use std::sync::atomic::Ordering;
+
+        // A device that failed at startup (or lost its client) keeps
+        // retrying with the same backoff policy instead of being dropped.
+        if self.client().await.is_err() {
+            match self.build_client(true).await {
+                Ok(client) => {
+                    *self.client.write().await = Some(client);
+                    tracing::info!(device = %self.device.name, "SNMP client (re)built");
+                }
+                Err(e) => {
+                    tracing::warn!(device = %self.device.name, error = %e, "SNMP client build failed; backing off");
+                    self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                    self.record_health(false, "client build failed");
+                    return CycleKind::Probe { ok: false };
+                }
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let breaker_open =
+            self.consecutive_failures.load(Ordering::Relaxed) >= self.resilience.breaker_after;
+
+        let kind = if breaker_open {
+            // Open: one cheap request instead of the full OID set.
+            let ok = self.snmp_get(SYS_UPTIME_OID).await.is_ok();
+            if ok {
+                // Close the breaker; the next cycle polls fully.
+                self.consecutive_failures.store(0, Ordering::Relaxed);
+                tracing::info!(device = %self.device.name, "device answered probe; resuming full polling");
+            } else {
+                self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+            }
+            self.record_health(ok, "probe failed");
+            CycleKind::Probe { ok }
+        } else {
+            match self.poll_once().await {
+                Ok(outcome) => {
+                    if outcome.all_transport_failed() {
+                        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        self.consecutive_failures.store(0, Ordering::Relaxed);
+                    }
+                    self.record_health(
+                        !outcome.all_transport_failed(),
+                        "all requests failed (transport)",
+                    );
+                    CycleKind::Full(outcome)
+                }
+                Err(e) => {
+                    tracing::warn!(device = %self.device.name, error = %e, "SNMP poll failed");
+                    self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                    self.record_health(false, "poll cycle error");
+                    CycleKind::Probe { ok: false }
+                }
+            }
+        };
+        if let Some(health) = &self.health {
+            health.record_poll_duration(started.elapsed().as_millis() as u64);
+        }
+        kind
+    }
+
+    fn record_health(&self, ok: bool, error: &str) {
+        if let Some(health) = &self.health {
+            if ok {
+                health.record_device_success(&self.device.name);
+            } else {
+                health.record_device_failure(&self.device.name, error);
+            }
+        }
+    }
+
+    /// The current backoff multiplier: 2^consecutive-failures, capped.
+    pub fn backoff_multiplier(&self) -> u32 {
+        backoff_multiplier(
+            self.consecutive_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.resilience.backoff_cap,
+        )
     }
 
     /// Run profile selection once (#531): read sysObjectID, match, remember.
@@ -657,6 +804,14 @@ fn rate_unit_for(metric_name: &str) -> &'static str {
     }
 }
 
+/// 2^failures, saturating, capped at `cap` (>=1).
+fn backoff_multiplier(consecutive_failures: u32, cap: u32) -> u32 {
+    let cap = cap.max(1);
+    1u32.checked_shl(consecutive_failures)
+        .unwrap_or(cap)
+        .min(cap)
+}
+
 /// Whether an error from the SNMP client is an authentication failure
 /// (wrong credentials, engine identity mismatch, time-window rejection).
 fn is_auth_error(err: &anyhow::Error) -> bool {
@@ -815,6 +970,17 @@ fn parse_hex(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_doubles_to_the_cap() {
+        assert_eq!(backoff_multiplier(0, 10), 1);
+        assert_eq!(backoff_multiplier(1, 10), 2);
+        assert_eq!(backoff_multiplier(2, 10), 4);
+        assert_eq!(backoff_multiplier(3, 10), 8);
+        assert_eq!(backoff_multiplier(4, 10), 10); // capped
+        assert_eq!(backoff_multiplier(63, 10), 10); // saturates, no overflow
+        assert_eq!(backoff_multiplier(40, 0), 1); // cap floor
+    }
 
     #[test]
     fn hex_parsing() {

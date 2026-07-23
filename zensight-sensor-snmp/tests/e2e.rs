@@ -1551,3 +1551,110 @@ async fn polled_device_publishes_identity_evidence() {
         claim.ips
     );
 }
+
+// ---------------------------------------------------------------------------
+// Resilience (#539)
+// ---------------------------------------------------------------------------
+
+use zensight_sensor_snmp::poller::CycleKind;
+
+/// Breaker lifecycle: consecutive dead cycles open the breaker (probe-only,
+/// one datagram per cycle), backoff grows, and a single successful probe
+/// closes it — full polling resumes on the next cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn breaker_opens_probes_and_recovers() {
+    let agent = SimAgent::start(base_mib()).await;
+    let proxy = FlakyProxy::start(agent.addr()).await;
+    let mut device = v2c_device("frail01", proxy.addr());
+    device.oids = vec![format!("{SYSTEM}.1.0"), format!("{SYSTEM}.5.0")];
+
+    let health = std::sync::Arc::new(zensight_sensor_core::SensorHealth::new("snmp"));
+    let mut rig = rig(device).await;
+    rig.poller.with_health(health.clone());
+
+    // Healthy first cycle.
+    assert!(matches!(rig.poller.cycle().await, CycleKind::Full(_)));
+    assert_eq!(rig.poller.backoff_multiplier(), 1);
+
+    // Device dies: three fully-failed cycles open the breaker.
+    proxy.set_blackhole(true);
+    for _ in 0..3 {
+        assert!(matches!(rig.poller.cycle().await, CycleKind::Full(_)));
+    }
+    assert!(rig.poller.backoff_multiplier() > 1, "backoff engaged");
+
+    // Open: probe-only — exactly ONE datagram for the whole cycle.
+    let before = proxy.forwarded();
+    assert!(matches!(
+        rig.poller.cycle().await,
+        CycleKind::Probe { ok: false }
+    ));
+    // Blackholed datagrams are not forwarded at all; the point is the cycle
+    // did not attempt the full OID set. Recovery below proves the probe path.
+    assert_eq!(proxy.forwarded(), before);
+
+    // Device returns: the probe closes the breaker within one cycle...
+    proxy.set_blackhole(false);
+    let before = proxy.forwarded();
+    assert!(matches!(
+        rig.poller.cycle().await,
+        CycleKind::Probe { ok: true }
+    ));
+    let probe_datagrams = proxy.forwarded() - before;
+    assert_eq!(probe_datagrams, 1, "probe cycle = one request");
+    assert_eq!(rig.poller.backoff_multiplier(), 1, "breaker closed");
+
+    // ...and the next cycle polls fully again, publishing telemetry.
+    let _ = collect_points(&rig, Duration::from_millis(100)).await; // drain
+    assert!(matches!(rig.poller.cycle().await, CycleKind::Full(_)));
+    let points = collect_points(&rig, IDLE).await;
+    assert!(points.contains_key("system/name"), "{:?}", points.keys());
+
+    // Health reflects the recovery.
+    let snapshot = health.snapshot();
+    assert_eq!(snapshot.devices_responding, 1);
+    assert_eq!(snapshot.devices_failed, 0);
+}
+
+/// A device whose client was never initialized (offline at startup) gets
+/// built by the poll loop itself — no sensor restart needed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uninitialized_client_is_built_by_the_cycle() {
+    let agent = SimAgent::start(base_mib()).await;
+    let mut device = v2c_device("late02", agent.addr());
+    device.oids = vec![format!("{SYSTEM}.5.0")];
+
+    // rig() calls init(); build a poller by hand WITHOUT init.
+    let session = std::sync::Arc::new(
+        zenoh::open(harness::isolated_zenoh_config())
+            .await
+            .expect("open zenoh"),
+    );
+    let sub = session
+        .declare_subscriber("v1/*/telemetry/snmp/**")
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut resolver = zensight_sensor_snmp::mib::MibResolver::new();
+    resolver.add_custom_mappings(&harness::test_oid_names());
+    let poller = zensight_sensor_snmp::poller::SnmpPoller::new(
+        device,
+        session.clone(),
+        std::sync::Arc::new(resolver),
+        &std::collections::HashMap::new(),
+        zensight_common::Format::Json,
+    );
+
+    assert!(matches!(poller.cycle().await, CycleKind::Full(_)));
+    let sample = tokio::time::timeout(Duration::from_secs(3), sub.recv_async())
+        .await
+        .expect("telemetry after self-built client")
+        .expect("recv");
+    assert!(
+        sample
+            .key_expr()
+            .as_str()
+            .contains("/telemetry/snmp/late02/")
+    );
+}

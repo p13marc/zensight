@@ -81,6 +81,51 @@ pub struct SnmpConfig {
     /// or v3 user, referenced per device via `devices[].credentials`.
     #[serde(default)]
     pub credentials: HashMap<String, CredentialSet>,
+
+    /// Resilience tuning (#539): backoff, circuit breaker, jitter.
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
+}
+
+/// Resilience configuration (#539).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ResilienceConfig {
+    /// Poll-interval backoff cap as a multiple of the base interval
+    /// (default 10× — exponential doubling stops here).
+    #[serde(default = "default_backoff_cap")]
+    pub backoff_cap: u32,
+
+    /// Consecutive fully-failed cycles before the circuit breaker opens
+    /// (probe-only polling; default 3).
+    #[serde(default = "default_breaker_after")]
+    pub breaker_after: u32,
+
+    /// Per-cycle scheduling jitter in percent of the interval (default 10);
+    /// the initial phase is randomized over the whole interval regardless.
+    #[serde(default = "default_jitter_percent")]
+    pub jitter_percent: u8,
+}
+
+fn default_backoff_cap() -> u32 {
+    10
+}
+
+fn default_breaker_after() -> u32 {
+    3
+}
+
+fn default_jitter_percent() -> u8 {
+    10
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self {
+            backoff_cap: default_backoff_cap(),
+            breaker_after: default_breaker_after(),
+            jitter_percent: default_jitter_percent(),
+        }
+    }
 }
 
 /// One named credential set (#538). Either kind (or both) may be present;

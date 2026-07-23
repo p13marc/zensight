@@ -39,6 +39,10 @@
     // source: "agent-host-01",
 
     // SNMP trap receiver (optional)
+    // Resilience (#539): defaults shown — backoff to 10x, probe-only after
+    // 3 dead cycles, 10% scheduling jitter.
+    // resilience: { backoff_cap: 10, breaker_after: 3, jitter_percent: 10 },
+
     // Named credential sets (#538): one place to rotate. Values accept
     // "${ENV_VAR}" and "file:/path" secret indirection everywhere.
     // credentials: {

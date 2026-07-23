@@ -185,6 +185,10 @@ async fn main() -> Result<()> {
         )
     });
 
+    runner
+        .health()
+        .set_devices_total(snmp_config.devices.len() as u64);
+
     // Spawn device pollers
     for device in snmp_config.devices.clone() {
         let mut poller = SnmpPoller::new(
@@ -226,14 +230,18 @@ async fn main() -> Result<()> {
             poller.with_evidence(registry.clone(), snmp_config.evidence.refresh_cycles);
         }
 
-        // Initialize poller (required for SNMPv3 to discover engine ID)
+        poller.with_resilience(snmp_config.resilience);
+        poller.with_health(runner.health());
+
+        // Initialize the client. A failure no longer drops the device
+        // (#539): the poll loop keeps retrying with backoff, so a device
+        // that is offline at startup starts working when it comes online.
         if let Err(e) = poller.init().await {
-            tracing::error!(
+            tracing::warn!(
                 device = %device.name,
                 error = %e,
-                "Failed to initialize SNMP poller, skipping device"
+                "SNMP client init failed; will keep retrying with backoff"
             );
-            continue;
         }
 
         runner.spawn(async move {
