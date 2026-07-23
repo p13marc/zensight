@@ -2,21 +2,15 @@
 //!
 //! This sensor polls SNMP devices and publishes telemetry to Zenoh.
 
-mod config;
-mod mib;
-mod oid;
-mod poller;
-mod trap;
-
 use std::sync::Arc;
 
 use anyhow::Result;
 use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 
-use crate::config::SnmpSensorConfig;
-use crate::mib::MibResolver;
-use crate::poller::SnmpPoller;
-use crate::trap::TrapReceiver;
+use zensight_sensor_snmp::config::SnmpSensorConfig;
+use zensight_sensor_snmp::mib::MibResolver;
+use zensight_sensor_snmp::poller::SnmpPoller;
+use zensight_sensor_snmp::trap::TrapReceiver;
 
 #[tokio::main]
 async fn main() -> Result<()> {

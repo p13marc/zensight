@@ -1,0 +1,10 @@
+//! SNMP sensor library: config schema, MIB resolution, device poller, trap receiver.
+//!
+//! The binary entry point lives in `main.rs`; the library exists so integration
+//! tests can drive the poller against an in-process SNMP agent.
+
+pub mod config;
+pub mod mib;
+pub mod oid;
+pub mod poller;
+pub mod trap;

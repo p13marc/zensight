@@ -1,0 +1,9 @@
+# Workspace-wide cargo environment.
+
+[env]
+# Debug-build futures around zenoh sessions are multi-megabyte state machines;
+# test threads (libtest default 2 MiB) overflow polling them via block_on —
+# first hit by zensight-sensor-snmp's e2e harness (#540). RUST_MIN_STACK is
+# honored by every std::thread spawn, so this lifts test threads to 8 MiB in
+# local runs and CI alike. Release builds are unaffected in practice.
+RUST_MIN_STACK = "8388608"

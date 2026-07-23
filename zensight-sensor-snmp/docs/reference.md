@@ -74,6 +74,31 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 `username`, `auth_protocol` (`MD5`/`SHA`/`SHA256`), `auth_password`,
 `priv_protocol` (`DES`/`AES`/`AES256`), `priv_password`, optional `engine_id`.
 
+## Testing
+
+`tests/e2e.rs` drives real UDP round-trips against an **in-process SNMP agent**
+(the [`async-snmp`](https://docs.rs/async-snmp) agent framework, a
+dev-dependency) — no snmpsim/net-snmp needed, CI-safe on localhost. The
+harness lives in `tests/harness/mod.rs`:
+
+- `SimMib` — mutable OID→value store (`MibHandler`), with builders for a
+  synthetic system group and ifTable/ifXTable; values can be changed between
+  poll cycles (counter advancement, status flips, sysUpTime resets).
+- `SimAgent` — agent on `127.0.0.1:0`; per-test v2c communities and/or
+  SNMPv3 USM users (the v3 matrix covers noAuthNoPriv → authPriv,
+  SHA-1/SHA-256 × AES-128/AES-256, wrong-credential failure modes).
+- `FlakyProxy` — UDP forwarder with *drop next N datagrams* and *blackhole*
+  knobs, and a swappable backend (agent restart behind a stable address).
+- `rig()` — an initialized `SnmpPoller` on an isolated in-process Zenoh peer
+  with a `v1/*/telemetry/snmp/**` subscriber; assertions read decoded
+  `TelemetryPoint`s.
+
+The harness maps OIDs through lowercase `oid_names` (grammar-valid chunks);
+built-in MIB names currently violate the chunk grammar — see issue #559.
+Two tests are `#[ignore]`d until the async-snmp client migration (#526):
+noAuthNoPriv (snmp2 panics on an empty password) and engine re-discovery
+after an agent restart.
+
 ## Build / run notes & caveats
 
 - **Build dependency:** the SNMP stack needs OpenSSL / net-snmp headers at build

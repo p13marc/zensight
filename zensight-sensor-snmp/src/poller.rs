@@ -102,7 +102,10 @@ impl SnmpPoller {
     }
 
     /// Perform a single poll cycle.
-    async fn poll_once(&self) -> Result<()> {
+    ///
+    /// Public so integration tests can drive individual cycles against an
+    /// in-process agent without the endless [`run`](Self::run) loop.
+    pub async fn poll_once(&self) -> Result<()> {
         // Poll individual OIDs with GET
         for oid_str in &self.oids {
             match self.snmp_get(oid_str).await {
