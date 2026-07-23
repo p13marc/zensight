@@ -40,6 +40,7 @@ pub mod cloud;
 mod config;
 pub mod container;
 mod error;
+pub mod event;
 mod health;
 mod identity;
 mod liveliness;
@@ -62,6 +63,7 @@ pub use cloud::detect_cloud;
 pub use config::SensorConfig;
 pub use container::{container_id_from_cgroup, container_id_from_path, detect_self_container_id};
 pub use error::{Result, SensorError};
+pub use event::EventPublisher;
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, SensorHealth,
 };

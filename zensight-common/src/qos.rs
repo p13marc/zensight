@@ -38,6 +38,10 @@ pub enum QosClass {
     Evidence,
     /// Materialized host entities — must arrive.
     Entity,
+    /// Append-only event records (`events` class, #534) — must arrive, like
+    /// alerts: a dropped trap/transition is unrecoverable (nothing supersedes
+    /// it). Priority `Data`: ahead of telemetry, behind live alert flips.
+    Event,
     /// Queryable replies / on-demand bulk detail — reliable, but low priority (bulk).
     Query,
     /// Live media (`@media` plane, #359): opaque access units, superseded by the
@@ -74,7 +78,7 @@ impl QosClass {
             QosClass::Telemetry => Priority::DataLow,
             QosClass::HealthLiveness => Priority::Data,
             QosClass::Alert | QosClass::Command | QosClass::LiveVideo => Priority::InteractiveHigh,
-            QosClass::Evidence | QosClass::Entity => Priority::Data,
+            QosClass::Evidence | QosClass::Entity | QosClass::Event => Priority::Data,
             QosClass::Query => Priority::DataLow,
         }
     }
