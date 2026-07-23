@@ -1775,6 +1775,7 @@ mod tests {
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(42.0),
             labels: std::collections::HashMap::new(),
+            unit: None,
         }
     }
 
@@ -1932,6 +1933,7 @@ mod tests {
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(value),
             labels: std::collections::HashMap::new(),
+            unit: None,
         }
     }
 

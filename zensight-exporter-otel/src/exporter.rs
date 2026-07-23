@@ -442,7 +442,11 @@ impl OtelExporter {
                     stats.metrics_failed += 1;
                     return;
                 };
-                let counter = meter.u64_counter(metric_name.clone()).build();
+                let mut builder = meter.u64_counter(metric_name.clone());
+                if let Some(unit) = &point.unit {
+                    builder = builder.with_unit(unit.clone());
+                }
+                let counter = builder.build();
                 counter.add(value as u64, &attributes);
 
                 trace!(
@@ -488,7 +492,11 @@ impl OtelExporter {
                 );
 
                 // Create/update gauge
-                let gauge = meter.f64_gauge(metric_name.clone()).build();
+                let mut builder = meter.f64_gauge(metric_name.clone());
+                if let Some(unit) = &point.unit {
+                    builder = builder.with_unit(unit.clone());
+                }
+                let gauge = builder.build();
                 gauge.record(value, &attributes);
 
                 trace!(

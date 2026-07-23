@@ -232,6 +232,7 @@ impl TrapReceiver {
             metric: metric_name.clone(),
             value: TelemetryValue::Counter(1),
             labels: labels.clone(),
+            unit: None,
         };
 
         let payload = encode(&point, self.format).context("Failed to encode trap")?;
@@ -258,6 +259,7 @@ impl TrapReceiver {
                 metric: varbind_metric,
                 value: varbind.value.clone(),
                 labels: varbind_labels,
+                unit: None,
             };
 
             let varbind_payload =

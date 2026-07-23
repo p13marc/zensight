@@ -14,6 +14,7 @@ observed device is the first subject chunk after the producer.
 | Key | Payload |
 |-----|---------|
 | `zensight/v1/<origin>/telemetry/snmp/<device>/<metric>` | Polled OID value. `<metric>` is the MIB-/map-resolved name, e.g. `system/sysUpTime`, `if/1/ifInOctets`. Unmapped OIDs fall back to the raw dotted OID. The `oid` label carries the source OID. |
+| `zensight/v1/<origin>/telemetry/snmp/<device>/<metric>.rate` | Derived per-second rate for counter OIDs (`Gauge`, unit `By/s` for octet counters, else `1/s`), published alongside the raw counter from the second poll cycle on. See *Counter semantics*. |
 | `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>` | Received trap (when `trap_listener.enabled`). `<trap_id>` is the enterprise/generic trap OID; `<sender>` is the slugged sender IP (`.`/`:` → `-`). |
 | `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>/<varbind>` | Per-varbind value from the trap PDU. |
 
@@ -34,6 +35,29 @@ Standard sensor metadata is published by the shared runner:
 - `zensight/v1/<origin>/@rpc/snmp/introspect` — the registry slice this build serves
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
+
+## Counter semantics (#527)
+
+- **Typing**: Counter32/Counter64 publish as `Counter`; Gauge32/Unsigned32 as
+  `Gauge`; **TimeTicks converts to seconds** (`Gauge`, unit `"s"`) — sysUpTime
+  renders as a duration with no consumer special-casing.
+- **Rates**: every counter OID gets a derived sibling metric `<metric>.rate`
+  (`Gauge`, per second) once a previous sample exists. Octet counters carry
+  unit `By/s`, all other counters `1/s`. The raw lifetime counter keeps
+  publishing unchanged (history, exporters).
+- **Wrap handling**: deltas use modular arithmetic in the counter's width, so
+  a single Counter32 wrap (~5.7 min at a saturated 100 Mb/s link) still
+  yields a correct continuous rate.
+- **Reset handling**: the poller reads sysUpTime.0 every cycle; if it goes
+  backwards, the device rebooted — all rate baselines drop and one interval
+  publishes no rates (never negative/garbage spikes). An implausibly large
+  single-counter delta (> 1e10/s) re-baselines just that counter. Rate
+  eligibility comes from the wire tag, backed by the MIB table's SYNTAX for
+  agents that mis-tag counters.
+- **Units**: `TelemetryPoint` carries an optional UCUM-style `unit` field
+  (serde-default, absent when unknown). The OTel exporter forwards it as the
+  instrument unit; the Prometheus exporter exports rates as gauges named
+  `..._rate` (dots/slashes sanitized to `_`) without unit annotation.
 
 > Note: this sensor does not currently emit `state/snmp/alert/*`; it has no
 > threshold/alert engine of its own.

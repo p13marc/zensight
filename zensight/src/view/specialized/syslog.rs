@@ -1581,6 +1581,7 @@ mod tests {
                 metric: "daemon/info".into(),
                 value: TelemetryValue::Text("hi".into()),
                 labels,
+                unit: None,
             };
             syslog_message_from_point(&point, "host01")
         };
@@ -1622,6 +1623,7 @@ mod tests {
             metric: "daemon/crit".into(),
             value: TelemetryValue::Text("segfault".into()),
             labels,
+            unit: None,
         };
         let m = syslog_message_from_point(&point, "host01");
         assert_eq!(m.pid.as_deref(), Some("4242"));
@@ -1665,6 +1667,7 @@ mod tests {
             metric: "events/0000000000009000000000042".into(),
             value: TelemetryValue::Text("login failed".into()),
             labels,
+            unit: None,
         };
         let m = syslog_message_from_point(&point, "host01");
         assert_eq!(m.facility, "auth");
@@ -1685,6 +1688,7 @@ mod tests {
             metric: "kern/warning".into(),
             value: TelemetryValue::Text("low mem".into()),
             labels: HashMap::new(),
+            unit: None,
         };
         let m = syslog_message_from_point(&point, "host01");
         assert_eq!(m.facility, "kern");
@@ -1708,6 +1712,7 @@ mod tests {
                 metric: "daemon/info".into(),
                 value: TelemetryValue::Text("x".into()),
                 labels,
+                unit: None,
             };
             syslog_message_from_point(&point, "h")
         };
@@ -1755,6 +1760,7 @@ mod tests {
             metric: "daemon/info".into(),
             value: TelemetryValue::Text("hi".into()),
             labels: HashMap::new(),
+            unit: None,
         };
         let m = syslog_message_from_point(&point, "10.0.0.9");
         assert_eq!(m.source_kind, LogSource::Network);

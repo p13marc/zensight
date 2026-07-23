@@ -1470,6 +1470,7 @@ impl SystemCollector {
             metric: metric.to_string(),
             value,
             labels,
+            unit: None,
         };
 
         match encode(&point, self.format) {

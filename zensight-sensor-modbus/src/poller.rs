@@ -335,6 +335,7 @@ impl ModbusPoller {
             metric: metric_name,
             value,
             labels,
+            unit: None,
         };
 
         match encode(&point, self.format) {

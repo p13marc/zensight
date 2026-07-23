@@ -13,6 +13,10 @@ use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, encode};
 use crate::config::{AuthProtocol, DeviceConfig, OidGroup, PrivProtocol, SnmpVersion};
 use crate::mib::MibResolver;
 use crate::oid::{oid_to_string, parse_oid};
+use crate::rate::RateTracker;
+
+/// sysUpTime.0 — auto-polled every cycle for reset detection (#527).
+const SYS_UPTIME_OID: &str = "1.3.6.1.2.1.1.3.0";
 
 /// SNMP poller for a single device.
 pub struct SnmpPoller {
@@ -32,6 +36,9 @@ pub struct SnmpPoller {
     /// Behind a lock because the poller rebuilds it from `&self` when a v3
     /// engine identity changes (see [`poll_once`](Self::poll_once)).
     client: tokio::sync::RwLock<Option<Client<UdpHandle>>>,
+    /// Counter→rate state (#527). Std mutex: locked only for synchronous
+    /// bookkeeping, never across an await.
+    rate: std::sync::Mutex<RateTracker>,
 }
 
 impl SnmpPoller {
@@ -59,6 +66,7 @@ impl SnmpPoller {
             oids,
             walks,
             client: tokio::sync::RwLock::new(None),
+            rate: std::sync::Mutex::new(RateTracker::new()),
         }
     }
 
@@ -157,19 +165,33 @@ impl SnmpPoller {
     /// in-process agent without the endless [`run`](Self::run) loop.
     pub async fn poll_once(&self) -> Result<()> {
         let mut requests = 0usize;
+        let mut failures = 0usize;
         let mut auth_failures = 0usize;
+
+        // Read sysUpTime up front: it anchors reset detection for every
+        // counter this cycle (a reboot must suppress the whole interval).
+        let uptime_ticks = self.fetch_uptime_ticks().await;
+        let device_reset = self.rate.lock().unwrap().begin_cycle(uptime_ticks);
+        if device_reset {
+            tracing::info!(
+                device = %self.device.name,
+                "sysUpTime went backwards — device rebooted; suppressing rates this cycle"
+            );
+        }
+        let mut seen_counters = std::collections::HashSet::new();
 
         // Poll individual OIDs with GET
         for oid_str in &self.oids {
             requests += 1;
             match self.snmp_get(oid_str).await {
                 Ok(Some((oid, value))) => {
-                    self.publish(&oid, value).await;
+                    self.publish(&oid, &value, &mut seen_counters).await;
                 }
                 Ok(None) => {
                     tracing::debug!(device = %self.device.name, oid = %oid_str, "No value returned");
                 }
                 Err(e) => {
+                    failures += 1;
                     auth_failures += usize::from(is_auth_error(&e));
                     tracing::warn!(device = %self.device.name, oid = %oid_str, error = %e, "GET failed");
                 }
@@ -182,14 +204,22 @@ impl SnmpPoller {
             match self.snmp_walk(subtree).await {
                 Ok(entries) => {
                     for (oid, value) in entries {
-                        self.publish(&oid, value).await;
+                        self.publish(&oid, &value, &mut seen_counters).await;
                     }
                 }
                 Err(e) => {
+                    failures += 1;
                     auth_failures += usize::from(is_auth_error(&e));
                     tracing::warn!(device = %self.device.name, subtree = %subtree, error = %e, "WALK failed");
                 }
             }
+        }
+
+        // Drop rate baselines for counters that vanished (removed table rows)
+        // — but only after a fully successful cycle, so a transient failure
+        // doesn't wipe baselines that just happened to go unobserved.
+        if requests > 0 && failures == 0 {
+            self.rate.lock().unwrap().retain(&seen_counters);
         }
 
         // A whole v3 cycle failing authentication usually means the device's
@@ -206,8 +236,23 @@ impl SnmpPoller {
         Ok(())
     }
 
-    /// Perform an SNMP GET operation.
-    async fn snmp_get(&self, oid_str: &str) -> Result<Option<(String, TelemetryValue)>> {
+    /// Read sysUpTime for reset detection; best-effort (None on any failure).
+    async fn fetch_uptime_ticks(&self) -> Option<u32> {
+        let oid = parse_oid(SYS_UPTIME_OID).ok()?;
+        match self.client().await.ok()?.get(&oid).await {
+            Ok(varbind) => match varbind.value {
+                Value::TimeTicks(ticks) => Some(ticks),
+                _ => None,
+            },
+            Err(e) => {
+                tracing::debug!(device = %self.device.name, error = %e, "sysUpTime probe failed");
+                None
+            }
+        }
+    }
+
+    /// Perform an SNMP GET operation, returning the wire value.
+    async fn snmp_get(&self, oid_str: &str) -> Result<Option<(String, Value)>> {
         let oid = parse_oid(oid_str)?;
         let varbind = self
             .client()
@@ -216,15 +261,21 @@ impl SnmpPoller {
             .await
             .context("SNMP GET error")?;
 
+        if matches!(
+            varbind.value,
+            Value::Null | Value::NoSuchObject | Value::NoSuchInstance | Value::EndOfMibView
+        ) {
+            return Ok(None);
+        }
         let oid_string = oid_to_string(&varbind.oid);
-        Ok(snmp_value_to_telemetry(&varbind.value).map(|tv| (oid_string, tv)))
+        Ok(Some((oid_string, varbind.value)))
     }
 
     /// Walk an OID subtree.
     ///
     /// The client picks GETBULK for v2c/v3 and GETNEXT for v1, stops at the
     /// subtree boundary / EndOfMibView, and bisects on tooBig.
-    async fn snmp_walk(&self, subtree_str: &str) -> Result<Vec<(String, TelemetryValue)>> {
+    async fn snmp_walk(&self, subtree_str: &str) -> Result<Vec<(String, Value)>> {
         let subtree = parse_oid(subtree_str)?;
         let mut stream = self
             .client()
@@ -236,19 +287,77 @@ impl SnmpPoller {
         while let Some(varbind) = stream.next().await {
             let varbind = varbind.context("SNMP WALK error")?;
             let oid_string = oid_to_string(&varbind.oid);
-            if let Some(tv) = snmp_value_to_telemetry(&varbind.value) {
-                results.push((oid_string, tv));
-            }
+            results.push((oid_string, varbind.value));
         }
         Ok(results)
     }
 
-    /// Publish a telemetry point to Zenoh.
-    async fn publish(&self, oid_str: &str, value: TelemetryValue) {
+    /// Publish the raw point for a polled value and, for counters, a derived
+    /// `<metric>.rate` sibling (per-second Gauge) when the tracker has a
+    /// plausible previous sample.
+    async fn publish(
+        &self,
+        oid_str: &str,
+        value: &Value,
+        seen_counters: &mut std::collections::HashSet<String>,
+    ) {
         let metric_name = self.mib_resolver.resolve(oid_str);
+        let syntax = self.mib_resolver.syntax(oid_str);
 
-        let point = TelemetryPoint::new(&self.device.name, Protocol::Snmp, &metric_name, value)
+        let Some((telemetry_value, unit)) = snmp_value_to_telemetry(value) else {
+            return;
+        };
+        self.publish_point(oid_str, &metric_name, telemetry_value, unit)
+            .await;
+
+        // Counter → rate. The wire tag decides; MIB SYNTAX backs it up for
+        // agents that mis-tag counters as Gauge32/Unsigned32.
+        let counter = match value {
+            Value::Counter32(n) => Some((u64::from(*n), true)),
+            Value::Counter64(n) => Some((*n, false)),
+            Value::Gauge32(n) | Value::UInteger32(n)
+                if matches!(syntax, Some("Counter32" | "Counter64")) =>
+            {
+                Some((u64::from(*n), syntax == Some("Counter32")))
+            }
+            _ => None,
+        };
+        let Some((counter_value, is_32bit)) = counter else {
+            return;
+        };
+
+        seen_counters.insert(oid_str.to_string());
+        let rate = self.rate.lock().unwrap().observe(
+            oid_str,
+            counter_value,
+            is_32bit,
+            std::time::Instant::now(),
+        );
+        if let Some(rate) = rate {
+            let rate_metric = format!("{metric_name}.rate");
+            let unit = rate_unit_for(&metric_name);
+            self.publish_point(
+                oid_str,
+                &rate_metric,
+                TelemetryValue::Gauge(rate),
+                Some(unit),
+            )
+            .await;
+        }
+    }
+
+    async fn publish_point(
+        &self,
+        oid_str: &str,
+        metric_name: &str,
+        value: TelemetryValue,
+        unit: Option<&str>,
+    ) {
+        let mut point = TelemetryPoint::new(&self.device.name, Protocol::Snmp, metric_name, value)
             .with_label("oid", oid_str);
+        if let Some(unit) = unit {
+            point = point.with_unit(unit);
+        }
 
         let key = format!(
             "{}/{}/{}",
@@ -274,6 +383,17 @@ impl SnmpPoller {
     }
 }
 
+/// Unit for a derived rate metric: octet counters are bytes/second,
+/// everything else (packets, errors, discards) counts per second.
+fn rate_unit_for(metric_name: &str) -> &'static str {
+    let last = metric_name.rsplit('/').next().unwrap_or(metric_name);
+    if last.to_ascii_lowercase().contains("octets") {
+        "By/s"
+    } else {
+        "1/s"
+    }
+}
+
 /// Whether an error from the SNMP client is an authentication failure
 /// (wrong credentials, engine identity mismatch, time-window rejection).
 fn is_auth_error(err: &anyhow::Error) -> bool {
@@ -281,16 +401,13 @@ fn is_auth_error(err: &anyhow::Error) -> bool {
         .is_some_and(|e| matches!(e.as_ref(), async_snmp::Error::Auth { .. }))
 }
 
-/// Convert an SNMP Value to a TelemetryValue.
-///
-/// The mapping is intentionally identical to the pre-migration (snmp2) one —
-/// including publishing Gauge32/Unsigned32 and TimeTicks as `Counter` — so
-/// the wire contract is untouched here. The semantic fixes (Gauge32 → Gauge,
-/// TimeTicks → seconds, counter rates) land with the counter-semantics work
-/// (#527).
-fn snmp_value_to_telemetry(value: &Value) -> Option<TelemetryValue> {
+/// Convert an SNMP wire value to a `TelemetryValue` + optional unit (#527):
+/// Gauge32/Unsigned32 are gauges (the pre-#527 code published them as
+/// `Counter`), and TimeTicks converts from centiseconds to a `Gauge` in
+/// seconds so consumers render durations without special-casing.
+fn snmp_value_to_telemetry(value: &Value) -> Option<(TelemetryValue, Option<&'static str>)> {
     match value {
-        Value::Integer(n) => Some(TelemetryValue::Gauge(f64::from(*n))),
+        Value::Integer(n) => Some((TelemetryValue::Gauge(f64::from(*n)), None)),
         Value::OctetString(s) => {
             // Try to interpret as UTF-8 string, fall back to binary
             match String::from_utf8(s.to_vec()) {
@@ -299,20 +416,22 @@ fn snmp_value_to_telemetry(value: &Value) -> Option<TelemetryValue> {
                         .chars()
                         .all(|c| !c.is_control() || c == '\n' || c == '\t') =>
                 {
-                    Some(TelemetryValue::Text(text))
+                    Some((TelemetryValue::Text(text), None))
                 }
-                _ => Some(TelemetryValue::Binary(s.to_vec())),
+                _ => Some((TelemetryValue::Binary(s.to_vec()), None)),
             }
         }
-        Value::ObjectIdentifier(oid) => Some(TelemetryValue::Text(oid_to_string(oid))),
-        Value::IpAddress(ip) => Some(TelemetryValue::Text(format!(
-            "{}.{}.{}.{}",
-            ip[0], ip[1], ip[2], ip[3]
-        ))),
-        Value::Counter32(n) => Some(TelemetryValue::Counter(u64::from(*n))),
-        Value::Gauge32(n) | Value::UInteger32(n) => Some(TelemetryValue::Counter(u64::from(*n))),
-        Value::TimeTicks(n) => Some(TelemetryValue::Counter(u64::from(*n))),
-        Value::Counter64(n) => Some(TelemetryValue::Counter(*n)),
+        Value::ObjectIdentifier(oid) => Some((TelemetryValue::Text(oid_to_string(oid)), None)),
+        Value::IpAddress(ip) => Some((
+            TelemetryValue::Text(format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])),
+            None,
+        )),
+        Value::Counter32(n) => Some((TelemetryValue::Counter(u64::from(*n)), None)),
+        Value::Gauge32(n) | Value::UInteger32(n) => {
+            Some((TelemetryValue::Gauge(f64::from(*n)), None))
+        }
+        Value::TimeTicks(n) => Some((TelemetryValue::Gauge(f64::from(*n) / 100.0), Some("s"))),
+        Value::Counter64(n) => Some((TelemetryValue::Counter(*n), None)),
         _ => None,
     }
 }

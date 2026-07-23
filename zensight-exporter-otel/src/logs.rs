@@ -348,6 +348,7 @@ mod tests {
             metric: "message".to_string(),
             value: TelemetryValue::Text("Connection refused".to_string()),
             labels,
+            unit: None,
         };
 
         let record = LogRecord::from_telemetry(&point).unwrap();
@@ -369,6 +370,7 @@ mod tests {
             metric: "sysDescr".to_string(),
             value: TelemetryValue::Text("Cisco Router".to_string()),
             labels: HashMap::new(),
+            unit: None,
         };
 
         assert!(LogRecord::from_telemetry(&point).is_none());
@@ -383,6 +385,7 @@ mod tests {
             metric: "count".to_string(),
             value: TelemetryValue::Counter(100),
             labels: HashMap::new(),
+            unit: None,
         };
 
         assert!(LogRecord::from_telemetry(&point).is_none());

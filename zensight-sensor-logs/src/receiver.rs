@@ -646,6 +646,7 @@ pub fn to_telemetry_point(
         metric: format!("events/{uid}"),
         value: TelemetryValue::Text(msg.message.clone()),
         labels,
+        unit: None,
     }
 }
 

@@ -21,6 +21,7 @@ pub fn telemetry_point(
         metric: metric.to_string(),
         value,
         labels: HashMap::new(),
+        unit: None,
     }
 }
 
@@ -39,6 +40,7 @@ pub fn telemetry_point_with_labels(
         metric: metric.to_string(),
         value,
         labels,
+        unit: None,
     }
 }
 
@@ -61,7 +63,7 @@ pub mod snmp {
                 Protocol::Snmp,
                 name,
                 "system/sysUpTime",
-                TelemetryValue::Counter(86400000), // 1 day in centiseconds
+                TelemetryValue::Gauge(86_400.0), // 1 day, seconds (#527)
             ),
             telemetry_point(
                 Protocol::Snmp,
@@ -108,7 +110,7 @@ pub mod snmp {
             Protocol::Snmp,
             name,
             "system/sysUpTime",
-            TelemetryValue::Counter(172800000), // 2 days
+            TelemetryValue::Gauge(172_800.0), // 2 days, seconds (#527)
         )];
 
         for port in 1..=port_count {

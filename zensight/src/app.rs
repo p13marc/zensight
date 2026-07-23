@@ -7832,6 +7832,7 @@ mod tier2_app_fold_tests {
                     metric: (*metric).to_string(),
                     value: value.clone(),
                     labels: Default::default(),
+                    unit: None,
                 },
             );
         }
@@ -7860,6 +7861,7 @@ mod tier2_app_fold_tests {
                     metric: metric.to_string(),
                     value: TelemetryValue::Counter(v),
                     labels: Default::default(),
+                    unit: None,
                 },
                 "h-5e5e5e5e5e5e",
             )

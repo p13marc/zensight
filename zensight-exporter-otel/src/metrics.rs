@@ -142,6 +142,7 @@ mod tests {
                 m.insert("oid".to_string(), "1.3.6.1.2.1.1.3.0".to_string());
                 m
             },
+            unit: None,
         };
 
         let attrs = build_metric_attributes(&point);
@@ -186,6 +187,7 @@ mod tests {
             metric: "network/eth0/rx_bytes".to_string(),
             value: TelemetryValue::Counter(1),
             labels: HashMap::new(),
+            unit: None,
         };
         let attrs = build_metric_attributes(&point);
         assert!(attrs.iter().any(|kv| kv.key.as_str() == "direction"));

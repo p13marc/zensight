@@ -181,6 +181,20 @@ impl MibResolver {
         oid.to_string()
     }
 
+    /// SMI SYNTAX for an OID (exact or table-prefix match), when the MIB
+    /// table knows it — e.g. `"Counter32"`, `"Counter64"`, `"TimeTicks"`.
+    pub fn syntax(&self, oid: &str) -> Option<&str> {
+        if let Some(entry) = self.exact_mappings.get(oid) {
+            return entry.syntax.as_deref();
+        }
+        for (prefix, entry) in &self.prefix_mappings {
+            if oid.starts_with(prefix) {
+                return entry.syntax.as_deref();
+            }
+        }
+        None
+    }
+
     /// Get list of loaded MIB modules.
     pub fn loaded_modules(&self) -> &[String] {
         &self.loaded_modules

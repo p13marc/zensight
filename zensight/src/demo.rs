@@ -966,12 +966,12 @@ impl DemoSimulator {
 
         // Router
         let router = "router01";
-        let uptime = self.tick * 100 + 8640000; // centiseconds (base 1 day uptime)
+        let uptime = self.tick + 86_400; // seconds since #527 (base 1 day uptime)
         points.push(self.make_point(
             Protocol::Snmp,
             router,
             "system/sysUpTime",
-            TelemetryValue::Counter(uptime),
+            TelemetryValue::Gauge(uptime as f64),
             timestamp,
         ));
         points.push(self.make_point(
@@ -1145,7 +1145,7 @@ impl DemoSimulator {
             Protocol::Snmp,
             switch,
             "system/sysUpTime",
-            TelemetryValue::Counter(uptime + 50000),
+            TelemetryValue::Gauge((uptime + 500) as f64),
             timestamp,
         ));
         points.push(self.make_point(
@@ -1409,6 +1409,7 @@ impl DemoSimulator {
                 ]
                 .into_iter()
                 .collect(),
+                unit: None,
             }
         };
 
@@ -2287,6 +2288,7 @@ impl DemoSimulator {
             metric: metric.to_string(),
             value,
             labels: HashMap::new(),
+            unit: None,
         }
     }
 
@@ -2307,6 +2309,7 @@ impl DemoSimulator {
             metric: metric.to_string(),
             value,
             labels: labels.into_iter().collect(),
+            unit: None,
         }
     }
 

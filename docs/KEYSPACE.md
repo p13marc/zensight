@@ -43,6 +43,12 @@ zensight/v1/@catalog/…                                   the identity catalog
   `zensight/v1/*/@rpc/…` with query target `All`.
 - Late joiners seed with a plain GET on the same state selectors (state is
   its own seed; storage-shaped queryables answer one reply per concrete key).
+- Telemetry payloads (`TelemetryPoint`) carry an optional UCUM-style `unit`
+  field (serde-defaulted, absent when unknown). Proxy pollers with counter
+  metrics (today: `snmp`, #527) publish a derived per-second sibling under
+  `<metric>.rate` (a `Gauge`; `By/s` for octet counters, else `1/s`) next to
+  the raw lifetime counter — a dot-suffix on the leaf chunk, not an extra
+  subject chunk, so it stays inside the registered `{metric...}` family.
 
 ## Where the machine-readable truth lives
 
