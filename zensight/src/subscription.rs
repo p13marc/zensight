@@ -644,6 +644,12 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                 }
             })
         }
+        ZensightState::SnmpInterfaces { device } => {
+            let device = device.to_string();
+            decode!(zensight_common::InterfaceTable, |table| {
+                Message::SnmpInterfaceTable { device, table }
+            })
+        }
         ZensightState::Common(CommonState::CatalogEntity { .. }) => {
             decode!(HostEntity, Message::EntityReceived)
         }

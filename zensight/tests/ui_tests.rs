@@ -1002,6 +1002,89 @@ fn test_snmp_specialized_view() {
     assert!(ui.find("System Metrics").is_ok());
 }
 
+/// SNMP interface table renders from the typed `InterfaceTable` doc (#530):
+/// names, alias, rates, utilization, and the down interface.
+#[test]
+fn test_snmp_interface_table_from_doc() {
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+    for point in mock::snmp::router("router01") {
+        state.update(point);
+    }
+    let metrics = state.metrics.clone();
+    state
+        .snmp_detail
+        .apply_interfaces(mock::snmp::interface_table("router01", 3), &metrics);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+
+    assert!(ui.find("eth0").is_ok());
+    assert!(ui.find("uplink to core").is_ok(), "alias renders");
+    // eth1's in-rate: 25 MB/s (12.5 MB/s × 2).
+    assert!(ui.find("23.8 MB/s").is_ok(), "rates render humanized");
+    // eth1 error rate.
+    assert!(ui.find("3.5").is_ok(), "error rate renders");
+    // Last interface is oper-down while admin-up.
+    assert!(ui.find("DOWN").is_ok(), "down interface shows");
+}
+
+/// A device without ifXTable still renders a coherent table (no rates yet).
+#[test]
+fn test_snmp_interface_table_without_hc() {
+    let device_id = DeviceId::fixture(Protocol::Snmp, "legacy01".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+    let metrics = state.metrics.clone();
+    state
+        .snmp_detail
+        .apply_interfaces(mock::snmp::interface_table_no_hc("legacy01"), &metrics);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+
+    assert!(ui.find("eth0").is_ok());
+    assert!(ui.find("10 Mb/s").is_ok(), "ifSpeed fallback renders");
+}
+
+/// Without the doc, the view shows the waiting hint (no string parsing left).
+#[test]
+fn test_snmp_view_without_doc_shows_hint() {
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+    for point in mock::snmp::router("router01") {
+        state.update(point);
+    }
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+    assert!(
+        ui.find("No interface data yet — waiting for the sensor's interface doc")
+            .is_ok()
+    );
+}
+
+/// Clicking a sortable column header emits the sort message (#530).
+#[test]
+fn test_snmp_interface_table_sort_click() {
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+    let metrics = state.metrics.clone();
+    state
+        .snmp_detail
+        .apply_interfaces(mock::snmp::interface_table("router01", 2), &metrics);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+    ui.click("name").expect("click name header");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SnmpTableSort(1))),
+        "sort message for the name column, got {messages:?}"
+    );
+}
+
 /// Test syslog specialized view renders with severity distribution.
 #[test]
 fn test_syslog_specialized_view() {
