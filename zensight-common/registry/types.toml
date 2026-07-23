@@ -60,6 +60,9 @@ kind = "json-schema"
 [types.HealthSnapshot]
 kind = "json-schema"
 
+[types.InterfaceTable]
+kind = "json-schema"
+
 [types.HostEntity]
 kind = "json-schema"
 

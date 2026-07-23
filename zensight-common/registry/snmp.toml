@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.2"
+version = "1.3"
 app = "zensight"
 convention = 1
 
@@ -53,6 +53,15 @@ type = "HostEvidence"
 ttl_s = 900
 since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "{device}/interfaces"
+class = "state"
+type = "InterfaceTable"
+cardinality = 64
+ttl_s = 300
+since = "1.3"
+description = "joined ifTable/ifXTable state doc per polled device (#529): decoded statuses, HC-preferred counters, derived rates"
 
 [[subject]]
 path = "alert/{alert_key}"

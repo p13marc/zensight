@@ -41,6 +41,9 @@ pub struct SnmpPoller {
     rate: std::sync::Mutex<RateTracker>,
     /// Threshold alerting (#528), when enabled for this device.
     alerts: Option<tokio::sync::Mutex<crate::alerts::AlertEvaluator>>,
+    /// Interface state-doc publishing (#529): the shared advanced-publisher
+    /// registry (cached, late-join seed) and this device's doc key.
+    interfaces_doc: Option<(Arc<zensight_sensor_core::AdvancedPublisherRegistry>, String)>,
 }
 
 impl SnmpPoller {
@@ -70,7 +73,20 @@ impl SnmpPoller {
             client: tokio::sync::RwLock::new(None),
             rate: std::sync::Mutex::new(RateTracker::new()),
             alerts: None,
+            interfaces_doc: None,
         }
+    }
+
+    /// Publish the joined `InterfaceTable` state doc each cycle (#529).
+    pub fn with_interfaces_doc(
+        &mut self,
+        registry: Arc<zensight_sensor_core::AdvancedPublisherRegistry>,
+    ) {
+        let key =
+            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
+                .state_key(&[&self.device.name, "interfaces"])
+                .into();
+        self.interfaces_doc = Some((registry, key));
     }
 
     /// Attach threshold alerting (#528). When the interface rules are on,
@@ -192,6 +208,7 @@ impl SnmpPoller {
         let mut auth_failures = 0usize;
         let mut transport_failures = 0usize;
         let mut observation = crate::alerts::CycleObservation::default();
+        let mut table = crate::interfaces::TableBuilder::new();
 
         // Read sysUpTime up front: it anchors reset detection for every
         // counter this cycle (a reboot must suppress the whole interval).
@@ -212,6 +229,7 @@ impl SnmpPoller {
                 Ok(Some((oid, value))) => {
                     let rate = self.publish(&oid, &value, &mut seen_counters).await;
                     observation.ingest(&oid, &value, rate);
+                    table.ingest(&oid, &value, rate);
                 }
                 Ok(None) => {
                     tracing::debug!(device = %self.device.name, oid = %oid_str, "No value returned");
@@ -233,6 +251,7 @@ impl SnmpPoller {
                     for (oid, value) in entries {
                         let rate = self.publish(&oid, &value, &mut seen_counters).await;
                         observation.ingest(&oid, &value, rate);
+                        table.ingest(&oid, &value, rate);
                     }
                 }
                 Err(e) => {
@@ -249,6 +268,17 @@ impl SnmpPoller {
         // doesn't wipe baselines that just happened to go unobserved.
         if requests > 0 && failures == 0 {
             self.rate.lock().unwrap().retain(&seen_counters);
+        }
+
+        // Joined interface state doc (#529): refresh whenever the cycle saw
+        // interface rows (LWW; a failed cycle keeps the previous doc).
+        if let Some((registry, key)) = &self.interfaces_doc
+            && !table.is_empty()
+        {
+            let doc = table.build(&self.device.name);
+            if let Err(e) = registry.publish_serializable(key, &doc).await {
+                tracing::warn!(device = %self.device.name, error = %e, "interfaces doc publish failed");
+            }
         }
 
         // Threshold alerting (#528) on what this cycle saw.

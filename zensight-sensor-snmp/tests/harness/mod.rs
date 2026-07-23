@@ -334,6 +334,9 @@ pub fn isolated_zenoh_config() -> zenoh::Config {
     config
         .insert_json5("scouting/gossip/enabled", "false")
         .unwrap();
+    // Advanced publishers (the InterfaceTable state doc) need session
+    // timestamps — production sessions enable this in `connect()` too.
+    config.insert_json5("timestamping/enabled", "true").unwrap();
     config
 }
 
@@ -438,6 +441,17 @@ pub async fn rig(device: DeviceConfig) -> TestRig {
         &HashMap::new(),
         Format::Json,
     );
+    // Mirror production default: the joined InterfaceTable doc is published.
+    poller.with_interfaces_doc(Arc::new(
+        zensight_sensor_core::AdvancedPublisherRegistry::new(
+            session.clone(),
+            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
+                .telemetry_prefix(),
+            Format::Json,
+            zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+        )
+        .with_qos(zensight_common::QosClass::HealthLiveness),
+    ));
     poller.init().await.expect("poller init");
 
     TestRig {
@@ -488,6 +502,31 @@ pub async fn rig_with_alerts(
         alert_sub,
         reporter,
     }
+}
+
+/// Declare a subscriber on every device's `InterfaceTable` state doc.
+/// Declare BEFORE polling: plain subscribers only see live samples.
+pub async fn interfaces_sub(
+    session: &zenoh::Session,
+) -> zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>> {
+    let sub = session
+        .declare_subscriber("v1/*/state/snmp/*/interfaces")
+        .await
+        .expect("declare interfaces subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    sub
+}
+
+/// The last `InterfaceTable` doc received before `idle` of silence.
+pub async fn latest_interfaces_doc(
+    sub: &zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    idle: Duration,
+) -> Option<zensight_common::InterfaceTable> {
+    let mut latest = None;
+    while let Ok(Ok(sample)) = tokio::time::timeout(idle, sub.recv_async()).await {
+        latest = Some(decode_auto(&sample.payload().to_bytes()).expect("decode interfaces doc"));
+    }
+    latest
 }
 
 /// Collect alert samples until `idle` elapses with no new one:

@@ -894,3 +894,97 @@ async fn two_devices_do_not_stomp_each_other() {
     assert_eq!(still.len(), 1, "dev-b's sweep stomped dev-a's alert");
     assert_eq!(still[0].labels["device"], "dev-a");
 }
+
+// ---------------------------------------------------------------------------
+// Joined InterfaceTable state doc (#529)
+// ---------------------------------------------------------------------------
+
+use harness::{interfaces_sub, latest_interfaces_doc};
+use zensight_common::IfStatus;
+
+/// Walking ifTable+ifXTable publishes a coherent joined doc on
+/// `state/snmp/<device>/interfaces`: decoded statuses, ifName/ifHighSpeed/HC
+/// preference, MAC formatting, and rates from the second cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interfaces_doc_joins_both_tables() {
+    let mib = base_mib();
+    // Give eth0 a MAC and make eth1 oper-down for decode assertions.
+    mib.set(
+        &format!("{IF_TABLE}.6.1"),
+        Value::OctetString(bytes::Bytes::from_static(&[
+            0x02, 0x42, 0xac, 0x11, 0x00, 0x07,
+        ])),
+    );
+    mib.set(&format!("{IF_TABLE}.8.2"), Value::Integer(2));
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("router01", agent.addr());
+    device.walks = vec![
+        "1.3.6.1.2.1.2.2".to_string(),
+        "1.3.6.1.2.1.31.1.1".to_string(),
+    ];
+
+    let rig = rig(device).await;
+    let sub = interfaces_sub(&rig.session).await;
+
+    rig.poller.poll_once().await.expect("poll");
+    let doc = latest_interfaces_doc(&sub, IDLE)
+        .await
+        .expect("interfaces doc published");
+    assert_eq!(doc.device, "router01");
+    assert_eq!(doc.interfaces.len(), 2);
+
+    let eth0 = &doc.interfaces[0];
+    assert_eq!(eth0.index, 1);
+    assert_eq!(eth0.name.as_deref(), Some("eth0")); // ifName
+    assert_eq!(eth0.alias.as_deref(), Some("uplink"));
+    assert_eq!(eth0.mac.as_deref(), Some("02:42:ac:11:00:07"));
+    assert_eq!(eth0.admin_status, Some(IfStatus::Up));
+    assert_eq!(eth0.oper_status, Some(IfStatus::Up));
+    assert_eq!(eth0.speed_bits, Some(100_000_000)); // ifHighSpeed (100 Mb)
+    assert_eq!(eth0.counters.in_octets, Some(0)); // HC preferred
+    assert!(
+        eth0.rates.in_octets_per_sec.is_none(),
+        "no rates on cycle 1"
+    );
+
+    let eth1 = &doc.interfaces[1];
+    assert_eq!(eth1.oper_status, Some(IfStatus::Down));
+
+    // Second cycle with HC counter movement: rates appear in the doc.
+    mib.set(&format!("{IF_X_TABLE}.6.1"), Value::Counter64(90_000));
+    rig.poller.poll_once().await.expect("poll");
+    let doc = latest_interfaces_doc(&sub, IDLE)
+        .await
+        .expect("refreshed doc");
+    let eth0 = &doc.interfaces[0];
+    assert_eq!(eth0.counters.in_octets, Some(90_000));
+    assert!(
+        eth0.rates.in_octets_per_sec.unwrap_or(0.0) > 0.0,
+        "HC rate must appear from the second cycle"
+    );
+}
+
+/// A device without ifXTable still yields a coherent doc (ifDescr naming,
+/// ifSpeed, 32-bit counters).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interfaces_doc_without_ifx_table() {
+    // Only ifTable columns — simulate a legacy device.
+    let mib = SimMib::new().with_if_table(1);
+    for col in [1, 6, 10, 15, 18] {
+        mib.remove(&format!("{IF_X_TABLE}.{col}.1"));
+    }
+    let agent = SimAgent::start(mib).await;
+    let mut device = v2c_device("legacy01", agent.addr());
+    device.walks = vec!["1.3.6.1.2.1.2.2".to_string()];
+
+    let rig = rig(device).await;
+    let sub = interfaces_sub(&rig.session).await;
+    rig.poller.poll_once().await.expect("poll");
+
+    let doc = latest_interfaces_doc(&sub, IDLE).await.expect("doc");
+    let e = &doc.interfaces[0];
+    assert_eq!(e.name.as_deref(), Some("eth0")); // ifDescr fallback
+    assert_eq!(e.speed_bits, Some(100_000_000)); // ifSpeed fallback
+    assert!(e.alias.is_none());
+    assert_eq!(e.counters.in_octets, Some(0)); // 32-bit counter
+}

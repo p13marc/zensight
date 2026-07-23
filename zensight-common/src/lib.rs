@@ -19,6 +19,7 @@ pub mod entity;
 pub mod error;
 pub mod evidence;
 pub mod health;
+pub mod interfaces;
 pub mod keyexpr;
 pub mod metric_guard;
 pub mod publisher_registry;
@@ -62,6 +63,7 @@ pub use evidence::{CloudFacts, HostEvidence, NameObservation};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
 };
+pub use interfaces::{IfStatus, InterfaceCounters, InterfaceEntry, InterfaceRates, InterfaceTable};
 pub use keyexpr::{
     alias_key, all_alerts_wildcard, all_alias_wildcard, all_assertion_wildcard,
     all_device_liveliness_wildcard, all_entity_wildcard, all_evidence_wildcard,
