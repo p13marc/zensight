@@ -1546,9 +1546,12 @@ impl ZenSight {
                 }
             }
             Message::SnmpInterfaceTable { device, table } => {
-                // LWW: replace the doc for the currently-open SNMP device
-                // (#530); docs for other devices are re-served to late
-                // joiners by the sensor's cached publisher on selection.
+                // Fleet-wide map for the overview's rate-based rankings
+                // (#533); LWW per device.
+                self.dashboard
+                    .snmp_interfaces
+                    .insert(device.clone(), table.clone());
+                // The currently-open SNMP device view consumes it too (#530).
                 if let Some(selected) = self.selected_device.as_mut()
                     && selected.device_id.protocol == zensight_common::Protocol::Snmp
                     && selected.device_id.source == device

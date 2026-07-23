@@ -174,6 +174,10 @@ pub struct DashboardState {
     /// Active status filter (None = show all). Driven by the fleet summary
     /// chips so a click on "3 Offline" narrows the grid to the problems (#34).
     pub status_filter: Option<DeviceStatus>,
+    /// Fleet-wide SNMP `InterfaceTable` docs (#533), keyed by device name —
+    /// LWW off `state/snmp/<device>/interfaces`, feeding the SNMP overview's
+    /// rate-based rankings.
+    pub snmp_interfaces: HashMap<String, zensight_common::InterfaceTable>,
 }
 
 impl Default for DashboardState {
@@ -191,6 +195,7 @@ impl Default for DashboardState {
             devices_per_page: DEFAULT_DEVICES_PER_PAGE,
             view_mode: DashboardViewMode::default(),
             status_filter: None,
+            snmp_interfaces: HashMap::new(),
         }
     }
 }
@@ -466,7 +471,7 @@ pub fn dashboard_view<'a>(
     let sensor_summary = render_sensor_health_summary(sensor_health);
     let filters = render_protocol_filters(state, &filtered);
     let group_filters = group_filter_bar(groups);
-    let overview_panel = overview_section(overview, &state.devices);
+    let overview_panel = overview_section(overview, &state.devices, &state.snmp_interfaces);
     let devices = render_device_grid(
         state,
         groups,

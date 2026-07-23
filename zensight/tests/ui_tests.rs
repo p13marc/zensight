@@ -5464,3 +5464,49 @@ fn fleet_view_shows_an_alive_but_silent_producer() {
     let mut ui = simulator(fleet_view(&state));
     assert!(ui.find("silent").is_ok());
 }
+
+/// SNMP fleet overview (#533): rate-based top talkers, down hotlist, error
+/// hotspots — all from the typed docs.
+#[test]
+fn test_snmp_overview_rate_based() {
+    use std::collections::HashMap;
+    use zensight::view::overview::snmp::snmp_overview;
+
+    let mut docs = HashMap::new();
+    // router01: iface 1 busy at 12.5 MB/s in, iface 2 has errors, iface 3 down.
+    docs.insert(
+        "router01".to_string(),
+        mock::snmp::interface_table("router01", 3),
+    );
+    // A freshly-rebooted device with huge *lifetime* counters but no current
+    // rate must NOT outrank the busy one (the raw-counter bug this fixes).
+    docs.insert(
+        "idle01".to_string(),
+        mock::snmp::interface_table_no_hc("idle01"),
+    );
+
+    let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
+    let mut ui = simulator(snmp_overview(&devices, &docs));
+
+    // Top talker is router01's busiest interface (rates, humanized).
+    assert!(ui.find("1.").is_ok());
+    assert!(ui.find("router01/eth2").is_ok(), "busiest iface ranks");
+    // Down hotlist: router01's last interface is admin-up/oper-down.
+    assert!(ui.find("Down Interfaces (1)").is_ok());
+    // Error hotspots by rate.
+    assert!(ui.find("3.5 errs/s").is_ok());
+    // Fleet throughput tile present.
+    assert!(ui.find("Throughput").is_ok());
+}
+
+/// Empty fleet renders the empty state.
+#[test]
+fn test_snmp_overview_empty() {
+    use std::collections::HashMap;
+    use zensight::view::overview::snmp::snmp_overview;
+
+    let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
+    let docs = HashMap::new();
+    let mut ui = simulator(snmp_overview(&devices, &docs));
+    assert!(ui.find("No SNMP devices available").is_ok());
+}
