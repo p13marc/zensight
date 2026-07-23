@@ -39,6 +39,12 @@
     // source: "agent-host-01",
 
     // SNMP trap receiver (optional)
+    // Named credential sets (#538): one place to rotate. Values accept
+    // "${ENV_VAR}" and "file:/path" secret indirection everywhere.
+    // credentials: {
+    //   "readonly-v2c": { community: "file:/run/credentials/snmp/community" },
+    // },
+
     // Traps (#535): durable events + alert mapping. communities/users filter
     // senders; builtin_rules maps linkDown/linkUp to alerts out of the box.
     trap_listener: {

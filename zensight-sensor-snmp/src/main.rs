@@ -52,8 +52,14 @@ async fn main() -> Result<()> {
     // Get session for setting up pollers
     let session = runner.session().clone();
 
-    // Clone config data we need before spawning tasks
-    let snmp_config = runner.config().snmp.clone();
+    // Clone config data we need before spawning tasks. Credential sets and
+    // ${ENV}/file: secret indirection resolve here (#538) — hard errors —
+    // and only this resolved copy carries live secrets; the runner's stored
+    // config (which feeds the redacted debug bundle) keeps the references.
+    let mut snmp_config = runner.config().snmp.clone();
+    snmp_config
+        .resolve_credentials()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let serialization = runner.config().serialization;
 
     // Initialize MIB resolver

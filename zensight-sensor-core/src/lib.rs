@@ -50,6 +50,7 @@ pub mod report;
 pub mod rpc;
 mod runner;
 pub mod scrub;
+pub mod secret;
 pub mod v1;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
@@ -73,6 +74,7 @@ pub use publisher::{Publisher, RawMediaPublisher};
 pub use report::{DebugBundleSource, SimpleBundleSource, redact};
 pub use runner::SensorRunner;
 pub use scrub::{ArgScrubber, CMDLINE_CAP_BYTES};
+pub use secret::{resolve_secret, resolve_secret_opt};
 
 // Re-export commonly used types from zensight-common
 pub use zensight_common::{
