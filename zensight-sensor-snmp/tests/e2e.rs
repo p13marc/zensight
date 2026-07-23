@@ -33,7 +33,10 @@ async fn v2c_get_publishes_points() {
 
     let points = collect_points(&rig, IDLE).await;
     let uptime = &points["system/uptime"];
-    assert_eq!(uptime.value, TelemetryValue::Counter(123_456));
+    // TimeTicks arrive as seconds (Gauge, unit "s") since #527 — the sim
+    // agent serves 123_456 centiseconds.
+    assert_eq!(uptime.value, TelemetryValue::Gauge(1_234.56));
+    assert_eq!(uptime.unit.as_deref(), Some("s"));
     assert_eq!(
         uptime.labels.get("oid").map(String::as_str),
         Some("1.3.6.1.2.1.1.3.0")
@@ -56,6 +59,11 @@ async fn v2c_walk_stays_in_subtree() {
     // 12 ifTable columns × 2 interfaces, resolved to `if/<index>/<name>` names.
     assert_eq!(points.len(), 24, "unexpected metrics: {:?}", points.keys());
     assert_eq!(points["if/1/in_octets"].value, TelemetryValue::Counter(0));
+    // Gauge32 is a Gauge since #527 (previously mis-published as Counter).
+    assert_eq!(
+        points["if/1/speed"].value,
+        TelemetryValue::Gauge(100_000_000.0)
+    );
     assert_eq!(
         points["if/2/descr"].value,
         TelemetryValue::Text("eth1".into())
@@ -143,6 +151,104 @@ async fn mutated_values_show_up_next_cycle() {
     );
 }
 
+/// Counters grow a `<metric>.rate` sibling (per-second Gauge) once a
+/// previous sample exists; the raw counter keeps publishing untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn counter_rate_published_from_second_cycle() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("router01", agent.addr());
+    device.oids = vec![format!("{IF_TABLE}.10.1")];
+
+    let rig = rig(device).await;
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    assert!(
+        !points.contains_key("if/1/in_octets.rate"),
+        "no rate before a second sample"
+    );
+
+    mib.set(&format!("{IF_TABLE}.10.1"), Value::Counter32(9_000));
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    assert_eq!(
+        points["if/1/in_octets"].value,
+        TelemetryValue::Counter(9_000)
+    );
+    let rate = &points["if/1/in_octets.rate"];
+    assert_eq!(rate.unit.as_deref(), Some("By/s"));
+    let TelemetryValue::Gauge(per_sec) = rate.value else {
+        panic!("rate must be a gauge, got {:?}", rate.value);
+    };
+    assert!(per_sec > 0.0, "rate {per_sec}");
+    assert_eq!(
+        rate.labels.get("oid").map(String::as_str),
+        Some(format!("{IF_TABLE}.10.1").as_str())
+    );
+}
+
+/// A Counter32 wrap between cycles still yields a rate (modular delta), not
+/// a garbage spike or a suppressed interval.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn counter32_wrap_still_rates() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("router01", agent.addr());
+    device.oids = vec![format!("{IF_TABLE}.10.1")];
+
+    mib.set(&format!("{IF_TABLE}.10.1"), Value::Counter32(u32::MAX - 99));
+    let rig = rig(device).await;
+    rig.poller.poll_once().await.expect("poll");
+    let _ = collect_points(&rig, IDLE).await;
+
+    // Past the wrap point: modular delta is 100 + 400 = 500.
+    mib.set(&format!("{IF_TABLE}.10.1"), Value::Counter32(400));
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    let rate = &points["if/1/in_octets.rate"];
+    let TelemetryValue::Gauge(per_sec) = rate.value else {
+        panic!("rate must be a gauge");
+    };
+    // Exact value depends on wall-clock dt; correctness of the math is
+    // unit-tested. Here: it exists and is not an absurd reset artifact.
+    assert!(per_sec.is_finite() && per_sec >= 0.0);
+}
+
+/// sysUpTime going backwards (device reboot) suppresses every rate for one
+/// cycle; the next cycle re-baselines and rates return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reboot_suppresses_rates_for_one_cycle() {
+    let mib = base_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("router01", agent.addr());
+    device.oids = vec![format!("{IF_TABLE}.10.1")];
+
+    let rig = rig(device).await;
+    rig.poller.poll_once().await.expect("poll");
+    let _ = collect_points(&rig, IDLE).await;
+
+    // Reboot: uptime restarts near zero, counters reset low.
+    mib.set(&format!("{SYSTEM}.3.0"), Value::TimeTicks(50));
+    mib.set(&format!("{IF_TABLE}.10.1"), Value::Counter32(10));
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    assert!(
+        !points.contains_key("if/1/in_octets.rate"),
+        "reboot cycle must not publish rates"
+    );
+
+    // Next cycle: fresh baseline exists, rates resume.
+    mib.set(&format!("{SYSTEM}.3.0"), Value::TimeTicks(150));
+    mib.set(&format!("{IF_TABLE}.10.1"), Value::Counter32(1_010));
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    assert!(
+        points.contains_key("if/1/in_octets.rate"),
+        "rates must resume after re-baselining: {:?}",
+        points.keys()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unreachable_device_then_recovery() {
     let agent = SimAgent::start(base_mib()).await;
@@ -209,8 +315,9 @@ async fn exhausted_retries_recover_by_next_cycle() {
 
     let rig = rig(device).await;
 
-    // Two lost requests against a single retry: attempts 1 and 2 both die.
-    proxy.drop_next(2);
+    // Four lost datagrams against a single retry: the sysUpTime probe eats
+    // its two attempts, then the sysName GET's two attempts both die.
+    proxy.drop_next(4);
     rig.poller
         .poll_once()
         .await

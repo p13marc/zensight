@@ -273,6 +273,7 @@ impl GnmiSubscriber {
                     metric: full_path.clone(),
                     value,
                     labels: HashMap::new(),
+                    unit: None,
                 };
 
                 let key = format!(

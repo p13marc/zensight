@@ -7,4 +7,5 @@ pub mod config;
 pub mod mib;
 pub mod oid;
 pub mod poller;
+pub mod rate;
 pub mod trap;

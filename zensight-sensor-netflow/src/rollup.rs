@@ -98,6 +98,7 @@ impl Rollups {
                 metric,
                 value: TelemetryValue::Counter(value),
                 labels: HashMap::new(),
+                unit: None,
             };
             out.push(point(format!("{slug}/flows_total"), agg.flows));
             out.push(point(format!("{slug}/bytes_total"), agg.bytes));

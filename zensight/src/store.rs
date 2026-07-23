@@ -678,6 +678,7 @@ impl StoredLog {
             metric: format!("events/{}", self.uid),
             value: TelemetryValue::Text(self.message.clone()),
             labels,
+            unit: None,
         }
     }
 }
@@ -946,6 +947,7 @@ mod tests {
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(value),
             labels: Map::new(),
+            unit: None,
         }
     }
 

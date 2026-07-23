@@ -423,6 +423,7 @@ mod tests {
                     metric: m.to_string(),
                     value: TelemetryValue::Gauge(*v),
                     labels: HashMap::new(),
+                    unit: None,
                 },
             );
         }
@@ -479,6 +480,7 @@ mod tests {
                     metric: m.clone(),
                     value: TelemetryValue::Gauge(*v),
                     labels: HashMap::new(),
+                    unit: None,
                 },
             );
         }

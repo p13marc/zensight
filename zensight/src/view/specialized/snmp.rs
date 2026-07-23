@@ -145,10 +145,10 @@ fn render_system_info(state: &DeviceDetailState) -> Element<'_, Message> {
         );
     }
 
-    // sysUpTime
+    // sysUpTime — published by the sensor as seconds since #527 (the raw
+    // TimeTicks centiseconds are converted at the source).
     if let Some(uptime) = get_metric_value(state, "system/sysUpTime") {
-        // SNMP uptime is in centiseconds
-        let secs = (uptime / 100.0) as u64;
+        let secs = uptime as u64;
         let days = secs / 86400;
         let hours = (secs % 86400) / 3600;
         let mins = (secs % 3600) / 60;

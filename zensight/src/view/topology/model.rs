@@ -1788,6 +1788,7 @@ mod tests {
             metric: metric.to_string(),
             value: v,
             labels: HashMap::new(),
+            unit: None,
         };
         let mut m = HashMap::new();
         for (k, v) in [
@@ -1836,6 +1837,7 @@ mod tests {
             metric: metric.to_string(),
             value: v,
             labels: HashMap::new(),
+            unit: None,
         };
         let mut m = HashMap::new();
         for (k, v) in [
@@ -1960,6 +1962,7 @@ mod tests {
             metric: metric.to_string(),
             value: v,
             labels: HashMap::new(),
+            unit: None,
         };
         let mut m = HashMap::new();
         m.insert(

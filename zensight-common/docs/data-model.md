@@ -15,12 +15,16 @@ pub struct TelemetryPoint {
     pub metric: String,               // metric name/path, e.g. "cpu/usage"
     pub value: TelemetryValue,        // the measured value
     pub labels: HashMap<String, String>, // extra context (skipped on the wire when empty)
+    pub unit: Option<String>,         // UCUM-style unit ("By/s", "s", "%"); absent when unknown
 }
 ```
 
 Build one with `TelemetryPoint::new(source, protocol, metric, value)` (stamps the
-current timestamp) and chain `.with_label(k, v)` / `.with_labels(map)`.
-`current_timestamp_millis()` is the shared clock helper.
+current timestamp) and chain `.with_label(k, v)` / `.with_labels(map)` /
+`.with_unit(u)`. `current_timestamp_millis()` is the shared clock helper.
+The `unit` field is serde-defaulted in both directions (JSON and CBOR), so
+old and new consumers interoperate; the OTel exporter forwards it as the
+instrument unit.
 
 ### Protocol
 

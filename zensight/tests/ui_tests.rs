@@ -230,6 +230,7 @@ fn test_global_search_panel_results() {
             metric: "queue/depth".to_string(),
             value: zensight_common::TelemetryValue::Gauge(7.0),
             labels: HashMap::new(),
+            unit: None,
         },
     );
 
@@ -732,6 +733,7 @@ fn test_metric_promote_to_alert() {
         metric: "cpu/usage".to_string(),
         value: TelemetryValue::Gauge(91.0),
         labels: HashMap::new(),
+        unit: None,
     };
     state.update(p.clone());
     p.metric = "memory/used".to_string();
@@ -767,6 +769,7 @@ fn test_sysinfo_depth_cards() {
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(v),
             labels: HashMap::new(),
+            unit: None,
         });
     };
     put("pressure/cpu/some_avg10", 12.5);
@@ -795,6 +798,7 @@ fn test_netlink_tc_panel() {
             metric: metric.to_string(),
             value: TelemetryValue::Counter(v),
             labels: HashMap::new(),
+            unit: None,
         });
     };
     put("tc/eth0/fq_codel/drops", 42);
@@ -823,6 +827,7 @@ fn test_netlink_depth_cards() {
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(v),
             labels: HashMap::new(),
+            unit: None,
         });
     };
     put("sockets/tcp/established", 10.0);
@@ -859,6 +864,7 @@ fn test_netring_red_cards() {
             metric: metric.to_string(),
             value: TelemetryValue::Counter(v as u64),
             labels: HashMap::new(),
+            unit: None,
         });
     };
     put("dns/queries_total", 100.0);
@@ -3381,6 +3387,7 @@ fn test_logs_view_renders_lines() {
         metric: "auth/crit".to_string(),
         value: TelemetryValue::Text("INTRUDER ALERT from 10.0.0.9".to_string()),
         labels: HashMap::new(),
+        unit: None,
     };
     let messages = vec![syslog_message_from_point(&point, &point.source)];
     let filter = SyslogFilterState::default();
@@ -3409,6 +3416,7 @@ fn test_logs_unit_filter_and_source_badge() {
         metric: "daemon/err".to_string(),
         value: TelemetryValue::Text("upstream timed out".to_string()),
         labels,
+        unit: None,
     };
     let messages = vec![syslog_message_from_point(&point, &point.source)];
 
@@ -3694,6 +3702,7 @@ fn test_syslog_device_shows_host_history() {
             metric: "daemon/err".to_string(),
             value: TelemetryValue::Text(msg.to_string()),
             labels: HashMap::new(),
+            unit: None,
         };
         syslog_message_from_point(&p, "host9")
     };
@@ -4478,6 +4487,7 @@ fn sysinfo_point(
         metric: metric.to_string(),
         value,
         labels: HashMap::new(),
+        unit: None,
     }
 }
 
@@ -4996,6 +5006,7 @@ fn netlink_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDe
             metric: metric.to_string(),
             value: value.clone(),
             labels: HashMap::new(),
+            unit: None,
         });
     }
     state
@@ -5072,6 +5083,7 @@ fn netring_state(
             metric: metric.to_string(),
             value: value.clone(),
             labels: HashMap::new(),
+            unit: None,
         });
     }
     state.specialized_tab = tab;
@@ -5156,6 +5168,7 @@ fn tier2_netlink_overview_counts_interfaces() {
                 metric: metric.to_string(),
                 value: zensight_common::TelemetryValue::Boolean(up),
                 labels: HashMap::new(),
+                unit: None,
             },
         );
     }
@@ -5266,6 +5279,7 @@ fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
         metric: "dns/encrypted/doh".to_string(),
         value: zensight_common::TelemetryValue::Counter(43),
         labels: HashMap::new(),
+        unit: None,
     });
     state.netring_detail.apply_encrypted_dns(Ok(vec![
         EncryptedDnsRecord {

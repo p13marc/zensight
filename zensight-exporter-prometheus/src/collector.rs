@@ -624,6 +624,7 @@ mod tests {
             metric: metric.to_string(),
             value,
             labels: HashMap::new(),
+            unit: None,
         }
     }
 

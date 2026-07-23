@@ -778,6 +778,7 @@ impl LogRecord {
             metric: format!("events/{}", self.uid),
             value: crate::TelemetryValue::Text(self.message.clone()),
             labels,
+            unit: None,
         }
     }
 }
@@ -951,6 +952,7 @@ mod tests {
             metric: "events/0000001719999000000000000042".to_string(),
             value: crate::TelemetryValue::Text("Failed password for root".to_string()),
             labels,
+            unit: None,
         };
 
         let rec = LogRecord::from_point(&point).expect("log line converts");
@@ -993,6 +995,7 @@ mod tests {
             metric: "logs/errors_total".to_string(),
             value: crate::TelemetryValue::Counter(5),
             labels: Default::default(),
+            unit: None,
         };
         assert!(LogRecord::from_point(&point).is_none());
     }

@@ -23,6 +23,12 @@ pub struct TelemetryPoint {
     /// Additional context labels (e.g., OID, interface name).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub labels: HashMap<String, String>,
+
+    /// Unit of the value, UCUM-style (e.g. `"By"`, `"By/s"`, `"1/s"`, `"%"`,
+    /// `"s"`). Absent when the producer doesn't know. Serde-defaulted both
+    /// ways, so old and new consumers interoperate over JSON and CBOR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 impl TelemetryPoint {
@@ -40,12 +46,19 @@ impl TelemetryPoint {
             metric: metric.into(),
             value,
             labels: HashMap::new(),
+            unit: None,
         }
     }
 
     /// Add a label to this telemetry point.
     pub fn with_label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.labels.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set the value's unit (UCUM-style string).
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
         self
     }
 
