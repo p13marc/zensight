@@ -12,75 +12,10 @@ use crate::view::components::empty_state;
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
 
-/// Syslog severity levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Severity {
-    Emergency = 0,
-    Alert = 1,
-    Critical = 2,
-    Error = 3,
-    Warning = 4,
-    Notice = 5,
-    Informational = 6,
-    Debug = 7,
-}
-
-impl Severity {
-    /// Parse the abbreviated/full severity name the logs sensor emits as the
-    /// second metric-path segment and the `severity` label (e.g. `crit`, `err`,
-    /// `warning`). This is the live contract — the old numeric-`severity` path
-    /// the overview used to read no longer exists (#101).
-    fn from_label(s: &str) -> Option<Self> {
-        Some(match s.to_ascii_lowercase().as_str() {
-            "emerg" | "emergency" => Severity::Emergency,
-            "alert" => Severity::Alert,
-            "crit" | "critical" => Severity::Critical,
-            "err" | "error" => Severity::Error,
-            "warning" | "warn" => Severity::Warning,
-            "notice" => Severity::Notice,
-            "info" | "informational" => Severity::Informational,
-            "debug" => Severity::Debug,
-            _ => return None,
-        })
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Severity::Emergency => "EMERG",
-            Severity::Alert => "ALERT",
-            Severity::Critical => "CRIT",
-            Severity::Error => "ERR",
-            Severity::Warning => "WARN",
-            Severity::Notice => "NOTICE",
-            Severity::Informational => "INFO",
-            Severity::Debug => "DEBUG",
-        }
-    }
-
-    fn color(&self) -> iced::Color {
-        match self {
-            Severity::Emergency | Severity::Alert => theme::SYSLOG_EMERGENCY,
-            Severity::Critical | Severity::Error => theme::SYSLOG_ERROR,
-            Severity::Warning => theme::SYSLOG_WARNING,
-            Severity::Notice => theme::SYSLOG_NOTICE,
-            Severity::Informational => theme::SYSLOG_INFO,
-            Severity::Debug => theme::SYSLOG_DEBUG,
-        }
-    }
-
-    fn all() -> &'static [Severity] {
-        &[
-            Severity::Emergency,
-            Severity::Alert,
-            Severity::Critical,
-            Severity::Error,
-            Severity::Warning,
-            Severity::Notice,
-            Severity::Informational,
-            Severity::Debug,
-        ]
-    }
-}
+/// Syslog severity — the one canonical model (#557), re-exported under the name
+/// this overview used. `from_label`/`label`/`all` are its methods; the bar color
+/// is [`theme::severity_color`].
+use zensight_common::LogSeverity as Severity;
 
 /// Log message summary.
 struct LogMessage {
@@ -247,7 +182,7 @@ fn render_severity_bar<'a>(severity: Severity, count: usize, total: usize) -> El
     };
 
     let bar_width = (pct * 2.0).clamp(2.0, 100.0) as f32;
-    let color = severity.color();
+    let color = theme::severity_color(severity);
 
     let bar = container(text(""))
         .width(Length::Fixed(bar_width))
@@ -310,7 +245,7 @@ fn render_critical_messages<'a>(messages: Vec<LogMessage>) -> Element<'a, Messag
 
 /// Render a single log message row.
 fn render_log_row<'a>(msg: LogMessage) -> Element<'a, Message> {
-    let color = msg.severity.color();
+    let color = theme::severity_color(msg.severity);
 
     let severity_label = text(msg.severity.label())
         .size(10)

@@ -644,6 +644,21 @@ pub const SYSLOG_INFO: Color = Color::from_rgb(0.5, 0.8, 0.5);
 /// See [`SYSLOG_EMERGENCY`].
 pub const SYSLOG_DEBUG: Color = Color::from_rgb(0.6, 0.6, 0.6);
 
+/// Badge color for a [`zensight_common::LogSeverity`] (#557) — the shared
+/// mapping both log views use, so the severity→color contract lives in one
+/// place (next to the palette) instead of duplicated per view.
+pub fn severity_color(sev: zensight_common::LogSeverity) -> Color {
+    use zensight_common::LogSeverity as S;
+    match sev {
+        S::Emergency | S::Alert => SYSLOG_EMERGENCY,
+        S::Critical | S::Error => SYSLOG_ERROR,
+        S::Warning => SYSLOG_WARNING,
+        S::Notice => SYSLOG_NOTICE,
+        S::Informational => SYSLOG_INFO,
+        S::Debug => SYSLOG_DEBUG,
+    }
+}
+
 /// Categorical protocol palette for distribution bars (TCP / UDP / ICMP / Other).
 pub const PROTOCOL_CATEGORY: [Color; 4] = [
     Color::from_rgb(0.3, 0.6, 0.9), // TCP — blue

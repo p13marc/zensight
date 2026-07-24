@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 use zensight_exporter_otel::config::FilterConfig;
-use zensight_exporter_otel::logs::{LogRecord, SyslogSeverity};
+use zensight_exporter_otel::logs::{LogRecord, SyslogSeverity, parse_severity, to_otel_severity};
 use zensight_exporter_otel::metrics::{
     OtelMetricType, build_metric_attributes, build_metric_name, extract_value, is_log_exportable,
     is_metric_exportable,
@@ -243,7 +243,7 @@ fn test_syslog_severity_mapping() {
 
     for (syslog_sev, expected_otel_sev) in test_cases {
         assert_eq!(
-            syslog_sev.to_otel_severity(),
+            to_otel_severity(syslog_sev),
             expected_otel_sev,
             "Syslog {:?} should map to OTEL {:?}",
             syslog_sev,
@@ -254,39 +254,21 @@ fn test_syslog_severity_mapping() {
 
 #[test]
 fn test_syslog_severity_parsing() {
-    assert_eq!(
-        SyslogSeverity::parse("emergency"),
-        Some(SyslogSeverity::Emergency)
-    );
-    assert_eq!(SyslogSeverity::parse("alert"), Some(SyslogSeverity::Alert));
-    assert_eq!(
-        SyslogSeverity::parse("critical"),
-        Some(SyslogSeverity::Critical)
-    );
-    assert_eq!(SyslogSeverity::parse("error"), Some(SyslogSeverity::Error));
-    assert_eq!(
-        SyslogSeverity::parse("warning"),
-        Some(SyslogSeverity::Warning)
-    );
-    assert_eq!(
-        SyslogSeverity::parse("notice"),
-        Some(SyslogSeverity::Notice)
-    );
-    assert_eq!(
-        SyslogSeverity::parse("info"),
-        Some(SyslogSeverity::Informational)
-    );
-    assert_eq!(SyslogSeverity::parse("debug"), Some(SyslogSeverity::Debug));
+    assert_eq!(parse_severity("emergency"), Some(SyslogSeverity::Emergency));
+    assert_eq!(parse_severity("alert"), Some(SyslogSeverity::Alert));
+    assert_eq!(parse_severity("critical"), Some(SyslogSeverity::Critical));
+    assert_eq!(parse_severity("error"), Some(SyslogSeverity::Error));
+    assert_eq!(parse_severity("warning"), Some(SyslogSeverity::Warning));
+    assert_eq!(parse_severity("notice"), Some(SyslogSeverity::Notice));
+    assert_eq!(parse_severity("info"), Some(SyslogSeverity::Informational));
+    assert_eq!(parse_severity("debug"), Some(SyslogSeverity::Debug));
 
     // Case insensitive
-    assert_eq!(
-        SyslogSeverity::parse("WARNING"),
-        Some(SyslogSeverity::Warning)
-    );
-    assert_eq!(SyslogSeverity::parse("Error"), Some(SyslogSeverity::Error));
+    assert_eq!(parse_severity("WARNING"), Some(SyslogSeverity::Warning));
+    assert_eq!(parse_severity("Error"), Some(SyslogSeverity::Error));
 
     // Unknown returns None
-    assert_eq!(SyslogSeverity::parse("unknown"), None);
+    assert_eq!(parse_severity("unknown"), None);
 }
 
 // =============================================================================
