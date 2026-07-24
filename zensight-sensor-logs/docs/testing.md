@@ -32,8 +32,13 @@ measurably reducing drops for the same burst (#546); ingest repeat collapse
 folding a burst into one `repeat_count` record (#546); the multiline `select!`
 idle-flush arm; and the dynamic-filter live path (`filter/set` narrows the ring).
 
-The harness is the named safety net for the durable-store (#544), TLS (#550),
-and file-source (#549) work — each adds its scenarios here.
+The durable store (#544) adds `durable_store_serves_paginated_time_range` (a
+`from`/`to` + `after_uid` walk over the redb store through the live queryable),
+alongside the `store` module's own unit tests (write/query/pagination/prune/
+reopen-durability).
+
+The harness is the named safety net for TLS (#550) and file-source (#549) work —
+each adds its scenarios here.
 
 Note: `journald` live reads are not exercised in CI (they need journal access);
 that path stays `#[ignore]`d / env-gated. A joined multiline record over a

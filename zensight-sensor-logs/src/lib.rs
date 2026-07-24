@@ -29,4 +29,5 @@ pub mod parser;
 pub mod query;
 pub mod receiver;
 pub mod sentinel;
+pub mod store;
 pub(crate) mod telemetry_guard;

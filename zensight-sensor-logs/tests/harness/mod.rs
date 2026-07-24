@@ -149,11 +149,13 @@ impl RigBuilder {
         let filter = Arc::new(FilterManager::pass_all());
         let (ring, capacity) = query::new_ring(10_000);
 
-        // Serve @rpc/<producer>/events.
+        // Serve @rpc/<producer>/events (no durable store in the socket rigs;
+        // the store's query path is exercised by a dedicated e2e test).
         tokio::spawn(query::run_events(
             session.clone(),
             producer.clone(),
             ring.clone(),
+            None,
         ));
 
         // Intake bridge (faithful to main.rs's inlined loop, minus analytics).

@@ -187,6 +187,92 @@ async fn multiline_idle_flush_emits_buffered_line() {
     let _ = stream; // hold the connection open across the poll
 }
 
+/// Durable store (#544): the `events` queryable answers `from`/`to` +
+/// `after_uid` pagination from the disk store, newest-first, in bounded pages —
+/// history that survives beyond the ring.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_store_serves_paginated_time_range() {
+    use std::sync::Arc;
+    use zensight_common::LogRecord;
+    use zensight_sensor_logs::query;
+    use zensight_sensor_logs::store::LogStore;
+
+    fn rec(ts: i64, seq: u64, msg: &str) -> LogRecord {
+        LogRecord {
+            uid: format!("{:013}{:012}", ts, seq),
+            ts,
+            host: "web01".into(),
+            facility: "daemon".into(),
+            severity: "info".into(),
+            severity_number: 9,
+            app: None,
+            pid: None,
+            message: msg.into(),
+            labels: Default::default(),
+        }
+    }
+
+    let dir = tempdir();
+    let store = Arc::new(LogStore::open(dir.join("logs.redb")).unwrap());
+    // 20 records across ts 1000..1019.
+    let recs: Vec<LogRecord> = (0..20)
+        .map(|i| rec(1000 + i, i as u64, &format!("line {i}")))
+        .collect();
+    store.write_batch(&recs).unwrap();
+
+    let session = Arc::new(
+        zenoh::open(harness::isolated_config())
+            .await
+            .expect("open zenoh"),
+    );
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let producer = format!("test_{nanos}/logs");
+    let (ring, _cap) = query::new_ring(100); // empty ring; the store answers
+    tokio::spawn(query::run_events(
+        session.clone(),
+        producer.clone(),
+        ring,
+        Some(store),
+    ));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let events_key = zensight_common::command::query_key(&producer, "events");
+    let get = |sel: String| {
+        let session = session.clone();
+        async move {
+            let replies = session
+                .get(&sel)
+                .timeout(Duration::from_secs(5))
+                .await
+                .expect("get");
+            let reply = replies.recv_async().await.expect("reply");
+            let sample = reply.result().expect("ok");
+            serde_json::from_slice::<Vec<LogRecord>>(&sample.payload().to_bytes()).expect("decode")
+        }
+    };
+
+    // Time window [1005, 1012], first page of 4 → newest-first 1012..1009.
+    let page1 = get(format!("{events_key}?from=1005;to=1012;limit=4")).await;
+    assert_eq!(
+        page1.iter().map(|r| r.ts).collect::<Vec<_>>(),
+        vec![1012, 1011, 1010, 1009]
+    );
+    // Next page via the cursor (last/oldest uid of page1).
+    let cursor = &page1.last().unwrap().uid;
+    let page2 = get(format!(
+        "{events_key}?from=1005;to=1012;after_uid={cursor};limit=4"
+    ))
+    .await;
+    assert_eq!(
+        page2.iter().map(|r| r.ts).collect::<Vec<_>>(),
+        vec![1008, 1007, 1006, 1005],
+        "pagination continues strictly older, still bounded to the window"
+    );
+}
+
 fn tempdir() -> std::path::PathBuf {
     let base = std::env::temp_dir().join(format!(
         "zensight-logs-{}-{}",
