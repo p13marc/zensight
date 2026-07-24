@@ -9,7 +9,7 @@ use iced::widget::{Row, column, container, pick_list, row, scrollable, text, tex
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
-use zensight_common::{TelemetryPoint, TelemetryValue};
+use zensight_common::{ArtifactKind, LogBundleFormat, Protocol, TelemetryPoint, TelemetryValue};
 
 use zensight_common::registry::logs::Subject as LogsSubject;
 
@@ -375,7 +375,7 @@ pub fn syslog_event_view<'a>(
         .spacing(space::MD)
         .padding(space::LG);
     if filter_state.panel_open {
-        content = content.push(card(render_filter_panel(messages, filter_state)));
+        content = content.push(card(render_filter_panel(messages, filter_state, None)));
     }
     // Log statistics (#350): severity summary + derived rollups behind ONE
     // collapsible header (default closed) so the log stream is on screen
@@ -530,9 +530,75 @@ fn render_logs_rollup<'a>(
 /// Top-level **Logs** view: a unified, filterable feed of recent log lines from
 /// every syslog/journald source (fed by the app's rolling buffer), independent
 /// of any single device. This is the discoverable home for logs.
+/// Availability of the filtered log-bundle export (#555) for the Logs feed.
+/// `Some` only when the logs sensor advertises a `logbundle` artifact kind; the
+/// button is disabled while any artifact transfer is already in flight (`busy`).
+#[derive(Debug, Clone, Copy)]
+pub struct LogExport {
+    /// Advertised max line count for one bundle (0 = sensor default).
+    pub max_lines: u64,
+    /// An artifact transfer is already running — disable the button.
+    pub busy: bool,
+}
+
+/// Map the active Logs filter onto a `LogBundle` artifact request, so the export
+/// carries the same selectors that scope the on-screen feed (#553 parity). Filter
+/// dimensions the bundle can't express (facility / boot / unit-run, or more than
+/// one selected unit) are dropped here and surfaced by [`log_export_caveats`].
+pub fn log_bundle_kind_from_filter(filter_state: &SyslogFilterState) -> ArtifactKind {
+    let non_empty = |s: &str| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+    // A single selected unit maps cleanly; multiple units can't be expressed in
+    // one bundle request, so fall back to no unit filter (caveat surfaced).
+    let unit = if filter_state.selected_units.len() == 1 {
+        filter_state.selected_units.iter().next().cloned()
+    } else {
+        None
+    };
+    ArtifactKind::LogBundle {
+        from: None,
+        // The live-tail pause upper bound, when frozen, is the visible window's end.
+        to: filter_state.frozen_at,
+        pattern: non_empty(&filter_state.message_filter),
+        severity_min: filter_state.min_severity.map(|n| n.to_string()),
+        unit,
+        app: non_empty(&filter_state.app_filter),
+        source: None,
+        format: LogBundleFormat::default(),
+    }
+}
+
+/// Active filter dimensions the log bundle can't carry, for an honest "the export
+/// is broader than the view" caption. `None` when the export faithfully matches
+/// the on-screen filter.
+pub fn log_export_caveats(filter_state: &SyslogFilterState) -> Option<String> {
+    let mut dropped = Vec::new();
+    if !filter_state.selected_facilities.is_empty() {
+        dropped.push("facility");
+    }
+    if !filter_state.selected_boots.is_empty() {
+        dropped.push("boot");
+    }
+    if filter_state.invocation_id.is_some() {
+        dropped.push("unit-run");
+    }
+    if filter_state.selected_units.len() > 1 {
+        dropped.push("multiple units");
+    }
+    (!dropped.is_empty()).then(|| {
+        format!(
+            "export ignores {} (not expressible in a bundle)",
+            dropped.join(", ")
+        )
+    })
+}
+
 pub fn logs_view<'a>(
     messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
+    export: Option<LogExport>,
 ) -> Element<'a, Message> {
     // Header: title + count + filter toggle (no per-device back button).
     let has_filters = filter_state.has_active_filters();
@@ -602,7 +668,7 @@ pub fn logs_view<'a>(
         ));
     }
     if filter_state.panel_open {
-        content = content.push(card(render_filter_panel(messages, filter_state)));
+        content = content.push(card(render_filter_panel(messages, filter_state, export)));
     }
     content = content.push(card(render_severity_summary(messages, filter_state)));
     content = content.push(card(render_log_stream(messages, filter_state)));
@@ -656,6 +722,7 @@ fn render_header<'a>(
 fn render_filter_panel<'a>(
     messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
+    export: Option<LogExport>,
 ) -> Element<'a, Message> {
     let title = row![
         icons::toggle(IconSize::Medium),
@@ -837,7 +904,38 @@ fn render_filter_panel<'a>(
         .on_press(Message::ClearSyslogFilters)
         .style(iced::widget::button::secondary);
 
-    let buttons_row = row![apply_button, clear_button].spacing(10);
+    let mut buttons_row = row![apply_button, clear_button].spacing(10);
+    // Export the currently-filtered feed as a log bundle (#555): the active
+    // selectors ride along as a `LogBundle` request (see `log_bundle_kind_from_filter`),
+    // reusing the same @rpc/@blob download path as the per-sensor whole-store button.
+    if let Some(exp) = export {
+        let label = if exp.max_lines > 0 {
+            format!("Export filtered logs (≤{} lines)", exp.max_lines)
+        } else {
+            "Export filtered logs".to_string()
+        };
+        let mut export_button = button(row![text(label).size(13)].align_y(Alignment::Center))
+            .style(iced::widget::button::secondary);
+        if !exp.busy {
+            export_button = export_button.on_press(Message::StartArtifact {
+                producer: Protocol::Logs.as_str().to_string(),
+                kind: log_bundle_kind_from_filter(filter_state),
+                target_source: None,
+            });
+        }
+        buttons_row = buttons_row.push(export_button);
+    }
+
+    // Honest caption when the active filter has dimensions the bundle can't carry.
+    let export_note: Element<'_, Message> = match export.and(log_export_caveats(filter_state)) {
+        Some(note) => text(note)
+            .size(11)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            })
+            .into(),
+        None => text("").into(),
+    };
 
     // Stats display
     let stats_row: Element<'_, Message> = if let Some(ref stats) = filter_state.stats {
@@ -868,6 +966,7 @@ fn render_filter_panel<'a>(
         app_filter_row,
         msg_filter_row,
         buttons_row,
+        export_note,
         stats_row,
     ]
     .spacing(12);
@@ -1504,6 +1603,40 @@ mod tests {
     use super::*;
     use crate::message::DeviceId;
     use zensight_common::Protocol;
+
+    /// #555: multiple selected units can't be expressed in one bundle request,
+    /// so the mapping drops the unit filter and the caveat is surfaced.
+    #[test]
+    fn export_multi_unit_falls_back_and_is_caveated() {
+        let mut f = SyslogFilterState::default();
+        f.selected_units.insert("a.service".to_string());
+        f.selected_units.insert("b.service".to_string());
+        f.selected_facilities.insert("daemon".to_string());
+
+        match log_bundle_kind_from_filter(&f) {
+            ArtifactKind::LogBundle { unit, .. } => assert_eq!(unit, None),
+            other => panic!("expected LogBundle, got {other:?}"),
+        }
+        let note = log_export_caveats(&f).expect("caveats present");
+        assert!(note.contains("facility"), "note: {note}");
+        assert!(note.contains("multiple units"), "note: {note}");
+    }
+
+    /// #555: a single selected unit maps cleanly and a plain filter has no caveat.
+    #[test]
+    fn export_single_unit_maps_and_no_caveat() {
+        let mut f = SyslogFilterState::default();
+        f.selected_units.insert("nginx.service".to_string());
+        f.app_filter = "  nginx  ".to_string(); // trimmed
+        match log_bundle_kind_from_filter(&f) {
+            ArtifactKind::LogBundle { unit, app, .. } => {
+                assert_eq!(unit.as_deref(), Some("nginx.service"));
+                assert_eq!(app.as_deref(), Some("nginx"));
+            }
+            other => panic!("expected LogBundle, got {other:?}"),
+        }
+        assert_eq!(log_export_caveats(&f), None);
+    }
 
     /// #554: the message filter is a case-insensitive regex, falling back to a
     /// substring match (never an error) on an invalid pattern.

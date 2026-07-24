@@ -6125,7 +6125,24 @@ impl ZenSight {
             ),
             CurrentView::Logs => {
                 let logs: Vec<_> = self.recent_logs.iter().cloned().collect();
-                crate::view::specialized::logs_view(&logs, &self.syslog_filter)
+                // Offer the filtered export only when a logs sensor advertises the
+                // `logbundle` artifact kind; disable it while a transfer is running.
+                let export = self
+                    .artifact_kinds
+                    .get(Protocol::Logs.as_str())
+                    .and_then(|kinds| {
+                        kinds.iter().find_map(|k| match &k.advert {
+                            zensight_common::KindAdvert::LogBundle { max_lines } => {
+                                Some(*max_lines)
+                            }
+                            _ => None,
+                        })
+                    })
+                    .map(|max_lines| crate::view::specialized::LogExport {
+                        max_lines,
+                        busy: self.artifact_fetch.is_busy(),
+                    });
+                crate::view::specialized::logs_view(&logs, &self.syslog_filter, export)
             }
             CurrentView::Inventory => {
                 crate::view::inventory::inventory_view(&self.inventory, &self.entities, now_ms())
