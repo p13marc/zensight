@@ -1,12 +1,14 @@
 //! Syslog message receivers (UDP, TCP, and Unix socket).
 
 use crate::config::{
-    ListenerConfig, ListenerProtocol, MultilineConfig, OverflowPolicy, SyslogConfig,
+    Framing, ListenerConfig, ListenerProtocol, MultilineConfig, OverflowPolicy, SyslogConfig,
 };
 use crate::ingest::{FrameReader, IngestStats, SharedRateLimiter, forward_parsed};
 use crate::multiline::MultilineJoiner;
-use crate::parser::{self, SyslogMessage};
+use crate::parser::{self, RfcTimeCtx, SyslogMessage};
 use anyhow::{Context, Result};
+use chrono::Utc;
+use chrono_tz::Tz;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -25,7 +27,9 @@ pub struct ReceivedMessage {
     pub message: SyslogMessage,
     /// Source address (for network protocols) or path (for Unix socket).
     pub source: MessageSource,
-    /// Resolved hostname (from aliases or reverse DNS).
+    /// Resolved hostname: `hostname_aliases` override, else the message's own
+    /// hostname header, else the peer IP. (Reverse-DNS enrichment, when enabled,
+    /// happens off this path in the evidence tracker — #552.)
     pub resolved_hostname: String,
 }
 
@@ -40,6 +44,9 @@ pub enum MessageSource {
     /// Only constructed by the feature-gated journald reader.
     #[cfg_attr(not(feature = "journald"), allow(dead_code))]
     Journald,
+    /// A tailed log file (#549). The originating path rides a label, not the
+    /// enum, so this stays a plain tag.
+    File,
 }
 
 impl std::fmt::Display for MessageSource {
@@ -48,6 +55,8 @@ impl std::fmt::Display for MessageSource {
             MessageSource::Network(addr) => write!(f, "{}", addr),
             MessageSource::Unix => write!(f, "unix"),
             MessageSource::Journald => write!(f, "journald"),
+            // `source_type=file` per #549; the path rides a separate label.
+            MessageSource::File => write!(f, "file"),
         }
     }
 }
@@ -128,6 +137,24 @@ struct IngestCtx {
     /// Multiline-join settings for the stream paths (#107). Copied per
     /// connection into a fresh [`MultilineJoiner`].
     multiline: MultilineConfig,
+    /// Default RFC 3164 sender timezone for this listener (#545). UTC unless the
+    /// listener sets `timezone`. Overridden per-sender by `host_tz`.
+    default_tz: Tz,
+    /// Per-sender RFC 3164 timezone overrides, keyed by sender IP (#545).
+    host_tz: Arc<HashMap<String, Tz>>,
+}
+
+impl IngestCtx {
+    /// Resolve the timezone for an RFC 3164 sender: per-IP override first, then
+    /// the listener default (#545). Unix senders have no IP → listener default.
+    fn tz_for(&self, source: &MessageSource) -> Tz {
+        if let MessageSource::Network(addr) = source
+            && let Some(tz) = self.host_tz.get(&addr.ip().to_string())
+        {
+            return *tz;
+        }
+        self.default_tz
+    }
 }
 
 /// Start all configured listeners and return the message channel, the shared
@@ -141,8 +168,18 @@ pub async fn start_listeners(
     Option<Arc<JournaldStats>>,
     Arc<IngestStats>,
 )> {
-    let (tx, rx) = mpsc::channel(1000);
+    // Central intake channel: capacity is configurable (#546) so operators can
+    // trade memory for burst absorption instead of the old hardcoded 1000.
+    let (tx, rx) = mpsc::channel(config.ingest.channel_capacity.max(1));
     let hostname_aliases = Arc::new(config.hostname_aliases.clone());
+
+    // Per-sender RFC 3164 timezone overrides, resolved once (#545). Validated in
+    // `validate_config`, so `parse_tz` cannot fail here.
+    let mut host_tz = HashMap::new();
+    for (host, tz) in &config.host_timezones {
+        host_tz.insert(host.clone(), crate::config::parse_tz(tz)?);
+    }
+    let host_tz = Arc::new(host_tz);
 
     // Shared network-ingest context: one stats block + one global rate limiter
     // across all network listeners (the `logs/ingest/*` series is sensor-wide).
@@ -156,13 +193,20 @@ pub async fn start_listeners(
         )),
         overflow: config.ingest.overflow,
         multiline: config.multiline,
+        // Per-listener default filled in below.
+        default_tz: Tz::UTC,
+        host_tz: host_tz.clone(),
     };
 
     for listener_config in &config.listeners {
         let tx = tx.clone();
         let aliases = hostname_aliases.clone();
         let config = listener_config.clone();
-        let ctx = ctx.clone();
+        let mut ctx = ctx.clone();
+        ctx.default_tz = match &config.timezone {
+            Some(tz) => crate::config::parse_tz(tz)?,
+            None => Tz::UTC,
+        };
 
         match config.protocol {
             ListenerProtocol::Udp => {
@@ -183,6 +227,13 @@ pub async fn start_listeners(
                 tokio::spawn(async move {
                     if let Err(e) = run_unix_listener(&config, tx, aliases, ctx).await {
                         tracing::error!("Unix listener error: {}", e);
+                    }
+                });
+            }
+            ListenerProtocol::Tls => {
+                tokio::spawn(async move {
+                    if let Err(e) = run_tls_listener(&config, tx, aliases, ctx).await {
+                        tracing::error!("TLS listener error: {}", e);
                     }
                 });
             }
@@ -213,6 +264,25 @@ pub async fn start_listeners(
         tracing::warn!(
             "journald.enabled is set but this binary was built without the \
              `journald` feature; ignoring"
+        );
+    }
+
+    // File tailing source (#549): a dedicated OS thread tails glob-matched files
+    // into the same channel with blocking I/O off the runtime. Shares the network
+    // ingest stats + rate limiter (it's another ingress into the same pipeline).
+    if !config.files.sources.is_empty() {
+        let tailer = crate::file_source::FileTailer::new(
+            config.files.clone(),
+            config.resolved_source(),
+            tx.clone(),
+            ingest_stats.clone(),
+            ctx.limiter.clone(),
+            config.ingest.overflow,
+        );
+        let _handle = tailer.spawn();
+        tracing::info!(
+            sources = config.files.sources.len(),
+            "file tailing source enabled"
         );
     }
 
@@ -250,7 +320,9 @@ async fn run_udp_listener(
                 };
 
                 IngestStats::inc(&ctx.stats.received);
-                if let Some(message) = parser::parse(text) {
+                let time_ctx =
+                    RfcTimeCtx::new(ctx.tz_for(&MessageSource::Network(addr)), Utc::now());
+                if let Some(message) = parser::parse_with_time(text, &time_ctx) {
                     IngestStats::inc(&ctx.stats.parsed);
                     let resolved_hostname = resolve_hostname_network(&addr, &message, &aliases);
 
@@ -322,6 +394,7 @@ async fn run_tcp_listener(
                                 &tx,
                                 &aliases,
                                 &ctx,
+                                None,
                             )
                             .await
                             {
@@ -346,6 +419,123 @@ async fn run_tcp_listener(
 /// wire via [`FrameReader`], then parse + account + forward each (#106). Shared
 /// by the TCP and Unix listeners — only the [`MessageSource`] and hostname
 /// resolution differ (resolved from the per-frame `source`).
+/// Run a TLS syslog listener (#550, RFC 5425): TLS over TCP with octet-counting
+/// framing. Certs are hot-reloaded on mtime change (rotation without restart);
+/// with `client_ca_file` set, clients must present a cert verified against it,
+/// and its CN is attached as `sd.tls.peer_cn`.
+async fn run_tls_listener(
+    config: &ListenerConfig,
+    tx: mpsc::Sender<ReceivedMessage>,
+    aliases: Arc<HashMap<String, String>>,
+    ctx: IngestCtx,
+) -> Result<()> {
+    use tokio_rustls::TlsAcceptor;
+
+    let tls_cfg = config
+        .tls
+        .as_ref()
+        .context("tls listener has no tls config")?
+        .clone();
+    let listener = TcpListener::bind(&config.bind)
+        .await
+        .with_context(|| format!("Failed to bind TLS socket to {}", config.bind))?;
+
+    // Reloadable server config: built once, swapped by a background mtime watcher
+    // so cert rotation needs no restart.
+    let server_config = Arc::new(std::sync::Mutex::new(crate::tls::load_server_config(
+        &tls_cfg,
+    )?));
+    tracing::info!(
+        mtls = tls_cfg.client_ca_file.is_some(),
+        min_version = %tls_cfg.min_version,
+        "TLS syslog listener started on {}",
+        config.bind
+    );
+    {
+        let shared = server_config.clone();
+        let watch_cfg = tls_cfg.clone();
+        tokio::spawn(async move {
+            let mut mtimes = crate::tls::cert_mtimes(&watch_cfg);
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                let current = crate::tls::cert_mtimes(&watch_cfg);
+                if current != mtimes {
+                    match crate::tls::load_server_config(&watch_cfg) {
+                        Ok(new) => {
+                            *shared.lock().unwrap_or_else(|p| p.into_inner()) = new;
+                            mtimes = current;
+                            tracing::info!("TLS listener reloaded rotated certificate");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "TLS cert reload failed; keeping old cert");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_connections));
+    let connection_timeout = Duration::from_secs(config.connection_timeout_secs);
+    let max_frame_len = config.max_message_size;
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                let Ok(permit) = semaphore.clone().try_acquire_owned() else {
+                    tracing::warn!("Max connections reached, rejecting {}", addr);
+                    drop(stream);
+                    continue;
+                };
+                let acceptor = TlsAcceptor::from(
+                    server_config
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone(),
+                );
+                let tx = tx.clone();
+                let aliases = aliases.clone();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            // Cleartext / bad-cert / wrong-version connections land
+                            // here — rejected, not ingested.
+                            tracing::debug!("TLS handshake failed from {}: {}", addr, e);
+                            return;
+                        }
+                    };
+                    let peer_cn = {
+                        let (_io, conn) = tls_stream.get_ref();
+                        crate::tls::peer_cn(conn.peer_certificates())
+                    };
+                    // RFC 5425 mandates octet-counting framing over TLS.
+                    let mut reader = FrameReader::new(Framing::Octet, max_frame_len);
+                    if let Err(e) = handle_stream_connection(
+                        tls_stream,
+                        &mut reader,
+                        connection_timeout,
+                        MessageSource::Network(addr),
+                        &tx,
+                        &aliases,
+                        &ctx,
+                        peer_cn.as_deref(),
+                    )
+                    .await
+                    {
+                        tracing::debug!("TLS connection error from {}: {}", addr, e);
+                    }
+                });
+            }
+            Err(e) => tracing::error!("TLS accept error: {}", e),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_stream_connection<R>(
     stream: R,
     reader: &mut FrameReader,
@@ -354,6 +544,7 @@ async fn handle_stream_connection<R>(
     tx: &mpsc::Sender<ReceivedMessage>,
     aliases: &HashMap<String, String>,
     ctx: &IngestCtx,
+    peer_cn: Option<&str>,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -377,7 +568,7 @@ where
             // Idle flush: no new frame within the window → emit the buffer.
             None => {
                 if let Some(raw) = joiner.flush()
-                    && !process_record(raw, &source, tx, aliases, ctx).await
+                    && !process_record(raw, &source, tx, aliases, ctx, peer_cn).await
                 {
                     break;
                 }
@@ -386,7 +577,7 @@ where
                 IngestStats::inc(&ctx.stats.received);
                 let text = String::from_utf8_lossy(&bytes).into_owned();
                 if let Some(raw) = joiner.push(text)
-                    && !process_record(raw, &source, tx, aliases, ctx).await
+                    && !process_record(raw, &source, tx, aliases, ctx, peer_cn).await
                 {
                     break;
                 }
@@ -395,7 +586,7 @@ where
             // stack trace isn't lost.
             Some(Ok(None)) => {
                 if let Some(raw) = joiner.flush() {
-                    let _ = process_record(raw, &source, tx, aliases, ctx).await;
+                    let _ = process_record(raw, &source, tx, aliases, ctx, peer_cn).await;
                 }
                 break;
             }
@@ -415,11 +606,22 @@ async fn process_record(
     tx: &mpsc::Sender<ReceivedMessage>,
     aliases: &HashMap<String, String>,
     ctx: &IngestCtx,
+    peer_cn: Option<&str>,
 ) -> bool {
-    let Some(message) = parser::parse(&raw) else {
+    let time_ctx = RfcTimeCtx::new(ctx.tz_for(source), Utc::now());
+    let Some(mut message) = parser::parse_with_time(&raw, &time_ctx) else {
         IngestStats::inc(&ctx.stats.parse_failed);
         return true;
     };
+    // mTLS peer identity (#550): surface the client-cert CN as `sd.tls.peer_cn`
+    // for sender attribution / observer evidence.
+    if let Some(cn) = peer_cn {
+        message
+            .structured_data
+            .entry("tls".to_string())
+            .or_default()
+            .insert("peer_cn".to_string(), cn.to_string());
+    }
     IngestStats::inc(&ctx.stats.parsed);
     let resolved_hostname = match source {
         MessageSource::Network(addr) => resolve_hostname_network(addr, &message, aliases),
@@ -496,6 +698,7 @@ async fn run_unix_listener(
                                 &tx,
                                 &aliases,
                                 &ctx,
+                                None,
                             )
                             .await
                             {
@@ -625,6 +828,15 @@ pub fn to_telemetry_point(
 
     // Add source information
     labels.insert("source_type".to_string(), received.source.to_string());
+
+    // Mark records whose timestamp we had to substitute (#545) so consumers can
+    // tell a receive-clock stamp from a sender stamp.
+    if msg.ts_source == crate::parser::TsSource::Receiver {
+        labels.insert(
+            "ts_source".to_string(),
+            msg.ts_source.as_label().to_string(),
+        );
+    }
 
     // Add raw message if configured. This doubles as OTel `log.record.original`.
     if include_raw {

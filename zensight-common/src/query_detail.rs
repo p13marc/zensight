@@ -665,6 +665,148 @@ pub struct CgroupPid {
     pub comm: String,
 }
 
+/// The one canonical syslog severity model (#557): RFC 5424 0–7, with the slug
+/// / display-label / OTel-number mappings every layer needs. Consumed by the
+/// sensor parser, the wire `LogRecord`, and both GUI views (which previously
+/// each defined their own copy, and had drifted). The wire stays slug+number.
+///
+/// Ordering follows the RFC number: `Emergency` (0) is the *most* severe, so
+/// `a <= b` means "a is at least as severe as b".
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[repr(u8)]
+pub enum LogSeverity {
+    Emergency = 0,
+    Alert = 1,
+    Critical = 2,
+    Error = 3,
+    Warning = 4,
+    Notice = 5,
+    Informational = 6,
+    Debug = 7,
+}
+
+impl LogSeverity {
+    /// Strict parse from a numeric code (0–7); `None` out of range.
+    pub fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => Self::Emergency,
+            1 => Self::Alert,
+            2 => Self::Critical,
+            3 => Self::Error,
+            4 => Self::Warning,
+            5 => Self::Notice,
+            6 => Self::Informational,
+            7 => Self::Debug,
+            _ => return None,
+        })
+    }
+
+    /// Lenient parse from a numeric value; out-of-range clamps to `Debug`.
+    pub fn from_value(val: u64) -> Self {
+        Self::from_code(val.min(7) as u8).unwrap_or(Self::Debug)
+    }
+
+    /// Parse from a severity slug (`emerg`/`err`/`warning`/…, plus common
+    /// aliases). `None` for anything unrecognized.
+    pub fn from_slug(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "emerg" | "emergency" => Self::Emergency,
+            "alert" => Self::Alert,
+            "crit" | "critical" => Self::Critical,
+            "err" | "error" => Self::Error,
+            "warning" | "warn" => Self::Warning,
+            "notice" => Self::Notice,
+            "info" | "informational" => Self::Informational,
+            "debug" => Self::Debug,
+            _ => return None,
+        })
+    }
+
+    /// Alias of [`from_slug`](Self::from_slug) (the name the overview used).
+    pub fn from_label(s: &str) -> Option<Self> {
+        Self::from_slug(s)
+    }
+
+    /// The lowercase wire slug (`emerg`/`err`/`warning`/…).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Emergency => "emerg",
+            Self::Alert => "alert",
+            Self::Critical => "crit",
+            Self::Error => "err",
+            Self::Warning => "warning",
+            Self::Notice => "notice",
+            Self::Informational => "info",
+            Self::Debug => "debug",
+        }
+    }
+
+    /// The uppercase display label (`EMERG`/`ERR`/`WARN`/…) for badges.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Emergency => "EMERG",
+            Self::Alert => "ALERT",
+            Self::Critical => "CRIT",
+            Self::Error => "ERR",
+            Self::Warning => "WARN",
+            Self::Notice => "NOTICE",
+            Self::Informational => "INFO",
+            Self::Debug => "DEBUG",
+        }
+    }
+
+    /// OTel `severity_number` (1–24) for this syslog severity (#104).
+    pub fn otel_severity_number(&self) -> u8 {
+        match self {
+            Self::Emergency => 24,
+            Self::Alert => 23,
+            Self::Critical => 22,
+            Self::Error => 17,
+            Self::Warning => 13,
+            Self::Notice => 10,
+            Self::Informational => 9,
+            Self::Debug => 5,
+        }
+    }
+
+    /// OTel `severity_text` coarse band.
+    pub fn otel_severity_text(&self) -> &'static str {
+        match self {
+            Self::Emergency | Self::Alert | Self::Critical => "FATAL",
+            Self::Error => "ERROR",
+            Self::Warning => "WARN",
+            Self::Notice | Self::Informational => "INFO",
+            Self::Debug => "DEBUG",
+        }
+    }
+
+    /// All eight severities, most-severe first — for building filter menus.
+    pub fn all() -> &'static [LogSeverity] {
+        &[
+            Self::Emergency,
+            Self::Alert,
+            Self::Critical,
+            Self::Error,
+            Self::Warning,
+            Self::Notice,
+            Self::Informational,
+            Self::Debug,
+        ]
+    }
+}
+
 /// One per-line log event, served on demand from the logs sensor's bounded
 /// ring at `@rpc/logs/events` (#358). Replaces the old streamed
 /// `zensight/logs/<host>/events/<uid>` keys — per-line events are

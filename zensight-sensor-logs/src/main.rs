@@ -6,25 +6,32 @@
 
 mod commands;
 mod config;
+mod dedup;
 mod derived;
-mod events;
+mod evidence;
+mod file_source;
 mod filter;
 mod ingest;
 #[cfg(feature = "journald")]
 mod journald;
+mod logbundle;
 mod multiline;
 mod novelty;
 mod parser;
 mod query;
 mod receiver;
+mod search;
+mod sentinel;
+mod store;
 mod telemetry_guard;
 mod template;
+mod tls;
 
 use anyhow::Result;
 use commands::{FilterCommand, FilterStatus};
 use config::SyslogSensorConfig;
-use events::EventDetector;
 use filter::FilterManager;
+use sentinel::LogSentinel;
 use std::sync::Arc;
 use zensight_common::serialization::encode;
 use zensight_common::telemetry::Protocol;
@@ -36,6 +43,10 @@ use zensight_sensor_core::{
 /// (#104) when multiple lines share a millisecond timestamp.
 static LOG_EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// While loss persists, re-report every this many monitor windows (#546) so a
+/// long partial-loss state keeps surfacing instead of being reported once.
+const LOSS_REREPORT_WINDOWS: u32 = 6;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI arguments
@@ -44,33 +55,17 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = SyslogSensorConfig::load_from_file(&args.config)?;
     let source = config.syslog.resolved_source();
+    tracing::info!(summary = %config.startup_summary(), "syslog sensor configuration");
 
     // Create the sensor runner
     let runner = SensorRunner::new_with_args("logs", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Enable status publishing
-
-    // On-demand debug-report (the artifact channel): bundle redacted config + health +
-    // counters. No-op unless `report.enabled` is set in the config.
-    let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
-        "logs",
-        source.clone(),
-        runner.config().clone(),
-        runner.health(),
-    ));
-    // Tier-2 directory snapshots (the artifact channel). No-op unless `snapshot.enabled`.
-    let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_identity().with_artifacts(vec![
-        std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
-            report_source,
-            &artifacts.report,
-        )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-        std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
-            &artifacts.snapshot,
-        )),
-    ]);
+    // Enable status publishing. Artifact producers are registered later
+    // (`with_artifacts`), once the log store + ring the `logbundle` producer
+    // (#555) reads from exist — see below.
+    let runner = runner.with_identity();
 
     // Get session and config for the receiver
     let session = runner.session().clone();
@@ -191,8 +186,11 @@ async fn main() -> Result<()> {
     let budget_alerts_on = syslog_config.derived && syslog_config.error_budget.enabled;
     // Novelty / rate-spike (#103) needs the template miner to feed it `template_id`s.
     let novelty_alerts_on = syslog_config.templating.enabled && syslog_config.novelty.enabled;
+    // Log sentinel (#543): on when the operator declared rules, or the built-in
+    // known-events are active (they ride the journald `detect_events` gate).
+    let sentinel_on = journald_events_on || !syslog_config.sentinel.rules.is_empty();
     let alert_reporter: Option<Arc<AlertReporter>> =
-        if journald_events_on || budget_alerts_on || novelty_alerts_on {
+        if journald_events_on || budget_alerts_on || novelty_alerts_on || sentinel_on {
             let reporter = AlertReporter::new(runner.publisher(), Protocol::Logs, format);
             // Stamp alerts with the host identity envelope when available.
             let reporter = match runner.identity() {
@@ -219,23 +217,43 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Known systemd-event detection → alerts (#61). Only when journald is the
-    // source and detection is enabled; the alert path is otherwise untouched.
-    let event_detector: Option<Arc<EventDetector>> =
-        match (&syslog_config.journald, &alert_reporter) {
-            (Some(j), Some(reporter)) if j.enabled && j.detect_events => {
-                let detector = Arc::new(EventDetector::new(
-                    reporter.clone(),
-                    j.event_dedup_secs,
-                    &j.event_severity,
-                ));
-                // Auto-resolve fired events after their dedup window.
-                runner.spawn(detector.clone().run_reconcile_loop());
-                tracing::info!("journald known-event detection enabled");
-                Some(detector)
+    // Log sentinel (#543): declarative pattern→alert rules evaluated per intake
+    // line, folding the journald known-events (#61) in as built-in rules. Runs
+    // whenever a reporter exists and there's something to evaluate.
+    let log_sentinel: Option<Arc<LogSentinel>> = alert_reporter
+        .as_ref()
+        .filter(|_| sentinel_on)
+        .map(|reporter| {
+            let mut rules_cfg = syslog_config.sentinel.clone();
+            // Built-in known-events ride the journald `detect_events` gate: keep
+            // them off when journald detection is off, preserving the old opt-out.
+            rules_cfg.include_builtins = rules_cfg.include_builtins && journald_events_on;
+            let sentinel = Arc::new(LogSentinel::new(source.clone(), rules_cfg));
+            runner.spawn(sentinel.clone().run_reconcile_loop(reporter.clone()));
+            runner.spawn(sentinel::serve_rules(
+                session.clone(),
+                "logs".to_string(),
+                sentinel.handle(),
+            ));
+            // #543 deprecation: the journald known-event severity override is
+            // gone; point operators at the sentinel-rule replacement.
+            if let Some(j) = &syslog_config.journald
+                && !j.event_severity.is_empty()
+            {
+                tracing::warn!(
+                    "journald.event_severity is deprecated and ignored (#543); \
+                     override a known-event by adding a sentinel rule with the \
+                     same id (coredump/unit-failed/oomd-kill/kernel-oom)"
+                );
             }
-            _ => None,
-        };
+            let rule_count = syslog_config.sentinel.rules.len();
+            tracing::info!(
+                rules = rule_count,
+                builtins = journald_events_on,
+                "log sentinel enabled"
+            );
+            sentinel
+        });
 
     // journald robustness monitor (#62): periodically snapshot the reader's
     // read/published/dropped/sampled counters; on sustained loss raise an
@@ -252,7 +270,10 @@ async fn main() -> Result<()> {
             use std::time::Duration;
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             let mut prev = stats.snapshot();
+            // Level-triggered (#546): re-report periodically while loss persists,
+            // and emit an explicit recovery report on clearing.
             let mut alerting = false;
+            let mut windows_lossy: u32 = 0;
             loop {
                 tick.tick().await;
                 let cur = stats.snapshot();
@@ -260,8 +281,10 @@ async fn main() -> Result<()> {
                 let dropped = cur.dropped.saturating_sub(prev.dropped);
                 let sampled = cur.sampled_out.saturating_sub(prev.sampled_out);
                 if loss > drop_alert_ratio && (dropped + sampled) > 0 {
-                    // Edge-triggered: report once on entering the lossy state.
-                    if !alerting {
+                    windows_lossy += 1;
+                    // Report on entering, then every LOSS_REREPORT_WINDOWS while
+                    // still lossy — so a long partial-loss state keeps surfacing.
+                    if !alerting || windows_lossy.is_multiple_of(LOSS_REREPORT_WINDOWS) {
                         alerting = true;
                         let report = zensight_sensor_core::ErrorReport::new(
                             zensight_sensor_core::ErrorType::Other,
@@ -284,6 +307,14 @@ async fn main() -> Result<()> {
                     }
                 } else if alerting {
                     alerting = false;
+                    windows_lossy = 0;
+                    let report = zensight_sensor_core::ErrorReport::new(
+                        zensight_sensor_core::ErrorType::Other,
+                        "journald log loss recovered — drop rate back under threshold",
+                    );
+                    if let Err(e) = health.publish_error(&report).await {
+                        tracing::warn!(error = %e, "failed to publish journald recovery report");
+                    }
                     tracing::info!("journald: log loss recovered");
                 }
                 prev = cur;
@@ -313,12 +344,22 @@ async fn main() -> Result<()> {
             let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
             let mut prev = stats.snapshot();
             let mut alerting = false;
+            let mut windows_lossy: u32 = 0;
             loop {
                 tick.tick().await;
                 let cur = stats.snapshot();
+                let loss = cur.loss_ratio_since(&prev);
+                let dropped = cur.dropped.saturating_sub(prev.dropped);
 
-                // Publish the ingest counters as telemetry.
-                for point in cur.to_points(&source) {
+                // Publish the ingest counters + a windowed `dropped_ratio` gauge
+                // (#546) so dashboards can alert on sustained loss directly.
+                let mut points = cur.to_points(&source);
+                points.push(telemetry_guard::checked_point(
+                    &source,
+                    "ingest/dropped_ratio",
+                    zensight_common::telemetry::TelemetryValue::Gauge(loss),
+                ));
+                for point in points {
                     let key = format!("{}/{}", v1_prefix_tick, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
@@ -333,11 +374,11 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Sustained-loss health alert (edge-triggered, mirrors journald).
-                let loss = cur.loss_ratio_since(&prev);
-                let dropped = cur.dropped.saturating_sub(prev.dropped);
+                // Sustained-loss health alert — level-triggered (#546): report on
+                // entering, re-report periodically while lossy, recovery on clear.
                 if loss > drop_alert_ratio && dropped > 0 {
-                    if !alerting {
+                    windows_lossy += 1;
+                    if !alerting || windows_lossy.is_multiple_of(LOSS_REREPORT_WINDOWS) {
                         alerting = true;
                         let report = zensight_sensor_core::ErrorReport::new(
                             zensight_sensor_core::ErrorType::Other,
@@ -359,6 +400,14 @@ async fn main() -> Result<()> {
                     }
                 } else if alerting {
                     alerting = false;
+                    windows_lossy = 0;
+                    let report = zensight_sensor_core::ErrorReport::new(
+                        zensight_sensor_core::ErrorType::Other,
+                        "network ingest log loss recovered — drop rate back under threshold",
+                    );
+                    if let Err(e) = health.publish_error(&report).await {
+                        tracing::warn!(error = %e, "failed to publish ingest recovery report");
+                    }
                     tracing::info!("network ingest: log loss recovered");
                 }
                 prev = cur;
@@ -540,30 +589,184 @@ async fn main() -> Result<()> {
         tracing::info!("log novelty / rate-spike detection enabled");
     }
 
+    // Durable log store (#544): a disk-backed history behind the hot ring, so
+    // `@rpc/logs/events` can serve days back across restarts. Opt-in. The intake
+    // loop only pushes to `store_tx`; a dedicated writer task batches to disk so
+    // a slow disk never adds latency to ingestion.
+    let store_cfg = &syslog_config.store;
+    let (log_store, store_tx, store_counters) = if store_cfg.enabled {
+        match store::resolve_store_path(store_cfg.path.as_deref()) {
+            Some(path) => match store::LogStore::open(&path) {
+                Ok(s) => {
+                    let store = Arc::new(s);
+                    let counters = Arc::new(store::StoreCounters::default());
+                    let (tx, rx) = tokio::sync::mpsc::channel::<zensight_common::LogRecord>(
+                        store_cfg.queue_capacity.max(1),
+                    );
+                    // Writer task: batch-append off the hot path.
+                    runner.spawn(store_writer_loop(
+                        store.clone(),
+                        rx,
+                        counters.clone(),
+                        store_cfg.batch_size.max(1),
+                        std::time::Duration::from_secs(store_cfg.flush_interval_secs.max(1)),
+                    ));
+                    // Prune + health task.
+                    runner.spawn(store_maintenance_loop(
+                        store.clone(),
+                        counters.clone(),
+                        registry.clone(),
+                        source.clone(),
+                        format,
+                        store_cfg.clone(),
+                    ));
+                    tracing::info!(path = %path.display(), "durable log store enabled");
+                    (Some(store), Some(tx), Some(counters))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, path = %path.display(), "failed to open log store; disabling");
+                    (None, None, None)
+                }
+            },
+            None => {
+                tracing::warn!("log store enabled but no state dir resolved; disabling");
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
     // Per-line event ring + on-demand query channel (#358): log lines are
-    // served from `@rpc/logs/events`, never streamed on the telemetry bus.
+    // served from `@rpc/logs/events`, never streamed on the telemetry bus. When
+    // the durable store is on, historical (`from`/`to`/`after_uid`) queries are
+    // answered from it; recent ones from the ring.
     let (event_ring, event_ring_capacity) = query::new_ring(syslog_config.events_ring_capacity);
     runner.spawn(query::run_events(
         session.clone(),
         "logs".to_string(),
         event_ring.clone(),
+        log_store.clone(),
     ));
+
+    // Register artifact producers now that the store + ring exist (#555). The
+    // `logbundle` producer reads from both; report/snapshot need only the runner.
+    {
+        let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
+            "logs",
+            source.clone(),
+            runner.config().clone(),
+            runner.health(),
+        ));
+        let artifacts = runner.config().artifact_limits();
+        runner = runner.with_artifacts(vec![
+            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+                report_source,
+                &artifacts.report,
+            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+                &artifacts.snapshot,
+            )),
+            std::sync::Arc::new(logbundle::LogBundleProducer::new(
+                &syslog_config.logbundle,
+                source.clone(),
+                log_store.clone(),
+                event_ring.clone(),
+            )),
+        ]);
+    }
+
+    // Observer evidence (#552): track remote senders and publish a HostEvidence
+    // claim per device on `evidence/device/*` (Evidence QoS, cache-1 for late
+    // correlator joins) so they reach the entity catalog. No-op without network
+    // sources (only Network peers are "observed devices").
+    let has_network = syslog_config
+        .listeners
+        .iter()
+        .any(|l| !matches!(l.protocol, config::ListenerProtocol::Unix));
+    let evidence_tracker = (syslog_config.evidence.enabled && has_network).then(|| {
+        let tracker = Arc::new(evidence::EvidenceTracker::new(
+            syslog_config.evidence.clone(),
+        ));
+        let ev_registry = Arc::new(
+            zensight_sensor_core::AdvancedPublisherRegistry::new(
+                session.clone(),
+                zensight_sensor_core::v1::V1Context::for_producer(
+                    &zensight_common::PROFILE,
+                    "logs",
+                )
+                .telemetry_prefix(),
+                format,
+                zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            )
+            .with_qos(zensight_common::QosClass::Evidence),
+        );
+        let refresh = std::time::Duration::from_secs(syslog_config.evidence.refresh_secs.max(1));
+        let t = tracker.clone();
+        runner.spawn(async move {
+            let mut tick = tokio::time::interval(refresh);
+            loop {
+                tick.tick().await;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let t2 = t.clone();
+                // Reverse-DNS (if enabled) blocks → build claims off the runtime.
+                let claims =
+                    match tokio::task::spawn_blocking(move || t2.build_claims(now_ms)).await {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                for (device, claim) in claims {
+                    let key = zensight_common::host_evidence_key("logs", &device);
+                    if let Err(e) = ev_registry.publish_serializable(&key, &claim).await {
+                        tracing::warn!(device = %device, error = %e, "evidence publish failed");
+                    }
+                }
+            }
+        });
+        tracing::info!("observer evidence enabled");
+        tracker
+    });
 
     // Spawn the message processing task
     let publish_health = runner.health();
+    let evidence_loop = evidence_tracker.clone();
     let aggregator_loop = aggregator.clone();
     let template_loop = template_agg.clone();
     let novelty_loop = novelty.clone();
     let novelty_reporter = novelty.is_some().then(|| alert_reporter.clone()).flatten();
+    let sentinel_loop = log_sentinel.clone();
+    let sentinel_reporter = log_sentinel
+        .is_some()
+        .then(|| alert_reporter.clone())
+        .flatten();
+    let store_tx_loop = store_tx.clone();
+    let store_counters_loop = store_counters.clone();
+    // Repeat collapse (#546): fold consecutive identical lines into one record +
+    // `repeat_count`. Opt-in; `None` = pass every line straight through.
+    let mut collapser = syslog_config.ingest.collapse_repeats.then(|| {
+        dedup::RepeatCollapser::new(std::time::Duration::from_millis(
+            syslog_config.ingest.collapse_window_ms.max(1),
+        ))
+    });
     runner.spawn(async move {
+        // Flush timer for the collapser's trailing run (a run that ends without a
+        // following different line). Cheap fixed tick; a no-op when collapse is off.
+        let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             tokio::select! {
                 Some(received) = rx.recv() => {
-                    // Known-event detection runs before filtering so a coredump
-                    // or unit failure still alerts even if it's filtered from the
-                    // telemetry stream.
-                    if let Some(detector) = &event_detector {
-                        detector.on_message(&received.message, &received.resolved_hostname).await;
+                    // Observer evidence (#552): record the sender before filtering
+                    // (a device whose logs are filtered still exists). Pure map
+                    // update — no I/O on the hot path.
+                    if let Some(ev) = &evidence_loop {
+                        ev.observe(&received, chrono::Utc::now().timestamp_millis());
+                    }
+
+                    // Sentinel rules (#543) run before filtering so a coredump,
+                    // unit failure, or operator-declared pattern still alerts even
+                    // when the line is filtered from the telemetry stream.
+                    if let (Some(s), Some(r)) = (&sentinel_loop, &sentinel_reporter) {
+                        s.observe(r, &received.message, std::time::Instant::now()).await;
                     }
 
                     // Apply filter
@@ -576,70 +779,36 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    // Feed derived rollups (#63) — counts what's actually
-                    // published (post-filter), alongside the per-message point.
+                    // Feed derived rollups (#63) — counts every post-filter line
+                    // (before collapse, so totals stay honest even when identical
+                    // lines fold into one ring record).
                     if let Some(agg) = &aggregator_loop {
                         agg.observe(&received.message);
                     }
 
-                    // Per-line event uid (#104): timestamp-prefixed + monotonic
-                    // sequence, so each log line gets a unique, time-sortable key
-                    // (`events/<uid>`) instead of last-writer-wins facility/severity.
-                    let ts_ms = received
-                        .message
-                        .timestamp
-                        .map(|dt| dt.timestamp_millis())
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                    let seq = LOG_EVENT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let uid = receiver::make_log_uid(ts_ms, seq);
-
-                    // Convert to telemetry point
-                    let mut point = receiver::to_telemetry_point(&received, include_raw, &uid);
-
-                    // Log-template mining (#102): mine the message text and
-                    // attach the stable template id + masked template as labels.
-                    if let Some(tagg) = &template_loop {
-                        let is_error = (received.message.severity as u8)
-                            <= (parser::Severity::Error as u8);
-                        if let Some(mined) = tagg.observe(&received.message.message, is_error) {
-                            // Novelty detection (#103): a never-before-seen shape
-                            // (after warm-up) fires a one-shot `log-novelty`
-                            // anomaly; the tick task ages it out / reconciles.
-                            if let (Some(tracker), Some(reporter)) =
-                                (&novelty_loop, &novelty_reporter)
-                                && let Some(alert) = tracker.observe(
-                                    &mined.id,
-                                    &mined.template,
-                                    std::time::Instant::now(),
-                                )
-                            {
-                                let key = alert.alert_key();
-                                if let Err(e) = reporter
-                                    .observe(alert, Some(std::time::Duration::ZERO))
-                                    .await
-                                {
-                                    tracing::warn!(error = %e, alert = %key, "failed to publish novelty alert");
-                                }
-                            }
-                            point.labels.insert("template_id".to_string(), mined.id);
-                            point.labels.insert("template".to_string(), mined.template);
-                        }
+                    // Repeat collapse: a folded line is suppressed here and emitted
+                    // once its run closes (a different line, or the flush tick).
+                    let to_emit = match &mut collapser {
+                        Some(c) => c.observe(received, std::time::Instant::now()),
+                        None => Some((received, 1)),
+                    };
+                    if let Some((record, count)) = to_emit {
+                        emit_line(
+                            &record, count, include_raw, &template_loop, &novelty_loop,
+                            &novelty_reporter, &event_ring, event_ring_capacity, &publish_health,
+                            &store_tx_loop, &store_counters_loop,
+                        ).await;
                     }
-
-                    // Ring, don't stream (#358): the per-line event goes into
-                    // the bounded `@rpc/logs/events` ring for on-demand pulls.
-                    // Only the derived rollups above ride the telemetry bus.
-                    if let Some(record) = zensight_common::LogRecord::from_point(&point) {
-                        query::push(&event_ring, event_ring_capacity, record);
-                        // Count ring-appended lines so the Sensors view still
-                        // reflects this sensor's throughput (#62).
-                        publish_health.record_metrics_published(1);
-                        tracing::trace!(
-                            "Ringed: events/{} from {} [{}]",
-                            uid,
-                            received.resolved_hostname,
-                            received.message.severity.as_str()
-                        );
+                }
+                _ = flush_tick.tick() => {
+                    if let Some(c) = &mut collapser
+                        && let Some((record, count)) = c.flush_due(std::time::Instant::now())
+                    {
+                        emit_line(
+                            &record, count, include_raw, &template_loop, &novelty_loop,
+                            &novelty_reporter, &event_ring, event_ring_capacity, &publish_health,
+                            &store_tx_loop, &store_counters_loop,
+                        ).await;
                     }
                 }
                 else => break,
@@ -652,6 +821,207 @@ async fn main() -> Result<()> {
         .run_with_metadata(Some(metadata))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Emit one processed log line to the `@rpc/logs/events` ring (#358): build the
+/// per-line uid + telemetry point, run template mining / novelty on it, and push
+/// it. Shared by the live-recv and repeat-collapse-flush paths (#546) so both
+/// treat a line identically; `repeat_count > 1` folds a collapsed run and is
+/// surfaced as a `repeat_count` label.
+#[allow(clippy::too_many_arguments)]
+async fn emit_line(
+    received: &receiver::ReceivedMessage,
+    repeat_count: u64,
+    include_raw: bool,
+    template: &Option<Arc<template::TemplateAggregator>>,
+    novelty: &Option<Arc<novelty::NoveltyTracker>>,
+    novelty_reporter: &Option<Arc<AlertReporter>>,
+    event_ring: &query::EventRing,
+    event_ring_capacity: usize,
+    health: &Arc<zensight_sensor_core::SensorHealth>,
+    store_tx: &Option<tokio::sync::mpsc::Sender<zensight_common::LogRecord>>,
+    store_counters: &Option<Arc<store::StoreCounters>>,
+) {
+    use std::sync::atomic::Ordering;
+
+    let ts_ms = received
+        .message
+        .timestamp
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let seq = LOG_EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let uid = receiver::make_log_uid(ts_ms, seq);
+
+    let mut point = receiver::to_telemetry_point(received, include_raw, &uid);
+    if repeat_count > 1 {
+        point
+            .labels
+            .insert("repeat_count".to_string(), repeat_count.to_string());
+    }
+
+    // Log-template mining (#102) + novelty (#103) on the representative line.
+    if let Some(tagg) = template {
+        let is_error = (received.message.severity as u8) <= (parser::Severity::Error as u8);
+        if let Some(mined) = tagg.observe(&received.message.message, is_error) {
+            if let (Some(tracker), Some(reporter)) = (novelty, novelty_reporter)
+                && let Some(alert) =
+                    tracker.observe(&mined.id, &mined.template, std::time::Instant::now())
+            {
+                let key = alert.alert_key();
+                if let Err(e) = reporter
+                    .observe(alert, Some(std::time::Duration::ZERO))
+                    .await
+                {
+                    tracing::warn!(error = %e, alert = %key, "failed to publish novelty alert");
+                }
+            }
+            point.labels.insert("template_id".to_string(), mined.id);
+            point.labels.insert("template".to_string(), mined.template);
+        }
+    }
+
+    if let Some(record) = zensight_common::LogRecord::from_point(&point) {
+        // Durable store (#544): hand a copy to the writer task off the hot path.
+        // A full writer queue drops + counts rather than back-pressuring intake.
+        if let Some(tx) = store_tx
+            && tx.try_send(record.clone()).is_err()
+            && let Some(c) = store_counters
+        {
+            store::StoreCounters::inc(&c.dropped);
+        }
+        query::push(event_ring, event_ring_capacity, record);
+        health.record_metrics_published(1);
+    }
+}
+
+/// Durable-store writer task (#544): drain the intake channel, batch, and write
+/// on a blocking thread so disk I/O never touches the hot loop.
+async fn store_writer_loop(
+    store: Arc<store::LogStore>,
+    mut rx: tokio::sync::mpsc::Receiver<zensight_common::LogRecord>,
+    counters: Arc<store::StoreCounters>,
+    batch_size: usize,
+    flush_interval: std::time::Duration,
+) {
+    let mut batch: Vec<zensight_common::LogRecord> = Vec::with_capacity(batch_size);
+    let mut tick = tokio::time::interval(flush_interval);
+    loop {
+        tokio::select! {
+            got = rx.recv() => match got {
+                Some(rec) => {
+                    batch.push(rec);
+                    if batch.len() >= batch_size {
+                        flush_store_batch(&store, &mut batch, &counters).await;
+                    }
+                }
+                None => {
+                    // Channel closed (shutdown): final flush and stop.
+                    flush_store_batch(&store, &mut batch, &counters).await;
+                    break;
+                }
+            },
+            _ = tick.tick() => flush_store_batch(&store, &mut batch, &counters).await,
+        }
+    }
+}
+
+/// Write and clear `batch` (no-op if empty), updating counters.
+async fn flush_store_batch(
+    store: &Arc<store::LogStore>,
+    batch: &mut Vec<zensight_common::LogRecord>,
+    counters: &Arc<store::StoreCounters>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let recs = std::mem::take(batch);
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.write_batch(&recs)).await {
+        Ok(Ok(n)) => store::StoreCounters::add(&counters.written, n as u64),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "log store: batch write failed");
+            store::StoreCounters::inc(&counters.errors);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "log store: writer task panicked");
+            store::StoreCounters::inc(&counters.errors);
+        }
+    }
+}
+
+/// Durable-store maintenance task (#544): periodic prune + store health gauges
+/// (`store/records`, `store/oldest_age_secs`, `store/write_drops_total`).
+async fn store_maintenance_loop(
+    store: Arc<store::LogStore>,
+    counters: Arc<store::StoreCounters>,
+    registry: Arc<zensight_common::PublisherRegistry>,
+    source: String,
+    format: zensight_common::serialization::Format,
+    cfg: config::LogStoreConfig,
+) {
+    use std::sync::atomic::Ordering;
+    let prefix =
+        zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "logs")
+            .telemetry_prefix();
+    let max_age_ms = (cfg.max_age_days as i64).saturating_mul(86_400_000);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+        cfg.prune_interval_secs.max(1),
+    ));
+    loop {
+        tick.tick().await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        let s = store.clone();
+        let keep = cfg.max_records;
+        match tokio::task::spawn_blocking(move || s.prune(now_ms, max_age_ms, keep)).await {
+            Ok(Ok(n)) if n > 0 => tracing::info!(pruned = n, "log store: pruned old records"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "log store: prune failed"),
+            _ => {}
+        }
+
+        let s = store.clone();
+        let stats = match tokio::task::spawn_blocking(move || s.stats()).await {
+            Ok(Ok(st)) => st,
+            _ => continue,
+        };
+        let oldest_age = stats
+            .oldest_ts
+            .map(|t| (now_ms - t).max(0) / 1000)
+            .unwrap_or(0);
+        let points = [
+            telemetry_guard::checked_point(
+                &source,
+                "store/records",
+                zensight_common::telemetry::TelemetryValue::Gauge(stats.records as f64),
+            ),
+            telemetry_guard::checked_point(
+                &source,
+                "store/oldest_age_secs",
+                zensight_common::telemetry::TelemetryValue::Gauge(oldest_age as f64),
+            ),
+            telemetry_guard::checked_point(
+                &source,
+                "store/write_drops_total",
+                zensight_common::telemetry::TelemetryValue::Counter(
+                    counters.dropped.load(Ordering::Relaxed),
+                ),
+            ),
+        ];
+        for point in points {
+            let key = format!("{}/{}", prefix, point.metric);
+            match encode(&point, format) {
+                Ok(payload) => {
+                    if let Err(e) = registry
+                        .put(&key, payload, zensight_common::QosClass::Telemetry)
+                        .await
+                    {
+                        tracing::warn!(error = %e, key, "failed to publish store metric");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to encode store metric"),
+            }
+        }
+    }
 }
 
 /// Handle a filter command.

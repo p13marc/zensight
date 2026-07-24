@@ -622,6 +622,9 @@ pub enum Message {
     },
     /// Clear the "filtered from alert <rule>" breadcrumb on the Logs view (#558).
     ClearLogsAlertPivot,
+    /// Route a global-search query into the Logs view pre-filtered to that
+    /// message pattern (#554) — the "search logs for …" pivot.
+    SearchLogsFor(String),
     /// Pivot from a Security anomaly to its netring flows (#119): fetch
     /// `@rpc/netring/flows` and filter to the offending `src`. `key` is the anomaly's
     /// `alert_key` so the result renders under the right row.

@@ -3,82 +3,43 @@
 use opentelemetry::logs::Severity;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
-/// Syslog severity levels (RFC 5424).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SyslogSeverity {
-    Emergency = 0,
-    Alert = 1,
-    Critical = 2,
-    Error = 3,
-    Warning = 4,
-    Notice = 5,
-    Informational = 6,
-    Debug = 7,
+/// Syslog severity — the one canonical model (#557), re-exported. The
+/// exporter-specific bits (combined number/name parse, OTel-crate mapping, and
+/// the full-name `severity_text` this exporter emits) are free helpers below.
+pub use zensight_common::LogSeverity as SyslogSeverity;
+
+/// Parse a severity from a number or a name (`"3"` / `"err"` / `"error"`).
+pub fn parse_severity(s: &str) -> Option<SyslogSeverity> {
+    if let Ok(n) = s.parse::<u8>() {
+        return SyslogSeverity::from_code(n);
+    }
+    SyslogSeverity::from_slug(s)
 }
 
-impl SyslogSeverity {
-    /// Parse from a string (number or name).
-    pub fn parse(s: &str) -> Option<Self> {
-        // Try numeric first
-        if let Ok(n) = s.parse::<u8>() {
-            return Self::from_number(n);
-        }
-
-        // Try name
-        match s.to_lowercase().as_str() {
-            "emergency" | "emerg" => Some(Self::Emergency),
-            "alert" => Some(Self::Alert),
-            "critical" | "crit" => Some(Self::Critical),
-            "error" | "err" => Some(Self::Error),
-            "warning" | "warn" => Some(Self::Warning),
-            "notice" => Some(Self::Notice),
-            "informational" | "info" => Some(Self::Informational),
-            "debug" => Some(Self::Debug),
-            _ => None,
-        }
+/// Map to the OpenTelemetry `Severity` enum.
+pub fn to_otel_severity(sev: SyslogSeverity) -> Severity {
+    match sev {
+        SyslogSeverity::Emergency | SyslogSeverity::Alert => Severity::Fatal,
+        SyslogSeverity::Critical | SyslogSeverity::Error => Severity::Error,
+        SyslogSeverity::Warning => Severity::Warn,
+        SyslogSeverity::Notice | SyslogSeverity::Informational => Severity::Info,
+        SyslogSeverity::Debug => Severity::Debug,
     }
+}
 
-    /// Create from numeric severity.
-    pub fn from_number(n: u8) -> Option<Self> {
-        match n {
-            0 => Some(Self::Emergency),
-            1 => Some(Self::Alert),
-            2 => Some(Self::Critical),
-            3 => Some(Self::Error),
-            4 => Some(Self::Warning),
-            5 => Some(Self::Notice),
-            6 => Some(Self::Informational),
-            7 => Some(Self::Debug),
-            _ => None,
-        }
-    }
-
-    /// Convert to OpenTelemetry Severity.
-    pub fn to_otel_severity(self) -> Severity {
-        match self {
-            Self::Emergency => Severity::Fatal,
-            Self::Alert => Severity::Fatal,
-            Self::Critical => Severity::Error,
-            Self::Error => Severity::Error,
-            Self::Warning => Severity::Warn,
-            Self::Notice => Severity::Info,
-            Self::Informational => Severity::Info,
-            Self::Debug => Severity::Debug,
-        }
-    }
-
-    /// Get the severity text name.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Emergency => "emergency",
-            Self::Alert => "alert",
-            Self::Critical => "critical",
-            Self::Error => "error",
-            Self::Warning => "warning",
-            Self::Notice => "notice",
-            Self::Informational => "info",
-            Self::Debug => "debug",
-        }
+/// The full-name severity text this exporter emits for OTel `severity_text` +
+/// the `syslog.severity` attribute (preserved from the pre-#557 mapping — note
+/// `informational` renders as `info`, matching the prior behavior).
+pub fn severity_text(sev: SyslogSeverity) -> &'static str {
+    match sev {
+        SyslogSeverity::Emergency => "emergency",
+        SyslogSeverity::Alert => "alert",
+        SyslogSeverity::Critical => "critical",
+        SyslogSeverity::Error => "error",
+        SyslogSeverity::Warning => "warning",
+        SyslogSeverity::Notice => "notice",
+        SyslogSeverity::Informational => "info",
+        SyslogSeverity::Debug => "debug",
     }
 }
 
@@ -248,7 +209,7 @@ impl LogRecord {
         let severity = point
             .labels
             .get("severity")
-            .and_then(|s| SyslogSeverity::parse(s))
+            .and_then(|s| parse_severity(s))
             .unwrap_or(SyslogSeverity::Informational);
 
         // Extract facility from labels
@@ -274,7 +235,7 @@ impl LogRecord {
 
     /// Get the OpenTelemetry severity.
     pub fn otel_severity(&self) -> Severity {
-        self.severity.to_otel_severity()
+        to_otel_severity(self.severity)
     }
 }
 
@@ -285,37 +246,25 @@ mod tests {
 
     #[test]
     fn test_syslog_severity_from_str() {
-        assert_eq!(SyslogSeverity::parse("0"), Some(SyslogSeverity::Emergency));
-        assert_eq!(SyslogSeverity::parse("3"), Some(SyslogSeverity::Error));
-        assert_eq!(SyslogSeverity::parse("7"), Some(SyslogSeverity::Debug));
+        assert_eq!(parse_severity("0"), Some(SyslogSeverity::Emergency));
+        assert_eq!(parse_severity("3"), Some(SyslogSeverity::Error));
+        assert_eq!(parse_severity("7"), Some(SyslogSeverity::Debug));
 
-        assert_eq!(
-            SyslogSeverity::parse("emergency"),
-            Some(SyslogSeverity::Emergency)
-        );
-        assert_eq!(SyslogSeverity::parse("error"), Some(SyslogSeverity::Error));
-        assert_eq!(
-            SyslogSeverity::parse("warning"),
-            Some(SyslogSeverity::Warning)
-        );
-        assert_eq!(
-            SyslogSeverity::parse("info"),
-            Some(SyslogSeverity::Informational)
-        );
+        assert_eq!(parse_severity("emergency"), Some(SyslogSeverity::Emergency));
+        assert_eq!(parse_severity("error"), Some(SyslogSeverity::Error));
+        assert_eq!(parse_severity("warning"), Some(SyslogSeverity::Warning));
+        assert_eq!(parse_severity("info"), Some(SyslogSeverity::Informational));
 
-        assert_eq!(SyslogSeverity::parse("invalid"), None);
+        assert_eq!(parse_severity("invalid"), None);
     }
 
     #[test]
     fn test_syslog_severity_to_otel() {
-        assert_eq!(
-            SyslogSeverity::Emergency.to_otel_severity(),
-            Severity::Fatal
-        );
-        assert_eq!(SyslogSeverity::Error.to_otel_severity(), Severity::Error);
-        assert_eq!(SyslogSeverity::Warning.to_otel_severity(), Severity::Warn);
-        assert_eq!(SyslogSeverity::Notice.to_otel_severity(), Severity::Info);
-        assert_eq!(SyslogSeverity::Debug.to_otel_severity(), Severity::Debug);
+        assert_eq!(to_otel_severity(SyslogSeverity::Emergency), Severity::Fatal);
+        assert_eq!(to_otel_severity(SyslogSeverity::Error), Severity::Error);
+        assert_eq!(to_otel_severity(SyslogSeverity::Warning), Severity::Warn);
+        assert_eq!(to_otel_severity(SyslogSeverity::Notice), Severity::Info);
+        assert_eq!(to_otel_severity(SyslogSeverity::Debug), Severity::Debug);
     }
 
     #[test]

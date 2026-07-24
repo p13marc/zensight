@@ -529,11 +529,14 @@ impl OtelExporter {
 
         // Set severity
         log_record.set_severity_number(record.otel_severity());
-        log_record.set_severity_text(record.severity.as_str());
+        log_record.set_severity_text(crate::logs::severity_text(record.severity));
 
         // Add attributes
         log_record.add_attribute("hostname", record.hostname.clone());
-        log_record.add_attribute("syslog.severity", record.severity.as_str().to_string());
+        log_record.add_attribute(
+            "syslog.severity",
+            crate::logs::severity_text(record.severity).to_string(),
+        );
 
         if let Some(facility) = &record.facility {
             log_record.add_attribute("syslog.facility", facility.as_str().to_string());
@@ -556,7 +559,7 @@ impl OtelExporter {
 
         trace!(
             hostname = %record.hostname,
-            severity = %record.severity.as_str(),
+            severity = %crate::logs::severity_text(record.severity),
             "Recorded log"
         );
 

@@ -625,6 +625,8 @@ pub fn map_record(
         message,
         raw: String::new(),
         version: SyslogVersion::Rfc5424,
+        // journald entries carry a real monotonic/realtime stamp.
+        ts_source: crate::parser::TsSource::Sender,
     }
 }
 

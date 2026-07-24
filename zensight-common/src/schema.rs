@@ -105,6 +105,8 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .entry("CaptureDiskStatus", summary("netring capture-to-disk status — defined in zensight-sensor-netring::command"))
         .entry("ExpectationCommand", summary("netlink sentinel expectation command — defined in zensight-sensor-netlink::command"))
         .entry("ExpectationsConfig", summary("sentinel expectations config — defined in zensight-sensor-{netlink,systemd}::sentinel"))
+        .entry("LogRulesConfig", summary("log sentinel ruleset (pattern→alert rules) — defined in zensight-sensor-logs::sentinel"))
+        .entry("RulesStatus", summary("log sentinel ruleset + per-rule hit counters — defined in zensight-sensor-logs::sentinel"))
         .entry("Vec<EventRecord>", summary("event ring records — defined in zensight-sensor-{netlink,systemd}::events"))
         .entry("Vec<AddressRecord>", summary("netlink address records — defined in zensight-sensor-netlink"))
         .entry("Vec<BandwidthRecord>", summary("bandwidth records — defined in zensight-sensor-{netlink,netring}"))

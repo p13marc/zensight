@@ -21,78 +21,21 @@ use crate::view::icons::{self, IconSize};
 use crate::view::theme;
 use crate::view::tokens::space;
 
-/// Syslog severity levels (RFC 5424).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SyslogSeverity {
-    Emergency = 0,
-    Alert = 1,
-    Critical = 2,
-    Error = 3,
-    Warning = 4,
-    Notice = 5,
-    Informational = 6,
-    Debug = 7,
-}
-
-impl SyslogSeverity {
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "emerg" | "emergency" => Some(SyslogSeverity::Emergency),
-            "alert" => Some(SyslogSeverity::Alert),
-            "crit" | "critical" => Some(SyslogSeverity::Critical),
-            "err" | "error" => Some(SyslogSeverity::Error),
-            "warning" | "warn" => Some(SyslogSeverity::Warning),
-            "notice" => Some(SyslogSeverity::Notice),
-            "info" | "informational" => Some(SyslogSeverity::Informational),
-            "debug" => Some(SyslogSeverity::Debug),
-            _ => None,
-        }
-    }
-
-    fn from_value(val: u64) -> Self {
-        match val {
-            0 => SyslogSeverity::Emergency,
-            1 => SyslogSeverity::Alert,
-            2 => SyslogSeverity::Critical,
-            3 => SyslogSeverity::Error,
-            4 => SyslogSeverity::Warning,
-            5 => SyslogSeverity::Notice,
-            6 => SyslogSeverity::Informational,
-            7 => SyslogSeverity::Debug,
-            _ => SyslogSeverity::Debug,
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            SyslogSeverity::Emergency => "EMERG",
-            SyslogSeverity::Alert => "ALERT",
-            SyslogSeverity::Critical => "CRIT",
-            SyslogSeverity::Error => "ERR",
-            SyslogSeverity::Warning => "WARN",
-            SyslogSeverity::Notice => "NOTICE",
-            SyslogSeverity::Informational => "INFO",
-            SyslogSeverity::Debug => "DEBUG",
-        }
-    }
-
-    fn color(&self) -> iced::Color {
-        match self {
-            SyslogSeverity::Emergency | SyslogSeverity::Alert => theme::SYSLOG_EMERGENCY,
-            SyslogSeverity::Critical | SyslogSeverity::Error => theme::SYSLOG_ERROR,
-            SyslogSeverity::Warning => theme::SYSLOG_WARNING,
-            SyslogSeverity::Notice => theme::SYSLOG_NOTICE,
-            SyslogSeverity::Informational => theme::SYSLOG_INFO,
-            SyslogSeverity::Debug => theme::SYSLOG_DEBUG,
-        }
-    }
-}
+/// Syslog severity — the one canonical model (#557), re-exported under the name
+/// this view has always used. `from_slug`/`from_value`/`label` are its methods;
+/// the badge color is [`theme::severity_color`] (a shared helper, since a
+/// `Color` can't live in the wire crate).
+pub use zensight_common::LogSeverity as SyslogSeverity;
 
 /// Parsed syslog message. Built from a `TelemetryPoint` via
 /// [`syslog_message_from_point`]; the app keeps a rolling buffer of these for
 /// the top-level [`logs_view`].
 #[derive(Debug, Clone)]
 pub struct SyslogMessage {
+    /// Time-sortable per-line event uid (`<13-ts_ms><12-seq>`, #104) — unique per
+    /// record. The buffer-merge dedup + sort tie-break key (#556); empty for
+    /// legacy points without a `log.record.uid` label.
+    uid: String,
     timestamp: i64,
     severity: SyslogSeverity,
     facility: String,
@@ -141,6 +84,12 @@ impl SyslogMessage {
     /// Event time (Unix epoch ms) — for ordering the merged buffer (#107, C9).
     pub fn timestamp(&self) -> i64 {
         self.timestamp
+    }
+
+    /// The unique, time-sortable record uid (#556). Empty for legacy points that
+    /// carried no `log.record.uid` label.
+    pub fn uid(&self) -> &str {
+        &self.uid
     }
 
     /// The message text — used to de-duplicate cold-store search-back against the
@@ -854,8 +803,9 @@ fn render_filter_panel<'a>(
     .spacing(10)
     .align_y(Alignment::Center);
 
-    // Message filter input
-    let msg_filter_row = row![
+    // Message filter input (#554): regex, with a subtle hint when the pattern
+    // isn't valid regex (we fall back to a substring match rather than error).
+    let mut msg_filter_row = row![
         text("Message Pattern:").size(13),
         text_input("e.g., error|failed", &filter_state.message_filter)
             .on_input(Message::SetSyslogMessageFilter)
@@ -865,6 +815,14 @@ fn render_filter_panel<'a>(
     ]
     .spacing(10)
     .align_y(Alignment::Center);
+    if message_filter_is_substring_fallback(&filter_state.message_filter) {
+        msg_filter_row =
+            msg_filter_row.push(text("invalid regex — matching as text").size(11).style(
+                |t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                },
+            ));
+    }
 
     // Action buttons
     let apply_button = button(row![text("Apply to Sensor").size(13)].align_y(Alignment::Center))
@@ -984,7 +942,7 @@ fn render_severity_summary<'a>(
     for sev in severities {
         let count = counts.get(&(sev as u8)).copied().unwrap_or(0);
         if count > 0 || sev as u8 <= SyslogSeverity::Warning as u8 {
-            let color = sev.color();
+            let color = theme::severity_color(sev);
             let label = text(format!("{}: {}", sev.label(), count))
                 .size(12)
                 .style(move |_theme: &Theme| text::Style { color: Some(color) });
@@ -995,17 +953,19 @@ fn render_severity_summary<'a>(
     // Show total and filtered count
     let total_count = messages.len();
     let filtered_count = filtered_messages.len();
+    // These counts are derived from the *local* recent-lines buffer, not the
+    // sensor's lifetime rollup counters below (#557 stats honesty) — label them
+    // so the two denominators aren't confused.
     let count_label = if total_count != filtered_count {
         text(format!(
-            "Showing {} of {} messages",
-            filtered_count, total_count
+            "Showing {filtered_count} of {total_count} (local buffer)"
         ))
         .size(12)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         })
     } else {
-        text(format!("{} messages", total_count))
+        text(format!("{total_count} messages (local buffer)"))
             .size(12)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
@@ -1140,7 +1100,7 @@ fn render_log_stream<'a>(
     for msg in sorted_messages {
         let key = msg.row_key();
         let expanded = filter_state.expanded_row.as_deref() == Some(key.as_str());
-        let severity_color = msg.severity.color();
+        let severity_color = theme::severity_color(msg.severity);
         let message_text = if msg.message.chars().count() > 100 {
             let head: String = msg.message.chars().take(97).collect();
             format!("{head}...")
@@ -1308,7 +1268,7 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
                 point
                     .labels
                     .get("severity")
-                    .and_then(|s| SyslogSeverity::from_str(s))
+                    .and_then(|s| SyslogSeverity::from_slug(s))
             });
         match (fac_label, sev_label) {
             (Some(fac), Some(sev)) => (fac, sev),
@@ -1325,7 +1285,7 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
                 let sev = sev_opt
                     .or_else(|| {
                         (parts.len() >= 2)
-                            .then(|| SyslogSeverity::from_str(parts[1]))
+                            .then(|| SyslogSeverity::from_slug(parts[1]))
                             .flatten()
                     })
                     .unwrap_or(SyslogSeverity::Informational);
@@ -1380,7 +1340,15 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
         })
         .collect();
 
+    // The per-line uid (#104/#556) — carried as the `log.record.uid` label.
+    let uid = point
+        .labels
+        .get("log.record.uid")
+        .cloned()
+        .unwrap_or_default();
+
     SyslogMessage {
+        uid,
         timestamp: point.timestamp,
         severity,
         facility,
@@ -1401,6 +1369,8 @@ fn apply_local_filters(
     messages: &[SyslogMessage],
     filter_state: &SyslogFilterState,
 ) -> Vec<SyslogMessage> {
+    // Compile the message-content matcher once (#554), not per row.
+    let msg_matcher = MessageMatcher::compile(&filter_state.message_filter);
     messages
         .iter()
         .filter(|msg| {
@@ -1460,18 +1430,61 @@ fn apply_local_filters(
                 }
             }
 
-            // Message content filter (simple substring match)
-            if !filter_state.message_filter.is_empty() {
-                let pattern = filter_state.message_filter.to_lowercase();
-                if !msg.message.to_lowercase().contains(&pattern) {
-                    return false;
-                }
+            // Message content filter (#554): regex (case-insensitive), falling
+            // back to substring on an invalid pattern. Compiled once below.
+            if !msg_matcher.matches(&msg.message) {
+                return false;
             }
 
             true
         })
         .cloned()
         .collect()
+}
+
+/// The compiled message-content filter (#554): a case-insensitive regex, or a
+/// substring fallback when the pattern is empty or not valid regex — so the
+/// placeholder's promise of `error|failed` regex is real, and a half-typed
+/// pattern still filters usefully instead of erroring.
+enum MessageMatcher {
+    All,
+    Regex(Box<regex::Regex>),
+    Substring(String),
+}
+
+impl MessageMatcher {
+    fn compile(pat: &str) -> Self {
+        if pat.is_empty() {
+            return Self::All;
+        }
+        match regex::RegexBuilder::new(pat)
+            .case_insensitive(true)
+            .size_limit(1 << 20)
+            .build()
+        {
+            Ok(re) => Self::Regex(Box::new(re)),
+            Err(_) => Self::Substring(pat.to_lowercase()),
+        }
+    }
+    fn matches(&self, msg: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Regex(re) => re.is_match(msg),
+            Self::Substring(p) => msg.to_lowercase().contains(p),
+        }
+    }
+}
+
+/// Whether the message filter is a valid regex (empty counts as valid) — drives
+/// the "filtering as text" hint under the filter input (#554).
+pub fn message_filter_is_regex(pat: &str) -> bool {
+    !pat.is_empty() && regex::Regex::new(pat).is_ok()
+}
+
+/// True when `pat` is non-empty and *not* valid regex (falling back to
+/// substring) — the case the hint calls out.
+pub fn message_filter_is_substring_fallback(pat: &str) -> bool {
+    !pat.is_empty() && regex::Regex::new(pat).is_err()
 }
 
 fn section_style(t: &Theme) -> container::Style {
@@ -1492,9 +1505,30 @@ mod tests {
     use crate::message::DeviceId;
     use zensight_common::Protocol;
 
+    /// #554: the message filter is a case-insensitive regex, falling back to a
+    /// substring match (never an error) on an invalid pattern.
+    #[test]
+    fn message_matcher_regex_and_substring_fallback() {
+        // Empty → matches everything.
+        assert!(MessageMatcher::compile("").matches("anything"));
+        // Valid regex, case-insensitive.
+        let m = MessageMatcher::compile("error|failed");
+        assert!(m.matches("connection FAILED"));
+        assert!(m.matches("disk Error"));
+        assert!(!m.matches("all good"));
+        // Invalid regex → substring fallback (matches the literal text), flagged.
+        assert!(message_filter_is_substring_fallback("err[or"));
+        let m = MessageMatcher::compile("err[or");
+        assert!(m.matches("an err[or occurred"));
+        assert!(!m.matches("fine"));
+        // A valid regex is not flagged as a fallback.
+        assert!(!message_filter_is_substring_fallback("error|failed"));
+    }
+
     /// Build a bare [`SyslogMessage`] at `ts` (ms) for rate-series tests.
     fn msg_at(ts: i64) -> SyslogMessage {
         SyslogMessage {
+            uid: format!("{ts:013}{:012}", 0),
             timestamp: ts,
             severity: SyslogSeverity::Informational,
             facility: "daemon".into(),
@@ -1789,17 +1823,20 @@ mod tests {
 
     #[test]
     fn test_severity_from_str() {
-        assert_eq!(SyslogSeverity::from_str("err"), Some(SyslogSeverity::Error));
         assert_eq!(
-            SyslogSeverity::from_str("ERROR"),
+            SyslogSeverity::from_slug("err"),
             Some(SyslogSeverity::Error)
         );
         assert_eq!(
-            SyslogSeverity::from_str("warning"),
+            SyslogSeverity::from_slug("ERROR"),
+            Some(SyslogSeverity::Error)
+        );
+        assert_eq!(
+            SyslogSeverity::from_slug("warning"),
             Some(SyslogSeverity::Warning)
         );
         assert_eq!(
-            SyslogSeverity::from_str("info"),
+            SyslogSeverity::from_slug("info"),
             Some(SyslogSeverity::Informational)
         );
     }

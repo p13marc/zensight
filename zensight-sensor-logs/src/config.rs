@@ -1,9 +1,17 @@
 //! Syslog sensor configuration.
 
 use crate::filter::SyslogFilterConfig;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zensight_common::config::ZenohConfig;
+
+/// Parse an IANA timezone name (e.g. `"Europe/Paris"`) into a [`chrono_tz::Tz`],
+/// erroring with the offending name so a typo fails startup loudly (#545).
+pub fn parse_tz(name: &str) -> anyhow::Result<chrono_tz::Tz> {
+    name.parse::<chrono_tz::Tz>()
+        .map_err(|_| anyhow::anyhow!("unknown IANA timezone: {name:?}"))
+}
 
 // Re-export LoggingConfig from the framework for compatibility
 pub use zensight_sensor_core::LoggingConfig;
@@ -29,6 +37,12 @@ pub struct SyslogSensorConfig {
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
+
+    /// Forward-compat escape hatch (#547): when true, unknown config keys are
+    /// warned about instead of rejected — for mixed-version fleets sharing one
+    /// config. Default false: a typo'd key fails startup with a clear error.
+    #[serde(default)]
+    pub allow_unknown_fields: bool,
 }
 
 /// Syslog receiver configuration.
@@ -45,6 +59,14 @@ pub struct SyslogConfig {
     /// Hostname overrides for source identification.
     #[serde(default)]
     pub hostname_aliases: std::collections::HashMap<String, String>,
+
+    /// Per-sender RFC 3164 timezone overrides (#545), keyed by sender IP — the
+    /// same key space as `hostname_aliases`. Takes precedence over a listener's
+    /// `timezone` for that sender, so a mixed fleet (some gear in UTC, some in
+    /// local time) is stamped correctly. Values are IANA names
+    /// (e.g. `"America/New_York"`).
+    #[serde(default)]
+    pub host_timezones: std::collections::HashMap<String, String>,
 
     /// Whether to include raw message in labels.
     #[serde(default)]
@@ -124,6 +146,326 @@ pub struct SyslogConfig {
     /// records (~3 MB), clamped to at least 100.
     #[serde(default = "default_events_ring_capacity")]
     pub events_ring_capacity: usize,
+
+    /// Log sentinel (#543): declarative pattern→alert rules, also managed at
+    /// runtime via `@rpc/logs/rules/set`. Empty by default; the shipped built-in
+    /// known-event rules ride on `journald.detect_events`.
+    #[serde(default)]
+    pub sentinel: crate::sentinel::LogRulesConfig,
+
+    /// Durable per-line history (#544): a disk-backed redb store behind the hot
+    /// ring, so `@rpc/logs/events` can serve days back across restarts.
+    /// Disabled by default (opt-in, like the other retention features).
+    #[serde(default)]
+    pub store: LogStoreConfig,
+
+    /// File tailing sources (#549): tail `/var/log/*.log`-style files into the
+    /// same intake pipeline. Empty by default (no file sources).
+    #[serde(default)]
+    pub files: FileTailingConfig,
+
+    /// Observer evidence for remote senders (#552): publish `HostEvidence` for
+    /// each device whose syslog this collector ingests, so they reach the
+    /// correlator's entity catalog. On by default; no-op without network sources.
+    #[serde(default)]
+    pub evidence: EvidenceConfig,
+
+    /// Log-bundle export artifact limits (#555). Producers own their limits (per
+    /// the artifact framework), so the `logbundle` kind's policy lives here, not
+    /// in the shared `artifacts` block. Disabled by default.
+    #[serde(default)]
+    pub logbundle: LogBundleLimits,
+}
+
+/// `logbundle` artifact limits (#555) — a filtered log export over `@blob`.
+/// Disabled by default (64 MiB / 1M lines / 30 s cooldown / 600 s TTL).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogBundleLimits {
+    /// Whether the sensor serves log-bundle export requests at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hard cap on the compressed bundle size; production stops + flags
+    /// truncation past this.
+    #[serde(default = "default_logbundle_max_bytes")]
+    pub max_bytes: u64,
+    /// Hard cap on lines included; production stops + flags truncation past this.
+    #[serde(default = "default_logbundle_max_lines")]
+    pub max_lines: u64,
+    /// Minimum gap between successive exports, seconds.
+    #[serde(default = "default_logbundle_cooldown")]
+    pub cooldown_secs: u64,
+    /// How long a produced bundle stays available before the reaper drops it.
+    #[serde(default = "default_logbundle_ttl")]
+    pub ttl_secs: u64,
+    /// Blob transfer chunk size (clamped to 256 KiB–1 MiB).
+    #[serde(default = "default_logbundle_chunk_size")]
+    pub chunk_size: u32,
+}
+
+impl Default for LogBundleLimits {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_bytes: default_logbundle_max_bytes(),
+            max_lines: default_logbundle_max_lines(),
+            cooldown_secs: default_logbundle_cooldown(),
+            ttl_secs: default_logbundle_ttl(),
+            chunk_size: default_logbundle_chunk_size(),
+        }
+    }
+}
+
+impl LogBundleLimits {
+    /// The shared bounds view used by the artifact channel.
+    pub fn common(&self) -> zensight_common::CommonArtifactLimits {
+        zensight_common::CommonArtifactLimits {
+            enabled: self.enabled,
+            max_bytes: self.max_bytes,
+            cooldown_secs: self.cooldown_secs,
+            ttl_secs: self.ttl_secs,
+            chunk_size: self.chunk_size,
+        }
+    }
+}
+
+fn default_logbundle_max_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+fn default_logbundle_max_lines() -> u64 {
+    1_000_000
+}
+fn default_logbundle_cooldown() -> u64 {
+    30
+}
+fn default_logbundle_ttl() -> u64 {
+    600
+}
+fn default_logbundle_chunk_size() -> u32 {
+    512 * 1024
+}
+
+/// Observer-evidence configuration (#552).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    /// Publish observer evidence for remote senders. Default true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Re-publish + prune cadence (seconds). Default 300.
+    #[serde(default = "default_evidence_refresh_secs")]
+    pub refresh_secs: u64,
+
+    /// Drop a sender not heard from in this many seconds. Default 21600 (6h).
+    #[serde(default = "default_evidence_expire_secs")]
+    pub expire_secs: u64,
+
+    /// Cardinality cap on tracked senders (bounds the key space against spoofed
+    /// sources). Default 4096.
+    #[serde(default = "default_evidence_max_senders")]
+    pub max_senders: usize,
+
+    /// Opt-in reverse-DNS (PTR) FQDN enrichment. Off by default; when on,
+    /// lookups run only in the publish tick (never on the intake path) and are
+    /// cached per IP.
+    #[serde(default)]
+    pub reverse_dns: bool,
+}
+
+impl Default for EvidenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_secs: default_evidence_refresh_secs(),
+            expire_secs: default_evidence_expire_secs(),
+            max_senders: default_evidence_max_senders(),
+            reverse_dns: false,
+        }
+    }
+}
+
+fn default_evidence_refresh_secs() -> u64 {
+    300
+}
+fn default_evidence_expire_secs() -> u64 {
+    21_600
+}
+fn default_evidence_max_senders() -> usize {
+    4096
+}
+
+/// File-tailing configuration (#549).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTailingConfig {
+    /// Sources to tail. Empty = file tailing disabled.
+    #[serde(default)]
+    pub sources: Vec<FileSourceConfig>,
+
+    /// How often (seconds) to re-expand globs and pick up newly-created files.
+    /// Default 15.
+    #[serde(default = "default_files_rescan_secs")]
+    pub rescan_secs: u64,
+
+    /// How often (ms) to poll tracked files for new bytes. Default 500.
+    #[serde(default = "default_files_poll_ms")]
+    pub poll_ms: u64,
+
+    /// Path of the offsets state file (atomic JSON, same scheme as the journald
+    /// cursor). `None` resolves the `$STATE_DIRECTORY` / XDG state location.
+    #[serde(default)]
+    pub offsets_path: Option<std::path::PathBuf>,
+
+    /// Hard cap on one joined line's bytes; a longer line is truncated. Default
+    /// 1 MiB.
+    #[serde(default = "default_files_max_line_bytes")]
+    pub max_line_bytes: usize,
+}
+
+impl Default for FileTailingConfig {
+    fn default() -> Self {
+        Self {
+            sources: Vec::new(),
+            rescan_secs: default_files_rescan_secs(),
+            poll_ms: default_files_poll_ms(),
+            offsets_path: None,
+            max_line_bytes: default_files_max_line_bytes(),
+        }
+    }
+}
+
+fn default_files_rescan_secs() -> u64 {
+    15
+}
+fn default_files_poll_ms() -> u64 {
+    500
+}
+fn default_files_max_line_bytes() -> usize {
+    1024 * 1024
+}
+
+/// One file-tailing source: a set of globs + how to interpret their lines.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileSourceConfig {
+    /// Glob patterns to tail (e.g. `["/var/log/app/*.log"]`).
+    pub paths: Vec<String>,
+
+    /// Static labels attached to every line from this source (as `sd.file.*`).
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+
+    /// Attribute lines to this unit (flows like the journald `unit` field, so
+    /// per-unit rollups/SLO apply).
+    #[serde(default)]
+    pub unit: Option<String>,
+
+    /// Attribute lines to this app / program name.
+    #[serde(default)]
+    pub app: Option<String>,
+
+    /// Line format: `plain` (whole line is the message) or `syslog` (run the
+    /// RFC 3164/5424 parser, e.g. files that contain `<PRI>` lines). Default
+    /// `plain`.
+    #[serde(default)]
+    pub format: FileFormat,
+
+    /// Default severity slug for `plain` lines (`emerg`..`debug`). Default
+    /// `info`.
+    #[serde(default)]
+    pub severity: Option<String>,
+
+    /// Optional regex whose first capture group (or a `severity` named group)
+    /// extracts a level word (`ERROR`/`WARN`/…) per line, overriding `severity`.
+    #[serde(default)]
+    pub severity_regex: Option<String>,
+
+    /// Join multi-line records (stack traces) per file. On by default.
+    #[serde(default = "default_true")]
+    pub multiline: bool,
+}
+
+/// How to interpret a tailed file's lines (#549).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileFormat {
+    /// The whole line is the message; severity/app/unit come from config.
+    #[default]
+    Plain,
+    /// Run the syslog parser over each line (`<PRI>…`), falling back to plain.
+    Syslog,
+}
+
+/// Durable log store configuration (#544).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogStoreConfig {
+    /// Persist retained lines to disk. Off by default.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Store file path. `None` resolves the systemd `STATE_DIRECTORY` / XDG
+    /// state location (same scheme as the journald cursor).
+    #[serde(default)]
+    pub path: Option<std::path::PathBuf>,
+
+    /// Retain history at most this many days (pruned by age). Default 7.
+    #[serde(default = "default_store_max_age_days")]
+    pub max_age_days: u64,
+
+    /// Hard cap on stored records regardless of age (pruned by size). Default
+    /// 2 000 000 (~a few hundred MB).
+    #[serde(default = "default_store_max_records")]
+    pub max_records: usize,
+
+    /// Flush a batch once this many records are queued. Default 500.
+    #[serde(default = "default_store_batch_size")]
+    pub batch_size: usize,
+
+    /// Flush at least this often even if the batch isn't full (seconds).
+    /// Default 2.
+    #[serde(default = "default_store_flush_secs")]
+    pub flush_interval_secs: u64,
+
+    /// Prune + health-report cadence (seconds). Default 300.
+    #[serde(default = "default_store_prune_secs")]
+    pub prune_interval_secs: u64,
+
+    /// Bound on the writer channel; when full, records are dropped and counted
+    /// (`store/write_drops_total`) rather than back-pressuring intake. Default
+    /// 100 000.
+    #[serde(default = "default_store_queue_capacity")]
+    pub queue_capacity: usize,
+}
+
+impl Default for LogStoreConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: None,
+            max_age_days: default_store_max_age_days(),
+            max_records: default_store_max_records(),
+            batch_size: default_store_batch_size(),
+            flush_interval_secs: default_store_flush_secs(),
+            prune_interval_secs: default_store_prune_secs(),
+            queue_capacity: default_store_queue_capacity(),
+        }
+    }
+}
+
+fn default_store_max_age_days() -> u64 {
+    7
+}
+fn default_store_max_records() -> usize {
+    2_000_000
+}
+fn default_store_batch_size() -> usize {
+    500
+}
+fn default_store_flush_secs() -> u64 {
+    2
+}
+fn default_store_prune_secs() -> u64 {
+    300
+}
+fn default_store_queue_capacity() -> usize {
+    100_000
 }
 
 /// Multiline / stacktrace joining configuration (#107, C6).
@@ -205,6 +547,30 @@ pub struct IngestConfig {
     /// (0.0..=1.0) — "not silently dropping your logs". Default 0.01 (1%).
     #[serde(default = "default_drop_alert_ratio")]
     pub drop_alert_ratio: f64,
+
+    /// Capacity of the central intake channel between the listeners and the
+    /// processing loop (#546). Under a burst larger than this, `drop_newest`
+    /// sheds before the (optional) rate limiter engages; raise it to trade
+    /// memory for burst absorption (each slot holds one parsed message).
+    /// Default 1000, clamped to ≥1.
+    #[serde(default = "default_channel_capacity")]
+    pub channel_capacity: usize,
+
+    /// Collapse consecutive identical `(source, message)` lines into one record
+    /// carrying a `repeat_count` label (#546) — syslog's classic "last message
+    /// repeated N times", done at the receiver so a screaming line doesn't
+    /// exhaust the ring, rate budget, and attention one copy at a time.
+    /// **Disabled by default** to preserve exact streams; the collapsed count
+    /// still feeds the rollup counters so totals stay honest.
+    #[serde(default)]
+    pub collapse_repeats: bool,
+
+    /// Idle gap (ms) that closes a run of identical lines when `collapse_repeats`
+    /// is on (#546): a run is emitted once no matching line has arrived for this
+    /// long, or a different line arrives. Also the max added latency for a line
+    /// with no follow-up. Default 1000ms, clamped to ≥1.
+    #[serde(default = "default_collapse_window_ms")]
+    pub collapse_window_ms: u64,
 }
 
 impl Default for IngestConfig {
@@ -214,8 +580,19 @@ impl Default for IngestConfig {
             sample_ratio: default_sample_ratio(),
             overflow: OverflowPolicy::default(),
             drop_alert_ratio: default_drop_alert_ratio(),
+            channel_capacity: default_channel_capacity(),
+            collapse_repeats: false,
+            collapse_window_ms: default_collapse_window_ms(),
         }
     }
+}
+
+fn default_channel_capacity() -> usize {
+    1000
+}
+
+fn default_collapse_window_ms() -> u64 {
+    1000
 }
 
 /// TCP/Unix stream framing mode (RFC 6587, #106).
@@ -527,13 +904,16 @@ pub struct JournaldConfig {
     #[serde(default = "default_true")]
     pub detect_events: bool,
 
-    /// Coalesce repeats of the same `(event, unit)` within this many seconds,
-    /// and auto-resolve a fired event alert after the window passes (#61).
+    /// **Deprecated (#543):** superseded by the log sentinel. The known-events
+    /// are now built-in sentinel rules with their own `for_secs`; still parsed
+    /// so existing configs load, but ignored. Kept only for compatibility.
     #[serde(default = "default_event_dedup_secs")]
     pub event_dedup_secs: u64,
 
-    /// Per-`MESSAGE_ID` severity overrides (`info` | `warning` | `critical`),
-    /// keyed by the 32-char hex id. Empty = use the built-in defaults.
+    /// **Deprecated (#543):** override a known-event's severity by adding a
+    /// sentinel rule with the same `id` (`coredump`/`unit-failed`/`oomd-kill`/
+    /// `kernel-oom`). Still parsed so existing configs load, but ignored; a
+    /// startup warning fires when non-empty.
     #[serde(default)]
     pub event_severity: std::collections::HashMap<String, String>,
 
@@ -702,6 +1082,41 @@ pub struct ListenerConfig {
     /// datagram is always exactly one frame). Default `auto`.
     #[serde(default)]
     pub framing: Framing,
+
+    /// IANA timezone (e.g. `"Europe/Paris"`) that RFC 3164 senders on this
+    /// listener express their yearless, zoneless timestamps in (#545). Applies
+    /// DST via the tz database. `None` (the default) means UTC. Overridden
+    /// per-sender by `syslog.host_timezones`. Has no effect on RFC 5424, which
+    /// carries its own explicit offset.
+    #[serde(default)]
+    pub timezone: Option<String>,
+
+    /// TLS settings (#550). Required when `protocol` is `tls` (RFC 5425); a TLS
+    /// listener always uses octet-counting framing regardless of `framing`.
+    #[serde(default)]
+    pub tls: Option<TlsListenerConfig>,
+}
+
+/// TLS listener settings (#550, RFC 5425). Key material is referenced by **path
+/// only** (never inline PEM); paths accept `${ENV}` / `file:` secret indirection
+/// (#538).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsListenerConfig {
+    /// Server certificate chain (PEM).
+    pub cert_file: String,
+    /// Server private key (PEM: PKCS#8 / PKCS#1 / SEC1).
+    pub key_file: String,
+    /// Require + verify client certificates against this CA bundle (PEM) —
+    /// mutual TLS. `None` (default) accepts any client (server-auth only).
+    #[serde(default)]
+    pub client_ca_file: Option<String>,
+    /// Minimum TLS version: `"1.3"` (default) or `"1.2"`.
+    #[serde(default = "default_tls_min_version")]
+    pub min_version: String,
+}
+
+fn default_tls_min_version() -> String {
+    "1.3".to_string()
 }
 
 fn default_max_message_size() -> usize {
@@ -720,7 +1135,7 @@ fn default_socket_mode() -> u32 {
     0o666
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -731,6 +1146,8 @@ pub enum ListenerProtocol {
     Udp,
     Tcp,
     Unix,
+    /// TLS over TCP (RFC 5425, #550) — octet-counting framing only.
+    Tls,
 }
 
 impl std::fmt::Display for ListenerProtocol {
@@ -739,6 +1156,7 @@ impl std::fmt::Display for ListenerProtocol {
             Self::Udp => write!(f, "udp"),
             Self::Tcp => write!(f, "tcp"),
             Self::Unix => write!(f, "unix"),
+            Self::Tls => write!(f, "tls"),
         }
     }
 }
@@ -747,7 +1165,38 @@ impl SyslogSensorConfig {
     /// Load configuration from a JSON5 file.
     pub fn load_from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
-        let config: Self = json5::from_str(&content)?;
+        Self::parse_strict(&content)
+    }
+
+    /// Parse config, rejecting unknown keys (#547) unless
+    /// `allow_unknown_fields` is set. Unknown keys are collected by full path
+    /// (including nested/external types) via `serde_ignored`, so a typo like
+    /// `novlety` fails loudly naming the key instead of silently taking the
+    /// default. With the escape hatch on, unknown keys are logged as warnings.
+    pub fn parse_strict(content: &str) -> anyhow::Result<Self> {
+        // json5 → Value → serde_ignored, so one parse yields both the typed
+        // config and the set of ignored (unknown) key paths.
+        let value: serde_json::Value = json5::from_str(content)?;
+        let mut unknown: Vec<String> = Vec::new();
+        let config: Self = serde_ignored::deserialize(value, |path| {
+            unknown.push(path.to_string());
+        })?;
+
+        if !unknown.is_empty() {
+            let list = unknown.join(", ");
+            if config.allow_unknown_fields {
+                tracing::warn!(
+                    unknown_keys = %list,
+                    "config has unknown keys (allow_unknown_fields is set — ignoring)"
+                );
+            } else {
+                anyhow::bail!(
+                    "unknown config key(s): {list}. Fix the typo, or set \
+                     allow_unknown_fields: true to ignore (mixed-version fleets)."
+                );
+            }
+        }
+
         config.validate_config()?;
         Ok(config)
     }
@@ -766,7 +1215,7 @@ impl SyslogSensorConfig {
             }
 
             match listener.protocol {
-                ListenerProtocol::Udp | ListenerProtocol::Tcp => {
+                ListenerProtocol::Udp | ListenerProtocol::Tcp | ListenerProtocol::Tls => {
                     // Validate bind address format for network protocols
                     if !listener.bind.contains(':') {
                         anyhow::bail!(
@@ -780,9 +1229,94 @@ impl SyslogSensorConfig {
                     // Just check it's not empty (already done above)
                 }
             }
+
+            // A TLS listener needs cert/key material and a known min version.
+            if listener.protocol == ListenerProtocol::Tls {
+                let Some(tls) = &listener.tls else {
+                    anyhow::bail!("Listener {i} is `tls` but has no `tls` cert/key config");
+                };
+                if tls.cert_file.is_empty() || tls.key_file.is_empty() {
+                    anyhow::bail!("Listener {i} tls: cert_file and key_file are required");
+                }
+                if !matches!(tls.min_version.as_str(), "1.2" | "1.3") {
+                    anyhow::bail!(
+                        "Listener {i} tls: min_version must be \"1.2\" or \"1.3\", got {:?}",
+                        tls.min_version
+                    );
+                }
+            }
+
+            // Fail fast on a bad IANA timezone rather than silently falling
+            // back to UTC at runtime (#545).
+            if let Some(tz) = &listener.timezone {
+                parse_tz(tz).with_context(|| format!("listener {i} timezone"))?;
+            }
+        }
+
+        for (host, tz) in &self.syslog.host_timezones {
+            parse_tz(tz).with_context(|| format!("host_timezones[{host}]"))?;
         }
 
         Ok(())
+    }
+
+    /// One-glance startup summary (#547): what sources are active and which
+    /// analytics are on/off, so a misconfiguration (a source that never came up,
+    /// an analytic silently left at its default) is visible in the log the moment
+    /// the sensor starts — not inferred later from missing telemetry.
+    pub fn startup_summary(&self) -> String {
+        let s = &self.syslog;
+
+        // Sources.
+        let mut sources: Vec<String> = s
+            .listeners
+            .iter()
+            .map(|l| format!("{:?}:{}", l.protocol, l.bind))
+            .collect();
+        if let Some(j) = &s.journald
+            && j.enabled
+        {
+            sources.push(format!(
+                "journald({:?}, {} unit filter(s))",
+                j.scope,
+                j.units.len()
+            ));
+        }
+        let sources = if sources.is_empty() {
+            "<none>".to_string()
+        } else {
+            sources.join(", ")
+        };
+
+        // Analytics toggles — name each so an off one reads as a deliberate off,
+        // not an oversight.
+        let on_off = |b: bool| if b { "on" } else { "off" };
+        let analytics = format!(
+            "derived={}, error_budget={}, templating={}, novelty={}, \
+             journald.detect_events={}, dynamic_filters={}, multiline={}",
+            on_off(s.derived),
+            on_off(s.error_budget.enabled),
+            on_off(s.templating.enabled),
+            on_off(s.novelty.enabled),
+            on_off(
+                s.journald
+                    .as_ref()
+                    .is_some_and(|j| j.enabled && j.detect_events)
+            ),
+            on_off(s.enable_dynamic_filters),
+            on_off(s.multiline.enabled),
+        );
+
+        let ingest = match s.ingest.max_eps {
+            Some(eps) => format!("rate_limit={eps}/s overflow={:?}", s.ingest.overflow),
+            None => format!("rate_limit=off overflow={:?}", s.ingest.overflow),
+        };
+
+        format!(
+            "sources: {sources} | analytics: {analytics} | ingest: {ingest} | \
+             events_ring={}",
+            s.events_ring_capacity
+        )
     }
 }
 
@@ -822,8 +1356,11 @@ impl Default for SyslogConfig {
                 socket_mode: default_socket_mode(),
                 remove_existing_socket: default_true(),
                 framing: Framing::default(),
+                timezone: None,
+                tls: None,
             }],
             hostname_aliases: std::collections::HashMap::new(),
+            host_timezones: std::collections::HashMap::new(),
             include_raw_message: false,
             filter: SyslogFilterConfig::default(),
             enable_dynamic_filters: false,
@@ -837,6 +1374,11 @@ impl Default for SyslogConfig {
             ingest: IngestConfig::default(),
             multiline: MultilineConfig::default(),
             events_ring_capacity: default_events_ring_capacity(),
+            sentinel: crate::sentinel::LogRulesConfig::default(),
+            store: LogStoreConfig::default(),
+            files: FileTailingConfig::default(),
+            evidence: EvidenceConfig::default(),
+            logbundle: LogBundleLimits::default(),
         }
     }
 }
@@ -847,9 +1389,11 @@ mod tests {
 
     /// The shipped example config must physically spell out the opt-in analytics.
     ///
-    /// No `deny_unknown_fields` anywhere, so an absent block parses clean and
-    /// silently takes the Rust default — which is how `novelty` and
-    /// `error_budget` stayed invisible. Asserting the parsed value would be
+    /// An absent block parses clean and takes the Rust default — that's correct
+    /// (absent = default). The old hazard was a *typo* (`novlety:`) making an
+    /// operator believe an analytic was on while it silently stayed at its
+    /// default; #547's strict loader now rejects that (see
+    /// `unknown_key_is_rejected`). Asserting the parsed value here would be
     /// vacuous (both ship `false` and default `false`), so walk the raw tree and
     /// prove the key is really present for `gen-configs.sh` to sed on.
     #[test]
@@ -880,6 +1424,119 @@ mod tests {
 
         assert_eq!(at("syslog.novelty.enabled"), false);
         assert_eq!(at("syslog.error_budget.enabled"), false);
+    }
+
+    const MINIMAL: &str = r#"{
+        zenoh: { mode: "peer" },
+        syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+    }"#;
+
+    /// A typo'd top-level key (the classic `novlety` silent-default trap) is
+    /// rejected with an error that names the offending key (#547).
+    #[test]
+    fn unknown_key_is_rejected() {
+        let bad = MINIMAL.replace(r#"syslog: {"#, r#"novlety: true, syslog: {"#);
+        let err = SyslogSensorConfig::parse_strict(&bad).expect_err("typo must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown config key"), "got: {msg}");
+        assert!(
+            msg.contains("novlety"),
+            "error must name the key, got: {msg}"
+        );
+    }
+
+    /// A misspelled *nested* key is caught too — serde_ignored reports the full
+    /// path, so a typo inside an analytics block can't hide.
+    #[test]
+    fn unknown_nested_key_is_rejected() {
+        let bad = MINIMAL.replace(r#"listeners:"#, r#"novelty: { enabld: true }, listeners:"#);
+        let err = SyslogSensorConfig::parse_strict(&bad).expect_err("nested typo must fail");
+        assert!(
+            err.to_string().contains("enabld"),
+            "error must name the nested key, got: {err}"
+        );
+    }
+
+    /// The escape hatch downgrades rejection to a warning for mixed-version
+    /// fleets: with `allow_unknown_fields: true` the unknown key is tolerated.
+    #[test]
+    fn allow_unknown_fields_tolerates_extras() {
+        let ok = MINIMAL.replace(
+            r#"syslog: {"#,
+            r#"allow_unknown_fields: true, future_knob: 42, syslog: {"#,
+        );
+        let cfg = SyslogSensorConfig::parse_strict(&ok).expect("escape hatch must allow extras");
+        assert!(cfg.allow_unknown_fields);
+    }
+
+    /// Every config shipped in-repo must survive the strict loader (#547): the
+    /// strictness is worthless if our own examples trip it. Guards against a
+    /// future edit adding a key the schema doesn't know.
+    #[test]
+    fn shipped_configs_load_strict() {
+        for rel in [
+            "/../configs/logs.json5",
+            "/../configs/syslog.json5",
+            "/../docker/configs/syslog.json5",
+        ] {
+            let path = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
+            SyslogSensorConfig::load_from_file(&path)
+                .unwrap_or_else(|e| panic!("{path} must load strict: {e}"));
+        }
+    }
+
+    /// A bad IANA timezone fails validation loudly at load (#545) rather than
+    /// silently falling back to UTC at runtime.
+    #[test]
+    fn bad_timezone_fails_validation() {
+        let bad = MINIMAL.replace(
+            r#"bind: "0.0.0.0:514""#,
+            r#"bind: "0.0.0.0:514", timezone: "Mars/Olympus""#,
+        );
+        let err = SyslogSensorConfig::parse_strict(&bad).expect_err("bad tz must fail");
+        // `{:#}` walks the anyhow context chain (context + source).
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Mars/Olympus"),
+            "error must name the bad zone, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn good_timezone_validates() {
+        let ok = MINIMAL.replace(
+            r#"bind: "0.0.0.0:514""#,
+            r#"bind: "0.0.0.0:514", timezone: "Europe/Paris""#,
+        );
+        let cfg = SyslogSensorConfig::parse_strict(&ok).expect("valid tz");
+        assert_eq!(
+            cfg.syslog.listeners[0].timezone.as_deref(),
+            Some("Europe/Paris")
+        );
+    }
+
+    /// A `tls` listener without a `tls` block fails validation (#550).
+    #[test]
+    fn tls_listener_requires_cert_config() {
+        let bad = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "tls", bind: "0.0.0.0:6514" } ] }
+        }"#;
+        let err = SyslogSensorConfig::parse_strict(bad).expect_err("tls without certs must fail");
+        assert!(format!("{err:#}").contains("tls"), "got: {err}");
+    }
+
+    #[test]
+    fn tls_listener_with_certs_validates() {
+        let ok = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ {
+                protocol: "tls", bind: "0.0.0.0:6514",
+                tls: { cert_file: "/c.crt", key_file: "/k.key", min_version: "1.2" }
+            } ] }
+        }"#;
+        let cfg = SyslogSensorConfig::parse_strict(ok).expect("valid tls listener");
+        assert_eq!(cfg.syslog.listeners[0].protocol, ListenerProtocol::Tls);
     }
 
     #[test]

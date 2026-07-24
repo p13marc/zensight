@@ -16,7 +16,7 @@
 # it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "2.1"
+version = "2.4"
 app = "zensight"
 convention = 1
 
@@ -51,6 +51,34 @@ class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "lines dropped"
+
+[[subject]]
+path = "ingest/dropped_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.2"
+description = "windowed dropped fraction (gauge, 0.0..=1.0); nonzero while ingest is shedding (#546)"
+
+[[subject]]
+path = "store/records"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.3"
+description = "durable log store row count (gauge, #544)"
+
+[[subject]]
+path = "store/oldest_age_secs"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.3"
+description = "age of the oldest stored log record in seconds (gauge, #544)"
+
+[[subject]]
+path = "store/write_drops_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.3"
+description = "log records dropped before the durable store (writer queue full, #544)"
 
 [[subject]]
 path = "by_severity/{severity}"
@@ -194,6 +222,16 @@ since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
 
 [[subject]]
+path = "evidence/device/{device}"
+common = "evidence_device"
+class = "state"
+type = "HostEvidence"
+cardinality = 4096
+ttl_s = 900
+since = "2.4"
+description = "observer claim for a remote syslog sender (#552); observer = logs"
+
+[[subject]]
 path = "alert/{alert_key}"
 common = "alert"
 class = "state"
@@ -257,7 +295,7 @@ kind = "read"
 reply = "Vec<LogRecord>"
 idempotent = true
 since = "1.0"
-description = "bounded log ring, newest first (?since=;max=;source= — source filters the observed device, a central receiver holds many)"
+description = "bounded log history, newest first. Recent (ring): ?since=;max=;source=. Durable (store, #544): ?from=;to=;after_uid=;limit= — time window + cursor pagination across restarts. Search (#553): ?pattern=<regex>;severity_min=;unit=;app=;facility= — server-side content filter over ring+store (source filters the observed device)"
 [[procedure]]
 path = "filter"
 kind = "read"
@@ -274,6 +312,23 @@ request = "TopicConfig"
 reply = "Ack"
 since = "1.0"
 description = "apply filter configuration (dynamic message filters)"
+
+[[procedure]]
+path = "rules"
+kind = "read"
+reply = "RulesStatus"
+idempotent = true
+since = "2.2"
+description = "log sentinel ruleset + per-rule hit counters (#543)"
+
+[[procedure]]
+path = "rules/set"
+kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
+request = "LogRulesConfig"
+reply = "Ack"
+since = "2.2"
+description = "replace the log sentinel ruleset (pattern→alert rules, #543)"
 
 # ── Retired (#470) ─────────────────────────────────────────────────────────
 # The doubled `logs/` head. Every path below moved to the same path without it

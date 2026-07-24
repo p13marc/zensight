@@ -83,9 +83,9 @@ pub use qos::QosClass;
 pub use query_detail::{
     AssetRecord, CaptureRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord,
     EncryptedDnsRecord, FlowRecord, HistBucket, Histogram, HttpHostRecord, Ja4hRecord,
-    LatencyReport, LogRecord, MatrixRecord, NameInfo, NeighborRecord, NetflowFieldValue,
-    NetflowRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
-    TimerRecord, TlsRecord, UnitDetail, UnitRecord,
+    LatencyReport, LogRecord, LogSeverity, MatrixRecord, NameInfo, NeighborRecord,
+    NetflowFieldValue, NetflowRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord,
+    SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };
 pub use rpc::{
     ERR_BUSY, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED, ERR_UNSUPPORTED,

@@ -28,6 +28,19 @@ use ulid::Ulid;
 
 pub use zblob::{Entry, Manifest, TreeIndex};
 
+/// Output format inside a [`ArtifactKind::LogBundle`] (#555).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum LogBundleFormat {
+    /// One JSON `LogRecord` per line — lossless, machine-readable.
+    #[default]
+    Jsonl,
+    /// Plain text: one rendered `ts host severity app: message` line each.
+    Text,
+}
+
 /// What to produce. The variant carries the kind-specific parameters; the
 /// discriminant is serialized under a `kind` tag (`report` / `snapshot` /
 /// `capture`), so `ArtifactRequest` flattens it onto the request object.
@@ -65,6 +78,36 @@ pub enum ArtifactKind {
         #[serde(default)]
         compress: bool,
     },
+    /// A filtered log-line export (#555). Tier-1 (a single zstd bundle). Produced
+    /// by the logs sensor; the selectors mirror the events/search query so the
+    /// same filter that scopes a feed scopes the export. The params live here so
+    /// both ends stay typed (matching `Capture`'s documented coupling).
+    LogBundle {
+        /// Inclusive time-range lower bound (epoch ms), if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<i64>,
+        /// Inclusive time-range upper bound (epoch ms), if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<i64>,
+        /// Message regex / substring (see `@rpc/logs/events?pattern=`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        /// Minimum severity (slug or number; worse-or-equal).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        severity_min: Option<String>,
+        /// Restrict to a unit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
+        /// Restrict to an app / program name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
+        /// Restrict to one originating host/source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        /// Output format inside the bundle.
+        #[serde(default)]
+        format: LogBundleFormat,
+    },
     /// Any kind this sensor build doesn't understand (forward-compat). A sensor
     /// rejects it with [`ArtifactState::Failed`].
     #[serde(other)]
@@ -80,6 +123,7 @@ impl ArtifactKind {
             ArtifactKind::Report {} => "report",
             ArtifactKind::Snapshot { .. } => "snapshot",
             ArtifactKind::Capture { .. } => "capture",
+            ArtifactKind::LogBundle { .. } => "logbundle",
             ArtifactKind::Unsupported => "unsupported",
         }
     }
@@ -246,6 +290,12 @@ pub enum KindAdvert {
         filter_allowed: bool,
         /// Largest allowed snap length, bytes (0 = full frame).
         snaplen_max: u32,
+    },
+    /// A filtered log-line export can be requested (#555). The GUI pre-fills the
+    /// selectors from the current Logs filter.
+    LogBundle {
+        /// Largest allowed line count in one bundle (0 = sensor default).
+        max_lines: u64,
     },
     /// A kind this GUI build doesn't understand (forward-compat) — hidden.
     #[serde(other)]

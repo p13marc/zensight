@@ -319,6 +319,19 @@ pub fn global_search_panel<'a>(
 
     let mut list = Column::new().spacing(2);
 
+    // "Search logs for …" pivot (#554): route the typed query into the Logs
+    // view's message filter (log *content* is searched sensor-side, not here).
+    let logs_query = state.query.trim();
+    if !logs_query.is_empty() {
+        list = list.push(
+            button(text(format!("Search logs for \"{logs_query}\"")).size(font::CAPTION))
+                .on_press(Message::SearchLogsFor(logs_query.to_string()))
+                .width(Length::Fill)
+                .padding([space::XS, space::SM])
+                .style(iced::widget::button::text),
+        );
+    }
+
     // "Jump to host" entity results (#314), above the metric hits.
     if !entity_hits.is_empty() {
         list = list.push(text("Hosts").size(font::CAPTION));

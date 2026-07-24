@@ -17,12 +17,22 @@
 
 pub mod commands;
 pub mod config;
-pub mod events;
+pub mod dedup;
+pub mod evidence;
+pub mod file_source;
 pub mod filter;
 pub mod ingest;
 #[cfg(feature = "journald")]
 pub mod journald;
+pub mod logbundle;
 pub mod multiline;
 pub mod parser;
+/// The bounded per-line event ring + `@rpc/logs/events` queryable. Public so
+/// the integration harness (#548) can drive socket→ring→query round-trips.
+pub mod query;
 pub mod receiver;
+pub mod search;
+pub mod sentinel;
+pub mod store;
 pub(crate) mod telemetry_guard;
+pub mod tls;
