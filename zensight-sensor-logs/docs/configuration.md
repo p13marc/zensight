@@ -57,6 +57,7 @@ from missing telemetry.
 | `events_ring_capacity` | `10000` | in-memory ring served on `@rpc/logs/events` (min 100, ≈3 MB) |
 | `sentinel` | empty | log sentinel pattern→alert rules (#543) — see [alerting.md](alerting.md) |
 | `store` | off | durable per-line history (#544) — see below |
+| `files` | none | file-tailing sources (#549) — see below |
 
 ### `syslog.listeners[]`
 
@@ -250,6 +251,40 @@ latency. Health gauges: `store/records`, `store/oldest_age_secs`,
 window; `after_uid=<uid>` is a pagination cursor (pass the previous page's
 last/oldest uid) and `limit=<n>` caps the page. Pages are newest-first. The
 legacy `since`/`max` ring selectors keep working.
+
+### `syslog.files` (#549, file tailing — none by default)
+
+Tail log files into the same pipeline as the network/journald sources (so
+filtering, templating, rollups, and sentinel rules apply). Lines carry
+`source_type=file` and an `sd.file.path` label.
+
+```json5
+files: {
+  rescan_secs: 15,          // re-expand globs (pick up new files) this often
+  poll_ms: 500,             // poll tracked files for new bytes this often
+  offsets_path: null,       // null = $STATE_DIRECTORY / XDG state
+  max_line_bytes: 1048576,  // truncate a single (joined) line beyond this
+  sources: [
+    {
+      paths: ["/var/log/app/*.log"],   // globs
+      unit: "app.service",             // attribute like journald `unit`
+      app:  "app",                     // program name
+      format: "plain",                 // plain | syslog (run the <PRI> parser)
+      severity: "info",                // default severity for plain lines
+      severity_regex: "^\\[(\\w+)\\]", // optional: extract ERROR/WARN/... per line
+      labels: { env: "prod" },         // static labels (as sd.file.*)
+      multiline: true,                 // join stack traces (on by default)
+    },
+  ],
+}
+```
+
+**Rotation-aware**: each file keeps its open handle, so a logrotate
+rename+recreate keeps draining the rotated-away inode to EOF before switching
+(no lost lines); a copytruncate (same inode, shrank) resets to offset 0.
+**Offsets** are persisted atomically (same scheme as the journald cursor) so a
+restart resumes without re-ingesting or skipping. File sources share the
+network ingest stats + rate limiter (`ingest.max_eps`/`overflow`).
 
 ### `syslog.multiline` (#107, on by default)
 

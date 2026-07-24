@@ -42,6 +42,9 @@ pub enum MessageSource {
     /// Only constructed by the feature-gated journald reader.
     #[cfg_attr(not(feature = "journald"), allow(dead_code))]
     Journald,
+    /// A tailed log file (#549). The originating path rides a label, not the
+    /// enum, so this stays a plain tag.
+    File,
 }
 
 impl std::fmt::Display for MessageSource {
@@ -50,6 +53,8 @@ impl std::fmt::Display for MessageSource {
             MessageSource::Network(addr) => write!(f, "{}", addr),
             MessageSource::Unix => write!(f, "unix"),
             MessageSource::Journald => write!(f, "journald"),
+            // `source_type=file` per #549; the path rides a separate label.
+            MessageSource::File => write!(f, "file"),
         }
     }
 }
@@ -250,6 +255,25 @@ pub async fn start_listeners(
         tracing::warn!(
             "journald.enabled is set but this binary was built without the \
              `journald` feature; ignoring"
+        );
+    }
+
+    // File tailing source (#549): a dedicated OS thread tails glob-matched files
+    // into the same channel with blocking I/O off the runtime. Shares the network
+    // ingest stats + rate limiter (it's another ingress into the same pipeline).
+    if !config.files.sources.is_empty() {
+        let tailer = crate::file_source::FileTailer::new(
+            config.files.clone(),
+            config.resolved_source(),
+            tx.clone(),
+            ingest_stats.clone(),
+            ctx.limiter.clone(),
+            config.ingest.overflow,
+        );
+        let _handle = tailer.spawn();
+        tracing::info!(
+            sources = config.files.sources.len(),
+            "file tailing source enabled"
         );
     }
 

@@ -45,6 +45,7 @@ systemd = { version = "0.10", optional = true, features = ["systemd_v245"] }
 serde_ignored = "0.1.14"
 chrono-tz = "0.10.4"
 redb = "4.1.0"
+glob = "0.3.4"
 
 [features]
 # journald ingestion is on by default (Linux observability target). Disable with
