@@ -273,6 +273,89 @@ async fn durable_store_serves_paginated_time_range() {
     );
 }
 
+/// Server-side search (#553): `pattern` + `severity_min` selectors filter the
+/// durable store server-side, returning only matching records over the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_side_search_filters_the_store() {
+    use std::sync::Arc;
+    use zensight_common::LogRecord;
+    use zensight_sensor_logs::query;
+    use zensight_sensor_logs::store::LogStore;
+
+    fn rec(ts: i64, seq: u64, sev: &str, sev_num: u8, msg: &str) -> LogRecord {
+        LogRecord {
+            uid: format!("{ts:013}{seq:012}"),
+            ts,
+            host: "web01".into(),
+            facility: "daemon".into(),
+            severity: sev.into(),
+            severity_number: sev_num,
+            app: None,
+            pid: None,
+            message: msg.into(),
+            labels: Default::default(),
+        }
+    }
+
+    let dir = tempdir();
+    let store = Arc::new(LogStore::open(dir.join("logs.redb")).unwrap());
+    store
+        .write_batch(&[
+            rec(1000, 0, "info", 9, "startup ok"),
+            rec(1001, 1, "err", 17, "I/O error on sda"),
+            rec(1002, 2, "warning", 13, "disk nearly full"),
+            rec(1003, 3, "info", 9, "I/O error but only info"),
+            rec(1004, 4, "err", 17, "kernel I/O error"),
+        ])
+        .unwrap();
+
+    let session = Arc::new(
+        zenoh::open(harness::isolated_config())
+            .await
+            .expect("open zenoh"),
+    );
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let producer = format!("test_{nanos}/logs");
+    let (ring, _cap) = query::new_ring(100);
+    tokio::spawn(query::run_events(
+        session.clone(),
+        producer.clone(),
+        ring,
+        Some(store),
+    ));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let events_key = zensight_common::command::query_key(&producer, "events");
+    let replies = session
+        .get(&format!(
+            "{events_key}?from=0;to=9999;pattern=(?i)i/o error;severity_min=warning"
+        ))
+        .timeout(Duration::from_secs(5))
+        .await
+        .expect("get");
+    let reply = replies.recv_async().await.expect("reply");
+    let sample = reply.result().expect("ok");
+    let hits: Vec<LogRecord> =
+        serde_json::from_slice(&sample.payload().to_bytes()).expect("decode");
+
+    // Only the two err-severity "I/O error" lines match (the info one is excluded
+    // by severity_min=warning; the disk-full and startup lines by the pattern).
+    assert_eq!(
+        hits.len(),
+        2,
+        "got {:?}",
+        hits.iter().map(|r| &r.message).collect::<Vec<_>>()
+    );
+    assert!(
+        hits.iter()
+            .all(|r| r.message.to_lowercase().contains("i/o error"))
+    );
+    assert!(hits.iter().all(|r| r.severity == "err"));
+}
+
 fn tempdir() -> std::path::PathBuf {
     let base = std::env::temp_dir().join(format!(
         "zensight-logs-{}-{}",
