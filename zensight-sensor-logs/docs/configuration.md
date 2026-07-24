@@ -113,6 +113,10 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.crt \
 Point an rsyslog sender at it with `omfwd` (`StreamDriver="ossl"`,
 `StreamDriverMode="1"`), or test with `openssl s_client -connect host:6514`.
 
+For **reliable delivery** across receiver restarts (sender-side disk-assisted
+queueing over TCP/TLS, and why RELP is deferred), see
+[reliable-delivery.md](reliable-delivery.md) (#551).
+
 ### RFC 3164 timestamps (#545)
 
 RFC 3164 (BSD) stamps carry neither a year nor a timezone. The parser:
