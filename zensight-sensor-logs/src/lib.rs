@@ -17,6 +17,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod dedup;
 pub mod events;
 pub mod filter;
 pub mod ingest;

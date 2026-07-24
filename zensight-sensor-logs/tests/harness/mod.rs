@@ -65,6 +65,10 @@ pub struct RigBuilder {
     listener: ListenerConfig,
     overflow: OverflowPolicy,
     flush_timeout_ms: u64,
+    channel_capacity: usize,
+    /// When set, the intake loop collapses consecutive identical lines with this
+    /// idle-gap window (#546).
+    collapse_window: Option<Duration>,
     /// When false, the intake loop is NOT spawned — the channel fills, so
     /// overflow/backpressure accounting can be exercised.
     drain: bool,
@@ -91,12 +95,25 @@ impl RigBuilder {
             listener,
             overflow: OverflowPolicy::DropNewest,
             flush_timeout_ms: 100,
+            channel_capacity: 1000,
+            collapse_window: None,
             drain: true,
         }
     }
 
+    /// Enable ingest repeat collapse with the given idle-gap window (#546).
+    pub fn collapse(mut self, window: Duration) -> Self {
+        self.collapse_window = Some(window);
+        self
+    }
+
     pub fn overflow(mut self, policy: OverflowPolicy) -> Self {
         self.overflow = policy;
+        self
+    }
+    /// Intake channel capacity (#546) — for burst-absorption tests.
+    pub fn channel_capacity(mut self, n: usize) -> Self {
+        self.channel_capacity = n;
         self
     }
     /// Park the intake loop (don't drain the channel) — for backpressure tests.
@@ -110,6 +127,7 @@ impl RigBuilder {
         cfg.listeners = vec![self.listener.clone()];
         cfg.ingest = IngestConfig {
             overflow: self.overflow,
+            channel_capacity: self.channel_capacity,
             ..cfg.ingest
         };
         cfg.multiline = MultilineConfig {
@@ -142,7 +160,13 @@ impl RigBuilder {
         if self.drain {
             let ring = ring.clone();
             let filter = filter.clone();
-            tokio::spawn(intake_loop(rx, filter, ring, capacity));
+            tokio::spawn(intake_loop(
+                rx,
+                filter,
+                ring,
+                capacity,
+                self.collapse_window,
+            ));
         } else {
             // Keep rx alive but never drain it, so the channel back-pressures.
             std::mem::forget(rx);
@@ -168,24 +192,58 @@ async fn intake_loop(
     filter: Arc<FilterManager>,
     ring: EventRing,
     capacity: usize,
+    collapse_window: Option<Duration>,
 ) {
+    use std::time::Instant;
+    use zensight_sensor_logs::dedup::RepeatCollapser;
+
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    while let Some(received) = rx.recv().await {
-        if !filter
-            .matches(&received.message, &received.resolved_hostname)
-            .await
-        {
-            continue;
-        }
+
+    let push = |received: &ReceivedMessage, count: u64| {
         let ts = received
             .message
             .timestamp
             .map(|d| d.timestamp_millis())
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
         let uid = receiver::make_log_uid(ts, SEQ.fetch_add(1, Ordering::Relaxed));
-        let point = receiver::to_telemetry_point(&received, false, &uid);
+        let mut point = receiver::to_telemetry_point(received, false, &uid);
+        if count > 1 {
+            point
+                .labels
+                .insert("repeat_count".to_string(), count.to_string());
+        }
         if let Some(record) = LogRecord::from_point(&point) {
             query::push(&ring, capacity, record);
+        }
+    };
+
+    let mut collapser = collapse_window.map(RepeatCollapser::new);
+    let mut flush = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            maybe = rx.recv() => {
+                let Some(received) = maybe else { break };
+                if !filter
+                    .matches(&received.message, &received.resolved_hostname)
+                    .await
+                {
+                    continue;
+                }
+                let to_emit = match &mut collapser {
+                    Some(c) => c.observe(received, Instant::now()),
+                    None => Some((received, 1)),
+                };
+                if let Some((rec, count)) = to_emit {
+                    push(&rec, count);
+                }
+            }
+            _ = flush.tick() => {
+                if let Some(c) = &mut collapser
+                    && let Some((rec, count)) = c.flush_due(Instant::now())
+                {
+                    push(&rec, count);
+                }
+            }
         }
     }
 }
@@ -225,7 +283,7 @@ impl LogRig {
     /// producer, mutating the shared `FilterManager` — the live dynamic-filter
     /// path (#548). Mirrors `main.rs`'s handler with the public
     /// `FilterCommand`/`FilterStatus` protocol.
-    pub fn serve_filters(&self) {
+    pub async fn serve_filters(&self) {
         use zensight_sensor_logs::commands::{
             FilterCommand, FilterStatus, command_key, status_key,
         };
@@ -235,14 +293,22 @@ impl LogRig {
         let read_key = status_key(&self.producer);
         let session = self.session.clone();
 
+        // Declare both queryables up front (awaited) so a caller that immediately
+        // GETs `filter/set` can't race the declaration — the source of a
+        // parallel-run flake.
+        let write_q = session
+            .declare_queryable(&write_key)
+            .await
+            .expect("filter/set queryable");
+        let read_q = session
+            .declare_queryable(&read_key)
+            .await
+            .expect("filter queryable");
+
         // Write: @rpc/<producer>/filter/set
         let f = filter.clone();
-        let s = session.clone();
         tokio::spawn(async move {
-            let q = s
-                .declare_queryable(&write_key)
-                .await
-                .expect("filter/set queryable");
+            let q = write_q;
             while let Ok(query) = q.recv_async().await {
                 let payload = query
                     .payload()
@@ -272,10 +338,7 @@ impl LogRig {
 
         // Read: @rpc/<producer>/filter
         tokio::spawn(async move {
-            let q = session
-                .declare_queryable(&read_key)
-                .await
-                .expect("filter queryable");
+            let q = read_q;
             while let Ok(query) = q.recv_async().await {
                 let status = FilterStatus {
                     base_filter: filter.base_config().clone(),

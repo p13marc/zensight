@@ -161,7 +161,9 @@ pub async fn start_listeners(
     Option<Arc<JournaldStats>>,
     Arc<IngestStats>,
 )> {
-    let (tx, rx) = mpsc::channel(1000);
+    // Central intake channel: capacity is configurable (#546) so operators can
+    // trade memory for burst absorption instead of the old hardcoded 1000.
+    let (tx, rx) = mpsc::channel(config.ingest.channel_capacity.max(1));
     let hostname_aliases = Arc::new(config.hostname_aliases.clone());
 
     // Per-sender RFC 3164 timezone overrides, resolved once (#545). Validated in

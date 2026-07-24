@@ -6,6 +6,7 @@
 
 mod commands;
 mod config;
+mod dedup;
 mod derived;
 mod events;
 mod filter;
@@ -35,6 +36,10 @@ use zensight_sensor_core::{
 /// Process-wide monotonic sequence that disambiguates per-line log event uids
 /// (#104) when multiple lines share a millisecond timestamp.
 static LOG_EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// While loss persists, re-report every this many monitor windows (#546) so a
+/// long partial-loss state keeps surfacing instead of being reported once.
+const LOSS_REREPORT_WINDOWS: u32 = 6;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -253,7 +258,10 @@ async fn main() -> Result<()> {
             use std::time::Duration;
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             let mut prev = stats.snapshot();
+            // Level-triggered (#546): re-report periodically while loss persists,
+            // and emit an explicit recovery report on clearing.
             let mut alerting = false;
+            let mut windows_lossy: u32 = 0;
             loop {
                 tick.tick().await;
                 let cur = stats.snapshot();
@@ -261,8 +269,10 @@ async fn main() -> Result<()> {
                 let dropped = cur.dropped.saturating_sub(prev.dropped);
                 let sampled = cur.sampled_out.saturating_sub(prev.sampled_out);
                 if loss > drop_alert_ratio && (dropped + sampled) > 0 {
-                    // Edge-triggered: report once on entering the lossy state.
-                    if !alerting {
+                    windows_lossy += 1;
+                    // Report on entering, then every LOSS_REREPORT_WINDOWS while
+                    // still lossy — so a long partial-loss state keeps surfacing.
+                    if !alerting || windows_lossy.is_multiple_of(LOSS_REREPORT_WINDOWS) {
                         alerting = true;
                         let report = zensight_sensor_core::ErrorReport::new(
                             zensight_sensor_core::ErrorType::Other,
@@ -285,6 +295,14 @@ async fn main() -> Result<()> {
                     }
                 } else if alerting {
                     alerting = false;
+                    windows_lossy = 0;
+                    let report = zensight_sensor_core::ErrorReport::new(
+                        zensight_sensor_core::ErrorType::Other,
+                        "journald log loss recovered — drop rate back under threshold",
+                    );
+                    if let Err(e) = health.publish_error(&report).await {
+                        tracing::warn!(error = %e, "failed to publish journald recovery report");
+                    }
                     tracing::info!("journald: log loss recovered");
                 }
                 prev = cur;
@@ -314,12 +332,22 @@ async fn main() -> Result<()> {
             let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
             let mut prev = stats.snapshot();
             let mut alerting = false;
+            let mut windows_lossy: u32 = 0;
             loop {
                 tick.tick().await;
                 let cur = stats.snapshot();
+                let loss = cur.loss_ratio_since(&prev);
+                let dropped = cur.dropped.saturating_sub(prev.dropped);
 
-                // Publish the ingest counters as telemetry.
-                for point in cur.to_points(&source) {
+                // Publish the ingest counters + a windowed `dropped_ratio` gauge
+                // (#546) so dashboards can alert on sustained loss directly.
+                let mut points = cur.to_points(&source);
+                points.push(telemetry_guard::checked_point(
+                    &source,
+                    "ingest/dropped_ratio",
+                    zensight_common::telemetry::TelemetryValue::Gauge(loss),
+                ));
+                for point in points {
                     let key = format!("{}/{}", v1_prefix_tick, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
@@ -334,11 +362,11 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Sustained-loss health alert (edge-triggered, mirrors journald).
-                let loss = cur.loss_ratio_since(&prev);
-                let dropped = cur.dropped.saturating_sub(prev.dropped);
+                // Sustained-loss health alert — level-triggered (#546): report on
+                // entering, re-report periodically while lossy, recovery on clear.
                 if loss > drop_alert_ratio && dropped > 0 {
-                    if !alerting {
+                    windows_lossy += 1;
+                    if !alerting || windows_lossy.is_multiple_of(LOSS_REREPORT_WINDOWS) {
                         alerting = true;
                         let report = zensight_sensor_core::ErrorReport::new(
                             zensight_sensor_core::ErrorType::Other,
@@ -360,6 +388,14 @@ async fn main() -> Result<()> {
                     }
                 } else if alerting {
                     alerting = false;
+                    windows_lossy = 0;
+                    let report = zensight_sensor_core::ErrorReport::new(
+                        zensight_sensor_core::ErrorType::Other,
+                        "network ingest log loss recovered — drop rate back under threshold",
+                    );
+                    if let Err(e) = health.publish_error(&report).await {
+                        tracing::warn!(error = %e, "failed to publish ingest recovery report");
+                    }
                     tracing::info!("network ingest: log loss recovered");
                 }
                 prev = cur;
@@ -556,7 +592,17 @@ async fn main() -> Result<()> {
     let template_loop = template_agg.clone();
     let novelty_loop = novelty.clone();
     let novelty_reporter = novelty.is_some().then(|| alert_reporter.clone()).flatten();
+    // Repeat collapse (#546): fold consecutive identical lines into one record +
+    // `repeat_count`. Opt-in; `None` = pass every line straight through.
+    let mut collapser = syslog_config.ingest.collapse_repeats.then(|| {
+        dedup::RepeatCollapser::new(std::time::Duration::from_millis(
+            syslog_config.ingest.collapse_window_ms.max(1),
+        ))
+    });
     runner.spawn(async move {
+        // Flush timer for the collapser's trailing run (a run that ends without a
+        // following different line). Cheap fixed tick; a no-op when collapse is off.
+        let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             tokio::select! {
                 Some(received) = rx.recv() => {
@@ -577,70 +623,34 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    // Feed derived rollups (#63) — counts what's actually
-                    // published (post-filter), alongside the per-message point.
+                    // Feed derived rollups (#63) — counts every post-filter line
+                    // (before collapse, so totals stay honest even when identical
+                    // lines fold into one ring record).
                     if let Some(agg) = &aggregator_loop {
                         agg.observe(&received.message);
                     }
 
-                    // Per-line event uid (#104): timestamp-prefixed + monotonic
-                    // sequence, so each log line gets a unique, time-sortable key
-                    // (`events/<uid>`) instead of last-writer-wins facility/severity.
-                    let ts_ms = received
-                        .message
-                        .timestamp
-                        .map(|dt| dt.timestamp_millis())
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                    let seq = LOG_EVENT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let uid = receiver::make_log_uid(ts_ms, seq);
-
-                    // Convert to telemetry point
-                    let mut point = receiver::to_telemetry_point(&received, include_raw, &uid);
-
-                    // Log-template mining (#102): mine the message text and
-                    // attach the stable template id + masked template as labels.
-                    if let Some(tagg) = &template_loop {
-                        let is_error = (received.message.severity as u8)
-                            <= (parser::Severity::Error as u8);
-                        if let Some(mined) = tagg.observe(&received.message.message, is_error) {
-                            // Novelty detection (#103): a never-before-seen shape
-                            // (after warm-up) fires a one-shot `log-novelty`
-                            // anomaly; the tick task ages it out / reconciles.
-                            if let (Some(tracker), Some(reporter)) =
-                                (&novelty_loop, &novelty_reporter)
-                                && let Some(alert) = tracker.observe(
-                                    &mined.id,
-                                    &mined.template,
-                                    std::time::Instant::now(),
-                                )
-                            {
-                                let key = alert.alert_key();
-                                if let Err(e) = reporter
-                                    .observe(alert, Some(std::time::Duration::ZERO))
-                                    .await
-                                {
-                                    tracing::warn!(error = %e, alert = %key, "failed to publish novelty alert");
-                                }
-                            }
-                            point.labels.insert("template_id".to_string(), mined.id);
-                            point.labels.insert("template".to_string(), mined.template);
-                        }
+                    // Repeat collapse: a folded line is suppressed here and emitted
+                    // once its run closes (a different line, or the flush tick).
+                    let to_emit = match &mut collapser {
+                        Some(c) => c.observe(received, std::time::Instant::now()),
+                        None => Some((received, 1)),
+                    };
+                    if let Some((record, count)) = to_emit {
+                        emit_line(
+                            &record, count, include_raw, &template_loop, &novelty_loop,
+                            &novelty_reporter, &event_ring, event_ring_capacity, &publish_health,
+                        ).await;
                     }
-
-                    // Ring, don't stream (#358): the per-line event goes into
-                    // the bounded `@rpc/logs/events` ring for on-demand pulls.
-                    // Only the derived rollups above ride the telemetry bus.
-                    if let Some(record) = zensight_common::LogRecord::from_point(&point) {
-                        query::push(&event_ring, event_ring_capacity, record);
-                        // Count ring-appended lines so the Sensors view still
-                        // reflects this sensor's throughput (#62).
-                        publish_health.record_metrics_published(1);
-                        tracing::trace!(
-                            "Ringed: events/{} from {} [{}]",
-                            uid,
-                            received.resolved_hostname,
-                            received.message.severity.as_str()
-                        );
+                }
+                _ = flush_tick.tick() => {
+                    if let Some(c) = &mut collapser
+                        && let Some((record, count)) = c.flush_due(std::time::Instant::now())
+                    {
+                        emit_line(
+                            &record, count, include_raw, &template_loop, &novelty_loop,
+                            &novelty_reporter, &event_ring, event_ring_capacity, &publish_health,
+                        ).await;
                     }
                 }
                 else => break,
@@ -653,6 +663,67 @@ async fn main() -> Result<()> {
         .run_with_metadata(Some(metadata))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Emit one processed log line to the `@rpc/logs/events` ring (#358): build the
+/// per-line uid + telemetry point, run template mining / novelty on it, and push
+/// it. Shared by the live-recv and repeat-collapse-flush paths (#546) so both
+/// treat a line identically; `repeat_count > 1` folds a collapsed run and is
+/// surfaced as a `repeat_count` label.
+#[allow(clippy::too_many_arguments)]
+async fn emit_line(
+    received: &receiver::ReceivedMessage,
+    repeat_count: u64,
+    include_raw: bool,
+    template: &Option<Arc<template::TemplateAggregator>>,
+    novelty: &Option<Arc<novelty::NoveltyTracker>>,
+    novelty_reporter: &Option<Arc<AlertReporter>>,
+    event_ring: &query::EventRing,
+    event_ring_capacity: usize,
+    health: &Arc<zensight_sensor_core::SensorHealth>,
+) {
+    use std::sync::atomic::Ordering;
+
+    let ts_ms = received
+        .message
+        .timestamp
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let seq = LOG_EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let uid = receiver::make_log_uid(ts_ms, seq);
+
+    let mut point = receiver::to_telemetry_point(received, include_raw, &uid);
+    if repeat_count > 1 {
+        point
+            .labels
+            .insert("repeat_count".to_string(), repeat_count.to_string());
+    }
+
+    // Log-template mining (#102) + novelty (#103) on the representative line.
+    if let Some(tagg) = template {
+        let is_error = (received.message.severity as u8) <= (parser::Severity::Error as u8);
+        if let Some(mined) = tagg.observe(&received.message.message, is_error) {
+            if let (Some(tracker), Some(reporter)) = (novelty, novelty_reporter)
+                && let Some(alert) =
+                    tracker.observe(&mined.id, &mined.template, std::time::Instant::now())
+            {
+                let key = alert.alert_key();
+                if let Err(e) = reporter
+                    .observe(alert, Some(std::time::Duration::ZERO))
+                    .await
+                {
+                    tracing::warn!(error = %e, alert = %key, "failed to publish novelty alert");
+                }
+            }
+            point.labels.insert("template_id".to_string(), mined.id);
+            point.labels.insert("template".to_string(), mined.template);
+        }
+    }
+
+    if let Some(record) = zensight_common::LogRecord::from_point(&point) {
+        query::push(event_ring, event_ring_capacity, record);
+        health.record_metrics_published(1);
+    }
 }
 
 /// Handle a filter command.
