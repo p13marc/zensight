@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = SyslogSensorConfig::load_from_file(&args.config)?;
     let source = config.syslog.resolved_source();
+    tracing::info!(summary = %config.startup_summary(), "syslog sensor configuration");
 
     // Create the sensor runner
     let runner = SensorRunner::new_with_args("logs", source.clone(), config, Some(&args))

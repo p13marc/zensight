@@ -16,8 +16,23 @@ required (validated at load).
   syslog: { ... },                // sensor settings (historical key name)
   artifacts: { report: { ... } }, // on-demand artifact procedures (disabled by default)
   logging: { level: "info" },
+  allow_unknown_fields: false,    // forward-compat escape hatch (see below)
 }
 ```
+
+### Strict loading (#547)
+
+Unknown keys are **rejected at load** with an error that names them (including
+nested paths, e.g. `syslog.novelty.enabld`). This closes the silent-default trap
+where a typo — `novlety:` instead of `novelty:` — left an analytic at its default
+while the operator believed it was on. Set `allow_unknown_fields: true` to
+downgrade rejection to a startup warning for mixed-version fleets sharing one
+config file across sensor versions.
+
+On start the sensor logs a one-line **configuration summary** (active sources +
+which analytics are on/off + ingest posture) at `info`, so a source that never
+came up or an analytic left off is visible immediately rather than inferred later
+from missing telemetry.
 
 ## `syslog`
 

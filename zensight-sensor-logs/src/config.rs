@@ -29,6 +29,12 @@ pub struct SyslogSensorConfig {
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
+
+    /// Forward-compat escape hatch (#547): when true, unknown config keys are
+    /// warned about instead of rejected — for mixed-version fleets sharing one
+    /// config. Default false: a typo'd key fails startup with a clear error.
+    #[serde(default)]
+    pub allow_unknown_fields: bool,
 }
 
 /// Syslog receiver configuration.
@@ -747,7 +753,38 @@ impl SyslogSensorConfig {
     /// Load configuration from a JSON5 file.
     pub fn load_from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
-        let config: Self = json5::from_str(&content)?;
+        Self::parse_strict(&content)
+    }
+
+    /// Parse config, rejecting unknown keys (#547) unless
+    /// `allow_unknown_fields` is set. Unknown keys are collected by full path
+    /// (including nested/external types) via `serde_ignored`, so a typo like
+    /// `novlety` fails loudly naming the key instead of silently taking the
+    /// default. With the escape hatch on, unknown keys are logged as warnings.
+    pub fn parse_strict(content: &str) -> anyhow::Result<Self> {
+        // json5 → Value → serde_ignored, so one parse yields both the typed
+        // config and the set of ignored (unknown) key paths.
+        let value: serde_json::Value = json5::from_str(content)?;
+        let mut unknown: Vec<String> = Vec::new();
+        let config: Self = serde_ignored::deserialize(value, |path| {
+            unknown.push(path.to_string());
+        })?;
+
+        if !unknown.is_empty() {
+            let list = unknown.join(", ");
+            if config.allow_unknown_fields {
+                tracing::warn!(
+                    unknown_keys = %list,
+                    "config has unknown keys (allow_unknown_fields is set — ignoring)"
+                );
+            } else {
+                anyhow::bail!(
+                    "unknown config key(s): {list}. Fix the typo, or set \
+                     allow_unknown_fields: true to ignore (mixed-version fleets)."
+                );
+            }
+        }
+
         config.validate_config()?;
         Ok(config)
     }
@@ -783,6 +820,65 @@ impl SyslogSensorConfig {
         }
 
         Ok(())
+    }
+
+    /// One-glance startup summary (#547): what sources are active and which
+    /// analytics are on/off, so a misconfiguration (a source that never came up,
+    /// an analytic silently left at its default) is visible in the log the moment
+    /// the sensor starts — not inferred later from missing telemetry.
+    pub fn startup_summary(&self) -> String {
+        let s = &self.syslog;
+
+        // Sources.
+        let mut sources: Vec<String> = s
+            .listeners
+            .iter()
+            .map(|l| format!("{:?}:{}", l.protocol, l.bind))
+            .collect();
+        if let Some(j) = &s.journald
+            && j.enabled
+        {
+            sources.push(format!(
+                "journald({:?}, {} unit filter(s))",
+                j.scope,
+                j.units.len()
+            ));
+        }
+        let sources = if sources.is_empty() {
+            "<none>".to_string()
+        } else {
+            sources.join(", ")
+        };
+
+        // Analytics toggles — name each so an off one reads as a deliberate off,
+        // not an oversight.
+        let on_off = |b: bool| if b { "on" } else { "off" };
+        let analytics = format!(
+            "derived={}, error_budget={}, templating={}, novelty={}, \
+             journald.detect_events={}, dynamic_filters={}, multiline={}",
+            on_off(s.derived),
+            on_off(s.error_budget.enabled),
+            on_off(s.templating.enabled),
+            on_off(s.novelty.enabled),
+            on_off(
+                s.journald
+                    .as_ref()
+                    .is_some_and(|j| j.enabled && j.detect_events)
+            ),
+            on_off(s.enable_dynamic_filters),
+            on_off(s.multiline.enabled),
+        );
+
+        let ingest = match s.ingest.max_eps {
+            Some(eps) => format!("rate_limit={eps}/s overflow={:?}", s.ingest.overflow),
+            None => format!("rate_limit=off overflow={:?}", s.ingest.overflow),
+        };
+
+        format!(
+            "sources: {sources} | analytics: {analytics} | ingest: {ingest} | \
+             events_ring={}",
+            s.events_ring_capacity
+        )
     }
 }
 
@@ -847,9 +943,11 @@ mod tests {
 
     /// The shipped example config must physically spell out the opt-in analytics.
     ///
-    /// No `deny_unknown_fields` anywhere, so an absent block parses clean and
-    /// silently takes the Rust default — which is how `novelty` and
-    /// `error_budget` stayed invisible. Asserting the parsed value would be
+    /// An absent block parses clean and takes the Rust default — that's correct
+    /// (absent = default). The old hazard was a *typo* (`novlety:`) making an
+    /// operator believe an analytic was on while it silently stayed at its
+    /// default; #547's strict loader now rejects that (see
+    /// `unknown_key_is_rejected`). Asserting the parsed value here would be
     /// vacuous (both ship `false` and default `false`), so walk the raw tree and
     /// prove the key is really present for `gen-configs.sh` to sed on.
     #[test]
@@ -880,6 +978,65 @@ mod tests {
 
         assert_eq!(at("syslog.novelty.enabled"), false);
         assert_eq!(at("syslog.error_budget.enabled"), false);
+    }
+
+    const MINIMAL: &str = r#"{
+        zenoh: { mode: "peer" },
+        syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+    }"#;
+
+    /// A typo'd top-level key (the classic `novlety` silent-default trap) is
+    /// rejected with an error that names the offending key (#547).
+    #[test]
+    fn unknown_key_is_rejected() {
+        let bad = MINIMAL.replace(r#"syslog: {"#, r#"novlety: true, syslog: {"#);
+        let err = SyslogSensorConfig::parse_strict(&bad).expect_err("typo must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown config key"), "got: {msg}");
+        assert!(
+            msg.contains("novlety"),
+            "error must name the key, got: {msg}"
+        );
+    }
+
+    /// A misspelled *nested* key is caught too — serde_ignored reports the full
+    /// path, so a typo inside an analytics block can't hide.
+    #[test]
+    fn unknown_nested_key_is_rejected() {
+        let bad = MINIMAL.replace(r#"listeners:"#, r#"novelty: { enabld: true }, listeners:"#);
+        let err = SyslogSensorConfig::parse_strict(&bad).expect_err("nested typo must fail");
+        assert!(
+            err.to_string().contains("enabld"),
+            "error must name the nested key, got: {err}"
+        );
+    }
+
+    /// The escape hatch downgrades rejection to a warning for mixed-version
+    /// fleets: with `allow_unknown_fields: true` the unknown key is tolerated.
+    #[test]
+    fn allow_unknown_fields_tolerates_extras() {
+        let ok = MINIMAL.replace(
+            r#"syslog: {"#,
+            r#"allow_unknown_fields: true, future_knob: 42, syslog: {"#,
+        );
+        let cfg = SyslogSensorConfig::parse_strict(&ok).expect("escape hatch must allow extras");
+        assert!(cfg.allow_unknown_fields);
+    }
+
+    /// Every config shipped in-repo must survive the strict loader (#547): the
+    /// strictness is worthless if our own examples trip it. Guards against a
+    /// future edit adding a key the schema doesn't know.
+    #[test]
+    fn shipped_configs_load_strict() {
+        for rel in [
+            "/../configs/logs.json5",
+            "/../configs/syslog.json5",
+            "/../docker/configs/syslog.json5",
+        ] {
+            let path = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
+            SyslogSensorConfig::load_from_file(&path)
+                .unwrap_or_else(|e| panic!("{path} must load strict: {e}"));
+        }
     }
 
     #[test]
