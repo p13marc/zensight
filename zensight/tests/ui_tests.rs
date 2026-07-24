@@ -3475,7 +3475,7 @@ fn test_logs_view_renders_lines() {
     let messages = vec![syslog_message_from_point(&point, &point.source)];
     let filter = SyslogFilterState::default();
 
-    let mut ui = simulator(logs_view(&messages, &filter));
+    let mut ui = simulator(logs_view(&messages, &filter, None));
     assert!(ui.find("Logs").is_ok());
     assert!(ui.find("INTRUDER ALERT from 10.0.0.9").is_ok());
     assert!(ui.find("host01").is_ok());
@@ -3506,7 +3506,7 @@ fn test_logs_unit_filter_and_source_badge() {
     let mut filter = SyslogFilterState::default();
     filter.panel_open = true;
 
-    let mut ui = simulator(logs_view(&messages, &filter));
+    let mut ui = simulator(logs_view(&messages, &filter, None));
     // Provenance badge + the unit chip render.
     assert!(ui.find("journald").is_ok());
     assert!(ui.find("nginx.service").is_ok());
@@ -3517,6 +3517,75 @@ fn test_logs_unit_filter_and_source_badge() {
     assert!(
         msgs.iter()
             .any(|m| matches!(m, Message::ToggleSyslogUnit(u) if u == "nginx.service"))
+    );
+}
+
+/// #555: the Logs-feed "Export filtered logs" button appears when the logs sensor
+/// advertises a `logbundle` kind, and fires a `StartArtifact` whose `LogBundle`
+/// carries the active filter's selectors (severity / unit / app / message).
+#[test]
+fn test_logs_filtered_export_button_carries_filter() {
+    use zensight::view::specialized::{LogExport, SyslogFilterState, logs_view};
+    use zensight_common::ArtifactKind;
+
+    let mut filter = SyslogFilterState::default();
+    filter.panel_open = true;
+    filter.min_severity = Some(3); // err
+    filter.selected_units.insert("nginx.service".to_string());
+    filter.app_filter = "nginx".to_string();
+    filter.message_filter = "timeout".to_string();
+
+    let export = Some(LogExport {
+        max_lines: 0,
+        busy: false,
+    });
+    let mut ui = simulator(logs_view(&[], &filter, export));
+
+    assert!(
+        ui.find("Export filtered logs").is_ok(),
+        "export button should render when logbundle is advertised"
+    );
+    ui.click("Export filtered logs").expect("click export");
+
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    let kind = msgs.iter().find_map(|m| match m {
+        Message::StartArtifact { producer, kind, .. } if producer == "logs" => Some(kind.clone()),
+        _ => None,
+    });
+    match kind {
+        Some(ArtifactKind::LogBundle {
+            pattern,
+            severity_min,
+            unit,
+            app,
+            from,
+            to,
+            source,
+            ..
+        }) => {
+            assert_eq!(pattern.as_deref(), Some("timeout"));
+            assert_eq!(severity_min.as_deref(), Some("3"));
+            assert_eq!(unit.as_deref(), Some("nginx.service"));
+            assert_eq!(app.as_deref(), Some("nginx"));
+            assert_eq!(from, None);
+            assert_eq!(to, None);
+            assert_eq!(source, None);
+        }
+        other => panic!("expected a LogBundle StartArtifact, got {other:?}"),
+    }
+}
+
+/// #555: with no `logbundle` advert (`None`), the Logs feed shows no export button.
+#[test]
+fn test_logs_no_export_button_when_unavailable() {
+    use zensight::view::specialized::{SyslogFilterState, logs_view};
+
+    let mut filter = SyslogFilterState::default();
+    filter.panel_open = true;
+    let mut ui = simulator(logs_view(&[], &filter, None));
+    assert!(
+        ui.find("Export filtered logs").is_err(),
+        "no export button without a logbundle advert"
     );
 }
 
@@ -3624,7 +3693,7 @@ fn test_logs_view_empty_state() {
     use zensight::view::specialized::logs_view;
 
     let filter = SyslogFilterState::default();
-    let mut ui = simulator(logs_view(&[], &filter));
+    let mut ui = simulator(logs_view(&[], &filter, None));
     assert!(ui.find("No log messages received yet...").is_ok());
 }
 
