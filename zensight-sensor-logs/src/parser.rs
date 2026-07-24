@@ -268,17 +268,35 @@ pub fn parse_with_time(input: &str, ctx: &RfcTimeCtx) -> Option<SyslogMessage> {
     let input = input.strip_prefix('\u{FEFF}').unwrap_or(input);
     let input = input.trim();
 
-    // Try RFC 5424 first
+    // Multi-line record (#584): a `MultilineJoiner` folds a `<PRI>` head line +
+    // indented continuation frames (stack traces) into one string with embedded
+    // `\n`s. The RFC 3164/5424 patterns anchor on `$` and end with `(.*)`, so
+    // they never match across a newline — the whole record used to be dropped.
+    // Parse the envelope from the first line only, then re-attach the folded
+    // continuation to the message verbatim so it survives as one event.
+    if let Some(nl) = input.find('\n') {
+        let head = &input[..nl];
+        let rest = &input[nl..]; // includes the leading '\n'
+        if let Some(mut msg) = parse_line(head, ctx) {
+            msg.message.push_str(rest);
+            msg.raw = input.to_string();
+            return Some(msg);
+        }
+        // Head didn't parse as an envelope → fall through (whole-input parse).
+    }
+
+    parse_line(input, ctx)
+}
+
+/// Parse a single syslog line (no embedded newlines): RFC 5424, then RFC 3164,
+/// then the PRI-only fallback.
+fn parse_line(input: &str, ctx: &RfcTimeCtx) -> Option<SyslogMessage> {
     if let Some(msg) = parse_rfc5424(input) {
         return Some(msg);
     }
-
-    // Try RFC 3164
     if let Some(msg) = parse_rfc3164(input, ctx) {
         return Some(msg);
     }
-
-    // Fallback: just extract priority
     parse_simple(input)
 }
 
@@ -595,6 +613,30 @@ mod tests {
         assert_eq!(parsed.app_name, Some("sshd".to_string()));
         assert_eq!(parsed.proc_id, Some("12345".to_string()));
         assert_eq!(parsed.message, "Connection from 192.168.1.1");
+    }
+
+    /// #584: a folded multi-line record (PRI head + indented continuation) is
+    /// parsed as ONE message — envelope from the head, continuation appended
+    /// verbatim — instead of being dropped by the newline-anchored regexes.
+    #[test]
+    fn multiline_record_keeps_envelope_and_folds_body() {
+        let msg = "<11>Oct 11 22:14:15 host app: Traceback (most recent call last):\n    File \"x.py\", line 1, in <module>\n    raise ValueError(\"boom\")";
+        let parsed = parse(msg).expect("multi-line record must parse, not drop");
+        // Envelope comes from the head line.
+        assert_eq!(parsed.hostname, Some("host".to_string()));
+        assert_eq!(parsed.app_name, Some("app".to_string()));
+        assert_eq!(parsed.severity, Severity::Error); // <11> = user.err
+        // Head message + every continuation line, folded into one.
+        assert!(
+            parsed
+                .message
+                .starts_with("Traceback (most recent call last):")
+        );
+        assert!(parsed.message.contains("File \"x.py\", line 1"));
+        assert!(parsed.message.contains("raise ValueError(\"boom\")"));
+        // A single-line record is unaffected (no trailing newline in message).
+        let single = parse("<11>Oct 11 22:14:15 host app: one line").unwrap();
+        assert_eq!(single.message, "one line");
     }
 
     #[test]

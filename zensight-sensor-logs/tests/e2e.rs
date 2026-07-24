@@ -161,10 +161,6 @@ async fn identical_lines_collapse_with_repeat_count() {
 /// an idle gap past `flush_timeout_ms` — without closing the connection. This
 /// is the `select!` idle-flush arm in `handle_stream_connection` (previously
 /// untested), distinct from the EOF-flush path the socket tests hit.
-///
-/// (Folding an indented continuation is unit-tested in `multiline.rs`; it is
-/// deliberately NOT asserted end-to-end here because a joined multi-line syslog
-/// record currently fails to re-parse — see #559-style follow-up filed for it.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiline_idle_flush_emits_buffered_line() {
     let port = free_tcp_port();
@@ -185,6 +181,44 @@ async fn multiline_idle_flush_emits_buffered_line() {
     assert_eq!(records[0].host, "idlehost");
     assert!(records[0].message.contains("buffered line"));
     let _ = stream; // hold the connection open across the poll
+}
+
+/// #584: a `<PRI>`-framed head + indented continuation over a stream listener is
+/// folded by the `MultilineJoiner` and now arrives as ONE record — envelope from
+/// the head, every continuation line in the message — instead of being dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiline_stacktrace_folds_into_one_record() {
+    let port = free_tcp_port();
+    let rig = RigBuilder::tcp(port, Framing::Lf).start().await;
+
+    let mut stream = tcp_connect(port).await;
+    // Head line + two indented continuation frames (`is_continuation`), then hold
+    // the connection open so the idle-flush arm emits the folded record.
+    send_line(
+        &mut stream,
+        "<11>Oct 11 22:14:15 web01 app: Traceback (most recent call last):",
+    )
+    .await;
+    send_line(&mut stream, "    File \"x.py\", line 1, in <module>").await;
+    send_line(&mut stream, "    raise ValueError(\"boom\")").await;
+
+    let records = rig.events_until(1, DEADLINE).await;
+    assert_eq!(
+        records.len(),
+        1,
+        "the folded trace is one record, not dropped"
+    );
+    let rec = &records[0];
+    assert_eq!(rec.host, "web01", "envelope host from the head line");
+    assert_eq!(rec.severity, "err", "<11> = user.err, from the head");
+    assert!(rec.message.contains("Traceback (most recent call last):"));
+    assert!(rec.message.contains("File \"x.py\", line 1"));
+    assert!(
+        rec.message.contains("raise ValueError(\"boom\")"),
+        "all continuation frames fold into the message, got {:?}",
+        rec.message
+    );
+    let _ = stream;
 }
 
 /// Durable store (#544): the `events` queryable answers `from`/`to` +
