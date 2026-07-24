@@ -1186,6 +1186,10 @@ pub enum Message {
     /// Set minimum severity filter (None = all severities).
     SetSyslogMinSeverity(Option<u8>),
 
+    /// Set the Logs-feed relative time window (#554); resolved to a `from=` bound
+    /// against `now` and re-queries the sensor with the new depth.
+    SetLogTimeRange(crate::view::specialized::LogTimeRange),
+
     /// Toggle inclusion of a facility in the filter.
     ToggleSyslogFacility(String),
 

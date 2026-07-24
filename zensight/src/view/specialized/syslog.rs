@@ -193,6 +193,12 @@ pub struct SyslogFilterState {
     /// rule name — shown as a "filtered from alert <rule>" breadcrumb with a
     /// one-click clear.
     pub alert_pivot: Option<String>,
+    /// Selected relative time window (#554). Displayed by the picker; resolved to
+    /// [`Self::range_from`] against `now` when applied.
+    pub time_range: LogTimeRange,
+    /// Absolute lower time bound (epoch ms) resolved from [`Self::time_range`],
+    /// pushed to the events query (`from=`) and the filtered export. `None` = all.
+    pub range_from: Option<i64>,
 }
 
 impl SyslogFilterState {
@@ -205,6 +211,15 @@ impl SyslogFilterState {
             || self.invocation_id.is_some()
             || !self.app_filter.is_empty()
             || !self.message_filter.is_empty()
+            || self.time_range != LogTimeRange::All
+    }
+
+    /// Select a relative time window and resolve its absolute lower bound against
+    /// `now_ms` (epoch ms). `LogTimeRange::All` clears the bound.
+    pub fn set_time_range(&mut self, range: LogTimeRange, now_ms: i64) {
+        self.time_range = range;
+        self.range_from = range.window_ms().map(|w| now_ms - w);
+        self.modified = true;
     }
 
     /// Toggle a systemd unit in the unit filter (#64).
@@ -291,6 +306,8 @@ impl SyslogFilterState {
         self.app_filter.clear();
         self.message_filter.clear();
         self.alert_pivot = None;
+        self.time_range = LogTimeRange::All;
+        self.range_from = None;
         self.modified = true;
     }
 
@@ -310,6 +327,70 @@ pub struct SeverityOption {
 impl std::fmt::Display for SeverityOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.label)
+    }
+}
+
+/// A relative time window for the Logs feed (#554). The picker stores the
+/// selection; the update handler resolves it to an absolute lower bound (epoch
+/// ms) against `now` when applied, so the pure view never needs the clock. The
+/// bound feeds both the events query (`from=`) and the filtered export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogTimeRange {
+    /// No lower bound — everything the sensor/ring holds.
+    #[default]
+    All,
+    /// The last 15 minutes.
+    Last15m,
+    /// The last hour.
+    LastHour,
+    /// The last 6 hours.
+    Last6h,
+    /// The last 24 hours.
+    Last24h,
+    /// The last 7 days.
+    Last7d,
+}
+
+impl LogTimeRange {
+    /// The pick-list options, in display order.
+    pub const ALL: [LogTimeRange; 6] = [
+        LogTimeRange::All,
+        LogTimeRange::Last15m,
+        LogTimeRange::LastHour,
+        LogTimeRange::Last6h,
+        LogTimeRange::Last24h,
+        LogTimeRange::Last7d,
+    ];
+
+    /// Window length in milliseconds, or `None` for "all time" (no lower bound).
+    pub fn window_ms(self) -> Option<i64> {
+        let mins = match self {
+            LogTimeRange::All => return None,
+            LogTimeRange::Last15m => 15,
+            LogTimeRange::LastHour => 60,
+            LogTimeRange::Last6h => 6 * 60,
+            LogTimeRange::Last24h => 24 * 60,
+            LogTimeRange::Last7d => 7 * 24 * 60,
+        };
+        Some(mins * 60_000)
+    }
+
+    /// The label shown in the picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            LogTimeRange::All => "All time",
+            LogTimeRange::Last15m => "Last 15 min",
+            LogTimeRange::LastHour => "Last hour",
+            LogTimeRange::Last6h => "Last 6 hours",
+            LogTimeRange::Last24h => "Last 24 hours",
+            LogTimeRange::Last7d => "Last 7 days",
+        }
+    }
+}
+
+impl std::fmt::Display for LogTimeRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
     }
 }
 
@@ -558,7 +639,8 @@ pub fn log_bundle_kind_from_filter(filter_state: &SyslogFilterState) -> Artifact
         None
     };
     ArtifactKind::LogBundle {
-        from: None,
+        // The selected time-range lower bound (#554), resolved to epoch ms.
+        from: filter_state.range_from,
         // The live-tail pause upper bound, when frozen, is the visible window's end.
         to: filter_state.frozen_at,
         pattern: non_empty(&filter_state.message_filter),
@@ -744,6 +826,21 @@ fn render_filter_panel<'a>(
             SEVERITY_OPTIONS.as_slice(),
             Some(current_severity),
             |opt: SeverityOption| Message::SetSyslogMinSeverity(opt.value)
+        )
+        .width(Length::Fixed(150.0))
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+
+    // Time-range picker (#554): a relative window resolved to a `from=` bound on
+    // apply, narrowing both the events query (server-side history depth) and the
+    // filtered export.
+    let time_range_picker = row![
+        text("Time range:").size(13),
+        pick_list(
+            LogTimeRange::ALL.as_slice(),
+            Some(filter_state.time_range),
+            Message::SetLogTimeRange,
         )
         .width(Length::Fixed(150.0))
     ]
@@ -960,6 +1057,7 @@ fn render_filter_panel<'a>(
     let filter_content = column![
         title,
         severity_picker,
+        time_range_picker,
         facility_row,
         unit_row,
         boot_row,
@@ -1620,6 +1718,27 @@ mod tests {
         let note = log_export_caveats(&f).expect("caveats present");
         assert!(note.contains("facility"), "note: {note}");
         assert!(note.contains("multiple units"), "note: {note}");
+    }
+
+    /// #554: a relative time range resolves to an absolute `from` bound against
+    /// `now`, feeds the bundle, and `All` clears it.
+    #[test]
+    fn time_range_resolves_from_bound() {
+        let now = 1_700_000_000_000;
+        let mut f = SyslogFilterState::default();
+        assert_eq!(f.range_from, None);
+        assert!(!f.has_active_filters());
+
+        f.set_time_range(LogTimeRange::LastHour, now);
+        assert_eq!(f.range_from, Some(now - 3_600_000));
+        assert!(f.has_active_filters());
+        match log_bundle_kind_from_filter(&f) {
+            ArtifactKind::LogBundle { from, .. } => assert_eq!(from, Some(now - 3_600_000)),
+            other => panic!("expected LogBundle, got {other:?}"),
+        }
+
+        f.set_time_range(LogTimeRange::All, now);
+        assert_eq!(f.range_from, None);
     }
 
     /// #555: a single selected unit maps cleanly and a plain filter has no caveat.
