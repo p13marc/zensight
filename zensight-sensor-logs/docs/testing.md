@@ -45,6 +45,7 @@ The harness is the named safety net for these — each source/transport adds its
 scenarios here.
 
 Note: `journald` live reads are not exercised in CI (they need journal access);
-that path stays `#[ignore]`d / env-gated. A joined multiline record over a
-`<PRI>` stream currently fails to re-parse (#584) — the idle-flush test asserts
-a single buffered line pending that fix.
+that path stays `#[ignore]`d / env-gated. A folded multiline record over a
+`<PRI>` stream now re-parses correctly (#584 fixed): the parser reads the
+envelope from the head line and re-attaches the continuation to the message —
+asserted end-to-end by `multiline_stacktrace_folds_into_one_record`.
