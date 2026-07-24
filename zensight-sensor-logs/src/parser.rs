@@ -1,6 +1,7 @@
 //! Syslog message parser supporting RFC 3164 (BSD) and RFC 5424 formats.
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
+use chrono_tz::Tz;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -195,6 +196,82 @@ pub struct SyslogMessage {
     pub raw: String,
     /// Syslog format version.
     pub version: SyslogVersion,
+    /// Where `timestamp` came from (#545). RFC 3164 stamps are yearless and
+    /// tz-less; when the reconstructed instant is implausibly far from receive
+    /// time it is replaced with the receive clock and marked `Receiver`.
+    pub ts_source: TsSource,
+}
+
+/// Provenance of a record's timestamp (#545).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TsSource {
+    /// Taken from the message: RFC 5424's explicit stamp, or a plausible
+    /// year-inferred + timezone-localized RFC 3164 stamp.
+    #[default]
+    Sender,
+    /// The message stamp was implausible (or absent); this is the receive time.
+    Receiver,
+}
+
+impl TsSource {
+    /// Label value for telemetry — only emitted when it's `Receiver`.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            TsSource::Sender => "sender",
+            TsSource::Receiver => "receiver",
+        }
+    }
+}
+
+/// Context for interpreting yearless / timezone-less RFC 3164 timestamps (#545).
+///
+/// RFC 3164 stamps (`Mmm dd hh:mm:ss`) carry neither a year nor a zone. We infer
+/// the year that puts the instant closest to `now` (fixing the Dec↔Jan boundary
+/// both ways) and interpret the wall clock in `tz` (default UTC). If the result
+/// still lands more than `max_skew` from `now`, it's treated as garbage and the
+/// receive time is used instead.
+#[derive(Debug, Clone, Copy)]
+pub struct RfcTimeCtx {
+    /// Timezone the sender's wall-clock timestamp is expressed in.
+    pub tz: Tz,
+    /// Receive time — the reference for year inference and the sanity clamp.
+    pub now: DateTime<Utc>,
+    /// Maximum plausible distance between the parsed instant and `now`.
+    pub max_skew: Duration,
+}
+
+impl RfcTimeCtx {
+    /// Default clamp window: 90 days. Generous enough that any real timezone
+    /// offset (≤14h) and ordinary delivery delay / replay never trips it, tight
+    /// enough to catch year-scale garbage that survives year inference.
+    pub const DEFAULT_MAX_SKEW_DAYS: i64 = 90;
+
+    /// UTC, `now = Utc::now()`, default clamp — the legacy behavior plus year
+    /// inference. Used by the plain [`parse`] entry point.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn utc_now() -> Self {
+        Self {
+            tz: Tz::UTC,
+            now: Utc::now(),
+            max_skew: Duration::days(Self::DEFAULT_MAX_SKEW_DAYS),
+        }
+    }
+
+    /// Explicit timezone + receive time, default clamp window.
+    pub fn new(tz: Tz, now: DateTime<Utc>) -> Self {
+        Self {
+            tz,
+            now,
+            max_skew: Duration::days(Self::DEFAULT_MAX_SKEW_DAYS),
+        }
+    }
+
+    /// Override the clamp window.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_max_skew(mut self, max_skew: Duration) -> Self {
+        self.max_skew = max_skew;
+        self
+    }
 }
 
 /// Syslog format version.
@@ -235,8 +312,23 @@ static SD_REGEX: Lazy<Regex> =
 static SD_PARAM_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"([^\s\]"=]+)="((?:[^"\\]|\\.)*)""#).unwrap());
 
-/// Parse a syslog message.
+/// Parse a syslog message with UTC / current-time defaults (#545).
+///
+/// Convenience wrapper over [`parse_with_time`] for callers with no timezone or
+/// receive-time context (and for tests). RFC 3164 stamps are interpreted as UTC
+/// with the year inferred against the current time.
+// The binary always parses with a resolved timezone context; this wrapper is
+// for the library API and tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse(input: &str) -> Option<SyslogMessage> {
+    parse_with_time(input, &RfcTimeCtx::utc_now())
+}
+
+/// Parse a syslog message, interpreting RFC 3164 timestamps with `ctx` (#545).
+///
+/// The RFC 5424 and simple-fallback paths ignore `ctx` — 5424 carries its own
+/// explicit timezone; the simple path has no timestamp at all.
+pub fn parse_with_time(input: &str, ctx: &RfcTimeCtx) -> Option<SyslogMessage> {
     // Remove UTF-8 BOM if present (RFC 5424 allows BOM in MSG)
     let input = input.strip_prefix('\u{FEFF}').unwrap_or(input);
     let input = input.trim();
@@ -247,7 +339,7 @@ pub fn parse(input: &str) -> Option<SyslogMessage> {
     }
 
     // Try RFC 3164
-    if let Some(msg) = parse_rfc3164(input) {
+    if let Some(msg) = parse_rfc3164(input, ctx) {
         return Some(msg);
     }
 
@@ -323,11 +415,13 @@ fn parse_rfc5424(input: &str) -> Option<SyslogMessage> {
         message,
         raw: input.to_string(),
         version: SyslogVersion::Rfc5424,
+        // RFC 5424 timestamps are explicit and timezone-qualified.
+        ts_source: TsSource::Sender,
     })
 }
 
 /// Parse RFC 3164 format.
-fn parse_rfc3164(input: &str) -> Option<SyslogMessage> {
+fn parse_rfc3164(input: &str, ctx: &RfcTimeCtx) -> Option<SyslogMessage> {
     let caps = RFC3164_REGEX.captures(input)?;
 
     let pri: u8 = caps.get(1)?.as_str().parse().ok()?;
@@ -335,7 +429,11 @@ fn parse_rfc3164(input: &str) -> Option<SyslogMessage> {
     let severity = Severity::from_code(pri & 0x07)?;
 
     let timestamp_str = caps.get(2)?.as_str();
-    let timestamp = parse_rfc3164_timestamp(timestamp_str);
+    let (timestamp, ts_source) = match parse_rfc3164_timestamp(timestamp_str, ctx) {
+        Some((ts, src)) => (Some(ts), src),
+        // Unparseable stamp: fall back to receive time.
+        None => (Some(ctx.now), TsSource::Receiver),
+    };
 
     let hostname = Some(caps.get(3)?.as_str().to_string());
     let app_name = Some(caps.get(4)?.as_str().to_string());
@@ -357,6 +455,7 @@ fn parse_rfc3164(input: &str) -> Option<SyslogMessage> {
         message,
         raw: input.to_string(),
         version: SyslogVersion::Rfc3164,
+        ts_source,
     })
 }
 
@@ -384,6 +483,8 @@ fn parse_simple(input: &str) -> Option<SyslogMessage> {
         message,
         raw: input.to_string(),
         version: SyslogVersion::Rfc3164,
+        // No timestamp in the simple fallback; leave provenance at the default.
+        ts_source: TsSource::Sender,
     })
 }
 
@@ -399,16 +500,80 @@ fn parse_rfc5424_timestamp(s: &str) -> Option<DateTime<Utc>> {
         .ok()
 }
 
-/// Parse RFC 3164 timestamp (e.g., "Jan  5 14:30:00").
-fn parse_rfc3164_timestamp(s: &str) -> Option<DateTime<Utc>> {
-    // RFC 3164 doesn't include year, so we use current year
-    let current_year = Utc::now().year();
-    let with_year = format!("{} {}", s, current_year);
+/// Parse an RFC 3164 timestamp (e.g. `Jan  5 14:30:00`) into a UTC instant,
+/// inferring the year and applying the sender timezone (#545).
+///
+/// Steps:
+/// 1. Parse the month/day/time (both single- and double-space day padding).
+/// 2. Pick the year (of `now-1`, `now`, `now+1`) that puts the *local* wall
+///    clock closest to `now` — fixing the Dec↔Jan boundary in both directions.
+/// 3. Interpret the wall clock in `ctx.tz` (DST-correct via the tz database);
+///    for a gap/overlap, take the earliest valid instant.
+/// 4. If the result is still more than `ctx.max_skew` from `now`, reject it so
+///    the caller falls back to receive time (`Receiver`).
+fn parse_rfc3164_timestamp(s: &str, ctx: &RfcTimeCtx) -> Option<(DateTime<Utc>, TsSource)> {
+    // The regex already fixed the shape; split off the "Mmm dd hh:mm:ss" fields.
+    // Accept one or more spaces between month and day ("Jan  5" and "Jan 5").
+    let mut it = s.split_whitespace();
+    let month = month_from_abbr(it.next()?)?;
+    let day: u32 = it.next()?.parse().ok()?;
+    let time = it.next()?;
+    let mut tp = time.split(':');
+    let hour: u32 = tp.next()?.parse().ok()?;
+    let min: u32 = tp.next()?.parse().ok()?;
+    let sec: u32 = tp.next()?.parse().ok()?;
 
-    NaiveDateTime::parse_from_str(&with_year, "%b %d %H:%M:%S %Y")
-        .or_else(|_| NaiveDateTime::parse_from_str(&with_year, "%b  %d %H:%M:%S %Y"))
-        .map(|ndt| ndt.and_utc())
-        .ok()
+    // In the sender's zone, `now` is the reference for year inference.
+    let now_local = ctx.now.with_timezone(&ctx.tz);
+    let candidate_years = [now_local.year() - 1, now_local.year(), now_local.year() + 1];
+
+    // Pick the candidate whose resulting UTC instant is closest to `now`.
+    let mut best: Option<(DateTime<Utc>, i64)> = None;
+    for year in candidate_years {
+        let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+            continue; // e.g. Feb 29 in a non-leap year
+        };
+        let Some(naive) = date.and_hms_opt(hour, min, sec) else {
+            continue;
+        };
+        // Localize; for DST gaps/overlaps take the earliest valid instant.
+        let Some(local) = ctx.tz.from_local_datetime(&naive).earliest() else {
+            continue;
+        };
+        let utc = local.with_timezone(&Utc);
+        let dist = (utc - ctx.now).num_seconds().abs();
+        if best.is_none_or(|(_, d)| dist < d) {
+            best = Some((utc, dist));
+        }
+    }
+
+    let (utc, dist) = best?;
+    if dist > ctx.max_skew.num_seconds() {
+        // Implausibly far from receive time even after year inference — the
+        // stamp is untrustworthy (bad clock, wrong tz). Use the receive clock.
+        Some((ctx.now, TsSource::Receiver))
+    } else {
+        Some((utc, TsSource::Sender))
+    }
+}
+
+/// Three-letter English month abbreviation → 1..=12.
+fn month_from_abbr(m: &str) -> Option<u32> {
+    Some(match m {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    })
 }
 
 /// Parse structured data section.
@@ -445,17 +610,6 @@ fn parse_structured_data(s: &str) -> HashMap<String, HashMap<String, String>> {
 /// Convert NILVALUE ("-") to None.
 fn nilvalue_to_option(s: &str) -> Option<String> {
     if s == "-" { None } else { Some(s.to_string()) }
-}
-
-/// Chrono year helper
-trait YearExt {
-    fn year(&self) -> i32;
-}
-
-impl YearExt for DateTime<Utc> {
-    fn year(&self) -> i32 {
-        chrono::Datelike::year(self)
-    }
 }
 
 #[cfg(test)]
@@ -518,6 +672,75 @@ mod tests {
         assert_eq!(parsed.hostname, Some("localhost".to_string()));
         assert_eq!(parsed.app_name, Some("kernel".to_string()));
         assert_eq!(parsed.proc_id, None);
+    }
+
+    // ---- #545: RFC 3164 timestamp correctness ----
+
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    }
+
+    /// A message received on Jan 1 carrying a `Dec 31` stamp is dated to the
+    /// *previous* year, not the current one (year rollover, backward).
+    #[test]
+    fn rfc3164_year_rollover_backward() {
+        let now = utc(2027, 1, 1, 0, 0, 2); // Jan 1 00:00:02 UTC
+        let ctx = RfcTimeCtx::new(Tz::UTC, now);
+        let msg = parse_with_time("<34>Dec 31 23:59:58 h app: x", &ctx).unwrap();
+        assert_eq!(msg.timestamp.unwrap(), utc(2026, 12, 31, 23, 59, 58));
+        assert_eq!(msg.ts_source, TsSource::Sender);
+    }
+
+    /// A message received on Dec 31 carrying a `Jan 1` stamp is dated to the
+    /// *next* year (year rollover, forward).
+    #[test]
+    fn rfc3164_year_rollover_forward() {
+        let now = utc(2026, 12, 31, 23, 59, 58);
+        let ctx = RfcTimeCtx::new(Tz::UTC, now);
+        let msg = parse_with_time("<34>Jan  1 00:00:02 h app: x", &ctx).unwrap();
+        assert_eq!(msg.timestamp.unwrap(), utc(2027, 1, 1, 0, 0, 2));
+    }
+
+    /// The acceptance example: a `Jul 23 14:00:00` stamp from a Europe/Paris
+    /// sender (CEST, UTC+2 in summer) is 12:00:00 UTC.
+    #[test]
+    fn rfc3164_sender_timezone_to_utc() {
+        let now = utc(2026, 7, 23, 12, 5, 0);
+        let ctx = RfcTimeCtx::new(chrono_tz::Europe::Paris, now);
+        let msg = parse_with_time("<34>Jul 23 14:00:00 h app: x", &ctx).unwrap();
+        assert_eq!(msg.timestamp.unwrap(), utc(2026, 7, 23, 12, 0, 0));
+    }
+
+    /// A winter timestamp from the same zone uses CET (UTC+1), proving DST is
+    /// applied from the tz database rather than a fixed offset.
+    #[test]
+    fn rfc3164_timezone_respects_dst() {
+        let now = utc(2026, 1, 15, 12, 5, 0);
+        let ctx = RfcTimeCtx::new(chrono_tz::Europe::Paris, now);
+        let msg = parse_with_time("<34>Jan 15 14:00:00 h app: x", &ctx).unwrap();
+        assert_eq!(msg.timestamp.unwrap(), utc(2026, 1, 15, 13, 0, 0));
+    }
+
+    /// An implausible stamp (months away even after year inference) is clamped
+    /// to the receive time and marked `Receiver`.
+    #[test]
+    fn rfc3164_implausible_stamp_clamps_to_receive_time() {
+        let now = utc(2026, 7, 23, 12, 0, 0);
+        // Tight 1-day window; a Jan stamp is ~6 months off → clamp.
+        let ctx = RfcTimeCtx::new(Tz::UTC, now).with_max_skew(Duration::days(1));
+        let msg = parse_with_time("<34>Jan 15 14:00:00 h app: x", &ctx).unwrap();
+        assert_eq!(msg.timestamp.unwrap(), now);
+        assert_eq!(msg.ts_source, TsSource::Receiver);
+    }
+
+    /// RFC 5424's explicit timestamp is unaffected by the RFC 3164 context.
+    #[test]
+    fn rfc5424_timestamp_unchanged_by_ctx() {
+        let ctx = RfcTimeCtx::new(chrono_tz::Europe::Paris, utc(2030, 1, 1, 0, 0, 0));
+        let msg = parse_with_time("<165>1 2023-08-24T05:14:15-07:00 h app - - - hi", &ctx).unwrap();
+        assert_eq!(msg.version, SyslogVersion::Rfc5424);
+        assert_eq!(msg.timestamp.unwrap(), utc(2023, 8, 24, 12, 14, 15));
+        assert_eq!(msg.ts_source, TsSource::Sender);
     }
 
     #[test]

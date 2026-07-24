@@ -5,8 +5,10 @@ use crate::config::{
 };
 use crate::ingest::{FrameReader, IngestStats, SharedRateLimiter, forward_parsed};
 use crate::multiline::MultilineJoiner;
-use crate::parser::{self, SyslogMessage};
+use crate::parser::{self, RfcTimeCtx, SyslogMessage};
 use anyhow::{Context, Result};
+use chrono::Utc;
+use chrono_tz::Tz;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -128,6 +130,24 @@ struct IngestCtx {
     /// Multiline-join settings for the stream paths (#107). Copied per
     /// connection into a fresh [`MultilineJoiner`].
     multiline: MultilineConfig,
+    /// Default RFC 3164 sender timezone for this listener (#545). UTC unless the
+    /// listener sets `timezone`. Overridden per-sender by `host_tz`.
+    default_tz: Tz,
+    /// Per-sender RFC 3164 timezone overrides, keyed by sender IP (#545).
+    host_tz: Arc<HashMap<String, Tz>>,
+}
+
+impl IngestCtx {
+    /// Resolve the timezone for an RFC 3164 sender: per-IP override first, then
+    /// the listener default (#545). Unix senders have no IP → listener default.
+    fn tz_for(&self, source: &MessageSource) -> Tz {
+        if let MessageSource::Network(addr) = source
+            && let Some(tz) = self.host_tz.get(&addr.ip().to_string())
+        {
+            return *tz;
+        }
+        self.default_tz
+    }
 }
 
 /// Start all configured listeners and return the message channel, the shared
@@ -144,6 +164,14 @@ pub async fn start_listeners(
     let (tx, rx) = mpsc::channel(1000);
     let hostname_aliases = Arc::new(config.hostname_aliases.clone());
 
+    // Per-sender RFC 3164 timezone overrides, resolved once (#545). Validated in
+    // `validate_config`, so `parse_tz` cannot fail here.
+    let mut host_tz = HashMap::new();
+    for (host, tz) in &config.host_timezones {
+        host_tz.insert(host.clone(), crate::config::parse_tz(tz)?);
+    }
+    let host_tz = Arc::new(host_tz);
+
     // Shared network-ingest context: one stats block + one global rate limiter
     // across all network listeners (the `logs/ingest/*` series is sensor-wide).
     let ingest_stats = Arc::new(IngestStats::default());
@@ -156,13 +184,20 @@ pub async fn start_listeners(
         )),
         overflow: config.ingest.overflow,
         multiline: config.multiline,
+        // Per-listener default filled in below.
+        default_tz: Tz::UTC,
+        host_tz: host_tz.clone(),
     };
 
     for listener_config in &config.listeners {
         let tx = tx.clone();
         let aliases = hostname_aliases.clone();
         let config = listener_config.clone();
-        let ctx = ctx.clone();
+        let mut ctx = ctx.clone();
+        ctx.default_tz = match &config.timezone {
+            Some(tz) => crate::config::parse_tz(tz)?,
+            None => Tz::UTC,
+        };
 
         match config.protocol {
             ListenerProtocol::Udp => {
@@ -250,7 +285,9 @@ async fn run_udp_listener(
                 };
 
                 IngestStats::inc(&ctx.stats.received);
-                if let Some(message) = parser::parse(text) {
+                let time_ctx =
+                    RfcTimeCtx::new(ctx.tz_for(&MessageSource::Network(addr)), Utc::now());
+                if let Some(message) = parser::parse_with_time(text, &time_ctx) {
                     IngestStats::inc(&ctx.stats.parsed);
                     let resolved_hostname = resolve_hostname_network(&addr, &message, &aliases);
 
@@ -416,7 +453,8 @@ async fn process_record(
     aliases: &HashMap<String, String>,
     ctx: &IngestCtx,
 ) -> bool {
-    let Some(message) = parser::parse(&raw) else {
+    let time_ctx = RfcTimeCtx::new(ctx.tz_for(source), Utc::now());
+    let Some(message) = parser::parse_with_time(&raw, &time_ctx) else {
         IngestStats::inc(&ctx.stats.parse_failed);
         return true;
     };
@@ -625,6 +663,15 @@ pub fn to_telemetry_point(
 
     // Add source information
     labels.insert("source_type".to_string(), received.source.to_string());
+
+    // Mark records whose timestamp we had to substitute (#545) so consumers can
+    // tell a receive-clock stamp from a sender stamp.
+    if msg.ts_source == crate::parser::TsSource::Receiver {
+        labels.insert(
+            "ts_source".to_string(),
+            msg.ts_source.as_label().to_string(),
+        );
+    }
 
     // Add raw message if configured. This doubles as OTel `log.record.original`.
     if include_raw {

@@ -41,6 +41,7 @@ from missing telemetry.
 | `source` | hostname | override the agent-host source id in payloads (v1 keys are origin-scoped, so it no longer appears in key expressions) |
 | `listeners` | `[]` (example: udp+tcp) | network listeners — see below |
 | `hostname_aliases` | `{}` | map sender IP → friendly name when a message has no hostname |
+| `host_timezones` | `{}` | map sender IP → IANA timezone (`"America/New_York"`) for RFC 3164 senders; overrides the listener `timezone` per sender (#545) |
 | `include_raw_message` | `false` | keep the raw line in labels (`log.record.original`) |
 | `filter` | empty | static message filters — see [filtering.md](filtering.md) |
 | `enable_dynamic_filters` | `false` | expose `@rpc/logs/filter/set` + `@rpc/logs/filter` |
@@ -77,6 +78,24 @@ listeners: [
 | `socket_mode` | `0o666` (438) | unix | socket file permissions |
 | `remove_existing_socket` | `true` | unix | unlink before binding |
 | `framing` | `auto` | TCP/unix | RFC 6587 framing: `auto` (leading digit ⇒ octet-counting, else LF), `lf`, `octet` |
+| `timezone` | `null` (UTC) | all | IANA zone RFC 3164 senders on this listener use (#545); DST-correct via the tz database. No effect on RFC 5424 |
+
+### RFC 3164 timestamps (#545)
+
+RFC 3164 (BSD) stamps carry neither a year nor a timezone. The parser:
+
+- **infers the year** that puts the instant closest to receive time — so a
+  `Dec 31 23:59:58` message received just after midnight is dated to the
+  *previous* year, and vice-versa;
+- interprets the wall clock in the sender's zone — the listener's `timezone`,
+  overridden per-sender by `syslog.host_timezones` (both IANA names, default
+  UTC), applying DST from the tz database;
+- **sanity-clamps**: if the reconstructed instant is still more than ~90 days
+  from receive time, it's treated as garbage, replaced with the receive time,
+  and labelled `ts_source=receiver`.
+
+A bad IANA name fails at load (it is not silently ignored). RFC 5424 carries its
+own explicit offset and is unaffected.
 
 ### `syslog.journald`
 

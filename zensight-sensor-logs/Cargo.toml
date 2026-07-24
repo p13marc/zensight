@@ -43,6 +43,7 @@ hostname = { workspace = true }
 # systemd_v245 unlocks sd_journal_open_namespace (libsystemd ≥ 245, ubiquitous).
 systemd = { version = "0.10", optional = true, features = ["systemd_v245"] }
 serde_ignored = "0.1.14"
+chrono-tz = "0.10.4"
 
 [features]
 # journald ingestion is on by default (Linux observability target). Disable with

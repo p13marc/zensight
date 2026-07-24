@@ -326,6 +326,7 @@ fn listener(protocol: ListenerProtocol, bind: String) -> ListenerConfig {
         socket_mode: 0o666,
         remove_existing_socket: true,
         framing: Framing::Auto,
+        timezone: None,
     }
 }
 
