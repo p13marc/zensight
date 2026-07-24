@@ -138,7 +138,12 @@ from the nav rail.
 **Alerts** (`view/alerts.rs`) — threshold alert rules alongside sensor- and
 sensor-external alerts (anomalies/expectations). Severity and source filter pills
 plus saved filter presets narrow the list; alerts move through a
-firing → resolved lifecycle.
+firing → resolved lifecycle. External alert rows show a **generic label-context
+block** (`alert_detail_pairs`, #558) — unit / burn ratio / template / coredump
+details / … — which degrades cleanly for any protocol. Log-sourced alerts add a
+**"view logs →"** pivot (`Message::PivotToLogsFromAlert`) that opens the Logs
+view pre-filtered to the alert's unit + pattern, with a "Filtered from alert
+&lt;rule&gt;" breadcrumb (one-click clear).
 
 **Security** (`view/security.rs`) — an NDR/anomaly lens over alerts of kind
 `Anomaly`, rolled up by MITRE ATT&CK tactic and by source. `view/detection_tuning.rs`

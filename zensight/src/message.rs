@@ -611,6 +611,17 @@ pub enum Message {
     },
     /// Clear the Logs view's unit-run (invocation id) filter.
     ClearLogsInvocationFilter,
+    /// Pivot from a log-sourced alert to the Logs feed pre-filtered to its
+    /// context (#558): unit and/or a message pattern (template/sample), optional
+    /// min severity, with a breadcrumb naming the source rule.
+    PivotToLogsFromAlert {
+        rule: String,
+        unit: Option<String>,
+        pattern: Option<String>,
+        severity_min: Option<u8>,
+    },
+    /// Clear the "filtered from alert <rule>" breadcrumb on the Logs view (#558).
+    ClearLogsAlertPivot,
     /// Pivot from a Security anomaly to its netring flows (#119): fetch
     /// `@rpc/netring/flows` and filter to the offending `src`. `key` is the anomaly's
     /// `alert_key` so the result renders under the right row.

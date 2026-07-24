@@ -1146,6 +1146,30 @@ impl ZenSight {
                 self.syslog_filter.invocation_id = None;
             }
 
+            Message::PivotToLogsFromAlert {
+                rule,
+                unit,
+                pattern,
+                severity_min,
+            } => {
+                // Alert → Logs pivot (#558): pre-filter the feed to the alert's
+                // context and open Logs (cold-store search-back included). A
+                // breadcrumb names the source rule with a one-click clear.
+                self.syslog_filter.invocation_id = None;
+                self.syslog_filter.selected_units.clear();
+                if let Some(unit) = unit {
+                    self.syslog_filter.selected_units.insert(unit);
+                }
+                self.syslog_filter
+                    .set_message_filter(pattern.unwrap_or_default());
+                self.syslog_filter.min_severity = severity_min;
+                self.syslog_filter.alert_pivot = Some(rule);
+                return ControlFlow::Break(Task::done(Message::OpenLogs));
+            }
+            Message::ClearLogsAlertPivot => {
+                self.syslog_filter.alert_pivot = None;
+            }
+
             Message::FetchNetlinkDetail(topic) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.loading(topic);
@@ -7404,6 +7428,32 @@ mod log_fetch_tests {
         let _ = a.update(Message::LogEventsLoaded(Err("timeout".to_string())));
         assert!(!a.log_fetch_inflight);
         assert!(a.recent_logs.is_empty());
+    }
+
+    /// #558: pivoting from a log alert pre-filters the feed (unit + pattern +
+    /// breadcrumb) and routes to the Logs view; clearing the pivot drops the
+    /// breadcrumb.
+    #[test]
+    fn pivot_from_alert_prefilters_and_routes() {
+        let mut a = app();
+        let _ = a.update(Message::PivotToLogsFromAlert {
+            rule: "log-error-budget".to_string(),
+            unit: Some("nginx.service".to_string()),
+            pattern: Some("upstream timed out".to_string()),
+            severity_min: Some(4),
+        });
+        assert!(a.syslog_filter.selected_units.contains("nginx.service"));
+        assert_eq!(a.syslog_filter.message_filter, "upstream timed out");
+        assert_eq!(a.syslog_filter.min_severity, Some(4));
+        assert_eq!(
+            a.syslog_filter.alert_pivot.as_deref(),
+            Some("log-error-budget")
+        );
+        let _ = a.update(Message::OpenLogs);
+        assert_eq!(a.current_view, CurrentView::Logs);
+
+        let _ = a.update(Message::ClearLogsAlertPivot);
+        assert!(a.syslog_filter.alert_pivot.is_none());
     }
 }
 
