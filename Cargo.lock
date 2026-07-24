@@ -13421,6 +13421,7 @@ dependencies = [
  "parallax-pipeline",
  "rand 0.9.5",
  "redb",
+ "regex",
  "rfd 0.15.4",
  "serde",
  "serde_json",

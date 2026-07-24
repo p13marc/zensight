@@ -834,8 +834,9 @@ fn render_filter_panel<'a>(
     .spacing(10)
     .align_y(Alignment::Center);
 
-    // Message filter input
-    let msg_filter_row = row![
+    // Message filter input (#554): regex, with a subtle hint when the pattern
+    // isn't valid regex (we fall back to a substring match rather than error).
+    let mut msg_filter_row = row![
         text("Message Pattern:").size(13),
         text_input("e.g., error|failed", &filter_state.message_filter)
             .on_input(Message::SetSyslogMessageFilter)
@@ -845,6 +846,14 @@ fn render_filter_panel<'a>(
     ]
     .spacing(10)
     .align_y(Alignment::Center);
+    if message_filter_is_substring_fallback(&filter_state.message_filter) {
+        msg_filter_row =
+            msg_filter_row.push(text("invalid regex — matching as text").size(11).style(
+                |t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                },
+            ));
+    }
 
     // Action buttons
     let apply_button = button(row![text("Apply to Sensor").size(13)].align_y(Alignment::Center))
@@ -1381,6 +1390,8 @@ fn apply_local_filters(
     messages: &[SyslogMessage],
     filter_state: &SyslogFilterState,
 ) -> Vec<SyslogMessage> {
+    // Compile the message-content matcher once (#554), not per row.
+    let msg_matcher = MessageMatcher::compile(&filter_state.message_filter);
     messages
         .iter()
         .filter(|msg| {
@@ -1440,18 +1451,61 @@ fn apply_local_filters(
                 }
             }
 
-            // Message content filter (simple substring match)
-            if !filter_state.message_filter.is_empty() {
-                let pattern = filter_state.message_filter.to_lowercase();
-                if !msg.message.to_lowercase().contains(&pattern) {
-                    return false;
-                }
+            // Message content filter (#554): regex (case-insensitive), falling
+            // back to substring on an invalid pattern. Compiled once below.
+            if !msg_matcher.matches(&msg.message) {
+                return false;
             }
 
             true
         })
         .cloned()
         .collect()
+}
+
+/// The compiled message-content filter (#554): a case-insensitive regex, or a
+/// substring fallback when the pattern is empty or not valid regex — so the
+/// placeholder's promise of `error|failed` regex is real, and a half-typed
+/// pattern still filters usefully instead of erroring.
+enum MessageMatcher {
+    All,
+    Regex(Box<regex::Regex>),
+    Substring(String),
+}
+
+impl MessageMatcher {
+    fn compile(pat: &str) -> Self {
+        if pat.is_empty() {
+            return Self::All;
+        }
+        match regex::RegexBuilder::new(pat)
+            .case_insensitive(true)
+            .size_limit(1 << 20)
+            .build()
+        {
+            Ok(re) => Self::Regex(Box::new(re)),
+            Err(_) => Self::Substring(pat.to_lowercase()),
+        }
+    }
+    fn matches(&self, msg: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Regex(re) => re.is_match(msg),
+            Self::Substring(p) => msg.to_lowercase().contains(p),
+        }
+    }
+}
+
+/// Whether the message filter is a valid regex (empty counts as valid) — drives
+/// the "filtering as text" hint under the filter input (#554).
+pub fn message_filter_is_regex(pat: &str) -> bool {
+    !pat.is_empty() && regex::Regex::new(pat).is_ok()
+}
+
+/// True when `pat` is non-empty and *not* valid regex (falling back to
+/// substring) — the case the hint calls out.
+pub fn message_filter_is_substring_fallback(pat: &str) -> bool {
+    !pat.is_empty() && regex::Regex::new(pat).is_err()
 }
 
 fn section_style(t: &Theme) -> container::Style {
@@ -1471,6 +1525,26 @@ mod tests {
     use super::*;
     use crate::message::DeviceId;
     use zensight_common::Protocol;
+
+    /// #554: the message filter is a case-insensitive regex, falling back to a
+    /// substring match (never an error) on an invalid pattern.
+    #[test]
+    fn message_matcher_regex_and_substring_fallback() {
+        // Empty → matches everything.
+        assert!(MessageMatcher::compile("").matches("anything"));
+        // Valid regex, case-insensitive.
+        let m = MessageMatcher::compile("error|failed");
+        assert!(m.matches("connection FAILED"));
+        assert!(m.matches("disk Error"));
+        assert!(!m.matches("all good"));
+        // Invalid regex → substring fallback (matches the literal text), flagged.
+        assert!(message_filter_is_substring_fallback("err[or"));
+        let m = MessageMatcher::compile("err[or");
+        assert!(m.matches("an err[or occurred"));
+        assert!(!m.matches("fine"));
+        // A valid regex is not flagged as a fallback.
+        assert!(!message_filter_is_substring_fallback("error|failed"));
+    }
 
     /// Build a bare [`SyslogMessage`] at `ts` (ms) for rate-series tests.
     fn msg_at(ts: i64) -> SyslogMessage {
