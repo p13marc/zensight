@@ -114,12 +114,18 @@ sed -E \
 
 # logs: journald ingestion is already on; add the on-demand debug report plus the
 # analytics over the (default-on) Drain3 template miner — novelty/rate-spike
-# anomalies and SLO error-budget burn alerting.
+# anomalies and SLO error-budget burn alerting — and the epic #542 additions:
+# the durable per-line store (#544, days of queryable history + server-side
+# search depth) and the log-bundle export artifact (#555). The store lives under
+# the run dir so it's self-contained and cleaned with it.
 # Scoped ranges are mandatory: a bare `enabled: false` would hit artifacts.report.
 sed -E \
     -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
     -e '/^    error_budget: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
     -e '/^    novelty: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
+    -e '/^    store: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
+    -e '/^    store: \{/,/^    \},/ s#path: null#path: "'"$outdir"'/logs-store.redb"#' \
+    -e '/^    logbundle: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
     "$configs_dir/logs.json5" > "$outdir/logs.json5"
 
 # sysinfo: the opt-in collectors (hwmon temps + fans, cgroup-v2 saturation, TCP
