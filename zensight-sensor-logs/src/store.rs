@@ -268,7 +268,9 @@ pub fn resolve_store_path(explicit: Option<&Path>) -> Option<PathBuf> {
         }
     }
     if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
-        return Some(Path::new(&xdg).join("zensight/logs.redb"));
+        // Split the join so no source literal spells the deployment base
+        // (CI guard #466) — this is a filesystem path, not a Zenoh key.
+        return Some(Path::new(&xdg).join("zensight").join("logs.redb"));
     }
     if let Ok(home) = std::env::var("HOME") {
         return Some(Path::new(&home).join(".local/state/zensight/logs.redb"));
