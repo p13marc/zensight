@@ -189,6 +189,10 @@ pub struct SyslogFilterState {
     pub stats_open: bool,
     /// Whether the by-unit rollup list shows every unit (vs. top-3) (#350).
     pub stats_all_units: bool,
+    /// When the feed was opened by pivoting from an alert (#558), the source
+    /// rule name — shown as a "filtered from alert <rule>" breadcrumb with a
+    /// one-click clear.
+    pub alert_pivot: Option<String>,
 }
 
 impl SyslogFilterState {
@@ -286,6 +290,7 @@ impl SyslogFilterState {
         self.invocation_id = None;
         self.app_filter.clear();
         self.message_filter.clear();
+        self.alert_pivot = None;
         self.modified = true;
     }
 
@@ -576,6 +581,21 @@ pub fn logs_view<'a>(
                     .padding([3, 9])
                     .style(iced::widget::button::secondary)
                     .on_press(Message::ClearLogsInvocationFilter),
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center),
+        ));
+    }
+    // Alert-pivot breadcrumb (#558): the feed was opened pre-filtered from an
+    // alert — name the source rule, with a one-click clear.
+    if let Some(rule) = &filter_state.alert_pivot {
+        content = content.push(card(
+            row![
+                text(format!("Filtered from alert · {rule}")).size(12),
+                button(text("Clear").size(11))
+                    .padding([3, 9])
+                    .style(iced::widget::button::secondary)
+                    .on_press(Message::ClearLogsAlertPivot),
             ]
             .spacing(space::SM)
             .align_y(Alignment::Center),

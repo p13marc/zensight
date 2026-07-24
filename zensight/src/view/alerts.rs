@@ -1498,7 +1498,7 @@ fn render_external_alert_row<'a>(alert: &'a SensorAlert, acked: bool) -> Element
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
-    Row::new()
+    let top = Row::new()
         .push(icon)
         .push(severity_badge)
         .push(kind)
@@ -1506,8 +1506,96 @@ fn render_external_alert_row<'a>(alert: &'a SensorAlert, acked: bool) -> Element
         .push(source)
         .push(time)
         .spacing(10)
-        .align_y(Alignment::Center)
-        .into()
+        .align_y(Alignment::Center);
+
+    // Context block (#558): surface the rich labels the sensor stamped (unit,
+    // burn ratio, template, coredump details, …) instead of hiding them. Generic
+    // — renders whatever known label groups are present, so it degrades cleanly
+    // for any protocol's alerts.
+    let mut col = Column::new().spacing(4).push(top);
+    if let Some(detail) = alert_detail_line(&alert.labels) {
+        col = col.push(detail);
+    }
+    // Pivot to the offending log lines for log-sourced alerts (#558).
+    if alert.protocol == Protocol::Logs {
+        let unit = alert.labels.get("unit").cloned();
+        // Novelty carries the masked template; fall back to the sample line.
+        let pattern = alert
+            .labels
+            .get("template")
+            .or_else(|| alert.labels.get("sample"))
+            .cloned();
+        if unit.is_some() || pattern.is_some() {
+            col = col.push(
+                button(text("view logs →").size(11))
+                    .on_press(Message::PivotToLogsFromAlert {
+                        rule: alert.rule.clone(),
+                        unit,
+                        pattern,
+                        severity_min: None,
+                    })
+                    .padding([space::XS, space::SM])
+                    .style(iced::widget::button::text),
+            );
+        }
+    }
+    col.into()
+}
+
+/// Compact, generic detail line from an alert's labels (#558): renders known
+/// label groups as `key: value` chips, in a stable order, skipping absent ones.
+/// `None` when no known label is present. Not logs-specific — any protocol's
+/// alert that stamps these keys gets the block.
+fn alert_detail_line<'a>(labels: &HashMap<String, String>) -> Option<Element<'a, Message>> {
+    let pairs = alert_detail_pairs(labels);
+    if pairs.is_empty() {
+        return None;
+    }
+    let chips: Vec<Element<'a, Message>> = pairs
+        .into_iter()
+        .map(|(disp, v)| {
+            text(format!("{disp}: {v}"))
+                .size(10)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).text_muted()),
+                })
+                .into()
+        })
+        .collect();
+    Some(Row::with_children(chips).spacing(12).into())
+}
+
+/// The high-signal context labels an alert carries, as ordered
+/// `(display-label, value)` pairs (#558). Pure — the render + tests share it.
+/// Absent labels are skipped; long values are truncated.
+fn alert_detail_pairs(labels: &HashMap<String, String>) -> Vec<(&'static str, String)> {
+    // Curated, ordered (key, display) — the context the sensors stamp.
+    const KNOWN: &[(&str, &str)] = &[
+        ("unit", "unit"),
+        ("app", "app"),
+        ("error_ratio", "err ratio"),
+        ("target_ratio", "target"),
+        ("burn_rate", "burn"),
+        ("template", "template"),
+        ("template_id", "template id"),
+        ("message_id", "message id"),
+        ("event", "event"),
+        ("coredump_exe", "exe"),
+        ("coredump_signal", "signal"),
+        ("count", "count"),
+    ];
+    KNOWN
+        .iter()
+        .filter_map(|(key, disp)| {
+            let v = labels.get(*key).filter(|v| !v.is_empty())?;
+            let v = if v.chars().count() > 60 {
+                format!("{}…", v.chars().take(60).collect::<String>())
+            } else {
+                v.clone()
+            };
+            Some((*disp, v))
+        })
+        .collect()
 }
 
 fn render_alerts_section(state: &AlertsState) -> Element<'_, Message> {
@@ -1618,6 +1706,29 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #558: the alert context block surfaces known label groups in a stable
+    /// order and is empty for an alert with no known labels.
+    #[test]
+    fn alert_detail_pairs_surfaces_known_labels() {
+        let mut labels = HashMap::new();
+        labels.insert("unit".to_string(), "nginx.service".to_string());
+        labels.insert("error_ratio".to_string(), "0.42".to_string());
+        labels.insert("irrelevant".to_string(), "x".to_string());
+        let pairs = alert_detail_pairs(&labels);
+        // unit before err ratio (curated order), irrelevant dropped.
+        assert_eq!(
+            pairs,
+            vec![
+                ("unit", "nginx.service".to_string()),
+                ("err ratio", "0.42".to_string()),
+            ]
+        );
+        // No known labels → empty (block hidden; degrades for other protocols).
+        let mut other = HashMap::new();
+        other.insert("some_other_key".to_string(), "y".to_string());
+        assert!(alert_detail_pairs(&other).is_empty());
+    }
 
     #[test]
     fn test_alert_rule_matches() {
