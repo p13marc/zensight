@@ -163,6 +163,61 @@ pub struct SyslogConfig {
     /// same intake pipeline. Empty by default (no file sources).
     #[serde(default)]
     pub files: FileTailingConfig,
+
+    /// Observer evidence for remote senders (#552): publish `HostEvidence` for
+    /// each device whose syslog this collector ingests, so they reach the
+    /// correlator's entity catalog. On by default; no-op without network sources.
+    #[serde(default)]
+    pub evidence: EvidenceConfig,
+}
+
+/// Observer-evidence configuration (#552).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    /// Publish observer evidence for remote senders. Default true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Re-publish + prune cadence (seconds). Default 300.
+    #[serde(default = "default_evidence_refresh_secs")]
+    pub refresh_secs: u64,
+
+    /// Drop a sender not heard from in this many seconds. Default 21600 (6h).
+    #[serde(default = "default_evidence_expire_secs")]
+    pub expire_secs: u64,
+
+    /// Cardinality cap on tracked senders (bounds the key space against spoofed
+    /// sources). Default 4096.
+    #[serde(default = "default_evidence_max_senders")]
+    pub max_senders: usize,
+
+    /// Opt-in reverse-DNS (PTR) FQDN enrichment. Off by default; when on,
+    /// lookups run only in the publish tick (never on the intake path) and are
+    /// cached per IP.
+    #[serde(default)]
+    pub reverse_dns: bool,
+}
+
+impl Default for EvidenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_secs: default_evidence_refresh_secs(),
+            expire_secs: default_evidence_expire_secs(),
+            max_senders: default_evidence_max_senders(),
+            reverse_dns: false,
+        }
+    }
+}
+
+fn default_evidence_refresh_secs() -> u64 {
+    300
+}
+fn default_evidence_expire_secs() -> u64 {
+    21_600
+}
+fn default_evidence_max_senders() -> usize {
+    4096
 }
 
 /// File-tailing configuration (#549).
@@ -1249,6 +1304,7 @@ impl Default for SyslogConfig {
             sentinel: crate::sentinel::LogRulesConfig::default(),
             store: LogStoreConfig::default(),
             files: FileTailingConfig::default(),
+            evidence: EvidenceConfig::default(),
         }
     }
 }

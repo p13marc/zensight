@@ -18,6 +18,7 @@
 pub mod commands;
 pub mod config;
 pub mod dedup;
+pub mod evidence;
 pub mod file_source;
 pub mod filter;
 pub mod ingest;

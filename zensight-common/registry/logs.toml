@@ -16,7 +16,7 @@
 # it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "2.3"
+version = "2.4"
 app = "zensight"
 convention = 1
 
@@ -220,6 +220,16 @@ type = "HostEvidence"
 ttl_s = 900
 since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "evidence/device/{device}"
+common = "evidence_device"
+class = "state"
+type = "HostEvidence"
+cardinality = 4096
+ttl_s = 900
+since = "2.4"
+description = "observer claim for a remote syslog sender (#552); observer = logs"
 
 [[subject]]
 path = "alert/{alert_key}"
