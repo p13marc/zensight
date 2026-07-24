@@ -41,7 +41,7 @@ pub mod telemetry;
 pub use alert::{Alert, AlertKind, AlertSeverity, AlertState};
 pub use artifact::{
     ArtifactKind, ArtifactOptions, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, Entry,
-    KindAdvert, KindStatus, Manifest, TreeIndex, TreeSummary,
+    KindAdvert, KindStatus, LogBundleFormat, Manifest, TreeIndex, TreeSummary,
 };
 pub use bandwidth::{
     BandwidthKey, BandwidthRecord, BandwidthSource, ByteSemantics, LABEL_SEMANTICS, LABEL_SOURCE,

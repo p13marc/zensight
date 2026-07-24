@@ -17,7 +17,7 @@ use zblob::{BlobClient, CancelToken, ContentStore, Format, Progress, ProgressSin
 use zenoh::Session;
 use zensight_common::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
-    fleet_rpc_key,
+    LogBundleFormat, fleet_rpc_key,
 };
 
 use crate::message::Message;
@@ -108,6 +108,7 @@ impl ArtifactFetch {
             ArtifactFetch::Requesting => match kind {
                 "snapshot" => "Requesting snapshot…".into(),
                 "capture" => "Requesting capture…".into(),
+                "logbundle" => "Requesting log export…".into(),
                 _ => "Requesting report…".into(),
             },
             ArtifactFetch::Generating { detail, .. } => {
@@ -117,6 +118,7 @@ impl ArtifactFetch {
                 match kind {
                     "snapshot" => "Building snapshot…".into(),
                     "capture" => "Capturing…".into(),
+                    "logbundle" => "Bundling logs…".into(),
                     _ => "Generating bundle…".into(),
                 }
             }
@@ -782,11 +784,39 @@ pub fn artifact_section<'a>(
                     ));
                 }
             }
-            // Empty snapshot advert / unknown kinds are hidden here. The
-            // `logbundle` export (#555) is driven from the Logs feed's Export
-            // button (prefilled from the active filter), not this generic
-            // per-sensor section — see #554.
-            KindAdvert::Snapshot { .. } | KindAdvert::LogBundle { .. } | KindAdvert::Unknown => {}
+            // A whole-store log export from the sensor's own card (#555). The
+            // filter-prefilled variant driven from the Logs feed (#554) rides on
+            // top of this same request path; here the selectors are left empty,
+            // so the sensor exports everything it holds, clamped to its
+            // configured `logbundle` line/byte caps.
+            KindAdvert::LogBundle { max_lines } => {
+                any = true;
+                let label = if *max_lines > 0 {
+                    format!("Export logs (zstd, ≤{max_lines} lines)")
+                } else {
+                    "Export logs (zstd)".to_string()
+                };
+                let mut btn = button(text(label).size(font::CAPTION));
+                if !other_busy {
+                    btn = btn.on_press(Message::StartArtifact {
+                        producer: this_prefix.to_string(),
+                        kind: ArtifactKind::LogBundle {
+                            from: None,
+                            to: None,
+                            pattern: None,
+                            severity_min: None,
+                            unit: None,
+                            app: None,
+                            source: target_source.map(str::to_string),
+                            format: LogBundleFormat::default(),
+                        },
+                        target_source: target_source.map(str::to_string),
+                    });
+                }
+                col = col.push(btn);
+            }
+            // Empty snapshot advert / unknown kinds are hidden here.
+            KindAdvert::Snapshot { .. } | KindAdvert::Unknown => {}
         }
     }
     if !any {
