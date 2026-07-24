@@ -95,10 +95,10 @@ zensight/v1/@catalog/…                                   the identity catalog
   consumers resolve payloads from metadata before falling back to sniffing.
 - **Fleet-wide writes are explicit** (RFC 05 amendment G2): a write procedure
   is origin-scoped unless its registry entry says `fanout = "allowed"`. The
-  nine operator-console fleet pushes (logs filter, systemd action/expectations,
-  netlink expectations, netring capture/detectors/filter/threat-intel,
-  parallax stream) carry that marker deliberately; everything else refuses a
-  wildcard origin at the type level.
+  operator-console fleet pushes (logs filter + sentinel rules, systemd
+  action/expectations, netlink expectations, netring
+  capture/detectors/filter/threat-intel, parallax stream) carry that marker
+  deliberately; everything else refuses a wildcard origin at the type level.
 - **Bus explorer**: [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) is the `busctl`/`d-feet`
   equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
   `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply

@@ -8,7 +8,6 @@ mod commands;
 mod config;
 mod dedup;
 mod derived;
-mod events;
 mod filter;
 mod ingest;
 #[cfg(feature = "journald")]
@@ -18,14 +17,15 @@ mod novelty;
 mod parser;
 mod query;
 mod receiver;
+mod sentinel;
 mod telemetry_guard;
 mod template;
 
 use anyhow::Result;
 use commands::{FilterCommand, FilterStatus};
 use config::SyslogSensorConfig;
-use events::EventDetector;
 use filter::FilterManager;
+use sentinel::LogSentinel;
 use std::sync::Arc;
 use zensight_common::serialization::encode;
 use zensight_common::telemetry::Protocol;
@@ -197,8 +197,11 @@ async fn main() -> Result<()> {
     let budget_alerts_on = syslog_config.derived && syslog_config.error_budget.enabled;
     // Novelty / rate-spike (#103) needs the template miner to feed it `template_id`s.
     let novelty_alerts_on = syslog_config.templating.enabled && syslog_config.novelty.enabled;
+    // Log sentinel (#543): on when the operator declared rules, or the built-in
+    // known-events are active (they ride the journald `detect_events` gate).
+    let sentinel_on = journald_events_on || !syslog_config.sentinel.rules.is_empty();
     let alert_reporter: Option<Arc<AlertReporter>> =
-        if journald_events_on || budget_alerts_on || novelty_alerts_on {
+        if journald_events_on || budget_alerts_on || novelty_alerts_on || sentinel_on {
             let reporter = AlertReporter::new(runner.publisher(), Protocol::Logs, format);
             // Stamp alerts with the host identity envelope when available.
             let reporter = match runner.identity() {
@@ -225,23 +228,43 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Known systemd-event detection → alerts (#61). Only when journald is the
-    // source and detection is enabled; the alert path is otherwise untouched.
-    let event_detector: Option<Arc<EventDetector>> =
-        match (&syslog_config.journald, &alert_reporter) {
-            (Some(j), Some(reporter)) if j.enabled && j.detect_events => {
-                let detector = Arc::new(EventDetector::new(
-                    reporter.clone(),
-                    j.event_dedup_secs,
-                    &j.event_severity,
-                ));
-                // Auto-resolve fired events after their dedup window.
-                runner.spawn(detector.clone().run_reconcile_loop());
-                tracing::info!("journald known-event detection enabled");
-                Some(detector)
+    // Log sentinel (#543): declarative pattern→alert rules evaluated per intake
+    // line, folding the journald known-events (#61) in as built-in rules. Runs
+    // whenever a reporter exists and there's something to evaluate.
+    let log_sentinel: Option<Arc<LogSentinel>> = alert_reporter
+        .as_ref()
+        .filter(|_| sentinel_on)
+        .map(|reporter| {
+            let mut rules_cfg = syslog_config.sentinel.clone();
+            // Built-in known-events ride the journald `detect_events` gate: keep
+            // them off when journald detection is off, preserving the old opt-out.
+            rules_cfg.include_builtins = rules_cfg.include_builtins && journald_events_on;
+            let sentinel = Arc::new(LogSentinel::new(source.clone(), rules_cfg));
+            runner.spawn(sentinel.clone().run_reconcile_loop(reporter.clone()));
+            runner.spawn(sentinel::serve_rules(
+                session.clone(),
+                "logs".to_string(),
+                sentinel.handle(),
+            ));
+            // #543 deprecation: the journald known-event severity override is
+            // gone; point operators at the sentinel-rule replacement.
+            if let Some(j) = &syslog_config.journald
+                && !j.event_severity.is_empty()
+            {
+                tracing::warn!(
+                    "journald.event_severity is deprecated and ignored (#543); \
+                     override a known-event by adding a sentinel rule with the \
+                     same id (coredump/unit-failed/oomd-kill/kernel-oom)"
+                );
             }
-            _ => None,
-        };
+            let rule_count = syslog_config.sentinel.rules.len();
+            tracing::info!(
+                rules = rule_count,
+                builtins = journald_events_on,
+                "log sentinel enabled"
+            );
+            sentinel
+        });
 
     // journald robustness monitor (#62): periodically snapshot the reader's
     // read/published/dropped/sampled counters; on sustained loss raise an
@@ -592,6 +615,11 @@ async fn main() -> Result<()> {
     let template_loop = template_agg.clone();
     let novelty_loop = novelty.clone();
     let novelty_reporter = novelty.is_some().then(|| alert_reporter.clone()).flatten();
+    let sentinel_loop = log_sentinel.clone();
+    let sentinel_reporter = log_sentinel
+        .is_some()
+        .then(|| alert_reporter.clone())
+        .flatten();
     // Repeat collapse (#546): fold consecutive identical lines into one record +
     // `repeat_count`. Opt-in; `None` = pass every line straight through.
     let mut collapser = syslog_config.ingest.collapse_repeats.then(|| {
@@ -606,11 +634,11 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 Some(received) = rx.recv() => {
-                    // Known-event detection runs before filtering so a coredump
-                    // or unit failure still alerts even if it's filtered from the
-                    // telemetry stream.
-                    if let Some(detector) = &event_detector {
-                        detector.on_message(&received.message, &received.resolved_hostname).await;
+                    // Sentinel rules (#543) run before filtering so a coredump,
+                    // unit failure, or operator-declared pattern still alerts even
+                    // when the line is filtered from the telemetry stream.
+                    if let (Some(s), Some(r)) = (&sentinel_loop, &sentinel_reporter) {
+                        s.observe(r, &received.message, std::time::Instant::now()).await;
                     }
 
                     // Apply filter

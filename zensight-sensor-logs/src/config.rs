@@ -146,6 +146,12 @@ pub struct SyslogConfig {
     /// records (~3 MB), clamped to at least 100.
     #[serde(default = "default_events_ring_capacity")]
     pub events_ring_capacity: usize,
+
+    /// Log sentinel (#543): declarative pattern→alert rules, also managed at
+    /// runtime via `@rpc/logs/rules/set`. Empty by default; the shipped built-in
+    /// known-event rules ride on `journald.detect_events`.
+    #[serde(default)]
+    pub sentinel: crate::sentinel::LogRulesConfig,
 }
 
 /// Multiline / stacktrace joining configuration (#107, C6).
@@ -584,13 +590,16 @@ pub struct JournaldConfig {
     #[serde(default = "default_true")]
     pub detect_events: bool,
 
-    /// Coalesce repeats of the same `(event, unit)` within this many seconds,
-    /// and auto-resolve a fired event alert after the window passes (#61).
+    /// **Deprecated (#543):** superseded by the log sentinel. The known-events
+    /// are now built-in sentinel rules with their own `for_secs`; still parsed
+    /// so existing configs load, but ignored. Kept only for compatibility.
     #[serde(default = "default_event_dedup_secs")]
     pub event_dedup_secs: u64,
 
-    /// Per-`MESSAGE_ID` severity overrides (`info` | `warning` | `critical`),
-    /// keyed by the 32-char hex id. Empty = use the built-in defaults.
+    /// **Deprecated (#543):** override a known-event's severity by adding a
+    /// sentinel rule with the same `id` (`coredump`/`unit-failed`/`oomd-kill`/
+    /// `kernel-oom`). Still parsed so existing configs load, but ignored; a
+    /// startup warning fires when non-empty.
     #[serde(default)]
     pub event_severity: std::collections::HashMap<String, String>,
 
@@ -785,7 +794,7 @@ fn default_socket_mode() -> u32 {
     0o666
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -1004,6 +1013,7 @@ impl Default for SyslogConfig {
             ingest: IngestConfig::default(),
             multiline: MultilineConfig::default(),
             events_ring_capacity: default_events_ring_capacity(),
+            sentinel: crate::sentinel::LogRulesConfig::default(),
         }
     }
 }

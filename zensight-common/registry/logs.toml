@@ -282,6 +282,23 @@ reply = "Ack"
 since = "1.0"
 description = "apply filter configuration (dynamic message filters)"
 
+[[procedure]]
+path = "rules"
+kind = "read"
+reply = "RulesStatus"
+idempotent = true
+since = "2.2"
+description = "log sentinel ruleset + per-rule hit counters (#543)"
+
+[[procedure]]
+path = "rules/set"
+kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
+request = "LogRulesConfig"
+reply = "Ack"
+since = "2.2"
+description = "replace the log sentinel ruleset (pattern→alert rules, #543)"
+
 # ── Retired (#470) ─────────────────────────────────────────────────────────
 # The doubled `logs/` head. Every path below moved to the same path without it
 # (`logs/errors_total` -> `errors_total`): the producer chunk already says
