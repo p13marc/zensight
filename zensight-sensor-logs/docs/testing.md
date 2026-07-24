@@ -37,8 +37,12 @@ The durable store (#544) adds `durable_store_serves_paginated_time_range` (a
 alongside the `store` module's own unit tests (write/query/pagination/prune/
 reopen-durability).
 
-The harness is the named safety net for TLS (#550) and file-source (#549) work —
-each adds its scenarios here.
+TLS (#550) adds `tests/tls_e2e.rs`: a real rustls handshake delivering a line
+end-to-end, a cleartext connection to the TLS port being rejected, and an mTLS
+listener refusing a client with no cert (certs generated in-test via `rcgen`).
+
+The harness is the named safety net for these — each source/transport adds its
+scenarios here.
 
 Note: `journald` live reads are not exercised in CI (they need journal access);
 that path stays `#[ignore]`d / env-gated. A joined multiline record over a

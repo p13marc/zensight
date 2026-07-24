@@ -962,6 +962,33 @@ pub struct ListenerConfig {
     /// carries its own explicit offset.
     #[serde(default)]
     pub timezone: Option<String>,
+
+    /// TLS settings (#550). Required when `protocol` is `tls` (RFC 5425); a TLS
+    /// listener always uses octet-counting framing regardless of `framing`.
+    #[serde(default)]
+    pub tls: Option<TlsListenerConfig>,
+}
+
+/// TLS listener settings (#550, RFC 5425). Key material is referenced by **path
+/// only** (never inline PEM); paths accept `${ENV}` / `file:` secret indirection
+/// (#538).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsListenerConfig {
+    /// Server certificate chain (PEM).
+    pub cert_file: String,
+    /// Server private key (PEM: PKCS#8 / PKCS#1 / SEC1).
+    pub key_file: String,
+    /// Require + verify client certificates against this CA bundle (PEM) —
+    /// mutual TLS. `None` (default) accepts any client (server-auth only).
+    #[serde(default)]
+    pub client_ca_file: Option<String>,
+    /// Minimum TLS version: `"1.3"` (default) or `"1.2"`.
+    #[serde(default = "default_tls_min_version")]
+    pub min_version: String,
+}
+
+fn default_tls_min_version() -> String {
+    "1.3".to_string()
 }
 
 fn default_max_message_size() -> usize {
@@ -991,6 +1018,8 @@ pub enum ListenerProtocol {
     Udp,
     Tcp,
     Unix,
+    /// TLS over TCP (RFC 5425, #550) — octet-counting framing only.
+    Tls,
 }
 
 impl std::fmt::Display for ListenerProtocol {
@@ -999,6 +1028,7 @@ impl std::fmt::Display for ListenerProtocol {
             Self::Udp => write!(f, "udp"),
             Self::Tcp => write!(f, "tcp"),
             Self::Unix => write!(f, "unix"),
+            Self::Tls => write!(f, "tls"),
         }
     }
 }
@@ -1057,7 +1087,7 @@ impl SyslogSensorConfig {
             }
 
             match listener.protocol {
-                ListenerProtocol::Udp | ListenerProtocol::Tcp => {
+                ListenerProtocol::Udp | ListenerProtocol::Tcp | ListenerProtocol::Tls => {
                     // Validate bind address format for network protocols
                     if !listener.bind.contains(':') {
                         anyhow::bail!(
@@ -1069,6 +1099,22 @@ impl SyslogSensorConfig {
                 ListenerProtocol::Unix => {
                     // Unix socket path should be absolute or relative path
                     // Just check it's not empty (already done above)
+                }
+            }
+
+            // A TLS listener needs cert/key material and a known min version.
+            if listener.protocol == ListenerProtocol::Tls {
+                let Some(tls) = &listener.tls else {
+                    anyhow::bail!("Listener {i} is `tls` but has no `tls` cert/key config");
+                };
+                if tls.cert_file.is_empty() || tls.key_file.is_empty() {
+                    anyhow::bail!("Listener {i} tls: cert_file and key_file are required");
+                }
+                if !matches!(tls.min_version.as_str(), "1.2" | "1.3") {
+                    anyhow::bail!(
+                        "Listener {i} tls: min_version must be \"1.2\" or \"1.3\", got {:?}",
+                        tls.min_version
+                    );
                 }
             }
 
@@ -1183,6 +1229,7 @@ impl Default for SyslogConfig {
                 remove_existing_socket: default_true(),
                 framing: Framing::default(),
                 timezone: None,
+                tls: None,
             }],
             hostname_aliases: std::collections::HashMap::new(),
             host_timezones: std::collections::HashMap::new(),
@@ -1336,6 +1383,30 @@ mod tests {
             cfg.syslog.listeners[0].timezone.as_deref(),
             Some("Europe/Paris")
         );
+    }
+
+    /// A `tls` listener without a `tls` block fails validation (#550).
+    #[test]
+    fn tls_listener_requires_cert_config() {
+        let bad = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "tls", bind: "0.0.0.0:6514" } ] }
+        }"#;
+        let err = SyslogSensorConfig::parse_strict(bad).expect_err("tls without certs must fail");
+        assert!(format!("{err:#}").contains("tls"), "got: {err}");
+    }
+
+    #[test]
+    fn tls_listener_with_certs_validates() {
+        let ok = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ {
+                protocol: "tls", bind: "0.0.0.0:6514",
+                tls: { cert_file: "/c.crt", key_file: "/k.key", min_version: "1.2" }
+            } ] }
+        }"#;
+        let cfg = SyslogSensorConfig::parse_strict(ok).expect("valid tls listener");
+        assert_eq!(cfg.syslog.listeners[0].protocol, ListenerProtocol::Tls);
     }
 
     #[test]

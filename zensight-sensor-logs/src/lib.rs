@@ -32,3 +32,4 @@ pub mod receiver;
 pub mod sentinel;
 pub mod store;
 pub(crate) mod telemetry_guard;
+pub mod tls;

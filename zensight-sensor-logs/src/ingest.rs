@@ -16,14 +16,11 @@
 //!   the framing/decision logic is unit-testable; [`FrameReader`] wraps it with
 //!   the async read loop.
 //!
-//! ## RFC 5425 (syslog-over-TLS) — deferred
+//! ## RFC 5425 (syslog-over-TLS)
 //!
-//! Transport-layer security (RFC 5425) is intentionally **not** implemented here.
-//! It would require pulling in a TLS stack (`tokio-rustls` + cert/key plumbing),
-//! a non-trivial new dependency for this crate. Rather than half-add it behind a
-//! config stub that silently does nothing, it is deferred: the octet-counted
-//! framing a TLS listener would reuse is implemented and tested here, so adding
-//! TLS later is a transport wrapper around the same [`FrameReader`].
+//! Transport-layer security (RFC 5425) is implemented in [`crate::tls`] (#550):
+//! a `tls` listener protocol built on tokio-rustls (`ring` provider) that wraps
+//! the same octet-counted [`FrameReader`] used here, so the framing is shared.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
