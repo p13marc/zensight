@@ -65,6 +65,7 @@ redb = "4"
 parallax-pipeline = { version = "0.3.0", default-features = false, features = [
     "h264",
 ], optional = true }
+regex = "1.13.1"
 
 [features]
 default = []

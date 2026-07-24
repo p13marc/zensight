@@ -1142,6 +1142,14 @@ impl ZenSight {
                 self.syslog_filter.selected_units.insert(unit);
                 return ControlFlow::Break(Task::done(Message::OpenLogs));
             }
+            Message::SearchLogsFor(pattern) => {
+                // Global-search → Logs pivot (#554): seed the message filter and
+                // open Logs through the normal path (cold-store search-back
+                // included). Content search itself is server-side.
+                self.syslog_filter.set_message_filter(pattern);
+                self.global_search.close();
+                return ControlFlow::Break(Task::done(Message::OpenLogs));
+            }
             Message::ClearLogsInvocationFilter => {
                 self.syslog_filter.invocation_id = None;
             }
@@ -6537,6 +6545,15 @@ impl ZenSight {
         if let Some(since) = since {
             selector.push_str(&format!(";since={since}"));
         }
+        // Push the active message filter to the sensor (#554/#553): it filters
+        // server-side, so more matching lines fit under the reply cap and the
+        // depth isn't limited to what the client already buffered. Skip values
+        // carrying a `;`/`?` (they'd break Zenoh's `Parameters` grammar) — those
+        // still filter locally.
+        let pattern = self.syslog_filter.message_filter.trim();
+        if !pattern.is_empty() && !pattern.contains([';', '?']) {
+            selector.push_str(&format!(";pattern={pattern}"));
+        }
         Task::future(async move {
             match session
                 .get(&selector)
@@ -7447,6 +7464,20 @@ mod log_fetch_tests {
         let _ = a.update(Message::LogEventsLoaded(Err("timeout".to_string())));
         assert!(!a.log_fetch_inflight);
         assert!(a.recent_logs.is_empty());
+    }
+
+    /// #554: the global-search "search logs for …" pivot seeds the Logs message
+    /// filter and routes to the Logs view.
+    #[test]
+    fn search_logs_for_seeds_filter_and_routes() {
+        let mut a = app();
+        a.global_search.open();
+        // Seeds the filter synchronously and returns an `OpenLogs` follow-up task.
+        let _ = a.update(Message::SearchLogsFor("i/o error".to_string()));
+        assert_eq!(a.syslog_filter.message_filter, "i/o error");
+        // Completing that follow-up routes to the Logs view.
+        let _ = a.update(Message::OpenLogs);
+        assert_eq!(a.current_view, CurrentView::Logs);
     }
 }
 

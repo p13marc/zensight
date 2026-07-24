@@ -268,6 +268,13 @@ dismisses it with the tiles.
 with a MESSAGE_ID catalog, follow/pause, and a boot lens. Seeds from the cold
 store on open (`Message::LogHistoryLoaded`; see [`local-store.md`](local-store.md)).
 Supports local filtering (severity, facility, patterns) via `SyslogFilterState`.
+The message pattern is a **case-insensitive regex** (#554), falling back to a
+substring match with a visible hint on an invalid pattern; the active pattern is
+also pushed to the sensor query as `pattern=` so history depth is filtered
+server-side (#553). The global search overlay offers a **"search logs for …"**
+action (`Message::SearchLogsFor`) that seeds this filter and routes to the Logs
+view. (Deep-history "load older" pagination and a time-range picker are planned
+follow-ons riding the durable-store search.)
 
 *Severity model (#557):* one canonical `zensight_common::LogSeverity` (RFC 5424
 0–7 + slug/label/OTel mappings) is the single severity type — consumed by the
