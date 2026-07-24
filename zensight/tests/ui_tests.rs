@@ -3575,6 +3575,22 @@ fn test_logs_filtered_export_button_carries_filter() {
     }
 }
 
+/// #554: the Logs-feed filter panel renders the time-range picker row (the
+/// picker's overlay/selection logic is covered by the `time_range_resolves_from_bound`
+/// unit test — pick_list internals aren't reachable through the simulator).
+#[test]
+fn test_logs_time_range_picker_renders() {
+    use zensight::view::specialized::{SyslogFilterState, logs_view};
+
+    let mut filter = SyslogFilterState::default();
+    filter.panel_open = true;
+    let mut ui = simulator(logs_view(&[], &filter, None));
+    assert!(
+        ui.find("Time range:").is_ok(),
+        "the time-range picker row should render in the filter panel"
+    );
+}
+
 /// #555: with no `logbundle` advert (`None`), the Logs feed shows no export button.
 #[test]
 fn test_logs_no_export_button_when_unavailable() {

@@ -974,6 +974,13 @@ impl ZenSight {
                 self.syslog_filter.set_min_severity(severity);
             }
 
+            Message::SetLogTimeRange(range) => {
+                self.syslog_filter.set_time_range(range, now_ms());
+                // Re-query so the feed's history depth reflects the new lower
+                // bound (the sensor filters `from=` server-side, #544/#553).
+                return ControlFlow::Break(self.query_log_events(None));
+            }
+
             Message::ToggleSyslogFacility(facility) => {
                 self.syslog_filter.toggle_facility(facility);
             }
@@ -6594,6 +6601,14 @@ impl ZenSight {
         let pattern = self.syslog_filter.message_filter.trim();
         if !pattern.is_empty() && !pattern.contains([';', '?']) {
             selector.push_str(&format!(";pattern={pattern}"));
+        }
+        // Push the active time-range bounds (#554) so the sensor scopes history
+        // server-side (#544 store `from=`/`to=`), not just the client buffer.
+        if let Some(from) = self.syslog_filter.range_from {
+            selector.push_str(&format!(";from={from}"));
+        }
+        if let Some(to) = self.syslog_filter.frozen_at {
+            selector.push_str(&format!(";to={to}"));
         }
         Task::future(async move {
             match session
