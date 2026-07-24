@@ -13654,6 +13654,7 @@ name = "zensight-sensor-logs"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "chrono-tz",
  "clap",
@@ -13679,10 +13680,12 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "x509-parser",
+ "zblob",
  "zenkey",
  "zenoh",
  "zensight-common",
  "zensight-sensor-core",
+ "zstd",
 ]
 
 [[package]]

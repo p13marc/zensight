@@ -53,6 +53,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 x509-parser = "0.18"
 libc = "0.2.189"
+zstd.workspace = true
+async-trait.workspace = true
 
 [features]
 # journald ingestion is on by default (Linux observability target). Disable with
@@ -64,6 +66,7 @@ journald = ["dep:systemd"]
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile.workspace = true
 tokio-test = "0.4"
+zblob.workspace = true
 
 # =============================================================================
 # Package metadata for cargo-deb

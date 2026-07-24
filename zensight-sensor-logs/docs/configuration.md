@@ -59,6 +59,7 @@ from missing telemetry.
 | `store` | off | durable per-line history (#544) — see below |
 | `files` | none | file-tailing sources (#549) — see below |
 | `evidence` | on | observer evidence for remote senders (#552) — see below |
+| `logbundle` | off | filtered log-export artifact limits (#555) — see below |
 
 ### `syslog.listeners[]`
 
@@ -350,6 +351,30 @@ evidence: {
 No-op without a network/TLS listener (only remote peers are "observed"). With
 `reverse_dns`, PTR lookups run only in the publish tick and are cached per IP, so
 they never block ingestion.
+
+### `logbundle` (#555, filtered log export — off by default)
+
+An on-demand artifact (`@rpc/logs/artifact/request` kind `logbundle`, delivered
+over `@blob`) that packages the log lines matching a filter into a single zstd
+bundle — for attaching to a ticket or handing to a vendor. The request selectors
+mirror the events/search query (`from`/`to`/`pattern`/`severity_min`/`unit`/
+`app`/`source`) plus a `format` (`jsonl` | `text`). The bundle's first line is a
+JSON manifest (query, counts, range, truncation flag).
+
+```json5
+logbundle: {
+  enabled: false,          // opt-in
+  max_bytes: 67108864,     // 64 MiB cap (stops + flags truncation)
+  max_lines: 1000000,      // line cap (stops + flags truncation)
+  cooldown_secs: 30,
+  ttl_secs: 600,
+  chunk_size: 524288,      // blob transfer chunk (256 KiB–1 MiB)
+}
+```
+
+Lines come from the durable store (#544) when enabled, plus the hot ring.
+Producer runs off the intake loop. `zenctl` can request the bundle headlessly;
+the GUI Export button (prefilled from the active Logs filter) rides with #554.
 
 ### `syslog.multiline` (#107, on by default)
 

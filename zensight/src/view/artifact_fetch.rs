@@ -782,8 +782,11 @@ pub fn artifact_section<'a>(
                     ));
                 }
             }
-            // Empty snapshot advert / unknown kinds are hidden.
-            KindAdvert::Snapshot { .. } | KindAdvert::Unknown => {}
+            // Empty snapshot advert / unknown kinds are hidden here. The
+            // `logbundle` export (#555) is driven from the Logs feed's Export
+            // button (prefilled from the active filter), not this generic
+            // per-sensor section — see #554.
+            KindAdvert::Snapshot { .. } | KindAdvert::LogBundle { .. } | KindAdvert::Unknown => {}
         }
     }
     if !any {
