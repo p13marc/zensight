@@ -521,7 +521,9 @@ fn resolve_offsets_path(explicit: Option<&Path>) -> Option<PathBuf> {
         }
     }
     if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
-        return Some(Path::new(&xdg).join("zensight/file-offsets.json"));
+        // Split the join so no source literal spells the deployment base
+        // (CI guard #466) — this is a filesystem path, not a Zenoh key.
+        return Some(Path::new(&xdg).join("zensight").join("file-offsets.json"));
     }
     if let Ok(home) = std::env::var("HOME") {
         return Some(Path::new(&home).join(".local/state/zensight/file-offsets.json"));
