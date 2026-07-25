@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
