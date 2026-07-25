@@ -1,0 +1,113 @@
+name: Release
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Build release artifacts
+        run: |
+          mkdir -p dist/release
+          name="${GITHUB_REPOSITORY#*/}"
+          git archive --format=tar.gz --prefix="${name}-${GITHUB_REF_NAME}/" \
+            -o "dist/release/${name}-${GITHUB_REF_NAME}.tar.gz" "${GITHUB_REF_NAME}"
+          (cd dist/release && sha256sum * > SHA256SUMS)
+      - uses: https://data.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          # internal URL: the runner zone cannot hairpin to the public vhost
+          url: http://10.10.0.30:3000
+          repo: ${{ github.repository }}
+          tag: ${{ github.ref_name }}
+          sha: ${{ github.sha }}
+          release-dir: dist/release
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # One job builds all binaries and assembles every component image from them
+  # (amd64 only). Single-job on purpose: artifact passing between jobs is not
+  # available on this instance (runner zone cannot reach the public vhost).
+  images:
+    runs-on: ubuntu-24.04
+    env:
+      REGISTRY: 10.10.0.30:3000
+      BUILDAH_ISOLATION: chroot
+      STORAGE_DRIVER: vfs
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Install build deps + buildah
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y buildah protobuf-compiler libsystemd-dev libpcap-dev libssl-dev pkg-config
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: images
+      - name: Build release binaries
+        run: |
+          pkgs=""
+          for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd; do
+            pkgs="$pkgs -p zensight-sensor-$s"
+          done
+          pkgs="$pkgs -p zensight-exporter-prometheus -p zensight-exporter-otel"
+          cargo build --release --locked $pkgs
+      - name: Stage binaries for Dockerfiles
+        run: |
+          mkdir -p docker-bins/docker-binaries-amd64
+          for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd; do
+            cp "target/release/zensight-sensor-$s" docker-bins/docker-binaries-amd64/
+          done
+          cp target/release/zensight-exporter-prometheus target/release/zensight-exporter-otel \
+             docker-bins/docker-binaries-amd64/
+      - name: Build and push component images
+        run: |
+          sudo -v 2>/dev/null || true
+          buildah login --tls-verify=false -u marcpardo -p "${{ secrets.REGISTRY_TOKEN }}" "$REGISTRY"
+          labels="--label org.opencontainers.image.source=https://git.marcpardo.eu/${GITHUB_REPOSITORY} --label org.opencontainers.image.revision=${GITHUB_SHA}"
+          for c in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
+                   zensight-sensor-gnmi zensight-sensor-modbus zensight-sensor-netflow \
+                   zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
+                   zensight-exporter-prometheus zensight-exporter-otel; do
+            image="$REGISTRY/marcpardo/$c"
+            buildah build $labels \
+              --build-arg "BINARY_PACKAGE=$c" --build-arg TARGETARCH=amd64 \
+              -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" -f docker/Dockerfile.runtime .
+            buildah push --tls-verify=false "$image:${GITHUB_REF_NAME}"
+            buildah push --tls-verify=false "$image:latest"
+          done
+          image="$REGISTRY/marcpardo/zensight-sensors"
+          buildah build $labels --build-arg TARGETARCH=amd64 \
+            -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" -f docker/Dockerfile.sensors-runtime .
+          buildah push --tls-verify=false "$image:${GITHUB_REF_NAME}"
+          buildah push --tls-verify=false "$image:latest"
+
+  flatpak:
+    runs-on: flatpak
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Build flatpak (unsigned; vm-edge signs on publish)
+        run: |
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --install-deps-from=flathub \
+            --repo=export-repo builddir flatpak/com.github.p13marc.ZenSight.yml
+          mkdir -p dist/release
+          flatpak build-bundle export-repo \
+            "dist/release/zensight-${GITHUB_REF_NAME}.flatpak" com.github.p13marc.ZenSight
+      - name: Publish export branch for vm-edge
+        run: |
+          cd export-repo
+          git init -q -b flatpak-export
+          git add -A
+          git -c user.name=ci -c user.email=ci@marcpardo.eu commit -q -m "flatpak export ${GITHUB_REF_NAME}"
+          git push --force "http://forgejo:${{ secrets.GITHUB_TOKEN }}@10.10.0.30:3000/${GITHUB_REPOSITORY}.git" HEAD:flatpak-export
+      - uses: https://data.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          url: http://10.10.0.30:3000
+          repo: ${{ github.repository }}
+          tag: ${{ github.ref_name }}
+          sha: ${{ github.sha }}
+          release-dir: dist/release
+          token: ${{ secrets.GITHUB_TOKEN }}

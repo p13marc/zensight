@@ -1,0 +1,112 @@
+name: CI
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: lint
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # D2 (#28): all colors must come from the design-system modules.
+      - name: no ad-hoc colors (D2 guard)
+        run: |
+          hits=$(grep -rn "Color::from_rgb" zensight/src --include='*.rs' \
+            | grep -vE "view/theme\.rs|view/tokens\.rs|view/components/" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Ad-hoc Color::from_rgb outside the design-system modules:"
+            echo "$hits"
+            exit 1
+          fi
+
+      # R5 (#356): every publication must go through a declared publisher.
+      - name: declared-publishers only (R5 guard)
+        run: |
+          hits=$(grep -rnE '(session[a-z_]*|zenoh)\.(put|delete)\(' \
+            zensight/src zensight-common/src zensight-correlator/src \
+            zensight-sensor-core/src zensight-sensor-*/src zensight-exporter-*/src \
+            zensight-rerun/src \
+            --include='*.rs' \
+            | grep -vE 'publisher_registry\.rs|/tests/|_test\.rs|mod tests' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Raw session.put/delete — publish through a declared publisher (PublisherRegistry / AdvancedPublisherRegistry / declare_publisher):"
+            echo "$hits"
+            exit 1
+          fi
+
+      # #466: keys are base-relative; the deployment base is never spelled.
+      - name: application code never spells the deployment base (#466)
+        run: |
+          cat > /tmp/strip_tests.awk <<'AWK'
+          /^#\[cfg\(test\)\]/ { intest=1 }
+          { if (!intest) print FILENAME ":" FNR ":" $0 }
+          AWK
+          SRC="zensight/src zensight-common/src zensight-correlator/src
+               zensight-sensor-core/src zensight-sensor-*/src
+               zensight-exporter-*/src zensight-rerun/src"
+          hits=$(find $SRC -name '*.rs' -print0 \
+            | xargs -0 -I{} awk -f /tmp/strip_tests.awk {} \
+            | grep -E '"zensight/' \
+            | grep -vE 'journald\.cursor|zensight/host-id' \
+            | grep -vE ':[0-9]+: *//' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::A key literal spells the deployment base. Keys are base-relative (#466) — the session namespace adds 'zensight/'. Build them through zenkey/zensight-common:"
+            echo "$hits"
+            exit 1
+          fi
+
+      # #466: the session namespace is set in exactly one place.
+      - name: every production session goes through zensight_common::session (#466)
+        run: |
+          cat > /tmp/strip_tests.awk <<'AWK'
+          /^#\[cfg\(test\)\]/ { intest=1 }
+          { if (!intest) print FILENAME ":" FNR ":" $0 }
+          AWK
+          SRC="zensight/src zensight-common/src zensight-correlator/src
+               zensight-sensor-core/src zensight-sensor-*/src
+               zensight-exporter-*/src zensight-rerun/src"
+          hits=$(find $SRC -name '*.rs' -print0 \
+            | xargs -0 -I{} awk -f /tmp/strip_tests.awk {} \
+            | grep 'zenoh::open(' \
+            | grep -vE 'zensight-common/src/session.rs|zensight-rerun/src/session.rs' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Raw zenoh::open — open sessions via zensight_common::session::{connect,build_config}. It is the only place the deployment namespace (#466) is set:"
+            echo "$hits"
+            exit 1
+          fi
