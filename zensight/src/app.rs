@@ -265,6 +265,9 @@ impl ZenSight {
             // from a text box. Empty (the default) means no session namespace:
             // the base-less bus-root deployment, Zenoh's own default.
             namespace: String::new(),
+            // TLS material is likewise not a GUI setting (0.9): it comes from
+            // `ZENSIGHT_ZENOH_TLS_{CA,CERT,KEY,MTLS}` via the overrides below.
+            tls: None,
         }
         .with_env_overrides();
         let link = crate::subscription::LinkConfig {
@@ -6944,6 +6947,8 @@ impl ZenSight {
                 // The base comes from `ZENSIGHT_ZENOH_NAMESPACE` inside
                 // `session::connect`; empty = base-less deployment (see boot()).
                 namespace: String::new(),
+                // TLS likewise: `ZENSIGHT_ZENOH_TLS_*` applies in connect().
+                tls: None,
             },
             scope: self.settings.scope_entries(),
             profile: self.settings.link_profile,

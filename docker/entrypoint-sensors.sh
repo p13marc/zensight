@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # entrypoint-sensors.sh — entrypoint of the all-in-one sensors image
-# (docker/Dockerfile.sensors). Validates the one supported knob
-# (ZENSIGHT_ZENOH_CONNECT), warns about missing host mounts, detects the
-# capture interface in the HOST network namespace (--net=host), generates the
-# demo-max configs, then hands off to the shared spawner in fail-fast mode.
+# (docker/Dockerfile.sensors). Validates the supported knobs
+# (ZENSIGHT_ZENOH_CONNECT, ZENSIGHT_ZENOH_TLS_*), warns about missing host
+# mounts, detects the capture interface in the HOST network namespace
+# (--net=host), generates the demo-max configs, then hands off to the shared
+# spawner in fail-fast mode.
 #
 # See docs/DEPLOYMENT.md for the full `podman run` invocation.
 
@@ -24,6 +25,22 @@ EOF
 fi
 # ZENSIGHT_ZENOH_MODE / ZENSIGHT_ZENOH_LISTEN also pass through to the sensors
 # (zensight-common honors them) but are unsupported for this image.
+
+# ── 1b. TLS material, if configured. A set variable whose file is missing
+#       inside the container is always a forgotten mount — every sensor would
+#       crash-loop on it, so fail fast with the fix. ──────────────────────────
+for var in ZENSIGHT_ZENOH_TLS_CA ZENSIGHT_ZENOH_TLS_CERT ZENSIGHT_ZENOH_TLS_KEY; do
+    path="${!var:-}"
+    if [[ -n "$path" && ! -r "$path" ]]; then
+        cat >&2 <<EOF
+ERROR: $var=$path is set but the file does not exist (or is unreadable)
+inside the container. Mount the certificate directory read-only, e.g.:
+
+    podman run ... -v /srv/containers/zensight-sensors/tls:/etc/zensight/tls:ro ...
+EOF
+        exit 64
+    fi
+done
 
 # ── 2. Host-mount / identity preflight (warn, don't fail — sensors degrade
 #       gracefully; a missing mount only silences its sensor) ─────────────────

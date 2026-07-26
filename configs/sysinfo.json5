@@ -11,6 +11,16 @@
                                     // on ingress, and filters other deployments' traffic.
                     // "client", "peer", or "router"
     // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
+
+    // OPTIONAL — TLS material for `tls/…` endpoints (e.g. a zenohd router
+    // behind mTLS). Field names mirror Zenoh's transport/link/tls keys; each
+    // is also overridable via ZENSIGHT_ZENOH_TLS_{CA,CERT,KEY,MTLS}.
+    // tls: {
+    //   root_ca_certificate: "/etc/zensight/tls/ca.crt",
+    //   connect_certificate: "/etc/zensight/tls/host.crt",  // mTLS only
+    //   connect_private_key: "/etc/zensight/tls/host.key",  // mTLS only
+    //   enable_mtls: true,
+    // },
   },
 
   // On-demand artifact channel (@rpc artifact/request + @blob delivery) —

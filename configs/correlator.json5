@@ -14,6 +14,16 @@
 
     // Endpoints to listen on (for peer/router mode)
     // listen: ["tcp/0.0.0.0:7448"],
+
+    // OPTIONAL — TLS material for `tls/…` endpoints (e.g. a zenohd router
+    // behind mTLS). Field names mirror Zenoh's transport/link/tls keys; each
+    // is also overridable via ZENSIGHT_ZENOH_TLS_{CA,CERT,KEY,MTLS}.
+    // tls: {
+    //   root_ca_certificate: "/etc/zensight/tls/ca.crt",
+    //   connect_certificate: "/etc/zensight/tls/correlator.crt",  // mTLS only
+    //   connect_private_key: "/etc/zensight/tls/correlator.key",  // mTLS only
+    //   enable_mtls: true,
+    // },
   },
 
   // Wire serialization for the entity docs this service publishes: "json" or "cbor".

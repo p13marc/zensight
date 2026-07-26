@@ -78,6 +78,39 @@ several deployments on one Zenoh infrastructure; it must match the rest of the
 fleet. `ZENSIGHT_ZENOH_MODE`/`ZENSIGHT_ZENOH_LISTEN` technically pass through
 to the sensors but are unsupported for this image.
 
+### TLS to the router
+
+When the fleet publishes to a zenohd router behind TLS (or mutual TLS), give
+the container the certificate material and a `tls/` endpoint:
+
+| Variable | Meaning |
+|----------|---------|
+| `ZENSIGHT_ZENOH_TLS_CA` | CA certificate (PEM) that signed the router's cert |
+| `ZENSIGHT_ZENOH_TLS_CERT` | this host's client certificate (mTLS only) |
+| `ZENSIGHT_ZENOH_TLS_KEY` | private key for the client certificate (mTLS only) |
+| `ZENSIGHT_ZENOH_TLS_MTLS` | `true` to present the client certificate |
+
+```bash
+sudo podman run -d --name zensight-sensors \
+  ... \
+  -v /srv/containers/zensight-sensors/tls:/etc/zensight/tls:ro \
+  -e ZENSIGHT_ZENOH_CONNECT=tls/<router-host>:7447 \
+  -e ZENSIGHT_ZENOH_TLS_CA=/etc/zensight/tls/ca.crt \
+  -e ZENSIGHT_ZENOH_TLS_CERT=/etc/zensight/tls/host.crt \
+  -e ZENSIGHT_ZENOH_TLS_KEY=/etc/zensight/tls/host.key \
+  -e ZENSIGHT_ZENOH_TLS_MTLS=true \
+  ...
+```
+
+The connect endpoint's scheme must be `tls/` — TLS material with a plain
+`tcp/` endpoint is loaded but never used (the session logs a warning). The
+entrypoint fails fast (exit 64) if a `ZENSIGHT_ZENOH_TLS_*` path is set but
+the file isn't visible inside the container — that's always a forgotten
+`-v` mount. The same variables work for the GUI (a flatpak install uses
+`flatpak override --user --env=…` with certs under `~/.config/zensight/tls`)
+and for the native sensors/correlator (whose configs also accept an
+equivalent `zenoh.tls` block — see `configs/sysinfo.json5`).
+
 ### Why each flag
 
 | Flag | Why |

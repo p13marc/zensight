@@ -101,6 +101,56 @@ pub fn build_config(config: &ZenohConfig) -> Result<zenoh::Config> {
             .map_err(|e| Error::Config(format!("Failed to disable multicast scouting: {}", e)))?;
     }
 
+    // TLS material for `tls/…` endpoints, mapped onto Zenoh's
+    // `transport/link/tls` block. ZenSight processes are TLS clients only —
+    // the listening side is the zenohd router, configured in its own file —
+    // so only the connect-side keys are set here.
+    if let Some(tls) = &config.tls {
+        if tls.connect_certificate.is_some() != tls.connect_private_key.is_some() {
+            return Err(Error::Config(
+                "zenoh.tls: connect_certificate and connect_private_key only make sense \
+                 together — set both or neither"
+                    .to_string(),
+            ));
+        }
+        if tls.enable_mtls && tls.connect_certificate.is_none() {
+            return Err(Error::Config(
+                "zenoh.tls: enable_mtls requires connect_certificate and connect_private_key"
+                    .to_string(),
+            ));
+        }
+        let mut set = |key: &str, value: &Option<String>| -> Result<()> {
+            if let Some(v) = value {
+                zenoh_config
+                    .insert_json5(&format!("transport/link/tls/{key}"), &format!("{v:?}"))
+                    .map_err(|e| Error::Config(format!("Failed to set tls {key}: {e}")))?;
+            }
+            Ok(())
+        };
+        set("root_ca_certificate", &tls.root_ca_certificate)?;
+        set("connect_certificate", &tls.connect_certificate)?;
+        set("connect_private_key", &tls.connect_private_key)?;
+        if tls.enable_mtls {
+            zenoh_config
+                .insert_json5("transport/link/tls/enable_mtls", "true")
+                .map_err(|e| Error::Config(format!("Failed to set tls enable_mtls: {e}")))?;
+        }
+        // The classic silent misconfiguration: a tls block with only plain
+        // `tcp/…` endpoints — the material is loaded and never used, and the
+        // traffic stays cleartext.
+        let uses_tls = config
+            .connect
+            .iter()
+            .chain(config.listen.iter())
+            .any(|e| e.starts_with("tls/") || e.starts_with("quic/"));
+        if !uses_tls {
+            tracing::warn!(
+                "zenoh.tls is configured but no connect/listen endpoint uses a tls/ or quic/ \
+                 scheme — the TLS material will not be used"
+            );
+        }
+    }
+
     Ok(zenoh_config)
 }
 
@@ -117,6 +167,8 @@ pub async fn connect(config: &ZenohConfig) -> Result<Session> {
         listen = ?config.listen,
         scouting = config.scouting,
         namespace = %config.namespace,
+        tls = config.tls.is_some(),
+        mtls = config.tls.as_ref().is_some_and(|t| t.enable_mtls),
         "Connecting to Zenoh"
     );
 
@@ -191,5 +243,96 @@ mod tests {
             ..Default::default()
         };
         assert!(build_config(&c).is_err());
+    }
+
+    fn tls_cfg(tls: crate::config::ZenohTlsConfig) -> ZenohConfig {
+        ZenohConfig {
+            mode: "client".into(),
+            connect: vec!["tls/10.0.0.1:7447".into()],
+            tls: Some(tls),
+            ..Default::default()
+        }
+    }
+
+    /// The TLS paths must reach the wire config under Zenoh's own key names —
+    /// a typo'd key is silently ignored by zenoh and the link stays cleartext.
+    #[test]
+    fn tls_fields_reach_the_zenoh_config() {
+        let c = build_config(&tls_cfg(crate::config::ZenohTlsConfig {
+            root_ca_certificate: Some("/tls/ca.crt".into()),
+            connect_certificate: Some("/tls/node.crt".into()),
+            connect_private_key: Some("/tls/node.key".into()),
+            enable_mtls: true,
+        }))
+        .expect("full tls block builds");
+        let json: serde_json::Value = serde_json::from_str(&c.to_string()).unwrap();
+        let tls = &json["transport"]["link"]["tls"];
+        assert_eq!(tls["root_ca_certificate"], "/tls/ca.crt");
+        assert_eq!(tls["connect_certificate"], "/tls/node.crt");
+        assert_eq!(tls["connect_private_key"], "/tls/node.key");
+        assert_eq!(tls["enable_mtls"], true);
+    }
+
+    /// CA-only (server-authenticated TLS, no client cert) is a legal
+    /// configuration and must not set the connect-side keys.
+    #[test]
+    fn ca_only_tls_is_legal() {
+        let c = build_config(&tls_cfg(crate::config::ZenohTlsConfig {
+            root_ca_certificate: Some("/tls/ca.crt".into()),
+            ..Default::default()
+        }))
+        .expect("ca-only tls builds");
+        let json: serde_json::Value = serde_json::from_str(&c.to_string()).unwrap();
+        let tls = &json["transport"]["link"]["tls"];
+        assert_eq!(tls["root_ca_certificate"], "/tls/ca.crt");
+        assert_eq!(tls["connect_certificate"], serde_json::Value::Null);
+    }
+
+    /// No tls block ⇒ no tls keys — the zenoh defaults stay untouched.
+    #[test]
+    fn no_tls_block_sets_no_tls_keys() {
+        let c = build_config(&ZenohConfig::default()).expect("default config builds");
+        let json: serde_json::Value = serde_json::from_str(&c.to_string()).unwrap();
+        assert_eq!(
+            json["transport"]["link"]["tls"]["root_ca_certificate"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["transport"]["link"]["tls"]["enable_mtls"],
+            serde_json::Value::Null
+        );
+    }
+
+    /// mTLS without the client material would be accepted by zenoh and fail
+    /// at handshake time on every connection attempt. Refuse it at build.
+    #[test]
+    fn mtls_without_client_cert_is_refused() {
+        let err = build_config(&tls_cfg(crate::config::ZenohTlsConfig {
+            root_ca_certificate: Some("/tls/ca.crt".into()),
+            enable_mtls: true,
+            ..Default::default()
+        }))
+        .expect_err("mtls without cert+key must not build");
+        assert!(
+            err.to_string().contains("enable_mtls"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// A certificate without its key (or vice versa) is always a mistake.
+    #[test]
+    fn cert_without_key_is_refused() {
+        for (cert, key) in [(Some("/tls/node.crt"), None), (None, Some("/tls/node.key"))] {
+            let err = build_config(&tls_cfg(crate::config::ZenohTlsConfig {
+                connect_certificate: cert.map(String::from),
+                connect_private_key: key.map(String::from),
+                ..Default::default()
+            }))
+            .expect_err("cert xor key must not build");
+            assert!(
+                err.to_string().contains("together"),
+                "unhelpful error: {err}"
+            );
+        }
     }
 }

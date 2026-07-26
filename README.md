@@ -128,8 +128,11 @@ run unprivileged under a transient `DynamicUser`).
 ## Configuration
 
 All sensors and exporters use JSON5 configs; see [`configs/`](configs/) for a working example
-per crate. Each shares a `zenoh` block (`mode`/`connect`/`listen`) and a `logging` block, all
-overridable via the `ZENSIGHT_ZENOH_*` env vars. The per-field reference for each crate lives
+per crate. Each shares a `zenoh` block (`mode`/`connect`/`listen`, plus an optional `tls`
+block — CA / client cert / key / `enable_mtls` — for `tls/…` endpoints to a TLS or mTLS
+router) and a `logging` block, all overridable via the `ZENSIGHT_ZENOH_*` env vars
+(`ZENSIGHT_ZENOH_TLS_{CA,CERT,KEY,MTLS}` for the TLS material — see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §TLS). The per-field reference for each crate lives
 in that crate's `docs/`.
 
 ## Data model

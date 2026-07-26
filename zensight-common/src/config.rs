@@ -47,6 +47,39 @@ pub struct ZenohConfig {
     /// Multi-chunk bases are legal (`acme/fleet-a`); wildcards are not.
     #[serde(default)]
     pub namespace: String,
+
+    /// TLS material for `tls/…` (or `quic/…`) endpoints. Optional — absent
+    /// means plain links only, matching Zenoh's own default. Field names
+    /// mirror Zenoh's `transport/link/tls` keys so a zenohd config and a
+    /// ZenSight config read the same.
+    #[serde(default)]
+    pub tls: Option<ZenohTlsConfig>,
+}
+
+/// Client-side TLS settings, mapped 1:1 onto Zenoh's `transport/link/tls`
+/// block (Zenoh 1.x key names). ZenSight processes are always TLS *clients*
+/// — the listening side of a TLS deployment is the zenohd router, configured
+/// in its own file — so only the connect-side keys are exposed here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ZenohTlsConfig {
+    /// Path to the CA certificate (PEM) that signed the router's certificate.
+    /// Required to reach a router whose certificate a private CA issued.
+    #[serde(default)]
+    pub root_ca_certificate: Option<String>,
+
+    /// Path to this process's client certificate (PEM), presented when the
+    /// router requires mutual TLS. Set together with `connect_private_key`.
+    #[serde(default)]
+    pub connect_certificate: Option<String>,
+
+    /// Path to the private key (PEM) for `connect_certificate`.
+    #[serde(default)]
+    pub connect_private_key: Option<String>,
+
+    /// Enable mutual TLS: present `connect_certificate` during the handshake.
+    /// Requires both `connect_certificate` and `connect_private_key`.
+    #[serde(default)]
+    pub enable_mtls: bool,
 }
 
 fn default_scouting() -> bool {
@@ -68,19 +101,22 @@ impl Default for ZenohConfig {
             // with no software default — empty means no session namespace
             // (keys at the bus root), which is Zenoh's own default.
             namespace: String::new(),
+            tls: None,
         }
     }
 }
 
 impl ZenohConfig {
-    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING,NAMESPACE}` environment
-    /// overrides.
+    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING,NAMESPACE}` and
+    /// `ZENSIGHT_ZENOH_TLS_{CA,CERT,KEY,MTLS}` environment overrides.
     ///
     /// `CONNECT`/`LISTEN` are comma-separated endpoint lists. Unset variables
     /// leave the field untouched. This lets a launcher (e.g. `just run`) pin
     /// explicit local endpoints so the GUI and sensors connect reliably without
     /// depending on multicast peer discovery (which is unreliable on hosts with
-    /// a VPN or multiple interfaces, e.g. tailscale/docker).
+    /// a VPN or multiple interfaces, e.g. tailscale/docker). The TLS variables
+    /// exist for launchers that cannot edit the config file (the flatpak GUI
+    /// via `flatpak override --env`, the sensors container via `podman -e`).
     pub fn with_env_overrides(self) -> Self {
         self.with_overrides_from(|k| std::env::var(k).ok())
     }
@@ -109,6 +145,27 @@ impl ZenohConfig {
         if let Some(ns) = get("ZENSIGHT_ZENOH_NAMESPACE") {
             self.namespace = ns.trim().to_string();
         }
+        if let Some(ca) = get("ZENSIGHT_ZENOH_TLS_CA") {
+            self.tls
+                .get_or_insert_with(Default::default)
+                .root_ca_certificate = Some(ca.trim().to_string());
+        }
+        if let Some(cert) = get("ZENSIGHT_ZENOH_TLS_CERT") {
+            self.tls
+                .get_or_insert_with(Default::default)
+                .connect_certificate = Some(cert.trim().to_string());
+        }
+        if let Some(key) = get("ZENSIGHT_ZENOH_TLS_KEY") {
+            self.tls
+                .get_or_insert_with(Default::default)
+                .connect_private_key = Some(key.trim().to_string());
+        }
+        if let Some(m) = get("ZENSIGHT_ZENOH_TLS_MTLS") {
+            // Positive form: mTLS is off by default, the variable switches it
+            // on (unlike SCOUTING, whose negative form matches its on-default).
+            self.tls.get_or_insert_with(Default::default).enable_mtls =
+                matches!(m.trim(), "true" | "1" | "on" | "yes");
+        }
         self
     }
 }
@@ -134,6 +191,7 @@ mod zenoh_env_tests {
             listen: vec![],
             scouting: true,
             namespace: "zensight".into(),
+            tls: None,
         };
         assert_eq!(over(base.clone(), &[]), base);
     }
@@ -176,6 +234,78 @@ mod zenoh_env_tests {
         assert_eq!(out.mode, "client");
         assert_eq!(out.connect, vec!["tcp/127.0.0.1:7447", "tcp/h:2"]); // trimmed, empties dropped
         assert_eq!(out.listen, vec!["tcp/0.0.0.0:7448"]);
+    }
+
+    /// The TLS variables must be able to conjure the whole block from `None`
+    /// — the flatpak GUI and the sensors container have no editable config
+    /// file, env is their only knob.
+    #[test]
+    fn tls_vars_create_the_block_from_none() {
+        let out = over(
+            ZenohConfig::default(),
+            &[
+                ("ZENSIGHT_ZENOH_TLS_CA", " /etc/zensight/tls/ca.crt "),
+                ("ZENSIGHT_ZENOH_TLS_CERT", "/etc/zensight/tls/node.crt"),
+                ("ZENSIGHT_ZENOH_TLS_KEY", "/etc/zensight/tls/node.key"),
+                ("ZENSIGHT_ZENOH_TLS_MTLS", "true"),
+            ],
+        );
+        let tls = out.tls.expect("env vars must create the tls block");
+        assert_eq!(
+            tls.root_ca_certificate.as_deref(),
+            Some("/etc/zensight/tls/ca.crt")
+        );
+        assert_eq!(
+            tls.connect_certificate.as_deref(),
+            Some("/etc/zensight/tls/node.crt")
+        );
+        assert_eq!(
+            tls.connect_private_key.as_deref(),
+            Some("/etc/zensight/tls/node.key")
+        );
+        assert!(tls.enable_mtls);
+    }
+
+    /// A variable overrides only its own field of an existing block.
+    #[test]
+    fn tls_vars_partially_override_an_existing_block() {
+        let base = ZenohConfig {
+            tls: Some(ZenohTlsConfig {
+                root_ca_certificate: Some("/old/ca.crt".into()),
+                connect_certificate: Some("/old/node.crt".into()),
+                connect_private_key: Some("/old/node.key".into()),
+                enable_mtls: true,
+            }),
+            ..Default::default()
+        };
+        let out = over(base, &[("ZENSIGHT_ZENOH_TLS_CA", "/new/ca.crt")]);
+        let tls = out.tls.expect("block survives");
+        assert_eq!(tls.root_ca_certificate.as_deref(), Some("/new/ca.crt"));
+        assert_eq!(tls.connect_certificate.as_deref(), Some("/old/node.crt"));
+        assert!(tls.enable_mtls);
+    }
+
+    /// mTLS defaults off; only an explicit truthy value enables it, and a
+    /// falsy value disables it again (e.g. neutralizing a config-file value).
+    #[test]
+    fn tls_mtls_var_parses_truthy_and_falsy() {
+        for on in ["true", "1", "on", "yes"] {
+            let out = over(ZenohConfig::default(), &[("ZENSIGHT_ZENOH_TLS_MTLS", on)]);
+            assert!(out.tls.expect("block created").enable_mtls, "for {on:?}");
+        }
+        for off in ["false", "0", "off", "no", "nonsense"] {
+            let out = over(ZenohConfig::default(), &[("ZENSIGHT_ZENOH_TLS_MTLS", off)]);
+            assert!(!out.tls.expect("block created").enable_mtls, "for {off:?}");
+        }
+    }
+
+    /// No TLS variables ⇒ `tls` stays `None` — the config must not grow a
+    /// TLS block (and later fail validation) on its own.
+    #[test]
+    fn no_tls_vars_leaves_tls_none() {
+        assert!(over(ZenohConfig::default(), &[]).tls.is_none());
+        let parsed: ZenohConfig = json5::from_str("{}").expect("empty zenoh block parses");
+        assert!(parsed.tls.is_none());
     }
 }
 
