@@ -2,6 +2,10 @@ name: Release
 on:
   push:
     tags: ['[0-9]+.[0-9]+.[0-9]+']
+  # Dry run on a branch: builds everything (binaries, images, smoke, tarball,
+  # flatpak) but publishes nothing — every push/upload step is gated on the
+  # ref being a tag. Run this once before tagging a release.
+  workflow_dispatch:
 
 env:
   # shared compiler cache: sccache (mounted from the runner VM) -> garage S3
@@ -22,6 +26,7 @@ jobs:
             -o "dist/release/${name}-${GITHUB_REF_NAME}.tar.gz" "${GITHUB_REF_NAME}"
           (cd dist/release && sha256sum * > SHA256SUMS)
       - uses: https://data.forgejo.org/actions/forgejo-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           direction: upload
           # internal URL: the runner zone cannot hairpin to the public vhost
@@ -35,60 +40,126 @@ jobs:
   # One job builds all binaries and assembles every component image from them
   # (amd64 only). Single-job on purpose: artifact passing between jobs is not
   # available on this instance (runner zone cannot reach the public vhost).
+  #
+  # Runs inside rust:1.97-bookworm so the binaries link against the SAME glibc
+  # (2.36) as the debian:bookworm-slim runtime base — building on the act
+  # ubuntu-24.04 image (glibc 2.39) produces binaries that can fail to load in
+  # the runtime image. This also pins rustc to the cluster-wide 1.97. No node
+  # inside the container -> no JS actions in this job (manual clone, curl API
+  # for the release asset).
+  #
+  # `needs: release` only because the tarball attach at the end requires the
+  # release object (created by the release job's upload) to exist.
   images:
+    needs: release
     runs-on: ubuntu-24.04
+    container:
+      image: rust:1.97-bookworm
     env:
       REGISTRY: 10.10.0.30:3000
       BUILDAH_ISOLATION: chroot
       STORAGE_DRIVER: vfs
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Clone
+        run: |
+          git clone --depth 1 --branch "$GITHUB_REF_NAME" \
+            "http://forgejo:${GITHUB_TOKEN}@10.10.0.30:3000/${GITHUB_REPOSITORY}.git" src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install build deps + buildah
         run: |
-          sudo apt-get update
-          sudo apt-get install -y buildah protobuf-compiler libsystemd-dev libpcap-dev libssl-dev pkg-config
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2
-        with:
-          key: images
-          cache-targets: false
+          apt-get update
+          apt-get install -y buildah protobuf-compiler libsystemd-dev libpcap-dev libssl-dev pkg-config jq
+      - name: Set version
+        run: |
+          cd src
+          case "$GITHUB_REF" in
+            refs/tags/*) echo "VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV" ;;
+            *)           echo "VERSION=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV" ;;
+          esac
       - name: Build release binaries
         run: |
+          cd src
           pkgs=""
           for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd; do
             pkgs="$pkgs -p zensight-sensor-$s"
           done
-          pkgs="$pkgs -p zensight-exporter-prometheus -p zensight-exporter-otel"
+          pkgs="$pkgs -p zensight-exporter-prometheus -p zensight-exporter-otel -p zensight-correlator"
           cargo build --release --locked $pkgs
       - name: Stage binaries for Dockerfiles
         run: |
+          cd src
           mkdir -p docker-bins/docker-binaries-amd64
           for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd; do
             cp "target/release/zensight-sensor-$s" docker-bins/docker-binaries-amd64/
           done
           cp target/release/zensight-exporter-prometheus target/release/zensight-exporter-otel \
+             target/release/zensight-correlator \
              docker-bins/docker-binaries-amd64/
-      - name: Build and push component images
+      - name: Assemble linux-amd64 tarball
         run: |
-          sudo -v 2>/dev/null || true
-          buildah login --tls-verify=false -u marcpardo -p "${{ secrets.REGISTRY_TOKEN }}" "$REGISTRY"
+          cd src
+          name="zensight-${VERSION}-linux-amd64"
+          mkdir -p dist/release "stage/$name/configs"
+          cp docker-bins/docker-binaries-amd64/* "stage/$name/"
+          cp -r packaging/systemd "stage/$name/systemd"
+          cp configs/*.json5 "stage/$name/configs/"
+          (cd "stage/$name" && sha256sum zensight-* > SHA256SUMS)
+          tar -C stage -czf "dist/release/$name.tar.gz" "$name"
+          # outer checksum named <name>.tar.gz.sha256 — the release job already
+          # uploads an asset called SHA256SUMS; the names must not collide
+          (cd dist/release && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+      - name: Build component images and smoke-test
+        run: |
+          cd src
           labels="--label org.opencontainers.image.source=https://git.marcpardo.eu/${GITHUB_REPOSITORY} --label org.opencontainers.image.revision=${GITHUB_SHA}"
           for c in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
                    zensight-sensor-gnmi zensight-sensor-modbus zensight-sensor-netflow \
                    zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
-                   zensight-exporter-prometheus zensight-exporter-otel; do
+                   zensight-exporter-prometheus zensight-exporter-otel zensight-correlator; do
             image="$REGISTRY/marcpardo/$c"
             buildah build $labels \
               --build-arg "BINARY_PACKAGE=$c" --build-arg TARGETARCH=amd64 \
-              -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" -f docker/Dockerfile.runtime .
-            buildah push --tls-verify=false "$image:${GITHUB_REF_NAME}"
-            buildah push --tls-verify=false "$image:latest"
+              -t "$image:${VERSION}" -t "$image:latest" -f docker/Dockerfile.runtime .
           done
           image="$REGISTRY/marcpardo/zensight-sensors"
           buildah build $labels --build-arg TARGETARCH=amd64 \
-            -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" -f docker/Dockerfile.sensors-runtime .
-          buildah push --tls-verify=false "$image:${GITHUB_REF_NAME}"
-          buildah push --tls-verify=false "$image:latest"
+            -t "$image:${VERSION}" -t "$image:latest" -f docker/Dockerfile.sensors-runtime .
+          # smoke: run one binary inside each runtime base — catches glibc or
+          # shared-library skew at build time instead of on the fleet
+          ctr=$(buildah from "$REGISTRY/marcpardo/zensight-sensors:${VERSION}")
+          buildah run "$ctr" -- /usr/local/bin/zensight-sensor-sysinfo --help >/dev/null
+          buildah rm "$ctr"
+          ctr=$(buildah from "$REGISTRY/marcpardo/zensight-correlator:${VERSION}")
+          buildah run "$ctr" -- /usr/local/bin/zensight-correlator --help >/dev/null
+          buildah rm "$ctr"
+      - name: Push images
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          buildah login --tls-verify=false -u marcpardo -p "${{ secrets.REGISTRY_TOKEN }}" "$REGISTRY"
+          for c in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
+                   zensight-sensor-gnmi zensight-sensor-modbus zensight-sensor-netflow \
+                   zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
+                   zensight-exporter-prometheus zensight-exporter-otel zensight-correlator \
+                   zensight-sensors; do
+            image="$REGISTRY/marcpardo/$c"
+            buildah push --tls-verify=false "$image:${VERSION}"
+            buildah push --tls-verify=false "$image:latest"
+          done
+      - name: Attach tarball to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cd src
+          name="zensight-${VERSION}-linux-amd64"
+          rid=$(curl -sf -H "Authorization: token ${GITHUB_TOKEN}" \
+            "http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" | jq .id)
+          for f in "$name.tar.gz" "$name.tar.gz.sha256"; do
+            curl -sf -H "Authorization: token ${GITHUB_TOKEN}" \
+              -F "attachment=@dist/release/$f" \
+              "http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}/releases/${rid}/assets?name=$f" >/dev/null
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   flatpak:
     runs-on: flatpak
@@ -115,6 +186,7 @@ jobs:
           flatpak build-bundle export-repo \
             "$GITHUB_WORKSPACE/dist/release/zensight-${GITHUB_REF_NAME}.flatpak" com.github.p13marc.ZenSight
       - name: Publish export branch for vm-edge
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           cd /srv/cache/flatpak/zensight/work/src/export-repo
           git init -q -b flatpak-export
@@ -122,6 +194,7 @@ jobs:
           git -c user.name=ci -c user.email=ci@marcpardo.eu commit -q -m "flatpak export ${GITHUB_REF_NAME}"
           git push --force "http://forgejo:${{ secrets.GITHUB_TOKEN }}@10.10.0.30:3000/${GITHUB_REPOSITORY}.git" HEAD:flatpak-export
       - uses: https://data.forgejo.org/actions/forgejo-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           direction: upload
           url: http://10.10.0.30:3000
