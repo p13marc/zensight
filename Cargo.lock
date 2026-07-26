@@ -13443,7 +13443,7 @@ dependencies = [
 
 [[package]]
 name = "zensight"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -13477,7 +13477,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-common"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ciborium",
  "json5",
@@ -13498,7 +13498,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-correlator"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -13520,7 +13520,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-exporter-otel"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -13543,7 +13543,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-exporter-prometheus"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -13571,7 +13571,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-rerun"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -13593,7 +13593,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13624,7 +13624,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-gnmi"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -13652,7 +13652,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-logs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13691,7 +13691,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-modbus"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -13713,7 +13713,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-netflow"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -13733,7 +13733,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-netlink"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "aya",
@@ -13759,7 +13759,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-netlink-ebpf"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aya-ebpf",
  "aya-log-ebpf",
@@ -13768,14 +13768,14 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-netlink-ebpf-common"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aya",
 ]
 
 [[package]]
 name = "zensight-sensor-netring"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -13803,7 +13803,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-parallax"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -13824,7 +13824,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-snmp"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-snmp",
@@ -13847,7 +13847,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-sysinfo"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "aya",
@@ -13876,7 +13876,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-sysinfo-ebpf"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aya-ebpf",
  "aya-log-ebpf",
@@ -13885,11 +13885,11 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-sysinfo-ebpf-common"
-version = "0.8.0"
+version = "0.9.0"
 
 [[package]]
 name = "zensight-sensor-systemd"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",
