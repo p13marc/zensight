@@ -78,6 +78,15 @@ several deployments on one Zenoh infrastructure; it must match the rest of the
 fleet. `ZENSIGHT_ZENOH_MODE`/`ZENSIGHT_ZENOH_LISTEN` technically pass through
 to the sensors but are unsupported for this image.
 
+`ZENSIGHT_PROFILE` selects the generated config profile (see
+`scripts/gen-configs.sh`): the default **`production`** keeps telemetry,
+health and actionable ops alerts on but leaves the whole anomaly/security
+detector suite (netring beaconing/RITA, DNS tunnelling, NOD, DGA, exfil,
+encrypted-DNS bypass, connection floods) and the log error-budget alerts at
+their shipped default, off — those are false-positive noise on most real
+fleets. Set `ZENSIGHT_PROFILE=demo-max` to light up the entire feature
+surface (what `just run` demos locally).
+
 ### TLS to the router
 
 When the fleet publishes to a zenohd router behind TLS (or mutual TLS), give

@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
-# gen-configs.sh — generate the *demo-max* run configs.
+# gen-configs.sh — generate run configs for one of two profiles.
 #
-# The single definition of the "demo-max" profile: it transforms the committed
-# example configs (configs/*.json5) into run configs with the opt-in
-# collectors, anomaly detectors and on-demand artifacts (report / directory
-# snapshot / pcap capture) turned ON, so the whole feature surface is visible
-# in the GUI. Bits gated on a non-default build feature (ja4plus / lateral /
-# sigma / snmp / ipfix) and privileged systemd unit control (`actions`) stay off.
+# The single definition of BOTH profiles:
+#
+#   --profile demo-max    (default; what `just configure` uses) transforms the
+#     committed example configs (configs/*.json5) into run configs with the
+#     opt-in collectors, anomaly/security detectors and on-demand artifacts
+#     (report / directory snapshot / pcap capture) turned ON, so the whole
+#     feature surface is visible in the GUI. Bits gated on a non-default build
+#     feature (ja4plus / lateral / sigma / snmp / ipfix) and privileged systemd
+#     unit control (`actions`) stay off.
+#
+#   --profile production  (what the sensors container defaults to) keeps every
+#     anomaly/security detector and analytics alert at its shipped default
+#     (off): no netring detector suite (beaconing/RITA, DNS tunnelling, NOD,
+#     DGA, exfil, encrypted-DNS bypass, connection floods), no log
+#     error-budget burn alerts, no durable log store on the (tmpfs) run dir.
+#     Telemetry stays rich — the L7 collectors, sysinfo opt-in collectors and
+#     hardware thermal alert, and the actionable systemd ops alerts remain on,
+#     as do the on-demand debug reports. Chosen for real deployments where the
+#     detector suite's false positives are noise (2026-07 fleet experience).
 #
 # A sed can only flip a key that is really in configs/*.json5 — a key that is
 # merely absent takes the Rust `#[serde(default)]` silently, and nothing here
@@ -20,8 +33,10 @@
 #
 # Usage:
 #   gen-configs.sh --iface IFACE --outdir DIR --configs-dir DIR \
-#                  [--snapshot-dir PATH] [--pcap-dir PATH] [--ebpf]
+#                  [--profile demo-max|production] [--snapshot-dir PATH] \
+#                  [--pcap-dir PATH] [--ebpf]
 #
+#   --profile      demo-max (default) or production — see header
 #   --iface        interface netring captures on
 #   --outdir       where the generated *.json5 land (created if missing)
 #   --configs-dir  the committed example configs (repo configs/ or the image's copy)
@@ -43,8 +58,10 @@
 set -euo pipefail
 
 iface="" outdir="" configs_dir="" snapshot_dir="" pcap_dir="" ebpf=0
+profile="demo-max"
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --profile)      profile="$2"; shift 2 ;;
         --iface)        iface="$2"; shift 2 ;;
         --outdir)       outdir="$2"; shift 2 ;;
         --configs-dir)  configs_dir="$2"; shift 2 ;;
@@ -56,26 +73,35 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ -z "$iface" || -z "$outdir" || -z "$configs_dir" ]]; then
     echo "Usage: gen-configs.sh --iface IFACE --outdir DIR --configs-dir DIR \
-[--snapshot-dir PATH] [--pcap-dir PATH] [--ebpf]" >&2
+[--profile demo-max|production] [--snapshot-dir PATH] [--pcap-dir PATH] [--ebpf]" >&2
     exit 64
 fi
+case "$profile" in demo-max|production) ;; *)
+    echo "gen-configs.sh: unknown --profile '$profile' (demo-max|production)" >&2; exit 64 ;;
+esac
 
 mkdir -p "$outdir"
 
 # netring: point capture at the chosen interface + light up the L7 collectors
 # (QUIC/SSH/encrypted-DNS), IP reassembly, the extra anomaly detectors, the
 # on-demand pcap capture (@/artifact, needs CAP_NET_RAW) and the debug report.
+# Both profiles: capture iface, the L7 telemetry collectors (QUIC/SSH/
+# encrypted-DNS — enrichment, no alerts), IP reassembly and the on-demand
+# debug report. demo-max additionally lights the whole detector suite up.
 netring_seds=(
     -e "s#interfaces: \[[^]]*\]#interfaces: [\"$iface\"]#"
     -e 's/quic: false/quic: true/'
     -e 's/ssh: false/ssh: true/'
     -e 's/encrypted_dns: false/encrypted_dns: true/'
     -e 's/ip_reassembly: false/ip_reassembly: true/'
+    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/'
+    -e '/^      on_demand:/,/enabled:/ s/enabled: false/enabled: true/'
+)
+if [[ "$profile" == "demo-max" ]]; then
+    netring_seds+=(
     -e 's/encrypted_dns_bypass: false/encrypted_dns_bypass: true/'
     -e 's/rita_beacon_fqdn: false/rita_beacon_fqdn: true/'
     -e 's/data_exfil: false/data_exfil: true/'
-    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/'
-    -e '/^      on_demand:/,/enabled:/ s/enabled: false/enabled: true/'
     # The rest of the detector suite: beaconing/C2 (both the coarse CV detector
     # and RITA's robust Bowley+MAD one), DNS tunnelling, newly-observed domains,
     # connection floods and DGA scoring. Their inputs (collect.dns, collect.flows,
@@ -86,7 +112,8 @@ netring_seds=(
     # Arm the hot-swappable IOC channel (#328) even though the demo ships no
     # indicators — otherwise @rpc/netring/threat_intel/set has nothing to fill.
     -e '/^    threat: \{/,/^    \},/ s/^( *)reload: false/\1reload: true/'
-)
+    )
+fi
 if [[ -n "$pcap_dir" ]]; then
     # Triggered capture-to-disk: keep a pre-trigger ring, and when an anomaly
     # fires write the lead-up to a pcap the GUI can download. Also expose the
@@ -112,21 +139,28 @@ sed -E \
     -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
     "$configs_dir/netlink.json5" > "$outdir/netlink.json5"
 
-# logs: journald ingestion is already on; add the on-demand debug report plus the
-# analytics over the (default-on) Drain3 template miner — novelty/rate-spike
-# anomalies and SLO error-budget burn alerting — and the epic #542 additions:
-# the durable per-line store (#544, days of queryable history + server-side
-# search depth) and the log-bundle export artifact (#555). The store lives under
-# the run dir so it's self-contained and cleaned with it.
+# logs: journald ingestion is already on; both profiles add the on-demand debug
+# report. demo-max additionally lights up the alerting analytics over the
+# (default-on) Drain3 template miner — SLO error-budget burn alerting — and the
+# epic #542 additions: the durable per-line store (#544, days of queryable
+# history + server-side search depth) and the log-bundle export artifact
+# (#555). The store lives under the run dir so it's self-contained and cleaned
+# with it. production keeps all of those at their shipped default (off): the
+# budget alerts are the false-positive-prone bit, and the store on a tmpfs run
+# dir is RAM.
 # Scoped ranges are mandatory: a bare `enabled: false` would hit artifacts.report.
-sed -E \
-    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
-    -e '/^    error_budget: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
-    -e '/^    novelty: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
-    -e '/^    store: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
-    -e '/^    store: \{/,/^    \},/ s#path: null#path: "'"$outdir"'/logs-store.redb"#' \
-    -e '/^    logbundle: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
-    "$configs_dir/logs.json5" > "$outdir/logs.json5"
+logs_seds=(
+    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/'
+)
+if [[ "$profile" == "demo-max" ]]; then
+    logs_seds+=(
+    -e '/^    error_budget: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/'
+    -e '/^    store: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/'
+    -e '/^    store: \{/,/^    \},/ s#path: null#path: "'"$outdir"'/logs-store.redb"#'
+    -e '/^    logbundle: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/'
+    )
+fi
+sed -E "${logs_seds[@]}" "$configs_dir/logs.json5" > "$outdir/logs.json5"
 
 # sysinfo: the opt-in collectors (hwmon temps + fans, cgroup-v2 saturation, TCP
 # states, top processes), the thermal alert that grades against the trip points
@@ -233,4 +267,6 @@ notes=""
 [[ -n "$pcap_dir" ]]            && notes+=" pcap='$pcap_dir'"
 [[ -n "$snapshot_dir" ]]        && notes+=" snapshot='$snapshot_dir'"
 [[ "$exclude_chips" != "[]" ]]  && notes+=" hwmon-exclude=$exclude_chips"
-echo "Configured (demo-max): netring iface='$iface' (L7+detectors+capture on), netlink, logs=journald+novelty, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator$notes  (configs in $outdir/)"
+detectors="detectors on"
+[[ "$profile" == "production" ]] && detectors="detectors OFF"
+echo "Configured ($profile): netring iface='$iface' (L7 on, $detectors), netlink, logs=journald, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator$notes  (configs in $outdir/)"

@@ -20,7 +20,7 @@ telemetry bus (#358). Only low-rate rollups (`by_severity/*`,
 - **Per-line events** with the OpenTelemetry logs data model in labels, each with
   a unique time-sortable `uid` (no last-writer-wins loss)
 - **Multiline joining** — fold Java/Python/Go stack traces into one event
-- **Template mining** (Drain3-style) + novelty / rate-spike detection
+- **Template mining** (Drain3-style) — stable `template_id`/`template` labels
 - **Derived rollups & SLOs** — per-unit log-rate / error rollups, error budgets,
   burn-rate alerts
 

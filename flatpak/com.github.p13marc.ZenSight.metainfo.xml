@@ -55,6 +55,14 @@
     <keyword>modbus</keyword>
   </keywords>
   <releases>
+    <release version="0.10.0" date="2026-07-27">
+      <description>
+        <p>Alert-noise release: the log novelty detector ("new log pattern"
+        alerts) is removed, and sensor deployments default to a quiet
+        production profile with the anomaly/security detector suite off.
+        Telemetry, health and actionable ops alerts are unchanged.</p>
+      </description>
+    </release>
     <release version="0.9.0" date="2026-07-26">
       <description>
         <p>SNMP and logs overhaul, TLS transport. Async SNMP poller with typed

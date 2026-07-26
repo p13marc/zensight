@@ -23,8 +23,8 @@ required (validated at load).
 ### Strict loading (#547)
 
 Unknown keys are **rejected at load** with an error that names them (including
-nested paths, e.g. `syslog.novelty.enabld`). This closes the silent-default trap
-where a typo — `novlety:` instead of `novelty:` — left an analytic at its default
+nested paths, e.g. `syslog.error_budget.enabld`). This closes the silent-default
+trap where a typo — `error_budgt:` instead of `error_budget:` — left an analytic at its default
 while the operator believed it was on. Set `allow_unknown_fields: true` to
 downgrade rejection to a startup warning for mixed-version fleets sharing one
 config file across sensor versions.
@@ -51,7 +51,6 @@ from missing telemetry.
 | `top_units` | `10` | distinct per-unit series before the rest fold into `other` |
 | `error_budget` | off | per-unit SLO burn-rate alerting — see below |
 | `templating` | on | Drain3 template mining — see below |
-| `novelty` | off | novelty / rate-spike anomaly alerts — see below |
 | `ingest` | safe | network-path rate-limit + loss accounting — see below |
 | `multiline` | on | stack-trace joining on stream listeners — see below |
 | `events_ring_capacity` | `10000` | in-memory ring served on `@rpc/logs/events` (min 100, ≈3 MB) |
@@ -206,25 +205,6 @@ templating: {
   top_templates: 50,   // distinct emitted series before the rest fold into `other`
 }
 ```
-
-### `syslog.novelty` (#103, off by default — raises alerts)
-
-Builds on the template miner; requires `templating.enabled`.
-
-```json5
-novelty: {
-  enabled: false,
-  warm_up_secs: 300,          // templates first seen in this window are baseline
-  novelty_dedup_secs: 300,    // how long a fired novelty stays firing
-  rate_spike_multiplier: 5.0, // known template fires above N× its EWMA baseline (<=1 disables)
-  min_spike_count: 10.0,      // absolute floor on window count before a spike fires
-  ewma_alpha: 0.3,            // baseline smoothing factor
-  max_templates: 2000,        // seen-set cap (bounds memory)
-}
-```
-
-Raises `log-novelty` (never-seen template) and `log-rate-spike` (known template
-rate jump) anomaly alerts.
 
 ### `syslog.ingest` (#106, network paths)
 

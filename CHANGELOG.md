@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-27
+
+Alert-noise release: the log novelty detector is gone, and the sensors
+container now defaults to a quiet **production** profile with the
+anomaly/security detector suite off. Field experience from the first fleet
+deployment (0.9.0): per-template "new log pattern" alerts and the NDR
+detector suite were near-pure false positives on a normal server fleet.
+
+### Changed — BREAKING
+
+- **Log novelty / rate-spike detection removed** (#103 retired): the
+  `log-novelty` ("new log pattern: …") and `log-rate-spike` alerts, the
+  `syslog.novelty` config block and the tracker are deleted. Template mining
+  (#102) itself stays — `template_id`/`template` labels and
+  `by_template/*` rollups are unaffected. **Migration:** the strict config
+  loader (#547) rejects unknown keys, so a config still carrying a
+  `novelty:` block fails to load — delete the block when upgrading.
+
+- **The sensors container defaults to the new `production` profile.**
+  `gen-configs.sh` grows `--profile demo-max|production`;
+  `docker/entrypoint-sensors.sh` defaults to `production`
+  (`ZENSIGHT_PROFILE=demo-max` restores the previous all-on behavior, and
+  `just configure`/`just run` still use demo-max). In production the netring
+  detector suite (beaconing/RITA ×2, DNS tunnelling, newly-observed domains,
+  DGA, data-exfil, encrypted-DNS bypass, connection floods), the log
+  error-budget burn alerts and the tmpfs-backed durable log store stay at
+  their shipped defaults (off). Telemetry stays rich: L7 collectors, sysinfo
+  opt-in collectors + thermal alert, systemd ops alerts and the on-demand
+  debug reports remain on.
+
 ## [0.9.0] - 2026-07-26
 
 SNMP and logs grow from pollers into full subsystems (typed models, durable

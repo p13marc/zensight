@@ -8,7 +8,6 @@ There are four alert families:
 |---|---|---|
 | **Sentinel** (#543) | declarative pattern→alert rules | this page |
 | Error-budget / SLO burn (#105) | per-unit error ratio | [telemetry.md](telemetry.md) |
-| Novelty / rate-spike (#103) | template miner | [telemetry.md](telemetry.md) |
 
 ## Sentinel (`syslog.sentinel`, `@rpc/logs/rules`)
 

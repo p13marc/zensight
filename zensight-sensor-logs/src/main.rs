@@ -16,7 +16,6 @@ mod ingest;
 mod journald;
 mod logbundle;
 mod multiline;
-mod novelty;
 mod parser;
 mod query;
 mod receiver;
@@ -184,13 +183,11 @@ async fn main() -> Result<()> {
     let journald_events_on =
         matches!(&syslog_config.journald, Some(j) if j.enabled && j.detect_events);
     let budget_alerts_on = syslog_config.derived && syslog_config.error_budget.enabled;
-    // Novelty / rate-spike (#103) needs the template miner to feed it `template_id`s.
-    let novelty_alerts_on = syslog_config.templating.enabled && syslog_config.novelty.enabled;
     // Log sentinel (#543): on when the operator declared rules, or the built-in
     // known-events are active (they ride the journald `detect_events` gate).
     let sentinel_on = journald_events_on || !syslog_config.sentinel.rules.is_empty();
     let alert_reporter: Option<Arc<AlertReporter>> =
-        if journald_events_on || budget_alerts_on || novelty_alerts_on || sentinel_on {
+        if journald_events_on || budget_alerts_on || sentinel_on {
             let reporter = AlertReporter::new(runner.publisher(), Protocol::Logs, format);
             // Stamp alerts with the host identity envelope when available.
             let reporter = match runner.identity() {
@@ -210,13 +207,6 @@ async fn main() -> Result<()> {
              the derived aggregator — skipping budget alerts"
         );
     }
-    if syslog_config.novelty.enabled && !syslog_config.templating.enabled {
-        tracing::warn!(
-            "novelty enabled but templating is off; novelty/rate-spike detection needs \
-             the template miner — skipping novelty alerts"
-        );
-    }
-
     // Log sentinel (#543): declarative pattern→alert rules evaluated per intake
     // line, folding the journald known-events (#61) in as built-in rules. Runs
     // whenever a reporter exists and there's something to evaluate.
@@ -529,66 +519,6 @@ async fn main() -> Result<()> {
         tracing::info!("log-template mining enabled");
     }
 
-    // Novelty / "what's new" detection (#103): on top of the template miner,
-    // raise a `log-novelty` anomaly the first time a template shape is seen after
-    // warm-up, and a `log-rate-spike` anomaly when a known template's rate jumps
-    // N× over its EWMA baseline. Reuses the shared `AlertReporter` (namespaced by
-    // `rule`). Gated on templating being on (it needs the `template_id`s).
-    let novelty: Option<Arc<novelty::NoveltyTracker>> = match (&template_agg, &alert_reporter) {
-        (Some(_), Some(_)) if novelty_alerts_on => {
-            let n = &syslog_config.novelty;
-            use std::time::Duration;
-            let source = source.clone();
-            let params = novelty::NoveltyParams {
-                warm_up: Duration::from_secs(n.warm_up_secs),
-                dedup: Duration::from_secs(n.novelty_dedup_secs.max(1)),
-                rate_spike_multiplier: n.rate_spike_multiplier,
-                min_spike_count: n.min_spike_count,
-                ewma_alpha: n.ewma_alpha,
-                max_templates: n.max_templates,
-            };
-            Some(Arc::new(novelty::NoveltyTracker::new(
-                params,
-                source,
-                std::time::Instant::now(),
-            )))
-        }
-        _ => None,
-    };
-    if let (Some(tracker), Some(reporter)) = (novelty.clone(), alert_reporter.clone()) {
-        let interval_secs = syslog_config.derived_interval_secs.max(1);
-        runner.spawn(async move {
-            use std::time::Duration;
-            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
-            loop {
-                tick.tick().await;
-                let out = tracker.tick(std::time::Instant::now());
-                // Rate-spikes fire/refresh here; novelty point-events fire in the
-                // publish loop. Both rules reconcile against their live key sets so
-                // anything no longer present auto-resolves.
-                for alert in out.firing {
-                    let key = alert.alert_key();
-                    if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
-                        tracing::warn!(error = %e, alert = %key, "failed to publish rate-spike alert");
-                    }
-                }
-                if let Err(e) = reporter
-                    .reconcile(novelty::NOVELTY_RULE, &out.novelty_keys)
-                    .await
-                {
-                    tracing::warn!(error = %e, "novelty alert reconcile failed");
-                }
-                if let Err(e) = reporter
-                    .reconcile(novelty::SPIKE_RULE, &out.spike_keys)
-                    .await
-                {
-                    tracing::warn!(error = %e, "rate-spike alert reconcile failed");
-                }
-            }
-        });
-        tracing::info!("log novelty / rate-spike detection enabled");
-    }
-
     // Durable log store (#544): a disk-backed history behind the hot ring, so
     // `@rpc/logs/events` can serve days back across restarts. Opt-in. The intake
     // loop only pushes to `store_tx`; a dedicated writer task batches to disk so
@@ -732,8 +662,6 @@ async fn main() -> Result<()> {
     let evidence_loop = evidence_tracker.clone();
     let aggregator_loop = aggregator.clone();
     let template_loop = template_agg.clone();
-    let novelty_loop = novelty.clone();
-    let novelty_reporter = novelty.is_some().then(|| alert_reporter.clone()).flatten();
     let sentinel_loop = log_sentinel.clone();
     let sentinel_reporter = log_sentinel
         .is_some()
@@ -794,8 +722,8 @@ async fn main() -> Result<()> {
                     };
                     if let Some((record, count)) = to_emit {
                         emit_line(
-                            &record, count, include_raw, &template_loop, &novelty_loop,
-                            &novelty_reporter, &event_ring, event_ring_capacity, &publish_health,
+                            &record, count, include_raw, &template_loop,
+                            &event_ring, event_ring_capacity, &publish_health,
                             &store_tx_loop, &store_counters_loop,
                         ).await;
                     }
@@ -805,8 +733,8 @@ async fn main() -> Result<()> {
                         && let Some((record, count)) = c.flush_due(std::time::Instant::now())
                     {
                         emit_line(
-                            &record, count, include_raw, &template_loop, &novelty_loop,
-                            &novelty_reporter, &event_ring, event_ring_capacity, &publish_health,
+                            &record, count, include_raw, &template_loop,
+                            &event_ring, event_ring_capacity, &publish_health,
                             &store_tx_loop, &store_counters_loop,
                         ).await;
                     }
@@ -824,7 +752,7 @@ async fn main() -> Result<()> {
 }
 
 /// Emit one processed log line to the `@rpc/logs/events` ring (#358): build the
-/// per-line uid + telemetry point, run template mining / novelty on it, and push
+/// per-line uid + telemetry point, run template mining on it, and push
 /// it. Shared by the live-recv and repeat-collapse-flush paths (#546) so both
 /// treat a line identically; `repeat_count > 1` folds a collapsed run and is
 /// surfaced as a `repeat_count` label.
@@ -834,8 +762,6 @@ async fn emit_line(
     repeat_count: u64,
     include_raw: bool,
     template: &Option<Arc<template::TemplateAggregator>>,
-    novelty: &Option<Arc<novelty::NoveltyTracker>>,
-    novelty_reporter: &Option<Arc<AlertReporter>>,
     event_ring: &query::EventRing,
     event_ring_capacity: usize,
     health: &Arc<zensight_sensor_core::SensorHealth>,
@@ -859,22 +785,10 @@ async fn emit_line(
             .insert("repeat_count".to_string(), repeat_count.to_string());
     }
 
-    // Log-template mining (#102) + novelty (#103) on the representative line.
+    // Log-template mining (#102) on the representative line.
     if let Some(tagg) = template {
         let is_error = (received.message.severity as u8) <= (parser::Severity::Error as u8);
         if let Some(mined) = tagg.observe(&received.message.message, is_error) {
-            if let (Some(tracker), Some(reporter)) = (novelty, novelty_reporter)
-                && let Some(alert) =
-                    tracker.observe(&mined.id, &mined.template, std::time::Instant::now())
-            {
-                let key = alert.alert_key();
-                if let Err(e) = reporter
-                    .observe(alert, Some(std::time::Duration::ZERO))
-                    .await
-                {
-                    tracing::warn!(error = %e, alert = %key, "failed to publish novelty alert");
-                }
-            }
             point.labels.insert("template_id".to_string(), mined.id);
             point.labels.insert("template".to_string(), mined.template);
         }

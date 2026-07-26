@@ -99,8 +99,6 @@ Put(Resolved) then a Delete tombstone):
 | Rule | Source | When |
 |---|---|---|
 | `log-error-budget` | `error_budget.enabled` (#105) | a unit burns budget (`error_ratio > target_ratio * burn_rate`) for `burn_windows` consecutive windows |
-| `log-novelty` | `novelty.enabled` (#103) | a never-before-seen template shape appears after warm-up |
-| `log-rate-spike` | `novelty.enabled` + `rate_spike_multiplier > 1` | a known template's window rate jumps N× over its EWMA baseline |
 | journald known-events | `journald.detect_events` (#61) | coredump / unit-failed / OOM matched by `MESSAGE_ID` |
 
 Late joiners seed the firing set with a plain GET on the same

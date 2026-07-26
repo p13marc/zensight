@@ -83,17 +83,6 @@
       burn_windows: 3,     // consecutive over-budget windows (anti-flap)
     },
 
-    // Log novelty + rate-spike anomalies, over the Drain3 template miner
-    // (`templating`, on by default). A template never seen before fires
-    // `log-novelty`; a known one running hot fires `log-rate-spike`.
-    // Templates first seen inside `warm_up_secs` are folded into the baseline,
-    // so a cold start isn't reported as all-novel.
-    novelty: {
-      enabled: false,
-      warm_up_secs: 300,
-      rate_spike_multiplier: 5.0,  // window rate vs. its EWMA baseline
-    },
-
     // Durable per-line history (#544): a disk-backed redb store behind the hot
     // ring, so `@rpc/logs/events` serves days back (?from=;to=;after_uid=) across
     // restarts and server-side search (?pattern=;severity_min=;#553) has depth.

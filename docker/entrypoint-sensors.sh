@@ -72,9 +72,13 @@ fi
 IFACE="${IFACE:-lo}"
 echo "netring capture interface: $IFACE"
 
-# ── 4. Generate the demo-max configs (same profile as `just configure`;
-#       no --snapshot-dir — the repo's docs/ doesn't exist in the image) ──────
+# ── 4. Generate the run configs. Default profile is PRODUCTION: telemetry,
+#       health and actionable ops alerts on; the anomaly/security detector
+#       suite and analytics alerts stay off (false-positive noise on real
+#       fleets). Set ZENSIGHT_PROFILE=demo-max for the full demo surface.
+#       (No --snapshot-dir — the repo's docs/ doesn't exist in the image.) ────
 /usr/local/bin/gen-configs.sh \
+    --profile "${ZENSIGHT_PROFILE:-production}" \
     --iface "$IFACE" \
     --outdir /run/zensight \
     --configs-dir /usr/share/zensight/configs

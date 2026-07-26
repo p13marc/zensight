@@ -1,7 +1,7 @@
 # Testing the logs sensor
 
 Alongside the inline unit tests (parser, framing, multiline, cursor, SLO math,
-novelty, templates), the crate has an **integration harness** (#548) at
+templates), the crate has an **integration harness** (#548) at
 `tests/` that exercises the real socket→intake→ring→query paths end-to-end
 over localhost, with no external services and no root.
 
