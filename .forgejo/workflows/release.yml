@@ -29,6 +29,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           direction: upload
+          override: true
           # internal URL: the runner zone cannot hairpin to the public vhost
           url: http://10.10.0.30:3000
           repo: ${{ github.repository }}
@@ -118,45 +119,48 @@ jobs:
                    zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
                    zensight-exporter-prometheus zensight-exporter-otel zensight-correlator; do
             image="$REGISTRY/marcpardo/$c"
-            buildah build $labels \
+            buildah --storage-driver vfs build $labels \
               --build-arg "BINARY_PACKAGE=$c" --build-arg TARGETARCH=amd64 \
               -t "$image:${VERSION}" -t "$image:latest" -f docker/Dockerfile.runtime .
           done
           image="$REGISTRY/marcpardo/zensight-sensors"
-          buildah build $labels --build-arg TARGETARCH=amd64 \
+          buildah --storage-driver vfs build $labels --build-arg TARGETARCH=amd64 \
             -t "$image:${VERSION}" -t "$image:latest" -f docker/Dockerfile.sensors-runtime .
           # smoke: run one binary inside each runtime base — catches glibc or
           # shared-library skew at build time instead of on the fleet
-          ctr=$(buildah from "$REGISTRY/marcpardo/zensight-sensors:${VERSION}")
-          buildah run "$ctr" -- /usr/local/bin/zensight-sensor-sysinfo --help >/dev/null
-          buildah rm "$ctr"
-          ctr=$(buildah from "$REGISTRY/marcpardo/zensight-correlator:${VERSION}")
-          buildah run "$ctr" -- /usr/local/bin/zensight-correlator --help >/dev/null
-          buildah rm "$ctr"
+          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-sensors:${VERSION}")
+          buildah --storage-driver vfs run "$ctr" -- /usr/local/bin/zensight-sensor-sysinfo --help >/dev/null
+          buildah --storage-driver vfs rm "$ctr"
+          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-correlator:${VERSION}")
+          buildah --storage-driver vfs run "$ctr" -- /usr/local/bin/zensight-correlator --help >/dev/null
+          buildah --storage-driver vfs rm "$ctr"
       - name: Push images
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          buildah login --tls-verify=false -u marcpardo -p "${{ secrets.REGISTRY_TOKEN }}" "$REGISTRY"
+          buildah --storage-driver vfs login --tls-verify=false -u marcpardo -p "${{ secrets.REGISTRY_TOKEN }}" "$REGISTRY"
           for c in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
                    zensight-sensor-gnmi zensight-sensor-modbus zensight-sensor-netflow \
                    zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
                    zensight-exporter-prometheus zensight-exporter-otel zensight-correlator \
                    zensight-sensors; do
             image="$REGISTRY/marcpardo/$c"
-            buildah push --tls-verify=false "$image:${VERSION}"
-            buildah push --tls-verify=false "$image:latest"
+            buildah --storage-driver vfs push --tls-verify=false "$image:${VERSION}"
+            buildah --storage-driver vfs push --tls-verify=false "$image:latest"
           done
       - name: Attach tarball to the release
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           cd src
           name="zensight-${VERSION}-linux-amd64"
-          rid=$(curl -sf -H "Authorization: token ${GITHUB_TOKEN}" \
-            "http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" | jq .id)
+          api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
+          auth="Authorization: token ${GITHUB_TOKEN}"
+          rid=$(curl -sf -H "$auth" "$api/releases/tags/${GITHUB_REF_NAME}" | jq .id)
           for f in "$name.tar.gz" "$name.tar.gz.sha256"; do
-            curl -sf -H "Authorization: token ${GITHUB_TOKEN}" \
-              -F "attachment=@dist/release/$f" \
-              "http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}/releases/${rid}/assets?name=$f" >/dev/null
+            # idempotent on re-runs: drop a stale same-name asset first
+            aid=$(curl -sf -H "$auth" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
+            [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
+            curl -sf -H "$auth" -F "attachment=@dist/release/$f" \
+              "$api/releases/$rid/assets?name=$f" >/dev/null
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -193,13 +197,19 @@ jobs:
           git add -A
           git -c user.name=ci -c user.email=ci@marcpardo.eu commit -q -m "flatpak export ${GITHUB_REF_NAME}"
           git push --force "http://forgejo:${{ secrets.GITHUB_TOKEN }}@10.10.0.30:3000/${GITHUB_REPOSITORY}.git" HEAD:flatpak-export
-      - uses: https://data.forgejo.org/actions/forgejo-release@v2
+      # curl attach, not forgejo-release: by this point the release job has
+      # already created the release object, and a second forgejo-release
+      # upload against the same tag 409s (seen on the 0.9.0 maiden run).
+      - name: Attach flatpak bundle to the release
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          direction: upload
-          url: http://10.10.0.30:3000
-          repo: ${{ github.repository }}
-          tag: ${{ github.ref_name }}
-          sha: ${{ github.sha }}
-          release-dir: dist/release
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          f="zensight-${GITHUB_REF_NAME}.flatpak"
+          api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
+          auth="Authorization: token ${GITHUB_TOKEN}"
+          rid=$(curl -sf -H "$auth" "$api/releases/tags/${GITHUB_REF_NAME}" | jq .id)
+          aid=$(curl -sf -H "$auth" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
+          [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
+          curl -sf -H "$auth" -F "attachment=@dist/release/$f" \
+            "$api/releases/$rid/assets?name=$f" >/dev/null
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
