@@ -166,6 +166,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   flatpak:
+    # needs: release for ordering, not artifacts — forgejo-release's
+    # override recreates the release object, and anything attached before
+    # that is silently wiped (lost the 0.9.0 bundle that way).
+    needs: release
     runs-on: flatpak
     env:
       # SDK/runtime installs persist on the runner cache disk
