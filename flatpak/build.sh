@@ -17,7 +17,7 @@ fi
 
 # Install SDK extension if needed
 echo "Checking Flatpak SDK..."
-flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension.rust-stable//24.08 || true
+flatpak install --user -y flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08 || true
 
 # Build the Flatpak
 echo "Building Flatpak..."

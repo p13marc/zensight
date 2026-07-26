@@ -18,7 +18,7 @@
 # =============================================================================
 # Stage 1: Build the sensor binaries
 # =============================================================================
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.97-bookworm AS builder
 
 # libsystemd-dev: logs (journald) + systemd (sd-bus) · libpcap-dev: netring
 RUN apt-get update && apt-get install -y \
