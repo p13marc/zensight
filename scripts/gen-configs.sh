@@ -97,6 +97,14 @@ netring_seds=(
     -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/'
     -e '/^      on_demand:/,/enabled:/ s/enabled: false/enabled: true/'
 )
+if [[ "$profile" == "production" ]]; then
+    # The one detector the committed example ships ON: TRW port-scan. It
+    # false-fired on the first fleet deployment (VPN/monitoring traffic looks
+    # scan-shaped) — production turns it off with the rest of the suite.
+    netring_seds+=(
+    -e 's/port_scan: true/port_scan: false/'
+    )
+fi
 if [[ "$profile" == "demo-max" ]]; then
     netring_seds+=(
     -e 's/encrypted_dns_bypass: false/encrypted_dns_bypass: true/'
@@ -130,14 +138,25 @@ fi
 sed -E "${netring_seds[@]}" "$configs_dir/netring.json5" > "$outdir/netring.json5"
 
 # netlink: baseline is already broad; just add the on-demand debug report.
+# production also drops the `demo-expected-service` sentinel expectation —
+# it is DESIGNED to always fire (a listener that deliberately isn't there,
+# so `just run` demos the alert pipeline); on a real fleet it is a permanent
+# false positive on every host. The `no-telnet` forbid rule stays (it cannot
+# false-fire on a clean host).
 # NOTE xfrm stays OFF. It is off in the committed config precisely because
 # nlink's XFRM dump trips a ratelimited kernel warning on every poll and that is
 # noisy *in this demo* (#242, nlink#160) — a sed here re-enabling it silently
 # undid that. Re-enable in configs/netlink.json5 when nlink ships the fix, in one
 # place, not two.
-sed -E \
-    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
-    "$configs_dir/netlink.json5" > "$outdir/netlink.json5"
+netlink_seds=(
+    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/'
+)
+if [[ "$profile" == "production" ]]; then
+    netlink_seds+=(
+    -e '/\/\/ Demo: a service that should be listening/,/demo-expected-service/d'
+    )
+fi
+sed -E "${netlink_seds[@]}" "$configs_dir/netlink.json5" > "$outdir/netlink.json5"
 
 # logs: journald ingestion is already on; both profiles add the on-demand debug
 # report. demo-max additionally lights up the alerting analytics over the

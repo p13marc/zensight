@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-27
+
+### Fixed
+
+- The `production` profile also silences the two default-ON alert sources
+  the 0.10.0 fleet still carried tombstones for: netring's TRW port-scan
+  detector (`port_scan: false` — VPN/monitoring traffic is scan-shaped
+  enough to false-fire) and netlink's `demo-expected-service` sentinel
+  expectation (designed to always fire so `just run` can demo the alert
+  pipeline; deleted in production — the `no-telnet` forbid rule stays, it
+  cannot false-fire on a clean host). demo-max is unchanged.
+
 ## [0.10.0] - 2026-07-27
 
 Alert-noise release: the log novelty detector is gone, and the sensors
