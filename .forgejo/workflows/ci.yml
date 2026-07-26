@@ -13,6 +13,10 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   CARGO_INCREMENTAL: "0"
+  # shared compiler cache: sccache (mounted from the runner VM) -> garage S3
+  # on vm-runner-01; S3 endpoint+credentials come from the runner's env_file
+  RUSTC_WRAPPER: /srv/cache/bin/sccache
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   test:
@@ -23,6 +27,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: cargo test --workspace --locked
 
   lint:
@@ -37,6 +43,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: lint
+          cache-targets: false
 
       - name: rustfmt
         run: cargo fmt --all --check
