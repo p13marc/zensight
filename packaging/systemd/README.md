@@ -1,12 +1,17 @@
 # ZenSight systemd units
 
-One unit per sensor / exporter. The `.deb` / `.rpm` packages install the matching
-unit to `/lib/systemd/system/` and an example config to `/etc/zensight/<name>.json5`
-(a conf-file, so your edits survive upgrades). Units are **not** enabled
-automatically — enable the ones you want:
+One unit per sensor / exporter (plus the correlator). These units ship inside each
+release's `zensight-<ver>-linux-amd64.tar.gz` (deb/rpm packaging was retired with
+the move to Forgejo releases) — install by hand:
 
 ```bash
+sudo install -m 755 zensight-sensor-sysinfo /usr/local/bin/
+sudo install -m 644 systemd/zensight-sensor-sysinfo.service /etc/systemd/system/
+# the units say /usr/bin (the old packaged path) — point ExecStart at
+# /usr/local/bin, or install the binaries to /usr/bin instead
+sudo install -D -m 644 configs/sysinfo.json5 /etc/zensight/sysinfo.json5
 sudoedit /etc/zensight/sysinfo.json5          # point it at your Zenoh router
+sudo systemctl daemon-reload
 sudo systemctl enable --now zensight-sensor-sysinfo
 journalctl -u zensight-sensor-sysinfo -f
 ```

@@ -93,7 +93,7 @@ container image, and has no systemd unit. Build it with
 `cargo build --release -p zensight-sensor-parallax`.
 
 To monitor **multiple machines**, run the GUI (+ correlator) on one host and the
-all-in-one sensors container (`ghcr.io/p13marc/zensight-sensors`) on each of the
+all-in-one sensors container (`git.marcpardo.eu/marcpardo/zensight-sensors`) on each of the
 others — the only configuration is `ZENSIGHT_ZENOH_CONNECT=tcp/<gui-host>:7447`.
 See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
@@ -110,15 +110,27 @@ target specific endpoints, set `ZENSIGHT_ZENOH_CONNECT`, `ZENSIGHT_ZENOH_LISTEN`
 > form a Zenoh session. `just run` fixes this; if you launch pieces by hand, give them matching
 > `connect`/`listen` endpoints (or the env vars above) instead of bare `peer` mode.
 
-### Install from packages
+### Install from a release
 
-Each sensor and exporter ships a `.deb` / `.rpm` (built by the release workflow) that installs
-the binary, a hardened **systemd unit**, and an example config to `/etc/zensight/<name>.json5`
-(a conf-file, so edits survive upgrades). Units are not enabled automatically:
+Two packaged paths (deb/rpm packaging was retired with the move to Forgejo releases):
+
+**Containers** — every sensor/exporter/correlator as a per-component image, plus the
+all-in-one `zensight-sensors` bundle (see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)):
 
 ```bash
-sudo dpkg -i zensight-sensor-sysinfo_*.deb          # or: rpm -i …
-sudoedit /etc/zensight/sysinfo.json5                 # point it at your Zenoh router
+sudo podman pull git.marcpardo.eu/marcpardo/zensight-sensors:latest
+```
+
+**Native binaries** — each release ships `zensight-<ver>-linux-amd64.tar.gz` with all
+binaries, the hardened systemd units, and example configs. For hosts where containers
+are not wanted (e.g. a hypervisor):
+
+```bash
+tar xf zensight-<ver>-linux-amd64.tar.gz && cd zensight-<ver>-linux-amd64
+sha256sum -c SHA256SUMS
+sudo install -m 755 zensight-sensor-sysinfo /usr/local/bin/
+sudo install -m 644 systemd/zensight-sensor-sysinfo.service /etc/systemd/system/  # adjust ExecStart to /usr/local/bin
+sudo install -D -m 644 configs/sysinfo.json5 /etc/zensight/sysinfo.json5          # point it at your Zenoh router
 sudo systemctl enable --now zensight-sensor-sysinfo
 ```
 

@@ -23,7 +23,7 @@
 
 services:
   sensors:
-    image: ghcr.io/p13marc/zensight-sensors:latest
+    image: git.marcpardo.eu/marcpardo/zensight-sensors:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.sensors

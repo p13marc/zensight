@@ -47,7 +47,7 @@ Get the image (from the registry, or build it on any machine with the repo):
 
 ```bash
 # from the release registry
-sudo podman pull ghcr.io/p13marc/zensight-sensors:latest
+sudo podman pull git.marcpardo.eu/marcpardo/zensight-sensors:latest
 
 # or build locally
 podman build -t zensight-sensors -f docker/Dockerfile.sensors .
@@ -66,7 +66,7 @@ sudo podman run -d --name zensight-sensors \
   -v /run/log/journal:/run/log/journal:ro \
   -e ZENSIGHT_ZENOH_CONNECT=tcp/<gui-host>:7447 \
   --restart=on-failure \
-  ghcr.io/p13marc/zensight-sensors:latest
+  git.marcpardo.eu/marcpardo/zensight-sensors:latest
 ```
 
 `ZENSIGHT_ZENOH_CONNECT` is the **only required knob** — the container exits
@@ -160,7 +160,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=ghcr.io/p13marc/zensight-sensors:latest
+Image=git.marcpardo.eu/marcpardo/zensight-sensors:latest
 Network=host
 PodmanArgs=--uts=host --pid=host
 AddCapability=NET_RAW NET_ADMIN IPC_LOCK
@@ -190,7 +190,7 @@ WantedBy=multi-user.target
 - `run-sensors.sh` — the shared spawner (`scripts/run-sensors.sh`) in
   fail-fast mode.
 
-Per-sensor images (`ghcr.io/p13marc/zensight-sensor-<name>`) still exist for
+Per-sensor images (`git.marcpardo.eu/marcpardo/zensight-sensor-<name>`) still exist for
 single-sensor deployments — see `docker/docker-compose.yml`. This bundle is
 the "monitor this whole machine" path.
 

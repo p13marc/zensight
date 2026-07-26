@@ -55,6 +55,18 @@
     <keyword>modbus</keyword>
   </keywords>
   <releases>
+    <release version="0.9.0" date="2026-07-26">
+      <description>
+        <p>SNMP and logs overhaul, TLS transport. Async SNMP poller with typed
+        interface models, rate derivation and a durable trap/inform pipeline;
+        syslog TLS listener, file tailing, durable log history with search;
+        an append-only events class; TLS/mTLS client support for connecting
+        to a certificate-protected zenoh router. The zblob and zenkey crates
+        graduated to their own repositories.</p>
+        <p>See the CHANGELOG in the repository for the full list, including
+        breaking changes and migration notes.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2024-12-28">
       <description>
         <p>Initial release</p>

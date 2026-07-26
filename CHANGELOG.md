@@ -7,7 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-26
+
+SNMP and logs grow from pollers into full subsystems (typed models, durable
+events, alerting, GUI views), the bus gains an append-only **events class** and
+**TLS/mTLS transport to a zenoh router**, and the repo slims down: `zblob` and
+`zenkey` graduate to their own repositories and come back as crates.io
+dependencies. CI moved from GitHub Actions to Forgejo Actions; deb/rpm
+packaging is retired in favor of container images and a binary tarball.
+
 ### Changed — BREAKING
+
+- **The repo splits: `zblob` and `zenkey` graduate to their own repositories**
+  (#518). The in-tree `zenoh-blob/` and `zensight-keyspace/` crates are gone;
+  zensight consumes `zblob` and `zenkey`/`zenkey-build` from crates.io. The
+  keyspace registry TOMLs stay application-owned and move to
+  `zensight-common/registry/`, compiled by `zenkey-build` from the build
+  script. **Migration:** patches against the old in-tree crates must target
+  the new repos; local cross-repo work needs a temporary `[patch.crates-io]`
+  path override in the consumer's root manifest.
+
+- **zenkey 0.3 migration** (from the in-tree 0.1 line): typed `Key`/origin
+  minting, codegen v2, RFC v1.5 — every producer now serves
+  `@rpc/<producer>/describe` (RFC 08 §7 `SchemaSet`) next to `introspect`,
+  and the repo carries a build-lint-enforced `registry/types.toml` type table.
+
+- **SNMP poller migrated to `async-snmp`** (#526): persistent per-device
+  sessions, GETBULK, retry/backoff in the library, no C dependencies. The
+  poller config surface changes (session/bulk tuning replaces the old
+  per-request knobs) — re-check `configs/snmp.json5` against your deployment.
+
+- **SNMP counter semantics** (#527): counters now publish **derived rates**
+  with wrap/reset detection, typed values and units, instead of raw
+  monotonically-increasing samples. Consumers (dashboards, exporter scrapes,
+  alert thresholds) that expected raw counters must be re-pointed at the new
+  rate series.
+
+- **SNMP typed interface model** (#529): per-device joined ifTable/ifXTable
+  **state documents** replace the flat per-OID telemetry for interfaces; the
+  GUI device view (#530) and fleet overview (#533) read the typed doc.
+
+- **SNMP trap pipeline** (#535): v3 traps and informs (with acks), MIB
+  translation, and **durable events** on the events class, with alert
+  mapping — trap handling that previously surfaced as ad-hoc telemetry now
+  lands as `events/snmp/…` records.
 
 - **`zenoh.namespace` no longer defaults to `zensight` — the empty base is the
   legal default** (RFC 03 §1.1 as amended). The base names a *deployment*, not
@@ -24,6 +67,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `v1_probe` example now assume the base-less wire; prefix their selectors
   with your base if you set one. `zensight_common::DEFAULT_BASE` is renamed to
   `CONVENTIONAL_BASE` (diagnostics-only — no longer a default).
+
+### Added
+
+- **Zenoh TLS/mTLS client support**: an optional `zenoh.tls` config block
+  (`root_ca_certificate`, `connect_certificate`, `connect_private_key`,
+  `enable_mtls` — names mirror Zenoh's `transport/link/tls` keys) on every
+  sensor, exporter, correlator and the GUI, overridable via
+  `ZENSIGHT_ZENOH_TLS_{CA,CERT,KEY,MTLS}` for launchers without an editable
+  config file (the flatpak GUI, the sensors container — whose entrypoint now
+  fails fast when a set TLS path is not mounted). Connect with a
+  `tls/<router>:7447` endpoint; see `docs/DEPLOYMENT.md` §TLS.
+
+- **Events class instantiated** (#534): `EventRecord`/`EventPublisher` +
+  `QosClass::Event` — the append-only third class next to telemetry and
+  state; first producers are the SNMP trap pipeline and the logs sensor.
+
+- **Logs epic** (#542, #543–#558): TLS syslog listener (RFC 5425, rustls,
+  mTLS, cert reload) (#550) · rotation-aware, position-persisted file tailing
+  (#549) · durable redb log history with retention and paginated query
+  (#544) · declarative log-sentinel pattern→alert rules (#543) · server-side
+  regex/field search (#553) · observer evidence for remote syslog senders
+  (#552) · log bundle / filtered-feed export artifacts (#555, #607, #608) ·
+  one `LogSeverity` model across common+GUI (#557) · GUI regex filter,
+  global-search routing, time-range picker, context-rich alert rows
+  (#554, #556, #558, #609) · ingest robustness — RFC 3164 year/timezone
+  inference, channel caps, repeat collapse, multiline re-parse
+  (#545–#547, #584) · in-process e2e harness (#548).
+
+- **SNMP epic remainder** (#526–#541): threshold alert engine (#528) ·
+  sysObjectID-matched device profiles (#531) · real SMI MIB support — vendor
+  MIB dirs, enum decode, units, trap translation (#532) · identity evidence
+  for polled devices (#537) · credential hygiene — secret indirection, named
+  sets, scrubbing audit (#538) · resilience — per-device backoff, circuit
+  breaker, poll jitter (#539) · subnet auto-discovery (#541) · GUI device
+  view, fleet overview, trap/event feed (#530, #533, #536) · in-process e2e
+  harness with sim agent and v3 matrix (#540).
+
+- Liveliness late-join via zenoh history (#520) and RFC 08 §7 payload
+  self-description on samples; GUI renders fan speed, battery and RAPL power
+  (#516); `zenctl` becomes app-agnostic and lives in the zenkey repo
+  (tcgui#45); `just run` demos the full surface (hwmon, detector suite,
+  sysinfo eBPF).
+
+- **Release artifacts**: a `zensight-correlator` container image (the one
+  mandatory-per-deployment piece was previously not shipped) and a
+  `zensight-<ver>-linux-amd64.tar.gz` with all 12 binaries, the hardened
+  systemd units and example configs, for native installs.
+
+### Infrastructure
+
+- **CI moved to Forgejo Actions** (`.forgejo/workflows/`); the GitHub
+  workflows are retired and GitHub is a passive mirror. **deb/rpm packaging
+  is discontinued** — container images (now at
+  `git.marcpardo.eu/marcpardo/*`) and the binary tarball replace it.
+- Release images are built inside `rust:1.97-bookworm` so binaries link
+  against the runtime base's glibc, smoke-tested in-image before push;
+  `workflow_dispatch` dry-runs the whole pipeline without publishing;
+  tags now run the full test suite.
+- rustc pinned to **1.97** repo-wide (root `rust-toolchain.toml`, CI,
+  image builds, flatpak SDK 25.08) in lockstep with the build cluster;
+  sccache (garage S3) caches compilation across all repos.
 
 ## [0.8.0] - 2026-07-16
 
