@@ -92,19 +92,31 @@ jobs:
 
   flatpak:
     runs-on: flatpak
+    env:
+      # SDK/runtime installs persist on the runner cache disk
+      FLATPAK_USER_DIR: /srv/cache/flatpak/inst
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - name: Build flatpak (unsigned; vm-edge signs on publish)
         run: |
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          # per-repo state dir on the cache disk: incremental module rebuilds
+          # + ccache for C/C++ inside the sandbox. flatpak-builder requires
+          # state dir and build tree on the same filesystem -> stage the
+          # build on the cache disk and copy the bundle back.
+          work=/srv/cache/flatpak/zensight/work
+          mkdir -p "$work" && rm -rf "$work/src" && cp -a . "$work/src"
+          cd "$work/src"
           flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --state-dir=/srv/cache/flatpak/zensight/state --ccache \
             --install-deps-from=flathub \
             --repo=export-repo builddir flatpak/com.github.p13marc.ZenSight.yml
-          mkdir -p dist/release
+          mkdir -p "$GITHUB_WORKSPACE/dist/release"
           flatpak build-bundle export-repo \
-            "dist/release/zensight-${GITHUB_REF_NAME}.flatpak" com.github.p13marc.ZenSight
+            "$GITHUB_WORKSPACE/dist/release/zensight-${GITHUB_REF_NAME}.flatpak" com.github.p13marc.ZenSight
       - name: Publish export branch for vm-edge
         run: |
-          cd export-repo
+          cd /srv/cache/flatpak/zensight/work/src/export-repo
           git init -q -b flatpak-export
           git add -A
           git -c user.name=ci -c user.email=ci@marcpardo.eu commit -q -m "flatpak export ${GITHUB_REF_NAME}"
