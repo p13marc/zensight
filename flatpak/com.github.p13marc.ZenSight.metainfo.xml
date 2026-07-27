@@ -55,6 +55,13 @@
     <keyword>modbus</keyword>
   </keywords>
   <releases>
+    <release version="0.10.1" date="2026-07-27">
+      <description>
+        <p>Production profile hardening: the default-on TRW port-scan
+        detector and the demo sentinel expectation are also disabled in
+        production deployments.</p>
+      </description>
+    </release>
     <release version="0.10.0" date="2026-07-27">
       <description>
         <p>Alert-noise release: the log novelty detector ("new log pattern"
