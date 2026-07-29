@@ -493,7 +493,10 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
         ]
         .spacing(10)
         .align_y(Alignment::Center);
-        if let Some(id) = &cap.artifact_id {
+        // The origin is as necessary as the id: a bulk fetch must name a
+        // literal one (RFC 07 §3), and a sensor that serves no prefix is
+        // pre-wire-v2 and could not answer this GUI anyway.
+        if let (Some(id), Some(prefix)) = (&cap.artifact_id, &cap.artifact_prefix) {
             line = line.push(
                 button(text("Download").size(11))
                     .padding([3, 9])
@@ -501,9 +504,13 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
                     .on_press(Message::DownloadCaptureBlob {
                         producer: "netring".to_string(),
                         artifact_id: id.clone(),
+                        blob_prefix: prefix.clone(),
+                        root: cap.artifact_root.clone(),
                         filename: cap.filename.clone(),
                     }),
             );
+        } else if cap.artifact_id.is_some() {
+            line = line.push(text("(sensor too old to serve it)").size(10).style(dim));
         } else {
             line = line.push(text("(expired — on sensor disk only)").size(10).style(dim));
         }

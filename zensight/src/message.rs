@@ -479,6 +479,14 @@ pub enum Message {
     DownloadCaptureBlob {
         producer: String,
         artifact_id: String,
+        /// The **concrete** `@blob/artifact` prefix of the host holding the
+        /// file, straight off the capture record. A bulk fetch must name a
+        /// literal origin (RFC 07 §3); this is where the GUI learns which one
+        /// instead of wildcarding because it does not know.
+        blob_prefix: String,
+        /// Hex BLAKE3 root to pin the transfer to (RFC 07 §2.1), when the
+        /// sensor served one.
+        root: Option<String>,
         filename: String,
     },
     /// Fetch the on-demand sysinfo process explorer for the selected host,

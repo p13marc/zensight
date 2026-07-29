@@ -942,16 +942,23 @@ fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Messa
             for rec in records.iter().take(50) {
                 let trigger = rec.trigger_kind.clone().unwrap_or_else(|| rec.mode.clone());
                 let size = format_bytes(rec.bytes as f64);
-                let action: Element<'_, Message> = match &rec.artifact_id {
-                    Some(id) => button(text("Download").size(font::CAPTION))
+                // A download needs the id *and* the origin holding it: a bulk
+                // fetch must name a literal origin (RFC 07 §3), and a sensor
+                // too old to say which one is also too old to serve wire v2 at
+                // all — so there is nothing a wildcard would buy here.
+                let action: Element<'_, Message> = match (&rec.artifact_id, &rec.artifact_prefix) {
+                    (Some(id), Some(prefix)) => button(text("Download").size(font::CAPTION))
                         .padding([3, 9])
                         .on_press(Message::DownloadCaptureBlob {
                             producer: "netring".to_string(),
                             artifact_id: id.clone(),
+                            blob_prefix: prefix.clone(),
+                            root: rec.artifact_root.clone(),
                             filename: rec.filename.clone(),
                         })
                         .into(),
-                    None => text(if rec.mode == "rotating" {
+                    (Some(_), None) => text("sensor too old").size(font::CAPTION).style(dim).into(),
+                    (None, _) => text(if rec.mode == "rotating" {
                         "on sensor disk"
                     } else {
                         "expired"
@@ -2258,6 +2265,10 @@ mod tests {
                 mode: "triggered".into(),
                 trigger_kind: Some("BeaconRita".into()),
                 artifact_id: Some("01J00000000000000000000000".into()),
+                // A servable record names the origin holding it and the root
+                // to pin — a bulk fetch may not wildcard the origin (RFC 07 §3).
+                artifact_prefix: Some("v1/h-3fa9c2d41b7e/@blob/artifact".into()),
+                artifact_root: Some("ab".repeat(32)),
                 ..Default::default()
             },
             CaptureRecord {
@@ -2267,6 +2278,19 @@ mod tests {
                 mode: "triggered".into(),
                 trigger_kind: Some("PortScanTRW".into()),
                 artifact_id: None, // TTL reaped — no download affordance
+                ..Default::default()
+            },
+            CaptureRecord {
+                filename: "zensight-host01-trigger-Legacy-0.pcap.zst".into(),
+                bytes: 4096,
+                packets: 9,
+                mode: "triggered".into(),
+                trigger_kind: Some("Legacy".into()),
+                // Served by a pre-wire-v2 sensor: an id but no origin. There
+                // is no download to offer — a wildcard fetch is forbidden, and
+                // that sensor could not answer this build anyway.
+                artifact_id: Some("01J00000000000000000000001".into()),
+                artifact_prefix: None,
                 ..Default::default()
             },
         ]);
@@ -2280,19 +2304,36 @@ mod tests {
         let mut ui = simulator(section);
         assert!(ui.find("Capture to disk").is_ok());
         assert!(ui.find("triggered").is_ok());
-        // The served file offers Download; the reaped one shows "expired".
+        // The served file offers Download; the reaped one shows "expired"; the
+        // one from a sensor that named no origin says so instead of offering a
+        // fetch it is not allowed to make.
         assert!(ui.find("expired").is_ok());
+        assert!(ui.find("sensor too old").is_ok());
         let _ = ui.click("Capture now");
         let _ = ui.click("Download");
         let _ = ui.click("rotating");
         let msgs: Vec<Message> = ui.into_messages().collect();
         assert!(msgs.iter().any(|m| matches!(m, Message::NetringCaptureNow)));
+        // The emitted message carries the concrete origin and the root, which
+        // is what lets the fetch be both literal-keyed (RFC 07 §3) and
+        // anchored (§2.1).
         assert!(msgs.iter().any(|m| matches!(
             m,
-            Message::DownloadCaptureBlob { artifact_id, filename, .. }
+            Message::DownloadCaptureBlob { artifact_id, filename, blob_prefix, root, .. }
                 if artifact_id == "01J00000000000000000000000"
                     && filename.contains("BeaconRita")
+                    && !blob_prefix.contains('*')
+                    && root.is_some()
         )));
+        // …and only one row is downloadable: the prefix-less record must not
+        // have produced a message at all, or the guard above is decorative.
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| matches!(m, Message::DownloadCaptureBlob { .. }))
+                .count(),
+            1,
+            "a record without an origin must offer no download"
+        );
         assert!(
             msgs.iter().any(
                 |m| matches!(m, Message::NetringSetCaptureDiskMode(mode) if mode == "rotating")

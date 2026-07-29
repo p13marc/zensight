@@ -2706,9 +2706,13 @@ impl ZenSight {
             Message::DownloadCaptureBlob {
                 producer,
                 artifact_id,
+                blob_prefix,
+                root,
                 filename,
             } => {
-                if let Some(task) = self.download_capture_blob(producer, artifact_id, filename) {
+                if let Some(task) =
+                    self.download_capture_blob(producer, artifact_id, blob_prefix, root, filename)
+                {
                     return task;
                 }
             }
@@ -3706,6 +3710,8 @@ impl ZenSight {
         &mut self,
         producer: String,
         artifact_id: String,
+        blob_prefix: String,
+        root: Option<String>,
         filename: String,
     ) -> Option<Task<Message>> {
         if self.artifact_fetch.is_busy() {
@@ -3720,7 +3726,22 @@ impl ZenSight {
                 .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
             return None;
         };
-        let dest = std::env::temp_dir().join("zensight-downloads");
+        // `blob_prefix` names the host that recorded the file, straight off
+        // the capture record — the GUI's own origin is never where a capture
+        // lives, and a `*` origin would make every holder ship the whole
+        // payload (RFC 07 §3). The root, when the sensor served one, pins the
+        // transfer so a wrong reply is dropped before it reaches disk (§2.1).
+        let root = root.and_then(|hex| match hex.parse::<zblob::Hash>() {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::warn!(error = %e, "capture record carried an unparseable root");
+                None
+            }
+        });
+        let dir = std::env::temp_dir().join("zensight-downloads");
+        // zblob 0.2 has the *caller* choose the destination file — a remote
+        // party must not pick where bytes land. Staging under the artifact id
+        // keeps the served filename advisory until the Save-as dialog.
         let mut job = crate::view::artifact_fetch::ArtifactJob::new(
             producer.clone(),
             zensight_common::ArtifactKind::Capture {
@@ -3730,26 +3751,26 @@ impl ZenSight {
                 snaplen: None,
                 compress: filename.ends_with(".zst"),
             },
-            dest.clone(),
+            dir,
         );
         if let Ok(id) = artifact_id.parse::<ulid::Ulid>() {
             job.id = id;
         }
         job.filename = Some(filename);
+        // Same rule as every other blob fetch (see `blob_or_tree_dest_of`):
+        // the caller names the file, staged under the artifact id, so the
+        // sensor's filename stays advisory until the Save-as dialog.
+        let dest = job.dest.join(job.id.to_string());
         let cancel = job.cancel.clone();
         self.artifact_job = Some(job);
         self.artifact_fetch =
             crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total: 0 };
-        // The artifact id is globally unique and one host owns it — the
-        // `*`-origin blob prefix reaches that owner without deriving an origin
-        // locally (the old artifact_blob_prefix call built the GUI's OWN
-        // origin, which is never where the capture lives).
-        let blob_prefix = zensight_common::fleet_blob_prefix();
         Some(Task::stream(
             crate::view::artifact_fetch::download_blob_direct(
                 session,
                 blob_prefix,
                 artifact_id,
+                root,
                 dest,
                 cancel,
             ),
@@ -3771,20 +3792,25 @@ impl ZenSight {
                 // blob, file count for a tree — matching the old per-tier behavior).
                 let total = match &delivery {
                     Delivery::Blob { manifest, .. } => {
-                        job.filename = Some(manifest.filename.clone());
-                        manifest.chunk_count as u64
+                        // The filename is advisory (the sensor's suggestion for
+                        // the Save-as dialog), so `None` just means "no
+                        // suggestion" — it never selects a path.
+                        if let Some(name) = &manifest.filename {
+                            job.filename = Some(name.clone());
+                        }
+                        // v2 manifests carry sizes, not a chunk count.
+                        manifest.total_len.div_ceil(manifest.chunk_size as u64)
                     }
                     Delivery::Tree { summary, .. } => summary.file_count.max(1),
                 };
-                let id = job.id.to_string();
-                let dest = job.dest.clone();
+                let dest = Self::blob_or_tree_dest_of(job, &delivery);
                 let cancel = job.cancel.clone();
                 self.artifact_fetch =
                     crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total };
                 let session = self.session.clone()?;
                 let store = self.content_store();
                 Some(Task::stream(crate::view::artifact_fetch::download_stream(
-                    session, delivery, id, dest, store, cancel,
+                    session, delivery, dest, store, cancel,
                 )))
             }
             Ok(_) => None, // request helper only returns Ready on success
@@ -3870,13 +3896,15 @@ impl ZenSight {
         let store = self.content_store();
         let job = self.artifact_job.as_mut()?;
         let delivery = job.delivery.clone()?;
-        let id = job.id.to_string();
-        let dest = job.dest.clone();
+        // Resume re-derives the destination the same way the first attempt
+        // did, so a blob resumes onto its own `.part` rather than starting a
+        // second one beside it.
+        let dest = Self::blob_or_tree_dest_of(job, &delivery);
         let cancel = job.reset_cancel();
         self.artifact_fetch =
             crate::view::artifact_fetch::ArtifactFetch::Downloading { got, total };
         Some(Task::stream(crate::view::artifact_fetch::download_stream(
-            session, delivery, id, dest, store, cancel,
+            session, delivery, dest, store, cancel,
         )))
     }
 
@@ -3890,15 +3918,18 @@ impl ZenSight {
         let id = job.id.to_string();
         // Only a blob delivery leaves an on-disk partial to clean up.
         let blob = match &job.delivery {
-            Some(zensight_common::Delivery::Blob { blob_prefix, .. }) => {
-                Some((blob_prefix.clone(), job.dest.clone()))
-            }
+            Some(delivery @ zensight_common::Delivery::Blob { blob_prefix, .. }) => Some((
+                blob_prefix.clone(),
+                Self::blob_or_tree_dest_of(job, delivery),
+            )),
             _ => None,
         };
         Some(Task::future(async move {
-            if let Some((bp, dir)) = blob {
-                let client = zblob::BlobClient::new(session.clone(), bp, zblob::Format::Json);
-                client.delete_partial(&id, &dir).await;
+            if let Some((bp, dest)) = blob {
+                // 0.2's `delete_partial` takes the destination *file* — the
+                // sidecar and `.part` are named after it, not after the id.
+                let client = zblob::BlobClient::new(session.clone(), bp);
+                client.delete_partial(&dest).await;
             }
             // Best-effort hint to the sensor (free the TTL'd artifact now) —
             // the cancel write procedure takes `?id=<ulid>` (RFC 05).
@@ -3913,6 +3944,27 @@ impl ZenSight {
                 .await;
             Message::ArtifactSaved(Ok(None))
         }))
+    }
+
+    /// Where this job's bytes land, per delivery tier.
+    ///
+    /// `job.dest` is the directory the user (or the staging area) chose. zblob
+    /// 0.2 has the **caller** name the destination file for a blob — a remote
+    /// party must not pick where bytes land, so `Manifest::filename` stays
+    /// advisory and is only offered later, in the Save-as dialog. Staging
+    /// under the artifact id keeps the path a safe single segment. A tree
+    /// materializes into the directory itself.
+    ///
+    /// One function, used by the initial fetch, the resume, and the partial
+    /// cleanup, so those three cannot disagree about which file they mean.
+    fn blob_or_tree_dest_of(
+        job: &crate::view::artifact_fetch::ArtifactJob,
+        delivery: &zensight_common::Delivery,
+    ) -> std::path::PathBuf {
+        match delivery {
+            zensight_common::Delivery::Blob { .. } => job.dest.join(job.id.to_string()),
+            zensight_common::Delivery::Tree { .. } => job.dest.clone(),
+        }
     }
 
     /// The local content store backing Tier-2 downloads (the redb `chunks` table,

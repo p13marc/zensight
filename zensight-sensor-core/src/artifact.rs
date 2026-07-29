@@ -29,8 +29,8 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 use ulid::Ulid;
 use zblob::{
-    BlobServer, CancelToken, ContentStore, FastCdcChunker, FileBlobSource, FixedSizeChunker,
-    Format, Hash, Manifest, MemoryStore, Sha256Digest, TreeIndex, TreeServer, build_tree,
+    BlobServer, BlobSpec, CancelToken, CdcParams, ContentStore, Hash, MemoryStore, TreeIndex,
+    TreeServer, build_tree,
 };
 use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
@@ -194,20 +194,14 @@ impl ArtifactChannel {
             .iter()
             .any(|p| p.delivery_kind() == DeliveryKind::Tree);
 
-        let blob = wants_blob.then(|| {
-            BlobServer::new(
-                session.clone(),
-                artifact_blob_prefix(&producer),
-                Format::Json,
-            )
-        });
+        let blob =
+            wants_blob.then(|| BlobServer::new(session.clone(), artifact_blob_prefix(&producer)));
         let (store, tree_server) = if wants_tree {
             let store = Arc::new(MemoryStore::new());
             let tree_server = TreeServer::new(
                 session.clone(),
                 artifact_store_prefix(&producer),
                 artifact_tree_prefix(&producer),
-                Format::Json,
                 store.clone() as Arc<dyn ContentStore>,
             );
             (Some(store), Some(tree_server))
@@ -259,11 +253,26 @@ impl ArtifactChannel {
             .await
             .map_err(|e| anyhow::anyhow!("declare artifact cancel queryable: {e}"))?;
 
+        // `spawn()` declares the queryable *before* it returns, so by the time
+        // this channel starts answering `artifact/request` its blob endpoints
+        // are already live — a request cannot race ahead of the server that
+        // must serve its bytes. (0.1's `run()` declared inside the spawned
+        // task, which left that window open.) The handles are detached
+        // deliberately: the servers live as long as the session, and dropping
+        // a `ServerHandle` does not stop the loop.
         if let Some(blob) = &self.blob {
-            tokio::spawn(blob.clone().run());
+            let _ = blob
+                .clone()
+                .spawn()
+                .await
+                .map_err(|e| anyhow::anyhow!("spawn blob server: {e}"))?;
         }
         if let Some(tree_server) = &self.tree_server {
-            tokio::spawn(tree_server.clone().run());
+            let _ = tree_server
+                .clone()
+                .spawn()
+                .await
+                .map_err(|e| anyhow::anyhow!("spawn tree server: {e}"))?;
         }
 
         let mut ttl_tick = tokio::time::interval(Duration::from_secs(5));
@@ -534,19 +543,20 @@ impl ArtifactChannel {
                     .blob
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("no blob server for a File artifact"))?;
-                let chunker = FixedSizeChunker::new(chunk_size);
-                let mut reader = tokio::fs::File::open(&path).await?;
-                let manifest = Manifest::compute::<_, Sha256Digest>(
-                    &mut reader,
-                    &chunker,
-                    id.to_string(),
-                    filename,
-                    created_ms,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("manifest: {e}"))?;
-                blob.register(manifest.clone(), Arc::new(FileBlobSource::new(&path)))
-                    .await;
+                // Registration streams the file once to build its bao
+                // outboard and derives the manifest from it, so a served
+                // manifest cannot disagree with the bytes — the manifest is
+                // the *result* of registering, not an input to it.
+                let manifest = blob
+                    .register_file(
+                        BlobSpec::new(id.to_string())
+                            .filename(filename)
+                            .chunk_size(chunk_size)
+                            .created_ms(created_ms),
+                        &path,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("register blob: {e}"))?;
                 let state = ArtifactState::Ready {
                     id,
                     kind: slug.to_string(),
@@ -574,14 +584,24 @@ impl ArtifactChannel {
                     .tree_server
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("no tree server for a Dir artifact"))?;
-                let tree_id = id.to_string();
-                let build_id = tree_id.clone();
-                let (index, chunks): (TreeIndex, Vec<(Hash, Vec<u8>)>) =
-                    tokio::task::spawn_blocking(move || {
-                        let chunker = FastCdcChunker::new(chunk_size);
-                        build_tree(&path, build_id, &chunker)
-                    })
-                    .await??;
+                // Single live tree: drop the prior snapshot's chunks *before*
+                // building, because `build_tree` streams each new chunk into
+                // the store as it walks. (In 0.1 it returned the chunks and
+                // the caller put them, so clearing afterwards was correct;
+                // doing that here would erase the snapshot just built.)
+                store.clear();
+
+                let build_store = store.clone() as Arc<dyn ContentStore>;
+                let build_id = id.to_string();
+                let cdc = CdcParams {
+                    avg: chunk_size,
+                    ..CdcParams::default()
+                };
+                let index: TreeIndex = tokio::task::spawn_blocking(move || {
+                    build_tree(&path, build_id, &cdc, build_store.as_ref())
+                })
+                .await?
+                .map_err(|e| anyhow::anyhow!("build tree: {e}"))?;
 
                 let total_bytes = index.total_size();
                 let file_count = index.file_count() as u64;
@@ -594,23 +614,28 @@ impl ArtifactChannel {
                     anyhow::bail!("snapshot ({file_count} files) exceeds max_files ({max_files})");
                 }
 
-                // Single live tree: drop prior chunks, then publish this one's.
-                store.clear();
-                for (h, bytes) in &chunks {
-                    store.put(h, bytes)?;
-                }
                 let summary = TreeSummary {
                     file_count,
                     total_bytes,
-                    root_hash_hex: index.root_hash.to_string(),
                 };
+
+                // RFC 07 §2.3: re-key the index by its own root before
+                // serving it. The consumer then GETs the identity it demands
+                // rather than a name it has to trust, so the fetch is
+                // self-anchoring and the "immutable ⇒ cacheable" argument the
+                // storage exemption rests on actually holds. The ULID stays
+                // the *artifact* id (the RPC's handle); it is no longer a
+                // `@blob` key.
+                let index = index.keyed_by_root();
+                let root: Hash = index.root_hash;
+                debug_assert!(index.is_content_addressed());
                 tree_server.register(index).await;
 
                 let state = ArtifactState::Ready {
                     id,
                     kind: slug.to_string(),
                     delivery: Delivery::Tree {
-                        tree_id: tree_id.clone(),
+                        root,
                         store_prefix: artifact_store_prefix(&self.producer),
                         tree_prefix: artifact_tree_prefix(&self.producer),
                         summary,
@@ -621,7 +646,7 @@ impl ArtifactChannel {
                     state,
                     Active {
                         id,
-                        cleanup: Cleanup::Tree(tree_id),
+                        cleanup: Cleanup::Tree(root.to_string()),
                         expires,
                     },
                 ))

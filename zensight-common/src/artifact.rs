@@ -157,14 +157,18 @@ pub struct ArtifactRequest {
 
 /// A lightweight summary of a built directory tree, shown before it is fetched.
 /// (Formerly `SnapshotSummary`.)
+///
+/// Display only. The integrity anchor is [`Delivery::Tree`]'s `root`, which is
+/// also the key. Through 0.10 this struct carried a `root_hash_hex` documented
+/// as the "integrity root" and checked by nobody — precisely the
+/// trust-on-first-use shape RFC 07 §2.1 forbids. It is removed rather than
+/// left unused, so nothing can mistake it for a verified value again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TreeSummary {
     /// Number of regular files in the tree.
     pub file_count: u64,
     /// Total uncompressed size of all files, bytes.
     pub total_bytes: u64,
-    /// Hex of the tree's Merkle-y root hash (integrity root).
-    pub root_hash_hex: String,
 }
 
 /// How a `Ready` artifact is delivered — the client picks its transfer client
@@ -173,22 +177,32 @@ pub struct TreeSummary {
 #[serde(tag = "delivery", rename_all = "snake_case")]
 pub enum Delivery {
     /// Tier-1 whole-blob: download with `zblob::BlobClient` from
-    /// `blob_prefix` using `manifest.id`.
+    /// `blob_prefix`, pinned to `manifest.root`.
     Blob {
-        /// Whole-blob manifest (size, chunking, SHA-256, filename).
+        /// Whole-blob manifest: size, chunking, advisory filename, and the
+        /// BLAKE3 bao `root` — the integrity anchor every received slice is
+        /// verified against *before* it touches disk (RFC 07 §2.1).
         #[schemars(with = "serde_json::Value")]
         manifest: Manifest,
-        /// Key prefix of the `zenoh-blob` server serving this blob.
+        /// Key prefix of the `zblob` server serving this blob.
         blob_prefix: String,
     },
-    /// Tier-2 tree: download with `zblob::TreeClient` — fetch the index
-    /// `tree_id` from `tree_prefix`, chunks from `store_prefix`.
+    /// Tier-2 tree: download with `zblob::TreeClient` — fetch the index keyed
+    /// by `root` from `tree_prefix`, chunks from `store_prefix`.
+    ///
+    /// The index is **content-addressed**: its key is its own root hash
+    /// (RFC 07 §2.3), so the request states the identity it demands and
+    /// [`zblob::DownloadRequest::by_root`] cannot express trust-on-first-use.
+    /// Through 0.10 this carried a caller-minted ULID instead — the mutable
+    /// snapshot *name* §2.3 revoked.
     Tree {
-        /// The `TreeIndex` id to GET (a single key segment under `tree_prefix`).
-        tree_id: String,
-        /// Key prefix of the content-addressed chunk queryable (`@/store`).
+        /// The tree's BLAKE3 root: both the integrity anchor and the key
+        /// segment to GET under `tree_prefix`.
+        #[schemars(with = "String")]
+        root: zblob::Hash,
+        /// Key prefix of the content-addressed chunk queryable (`@blob/store`).
         store_prefix: String,
-        /// Key prefix of the index queryable (`@/tree`).
+        /// Key prefix of the index queryable (`@blob/tree`).
         tree_prefix: String,
         /// What the tree contains (for display before download).
         summary: TreeSummary,
@@ -392,13 +406,12 @@ mod tests {
             kind: "report".into(),
             delivery: Delivery::Blob {
                 manifest: Manifest {
+                    version: 2,
                     id: "00000000000000000000000009".into(),
-                    filename: "zensight-debug.tar.zst".into(),
+                    filename: Some("zensight-debug.tar.zst".into()),
                     total_len: 1024,
-                    chunk_size: 512,
-                    chunk_count: 2,
-                    hash_algo: "sha256".into(),
-                    hash: zblob::Hash([0u8; 32]),
+                    chunk_size: 64 * 1024,
+                    root: zblob::Hash::of(b"zensight-debug"),
                     created_ms: 1,
                 },
                 blob_prefix: "v1/h-3fa9c2d41b7e/@blob/artifact".into(),
@@ -416,13 +429,12 @@ mod tests {
             id: Ulid::from_parts(9, 9),
             kind: "snapshot".into(),
             delivery: Delivery::Tree {
-                tree_id: "t".into(),
+                root: zblob::Hash::of(b"snapshot"),
                 store_prefix: "v1/h-3fa9c2d41b7e/@blob/store".into(),
                 tree_prefix: "v1/h-3fa9c2d41b7e/@blob/tree".into(),
                 summary: TreeSummary {
                     file_count: 3,
                     total_bytes: 42,
-                    root_hash_hex: "ab".into(),
                 },
             },
             expires_ms: 2,
@@ -430,6 +442,9 @@ mod tests {
         let json = serde_json::to_string(&tree).unwrap();
         assert!(json.contains("\"delivery\":\"tree\""));
         assert_eq!(serde_json::from_str::<ArtifactState>(&json).unwrap(), tree);
+        // The root rides the wire as hex, and it is what a consumer keys the
+        // GET on (RFC 07 §2.3) — so it must survive the round trip verbatim.
+        assert!(json.contains(&zblob::Hash::of(b"snapshot").to_string()));
     }
 
     #[test]

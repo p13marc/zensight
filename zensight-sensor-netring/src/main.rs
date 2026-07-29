@@ -143,11 +143,11 @@ async fn main() -> Result<()> {
         let handle = disk::CaptureDiskHandle::new(ctl_tx, disk_stats.clone());
         let index: disk::CaptureIndex =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        let blob = zblob::BlobServer::new(
-            runner.session().clone(),
-            zensight_common::artifact_blob_prefix(&producer),
-            zblob::Format::Json,
-        );
+        // The concrete prefix is captured once and travels with the server, so
+        // every capture record can name the literal origin serving its bytes
+        // (RFC 07 §3) instead of leaving the consumer to wildcard for it.
+        let blob_prefix = zensight_common::artifact_blob_prefix(&producer);
+        let blob = zblob::BlobServer::new(runner.session().clone(), blob_prefix.clone());
         {
             let blob = blob.clone();
             runner.spawn(async move {
@@ -163,7 +163,10 @@ async fn main() -> Result<()> {
             ctl_rx,
             disk_stats.clone(),
             index.clone(),
-            Some(blob),
+            Some(disk::CaptureBlob {
+                server: blob,
+                prefix: blob_prefix,
+            }),
             keepalive.clone(),
         ));
         runner.spawn(command::run_capture_disk(

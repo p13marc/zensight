@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **zblob 0.2 (wire v2).** Artifact transfer moves to BLAKE3 + bao verified
+  streaming, postcard control messages and chunk-range resume. v1 and v2
+  peers deliberately do not interoperate — v2 renamed the reply keys so a
+  mixed fleet fails closed instead of corrupting — so **sensors and frontend
+  upgrade together**. Every reply is verified against the blob's content root
+  *before* it touches disk, so a wrong or tampered slice is discarded rather
+  than assembled and detected at the end.
+  - `Delivery::Blob`'s manifest changes shape: `filename` is optional and
+    advisory, and `chunk_count`/`hash_algo`/`hash` give way to `root` (the
+    BLAKE3 bao root). The caller now names the destination *file*; the crate
+    never joins a remote-supplied filename to a path.
+  - The GUI's redb chunk store re-keys from `sha256/<hex>` to
+    `blake3/<hex>`. Dedup is per-algorithm, so pre-0.11 chunks are inert
+    rather than wrong — the store refills on the next fetch. It also gained
+    the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
+
+### Fixed
+
+- **Tier-2 artifact fetches were trust-on-first-use** (RFC 07 §2.1/§2.3).
+  `Delivery::Tree` named the snapshot by a caller-minted ULID, and the root
+  hash it *did* carry (`TreeSummary::root_hash_hex`) was documented as the
+  "integrity root" and checked by nobody — so the consumer asked for a name
+  and trusted whatever index answered. Snapshot indexes are now
+  content-addressed: the key **is** the root, and the fetch uses
+  `DownloadRequest::by_root`, which cannot express trust-on-first-use.
+  `root_hash_hex` is removed rather than left unused, so nothing can mistake
+  it for a verified value again. Tier-1 fetches are likewise pinned to
+  `manifest.root`.
+- **Capture downloads used a wildcard-origin bulk GET** (RFC 07 §3). The GUI
+  did not know which host held a capture, so it fetched under
+  `v1/*/@blob/artifact` — every matching holder ships the full payload and
+  Zenoh cannot cancel remote replies in flight, so the cost was bounded only
+  by artifact ids happening to be unique ULIDs rather than by the protocol.
+  The origin was already known one hop upstream and simply discarded:
+  `CaptureRecord` now carries `artifact_prefix` (the concrete origin) and
+  `artifact_root`, both `#[serde(default)]`. `fleet_blob_prefix()` is gone,
+  with a `keyexpr.rs` guard test asserting no builder can hand out that shape
+  again. A record without an origin shows "sensor too old" instead of a
+  Download button — such a sensor is pre-wire-v2 and could not answer this
+  build anyway.
+- Artifact blob/tree servers are declared before the channel starts answering
+  requests (zblob 0.2's `spawn()`), closing a window where a request could
+  race ahead of the server meant to serve its bytes.
+
 ## [0.10.1] - 2026-07-27
 
 ### Fixed
