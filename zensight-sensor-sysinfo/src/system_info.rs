@@ -15,9 +15,12 @@ use zenoh::Session;
 use zensight_common::SystemInfo;
 use zensight_sensor_core::identity::OsRelease;
 
-/// Refresh period. Near-static data: the publisher cache serves late joiners
-/// in between, and the registry TTL (7200 s) outlives three refreshes.
-const REFRESH: Duration = Duration::from_secs(600);
+/// Refresh period. The GUI's state-plane subscriber is a plain subscriber —
+/// it sees a doc when it is (re-)emitted, not from the publisher cache — so
+/// this matches the 60 s `sensor`/`evidence` cadence: a late-joining GUI
+/// shows the OS within a minute. The data is near-static; the collect is a
+/// handful of file reads.
+const REFRESH: Duration = Duration::from_secs(60);
 
 /// Gather the current host facts. Cheap one-shot file reads.
 pub fn collect() -> SystemInfo {

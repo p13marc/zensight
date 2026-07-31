@@ -6308,6 +6308,7 @@ impl ZenSight {
                         &self.overview,
                         &self.sensor_health,
                         &self.entities,
+                        &self.system_info,
                         &self.firing_by_source,
                         self.settings.group_by_host,
                     )
@@ -6321,6 +6322,7 @@ impl ZenSight {
                 &self.overview,
                 &self.sensor_health,
                 &self.entities,
+                &self.system_info,
                 &self.firing_by_source,
                 self.settings.group_by_host,
             ),

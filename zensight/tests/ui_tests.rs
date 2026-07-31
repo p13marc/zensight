@@ -47,6 +47,15 @@ fn topo_view(state: &TopologyState, theme: AppTheme) -> iced::Element<'_, Messag
 use std::collections::HashMap;
 use zensight_common::Protocol;
 
+/// An empty per-origin `SystemInfo` map for `dashboard_view` calls that don't
+/// exercise the host-facts fallback (leaked once — the view borrows it for
+/// the returned element's lifetime).
+fn no_system_info() -> &'static HashMap<String, zensight_common::SystemInfo> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, zensight_common::SystemInfo>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// Test that the dashboard view renders correctly with no devices.
 #[test]
 fn test_dashboard_empty() {
@@ -64,6 +73,7 @@ fn test_dashboard_empty() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -99,6 +109,7 @@ fn test_dashboard_with_devices() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -138,6 +149,7 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -185,6 +197,7 @@ fn test_dashboard_card_shows_system_info_line() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -193,6 +206,57 @@ fn test_dashboard_card_shows_system_info_line() {
     assert!(
         ui.find("Fedora Linux 42 · kernel 6.15.3 · x86_64").is_ok(),
         "the card must show the self-reported OS line"
+    );
+}
+
+/// With NO correlator (empty entity store) the card still shows the OS line,
+/// straight from the per-origin `system/info` doc — a plain `just sensors`
+/// run must not lose the system information.
+#[test]
+fn test_dashboard_card_shows_system_info_without_entities() {
+    let mut state = DashboardState::default();
+    state.connected = true;
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
+    let origin = device_id.origin.clone();
+    let mut device = DeviceState::new(device_id.clone());
+    device.metric_count = 1;
+    device.is_healthy = true;
+    state.devices.insert(device_id, device);
+
+    let entities = zensight::entity::EntityStore::default();
+    let mut system_info: HashMap<String, zensight_common::SystemInfo> = HashMap::new();
+    system_info.insert(
+        origin,
+        zensight_common::SystemInfo {
+            os_pretty_name: Some("Debian GNU/Linux 12".into()),
+            kernel: Some("6.1.0-18-amd64".into()),
+            arch: Some("x86_64".into()),
+            timestamp: 1,
+            ..Default::default()
+        },
+    );
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let sensor_health = HashMap::new();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+        &sensor_health,
+        &entities,
+        &system_info,
+        &firing,
+        true,
+    ));
+
+    assert!(
+        ui.find("Debian GNU/Linux 12 · kernel 6.1.0-18-amd64 · x86_64")
+            .is_ok(),
+        "the doc-sourced OS line must render without any entity"
     );
 }
 
@@ -226,6 +290,7 @@ fn test_dashboard_card_falls_back_to_wire_identity() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -610,6 +675,7 @@ fn test_host_card_disambiguates_same_protocol_facets() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -626,6 +692,7 @@ fn test_host_card_disambiguates_same_protocol_facets() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -1275,6 +1342,7 @@ fn test_overview_section_renders() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -1323,6 +1391,7 @@ fn test_overview_protocol_tab_click() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -1375,6 +1444,7 @@ fn test_overview_collapse_toggle() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -4151,6 +4221,7 @@ fn test_host_card_renders_entity_members() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));
@@ -4187,6 +4258,7 @@ fn test_dashboard_empty_entity_store_degraded_parity() {
         &overview,
         &sensor_health,
         &entities,
+        no_system_info(),
         &firing,
         true,
     ));

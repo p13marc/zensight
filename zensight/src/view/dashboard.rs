@@ -477,6 +477,7 @@ pub fn dashboard_view<'a>(
     overview: &'a OverviewState,
     sensor_health: &'a HashMap<String, HealthSnapshot>,
     entities: &'a EntityStore,
+    system_info: &'a HashMap<String, zensight_common::SystemInfo>,
     firing_by_source: &'a HashMap<String, usize>,
     group_by_host: bool,
 ) -> Element<'a, Message> {
@@ -502,7 +503,14 @@ pub fn dashboard_view<'a>(
         &state.snmp_interfaces,
         &state.snmp_events,
     );
-    let devices = render_device_grid(state, groups, &filtered, store, firing_by_source);
+    let devices = render_device_grid(
+        state,
+        groups,
+        &filtered,
+        store,
+        system_info,
+        firing_by_source,
+    );
 
     let content = column![
         header,
@@ -900,6 +908,7 @@ fn render_device_grid<'a>(
     groups: &'a GroupsState,
     filtered: &[&'a DeviceState],
     entities: &'a EntityStore,
+    system_info: &'a HashMap<String, zensight_common::SystemInfo>,
     firing_by_source: &'a HashMap<String, usize>,
 ) -> Element<'a, Message> {
     // Apply group filter on top of pre-computed protocol/search filter
@@ -938,7 +947,10 @@ fn render_device_grid<'a>(
             } else {
                 &[]
             };
-            (render_host_cards(page, groups, firing_by_source), total)
+            (
+                render_host_cards(page, groups, system_info, firing_by_source),
+                total,
+            )
         }
         DashboardViewMode::Table => {
             let total = all_devices.len();
@@ -987,6 +999,7 @@ const CARD_MIN_WIDTH: f32 = 350.0;
 fn render_host_cards<'a>(
     hosts: &[crate::view::host::Host<'a>],
     groups: &'a GroupsState,
+    system_info: &'a HashMap<String, zensight_common::SystemInfo>,
     firing_by_source: &'a HashMap<String, usize>,
 ) -> Element<'a, Message> {
     let cards: Vec<Element<'a, Message>> = hosts
@@ -998,7 +1011,7 @@ fn render_host_cards<'a>(
                 .iter()
                 .map(|f| firing_by_source.get(&f.id.source).copied().unwrap_or(0))
                 .sum();
-            render_host_card(host, groups, alert_count)
+            render_host_card(host, groups, system_info, alert_count)
         })
         .collect();
 
@@ -1015,6 +1028,7 @@ fn render_host_cards<'a>(
 fn render_host_card<'a>(
     host: &crate::view::host::Host<'a>,
     groups: &'a GroupsState,
+    system_info: &'a HashMap<String, zensight_common::SystemInfo>,
     alert_count: usize,
 ) -> Element<'a, Message> {
     let primary = host.primary();
@@ -1143,33 +1157,42 @@ fn render_host_card<'a>(
                 .size(11)
                 .style(move |_: &Theme| text::Style { color: Some(color) }),
         );
-        // One identity line per host. Preferred: the self-reported system
-        // information (os-release name, kernel, arch off the evidence plane).
-        // Fallback for hosts that never self-report (switches, SNMP gear):
-        // the reverse wire affordance (#314) — what ARP/LLDP/CDP/sysDescr
-        // says this host *is*.
-        let os_parts: Vec<String> = [
-            entity.os_name.clone(),
-            entity.kernel.as_ref().map(|k| format!("kernel {k}")),
-            entity.arch.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let identity_line = if !os_parts.is_empty() {
-            Some(os_parts.join(" · "))
-        } else {
+    }
+
+    // One identity line per host. Preferred: the self-reported system
+    // information (os-release name, kernel, arch) — off the correlated entity
+    // when one exists, else straight from the per-origin `system/info` doc,
+    // so the line does not depend on a running correlator. Fallback for hosts
+    // that never self-report (switches, SNMP gear): the reverse wire
+    // affordance (#314) — what ARP/LLDP/CDP/sysDescr says this host *is*.
+    let os_line = |name: Option<String>, kernel: Option<&String>, arch: Option<String>| {
+        let parts: Vec<String> = [name, kernel.map(|k| format!("kernel {k}")), arch]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    };
+    let identity_line = host
+        .entity
+        .and_then(|e| os_line(e.os_name.clone(), e.kernel.as_ref(), e.arch.clone()))
+        .or_else(|| {
+            host.facets
+                .iter()
+                .find_map(|f| system_info.get(&f.id.origin))
+                .and_then(|si| os_line(si.display_name(), si.kernel.as_ref(), si.arch.clone()))
+        })
+        .or_else(|| {
+            let entity = host.entity?;
             let wire: Vec<&str> = [entity.vendor.as_deref(), entity.platform.as_deref()]
                 .into_iter()
                 .flatten()
                 .collect();
             (!wire.is_empty()).then(|| format!("seen on the wire as {}", wire.join(" · ")))
-        };
-        if let Some(line) = identity_line {
-            card_content = card_content.push(text(line).size(11).style(|t: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(t).text_muted()),
-            }));
-        }
+        });
+    if let Some(line) = identity_line {
+        card_content = card_content.push(text(line).size(11).style(|t: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(t).text_muted()),
+        }));
     }
 
     let card_button = button(card_content)
