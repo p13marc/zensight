@@ -102,6 +102,28 @@ pub fn badge<'a, Message: 'a>(
         .into()
 }
 
+/// A small bordered pill for compact facts (OS name, kernel, arch, roles):
+/// tinted background, 1 px border, caption text in the color. Meaning must
+/// never ride on color alone — pair distinct pills with distinct text.
+pub fn pill<'a, Message: 'a>(
+    color: Color,
+    label: impl text::IntoFragment<'a>,
+) -> Element<'a, Message> {
+    container(text(label).size(font::CAPTION))
+        .padding([2, 6])
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(Color { a: 0.18, ..color })),
+            border: Border {
+                color,
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            text_color: Some(color),
+            ..Default::default()
+        })
+        .into()
+}
+
 /// An empty-state placeholder: a centered, muted message with optional action,
 /// for "no data yet" / "no match" panels. Replaces bare strings of varying size.
 pub fn empty_state<'a, Message: 'a>(

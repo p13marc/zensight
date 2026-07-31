@@ -48,6 +48,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::groups::{GroupTag, GroupsState, device_group_tags, group_filter_bar};
 use crate::view::icons::{self, IconSize};
 use crate::view::overview::{OverviewState, overview_section};
+use crate::view::tokens::{font, space};
 
 /// State for a single device on the dashboard.
 #[derive(Debug, Clone)]
@@ -1043,7 +1044,7 @@ fn render_host_card<'a>(
     };
     let status_indicator = tooltip(
         status_indicator_dot,
-        container(text(status_tooltip_text).size(11))
+        container(text(status_tooltip_text).size(font::CAPTION))
             .padding(6)
             .style(container::rounded_box),
         tooltip::Position::Top,
@@ -1058,14 +1059,14 @@ fn render_host_card<'a>(
         .map(|f| f.id.protocol.display_name().to_string())
         .collect();
     let host_name = tooltip(
-        text(host.display_name.clone()).size(16),
-        container(text(format!("{} · {}", host.display_name, protocols.join(", "))).size(12))
-            .padding(6)
-            .style(container::rounded_box),
+        text(host.display_name.clone()).size(font::EMPHASIS),
+        container(
+            text(format!("{} · {}", host.display_name, protocols.join(", "))).size(font::CAPTION),
+        )
+        .padding(6)
+        .style(container::rounded_box),
         tooltip::Position::Top,
     );
-
-    let metric_count = text(format!("{} metrics", host.metric_count())).size(12);
 
     // Firing-alert rollup across the host's facet sources (#306).
     let alert_badge: Option<Element<'a, Message>> = (alert_count > 0).then(|| {
@@ -1092,13 +1093,17 @@ fn render_host_card<'a>(
         .collect();
     let group_tags = device_group_tags(device_groups);
 
-    let mut header = row![status_indicator, primary_icon, host_name, health_badge]
-        .spacing(10)
+    // Identity on the left, judgements on the right: the fill spacer keeps
+    // the badges from butting against the host name (the old flat row).
+    let mut header = row![status_indicator, primary_icon, host_name]
+        .spacing(space::SM)
         .align_y(Alignment::Center);
+    header = header.push(iced::widget::Space::new().width(Length::Fill));
+    header = header.push(health_badge);
     if let Some(badge) = alert_badge {
         header = header.push(badge);
     }
-    let header = header.push(metric_count).push(group_tags);
+    let header = header.push(group_tags).spacing(space::SM);
 
     // One clickable badge per facet — protocol icon + per-facet status dot —
     // pivoting to that sensor's device view. When the same protocol appears on
@@ -1106,22 +1111,24 @@ fn render_host_card<'a>(
     // facet's source so the badges stay distinguishable.
     let dup_protocols =
         crate::view::host::duplicated_protocols(host.facets.iter().map(|f| f.id.protocol));
-    let mut facet_row = iced::widget::Row::new().spacing(6);
+    let mut facet_row = iced::widget::Row::new().spacing(space::XS);
     for facet in &host.facets {
         let fstatus = facet.effective_status();
         let mut chip_label = row![
             animated_status_indicator(fstatus, 8.0),
             icons::protocol_icon::<Message>(facet.id.protocol, IconSize::Small),
-            text(facet.id.protocol.display_name()).size(11),
+            text(facet.id.protocol.display_name()).size(font::CAPTION),
         ]
         .spacing(4)
         .align_y(Alignment::Center);
         if dup_protocols.contains(&facet.id.protocol) {
-            chip_label = chip_label.push(text(format!("· {}", facet.id.source)).size(11).style(
-                |t: &Theme| text::Style {
-                    color: Some(crate::view::theme::colors(t).text_muted()),
-                },
-            ));
+            chip_label = chip_label.push(
+                text(format!("· {}", facet.id.source))
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(t).text_muted()),
+                    }),
+            );
         }
         let chip = button(chip_label)
             .on_press(Message::SelectDevice(facet.id.clone()))
@@ -1129,75 +1136,103 @@ fn render_host_card<'a>(
             .style(iced::widget::button::secondary);
         facet_row = facet_row.push(tooltip(
             chip,
-            container(text(format!("{} metrics", facet.metric_count)).size(11))
+            container(text(format!("{} metrics", facet.metric_count)).size(font::CAPTION))
                 .padding(6)
                 .style(container::rounded_box),
             tooltip::Position::Bottom,
         ));
     }
 
-    let mut card_content = column![header, facet_row.wrap()].spacing(6);
+    let mut card_content = column![header, facet_row.wrap()].spacing(space::SM);
 
-    // Correlated host: a "merged from N sources" caption + staleness note (#306).
-    if let Some(entity) = host.entity {
-        let n = host.merged_source_count().unwrap_or(host.facets.len());
-        let stale = crate::entity::EntityStore::is_stale(entity, current_timestamp());
-        let caption = if stale {
-            format!("merged from {n} sources · stale")
-        } else {
-            format!("merged from {n} sources")
-        };
-        let color = if stale {
-            crate::view::theme::STATUS_UNKNOWN
-        } else {
-            crate::view::theme::STATUS_ONLINE
-        };
-        card_content = card_content.push(
-            text(caption)
-                .size(11)
-                .style(move |_: &Theme| text::Style { color: Some(color) }),
-        );
-    }
-
-    // One identity line per host. Preferred: the self-reported system
-    // information (os-release name, kernel, arch) — off the correlated entity
-    // when one exists, else straight from the per-origin `system/info` doc,
-    // so the line does not depend on a running correlator. Fallback for hosts
-    // that never self-report (switches, SNMP gear): the reverse wire
-    // affordance (#314) — what ARP/LLDP/CDP/sysDescr says this host *is*.
-    let os_line = |name: Option<String>, kernel: Option<&String>, arch: Option<String>| {
-        let parts: Vec<String> = [name, kernel.map(|k| format!("kernel {k}")), arch]
-            .into_iter()
-            .flatten()
-            .collect();
-        (!parts.is_empty()).then(|| parts.join(" · "))
-    };
-    let identity_line = host
+    // System information as small neutral pills — self-reported os-release
+    // facts, off the correlated entity when one exists, else straight from
+    // the per-origin `system/info` doc (no correlator needed). The kernel
+    // pill shows the release up to its first `-` (the flavor suffix is
+    // noise at card scale); the full string rides its tooltip. Fallback for
+    // hosts that never self-report (switches, SNMP gear): the reverse wire
+    // affordance (#314) as a muted caption.
+    let os_facts = host
         .entity
-        .and_then(|e| os_line(e.os_name.clone(), e.kernel.as_ref(), e.arch.clone()))
+        .map(|e| (e.os_name.clone(), e.kernel.clone(), e.arch.clone()))
+        .filter(|(n, k, a)| n.is_some() || k.is_some() || a.is_some())
         .or_else(|| {
             host.facets
                 .iter()
                 .find_map(|f| system_info.get(&f.id.origin))
-                .and_then(|si| os_line(si.display_name(), si.kernel.as_ref(), si.arch.clone()))
+                .map(|si| (si.display_name(), si.kernel.clone(), si.arch.clone()))
         })
-        .or_else(|| {
-            let entity = host.entity?;
-            let wire: Vec<&str> = [entity.vendor.as_deref(), entity.platform.as_deref()]
-                .into_iter()
-                .flatten()
-                .collect();
-            (!wire.is_empty()).then(|| format!("seen on the wire as {}", wire.join(" · ")))
-        });
-    if let Some(line) = identity_line {
-        card_content = card_content.push(text(line).size(11).style(|t: &Theme| text::Style {
-            color: Some(crate::view::theme::colors(t).text_muted()),
-        }));
+        .filter(|(n, k, a)| n.is_some() || k.is_some() || a.is_some());
+    if let Some((os_name, kernel, arch)) = os_facts {
+        let neutral = crate::view::theme::STATUS_UNKNOWN;
+        let mut pills = iced::widget::Row::new()
+            .spacing(space::XS)
+            .align_y(Alignment::Center);
+        if let Some(name) = os_name {
+            pills = pills.push(crate::view::components::pill::<Message>(neutral, name));
+        }
+        if let Some(k) = kernel {
+            let short = k.split('-').next().unwrap_or(&k).to_string();
+            pills = pills.push(tooltip(
+                crate::view::components::pill::<Message>(neutral, short),
+                container(text(k).size(font::CAPTION))
+                    .padding(6)
+                    .style(container::rounded_box),
+                tooltip::Position::Bottom,
+            ));
+        }
+        if let Some(a) = arch {
+            pills = pills.push(crate::view::components::pill::<Message>(neutral, a));
+        }
+        card_content = card_content.push(pills.wrap());
+    } else if let Some(entity) = host.entity {
+        let wire: Vec<&str> = [entity.vendor.as_deref(), entity.platform.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        if !wire.is_empty() {
+            card_content = card_content.push(
+                text(format!("seen on the wire as {}", wire.join(" · ")))
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(t).text_muted()),
+                    }),
+            );
+        }
     }
+
+    // One footer caption: merge provenance + metric count (#306). Stale
+    // entities keep their distinct color so staleness never hides.
+    let metric_count = host.metric_count();
+    let footer = match host.entity {
+        Some(entity) => {
+            let n = host.merged_source_count().unwrap_or(host.facets.len());
+            let stale = crate::entity::EntityStore::is_stale(entity, current_timestamp());
+            let caption = if stale {
+                format!("merged from {n} sources · stale · {metric_count} metrics")
+            } else {
+                format!("merged from {n} sources · {metric_count} metrics")
+            };
+            let color = if stale {
+                crate::view::theme::STATUS_UNKNOWN
+            } else {
+                crate::view::theme::STATUS_ONLINE
+            };
+            text(caption)
+                .size(font::CAPTION)
+                .style(move |_: &Theme| text::Style { color: Some(color) })
+        }
+        None => text(format!("{metric_count} metrics"))
+            .size(font::CAPTION)
+            .style(|t: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(t).text_dimmed()),
+            }),
+    };
+    let card_content = card_content.push(footer);
 
     let card_button = button(card_content)
         .on_press(Message::SelectDevice(primary.id.clone()))
-        .padding(10)
+        .padding(space::SM)
         .width(Length::Fill)
         .style(iced::widget::button::secondary);
 

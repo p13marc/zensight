@@ -15,11 +15,11 @@ use zenoh::Session;
 use zensight_common::SystemInfo;
 use zensight_sensor_core::identity::OsRelease;
 
-/// Refresh period. The GUI's state-plane subscriber is a plain subscriber —
-/// it sees a doc when it is (re-)emitted, not from the publisher cache — so
-/// this matches the 60 s `sensor`/`evidence` cadence: a late-joining GUI
-/// shows the OS within a minute. The data is near-static; the collect is a
-/// handful of file reads.
+/// Refresh period. A Standard-profile GUI recovers the cached doc at
+/// subscriber declare (AdvancedSubscriber history), so this cadence only
+/// matters for Constrained-profile consumers, which stay on plain
+/// subscribers — 60 s matches the `sensor`/`evidence` docs. The data is
+/// near-static; the collect is a handful of file reads.
 const REFRESH: Duration = Duration::from_secs(60);
 
 /// Gather the current host facts. Cheap one-shot file reads.

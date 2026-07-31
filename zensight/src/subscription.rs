@@ -142,14 +142,61 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // Focus mode narrows this to one origin (#476); the catalog entity
             // subscriber below deliberately stays fleet-wide, because it is what
             // lets an operator un-focus and focus onto a *different* host.
-            let control = session
-                .declare_subscriber(state_selector(&config))
-                .with(flume::unbounded())
-                .await
-                .ok();
-            if control.is_none() {
-                tracing::warn!("Failed to create state-plane subscriber (health/alerts)");
+            // On the Standard profile this is an AdvancedSubscriber with
+            // history recovery: the sensors' cached state docs (sensor info,
+            // evidence, sysinfo system/info, SNMP interfaces/discovery) are
+            // delivered at declare time instead of waiting on the next
+            // re-emit — a freshly opened GUI shows host facts immediately.
+            // The burst lands in an UNBOUNDED channel, so unlike the bounded
+            // telemetry case (see the ordering note above) it can safely
+            // queue while the seed GETs below run; every state doc is LWW
+            // keyed by its subject, so replays and seed/GET overlaps are
+            // idempotent. Constrained links keep a plain subscriber —
+            // history/recovery are deliberately off-profile there
+            // (LinkProfile, #476-adjacent bandwidth discipline).
+            let (control_tx, control_rx) = flume::unbounded::<zenoh::sample::Sample>();
+            let mut control_advanced = None;
+            let mut control_plain = None;
+            match config.profile {
+                LinkProfile::Standard => {
+                    let tx = control_tx.clone();
+                    match session
+                        .declare_subscriber(state_selector(&config))
+                        .callback(move |sample| {
+                            let _ = tx.send(sample);
+                        })
+                        .history(HistoryConfig::default().detect_late_publishers())
+                        .await
+                    {
+                        Ok(sub) => control_advanced = Some(sub),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "Failed to create state-plane subscriber (health/alerts)"
+                        ),
+                    }
+                }
+                LinkProfile::Constrained => {
+                    let tx = control_tx.clone();
+                    match session
+                        .declare_subscriber(state_selector(&config))
+                        .callback(move |sample| {
+                            let _ = tx.send(sample);
+                        })
+                        .await
+                    {
+                        Ok(sub) => control_plain = Some(sub),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "Failed to create state-plane subscriber (health/alerts)"
+                        ),
+                    }
+                }
             }
+            // Keep the local sender alive for the stream's lifetime: if the
+            // declare failed, a closed channel would make the select! arm
+            // spin on Err instead of pending.
+            let _control_tx = control_tx;
+            let _keepalive = (&control_advanced, &control_plain);
 
             // Events plane (#536): append-only records (SNMP traps today).
             // A startup GET on the same selector backfills history when a
@@ -458,12 +505,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                     // State plane (v1): health / errors / registrations /
                     // alerts / device liveness / stream docs — plain puts and
                     // tombstone deletes on one class selector.
-                    result = async {
-                        match &control {
-                            Some(sub) => sub.recv_async().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
+                    result = control_rx.recv_async() => {
                         if let Ok(sample) = result {
                             let key = sample.key_expr().as_str();
                             if sample.kind() == SampleKind::Delete {

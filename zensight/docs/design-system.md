@@ -93,6 +93,11 @@ kit::rgb((0.40, 0.75, 0.45))        // opaque
 kit::rgba((0.40, 0.75, 0.45), 0.5)  // with alpha
 ```
 
+`kit.rs` also holds the small shared primitives: `badge` (colored dot +
+caption — meaning never rides on color alone), `pill` (small bordered tinted
+chip for compact facts: OS name, kernel, arch, roles), `metric_tile`, `card`,
+`section_header`, `empty_state`.
+
 Prefer building shared widgets here (and reusing them from views) over
 hand-rolling styled widgets in a view module — that keeps both the look and the
 color-guard compliance in one place.

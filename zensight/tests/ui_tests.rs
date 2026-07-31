@@ -203,10 +203,13 @@ fn test_dashboard_card_shows_system_info_line() {
     ));
 
     assert!(ui.find("server01").is_ok());
+    // Pills: one per fact (the joined-string form is gone).
     assert!(
-        ui.find("Fedora Linux 42 · kernel 6.15.3 · x86_64").is_ok(),
-        "the card must show the self-reported OS line"
+        ui.find("Fedora Linux 42").is_ok(),
+        "the card must show the self-reported OS pill"
     );
+    assert!(ui.find("6.15.3").is_ok());
+    assert!(ui.find("x86_64").is_ok());
 }
 
 /// With NO correlator (empty entity store) the card still shows the OS line,
@@ -254,10 +257,13 @@ fn test_dashboard_card_shows_system_info_without_entities() {
     ));
 
     assert!(
-        ui.find("Debian GNU/Linux 12 · kernel 6.1.0-18-amd64 · x86_64")
-            .is_ok(),
-        "the doc-sourced OS line must render without any entity"
+        ui.find("Debian GNU/Linux 12").is_ok(),
+        "the doc-sourced OS pill must render without any entity"
     );
+    // The kernel pill shortens at the first `-`; the full release rides the
+    // pill's tooltip.
+    assert!(ui.find("6.1.0").is_ok());
+    assert!(ui.find("x86_64").is_ok());
 }
 
 /// Without self-reported OS facts the card falls back to the wire-observed
@@ -4228,7 +4234,8 @@ fn test_host_card_renders_entity_members() {
 
     // One merged host card named by the entity hostname, both facet chips.
     assert!(ui.find("web-01").is_ok());
-    assert!(ui.find("merged from 2 sources").is_ok());
+    // Provenance + metric count merged into the one footer caption.
+    assert!(ui.find("merged from 2 sources · 6 metrics").is_ok());
     assert!(ui.find("sysinfo").is_ok());
     assert!(ui.find("netlink").is_ok());
 }
