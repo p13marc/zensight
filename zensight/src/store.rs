@@ -551,6 +551,33 @@ impl PersistentStore {
         txn.commit()?;
         Ok(())
     }
+
+    /// Every chunk key currently stored, as `<algo>/<hex>`. Blocking I/O, and
+    /// O(chunks) — it is a garbage-collection input, not a hot path.
+    pub fn chunk_keys(&self) -> Result<Vec<String>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(CHUNKS_TABLE)?;
+        let mut out = Vec::new();
+        for row in table.iter()? {
+            out.push(row?.0.value().to_string());
+        }
+        Ok(out)
+    }
+
+    /// Remove chunk `key`; returns whether it was present. Blocking I/O.
+    ///
+    /// Content-addressed removal is only safe behind a liveness analysis — a
+    /// chunk may be shared by many files and snapshots — so this is a
+    /// primitive for a sweep, not something to call on a hunch.
+    pub fn delete_chunk(&self, key: &str) -> Result<bool, redb::Error> {
+        let txn = self.db.begin_write()?;
+        let existed = {
+            let mut table = txn.open_table(CHUNKS_TABLE)?;
+            table.remove(key)?.is_some()
+        };
+        txn.commit()?;
+        Ok(existed)
+    }
 }
 
 /// A redb-backed [`zblob::ContentStore`] (#199): the durable, dedup-and-resume
@@ -569,23 +596,52 @@ impl RedbContentStore {
     }
 }
 
+/// The chunk-key prefix. zblob wire v2 is BLAKE3-only, so this is the `<algo>`
+/// segment of RFC 07 §2.4's `store/<algo>/<hash>`. It changed from `sha256/`
+/// with the 0.2 bump: dedup is per-algorithm, so keys minted under the old
+/// digest name a different address space and are simply cold — the store
+/// refills on the next fetch rather than pretending they still resolve.
+const CHUNK_ALGO: &str = "blake3";
+
 impl zblob::ContentStore for RedbContentStore {
     fn has(&self, hash: &zblob::Hash) -> bool {
         self.store
-            .has_chunk(&format!("sha256/{hash}"))
+            .has_chunk(&format!("{CHUNK_ALGO}/{hash}"))
             .unwrap_or(false)
     }
 
     fn get(&self, hash: &zblob::Hash) -> Option<Vec<u8>> {
         self.store
-            .read_chunk(&format!("sha256/{hash}"))
+            .read_chunk(&format!("{CHUNK_ALGO}/{hash}"))
             .ok()
             .flatten()
     }
 
     fn put(&self, hash: &zblob::Hash, bytes: &[u8]) -> std::io::Result<()> {
         self.store
-            .write_chunk(&format!("sha256/{hash}"), bytes)
+            .write_chunk(&format!("{CHUNK_ALGO}/{hash}"), bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    /// Keys that do not parse as `<CHUNK_ALGO>/<hex>` are skipped rather than
+    /// erroring the sweep: this table has held `sha256/…` keys from before the
+    /// 0.2 bump, and a garbage-collection input that refuses to enumerate is
+    /// worse than one that reports only what it understands.
+    fn hashes(&self) -> std::io::Result<Vec<zblob::Hash>> {
+        let keys = self
+            .store
+            .chunk_keys()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(keys
+            .iter()
+            .filter_map(|k| k.strip_prefix(CHUNK_ALGO).and_then(|r| r.strip_prefix('/')))
+            .filter_map(|hex| hex.parse::<zblob::Hash>().ok())
+            .collect())
+    }
+
+    fn remove(&self, hash: &zblob::Hash) -> std::io::Result<bool> {
+        self.store
+            .delete_chunk(&format!("{CHUNK_ALGO}/{hash}"))
             .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
@@ -1389,16 +1445,14 @@ mod tests {
 
     #[test]
     fn chunk_store_round_trip_and_persists() {
-        use zblob::{ContentStore, Digest, Sha256Digest};
+        use zblob::ContentStore;
 
         let path = temp_db_path("chunks");
         let persistent = PersistentStore::open(&path).expect("open");
         let cs = RedbContentStore::new(persistent.clone());
 
         let bytes = b"tier-2 chunk bytes";
-        let mut d = Sha256Digest::default();
-        d.update(bytes);
-        let hash = d.finalize();
+        let hash = zblob::Hash::of(bytes);
 
         // Missing → put → present → readable.
         assert!(!cs.has(&hash));
@@ -1409,6 +1463,22 @@ mod tests {
         // Idempotent re-put.
         cs.put(&hash, bytes).unwrap();
         assert_eq!(cs.get(&hash).unwrap(), bytes);
+
+        // `hashes()` and `remove()` (the 0.2 trait methods) agree with the
+        // rest: a store that enumerates a chunk `get` cannot return, or keeps
+        // one `remove` claimed to drop, breaks garbage collection silently.
+        assert_eq!(cs.hashes().unwrap(), vec![hash]);
+        assert!(cs.remove(&hash).unwrap(), "remove reports it was present");
+        assert!(!cs.has(&hash));
+        assert!(cs.hashes().unwrap().is_empty());
+        assert!(!cs.remove(&hash).unwrap(), "second remove is a no-op");
+        cs.put(&hash, bytes).unwrap();
+
+        // A pre-0.2 `sha256/…` key is inert rather than fatal: it belongs to a
+        // different address space, so `hashes()` skips it instead of failing
+        // the whole sweep.
+        persistent.write_chunk("sha256/deadbeef", b"stale").unwrap();
+        assert_eq!(cs.hashes().unwrap(), vec![hash]);
 
         // Reopening the database sees the persisted chunk (restart-proof resume).
         drop(cs);

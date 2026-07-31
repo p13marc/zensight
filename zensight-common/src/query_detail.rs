@@ -279,6 +279,22 @@ pub struct CaptureRecord {
     /// lives; `None` for rotating spool files or once the TTL reaped it.
     #[serde(default)]
     pub artifact_id: Option<String>,
+    /// The **concrete** `@blob/artifact` prefix of the origin serving this
+    /// capture — the host that recorded it.
+    ///
+    /// Carrying it is what lets a consumer fetch from a literal key instead of
+    /// a `*`-origin one. RFC 07 §2.5/§3 permit a wildcard origin for *probing*
+    /// (tiny replies) and forbid it for a bulk fetch, because every matching
+    /// holder ships the full payload and Zenoh cannot cancel remote replies in
+    /// flight. Through 0.10 the GUI wildcarded the fetch — while the origin
+    /// was already known one hop upstream and simply thrown away here.
+    #[serde(default)]
+    pub artifact_prefix: Option<String>,
+    /// Hex BLAKE3 root of the capture file — the integrity anchor a downloader
+    /// pins so a wrong or tampered reply is discarded *before* it reaches disk
+    /// (RFC 07 §2.1) rather than assembled and detected afterwards.
+    #[serde(default)]
+    pub artifact_root: Option<String>,
     /// When the served artifact expires (epoch ms); `None` when not served.
     #[serde(default)]
     pub expires_ms: Option<i64>,

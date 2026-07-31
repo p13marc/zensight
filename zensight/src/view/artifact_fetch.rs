@@ -13,7 +13,9 @@ use iced::futures::Stream;
 use iced::widget::{Row, button, checkbox, column, row, text, text_input};
 use iced::{Alignment, Element, Length};
 use ulid::Ulid;
-use zblob::{BlobClient, CancelToken, ContentStore, Format, Progress, ProgressSink, TreeClient};
+use zblob::{
+    BlobClient, CancelToken, ContentStore, DownloadRequest, Progress, ProgressSink, TreeClient,
+};
 use zenoh::Session;
 use zensight_common::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
@@ -483,14 +485,24 @@ async fn poll_status(
     None
 }
 
-/// Drive the right `zenoh-blob` client for `delivery` into `dest`, yielding
+/// Drive the right `zblob` client for `delivery` into `dest`, yielding
 /// [`Message::ArtifactProgress`] as chunks arrive and a final
 /// [`Message::ArtifactDownloaded`]. `store` (the local content store) is only used
 /// by the tree arm, so already-present chunks are skipped and a resume is free.
+///
+/// `dest` is the **destination file** for a blob and the **destination root
+/// directory** for a tree. The caller always chooses it — a remote party must
+/// not pick where bytes land, so `Manifest::filename` is advisory and this
+/// function never joins it to a path.
+///
+/// Both arms are **anchored**: the blob is pinned to `manifest.root` and the
+/// tree is fetched by root, so a wrong or tampered reply is rejected before it
+/// reaches disk rather than assembled and detected afterwards (RFC 07 §2.1).
+/// The id comes out of `delivery` rather than being passed alongside it, so an
+/// id and an anchor that disagree are not expressible here.
 pub fn download_stream(
     session: Arc<Session>,
     delivery: Delivery,
-    id: String,
     dest: PathBuf,
     store: Arc<dyn ContentStore>,
     cancel: CancelToken,
@@ -507,21 +519,22 @@ pub fn download_stream(
             }
             let sink = Sink(tx);
             match delivery {
-                Delivery::Blob { blob_prefix, .. } => {
-                    let client = BlobClient::new(session, blob_prefix, Format::Json);
-                    client.download_cancellable(&id, &dest, &sink, &cancel).await
+                Delivery::Blob { manifest, blob_prefix } => {
+                    let client = BlobClient::new(session, blob_prefix);
+                    let req = DownloadRequest::pinned(manifest.id, manifest.root);
+                    client.download_to(&req, &dest, &sink, &cancel).await
                 }
                 Delivery::Tree {
-                    tree_id,
+                    root,
                     store_prefix,
                     tree_prefix,
                     ..
                 } => {
-                    let client = TreeClient::new(session, store_prefix, tree_prefix, Format::Json);
+                    let client = TreeClient::new(session, store_prefix, tree_prefix);
+                    let req = DownloadRequest::by_root(root);
                     client
-                        .download_tree_cancellable(&tree_id, &dest, store.as_ref(), &sink, &cancel)
+                        .download_tree(&req, &dest, &store, &sink, &cancel)
                         .await
-                        .map(|_| ret)
                 }
             }
         });
@@ -531,7 +544,7 @@ pub fn download_stream(
             }
         }
         match dl.await {
-            Ok(Ok(path)) => yield Message::ArtifactDownloaded(Ok(path)),
+            Ok(Ok(_stats)) => yield Message::ArtifactDownloaded(Ok(ret)),
             Ok(Err(e)) => yield Message::ArtifactDownloaded(Err(e.to_string())),
             Err(e) => yield Message::ArtifactDownloaded(Err(format!("download task failed: {e}"))),
         }
@@ -540,18 +553,48 @@ pub fn download_stream(
 
 /// Download an already-registered blob by id (#327: triggered captures listed on
 /// `@rpc/netring/captures`). Unlike [`download_stream`] there is no request/produce
-/// phase and no `Delivery` in hand — the `BlobClient` fetches the manifest by id
-/// itself. Pause/resume is not offered on this path (no stored delivery); cancel
-/// works through the token.
+/// phase and no `Delivery` in hand. Pause/resume is not offered on this path (no
+/// stored delivery); cancel works through the token.
+///
+/// `blob_prefix` MUST name a **concrete** origin. RFC 07 §3 forbids a
+/// wildcard-origin bulk fetch: every matching holder ships the full payload
+/// and Zenoh cannot cancel remote replies in flight, so N holders cost N× the
+/// bytes on exactly the links the plane exists to spare. Through 0.10 this
+/// function was handed `v1/*/@blob/artifact` and the amplification was held
+/// down only by artifact ids happening to be unique ULIDs — a cost bound
+/// resting on id collisions rather than on the protocol. The origin now rides
+/// on [`CaptureRecord::artifact_prefix`](zensight_common::query_detail::CaptureRecord).
+///
+/// `root`, when known, pins the transfer (RFC 07 §2.1). It is optional only
+/// because a record served by a pre-0.11 sensor carries no root; that case is
+/// trust-on-first-use and is logged as such rather than silently accepted.
+///
+/// `dest` is the destination **file** — the caller chooses it, never the
+/// manifest's advisory filename.
 pub fn download_blob_direct(
     session: Arc<Session>,
     blob_prefix: String,
     id: String,
+    root: Option<zblob::Hash>,
     dest: PathBuf,
     cancel: CancelToken,
 ) -> impl Stream<Item = Message> {
     async_stream::stream! {
+        if blob_prefix.contains('*') {
+            yield Message::ArtifactDownloaded(Err(format!(
+                "refusing a wildcard-origin bulk fetch on {blob_prefix:?} (RFC 07 §3)"
+            )));
+            return;
+        }
+        if root.is_none() {
+            tracing::warn!(
+                id = %id,
+                "capture download is unanchored (sensor served no content root) — \
+                 trust-on-first-use, see RFC 07 §2.1"
+            );
+        }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
+        let ret = dest.clone();
         let dl = tokio::spawn(async move {
             struct Sink(tokio::sync::mpsc::UnboundedSender<Progress>);
             impl ProgressSink for Sink {
@@ -560,8 +603,12 @@ pub fn download_blob_direct(
                 }
             }
             let sink = Sink(tx);
-            let client = BlobClient::new(session, blob_prefix, Format::Json);
-            client.download_cancellable(&id, &dest, &sink, &cancel).await
+            let client = BlobClient::new(session, blob_prefix);
+            let req = match root {
+                Some(r) => DownloadRequest::pinned(id, r),
+                None => DownloadRequest::new(id),
+            };
+            client.download_to(&req, &dest, &sink, &cancel).await
         });
         while let Some(p) = rx.recv().await {
             if let Progress::Chunk { received, total, .. } = p {
@@ -569,7 +616,7 @@ pub fn download_blob_direct(
             }
         }
         match dl.await {
-            Ok(Ok(path)) => yield Message::ArtifactDownloaded(Ok(path)),
+            Ok(Ok(_stats)) => yield Message::ArtifactDownloaded(Ok(ret)),
             Ok(Err(e)) => yield Message::ArtifactDownloaded(Err(e.to_string())),
             Err(e) => yield Message::ArtifactDownloaded(Err(format!("download task failed: {e}"))),
         }

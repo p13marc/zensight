@@ -36,7 +36,7 @@ use std::time::Duration;
 use netring::packet::Timestamp;
 use netring::pcap_rotate::{FileNaming, RotatingConfig, RotatingPcapWriter};
 use tokio::sync::mpsc;
-use zblob::{BlobServer, FileBlobSource, FixedSizeChunker, Manifest, Sha256Digest};
+use zblob::{BlobServer, BlobSpec, Manifest};
 use zensight_common::query_detail::CaptureRecord;
 use zensight_common::{AlertSeverity, TelemetryPoint};
 
@@ -64,6 +64,19 @@ pub struct DiskFrame {
 
 /// The bounded ring of recent [`CaptureRecord`]s served on `@rpc/netring/captures`.
 pub type CaptureIndex = Arc<Mutex<VecDeque<CaptureRecord>>>;
+
+/// The engine's blob server together with the **concrete** key prefix it
+/// serves on.
+///
+/// The prefix travels with the server rather than being rebuilt at the record
+/// site because a served record must name a literal origin: RFC 07 §3 forbids
+/// a wildcard-origin bulk fetch, and the only place that knows the right
+/// origin for these bytes is the host that wrote them. Bundling makes it
+/// impossible to register a capture and forget to say where it lives.
+pub struct CaptureBlob {
+    pub server: BlobServer,
+    pub prefix: String,
+}
 
 /// Live engine counters, shared with the packet subscription (drop counter),
 /// the command/status channel and the telemetry emitter. All loads are relaxed
@@ -319,7 +332,7 @@ pub async fn run_engine(
     mut ctl: mpsc::UnboundedReceiver<DiskCtl>,
     stats: Arc<CaptureDiskStats>,
     index: CaptureIndex,
-    blob: Option<BlobServer>,
+    blob: Option<CaptureBlob>,
     events: mpsc::UnboundedSender<TelemetryPoint>,
 ) {
     let Some(dir) = cfg.dir.clone() else {
@@ -473,7 +486,7 @@ async fn handle_ctl(
     source: &str,
     stats: &Arc<CaptureDiskStats>,
     index: &CaptureIndex,
-    blob: &Option<BlobServer>,
+    blob: &Option<CaptureBlob>,
     events: &mpsc::UnboundedSender<TelemetryPoint>,
     retained: &mut Vec<RetainedFile>,
 ) {
@@ -605,7 +618,7 @@ async fn finalize_recording(
     source: &str,
     stats: &Arc<CaptureDiskStats>,
     index: &CaptureIndex,
-    blob: &Option<BlobServer>,
+    blob: &Option<CaptureBlob>,
     events: &mpsc::UnboundedSender<TelemetryPoint>,
     retained: &mut Vec<RetainedFile>,
 ) {
@@ -659,16 +672,24 @@ async fn finalize_recording(
     let disk_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
     // Serve as a TTL'd Tier-1 blob (see module docs on server coexistence).
+    // The record carries the id, this origin's *concrete* prefix, and the
+    // content root, so a consumer can fetch from a literal key (RFC 07 §3)
+    // and pin what it expects to receive (§2.1) — neither of which it can do
+    // from an id alone.
     let mut artifact_id = None;
+    let mut artifact_prefix = None;
+    let mut artifact_root = None;
     let mut expires_ms = None;
     let mut expires = None;
     if let Some(blob) = blob {
-        match register_blob(blob, &path, &filename).await {
-            Ok(id) => {
+        match register_blob(&blob.server, &path, &filename).await {
+            Ok(manifest) => {
                 expires_ms = Some(now_ms() + (cfg.artifact_ttl_secs as i64) * 1000);
                 expires =
                     Some(tokio::time::Instant::now() + Duration::from_secs(cfg.artifact_ttl_secs));
-                artifact_id = Some(id);
+                artifact_id = Some(manifest.id.clone());
+                artifact_prefix = Some(blob.prefix.clone());
+                artifact_root = Some(manifest.root.to_string());
             }
             Err(e) => {
                 tracing::warn!(error = %e, "netring: capture blob registration failed");
@@ -686,6 +707,8 @@ async fn finalize_recording(
         start_ms: rec.first_ts.map(epoch_ms).unwrap_or(0),
         end_ms: rec.last_ts.map(epoch_ms).unwrap_or(0),
         artifact_id: artifact_id.clone(),
+        artifact_prefix,
+        artifact_root,
         expires_ms,
         truncated: rec.truncated,
     };
@@ -715,30 +738,30 @@ async fn finalize_recording(
     let _ = events.send(crate::map::capture_event_point(source, "ready", &detail));
 }
 
-/// Compute the manifest and register the file on the blob server; the returned
-/// id is what the GUI downloads by.
-async fn register_blob(blob: &BlobServer, path: &Path, filename: &str) -> anyhow::Result<String> {
-    let id = ulid::Ulid::new().to_string();
-    let mut reader = tokio::fs::File::open(path).await?;
-    let manifest = Manifest::compute::<_, Sha256Digest>(
-        &mut reader,
-        &FixedSizeChunker::new(BLOB_CHUNK_SIZE),
-        id.clone(),
-        filename.to_string(),
-        now_ms(),
+/// Register the file on the blob server. The returned manifest carries both
+/// the id the GUI downloads by **and** the BLAKE3 root it must pin
+/// (RFC 07 §2.1).
+///
+/// Registration streams the file once to build its bao outboard and derives
+/// the manifest from that, so a served manifest cannot disagree with the
+/// bytes — the manifest is the result of registering, not an input to it.
+async fn register_blob(blob: &BlobServer, path: &Path, filename: &str) -> anyhow::Result<Manifest> {
+    blob.register_file(
+        BlobSpec::new(ulid::Ulid::new().to_string())
+            .filename(filename.to_string())
+            .chunk_size(BLOB_CHUNK_SIZE)
+            .created_ms(now_ms()),
+        path,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("manifest: {e}"))?;
-    blob.register(manifest, Arc::new(FileBlobSource::new(path)))
-        .await;
-    Ok(id)
+    .map_err(|e| anyhow::anyhow!("register blob: {e}"))
 }
 
 /// Evict oldest triggered files past the file-count / total-byte caps.
 async fn enforce_retention(
     cfg: &CaptureToDiskConfig,
     retained: &mut Vec<RetainedFile>,
-    blob: &Option<BlobServer>,
+    blob: &Option<CaptureBlob>,
     index: &CaptureIndex,
     stats: &CaptureDiskStats,
 ) {
@@ -751,7 +774,7 @@ async fn enforce_retention(
         }
         let victim = retained.remove(0);
         if let (Some(blob), Some(id)) = (blob.as_ref(), victim.artifact_id.as_ref()) {
-            blob.unregister(id).await;
+            blob.server.unregister(id).await;
         }
         let _ = std::fs::remove_file(&victim.path);
         stats.evictions.fetch_add(1, Ordering::Relaxed);
@@ -766,7 +789,7 @@ async fn enforce_retention(
 /// evicts it); clear the download affordance from the served index.
 async fn reap_expired_artifacts(
     retained: &mut [RetainedFile],
-    blob: &Option<BlobServer>,
+    blob: &Option<CaptureBlob>,
     index: &CaptureIndex,
     stats: &CaptureDiskStats,
 ) {
@@ -776,7 +799,7 @@ async fn reap_expired_artifacts(
             && exp <= now
         {
             if let Some(blob) = blob {
-                blob.unregister(&id).await;
+                blob.server.unregister(&id).await;
             }
             f.artifact_id = None;
             f.expires = None;

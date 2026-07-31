@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ulid::Ulid;
-use zblob::{BlobClient, CancelToken, Format, MemoryStore, TreeClient};
+use zblob::{BlobClient, CancelToken, DownloadRequest, MemoryStore, TreeClient};
 use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert,
 };
@@ -158,16 +158,38 @@ async fn report_and_snapshot_on_one_channel() {
     assert_eq!(manifest.id, report_id.to_string());
 
     let dest = tempfile::tempdir().unwrap();
-    let client = BlobClient::new(session.clone(), blob_prefix, Format::Json);
+    let path = dest.path().join("report.tar.zst");
+    let client = BlobClient::new(session.clone(), blob_prefix);
     let cancel = CancelToken::new();
-    let path = tokio::time::timeout(
+    // Pinned to the manifest's root, which is the shape every consumer uses
+    // (RFC 07 §2.1): the transfer fails rather than writing bytes whose
+    // identity does not match what was advertised.
+    let req = DownloadRequest::pinned(report_id.to_string(), manifest.root);
+    tokio::time::timeout(
         Duration::from_secs(10),
-        client.download_cancellable(&report_id.to_string(), dest.path(), &(), &cancel),
+        client.download_to(&req, &path, &(), &cancel),
     )
     .await
     .expect("blob download timed out")
     .expect("blob download failed");
     assert!(path.exists());
+
+    // The pin discriminates: a request for the same id under a *wrong* root
+    // must fail, or "pinned" would be decoration. Without this the happy path
+    // above passes whether or not the anchor is checked at all.
+    let wrong = DownloadRequest::pinned(report_id.to_string(), zblob::Hash::of(b"not the report"));
+    let decoy = dest.path().join("decoy.tar.zst");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            client.download_to(&wrong, &decoy, &(), &cancel),
+        )
+        .await
+        .expect("mispinned download timed out")
+        .is_err(),
+        "a mispinned request must be refused"
+    );
+    assert!(!decoy.exists(), "nothing may be written for a refused pin");
     // It's a valid tar.zst with the redacted config.
     let f = std::fs::File::open(&path).unwrap();
     let dec = zstd::Decoder::new(f).unwrap();
@@ -195,41 +217,76 @@ async fn report_and_snapshot_on_one_channel() {
     let reply = replies.recv_async().await.expect("snapshot request reply");
     assert!(reply.result().is_ok(), "snapshot refused: {reply:?}");
 
-    let (tree_id, store_prefix, tree_prefix) =
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(s) = poll_status(&session, &status_key).await
-                    && let Some(ArtifactState::Ready {
-                        delivery:
-                            Delivery::Tree {
-                                tree_id,
-                                store_prefix,
-                                tree_prefix,
-                                summary,
-                            },
-                        ..
-                    }) = kind_current(&s, "snapshot")
-                {
-                    assert_eq!(summary.file_count, 2);
-                    return (tree_id, store_prefix, tree_prefix);
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+    let (root, store_prefix, tree_prefix) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(s) = poll_status(&session, &status_key).await
+                && let Some(ArtifactState::Ready {
+                    delivery:
+                        Delivery::Tree {
+                            root,
+                            store_prefix,
+                            tree_prefix,
+                            summary,
+                        },
+                    ..
+                }) = kind_current(&s, "snapshot")
+            {
+                assert_eq!(summary.file_count, 2);
+                return (root, store_prefix, tree_prefix);
             }
-        })
-        .await
-        .expect("snapshot never became Ready");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("snapshot never became Ready");
+
+    // RFC 07 §2.3: the delivery names the tree by its own root, not by the
+    // caller-minted ULID that identifies the *artifact*. The two must not be
+    // confused — that confusion is what made a Tier-2 key mutable.
+    assert_ne!(
+        root.to_string(),
+        snap_id.to_string(),
+        "the tree key must be the content root, not the artifact id"
+    );
 
     let tdest = tempfile::tempdir().unwrap();
-    let tclient = TreeClient::new(session.clone(), store_prefix, tree_prefix, Format::Json);
-    let tstore = MemoryStore::new();
+    let tclient = TreeClient::new(session.clone(), store_prefix, tree_prefix);
+    let tstore: Arc<dyn zblob::ContentStore> = Arc::new(MemoryStore::new());
+    let cancel = CancelToken::new();
     tokio::time::timeout(
         Duration::from_secs(10),
-        tclient.download_tree(&tree_id, tdest.path(), &tstore),
+        tclient.download_tree(
+            &DownloadRequest::by_root(root),
+            tdest.path(),
+            &tstore,
+            &(),
+            &cancel,
+        ),
     )
     .await
     .expect("tree download timed out")
     .expect("tree download failed");
     assert_eq!(std::fs::read(tdest.path().join("a.txt")).unwrap(), b"alpha");
+
+    // `by_root` is pinned by construction, so a root nobody serves resolves to
+    // nothing rather than to whatever index happens to answer.
+    let bogus = tempfile::tempdir().unwrap();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            tclient.download_tree(
+                &DownloadRequest::by_root(zblob::Hash::of(b"no such tree")),
+                bogus.path(),
+                &tstore,
+                &(),
+                &cancel,
+            ),
+        )
+        .await
+        .expect("bogus-root download timed out")
+        .is_err(),
+        "an unserved root must not resolve to some other snapshot"
+    );
 }
 
 /// A producer that blocks until cancelled, to exercise cancel-mid-production.
