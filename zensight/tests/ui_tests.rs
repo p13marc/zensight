@@ -5499,8 +5499,14 @@ fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
         .map(|(_, t)| (*t).to_string())
         .expect("sysinfo registry");
 
-    // edge01 serves a bumped registry version; server01 serves ours.
-    let skewed = sysinfo_slice.replacen("version = \"1.3\"", "version = \"1.0\"", 1);
+    // edge01 serves a different registry version; server01 serves ours.
+    // Derive the current version line instead of hardcoding it, so a routine
+    // registry bump does not break this fixture.
+    let version_line = sysinfo_slice
+        .lines()
+        .find(|l| l.starts_with("version = "))
+        .expect("registry version line");
+    let skewed = sysinfo_slice.replacen(version_line, "version = \"0.0\"", 1);
     assert_ne!(skewed, sysinfo_slice, "the fixture must actually differ");
 
     let mut state = FleetState::default();
