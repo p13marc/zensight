@@ -263,8 +263,11 @@ async fn the_catalog_needs_its_own_storage_because_star_cannot_match_it() {
 #[ignore = "needs a real zenohd; run via `just router-verify`"]
 async fn blob_chunks_outlive_the_sensor_that_stored_them() {
     let _router = router_or_skip!("router-blob-storage.json5");
-    let chunk = "zensight/v1/h-aaaabbbbcccc/@blob/store/sha256/deadbeefcafe";
-    let tree = "zensight/v1/h-aaaabbbbcccc/@blob/tree/report-1";
+    // Keys spell the RFC 07 v1.7 shapes: `blake3` (the only algo zblob 0.2
+    // writes — pre-0.11 `sha256/` chunks are inert, not part of this claim)
+    // and a hex content root, never a name (`tree/report-1` is illegal now).
+    let chunk = "zensight/v1/h-aaaabbbbcccc/@blob/store/blake3/deadbeefcafe";
+    let tree = &format!("zensight/v1/h-aaaabbbbcccc/@blob/tree/{}", "ab".repeat(32));
     let bytes = b"chunk-bytes".to_vec();
 
     {

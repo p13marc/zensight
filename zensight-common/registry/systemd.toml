@@ -4,7 +4,7 @@
 # Source: src/map.rs, src/collector.rs (boot/manager/units), src/events.rs.
 
 [registry]
-version = "1.2"
+version = "1.3"
 app = "zensight"
 convention = 1
 
@@ -466,3 +466,29 @@ reply = "CgroupNode"
 idempotent = true
 since = "1.0"
 description = "cgroup subtree (?path=<rel>)"
+
+# The `@blob` plane (RFC 07 §2, RFC 08 §2 v1.8): every artifact-capable
+# sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2
+# snapshot TreeServer/store. Endpoints list what the server actually serves:
+# no `push` (never enabled — RFC 07 §2.2 keeps it off by default) and no
+# `fanout` (zblob feature off). Shapes must agree app-wide (every producer
+# declares the same three families); prose is per-producer.
+[[blob]]
+tier = "artifact"
+endpoints = ["manifest", "slice", "have"]
+reference = "ArtifactStatus"
+since = "1.3"
+description = "report bundles from the artifact channel"
+
+[[blob]]
+tier = "tree"
+reference = "ArtifactStatus"
+since = "1.3"
+description = "snapshot directory indexes, keyed by their own root hash"
+
+[[blob]]
+tier = "store"
+algo = "blake3"
+reference = "ArtifactStatus"
+since = "1.3"
+description = "content-addressed chunks backing the snapshot trees"

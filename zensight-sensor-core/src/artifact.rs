@@ -628,7 +628,18 @@ impl ArtifactChannel {
                 // `@blob` key.
                 let index = index.keyed_by_root();
                 let root: Hash = index.root_hash;
-                debug_assert!(index.is_content_addressed());
+                // RFC 07 §2.3, checked in release builds too (was a
+                // debug_assert): a snapshot whose key is not its own content
+                // root must fail the job, not get served — zenkey's
+                // ContentHash is the arbiter of what spells a legal tree key.
+                if !index.is_content_addressed()
+                    || zenkey::ContentHash::parse(&root.to_string()).is_err()
+                {
+                    anyhow::bail!(
+                        "tree index is not content-addressed — refusing to serve a name \
+                         as a @blob/tree key (root {root})"
+                    );
+                }
                 tree_server.register(index).await;
 
                 let state = ArtifactState::Ready {

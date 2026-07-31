@@ -484,9 +484,9 @@ pub enum Message {
         /// literal origin (RFC 07 §3); this is where the GUI learns which one
         /// instead of wildcarding because it does not know.
         blob_prefix: String,
-        /// Hex BLAKE3 root to pin the transfer to (RFC 07 §2.1), when the
-        /// sensor served one.
-        root: Option<String>,
+        /// BLAKE3 root to pin the transfer to (RFC 07 §2.1), when the sensor
+        /// served one — already hex-validated at the wire (`ContentHash`).
+        root: Option<zenkey::ContentHash>,
         filename: String,
     },
     /// Fetch the on-demand sysinfo process explorer for the selected host,

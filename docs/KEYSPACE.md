@@ -72,6 +72,11 @@ zensight/v1/@catalog/…                                   the identity catalog
   `…/@rpc/<producer>/introspect` — and the GUI's **Fleet** view calls it, parsing
   the reply into a `zensight_keyspace::RegistrySlice` and diffing it against the
   slice it compiled in. RFC 08 §6: a disagreement is a *finding*, not an ambiguity.
+  Since zenkey 0.4 the registry also declares the **`@blob` tiers** each producer
+  serves (`[[blob]]` entries, RFC 08 §2 v1.8): all ten artifact-capable sensors
+  declare `artifact`/`tree`/`store` (blake3), so the slice answers "does this
+  producer serve blobs?" and the generated `zensight_common::registry::blob`
+  module carries the typed key builders.
 - **The registry is load-bearing.** Publishing a telemetry subject that is not
   registered panics in debug builds and warns once per name in release
   (`zensight_common::metric_guard`). This is only meaningful because the six host
