@@ -2268,7 +2268,7 @@ mod tests {
                 // A servable record names the origin holding it and the root
                 // to pin — a bulk fetch may not wildcard the origin (RFC 07 §3).
                 artifact_prefix: Some("v1/h-3fa9c2d41b7e/@blob/artifact".into()),
-                artifact_root: Some("ab".repeat(32)),
+                artifact_root: Some(zenkey::ContentHash::parse(&"ab".repeat(32)).unwrap()),
                 ..Default::default()
             },
             CaptureRecord {

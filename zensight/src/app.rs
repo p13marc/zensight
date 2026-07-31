@@ -3711,7 +3711,7 @@ impl ZenSight {
         producer: String,
         artifact_id: String,
         blob_prefix: String,
-        root: Option<String>,
+        root: Option<zenkey::ContentHash>,
         filename: String,
     ) -> Option<Task<Message>> {
         if self.artifact_fetch.is_busy() {
@@ -3731,10 +3731,12 @@ impl ZenSight {
         // lives, and a `*` origin would make every holder ship the whole
         // payload (RFC 07 §3). The root, when the sensor served one, pins the
         // transfer so a wrong reply is dropped before it reaches disk (§2.1).
-        let root = root.and_then(|hex| match hex.parse::<zblob::Hash>() {
+        // `ContentHash` already guaranteed hex at the wire; the residual check
+        // is only that it is a 32-byte blake3 digest and not some other size.
+        let root = root.and_then(|r| match r.as_str().parse::<zblob::Hash>() {
             Ok(h) => Some(h),
             Err(e) => {
-                tracing::warn!(error = %e, "capture record carried an unparseable root");
+                tracing::warn!(error = %e, "capture record carried a non-blake3-sized root");
                 None
             }
         });

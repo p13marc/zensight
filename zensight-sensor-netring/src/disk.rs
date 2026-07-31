@@ -689,7 +689,10 @@ async fn finalize_recording(
                     Some(tokio::time::Instant::now() + Duration::from_secs(cfg.artifact_ttl_secs));
                 artifact_id = Some(manifest.id.clone());
                 artifact_prefix = Some(blob.prefix.clone());
-                artifact_root = Some(manifest.root.to_string());
+                artifact_root = Some(
+                    zenkey::ContentHash::parse(&manifest.root.to_string())
+                        .expect("a blake3 root displays as 64-char lowercase hex"),
+                );
             }
             Err(e) => {
                 tracing::warn!(error = %e, "netring: capture blob registration failed");

@@ -154,8 +154,12 @@ pub fn fleet_command_key(producer: &str, topic: &str) -> String {
 // `*`-origin *probe* with tiny replies (`have`/`manifest`) — but a probe
 // prefix and a fetch prefix are interchangeable as strings, which is exactly
 // how the first becomes the second, so a probe helper belongs behind a
-// distinct type (zenkey's `BlobProbePrefix`) rather than as another `String`
-// here.
+// distinct type rather than as another `String` here. Since zenkey 0.4 that
+// type exists: `zenkey::BlobProbePrefix` (deliberately not convertible to a
+// `Key`), reachable as `registry::blob::Tier::probe()`. Nothing probes yet;
+// when something does, its helper goes next to the tier builders in
+// `command.rs`, not in this file (the guard test below scans this file's
+// source and rightly refuses any `@blob` + `*` spelling).
 
 /// Caller-side single-host procedure key (RFC 05 §2): GET
 /// `<base>/v1/<origin>/@rpc/<producer>/<procedure...>` reaches exactly one

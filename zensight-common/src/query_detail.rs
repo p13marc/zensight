@@ -290,11 +290,14 @@ pub struct CaptureRecord {
     /// was already known one hop upstream and simply thrown away here.
     #[serde(default)]
     pub artifact_prefix: Option<String>,
-    /// Hex BLAKE3 root of the capture file — the integrity anchor a downloader
+    /// BLAKE3 root of the capture file — the integrity anchor a downloader
     /// pins so a wrong or tampered reply is discarded *before* it reaches disk
-    /// (RFC 07 §2.1) rather than assembled and detected afterwards.
+    /// (RFC 07 §2.1) rather than assembled and detected afterwards. Typed as
+    /// [`zenkey::ContentHash`] since zenkey 0.4, so a name or malformed hex
+    /// fails at deserialization instead of at the consumer's re-parse; the
+    /// wire shape stays the plain hex string 0.10 sensors sent.
     #[serde(default)]
-    pub artifact_root: Option<String>,
+    pub artifact_root: Option<zenkey::ContentHash>,
     /// When the served artifact expires (epoch ms); `None` when not served.
     #[serde(default)]
     pub expires_ms: Option<i64>,

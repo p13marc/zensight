@@ -62,6 +62,16 @@ form is gone with `key_prefix` (#465), and the origin is derived, never passed:
 | `artifact_store_prefix(producer)` | `zensight/v1/<origin>/@blob/store` (Tier-2 chunks) |
 | `artifact_tree_prefix(prefix)` | `zensight/v1/<origin>/@blob/tree` (Tier-2 index) |
 
+Since zenkey 0.4 the `@blob` tiers are also **declared in the registry**
+(`[[blob]]` entries, RFC 08 §2 v1.8): every artifact-capable producer's TOML
+names the tiers it serves, so `introspect` slices answer "does this producer
+serve blobs?" per producer and `zenctl` can see the blob surface without
+probing. The generated app-level module is `zensight_common::registry::blob`
+(`Tier::{Artifact,Tree,Store}`, typed key builders over
+`zenkey::ContentHash`, and `Tier::probe()` → `BlobProbePrefix`, the RFC 07
+§2.5 probe form that deliberately does not convert into a fetchable key). The
+three prefix helpers above remain the producer-side entry points.
+
 ## Producer-side keys — `zensight_keyspace::V1Context`
 
 Producers (sensors) build their own keys through `V1Context` (re-exported as
