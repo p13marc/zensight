@@ -555,6 +555,12 @@ pub enum Message {
         device: String,
         table: zensight_common::InterfaceTable,
     },
+    /// The static host-facts doc from `state/sysinfo/system/info` — LWW per
+    /// origin; feeds the sysinfo detail header + System information card.
+    SystemInfoReceived {
+        origin: String,
+        info: zensight_common::SystemInfo,
+    },
     /// A durable SNMP trap/inform record off the events plane (#536).
     SnmpEventReceived(zensight_common::EventRecord),
     /// SNMP device view: interface-table sort/filter/paging (#530).

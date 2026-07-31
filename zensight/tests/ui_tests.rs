@@ -63,7 +63,6 @@ fn test_dashboard_empty() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -99,7 +98,6 @@ fn test_dashboard_with_devices() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -139,7 +137,6 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -156,13 +153,11 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
     );
 }
 
-/// A device card renders its trend-badge + sparkline strip when sparks are
-/// provided. The badge text ("+50.0%") is searchable in the simulator (#24).
+/// A host card shows the self-reported system information line (os-release
+/// name · kernel · arch) from its entity — the replacement for the retired
+/// sparkline strip, which was too small to read.
 #[test]
-fn test_dashboard_card_shows_trend_badge() {
-    use zensight::store::Sample;
-    use zensight::view::trend::{self, DeviceSparks, MetricSpark};
-
+fn test_dashboard_card_shows_system_info_line() {
     let mut state = DashboardState::default();
     state.connected = true;
     let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
@@ -171,29 +166,16 @@ fn test_dashboard_card_shows_trend_badge() {
     device.is_healthy = true;
     state.devices.insert(device_id.clone(), device);
 
-    // A rising series: 100 -> 150 == +50%.
-    let samples = vec![
-        Sample {
-            ts: 0,
-            value: 100.0,
-        },
-        Sample {
-            ts: 1,
-            value: 150.0,
-        },
-    ];
-    let spark = MetricSpark {
-        metric: "cpu/usage".to_string(),
-        values: samples.iter().map(|s| s.value).collect(),
-        trend: trend::compute(&samples),
-    };
-    let mut sparks = DeviceSparks::new();
-    sparks.insert(device_id, vec![spark]);
+    let mut entities = zensight::entity::EntityStore::default();
+    let mut entity = test_entity("h_srv01", "server01", &[("sysinfo", "server01")]);
+    entity.os_name = Some("Fedora Linux 42".to_string());
+    entity.kernel = Some("6.15.3".to_string());
+    entity.arch = Some("x86_64".to_string());
+    entities.upsert(entity);
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
-    let entities = zensight::entity::EntityStore::default();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
@@ -202,16 +184,56 @@ fn test_dashboard_card_shows_trend_badge() {
         &groups,
         &overview,
         &sensor_health,
-        sparks,
         &entities,
         &firing,
         true,
     ));
 
     assert!(ui.find("server01").is_ok());
-    assert!(ui.find("cpu/usage").is_ok());
-    // Trend badge: up arrow + signed percent.
-    assert!(ui.find("\u{2191} +50.0%").is_ok());
+    assert!(
+        ui.find("Fedora Linux 42 · kernel 6.15.3 · x86_64").is_ok(),
+        "the card must show the self-reported OS line"
+    );
+}
+
+/// Without self-reported OS facts the card falls back to the wire-observed
+/// vendor/platform line (#314) — third-party gear never self-reports.
+#[test]
+fn test_dashboard_card_falls_back_to_wire_identity() {
+    let mut state = DashboardState::default();
+    state.connected = true;
+    let device_id = DeviceId::fixture(Protocol::Snmp, "core-sw-1".to_string());
+    let mut device = DeviceState::new(device_id.clone());
+    device.metric_count = 1;
+    device.is_healthy = true;
+    state.devices.insert(device_id.clone(), device);
+
+    let mut entities = zensight::entity::EntityStore::default();
+    let mut entity = test_entity("h_sw1", "core-sw-1", &[("snmp", "core-sw-1")]);
+    entity.vendor = Some("cisco".to_string());
+    entity.platform = Some("IOS XE".to_string());
+    entities.upsert(entity);
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let sensor_health = HashMap::new();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+        &sensor_health,
+        &entities,
+        &firing,
+        true,
+    ));
+
+    assert!(
+        ui.find("seen on the wire as cisco · IOS XE").is_ok(),
+        "wire identity must survive as the fallback line"
+    );
 }
 
 /// The global search panel renders matching results and a Close button (#27).
@@ -587,7 +609,6 @@ fn test_host_card_disambiguates_same_protocol_facets() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -604,7 +625,6 @@ fn test_host_card_disambiguates_same_protocol_facets() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -1254,7 +1274,6 @@ fn test_overview_section_renders() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -1303,7 +1322,6 @@ fn test_overview_protocol_tab_click() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -1356,7 +1374,6 @@ fn test_overview_collapse_toggle() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -4133,7 +4150,6 @@ fn test_host_card_renders_entity_members() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -4170,7 +4186,6 @@ fn test_dashboard_empty_entity_store_degraded_parity() {
         &groups,
         &overview,
         &sensor_health,
-        zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
         true,
@@ -4673,6 +4688,50 @@ fn sysinfo_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDe
         state.update(sysinfo_point(metric, value.clone()));
     }
     state
+}
+
+/// The System information card renders the static host facts doc, and the
+/// header shows the OS instead of "Unknown OS". Absent doc ⇒ no card, header
+/// keeps the honest fallback (zero ≠ absent).
+#[test]
+fn sysinfo_system_information_card_renders_from_the_doc() {
+    let mut state = sysinfo_state(&[]);
+    state.sysinfo_detail.system_info = Some(zensight_common::SystemInfo {
+        os_pretty_name: Some("Fedora Linux 42 (Workstation Edition)".into()),
+        os_id: Some("fedora".into()),
+        os_version: Some("42".into()),
+        kernel: Some("6.15.3-200.fc42.x86_64".into()),
+        arch: Some("x86_64".into()),
+        hostname: Some("server01".into()),
+        timestamp: 1,
+        ..Default::default()
+    });
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("System information").is_ok());
+    // Header + card both carry the display name.
+    assert!(
+        ui.find("Fedora Linux 42 (Workstation Edition)").is_ok(),
+        "the header must show the real OS, not Unknown OS"
+    );
+    assert!(ui.find("fedora 42").is_ok());
+    assert!(ui.find("6.15.3-200.fc42.x86_64").is_ok());
+    assert!(ui.find("x86_64").is_ok());
+    assert!(ui.find("Unknown OS").is_err());
+}
+
+#[test]
+fn sysinfo_without_the_doc_keeps_unknown_os_and_no_card() {
+    let state = sysinfo_state(&[]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("Unknown OS").is_ok());
+    assert!(
+        ui.find("System information").is_err(),
+        "no doc ⇒ no card — absence is a fact, not empty rows"
+    );
 }
 
 /// A labelled telemetry point for [`sysinfo_state_labeled`]: `(metric, value,

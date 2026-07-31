@@ -35,16 +35,22 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let disk_section = render_disk_section(state);
     let network_section = render_network_section(state);
 
-    let mut content = column![
-        header,
+    let mut content = column![header].spacing(space::MD).padding(space::LG);
+
+    // Static host facts (`state/sysinfo/system/info`), first card: rendered
+    // only when the doc exists — absence (old sensor, collection off) is a
+    // fact, not a card of empty rows.
+    if state.sysinfo_detail.system_info.is_some() {
+        content = content.push(card(render_system_information(state)));
+    }
+
+    let mut content = content.extend([
         card(system_overview),
         card(cpu_section),
         card(memory_section),
         card(disk_section),
         card(network_section),
-    ]
-    .spacing(space::MD)
-    .padding(space::LG);
+    ]);
 
     // Linux-specific sections (only show if data is present)
     if has_cpu_times(state) {
@@ -111,9 +117,13 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
     let host_name = text(&state.device_id.source).size(24);
 
-    // Try to get OS info
-    let os_info = get_metric_text(state, "system/os_name")
-        .or_else(|| get_metric_text(state, "system/kernel_version"))
+    // OS identity off the static host-facts doc (`state/sysinfo/system/info`).
+    // Absent doc (old sensor, `collect.system_info` off) ⇒ "Unknown OS".
+    let os_info = state
+        .sysinfo_detail
+        .system_info
+        .as_ref()
+        .and_then(|si| si.display_name())
         .unwrap_or_else(|| "Unknown OS".to_string());
 
     let os_text = text(os_info).size(14).style(|t: &Theme| text::Style {
@@ -204,6 +214,57 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     container(Row::with_children(info_items).spacing(30))
+        .padding(10)
+        .style(section_style)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Render the static host facts (`state/sysinfo/system/info`): os-release
+/// identity, kernel, arch, hostname. Only called when the doc is present.
+fn render_system_information(state: &DeviceDetailState) -> Element<'_, Message> {
+    let Some(si) = state.sysinfo_detail.system_info.as_ref() else {
+        return empty_state("No system information", None);
+    };
+
+    let title = row![
+        icons::info(IconSize::Medium),
+        text("System information").size(16)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+    let mut push = |label: &'static str, value: Option<String>| {
+        if let Some(v) = value {
+            items.push(
+                row![
+                    text(label).size(12).style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    }),
+                    text(v).size(12)
+                ]
+                .spacing(8)
+                .into(),
+            );
+        }
+    };
+    push("OS:", si.display_name());
+    // Distro id + version only when they add something over the display name.
+    push(
+        "Distro:",
+        match (si.os_id.as_deref(), si.os_version.as_deref()) {
+            (Some(id), Some(v)) => Some(format!("{id} {v}")),
+            (Some(id), None) => Some(id.to_string()),
+            _ => None,
+        },
+    );
+    push("Codename:", si.os_codename.clone());
+    push("Kernel:", si.kernel.clone());
+    push("Arch:", si.arch.clone());
+    push("Hostname:", si.hostname.clone());
+
+    container(column![title, Row::with_children(items).spacing(30).wrap()].spacing(10))
         .padding(10)
         .style(section_style)
         .width(Length::Fill)

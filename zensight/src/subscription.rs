@@ -728,6 +728,11 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                 Message::SnmpInterfaceTable { device, table }
             })
         }
+        ZensightState::SysinfoSystemInfo => {
+            decode!(zensight_common::SystemInfo, |info| {
+                Message::SystemInfoReceived { origin, info }
+            })
+        }
         ZensightState::Common(CommonState::CatalogEntity { .. }) => {
             decode!(HostEntity, Message::EntityReceived)
         }
@@ -899,6 +904,15 @@ pub fn demo_subscription() -> Subscription<Message> {
                 if tick_count.is_multiple_of(30) {
                     for entity in simulator.generate_entities(now) {
                         yield Message::EntityReceived(entity);
+                    }
+                    // Static host facts for the sysinfo hosts (LWW per origin),
+                    // so the sysinfo drill-down shows the System information
+                    // card in demo mode too.
+                    for host in ["server01", "server02", "server03", "database01"] {
+                        yield Message::SystemInfoReceived {
+                            origin: crate::mock::entity_id_for(host),
+                            info: crate::mock::system_info_for(host, now),
+                        };
                     }
                 }
 

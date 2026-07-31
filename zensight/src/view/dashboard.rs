@@ -476,7 +476,6 @@ pub fn dashboard_view<'a>(
     groups: &'a GroupsState,
     overview: &'a OverviewState,
     sensor_health: &'a HashMap<String, HealthSnapshot>,
-    mut sparks: crate::view::trend::DeviceSparks,
     entities: &'a EntityStore,
     firing_by_source: &'a HashMap<String, usize>,
     group_by_host: bool,
@@ -503,14 +502,7 @@ pub fn dashboard_view<'a>(
         &state.snmp_interfaces,
         &state.snmp_events,
     );
-    let devices = render_device_grid(
-        state,
-        groups,
-        &filtered,
-        &mut sparks,
-        store,
-        firing_by_source,
-    );
+    let devices = render_device_grid(state, groups, &filtered, store, firing_by_source);
 
     let content = column![
         header,
@@ -907,7 +899,6 @@ fn render_device_grid<'a>(
     state: &'a DashboardState,
     groups: &'a GroupsState,
     filtered: &[&'a DeviceState],
-    sparks: &mut crate::view::trend::DeviceSparks,
     entities: &'a EntityStore,
     firing_by_source: &'a HashMap<String, usize>,
 ) -> Element<'a, Message> {
@@ -947,10 +938,7 @@ fn render_device_grid<'a>(
             } else {
                 &[]
             };
-            (
-                render_host_cards(page, groups, sparks, firing_by_source),
-                total,
-            )
+            (render_host_cards(page, groups, firing_by_source), total)
         }
         DashboardViewMode::Table => {
             let total = all_devices.len();
@@ -999,31 +987,18 @@ const CARD_MIN_WIDTH: f32 = 350.0;
 fn render_host_cards<'a>(
     hosts: &[crate::view::host::Host<'a>],
     groups: &'a GroupsState,
-    sparks: &mut crate::view::trend::DeviceSparks,
     firing_by_source: &'a HashMap<String, usize>,
 ) -> Element<'a, Message> {
     let cards: Vec<Element<'a, Message>> = hosts
         .iter()
         .map(|host| {
-            // Merge each facet's spark strip into one host-level strip.
-            let mut merged: Vec<crate::view::trend::MetricSpark> = Vec::new();
-            for facet in &host.facets {
-                if let Some(s) = sparks.remove(&facet.id) {
-                    merged.extend(s);
-                }
-            }
-            let merged = if merged.is_empty() {
-                None
-            } else {
-                Some(merged)
-            };
             // Roll up firing alerts across all of the host's facet sources.
             let alert_count: usize = host
                 .facets
                 .iter()
                 .map(|f| firing_by_source.get(&f.id.source).copied().unwrap_or(0))
                 .sum();
-            render_host_card(host, groups, merged, alert_count)
+            render_host_card(host, groups, alert_count)
         })
         .collect();
 
@@ -1040,7 +1015,6 @@ fn render_host_cards<'a>(
 fn render_host_card<'a>(
     host: &crate::view::host::Host<'a>,
     groups: &'a GroupsState,
-    sparks: Option<Vec<crate::view::trend::MetricSpark>>,
     alert_count: usize,
 ) -> Element<'a, Message> {
     let primary = host.primary();
@@ -1169,30 +1143,33 @@ fn render_host_card<'a>(
                 .size(11)
                 .style(move |_: &Theme| text::Style { color: Some(color) }),
         );
-        // Reverse wire affordance (#314): the correlator fused observed-asset
-        // evidence (vendor/platform from ARP/LLDP/CDP) into this entity — show
-        // what the wire says this host *is*.
-        let wire: Vec<&str> = [entity.vendor.as_deref(), entity.platform.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect();
-        if !wire.is_empty() {
-            card_content = card_content.push(
-                text(format!("seen on the wire as {}", wire.join(" · ")))
-                    .size(11)
-                    .style(|t: &Theme| text::Style {
-                        color: Some(crate::view::theme::colors(t).text_muted()),
-                    }),
-            );
+        // One identity line per host. Preferred: the self-reported system
+        // information (os-release name, kernel, arch off the evidence plane).
+        // Fallback for hosts that never self-report (switches, SNMP gear):
+        // the reverse wire affordance (#314) — what ARP/LLDP/CDP/sysDescr
+        // says this host *is*.
+        let os_parts: Vec<String> = [
+            entity.os_name.clone(),
+            entity.kernel.as_ref().map(|k| format!("kernel {k}")),
+            entity.arch.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let identity_line = if !os_parts.is_empty() {
+            Some(os_parts.join(" · "))
+        } else {
+            let wire: Vec<&str> = [entity.vendor.as_deref(), entity.platform.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect();
+            (!wire.is_empty()).then(|| format!("seen on the wire as {}", wire.join(" · ")))
+        };
+        if let Some(line) = identity_line {
+            card_content = card_content.push(text(line).size(11).style(|t: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(t).text_muted()),
+            }));
         }
-    }
-
-    if let Some(sparks) = sparks.filter(|s| !s.is_empty()) {
-        let mut spark_col = Column::new().spacing(2);
-        for spark in sparks {
-            spark_col = spark_col.push(crate::view::trend::card_metric_spark::<Message>(spark));
-        }
-        card_content = card_content.push(spark_col);
     }
 
     let card_button = button(card_content)

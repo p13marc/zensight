@@ -22,6 +22,8 @@ pub enum ZensightState<'a> {
     CatalogAssertion { id: &'a str },
     /// SNMP `state/snmp/{device}/interfaces` — joined interface table (#529).
     SnmpInterfaces { device: &'a str },
+    /// Sysinfo `state/sysinfo/system/info` — static host facts.
+    SysinfoSystemInfo,
 }
 
 impl<'a> ZensightState<'a> {
@@ -39,6 +41,9 @@ impl<'a> ZensightState<'a> {
             }
             AnySubject::Snmp(registry::snmp::Subject::Interfaces { device }) => {
                 Some(ZensightState::SnmpInterfaces { device })
+            }
+            AnySubject::Sysinfo(registry::sysinfo::Subject::SystemInfo) => {
+                Some(ZensightState::SysinfoSystemInfo)
             }
             AnySubject::Gnmi(registry::gnmi::Subject::Artifact { kind })
             | AnySubject::Logs(registry::logs::Subject::Artifact { kind })

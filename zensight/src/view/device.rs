@@ -845,8 +845,20 @@ fn entity_identity_details(entity: &HostEntity) -> Element<'static, Message> {
     if let Some(v) = &entity.vendor {
         facts.push(format!("vendor: {v}"));
     }
-    if let Some(p) = &entity.platform {
+    // Self-reports mirror os_name into platform for compat — skip the echo.
+    if let Some(p) = &entity.platform
+        && entity.os_name.as_deref() != Some(p.as_str())
+    {
         facts.push(format!("platform: {p}"));
+    }
+    if let Some(os) = &entity.os_name {
+        facts.push(format!("OS: {os}"));
+    }
+    if let Some(k) = &entity.kernel {
+        facts.push(format!("kernel: {k}"));
+    }
+    if let Some(a) = &entity.arch {
+        facts.push(format!("arch: {a}"));
     }
     if !entity.names.is_empty() {
         let names: Vec<String> = entity

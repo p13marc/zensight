@@ -909,6 +909,23 @@ pub mod bandwidth {
     }
 }
 
+/// Mock static host facts (`state/sysinfo/system/info`) for a demo sysinfo
+/// host, consistent with the OS the mock entities claim.
+pub fn system_info_for(host: &str, now: i64) -> zensight_common::SystemInfo {
+    zensight_common::SystemInfo {
+        os_pretty_name: Some("Fedora Linux 42 (Workstation Edition)".to_string()),
+        os_name: Some("Fedora Linux".to_string()),
+        os_id: Some("fedora".to_string()),
+        os_version: Some("42".to_string()),
+        os_codename: None,
+        kernel: Some("6.15.3-200.fc42.x86_64".to_string()),
+        arch: Some("x86_64".to_string()),
+        hostname: Some(host.to_string()),
+        boot_time_ms: Some(now - 86_400_000),
+        timestamp: now,
+    }
+}
+
 /// Mock correlator host entities (#306), consistent with the sources emitted by
 /// [`mock_environment`]: server01 (sysinfo+logs+netlink) and server02
 /// (sysinfo+netlink) each merge into one host, and a wire-only entity models a

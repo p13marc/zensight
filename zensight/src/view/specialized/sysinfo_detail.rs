@@ -111,6 +111,11 @@ pub struct SysinfoDetailState {
     /// Active pid pivot (#313): filters the explorer to one process, with the
     /// stale-generation guard. `None` = normal explorer.
     pub pid_filter: Option<PidFilter>,
+    /// Static host facts (`state/sysinfo/system/info`), seeded from the
+    /// app-level per-origin map on select and refreshed on receipt. `None` =
+    /// the sensor never published one (old sensor, or `collect.system_info`
+    /// off) — the view renders absence, not zeros.
+    pub system_info: Option<zensight_common::SystemInfo>,
 }
 
 impl SysinfoDetailState {

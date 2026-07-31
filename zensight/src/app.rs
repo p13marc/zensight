@@ -177,6 +177,10 @@ pub struct ZenSight {
     /// Known sensor instances, keyed by `<name>@<source>` (one sensor can run
     /// on many hosts).
     known_sensors: std::collections::HashMap<String, SensorInfo>,
+    /// Static host facts per origin (`state/sysinfo/system/info`, LWW) —
+    /// seeds the sysinfo detail view when a device is opened after the doc
+    /// arrived.
+    system_info: std::collections::HashMap<String, zensight_common::SystemInfo>,
     /// Toast notification state.
     toasts: ToastState,
     /// Live Zenoh session handle (set on connect) for sending commands to
@@ -235,12 +239,6 @@ pub struct ZenSight {
     /// Favorited metrics (#27), keyed `protocol/source/metric`. Persisted; the
     /// per-device projection is pushed into the device detail state on selection.
     favorites: std::collections::HashSet<String>,
-    /// Cached dashboard-card sparklines, rebuilt once per tick (not per frame).
-    /// `view()` used to call `build_device_sparks` on every render; under a high
-    /// telemetry rate that pegged the single UI thread (the startup freeze).
-    /// Now the (indexed, O(device)) build runs at 1 Hz in `handle_tick`, and the
-    /// render just clones this small truncated result.
-    dashboard_sparks: crate::view::trend::DeviceSparks,
     /// Firing external-alert counts keyed by source, for the dashboard host-card
     /// alert rollup (#306). Rebuilt at 1 Hz in `handle_tick`.
     firing_by_source: std::collections::HashMap<String, usize>,
@@ -389,6 +387,7 @@ impl ZenSight {
             sensor_health: std::collections::HashMap::new(),
             recent_errors: std::collections::HashMap::new(),
             known_sensors: std::collections::HashMap::new(),
+            system_info: std::collections::HashMap::new(),
             toasts: ToastState::default(),
             session: None,
             command_registry: None,
@@ -420,7 +419,6 @@ impl ZenSight {
             command_palette: crate::view::palette::CommandPaletteState::default(),
             help_open: false,
             favorites: persistent.favorite_metrics.iter().cloned().collect(),
-            dashboard_sparks: crate::view::trend::DeviceSparks::new(),
             firing_by_source: std::collections::HashMap::new(),
         };
 
@@ -1605,6 +1603,16 @@ impl ZenSight {
                     } = selected;
                     snmp_detail.apply_interfaces(table, metrics);
                 }
+            }
+            Message::SystemInfoReceived { origin, info } => {
+                // LWW per origin; the open sysinfo view consumes it live.
+                if let Some(selected) = self.selected_device.as_mut()
+                    && selected.device_id.protocol == zensight_common::Protocol::Sysinfo
+                    && selected.device_id.origin == origin
+                {
+                    selected.sysinfo_detail.system_info = Some(info.clone());
+                }
+                self.system_info.insert(origin, info);
             }
             Message::SnmpEventReceived(record) => {
                 // Selected SNMP device gets its own ring for the Events card.
@@ -3526,15 +3534,6 @@ impl ZenSight {
     /// Set the current view.
     fn set_view(&mut self, view: CurrentView) {
         self.current_view = view;
-        // Populate card sparklines immediately on entering a grid view so they
-        // don't blink empty for up to a tick (they're otherwise rebuilt at 1 Hz).
-        if self.on_dashboard_grid() {
-            self.dashboard_sparks = crate::view::trend::build_device_sparks(
-                &self.store,
-                self.dashboard.devices.keys(),
-                2,
-            );
-        }
     }
 
     /// Focus the appropriate search input based on current view.
@@ -6154,16 +6153,6 @@ impl ZenSight {
         // alerts (anomalies + expectation violations).
         let unack = self.alerts.unacknowledged_count + self.alerts.external_count();
 
-        // Per-card sparkline previews (#24). Built at 1 Hz in `handle_tick` and
-        // cached in `dashboard_sparks` — rendering just clones the small (≤2
-        // metrics/device) result rather than rescanning the store every frame,
-        // which is what pegged the UI thread under a high telemetry rate.
-        let sparks = if self.on_dashboard_grid() {
-            self.dashboard_sparks.clone()
-        } else {
-            crate::view::trend::DeviceSparks::new()
-        };
-
         let main_view: Element<'_, Message> = match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
             CurrentView::Alerts => alerts_view(&self.alerts),
@@ -6318,7 +6307,6 @@ impl ZenSight {
                         &self.groups,
                         &self.overview,
                         &self.sensor_health,
-                        sparks,
                         &self.entities,
                         &self.firing_by_source,
                         self.settings.group_by_host,
@@ -6332,7 +6320,6 @@ impl ZenSight {
                 &self.groups,
                 &self.overview,
                 &self.sensor_health,
-                sparks,
                 &self.entities,
                 &self.firing_by_source,
                 self.settings.group_by_host,
@@ -6855,6 +6842,8 @@ impl ZenSight {
         // the Focus control is armed the moment a device can be selected at all.
         detail_state.focused = self.link.focus.as_deref() == Some(device_id.origin.as_str());
         detail_state.origin = Some(device_id.origin.clone());
+        // Seed the static host facts if the doc arrived before this open.
+        detail_state.sysinfo_detail.system_info = self.system_info.get(&device_id.origin).cloned();
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
         // Project firing anomalies for this source into the netring view (#253).
@@ -7091,15 +7080,6 @@ impl ZenSight {
     }
 
     /// Handle periodic tick (update health status, etc.).
-    /// Whether the current view renders the device-card grid (which needs the
-    /// sparkline previews). Dashboard, or the Device route with no device open.
-    fn on_dashboard_grid(&self) -> bool {
-        matches!(
-            self.current_view,
-            CurrentView::Dashboard | CurrentView::Device
-        ) && !(self.current_view == CurrentView::Device && self.selected_device.is_some())
-    }
-
     fn handle_tick(&mut self) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -7108,19 +7088,6 @@ impl ZenSight {
 
         for device in self.dashboard.devices.values_mut() {
             device.update_health(now, self.stale_threshold_ms);
-        }
-
-        // Rebuild the dashboard-card sparklines at 1 Hz (only when a card grid is
-        // actually showing), so the per-frame render just clones the cached result
-        // instead of rescanning the store on every redraw (startup-freeze fix).
-        if self.on_dashboard_grid() {
-            self.dashboard_sparks = crate::view::trend::build_device_sparks(
-                &self.store,
-                self.dashboard.devices.keys(),
-                2,
-            );
-        } else if !self.dashboard_sparks.is_empty() {
-            self.dashboard_sparks.clear();
         }
 
         // Bound the device map over long sessions: reap devices gone for a day

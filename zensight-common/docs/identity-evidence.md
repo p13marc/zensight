@@ -57,6 +57,10 @@ pub struct HostEvidence {
     pub macs: Vec<String>,            // merge evidence, not identity (VMs clone MACs)
     pub vendor: Option<String>,       // descriptive / display-only
     pub platform: Option<String>,     // descriptive / display-only
+    pub os_name: Option<String>,      // self-reported os-release display name (descriptive)
+    pub os_version: Option<String>,   // os-release VERSION_ID (descriptive)
+    pub kernel: Option<String>,       // kernel release (descriptive)
+    pub arch: Option<String>,         // CPU architecture (descriptive)
     pub container_id: Option<String>, // #311 — host-scoped qualifier, never a merge key
     pub cloud: Option<CloudFacts>,    // #311 — authoritative when present
     pub last_updated: i64,
@@ -117,6 +121,10 @@ pub struct HostEntity {
     pub names: Vec<NameVal>,        // attached from the passive-DNS name map
     pub vendor: Option<String>,
     pub platform: Option<String>,
+    pub os_name: Option<String>,    // representative()-picked, self-report first
+    pub os_version: Option<String>,
+    pub kernel: Option<String>,
+    pub arch: Option<String>,
     pub members: Vec<MemberClaim>,  // the evidence claims merged in
     pub status: Option<String>,     // rolled-up device status, worst-of-members
     pub last_updated: i64,

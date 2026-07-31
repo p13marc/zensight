@@ -124,8 +124,12 @@ flowchart TB
 ## View tour
 
 **Dashboard** (`view/dashboard.rs`) — the fleet overview and landing view. Host
-cards group each host's per-protocol facets under one composite-health card, and
-a sensor-health summary bar lists every connected sensor with its status, device
+cards group each host's per-protocol facets under one composite-health card with
+one identity line: the self-reported system information (os-release name ·
+kernel · arch, off the entity), falling back to the wire-observed
+`vendor · platform` (#314) for gear that never self-reports. (The per-card
+metric sparklines this line replaced were retired — too small to read.) A
+sensor-health summary bar lists every connected sensor with its status, device
 counts (total / responding / failed), last poll duration, and error count in the
 last hour. Click a card to drill into the host or a device.
 
