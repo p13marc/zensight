@@ -43,6 +43,87 @@ pub struct HostIdentity {
     /// here (file reads only) — the runner sets it via
     /// [`SharedIdentity::set_cloud`] after the async probe.
     pub cloud: Option<zensight_common::CloudFacts>,
+    /// OS display name (`PRETTY_NAME`, falling back to `NAME VERSION_ID`) —
+    /// descriptive, display-only; never part of identity merging.
+    pub os_name: Option<String>,
+    /// os-release `ID` (`fedora`, `debian`, …).
+    pub os_id: Option<String>,
+    /// os-release `VERSION_ID`.
+    pub os_version: Option<String>,
+    /// Kernel release (`/proc/sys/kernel/osrelease`).
+    pub kernel: Option<String>,
+    /// CPU architecture this sensor was built for (`std::env::consts::ARCH`).
+    pub arch: Option<String>,
+}
+
+/// Parsed `/etc/os-release` fields (the subset ZenSight carries). The format
+/// is simple `KEY=value` with optional single/double quoting — see
+/// os-release(5); values ZenSight reads never use shell escapes in practice,
+/// so quote-stripping is the whole grammar here.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OsRelease {
+    pub name: Option<String>,
+    pub pretty_name: Option<String>,
+    pub id: Option<String>,
+    pub version_id: Option<String>,
+    pub version_codename: Option<String>,
+}
+
+impl OsRelease {
+    /// Parse an os-release-shaped file. Missing/unreadable file ⇒ all `None`
+    /// — absence is expected (minimal containers), not an error.
+    pub fn read(path: &Path) -> Self {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        let mut out = Self::default();
+        for line in src.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, raw)) = line.split_once('=') else {
+                continue;
+            };
+            let value = raw.trim().trim_matches('"').trim_matches('\'').to_string();
+            if value.is_empty() {
+                continue;
+            }
+            match key.trim() {
+                "NAME" => out.name = Some(value),
+                "PRETTY_NAME" => out.pretty_name = Some(value),
+                "ID" => out.id = Some(value),
+                "VERSION_ID" => out.version_id = Some(value),
+                "VERSION_CODENAME" => out.version_codename = Some(value),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The one-line display form: `PRETTY_NAME`, else `NAME VERSION_ID`,
+    /// else `NAME`.
+    pub fn display_name(&self) -> Option<String> {
+        if let Some(pretty) = &self.pretty_name {
+            return Some(pretty.clone());
+        }
+        match (&self.name, &self.version_id) {
+            (Some(n), Some(v)) => Some(format!("{n} {v}")),
+            (Some(n), None) => Some(n.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// The os-release path to read: `/etc/os-release`, with the os-release(5)
+/// documented fallback to `/usr/lib/os-release`.
+fn os_release_path() -> &'static Path {
+    let etc = Path::new("/etc/os-release");
+    if etc.exists() {
+        etc
+    } else {
+        Path::new("/usr/lib/os-release")
+    }
 }
 
 impl HostIdentity {
@@ -53,6 +134,8 @@ impl HostIdentity {
             Path::new("/proc/sys/kernel/random/boot_id"),
             Path::new("/sys/class/net"),
             Path::new("/proc/self/cgroup"),
+            os_release_path(),
+            Path::new("/proc/sys/kernel/osrelease"),
         );
         identity.ips = detect_ips();
         identity
@@ -66,6 +149,8 @@ impl HostIdentity {
         boot_id: &Path,
         sys_class_net: &Path,
         self_cgroup: &Path,
+        os_release: &Path,
+        kernel_osrelease: &Path,
     ) -> Self {
         let host_id = std::fs::read_to_string(machine_id)
             .ok()
@@ -84,6 +169,11 @@ impl HostIdentity {
         let container_id = std::fs::read_to_string(self_cgroup)
             .ok()
             .and_then(|c| crate::container::container_id_from_cgroup(&c));
+        let os = OsRelease::read(os_release);
+        let kernel = std::fs::read_to_string(kernel_osrelease)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         HostIdentity {
             host_id,
             boot_id,
@@ -93,6 +183,11 @@ impl HostIdentity {
             macs,
             container_id,
             cloud: None,
+            os_name: os.display_name(),
+            os_id: os.id,
+            os_version: os.version_id,
+            kernel,
+            arch: Some(std::env::consts::ARCH.to_string()),
         }
     }
 }
@@ -249,8 +344,28 @@ mod tests {
         )
         .unwrap();
 
-        let id = HostIdentity::detect_from(&machine_id, &boot_id, &net, &cgroup);
+        // os-release fixture: quoted values must strip; PRETTY_NAME wins.
+        let os_release = dir.path().join("os-release");
+        std::fs::write(
+            &os_release,
+            "NAME=\"Fedora Linux\"\nPRETTY_NAME=\"Fedora Linux 42 (Workstation Edition)\"\n\
+             ID=fedora\nVERSION_ID=42\nVERSION_CODENAME=\n# comment\n",
+        )
+        .unwrap();
+        let kernel = dir.path().join("osrelease");
+        std::fs::write(&kernel, "6.15.3-200.fc42.x86_64\n").unwrap();
+
+        let id =
+            HostIdentity::detect_from(&machine_id, &boot_id, &net, &cgroup, &os_release, &kernel);
         assert_eq!(id.host_id.as_deref(), Some(FIXTURE_HOST_ID));
+        assert_eq!(
+            id.os_name.as_deref(),
+            Some("Fedora Linux 42 (Workstation Edition)")
+        );
+        assert_eq!(id.os_id.as_deref(), Some("fedora"));
+        assert_eq!(id.os_version.as_deref(), Some("42"));
+        assert_eq!(id.kernel.as_deref(), Some("6.15.3-200.fc42.x86_64"));
+        assert_eq!(id.arch.as_deref(), Some(std::env::consts::ARCH));
         assert_eq!(
             id.boot_id.as_deref(),
             Some("aaaabbbb-cccc-dddd-eeee-ffff00001111")
@@ -271,11 +386,37 @@ mod tests {
             &dir.path().join("nope2"),
             &dir.path().join("nonet"),
             &dir.path().join("nocgroup"),
+            &dir.path().join("no-os-release"),
+            &dir.path().join("no-osrelease"),
         );
         assert_eq!(id.host_id, None);
         assert_eq!(id.boot_id, None);
         assert!(id.macs.is_empty());
         assert_eq!(id.container_id, None);
+        // A minimal container has no os-release — absence, not error.
+        assert_eq!(id.os_name, None);
+        assert_eq!(id.os_id, None);
+        assert_eq!(id.os_version, None);
+        assert_eq!(id.kernel, None);
+    }
+
+    #[test]
+    fn os_release_display_name_falls_back_without_pretty_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("os-release");
+        std::fs::write(
+            &p,
+            "NAME='Debian GNU/Linux'\nID=debian\nVERSION_ID=\"12\"\n",
+        )
+        .unwrap();
+        let os = OsRelease::read(&p);
+        assert_eq!(os.display_name().as_deref(), Some("Debian GNU/Linux 12"));
+        std::fs::write(&p, "NAME=Alpine\n").unwrap();
+        assert_eq!(
+            OsRelease::read(&p).display_name().as_deref(),
+            Some("Alpine")
+        );
+        assert_eq!(OsRelease::default().display_name(), None);
     }
 
     #[test]

@@ -827,7 +827,11 @@ fn mock_entity(
         fqdn: Some(format!("{name}.lab.example")),
         names: vec![],
         vendor: None,
-        platform: Some("linux".to_string()),
+        platform: Some("Fedora Linux 42".to_string()),
+        os_name: Some("Fedora Linux 42".to_string()),
+        os_version: Some("42".to_string()),
+        kernel: Some("6.15.3-200.fc42.x86_64".to_string()),
+        arch: Some("x86_64".to_string()),
         members: members
             .iter()
             .map(|(sensor, source)| MemberClaim {

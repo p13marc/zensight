@@ -42,6 +42,10 @@ fn demo_entity() -> HostEntity {
         names: vec![],
         vendor: None,
         platform: None,
+        os_name: None,
+        os_version: None,
+        kernel: None,
+        arch: None,
         members: vec![
             // Join the demo's sysinfo series onto the entity (the netlink/
             // netring series stay on the sensors/ fallback — both paths land

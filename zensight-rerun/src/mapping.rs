@@ -329,6 +329,10 @@ mod tests {
             names: vec![],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             members: members
                 .iter()
                 .map(|(sensor, source)| MemberClaim {

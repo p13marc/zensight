@@ -200,6 +200,18 @@ pub struct HostEntity {
     /// OS/platform hint, when observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// OS display name (self-report preferred over wire observation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_name: Option<String>,
+    /// os-release `VERSION_ID`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    /// Kernel release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    /// CPU architecture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
 
     // --- membership + status ---
     /// The evidence claims merged into this entity (sorted by `(sensor, source)`).
@@ -265,6 +277,10 @@ mod tests {
             }],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             members: vec![MemberClaim {
                 sensor: "sysinfo".into(),
                 source: "host1".into(),
@@ -322,6 +338,10 @@ mod tests {
             names: vec![],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             members: vec![],
             status: None,
             last_updated: 1,
@@ -354,6 +374,10 @@ mod tests {
             names: vec![],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             members: vec![
                 MemberClaim {
                     sensor: "netlink".into(),

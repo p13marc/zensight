@@ -561,6 +561,10 @@ mod tests {
             }],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             members: vec![MemberClaim {
                 sensor: "sysinfo".into(),
                 source: "web01".into(),

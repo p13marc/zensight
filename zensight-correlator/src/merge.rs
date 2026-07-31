@@ -600,6 +600,29 @@ fn build_entity(
             evidence[i].platform.as_deref(),
         )
     }));
+    let os_name = representative(members.iter().map(|&i| {
+        (
+            evidence[i].observer.is_none(),
+            evidence[i].os_name.as_deref(),
+        )
+    }));
+    let os_version = representative(members.iter().map(|&i| {
+        (
+            evidence[i].observer.is_none(),
+            evidence[i].os_version.as_deref(),
+        )
+    }));
+    let kernel = representative(members.iter().map(|&i| {
+        (
+            evidence[i].observer.is_none(),
+            evidence[i].kernel.as_deref(),
+        )
+    }));
+    let arch = representative(
+        members
+            .iter()
+            .map(|&i| (evidence[i].observer.is_none(), evidence[i].arch.as_deref())),
+    );
 
     let mut member_claims: Vec<MemberClaim> = members
         .iter()
@@ -644,6 +667,10 @@ fn build_entity(
         names: Vec::new(),
         vendor,
         platform,
+        os_name,
+        os_version,
+        kernel,
+        arch,
         members: member_claims,
         status: None,
         last_updated,
@@ -741,6 +768,10 @@ mod tests {
             macs: vec![],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             container_id: None,
             cloud: None,
             last_updated: 1000,
@@ -759,6 +790,35 @@ mod tests {
             region: None,
             account: None,
         }
+    }
+
+    #[test]
+    fn os_facts_prefer_the_self_report_over_wire_observation() {
+        // A local sensor's os-release self-report must beat a third-party
+        // platform guess (SNMP sysDescr, CDP), exactly like `platform` — the
+        // fields are descriptive and never affect the partition.
+        let mut selfrep = ev("sysinfo", "host1");
+        selfrep.host_id = Some(hid(0xab));
+        selfrep.platform = Some("Fedora Linux 42".into());
+        selfrep.os_name = Some("Fedora Linux 42".into());
+        selfrep.os_version = Some("42".into());
+        selfrep.kernel = Some("6.15.3".into());
+        selfrep.arch = Some("x86_64".into());
+        let mut wire = ev("netring", "host1");
+        wire.observer = Some("netring".into());
+        wire.host_id = Some(hid(0xab));
+        wire.platform = Some("linux (guessed)".into());
+        let ents = correlate(
+            &[wire, selfrep],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        assert_eq!(ents.len(), 1);
+        assert_eq!(ents[0].platform.as_deref(), Some("Fedora Linux 42"));
+        assert_eq!(ents[0].os_name.as_deref(), Some("Fedora Linux 42"));
+        assert_eq!(ents[0].os_version.as_deref(), Some("42"));
+        assert_eq!(ents[0].kernel.as_deref(), Some("6.15.3"));
+        assert_eq!(ents[0].arch.as_deref(), Some("x86_64"));
     }
 
     #[test]

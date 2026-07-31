@@ -69,6 +69,19 @@ pub struct HostEvidence {
     /// OS/platform hint, when observed (descriptive, display-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// OS display name (`PRETTY_NAME`-style) self-reported by a local sensor
+    /// (descriptive, display-only — like `platform`, never a merge key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_name: Option<String>,
+    /// os-release `VERSION_ID` (descriptive, display-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    /// Kernel release (descriptive, display-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    /// CPU architecture (descriptive, display-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
     /// Container the *reporting sensor process* runs in (#311) — a host-scoped
     /// qualifier ("this sensor's view is from inside container X"), **never** a
     /// cross-host merge key: container ids are only unique per host runtime.
@@ -138,6 +151,10 @@ mod tests {
             macs: vec![],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             container_id: None,
             cloud: None,
             last_updated: 1_700_000_000_000,
@@ -148,6 +165,10 @@ mod tests {
         assert!(!json.contains("macs"));
         assert!(!json.contains("container_id"));
         assert!(!json.contains("cloud"));
+        // The OS facts are additive optionals: absent claims stay off the wire.
+        assert!(!json.contains("os_name"));
+        assert!(!json.contains("kernel"));
+        assert!(!json.contains("arch"));
         let back: HostEvidence = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ev);
 
@@ -178,6 +199,10 @@ mod tests {
             macs: vec![],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             container_id: Some("f".repeat(64)),
             cloud: Some(CloudFacts {
                 provider: "aws".into(),

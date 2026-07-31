@@ -57,6 +57,10 @@ pub fn asset_to_evidence(rec: &AssetRecord, now_ms: i64) -> Option<HostEvidence>
         macs: vec![rec.mac.clone()],
         vendor: rec.vendor.clone(),
         platform: rec.platform.clone(),
+        os_name: None,
+        os_version: None,
+        kernel: None,
+        arch: None,
         // Observed assets: container/cloud identity is only knowable from the
         // device's own sensor self-report, never from passive wire data (#311).
         container_id: None,

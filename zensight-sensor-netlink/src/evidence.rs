@@ -95,6 +95,10 @@ pub fn neighbor_evidence(neighbors: &[NeighborMessage], now_ms: i64) -> Vec<Host
                 macs: vec![mac],
                 vendor: None,
                 platform: None,
+                os_name: None,
+                os_version: None,
+                kernel: None,
+                arch: None,
                 // Observed devices: we can't know their container/cloud identity
                 // from the wire — only their own sensor self-report can (#311).
                 container_id: None,

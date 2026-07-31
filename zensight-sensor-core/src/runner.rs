@@ -458,7 +458,14 @@ impl<C: SensorConfig> SensorRunner<C> {
                         ips: id.ips,
                         macs: id.macs,
                         vendor: None,
-                        platform: None,
+                        // Self-reported OS facts (#301 follow-up): descriptive
+                        // only — the correlator's representative() prefers a
+                        // self-report over any third-party wire observation.
+                        platform: id.os_name.clone(),
+                        os_name: id.os_name,
+                        os_version: id.os_version,
+                        kernel: id.kernel,
+                        arch: id.arch,
                         container_id: id.container_id,
                         cloud: id.cloud,
                         last_updated: now,

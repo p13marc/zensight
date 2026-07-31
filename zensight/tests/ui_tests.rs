@@ -562,6 +562,10 @@ fn test_host_card_disambiguates_same_protocol_facets() {
             names: vec![],
             vendor: None,
             platform: None,
+            os_name: None,
+            os_version: None,
+            kernel: None,
+            arch: None,
             members: sources.iter().map(|s| member("sysinfo", s)).collect(),
             status: None,
             last_updated: 1_000,
@@ -4071,6 +4075,10 @@ fn test_entity(id: &str, hostname: &str, members: &[(&str, &str)]) -> HostEntity
         names: vec![],
         vendor: None,
         platform: Some("linux".to_string()),
+        os_name: None,
+        os_version: None,
+        kernel: None,
+        arch: None,
         members: members
             .iter()
             .map(|(sensor, source)| MemberClaim {
