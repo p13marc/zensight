@@ -60,6 +60,9 @@ kind = "json-schema"
 [types.DiscoveryReport]
 kind = "json-schema"
 
+[types.SystemInfo]
+kind = "json-schema"
+
 [types.EventRecord]
 kind = "json-schema"
 

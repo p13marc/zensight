@@ -42,7 +42,7 @@ pub mod container;
 mod error;
 pub mod event;
 mod health;
-mod identity;
+pub mod identity;
 mod liveliness;
 pub mod procutil;
 mod publisher;
@@ -68,7 +68,7 @@ pub use event::EventPublisher;
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, SensorHealth,
 };
-pub use identity::{HostIdentity, SharedIdentity};
+pub use identity::{HostIdentity, OsRelease, SharedIdentity};
 pub use liveliness::LivelinessManager;
 pub use publisher::{Publisher, RawMediaPublisher};
 pub use report::{DebugBundleSource, SimpleBundleSource, redact};

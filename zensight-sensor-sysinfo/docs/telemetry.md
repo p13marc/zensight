@@ -112,6 +112,7 @@ zensight/v1/<origin>/state/sysinfo/errors             # rolling error window
 zensight/v1/<origin>/state/sysinfo/alert/<alert_key>  # threshold alerts
 zensight/v1/<origin>/state/sysinfo/sensor             # SensorInfo registration
 zensight/v1/<origin>/state/sysinfo/evidence/self      # self-identity claim
+zensight/v1/<origin>/state/sysinfo/system/info        # static host facts (os-release, kernel, arch; SystemInfo, ttl 7200 s)
 ```
 
 Telemetry selectors never reach the state class or the `@rpc` plane: narrow

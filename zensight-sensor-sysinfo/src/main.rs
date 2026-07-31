@@ -109,6 +109,15 @@ async fn main() -> Result<()> {
         collector.run().await;
     });
 
+    // Static host facts (state/sysinfo/system/info): near-static LWW doc,
+    // collected at startup and refreshed slowly through a cached publisher.
+    if sysinfo_config.collect.system_info {
+        let si_session = runner.session().clone();
+        runner.spawn(async move {
+            zensight_sensor_sysinfo::system_info::run_publisher(si_session, Format::Json).await;
+        });
+    }
+
     // Opt-in eBPF saturation histograms (#99): load runqlat/biolatency and serve
     // the snapshot on `@rpc/sysinfo/latency`.
     //
@@ -187,6 +196,7 @@ async fn main() -> Result<()> {
             "disk_io": runner.config().sysinfo.collect.disk_io,
             "network": runner.config().sysinfo.collect.network,
             "system": runner.config().sysinfo.collect.system,
+            "system_info": runner.config().sysinfo.collect.system_info,
             "temperatures": runner.config().sysinfo.collect.temperatures,
             "tcp_states": runner.config().sysinfo.collect.tcp_states,
             "processes": runner.config().sysinfo.collect.processes,

@@ -35,6 +35,7 @@ pub mod serialization;
 pub mod session;
 pub mod state;
 pub mod stream;
+pub mod system_info;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root
@@ -95,6 +96,7 @@ pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
 pub use state::ZensightState;
 pub use stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
+pub use system_info::SystemInfo;
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
 /// The registry's *parse* direction, re-exported so consumers get it without a
 /// direct `zenkey` dependency (RFC 08 §1, issue #475).

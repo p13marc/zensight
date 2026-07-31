@@ -70,6 +70,12 @@ pub struct OsRelease {
 }
 
 impl OsRelease {
+    /// Read the live system's os-release: `/etc/os-release`, with the
+    /// os-release(5) documented fallback to `/usr/lib/os-release`.
+    pub fn read_system() -> Self {
+        Self::read(os_release_path())
+    }
+
     /// Parse an os-release-shaped file. Missing/unreadable file ⇒ all `None`
     /// — absence is expected (minimal containers), not an error.
     pub fn read(path: &Path) -> Self {

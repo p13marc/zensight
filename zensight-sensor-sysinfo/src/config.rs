@@ -149,6 +149,12 @@ pub struct CollectConfig {
     #[serde(default = "default_true")]
     pub system: bool,
 
+    /// Publish the static host-facts doc (`state/sysinfo/system/info`):
+    /// os-release identity, kernel release, arch, hostname, boot time.
+    /// Near-static — collected at startup and refreshed slowly.
+    #[serde(default = "default_true")]
+    pub system_info: bool,
+
     /// Collect temperature sensor readings.
     /// Only available on Linux with hwmon support.
     #[serde(default)]
@@ -273,6 +279,7 @@ impl Default for CollectConfig {
             disk_io: true,
             network: true,
             system: true,
+            system_info: true,
             temperatures: false,
             tcp_states: false,
             processes: false,

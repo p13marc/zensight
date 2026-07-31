@@ -83,6 +83,9 @@
 
       // System info (uptime, load averages)
       system: true,
+      // Static host facts doc (state/sysinfo/system/info): os-release
+      // identity, kernel, arch, hostname, boot time. Near-static, slow refresh.
+      system_info: true,
 
       // hwmon temperature sensors, per chip/label, with their critical/max trip
       // points (sensors/{chip}/{label}/{temp,critical,max}). Linux + hwmon only;
