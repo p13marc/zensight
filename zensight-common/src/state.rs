@@ -61,3 +61,22 @@ impl<'a> ZensightState<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The full wire key must refine to the SystemInfo variant — pins the
+    /// subject-parse precedence against the `system/*` telemetry family
+    /// (`system/uptime`, `system/load`, …) sharing the same head chunk.
+    #[test]
+    fn system_info_key_refines_to_its_variant() {
+        let (_, protocol, subject) =
+            crate::keyexpr::refine_key("v1/h-3fa9c2d41b7e/state/sysinfo/system/info").unwrap();
+        assert_eq!(protocol, "sysinfo");
+        assert_eq!(
+            ZensightState::of(&subject),
+            Some(ZensightState::SysinfoSystemInfo)
+        );
+    }
+}
