@@ -16,7 +16,7 @@ tokio = { workspace = true, features = ["full", "net", "sync", "time", "io-util"
 tokio-serial = "5.4"
 
 # Modbus protocol
-tokio-modbus = { version = "0.16", default-features = false, features = ["tcp", "rtu"] }
+tokio-modbus = { version = "0.17", default-features = false, features = ["tcp", "rtu"] }
 
 # Zenoh
 zenoh.workspace = true

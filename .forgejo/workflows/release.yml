@@ -17,7 +17,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v6.1.0
       - name: Build release artifacts
         run: |
           mkdir -p dist/release
@@ -175,7 +175,7 @@ jobs:
       # SDK/runtime installs persist on the runner cache disk
       FLATPAK_USER_DIR: /srv/cache/flatpak/inst
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v6.1.0
       - name: Build flatpak (unsigned; vm-edge signs on publish)
         run: |
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo

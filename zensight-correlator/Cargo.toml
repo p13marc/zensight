@@ -21,7 +21,7 @@ tokio.workspace = true
 
 # Unbounded channels for the Zenoh subscribers (must match zenoh's flume so the
 # `.with(flume::unbounded())` sink type-checks).
-flume = "0.11"
+flume = "0.12"
 
 # Serialization
 serde.workspace = true

@@ -55,7 +55,7 @@ serde_json = "1"
 ciborium = "0.2"
 
 # Hashing (blob integrity — promoted from a transitive pin)
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Content-defined chunking (zblob Tier-2 cross-version dedup, #200)
 fastcdc = "4"
@@ -71,7 +71,7 @@ async-trait = "0.1"
 
 # Host identity envelope (#301): hostname + local interface addresses
 hostname = "0.4"
-if-addrs = "0.14"
+if-addrs = "0.15"
 
 # Configuration
 json5 = "0.4"
@@ -96,7 +96,7 @@ dirs = "5"
 # async-std features are mutually exclusive, so feature unification with our
 # own rfd dep must agree. The dialog futures are executor-agnostic — awaiting
 # them from the tokio runtime is fine; only ashpd's internal reactor changes.
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "async-std"] }
 # Desktop notifications for CRITICAL alert transitions (#26, opt-in). On Linux it
 # uses the freedesktop notification spec over D-Bus (zbus, already pulled by rfd).
 notify-rust = "4"
@@ -104,9 +104,9 @@ notify-rust = "4"
 # eBPF (opt-in `ebpf` feature on sysinfo/netlink sensors only — #99/#114).
 # Userspace side; the kernel side pulls aya-ebpf/aya-log-ebpf from the program
 # crates. VERIFY-LATEST on crates.io before merging.
-aya = "0.13"
-aya-log = "0.2"
-aya-build = "0.1"
+aya = "0.14"
+aya-log = "0.3"
+aya-build = "0.2"
 
 # Internal crates
 zensight-common = { path = "zensight-common" }

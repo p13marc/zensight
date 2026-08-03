@@ -48,12 +48,12 @@ clap.workspace = true
 # viewer (egui/wgpu), analytics, dataframe, and server stacks out of the build;
 # `sdk` alone provides save() (.rrd) and connect_grpc() (dep-hygiene gate:
 # cargo tree must show no re_viewer/wgpu/egui/re_analytics/re_renderer).
-rerun = { version = "=0.34.1", default-features = false, features = ["sdk"] }
+rerun = { version = "=0.35.0", default-features = false, features = ["sdk"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 # e2e decode pass on the produced .rrd (already in the rerun dep tree, so this
 # adds no meaningful build cost; exact-pinned alongside `rerun`).
-re_log_encoding = "=0.34.1"
-re_log_types = "=0.34.1"
+re_log_encoding = "=0.35.0"
+re_log_types = "=0.35.0"
 

@@ -46,7 +46,7 @@ tower-http = { version = "0.7", features = ["cors"] }
 # Remote-write push (protobuf WriteRequest + snappy block compression)
 prost = "0.14"
 snap = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-tls"] }
 
 # Utilities
 parking_lot = "0.12"

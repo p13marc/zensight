@@ -29,11 +29,11 @@ aya-log = { workspace = true, optional = true }
 libc = { version = "0.2", optional = true }
 
 # System information
-sysinfo = "0.33"
+sysinfo = "0.39"
 
 # Linux-specific metrics (CPU times, disk I/O, TCP states)
 [target.'cfg(target_os = "linux")'.dependencies]
-procfs = "0.17"
+procfs = "0.18"
 # statvfs() for inode saturation ceilings (FD + inode plan §C)
 rustix = { version = "1", features = ["fs"] }
 

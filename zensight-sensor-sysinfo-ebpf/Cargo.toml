@@ -22,8 +22,8 @@ zensight-sensor-sysinfo-ebpf-common = { path = "../zensight-sensor-sysinfo-ebpf-
 # of this member (e.g. `cargo build --workspace`) is a trivial empty binary and
 # never pulls bpf-only crates. VERIFY-LATEST on crates.io before merging.
 [target.'cfg(target_arch = "bpf")'.dependencies]
-aya-ebpf = "0.1"
-aya-log-ebpf = "0.1"
+aya-ebpf = "0.2"
+aya-log-ebpf = "0.2"
 
 [[bin]]
 # NOTE: must differ from the package name — aya-build 0.1 uses

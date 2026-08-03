@@ -46,10 +46,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 async-stream = "0.3"
 # Unbounded channels for the Zenoh subscribers (must match zenoh's flume so the
 # (Sender, Receiver) pair satisfies zenoh's IntoHandler impl).
-flume = "0.11"
+flume = "0.12"
 
 # Random number generation (for demo mode)
-rand = "0.9"
+rand = "0.10"
 
 # Platform utilities
 dirs.workspace = true
