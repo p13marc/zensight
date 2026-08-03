@@ -88,7 +88,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 
 # Platform utilities
-dirs = "5"
+dirs = "6"
 # Native file dialogs (export save-as, #37). xdg-portal backend avoids a hard
 # GTK system-lib dependency (uses the desktop portal over D-Bus via ashpd).
 # rfd backend: async-std, NOT tokio — iced_tester (the `tester` feature) pulls
