@@ -8,8 +8,11 @@
 //! - typed columns (label + width + a `&T -> Element` cell renderer),
 //! - header **sort** (click a sortable column to toggle asc/desc),
 //! - an inline **filter** box (substring match over a per-row searchable string),
-//! - and an explicit **"showing N of M"** footer with a load-more affordance,
-//!   instead of a silent cap.
+//! - and an explicit **"showing N of M"** count, instead of a silent cap.
+//!
+//! The filter box and the count sit **above** the header; only the load-more
+//! button sits below. The control that shortens a long table must not be at the
+//! far end of it, and the count belongs next to the box whose effect it reports.
 //!
 //! Sort/filter/limit live in a small [`TableState`] the caller stores per table;
 //! the three interactions are wired via caller-supplied message closures so one
@@ -289,38 +292,47 @@ impl<'a, T, Message: Clone + 'a> DataTable<'a, T, Message> {
             body = body.push(line);
         }
 
-        // 5. Footer: filter box + "showing N of M" + load-more.
-        let mut footer = Row::new().spacing(space::MD).align_y(Alignment::Center);
+        // 5. Controls, ABOVE the table: filter box + "showing N of M".
+        //
+        // A filter you have to scroll past the whole table to reach is
+        // backwards — on a long table the control that shortens it is the one
+        // furthest away. The row count sits with it so typing shows its effect
+        // without looking anywhere else.
+        let mut controls = Row::new().spacing(space::MD).align_y(Alignment::Center);
         if let Some(on_filter) = self.on_filter {
-            footer = footer.push(
+            controls = controls.push(
                 text_input("filter…", &st.filter)
                     .on_input(on_filter)
                     .size(font::CAPTION)
                     .width(Length::Fixed(160.0)),
             );
         }
-        footer = footer.push(
+        controls = controls.push(
             text(format!("showing {shown} of {total} {}", self.noun))
                 .size(font::CAPTION)
                 .style(|t: &iced::Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 }),
         );
-        if shown < total
-            && let Some(on_more) = self.on_more
-        {
-            footer = footer.push(
+
+        // 6. Load-more stays BELOW: it extends the table downwards, so it
+        //    belongs where the rows run out.
+        let more: Option<Element<'a, Message>> = (shown < total)
+            .then_some(self.on_more)
+            .flatten()
+            .map(|on_more| {
                 button(text("Show more").size(font::CAPTION))
                     .padding([space::XS as u16, space::SM as u16])
                     .style(button::text)
-                    .on_press(on_more),
-            );
-        }
+                    .on_press(on_more)
+                    .into()
+            });
 
-        column![header, body, footer]
-            .spacing(space::SM)
-            .width(Length::Fill)
-            .into()
+        let mut table = column![controls, header, body];
+        if let Some(more) = more {
+            table = table.push(more);
+        }
+        table.spacing(space::SM).width(Length::Fill).into()
     }
 }
 
@@ -374,13 +386,44 @@ mod tests {
     }
 
     #[test]
-    fn renders_rows_and_footer() {
+    fn renders_rows_and_count() {
         let data = rows();
         let st = TableState::default();
         let mut ui = simulator(table().view(&data, &st));
         assert!(ui.find("alpha").is_ok());
         assert!(ui.find("charlie").is_ok());
         assert!(ui.find("showing 3 of 3 flows").is_ok());
+    }
+
+    /// The filter box must sit above the rows: on a long table, a control you
+    /// have to scroll past the data to reach is the one you need most and can
+    /// see least. Load-more stays below, where the rows run out.
+    #[test]
+    fn filter_sits_above_the_rows_and_load_more_below() {
+        let data = rows();
+        let st = TableState {
+            limit: 1,
+            ..Default::default()
+        };
+        let mut ui = simulator(table().view(&data, &st));
+
+        let mut top = |t: &str| ui.find(t).unwrap_or_else(|_| panic!("{t}")).bounds().y;
+        let filter = top("filter…");
+        let count = top("showing 1 of 3 flows");
+        let header = top("name");
+        let first_row = top("alpha");
+        let more = top("Show more");
+
+        assert!(
+            filter < header,
+            "filter box must precede the column headers"
+        );
+        assert!(count < header, "the count travels with the filter box");
+        assert!(header < first_row, "headers still precede the rows");
+        assert!(
+            more > first_row,
+            "load-more extends the table downwards, so it stays at the bottom"
+        );
     }
 
     #[test]
@@ -405,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn limit_truncates_and_shows_footer_count() {
+    fn limit_truncates_and_says_so_rather_than_cutting_silently() {
         let data = rows();
         let st = TableState {
             limit: 2,
