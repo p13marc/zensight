@@ -4,7 +4,7 @@
 # Source: src/map.rs, src/collector.rs (boot/manager/units), src/events.rs.
 
 [registry]
-version = "1.3"
+version = "1.4"
 app = "zensight"
 convention = 1
 
@@ -409,16 +409,32 @@ kind = "read"
 reply = "ActionStatus"
 idempotent = true
 since = "1.0"
-description = "gated-action switch state + last action outcome"
+description = "the most recent action outcome, or null if none has run"
+[[procedure]]
+path = "action/capability"
+kind = "read"
+reply = "ActionCapability"
+idempotent = true
+since = "1.4"
+description = "service-control gate state: enabled flag, allowlist globs, permitted verbs, job timeout — served even when actions are disabled, so 'off' is an answer and not a silence"
+[[procedure]]
+path = "actions"
+kind = "read"
+reply = "Vec<ActionStatus>"
+idempotent = true
+since = "1.4"
+description = "bounded ring of recent action outcomes (operator audit timeline)"
 [[procedure]]
 path = "action/set"
 kind = "write"
-fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
+fanout = "allowed"  # zenctl fleet push (G2); the GUI is strictly origin-scoped
 request = "ServiceAction"
-reply = "Ack"
+# Was declared "Ack"; the sensor has always replied the full outcome
+# (src/action.rs), so the declaration — not the implementation — was wrong.
+reply = "ActionStatus"
 idempotent = false
 since = "1.0"
-description = "gated service control {verb,unit} — default OFF, allowlist + polkit; refuses with error/gated"
+description = "gated service control {verb,unit} — default OFF, allowlist + polkit; blocks until the job completes or actions.job_timeout_secs elapses; refuses with error/gated"
 [[procedure]]
 path = "units"
 kind = "read"

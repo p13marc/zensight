@@ -19,6 +19,9 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 ulid = { workspace = true }
 zblob = { workspace = true }
+# `action::allows` is the one allowlist rule, shared by the systemd sensor's
+# gate and the frontend's pre-click preview — two implementations would drift.
+glob.workspace = true
 
 [build-dependencies]
 # Compiles registry/*.toml into the typed subject registry (RFC 08 §5).

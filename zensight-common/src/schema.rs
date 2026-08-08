@@ -68,6 +68,11 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::StreamStatus>("StreamStatus")
         .json::<crate::stream::FrameMeta>("FrameMeta")
         .json::<crate::command::Command<crate::stream::StreamControl>>("Command<StreamControl>")
+        // ── service control (this crate, fully derived) ───────────────────
+        .json::<crate::action::ActionCapability>("ActionCapability")
+        .json::<crate::action::ActionStatus>("ActionStatus")
+        .json::<crate::action::ServiceAction>("ServiceAction")
+        .json::<Vec<crate::action::ActionStatus>>("Vec<ActionStatus>")
         // ── query-detail records (this crate, fully derived) ──────────────
         .json::<crate::query_detail::LatencyReport>("LatencyReport")
         .json::<crate::query_detail::UnitDetail>("UnitDetail")
@@ -100,7 +105,6 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<Vec<crate::query_detail::HttpHostRecord>>("Vec<HttpRecord>")
         .json::<Vec<crate::query_detail::NetflowRecord>>("Vec<IpfixRecord>")
         // ── defined in sensor crates (summary entries) ────────────────────
-        .entry("ActionStatus", summary("systemd action outcome — defined in zensight-sensor-systemd::action"))
         .entry("CaptureDiskCommand", summary("netring capture-to-disk command — defined in zensight-sensor-netring::command"))
         .entry("CaptureDiskStatus", summary("netring capture-to-disk status — defined in zensight-sensor-netring::command"))
         .entry("ExpectationCommand", summary("netlink sentinel expectation command — defined in zensight-sensor-netlink::command"))
@@ -125,7 +129,6 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .entry("ThreatIntelConfig", summary("netring threat-intel config — declared only, ad-hoc JSON on the wire"))
         .entry("FilterConfig", summary("capture filter config — declared only, ad-hoc JSON on the wire"))
         .entry("CollectionConfig", summary("netlink collection config — declared only, ad-hoc JSON on the wire"))
-        .entry("ServiceAction", summary("systemd service action request — declared only, ad-hoc JSON on the wire"))
         // ── meta entries ──────────────────────────────────────────────────
         .entry(
             "RegistrySlice",
