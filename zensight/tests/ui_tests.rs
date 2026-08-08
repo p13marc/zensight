@@ -20,7 +20,7 @@ use zensight::view::device::{
 use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
 use zensight::view::settings::{SettingsState, settings_view};
-use zensight::view::specialized::SyslogFilterState;
+use zensight::view::specialized::{SyslogFilterState, specialized_view};
 use zensight::view::topology::{TopologyState, topology_view};
 
 /// Render the topology view with empty panel context (#393).
@@ -3956,26 +3956,13 @@ fn test_systemd_units_tab_fetches_on_demand() {
 /// sends to `@rpc/systemd/action/set`); "cancel" backs out.
 #[test]
 fn test_systemd_units_action_confirm_flow() {
-    use zensight::view::specialized::specialized_view;
-    use zensight::view::specialized::systemd_detail::{SystemdDetailData, SystemdDetailTopic};
-    use zensight_common::query_detail::UnitRecord;
+    use zensight_common::action::Verb;
 
-    let id = DeviceId::fixture(Protocol::Systemd, "server01".to_string());
-    let mut state = DeviceDetailState::new(id);
-    state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
-    state.systemd_detail.apply(
-        SystemdDetailTopic::Units,
-        Ok(SystemdDetailData::Units(vec![UnitRecord {
-            name: "nginx.service".into(),
-            description: "web server".into(),
-            load_state: "loaded".into(),
-            active_state: "active".into(),
-            sub_state: "running".into(),
-            job: None,
-        }])),
-    );
+    // The gate is load-bearing: without a capability saying this host permits
+    // the unit, the row renders no live buttons at all.
+    let mut state = systemd_units_state(&["nginx.service"], gate_allowing(&["nginx.service"]));
 
-    // Step 1: the row offers start/stop/restart; clicking "start" arms it.
+    // Step 1: the row offers the advertised verbs; clicking "start" arms it.
     let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
     assert!(ui.find("restart").is_ok());
     let _ = ui.click("start");
@@ -3983,12 +3970,12 @@ fn test_systemd_units_action_confirm_flow() {
     assert!(messages.iter().any(|m| matches!(
         m,
         Message::SystemdUnitActionArm { verb, unit }
-            if verb == "start" && unit == "nginx.service"
+            if *verb == Verb::Start && unit == "nginx.service"
     )));
 
     // Step 2: with the action armed, the row swaps to confirm/cancel and
     // "confirm" emits the send.
-    state.systemd_detail.pending_action = Some(("start".to_string(), "nginx.service".to_string()));
+    state.systemd_detail.pending_action = Some((Verb::Start, "nginx.service".to_string()));
     let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
     assert!(ui.find("start?").is_ok());
     let _ = ui.click("confirm");
@@ -4007,6 +3994,138 @@ fn test_systemd_units_action_confirm_flow() {
         messages
             .iter()
             .any(|m| matches!(m, Message::SystemdUnitActionCancel))
+    );
+}
+
+/// A systemd device sitting on the Units tab with `units` loaded and `capability`
+/// answered.
+fn systemd_units_state(
+    units: &[&str],
+    capability: zensight_common::action::ActionCapability,
+) -> DeviceDetailState {
+    use zensight::view::specialized::fetch::Fetch;
+    use zensight::view::specialized::systemd_detail::{SystemdDetailData, SystemdDetailTopic};
+    use zensight_common::query_detail::UnitRecord;
+
+    let id = DeviceId::fixture(Protocol::Systemd, "server01".to_string());
+    let mut state = DeviceDetailState::new(id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
+    state.systemd_detail.apply(
+        SystemdDetailTopic::Units,
+        Ok(SystemdDetailData::Units(
+            units
+                .iter()
+                .map(|n| UnitRecord {
+                    name: (*n).into(),
+                    description: format!("{n} description"),
+                    load_state: "loaded".into(),
+                    active_state: "active".into(),
+                    sub_state: "running".into(),
+                    job: None,
+                    unit_file_state: Some("enabled".into()),
+                })
+                .collect(),
+        )),
+    );
+    state.systemd_detail.capability = Fetch::Ready(capability);
+    state
+}
+
+fn gate_allowing(allow: &[&str]) -> zensight_common::action::ActionCapability {
+    zensight_common::action::ActionCapability {
+        enabled: true,
+        allow_units: allow.iter().map(|s| s.to_string()).collect(),
+        job_timeout_secs: 30,
+        verbs: zensight_common::action::Verb::all(),
+        unit_files: false,
+        daemon_reload: false,
+    }
+}
+
+/// A read-only host must not render controls it will refuse. Before the
+/// capability probe the buttons were always live, so on the default
+/// (actions-disabled) sensor every click failed a second and a half later.
+#[test]
+fn test_systemd_actions_absent_on_a_read_only_host() {
+    let state = systemd_units_state(
+        &["nginx.service"],
+        zensight_common::action::ActionCapability::disabled(30),
+    );
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    assert!(ui.find("restart").is_err(), "no live verb buttons");
+    assert!(
+        ui.find("Service control is disabled on this host — the sensor is read-only.")
+            .is_ok(),
+        "and the table says why, once, rather than per row"
+    );
+}
+
+/// A unit outside the host's allowlist shows the controls inert, with the reason
+/// — the operator learns it before arming, not from a toast afterwards.
+#[test]
+fn test_systemd_actions_inert_for_an_unallowlisted_unit() {
+    let state = systemd_units_state(&["nginx.service"], gate_allowing(&["app-*.service"]));
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    assert!(ui.find("not allowlisted").is_ok());
+    // A button with no on_press emits nothing.
+    let _ = ui.click("start");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::SystemdUnitActionArm { .. })),
+        "an inert button must not arm an action"
+    );
+}
+
+/// Filtering is the point of the table: typing a unit name narrows to it, and
+/// the header sorts.
+#[test]
+fn test_systemd_units_table_filters_and_sorts() {
+    let mut state = systemd_units_state(
+        &["nginx.service", "sshd.service", "postgres.service"],
+        gate_allowing(&[]),
+    );
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    assert!(ui.find("showing 3 of 3 units").is_ok());
+
+    let _ = ui.click("Unit");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SystemdUnitsTableSort(0))),
+        "the Unit header sorts"
+    );
+
+    // The filter narrows the rows, and the footer reports honestly rather than
+    // silently truncating the way the old hand-rolled table did at 400.
+    state
+        .systemd_detail
+        .units_table
+        .set_filter("nginx".to_string());
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    assert!(ui.find("showing 1 of 1 units").is_ok());
+    assert!(ui.find("nginx.service").is_ok());
+    assert!(ui.find("sshd.service").is_err(), "filtered out");
+}
+
+/// The table defaults to services, and the type chips widen it.
+#[test]
+fn test_systemd_units_table_defaults_to_services() {
+    let state = systemd_units_state(&["nginx.service", "logrotate.timer"], gate_allowing(&[]));
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    assert!(
+        ui.find("showing 1 of 1 units").is_ok(),
+        "the .timer is filtered out by the default type chip"
+    );
+    let _ = ui.click("all types");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SystemdSetUnitTypeFilter(None))),
+        "the all-types chip clears the filter"
     );
 }
 

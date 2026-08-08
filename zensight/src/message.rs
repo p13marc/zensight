@@ -282,18 +282,39 @@ pub enum Message {
     ),
     /// Units table (#281): set the active-state filter (`None` = all).
     SystemdSetUnitFilter(Option<String>),
-    /// Arm a unit action (#283): the row's start/stop/restart buttons swap to an
-    /// inline confirm/cancel pair until resolved.
+    /// Units table: set the unit-type suffix filter (`None` = every type).
+    SystemdSetUnitTypeFilter(Option<String>),
+    /// Units table: sort on a column (toggles direction if already active).
+    SystemdUnitsTableSort(usize),
+    /// Units table: the filter-box text changed.
+    SystemdUnitsTableFilter(String),
+    /// Units table: reveal another page of rows.
+    SystemdUnitsTableMore,
+    /// Fetch this host's advertised service-control gate (#283) so the Units tab
+    /// can render what it will actually accept.
+    FetchSystemdActionCapability,
+    /// The service-control probe's reply, or why there wasn't one.
+    SystemdActionCapabilityReceived(Result<zensight_common::action::ActionCapability, String>),
+    /// Arm a unit action (#283): the row's buttons swap to an inline
+    /// confirm/cancel pair until resolved. `unit` is empty for `daemon-reload`.
     SystemdUnitActionArm {
-        verb: String,
+        verb: zensight_common::action::Verb,
         unit: String,
     },
     /// Cancel the armed unit action (#283).
     SystemdUnitActionCancel,
-    /// Send the armed unit action as `{verb, unit}` via
-    /// `@rpc/systemd/action/set` (#283), then poll `@rpc/systemd/action`
-    /// for the job outcome. The sensor refuses unless `actions.enabled` is set.
+    /// Send the armed unit action as `{verb, unit}` via the drilled-in host's
+    /// `@rpc/systemd/action/set` (#283). The sensor refuses unless the action is
+    /// gated open.
     SystemdUnitActionConfirm,
+    /// The `action/set` reply: the sensor's own `ActionStatus`, produced *after*
+    /// it tracked the D-Bus job to completion, or why none arrived.
+    SystemdUnitActionResult(
+        Result<
+            zensight_common::action::ActionStatus,
+            crate::view::specialized::systemd_detail::ActionFailure,
+        >,
+    ),
 
     /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),

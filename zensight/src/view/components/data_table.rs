@@ -156,9 +156,13 @@ type SearchFn<'a, T> = Box<dyn Fn(&T) -> String + 'a>;
 /// Boxed message builder for a table interaction (sort/filter) taking one arg.
 type ActionFn<'a, A, Message> = Box<dyn Fn(A) -> Message + 'a>;
 
+/// Boxed row predicate for caller-owned filtering (chips, toggles, …).
+type RetainFn<'a, T> = Box<dyn Fn(&T) -> bool + 'a>;
+
 pub struct DataTable<'a, T, Message> {
     columns: Vec<Column<'a, T, Message>>,
     searchable: Option<SearchFn<'a, T>>,
+    retain: Option<RetainFn<'a, T>>,
     on_sort: Option<ActionFn<'a, usize, Message>>,
     on_filter: Option<ActionFn<'a, String, Message>>,
     on_more: Option<Message>,
@@ -170,11 +174,25 @@ impl<'a, T, Message: Clone + 'a> DataTable<'a, T, Message> {
         Self {
             columns,
             searchable: None,
+            retain: None,
             on_sort: None,
             on_filter: None,
             on_more: None,
             noun: "rows".to_string(),
         }
+    }
+
+    /// Keep only rows matching `f`, applied *before* the filter box and counted
+    /// as the "of M" denominator.
+    ///
+    /// This is for selectors the caller owns — state chips, type toggles — which
+    /// compose with the filter box rather than replacing it: chips narrow *what
+    /// the table is about*, the box searches *within that*. Callers used to
+    /// pre-filter into a `Vec<&T>` instead, which cannot be handed to
+    /// [`DataTable::view`] because the borrow dies with the temporary.
+    pub fn retain(mut self, f: impl Fn(&T) -> bool + 'a) -> Self {
+        self.retain = Some(Box::new(f));
+        self
     }
 
     /// Provide the per-row string the filter box matches against.
@@ -208,16 +226,19 @@ impl<'a, T, Message: Clone + 'a> DataTable<'a, T, Message> {
     }
 
     pub fn view(self, rows: &'a [T], st: &TableState) -> Element<'a, Message> {
-        // 1. Filter.
+        // 1. Filter: the caller's row predicate first, then the filter box
+        //    within what it left.
         let needle = st.filter.trim().to_lowercase();
+        let kept = rows
+            .iter()
+            .filter(|r| self.retain.as_ref().is_none_or(|keep| keep(r)));
         let mut view_rows: Vec<&'a T> = if needle.is_empty() {
-            rows.iter().collect()
+            kept.collect()
         } else if let Some(search) = &self.searchable {
-            rows.iter()
-                .filter(|r| search(r).to_lowercase().contains(&needle))
+            kept.filter(|r| search(r).to_lowercase().contains(&needle))
                 .collect()
         } else {
-            rows.iter().collect()
+            kept.collect()
         };
         let total = view_rows.len();
 

@@ -246,6 +246,22 @@ pub struct ZenSight {
     firing_by_source: std::collections::HashMap<String, usize>,
 }
 
+/// Decode an `@rpc` reply-error payload into its `(error, message)` pair
+/// (RFC 05 §3's namespaced refusal, e.g. `error/gated`).
+///
+/// Shared by every write path so a refusal reads the same however it was sent.
+fn parse_rpc_error(payload: &[u8]) -> (String, String) {
+    serde_json::from_slice::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| {
+            Some((
+                v.get("error")?.as_str()?.to_string(),
+                v.get("message")?.as_str()?.to_string(),
+            ))
+        })
+        .unwrap_or_else(|| ("error".to_string(), "refused".to_string()))
+}
+
 impl ZenSight {
     /// Boot the ZenSight application (called by iced::application).
     pub fn boot(demo_mode: bool) -> (Self, Task<Message>) {
@@ -1079,6 +1095,42 @@ impl ZenSight {
             Message::SystemdSetUnitFilter(filter) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.systemd_detail.unit_state_filter = filter;
+                    device.systemd_detail.units_table.limit =
+                        crate::view::components::data_table::DEFAULT_LIMIT;
+                }
+            }
+            Message::SystemdSetUnitTypeFilter(filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_type_filter = filter;
+                    device.systemd_detail.units_table.limit =
+                        crate::view::components::data_table::DEFAULT_LIMIT;
+                }
+            }
+            Message::SystemdUnitsTableSort(col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.units_table.toggle_sort(col);
+                }
+            }
+            Message::SystemdUnitsTableFilter(f) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.units_table.set_filter(f);
+                }
+            }
+            Message::SystemdUnitsTableMore => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.units_table.load_more();
+                }
+            }
+            Message::FetchSystemdActionCapability => {
+                return ControlFlow::Break(self.query_systemd_action_capability());
+            }
+            Message::SystemdActionCapabilityReceived(result) => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.capability = match result {
+                        Ok(cap) => Fetch::Ready(cap),
+                        Err(e) => Fetch::Error(e),
+                    };
                 }
             }
             Message::SystemdUnitActionArm { verb, unit } => {
@@ -1090,6 +1142,9 @@ impl ZenSight {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.systemd_detail.pending_action = None;
                 }
+            }
+            Message::SystemdUnitActionResult(result) => {
+                return ControlFlow::Break(self.apply_systemd_action_result(result));
             }
             Message::SystemdUnitActionConfirm => {
                 if let Some((verb, unit)) = self
@@ -1110,11 +1165,19 @@ impl ZenSight {
                         }));
                     };
                     let key = crate::view::specialized::systemd_detail::action_set_key(&origin);
-                    let command = serde_json::json!({ "verb": verb, "unit": unit });
-                    return ControlFlow::Break(
-                        self.send_command(key, &command, format!("Sent {verb} {unit}"))
-                            .chain(self.query_systemd_action_status(origin)),
-                    );
+                    let timeout = self
+                        .selected_device
+                        .as_ref()
+                        .map(|d| d.systemd_detail.action_timeout())
+                        .unwrap_or_else(|| std::time::Duration::from_secs(35));
+                    let command = zensight_common::action::ServiceAction {
+                        verb,
+                        unit: unit.clone(),
+                    };
+                    if let Some(device) = self.selected_device.as_mut() {
+                        device.systemd_detail.action_inflight = Some((verb, unit));
+                    }
+                    return ControlFlow::Break(self.call_systemd_action(key, command, timeout));
                 }
             }
 
@@ -3613,20 +3676,10 @@ impl ZenSight {
                         message: ok_message,
                     },
                     Err(err) => {
-                        let detail =
-                            serde_json::from_slice::<serde_json::Value>(&err.payload().to_bytes())
-                                .ok()
-                                .and_then(|v| {
-                                    Some(format!(
-                                        "{}: {}",
-                                        v.get("error")?.as_str()?,
-                                        v.get("message")?.as_str()?
-                                    ))
-                                })
-                                .unwrap_or_else(|| "refused".to_string());
+                        let (error, message) = parse_rpc_error(&err.payload().to_bytes());
                         Message::CommandFeedback {
                             success: false,
-                            message: format!("Command refused — {detail}"),
+                            message: format!("Command refused — {error}: {message}"),
                         }
                     }
                 },
@@ -4089,65 +4142,204 @@ impl ZenSight {
         })
     }
 
-    /// Poll `@rpc/systemd/action` after sending a unit action (#283) and toast the
-    /// outcome. The short delay lets the sensor's async `JobRemoved` tracking
-    /// resolve first, so the toast usually carries the real job result.
-    fn query_systemd_action_status(&self, origin: String) -> Task<Message> {
+    /// Issue a service action and wait for the sensor's own outcome.
+    ///
+    /// The `action/set` reply *is* the `ActionStatus`, produced after the sensor
+    /// tracked the D-Bus job to completion — so there is nothing to poll for.
+    /// This replaces a fixed 1.5 s sleep followed by a fleet-wide status read,
+    /// which could report a different host's last action and reported an unknown
+    /// outcome as success.
+    ///
+    /// `timeout` is sized from the host's advertised `job_timeout_secs`
+    /// (`SystemdDetailState::action_timeout`) rather than the 5 s `send_command`
+    /// uses, because the sensor legitimately blocks for the length of the job.
+    fn call_systemd_action(
+        &self,
+        key: String,
+        command: zensight_common::action::ServiceAction,
+        timeout: std::time::Duration,
+    ) -> Task<Message> {
+        use crate::view::specialized::systemd_detail::ActionFailure;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SystemdUnitActionResult(Err(
+                ActionFailure::Transport("Not connected to Zenoh".to_string()),
+            )));
+        };
+        let payload = match serde_json::to_vec(&command) {
+            Ok(p) => p,
+            Err(e) => {
+                return Task::done(Message::SystemdUnitActionResult(Err(
+                    ActionFailure::Transport(format!("Failed to encode action: {e}")),
+                )));
+            }
+        };
+        Task::future(async move {
+            let started = std::time::Instant::now();
+            // A concrete single-origin key has exactly one queryable, so
+            // BestMatching is the honest target here; QueryTarget::All is for
+            // fleet fan-in (RFC 05 §2.1).
+            let replies = match session
+                .get(&key)
+                .payload(payload)
+                .target(zenoh::query::QueryTarget::BestMatching)
+                .timeout(timeout)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return Message::SystemdUnitActionResult(Err(ActionFailure::Transport(
+                        e.to_string(),
+                    )));
+                }
+            };
+            let outcome = match replies.recv_async().await {
+                Ok(reply) => match reply.result() {
+                    Ok(sample) => {
+                        match zensight_common::decode_auto::<zensight_common::action::ActionStatus>(
+                            &sample.payload().to_bytes(),
+                        ) {
+                            Ok(status) => Ok(status),
+                            Err(e) => Err(ActionFailure::Transport(format!(
+                                "Undecodable action reply: {e}"
+                            ))),
+                        }
+                    }
+                    Err(err) => {
+                        let (error, message) = parse_rpc_error(&err.payload().to_bytes());
+                        Err(ActionFailure::Refused { error, message })
+                    }
+                },
+                // Zenoh reports "nobody served the key" and "the deadline
+                // elapsed" identically, as a closed reply channel. Elapsed time
+                // against the deadline is the only way to tell them apart — a
+                // heuristic, but the two need very different wording: one is an
+                // error, the other is a job that may well be succeeding.
+                Err(_) => {
+                    let waited = started.elapsed();
+                    if waited + std::time::Duration::from_millis(250) >= timeout {
+                        Err(ActionFailure::StillRunning {
+                            waited_secs: waited.as_secs(),
+                        })
+                    } else {
+                        Err(ActionFailure::NotServed)
+                    }
+                }
+            };
+            Message::SystemdUnitActionResult(outcome)
+        })
+    }
+
+    /// Toast a finished action and refresh what it changed.
+    fn apply_systemd_action_result(
+        &mut self,
+        result: Result<
+            zensight_common::action::ActionStatus,
+            crate::view::specialized::systemd_detail::ActionFailure,
+        >,
+    ) -> Task<Message> {
+        use crate::view::specialized::systemd_detail::{ActionFailure, SystemdDetailTopic};
+        use crate::view::toast::ToastSeverity;
+        if let Some(device) = self.selected_device.as_mut() {
+            device.systemd_detail.action_inflight = None;
+        }
+        // Whether the host's state may have moved. `StillRunning` counts: that is
+        // exactly the case where the unit's own state is the only ground truth
+        // available to us.
+        let mut refresh = matches!(&result, Err(ActionFailure::StillRunning { .. }));
+        let (severity, message) = match result {
+            Ok(status) => {
+                refresh |= status.accepted;
+                let what = if status.unit.is_empty() {
+                    status.verb.to_string()
+                } else {
+                    format!("{} {}", status.verb, status.unit)
+                };
+                match (status.accepted, status.result.as_deref()) {
+                    (false, _) => (
+                        ToastSeverity::Error,
+                        format!(
+                            "{what} refused: {}",
+                            status.error.unwrap_or_else(|| "no reason given".into())
+                        ),
+                    ),
+                    (true, Some("done")) | (true, Some("applied")) => {
+                        let hint = if status.needs_daemon_reload {
+                            " — run daemon-reload for systemd to pick it up"
+                        } else {
+                            ""
+                        };
+                        (ToastSeverity::Success, format!("{what}: done{hint}"))
+                    }
+                    (true, Some(other)) => (
+                        ToastSeverity::Error,
+                        format!(
+                            "{what}: {other}{}",
+                            status
+                                .error
+                                .map(|e| format!(" — {e}"))
+                                .unwrap_or_default()
+                        ),
+                    ),
+                    // Accepted, but the sensor's own job wait elapsed. Not a
+                    // success: the previous code reported exactly this case as
+                    // one.
+                    (true, None) => (
+                        ToastSeverity::Warning,
+                        format!("{what}: issued, outcome unknown (the sensor's job wait elapsed)"),
+                    ),
+                }
+            }
+            Err(ActionFailure::Refused { error, message }) => {
+                (ToastSeverity::Error, format!("Refused — {error}: {message}"))
+            }
+            Err(ActionFailure::NotServed) => (
+                ToastSeverity::Error,
+                "No service-control endpoint on this host — actions are disabled or the sensor is offline"
+                    .to_string(),
+            ),
+            Err(ActionFailure::StillRunning { waited_secs }) => (
+                ToastSeverity::Warning,
+                format!("No reply within {waited_secs}s — the job may still be running"),
+            ),
+            Err(ActionFailure::Transport(e)) => (ToastSeverity::Error, format!("Action failed: {e}")),
+        };
+        self.toasts.push(severity, message);
+        if !refresh {
+            return Task::none();
+        }
+        // Refresh immediately rather than sleeping first: a value one poll stale
+        // resolves visibly, and a sleep here is the anti-pattern this replaced.
+        let mut tasks = vec![self.query_systemd_detail(SystemdDetailTopic::Units)];
+        if let Some(unit) = self
+            .selected_device
+            .as_ref()
+            .and_then(|d| d.systemd_detail.selected_unit.clone())
+        {
+            tasks.push(self.query_systemd_unit_detail(unit));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Ask the drilled-in host what service control it permits (#283). Every
+    /// 1.4+ sensor answers, enabled or not.
+    fn query_systemd_action_capability(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        // Read back from the host we acted on. A fleet read returns whichever
-        // sensor answered first, which may be a different host's last action.
-        let key = crate::view::specialized::systemd_detail::action_read_key(&origin);
+        let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Systemd) else {
+            return Task::done(Message::SystemdActionCapabilityReceived(Err(
+                "No systemd host selected".to_string(),
+            )));
+        };
+        let key = crate::view::specialized::systemd_detail::action_capability_key(&origin);
         Task::future(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            let no_reply = Message::CommandFeedback {
-                success: false,
-                message: "No systemd sensor replied with an action status — are actions enabled?"
-                    .to_string(),
-            };
-            match session.get(&key).await {
-                Ok(replies) => {
-                    if let Ok(reply) = replies.recv_async().await
-                        && let Ok(sample) = reply.result()
-                        && let Ok(status) = serde_json::from_slice::<serde_json::Value>(
-                            &sample.payload().to_bytes(),
-                        )
-                    {
-                        let accepted = status["accepted"].as_bool().unwrap_or(false);
-                        let unit = status["unit"].as_str().unwrap_or("?").to_string();
-                        let verb = status["verb"].as_str().unwrap_or("?").to_string();
-                        let result = status["result"].as_str().map(str::to_string);
-                        let error = status["error"].as_str().map(str::to_string);
-                        let (success, message) = match (accepted, result, error) {
-                            (false, _, reason) => (
-                                false,
-                                format!(
-                                    "{verb} {unit} rejected: {}",
-                                    reason.unwrap_or_else(|| "actions disabled".into())
-                                ),
-                            ),
-                            (true, Some(r), _) if r == "done" => {
-                                (true, format!("{verb} {unit}: done"))
-                            }
-                            (true, Some(r), e) => (
-                                false,
-                                format!(
-                                    "{verb} {unit}: {r}{}",
-                                    e.map(|e| format!(" — {e}")).unwrap_or_default()
-                                ),
-                            ),
-                            (true, None, _) => (true, format!("{verb} {unit} accepted (pending)")),
-                        };
-                        return Message::CommandFeedback { success, message };
-                    }
-                    no_reply
-                }
-                Err(e) => Message::CommandFeedback {
-                    success: false,
-                    message: format!("Action status query failed: {e}"),
-                },
-            }
+            let cap = crate::view::specialized::systemd_detail::fetch_one::<
+                zensight_common::action::ActionCapability,
+            >(session, key)
+            .await;
+            Message::SystemdActionCapabilityReceived(
+                cap.ok_or_else(|| "This host did not answer the service-control probe".to_string()),
+            )
         })
     }
 
@@ -4262,10 +4454,18 @@ impl ZenSight {
             SystemdDetailTopic::Events => !matches!(device.systemd_detail.events, Fetch::Idle),
             SystemdDetailTopic::Cgroups => !matches!(device.systemd_detail.cgroups, Fetch::Idle),
         };
+        // The Units tab also needs to know what this host permits before it can
+        // decide which controls to offer.
+        let probe = (tab == SpecializedTab::Units
+            && matches!(device.systemd_detail.capability, Fetch::Idle))
+        .then(|| self.query_systemd_action_capability());
         if already {
-            return None;
+            return probe;
         }
-        Some(self.query_systemd_detail(topic))
+        Some(match probe {
+            Some(probe) => Task::batch([self.query_systemd_detail(topic), probe]),
+            None => self.query_systemd_detail(topic),
+        })
     }
 
     /// Fetch a systemd on-demand detail channel and wrap the outcome (#281).
