@@ -136,6 +136,9 @@ pub trait Unit {
     fn sub_state(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn fragment_path(&self) -> zbus::Result<String>;
+    /// Override files layered over `FragmentPath`, in systemd's own order.
+    #[zbus(property)]
+    fn drop_in_paths(&self) -> zbus::Result<Vec<String>>;
     /// Wall-clock µs of the last active-enter transition (0 if never).
     #[zbus(property)]
     fn active_enter_timestamp(&self) -> zbus::Result<u64>;

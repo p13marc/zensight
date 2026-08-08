@@ -99,6 +99,7 @@ authorization model are security-sensitive.
 | `allow_unit_files` | **false** | additionally permit `enable`/`disable` |
 | `allow_daemon_reload` | **false** | additionally permit `daemon-reload` |
 | `history_capacity` | 64 | bounded action ring served on `@rpc/systemd/actions` |
+| `expose_unit_files` | **false** | serve unit-file contents on `@rpc/systemd/unit/file` |
 
 The three switches are separate because the verbs they gate need three
 *different* polkit actions and have three different blast radii:
@@ -123,3 +124,13 @@ Regardless of these switches, `@rpc/systemd/action/capability` is **always**
 served, replying `{"enabled": false, …}` on a read-only host. It is a read-only
 probe naming no units, and it exists so a caller can tell "this host refuses"
 from "nobody answered".
+
+`expose_unit_files` is a *read* surface and independent of `enabled` — it can be
+turned on for a read-only sensor. It is off by default because unit files
+routinely carry credentials in `Environment=` lines. When on, the sensor redacts
+secret-looking assignments (the same denylist the debug bundle uses) before the
+reply leaves the host, caps the reply at 128 KiB, and flags both facts in the
+payload. That is a denylist, not a proof: review your unit files before enabling
+it on a host whose files you did not write. Paths come from D-Bus
+(`FragmentPath`/`DropInPaths`), never from the request, so the procedure cannot
+be pointed at an arbitrary file.

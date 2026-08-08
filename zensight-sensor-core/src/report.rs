@@ -117,12 +117,20 @@ const REDACT_EXACT: &[&str] = &[
 
 const REDACTED: &str = "***REDACTED***";
 
-fn is_secret_key(key: &str, extra: &[String]) -> bool {
+/// Whether `key` names a value that must not leave the host.
+///
+/// Public so callers redacting *text* rather than JSON — systemd unit files,
+/// whose `Environment=` lines routinely carry credentials — apply exactly the
+/// same denylist as [`redact`] instead of inventing a second one.
+pub fn is_secret_key(key: &str, extra: &[String]) -> bool {
     let lk = key.to_ascii_lowercase();
     REDACT_CONTAINS.iter().any(|p| lk.contains(p))
         || REDACT_EXACT.iter().any(|p| lk == *p)
         || extra.iter().any(|p| lk.contains(&p.to_ascii_lowercase()))
 }
+
+/// The marker substituted for a redacted value.
+pub const REDACTED_MARKER: &str = REDACTED;
 
 /// Recursively replace any object value whose key looks secret with a redaction
 /// marker. Generic over every sensor config (they share no supertype but all

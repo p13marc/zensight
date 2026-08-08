@@ -94,6 +94,13 @@
     //   allow_daemon_reload: false,
     //
     //   history_capacity: 64,   // audit ring served on @rpc/systemd/actions
+    //
+    //   // Serve unit-file contents on @rpc/systemd/unit/file. A *read* surface,
+    //   // independent of `enabled`. Off by default because unit files routinely
+    //   // carry credentials in Environment= lines; secret-looking assignments
+    //   // are redacted and the reply is capped, but that is a denylist, not a
+    //   // proof. Review your unit files before turning this on.
+    //   expose_unit_files: false,
     // },
 
     collect: {

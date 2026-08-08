@@ -290,6 +290,12 @@ pub enum Message {
     SystemdUnitsTableFilter(String),
     /// Units table: reveal another page of rows.
     SystemdUnitsTableMore,
+    /// Read the selected unit's on-disk definition (opt-in per host).
+    SystemdFetchUnitFile(String),
+    /// The unit-file reply, or why there wasn't one.
+    SystemdUnitFileReceived(Result<zensight_common::query_detail::UnitFile, String>),
+    /// Collapse the unit-file panel.
+    SystemdHideUnitFile,
     /// Fetch this host's advertised service-control gate (#283) so the Units tab
     /// can render what it will actually accept.
     FetchSystemdActionCapability,

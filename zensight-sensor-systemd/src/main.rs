@@ -84,12 +84,14 @@ async fn main() -> Result<()> {
     let query_producer = "systemd".to_string();
     let query_events = event_state.clone();
     let query_cgroup = systemd_config.cgroup.clone();
+    let query_expose_unit_files = systemd_config.actions.expose_unit_files;
     runner.spawn(async move {
         zensight_sensor_systemd::query::run(
             query_session,
             query_producer,
             query_events,
             query_cgroup,
+            query_expose_unit_files,
         )
         .await;
     });

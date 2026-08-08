@@ -584,6 +584,32 @@ pub struct UnitRecord {
     pub unit_file_state: Option<String>,
 }
 
+/// One unit's on-disk definition, served from `@rpc/systemd/unit/file?name=<u>`.
+///
+/// Opt-in (`actions.expose_unit_files`) because unit files routinely carry
+/// credentials in `Environment=` lines; the sensor redacts those before they
+/// reach the bus. Paths are resolved from D-Bus `FragmentPath`/`DropInPaths`,
+/// never from the request, so there is no traversal surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UnitFile {
+    pub name: String,
+    /// The main unit file's path, if the unit has one (generated and transient
+    /// units do not).
+    #[serde(default)]
+    pub fragment_path: Option<String>,
+    #[serde(default)]
+    pub fragment: Option<String>,
+    /// Drop-ins, in systemd's own override order: `(path, contents)`.
+    #[serde(default)]
+    pub dropins: Vec<(String, String)>,
+    /// Whether the size cap dropped content.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Whether any line was redacted, so the reader knows this is not verbatim.
+    #[serde(default)]
+    pub redacted: bool,
+}
+
 /// Full detail for one systemd unit (#274), served from `@rpc/systemd/unit?name=<u>`:
 /// the inventory fields plus resource accounting, the unit file path, and the
 /// dependency edges. Resource fields are `None` when accounting is off / the unit

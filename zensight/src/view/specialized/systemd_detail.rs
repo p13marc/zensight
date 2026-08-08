@@ -36,6 +36,8 @@ pub enum SystemdDetailTopic {
     Timers,
     Events,
     Cgroups,
+    /// The service-control audit ring.
+    Actions,
 }
 
 impl SystemdDetailTopic {
@@ -48,6 +50,7 @@ impl SystemdDetailTopic {
             SystemdDetailTopic::Timers => "timers",
             SystemdDetailTopic::Events => "events",
             SystemdDetailTopic::Cgroups => "cgroups",
+            SystemdDetailTopic::Actions => "actions",
         };
         match origin {
             Some(o) => zensight_common::origin_rpc_key(o, "systemd", topic),
@@ -61,6 +64,7 @@ impl SystemdDetailTopic {
             SystemdDetailTopic::Timers => "Timers",
             SystemdDetailTopic::Events => "Events",
             SystemdDetailTopic::Cgroups => "cgroups",
+            SystemdDetailTopic::Actions => "Actions",
         }
     }
 }
@@ -73,6 +77,7 @@ pub enum SystemdDetailData {
     Events(Vec<SystemdEventRecord>),
     /// The cgroups query replies a single tree node (or `null`).
     Cgroups(Option<CgroupNode>),
+    Actions(Vec<zensight_common::action::ActionStatus>),
 }
 
 /// What the Units tab may offer for one unit, decided from the host's advertised
@@ -107,6 +112,8 @@ pub struct SystemdDetailState {
     pub timers: Fetch<Vec<TimerRecord>>,
     pub events: Fetch<Vec<SystemdEventRecord>>,
     pub cgroups: Fetch<Option<CgroupNode>>,
+    /// The service-control audit ring (#283).
+    pub actions: Fetch<Vec<zensight_common::action::ActionStatus>>,
     /// Units table: sort column, filter-box text, row cap.
     pub units_table: TableState,
     /// Units table: active-state filter (`None` = all).
@@ -128,6 +135,14 @@ pub struct SystemdDetailState {
     /// The drill-down's `@rpc/systemd/unit?name=` reply (#313): control_group,
     /// MainPID + start_time, invocation_id — the cross-view join keys.
     pub unit_detail: Fetch<UnitDetail>,
+    /// The selected unit's on-disk definition, fetched on demand (opt-in per
+    /// host). Reset whenever the selected unit changes.
+    pub unit_file: Fetch<zensight_common::query_detail::UnitFile>,
+    /// Last seen `events/job_removed_total`. A change means some unit's state
+    /// moved on the host — including from outside ZenSight — so the open table
+    /// is stale and should re-pull. `None` until first sight, so arriving at a
+    /// host does not itself trigger a refresh.
+    pub job_events_seen: Option<f64>,
 }
 
 impl Default for SystemdDetailState {
@@ -137,6 +152,7 @@ impl Default for SystemdDetailState {
             timers: Fetch::default(),
             events: Fetch::default(),
             cgroups: Fetch::default(),
+            actions: Fetch::default(),
             units_table: TableState::default(),
             unit_state_filter: None,
             // Not `None`: a host lists hundreds of units, and the operator
@@ -147,6 +163,8 @@ impl Default for SystemdDetailState {
             pending_action: None,
             selected_unit: None,
             unit_detail: Fetch::default(),
+            unit_file: Fetch::default(),
+            job_events_seen: None,
         }
     }
 }
@@ -231,6 +249,7 @@ impl SystemdDetailState {
             SystemdDetailTopic::Timers => self.timers = Fetch::Loading,
             SystemdDetailTopic::Events => self.events = Fetch::Loading,
             SystemdDetailTopic::Cgroups => self.cgroups = Fetch::Loading,
+            SystemdDetailTopic::Actions => self.actions = Fetch::Loading,
         }
     }
 
@@ -245,11 +264,16 @@ impl SystemdDetailState {
                 self.events = Fetch::Ready(v);
             }
             Ok(SystemdDetailData::Cgroups(v)) => self.cgroups = Fetch::Ready(v),
+            Ok(SystemdDetailData::Actions(mut v)) => {
+                v.sort_by_key(|a| std::cmp::Reverse(a.ts_unix));
+                self.actions = Fetch::Ready(v);
+            }
             Err(e) => match topic {
                 SystemdDetailTopic::Units => self.units = Fetch::Error(e),
                 SystemdDetailTopic::Timers => self.timers = Fetch::Error(e),
                 SystemdDetailTopic::Events => self.events = Fetch::Error(e),
                 SystemdDetailTopic::Cgroups => self.cgroups = Fetch::Error(e),
+                SystemdDetailTopic::Actions => self.actions = Fetch::Error(e),
             },
         }
     }
@@ -281,6 +305,15 @@ pub fn action_capability_key(origin: &str) -> String {
 /// The audit-timeline key: a bounded ring of recent action outcomes.
 pub fn actions_history_key(origin: &str) -> String {
     zensight_common::origin_rpc_key(origin, "systemd", "actions")
+}
+
+/// The unit-file read key, matching the sensor's `unit/file?name=` queryable.
+pub fn unit_file_key(origin: Option<&str>, unit: &str) -> String {
+    let key = match origin {
+        Some(o) => zensight_common::origin_rpc_key(o, "systemd", "unit/file"),
+        None => zensight_common::fleet_rpc_key("systemd", "unit/file"),
+    };
+    format!("{key}?name={unit}")
 }
 
 /// Why an action produced no `ActionStatus`. GUI-only — not a wire type.

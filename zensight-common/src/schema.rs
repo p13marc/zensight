@@ -76,6 +76,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         // ── query-detail records (this crate, fully derived) ──────────────
         .json::<crate::query_detail::LatencyReport>("LatencyReport")
         .json::<crate::query_detail::UnitDetail>("UnitDetail")
+        .json::<crate::query_detail::UnitFile>("UnitFile")
         .json::<Vec<crate::query_detail::CgroupNode>>("CgroupNode")
         .json::<Vec<crate::entity::NameVal>>("Vec<NameVal>")
         .json::<Vec<crate::stream::StreamDescriptor>>("Vec<StreamDescriptor>")

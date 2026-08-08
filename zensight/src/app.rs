@@ -1121,6 +1121,28 @@ impl ZenSight {
                     device.systemd_detail.units_table.load_more();
                 }
             }
+            Message::SystemdFetchUnitFile(unit) => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_file = Fetch::Loading;
+                }
+                return ControlFlow::Break(self.query_systemd_unit_file(unit));
+            }
+            Message::SystemdUnitFileReceived(result) => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_file = match result {
+                        Ok(f) => Fetch::Ready(f),
+                        Err(e) => Fetch::Error(e),
+                    };
+                }
+            }
+            Message::SystemdHideUnitFile => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_file = Fetch::Idle;
+                }
+            }
             Message::FetchSystemdActionCapability => {
                 return ControlFlow::Break(self.query_systemd_action_capability());
             }
@@ -1190,6 +1212,9 @@ impl ZenSight {
                         Some(_) => Fetch::Loading,
                         None => Fetch::Idle,
                     };
+                    // Collapse the file panel: it belongs to the unit that was
+                    // selected, not the one now selected.
+                    device.systemd_detail.unit_file = Fetch::Idle;
                 }
                 if let Some(unit) = unit {
                     return ControlFlow::Break(self.query_systemd_unit_detail(unit));
@@ -2194,7 +2219,15 @@ impl ZenSight {
                 // Topology refresh (#391): while the map is open, re-pull
                 // matrix/flows/neighbors every ~10 s so edge rates stay live.
                 let topo_fetch = self.maybe_refresh_topology();
+                // Units refresh (#283): while the systemd Units tab is open,
+                // re-pull it when the host reports a unit job completing.
+                let units_fetch = self.maybe_refresh_systemd_units();
                 let log_fetch = match (log_fetch, topo_fetch) {
+                    (Some(a), Some(b)) => Some(Task::batch([a, b])),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                };
+                let log_fetch = match (log_fetch, units_fetch) {
                     (Some(a), Some(b)) => Some(Task::batch([a, b])),
                     (Some(a), None) | (None, Some(a)) => Some(a),
                     (None, None) => None,
@@ -4320,6 +4353,69 @@ impl ZenSight {
         Task::batch(tasks)
     }
 
+    /// Read one unit's on-disk definition. A host that has not opted in serves
+    /// no such procedure, so the absence of a reply is the honest answer.
+    fn query_systemd_unit_file(&self, unit: String) -> Task<Message> {
+        use crate::view::specialized::systemd_detail::{fetch_one, unit_file_key};
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SystemdUnitFileReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        let key = unit_file_key(
+            self.selected_origin_for(zensight_common::Protocol::Systemd)
+                .as_deref(),
+            &unit,
+        );
+        Task::future(async move {
+            let file = fetch_one::<zensight_common::query_detail::UnitFile>(session, key).await;
+            Message::SystemdUnitFileReceived(file.ok_or_else(|| {
+                "this host does not serve unit files (actions.expose_unit_files is off)".to_string()
+            }))
+        })
+    }
+
+    /// Re-pull the Units table when the host reports that a unit job finished.
+    ///
+    /// The sensor already streams `events/job_removed_total`, so this needs no
+    /// new wire surface: a change in that counter means some unit's state moved,
+    /// whether ZenSight caused it or someone ran `systemctl` over SSH. Without
+    /// this the table silently showed whatever was true when it was last
+    /// fetched.
+    ///
+    /// Runs off the 1 Hz tick, so it is inherently rate-limited, and skips while
+    /// a fetch is already in flight.
+    fn maybe_refresh_systemd_units(&mut self) -> Option<Task<Message>> {
+        use crate::view::specialized::SpecializedTab;
+        use crate::view::specialized::fetch::Fetch;
+        use crate::view::specialized::systemd_detail::SystemdDetailTopic;
+
+        let device = self.selected_device.as_mut()?;
+        if device.device_id.protocol != zensight_common::Protocol::Systemd
+            || device.specialized_tab != SpecializedTab::Units
+        {
+            return None;
+        }
+        let jobs = match device
+            .metrics
+            .get("events/job_removed_total")
+            .map(|p| &p.value)
+        {
+            Some(zensight_common::TelemetryValue::Counter(v)) => *v as f64,
+            Some(zensight_common::TelemetryValue::Gauge(v)) => *v,
+            _ => return None,
+        };
+        let moved = device.systemd_detail.job_events_seen != Some(jobs);
+        // Seed on first sight rather than refreshing: arriving at a host that
+        // has restarted units at some point in its life is not news.
+        let first_sight = device.systemd_detail.job_events_seen.is_none();
+        device.systemd_detail.job_events_seen = Some(jobs);
+        if !moved || first_sight || matches!(device.systemd_detail.units, Fetch::Loading) {
+            return None;
+        }
+        Some(self.query_systemd_detail(SystemdDetailTopic::Units))
+    }
+
     /// Ask the drilled-in host what service control it permits (#283). Every
     /// 1.4+ sensor answers, enabled or not.
     fn query_systemd_action_capability(&self) -> Task<Message> {
@@ -4445,6 +4541,7 @@ impl ZenSight {
             SpecializedTab::Timers => SystemdDetailTopic::Timers,
             SpecializedTab::Events => SystemdDetailTopic::Events,
             SpecializedTab::Cgroups => SystemdDetailTopic::Cgroups,
+            SpecializedTab::Actions => SystemdDetailTopic::Actions,
             _ => return None,
         };
         // Only prefetch when we haven't already loaded/started this channel.
@@ -4453,6 +4550,7 @@ impl ZenSight {
             SystemdDetailTopic::Timers => !matches!(device.systemd_detail.timers, Fetch::Idle),
             SystemdDetailTopic::Events => !matches!(device.systemd_detail.events, Fetch::Idle),
             SystemdDetailTopic::Cgroups => !matches!(device.systemd_detail.cgroups, Fetch::Idle),
+            SystemdDetailTopic::Actions => !matches!(device.systemd_detail.actions, Fetch::Idle),
         };
         // The Units tab also needs to know what this host permits before it can
         // decide which controls to offer.
@@ -4502,6 +4600,9 @@ impl ZenSight {
                 SystemdDetailTopic::Cgroups => {
                     Some(SystemdDetailData::Cgroups(fetch_one(session, key).await))
                 }
+                SystemdDetailTopic::Actions => fetch_records(session, key)
+                    .await
+                    .map(SystemdDetailData::Actions),
             };
             let result =
                 data.ok_or_else(|| format!("No systemd sensor responded for {}", topic.label()));

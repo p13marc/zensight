@@ -56,6 +56,16 @@ pub fn capability_key(producer: &str, topic: &str) -> String {
         .into()
 }
 
+/// A two-chunk detail read: `…/@rpc/<producer>/<topic>/<sub>`.
+///
+/// For procedures that group under a parent topic (`unit/file` beside `unit`)
+/// rather than adding a top-level name.
+pub fn nested_query_key(producer: &str, topic: &str, sub: &str) -> String {
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&[topic, sub])
+        .into()
+}
+
 /// The on-demand detail-read procedure: `…/@rpc/<producer>/<topic>`.
 /// High-cardinality detail (flow tables, socket lists, …) is served here on
 /// request, never streamed onto the telemetry bus (RFC 04 R3). Same key

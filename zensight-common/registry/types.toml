@@ -123,6 +123,9 @@ kind = "json-schema"
 [types.UnitDetail]
 kind = "json-schema"
 
+[types.UnitFile]
+kind = "json-schema"
+
 [types."Vec<ActionStatus>"]
 kind = "json-schema"
 

@@ -60,6 +60,15 @@ fn systemd_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
         TabItem::new(Sentinel, "Sentinel"),
         TabItem::new(Events, "Events"),
         TabItem::new(Cgroups, "cgroups"),
+        // Only on a host that actually offers service control — an audit
+        // timeline that can never have entries is just a dead tab.
+        TabItem::new(Actions, "Actions").visible(
+            state
+                .systemd_detail
+                .capability
+                .ready()
+                .is_some_and(|c| c.enabled),
+        ),
     ]
     .into_iter()
     .map(|t| {
@@ -80,6 +89,7 @@ fn systemd_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         Sentinel => render_sentinel_tab(state),
         Events => render_events_tab(state),
         Cgroups => render_cgroups_tab(state),
+        Actions => render_actions_tab(state),
         // Overview is the default for any non-systemd remembered tab.
         _ => render_overview(state),
     };
@@ -452,7 +462,81 @@ fn render_unit_detail_panel<'a>(
         }
     };
 
-    column![header, body].spacing(space::SM).into()
+    column![header, body, unit_file_section(d, unit)]
+        .spacing(space::SM)
+        .into()
+}
+
+/// The unit's on-disk definition, behind a toggle.
+///
+/// Opt-in per host (`actions.expose_unit_files`), so a sensor that does not
+/// serve it answers nothing and the panel says so rather than spinning.
+fn unit_file_section<'a>(d: &'a SystemdDetailState, unit: &'a str) -> Element<'a, Message> {
+    match &d.unit_file {
+        Fetch::Idle => button(text("View unit file").size(font::CAPTION))
+            .padding([2, 8])
+            .style(iced::widget::button::secondary)
+            .on_press(Message::SystemdFetchUnitFile(unit.to_string()))
+            .into(),
+        Fetch::Loading => text("Reading unit file…")
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+        Fetch::Error(e) => text(format!("Unit file unavailable: {e}"))
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+        Fetch::Ready(file) => {
+            let mut colm = column![
+                row![
+                    section_header("Unit file", None),
+                    button(text("Hide").size(font::CAPTION))
+                        .padding([2, 8])
+                        .style(iced::widget::button::text)
+                        .on_press(Message::SystemdHideUnitFile),
+                ]
+                .spacing(space::SM)
+                .align_y(iced::Alignment::Center)
+            ]
+            .spacing(space::XS);
+            // Say plainly that this is not the file as it exists on disk.
+            if file.redacted {
+                colm = colm.push(
+                    text("Secret-looking assignments have been redacted by the sensor.")
+                        .size(font::CAPTION)
+                        .style(dim),
+                );
+            }
+            if file.truncated {
+                colm = colm.push(
+                    text("Content was truncated at the sensor's size cap.")
+                        .size(font::CAPTION)
+                        .style(dim),
+                );
+            }
+            if let Some(body) = &file.fragment {
+                let path = file.fragment_path.as_deref().unwrap_or("(fragment)");
+                colm = colm.push(text(path.to_string()).size(font::CAPTION).style(dim));
+                colm = colm.push(text(body.clone()).size(font::CAPTION));
+            }
+            for (path, body) in &file.dropins {
+                colm = colm.push(
+                    text(format!("drop-in: {path}"))
+                        .size(font::CAPTION)
+                        .style(dim),
+                );
+                colm = colm.push(text(body.clone()).size(font::CAPTION));
+            }
+            if file.fragment.is_none() && file.dropins.is_empty() {
+                colm = colm.push(
+                    text("This unit has no unit file (generated or transient).")
+                        .size(font::CAPTION)
+                        .style(dim),
+                );
+            }
+            scrollable(colm).height(Length::Fixed(320.0)).into()
+        }
+    }
 }
 
 // ── Timers ────────────────────────────────────────────────────────────────────
@@ -568,6 +652,91 @@ fn event_row(e: &SystemdEventRecord) -> Element<'_, Message> {
     ]
     .spacing(space::SM)
     .into()
+}
+
+// ── Service-control audit timeline (#283) ─────────────────────────────────────
+
+fn render_actions_tab(state: &DeviceDetailState) -> Column<'_, Message> {
+    let d = &state.systemd_detail;
+    let header = row![
+        section_header("Service-control audit", None),
+        refresh_button(SystemdDetailTopic::Actions),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
+
+    let body = fetch_body(&d.actions, SystemdDetailTopic::Actions, |actions| {
+        if actions.is_empty() {
+            return empty_state("No service actions have been attempted on this host.", None);
+        }
+        let mut list = column![table_header(&["When", "Verb", "Unit", "Outcome"])].spacing(2);
+        for a in actions.iter().take(200) {
+            list = list.push(action_row(a));
+        }
+        list.into()
+    });
+
+    let note = text(
+        "Every attempt is recorded, refused ones included; the sensor also writes each to its audit log.",
+    )
+    .size(font::CAPTION)
+    .style(dim);
+
+    column![card(column![header, note, body].spacing(space::SM))].spacing(space::MD)
+}
+
+fn action_row(a: &zensight_common::action::ActionStatus) -> Element<'_, Message> {
+    // Refusals and failures must be legible as such at a glance, not inferred
+    // from an absent word.
+    let (outcome, tone) = match (a.accepted, a.result.as_deref()) {
+        (false, _) => (
+            format!("refused: {}", a.error.as_deref().unwrap_or("no reason")),
+            Tone::Bad,
+        ),
+        (true, Some("done")) | (true, Some("applied")) => {
+            let hint = if a.needs_daemon_reload {
+                " (needs daemon-reload)"
+            } else {
+                ""
+            };
+            (format!("done{hint}"), Tone::Good)
+        }
+        (true, Some(other)) => (other.to_string(), Tone::Bad),
+        (true, None) => ("issued, outcome unknown".to_string(), Tone::Warn),
+    };
+    row![
+        cell(&fmt_unix(a.ts_unix.max(0) as u64), 2),
+        cell(a.verb.as_str(), 1),
+        cell(if a.unit.is_empty() { "—" } else { &a.unit }, 3),
+        toned(outcome, tone, 3),
+    ]
+    .spacing(space::SM)
+    .into()
+}
+
+#[derive(Clone, Copy)]
+enum Tone {
+    Good,
+    Warn,
+    Bad,
+}
+
+fn toned<'a>(value: String, tone: Tone, portion: u16) -> Element<'a, Message> {
+    let styled = move |t: &Theme| {
+        let c = theme::colors(t);
+        text::Style {
+            color: Some(match tone {
+                Tone::Good => c.status_healthy(),
+                Tone::Warn => c.status_warning(),
+                Tone::Bad => c.status_error(),
+            }),
+        }
+    };
+    text(value)
+        .size(font::CAPTION)
+        .width(Length::FillPortion(portion))
+        .style(styled)
+        .into()
 }
 
 // ── cgroups tree ──────────────────────────────────────────────────────────────

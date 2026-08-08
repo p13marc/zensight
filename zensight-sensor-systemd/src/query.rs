@@ -72,6 +72,7 @@ pub async fn run(
     producer: String,
     events: EventState,
     cgroup: crate::config::CgroupConfig,
+    expose_unit_files: bool,
 ) {
     let conn = match zbus::Connection::system().await {
         Ok(c) => c,
@@ -94,6 +95,7 @@ pub async fn run(
     let events_key = zensight_common::command::query_key(&producer, "events");
     let timers_key = zensight_common::command::query_key(&producer, "timers");
     let cgroups_key = zensight_common::command::query_key(&producer, "cgroups");
+    let unit_file_key = zensight_common::command::nested_query_key(&producer, "unit", "file");
 
     let units_q = match session.declare_queryable(&units_key).await {
         Ok(q) => q,
@@ -137,8 +139,22 @@ pub async fn run(
             return;
         }
     };
+    // Opt-in: unit files routinely carry credentials, so a host does not serve
+    // them unless asked to. When off the queryable is not declared at all.
+    let unit_file_q = if expose_unit_files {
+        match session.declare_queryable(&unit_file_key).await {
+            Ok(q) => Some(q),
+            Err(e) => {
+                tracing::error!(error = %e, key = %unit_file_key, "query: declare unit/file failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
     tracing::info!(units = %units_key, failed = %failed_key, unit = %unit_key, events = %events_key,
-        timers = %timers_key, cgroups = %cgroups_key, "systemd unit inventory query channel ready");
+        timers = %timers_key, cgroups = %cgroups_key, unit_files = expose_unit_files,
+        "systemd unit inventory query channel ready");
 
     loop {
         tokio::select! {
@@ -179,6 +195,22 @@ pub async fn run(
                 let Ok(query) = q else { return };
                 let tree = build_cgroup_tree(&cgroup, query.parameters().as_str());
                 reply_json(&query, &cgroups_key, &tree).await;
+            }
+            // `Option::None` makes this arm never ready, so an opted-out sensor
+            // simply parks here forever rather than needing a second loop.
+            q = async {
+                match &unit_file_q {
+                    Some(q) => q.recv_async().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Ok(query) = q else { return };
+                let name = param(query.parameters().as_str(), "name");
+                let file = match name.as_deref() {
+                    Some(n) => unit_file(&conn, &manager, n).await,
+                    None => None,
+                };
+                reply_json(&query, &unit_file_key, &file).await;
             }
         }
     }
@@ -338,6 +370,125 @@ async fn unit_detail(
     Some(d)
 }
 
+/// Total bytes of unit-file content one reply may carry.
+const UNIT_FILE_MAX_BYTES: usize = 128 * 1024;
+
+/// Redact secret-looking `Key=Value` assignments in unit-file text.
+///
+/// Unit files carry credentials in `Environment=`/`EnvironmentFile=` lines far
+/// too often to ship them verbatim. Reuses the sensor framework's denylist
+/// rather than a second one, so what counts as a secret cannot drift between the
+/// debug bundle and this.
+///
+/// Handles the two shapes systemd uses: a bare `Key=secret` directive, and
+/// `Environment="FOO=secret" BAR=secret`, where the interesting key is inside
+/// the value. Returns the text and whether anything was redacted.
+pub fn redact_unit_file(text: &str) -> (String, bool) {
+    let mut redacted = false;
+    let out = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            // Comments carry no assignments worth scanning.
+            if trimmed.starts_with('#') || trimmed.starts_with(';') {
+                return line.to_string();
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return line.to_string();
+            };
+            let directive = key.trim();
+            // `Environment=FOO=secret`: the directive is benign, the embedded
+            // assignment is not.
+            let embedded_secret = matches!(
+                directive.to_ascii_lowercase().as_str(),
+                "environment" | "environmentfile" | "passenvironment"
+            ) && value.split_once('=').is_some_and(|(inner, _)| {
+                zensight_sensor_core::is_secret_key(inner.trim().trim_matches('"'), &[])
+            });
+            if zensight_sensor_core::is_secret_key(directive, &[]) || embedded_secret {
+                redacted = true;
+                let indent = &line[..line.len() - trimmed.len()];
+                format!(
+                    "{indent}{directive}={}",
+                    zensight_sensor_core::REDACTED_MARKER
+                )
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (out, redacted)
+}
+
+/// Trim `text` to `budget` bytes, reporting whether anything was dropped.
+/// Splits only on a UTF-8 boundary, so the result is always valid text.
+fn take_within_budget(text: String, budget: usize) -> (String, bool) {
+    if text.len() <= budget {
+        return (text, false);
+    }
+    let mut cut = budget;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut text = text;
+    text.truncate(cut);
+    (text, true)
+}
+
+/// Read one unit's fragment + drop-ins, redacted and size-capped.
+async fn unit_file(
+    conn: &zbus::Connection,
+    manager: &ManagerProxy<'_>,
+    name: &str,
+) -> Option<zensight_common::query_detail::UnitFile> {
+    let path = manager.load_unit(name).await.ok()?;
+    let unit = UnitProxy::builder(conn)
+        .path(path)
+        .ok()?
+        .build()
+        .await
+        .ok()?;
+    let fragment_path = unit.fragment_path().await.ok().filter(|p| !p.is_empty());
+    let drop_in_paths = unit.drop_in_paths().await.unwrap_or_default();
+
+    let mut budget = UNIT_FILE_MAX_BYTES;
+    let mut truncated = false;
+    let mut redacted = false;
+    // Paths come from D-Bus, never from the request, so there is nothing to
+    // sanitize — the unit cannot ask us to read an arbitrary file.
+    let mut read = |p: &str, budget: &mut usize| -> Option<String> {
+        let raw = std::fs::read_to_string(p).ok()?;
+        let (text, hit) = redact_unit_file(&raw);
+        redacted |= hit;
+        let (text, cut) = take_within_budget(text, *budget);
+        truncated |= cut;
+        *budget -= text.len();
+        Some(text)
+    };
+
+    let fragment = fragment_path.as_deref().and_then(|p| read(p, &mut budget));
+    let mut dropins = Vec::new();
+    for p in drop_in_paths {
+        if budget == 0 {
+            truncated = true;
+            break;
+        }
+        if let Some(text) = read(&p, &mut budget) {
+            dropins.push((p, text));
+        }
+    }
+
+    Some(zensight_common::query_detail::UnitFile {
+        name: name.to_string(),
+        fragment_path,
+        fragment,
+        dropins,
+        truncated,
+        redacted,
+    })
+}
+
 /// Lowercase hex of a byte string (InvocationID wire form).
 fn hex_lower(bytes: Vec<u8>) -> String {
     bytes.iter().fold(String::with_capacity(32), |mut s, b| {
@@ -435,6 +586,60 @@ mod tests {
         );
         assert_eq!(param("other=x", "name"), None);
         assert_eq!(param("", "name"), None);
+    }
+
+    /// Unit files carry credentials often enough that shipping one verbatim is
+    /// not an option.
+    #[test]
+    fn unit_file_redaction_catches_both_systemd_shapes() {
+        let (out, redacted) = redact_unit_file(
+            "[Service]\n\
+             ExecStart=/usr/bin/app --verbose\n\
+             Environment=DB_PASSWORD=hunter2\n\
+             Environment=LOG_LEVEL=debug\n\
+             # Environment=OLD_TOKEN=stale\n",
+        );
+        assert!(redacted);
+        assert!(!out.contains("hunter2"), "embedded secret survived: {out}");
+        assert!(
+            out.contains("ExecStart=/usr/bin/app --verbose"),
+            "benign directives are untouched"
+        );
+        assert!(
+            out.contains("Environment=LOG_LEVEL=debug"),
+            "a benign environment assignment is untouched"
+        );
+        assert!(
+            out.contains("# Environment=OLD_TOKEN=stale"),
+            "comments kept"
+        );
+    }
+
+    #[test]
+    fn budget_trimming_keeps_valid_utf8_and_reports_the_cut() {
+        let (kept, cut) = take_within_budget("abcdef".to_string(), 10);
+        assert_eq!(kept, "abcdef");
+        assert!(!cut, "under budget is not a truncation");
+
+        let (kept, cut) = take_within_budget("abcdef".to_string(), 3);
+        assert_eq!(kept, "abc", "a capped file must still carry what fits");
+        assert!(cut);
+
+        // Cutting mid-sequence backs off rather than producing invalid UTF-8.
+        let (kept, cut) = take_within_budget("aé".to_string(), 2);
+        assert_eq!(kept, "a");
+        assert!(cut);
+
+        let (kept, cut) = take_within_budget("abc".to_string(), 0);
+        assert!(kept.is_empty());
+        assert!(cut);
+    }
+
+    #[test]
+    fn unit_file_redaction_reports_when_it_did_nothing() {
+        let (out, redacted) = redact_unit_file("[Unit]\nDescription=nginx\n");
+        assert!(!redacted);
+        assert_eq!(out, "[Unit]\nDescription=nginx");
     }
 
     #[test]

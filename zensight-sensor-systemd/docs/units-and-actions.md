@@ -101,6 +101,14 @@ verb — so the reply carries `needs_daemon_reload: true` and the operator decid
 - Read: `zensight/v1/<origin>/@rpc/systemd/action/capability` replies
   `ActionCapability` — `{ enabled, allow_units, job_timeout_secs, verbs,
   unit_files, daemon_reload }`. **Served unconditionally**, see below.
+- Read: `zensight/v1/<origin>/@rpc/systemd/unit/file?name=<u>` replies a
+  `UnitFile` — the unit's fragment and drop-ins. Declared only when
+  `actions.expose_unit_files` is set (a *read* surface, independent of
+  `enabled`). Secret-looking `Key=Value` assignments are redacted with the same
+  denylist the debug bundle uses, the reply is capped at 128 KiB, and both facts
+  are flagged in the payload (`redacted`/`truncated`) so a reader never mistakes
+  it for the file as it exists on disk. Paths are resolved from D-Bus
+  `FragmentPath`/`DropInPaths`, never from the request.
 
 ### The capability probe is served even when actions are off
 

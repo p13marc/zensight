@@ -112,6 +112,12 @@ pub struct ActionsConfig {
     /// `@rpc/systemd/actions`.
     #[serde(default = "default_history_capacity")]
     pub history_capacity: usize,
+    /// Serve unit-file contents on `@rpc/systemd/unit/file`. Off by default:
+    /// unit files routinely carry credentials in `Environment=` lines. Secret-
+    /// looking assignments are redacted before the reply leaves the host, but
+    /// that is a denylist, not a proof, so the surface stays opt-in.
+    #[serde(default)]
+    pub expose_unit_files: bool,
 }
 
 impl Default for ActionsConfig {
@@ -123,6 +129,7 @@ impl Default for ActionsConfig {
             allow_unit_files: false,
             allow_daemon_reload: false,
             history_capacity: default_history_capacity(),
+            expose_unit_files: false,
         }
     }
 }

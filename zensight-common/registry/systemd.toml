@@ -460,6 +460,14 @@ since = "1.0"
 description = "one unit's detail (?name=<u>)"
 
 [[procedure]]
+path = "unit/file"
+kind = "read"
+reply = "UnitFile"
+idempotent = true
+since = "1.4"
+description = "one unit's fragment + drop-in contents (?name=<u>) — opt-in (actions.expose_unit_files), secret-looking assignments redacted, size-capped"
+
+[[procedure]]
 path = "timers"
 kind = "read"
 reply = "Vec<TimerRecord>"
