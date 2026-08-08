@@ -1097,11 +1097,23 @@ impl ZenSight {
                     .as_mut()
                     .and_then(|d| d.systemd_detail.pending_action.take())
                 {
-                    let key = zensight_common::fleet_command_key("systemd", "action");
+                    // Addressed to the drilled-in host only. There is deliberately
+                    // no fleet fallback: a wildcard here would restart the unit on
+                    // every host serving the sensor, so an unresolvable origin
+                    // refuses rather than widening the blast radius.
+                    let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Systemd)
+                    else {
+                        return ControlFlow::Break(Task::done(Message::CommandFeedback {
+                            success: false,
+                            message: "No host selected — refusing to broadcast a service action"
+                                .to_string(),
+                        }));
+                    };
+                    let key = crate::view::specialized::systemd_detail::action_set_key(&origin);
                     let command = serde_json::json!({ "verb": verb, "unit": unit });
                     return ControlFlow::Break(
                         self.send_command(key, &command, format!("Sent {verb} {unit}"))
-                            .chain(self.query_systemd_action_status()),
+                            .chain(self.query_systemd_action_status(origin)),
                     );
                 }
             }
@@ -4080,11 +4092,13 @@ impl ZenSight {
     /// Poll `@rpc/systemd/action` after sending a unit action (#283) and toast the
     /// outcome. The short delay lets the sensor's async `JobRemoved` tracking
     /// resolve first, so the toast usually carries the real job result.
-    fn query_systemd_action_status(&self) -> Task<Message> {
+    fn query_systemd_action_status(&self, origin: String) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::fleet_rpc_key("systemd", "action");
+        // Read back from the host we acted on. A fleet read returns whichever
+        // sensor answered first, which may be a different host's last action.
+        let key = crate::view::specialized::systemd_detail::action_read_key(&origin);
         Task::future(async move {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             let no_reply = Message::CommandFeedback {

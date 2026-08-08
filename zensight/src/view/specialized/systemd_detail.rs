@@ -124,6 +124,24 @@ impl SystemdDetailState {
     }
 }
 
+/// The service-control write key for one host: `…/v1/<origin>/@rpc/systemd/action/set`.
+///
+/// Deliberately takes `&str`, not `Option<&str>` like the read keys above: there
+/// is no way to spell a wildcard action key, so a per-row start/stop/restart can
+/// never widen into a fleet broadcast. A caller without an origin must refuse.
+/// (Contrast `parallax_stream_set_key`, which does fall back to the fleet — a
+/// media control is recoverable, `stop nginx.service` on every host is not.)
+pub fn action_set_key(origin: &str) -> String {
+    zensight_common::origin_rpc_key(origin, "systemd", "action/set")
+}
+
+/// The last-action-outcome read key for one host, origin-scoped for the same
+/// reason as [`action_set_key`]: a fleet read returns whichever host replied
+/// first, which is not necessarily the one we acted on.
+pub fn action_read_key(origin: &str) -> String {
+    zensight_common::origin_rpc_key(origin, "systemd", "action")
+}
+
 /// The single-unit detail key (#313), matching the sensor's
 /// `@rpc/systemd/unit?name=<u>` queryable.
 pub fn unit_detail_key(origin: Option<&str>, unit: &str) -> String {
@@ -184,6 +202,22 @@ mod tests {
             unit_detail_key(None, "sshd.service"),
             "v1/*/@rpc/systemd/unit?name=sshd.service"
         );
+    }
+
+    /// Service control is addressed to exactly one host. A wildcard here would
+    /// restart the unit on every host running the sensor; the key builders take
+    /// a concrete origin so that cannot be spelled.
+    #[test]
+    fn action_keys_are_origin_scoped() {
+        assert_eq!(
+            action_set_key("h-3fa9c2d41b7e"),
+            "v1/h-3fa9c2d41b7e/@rpc/systemd/action/set"
+        );
+        assert_eq!(
+            action_read_key("h-3fa9c2d41b7e"),
+            "v1/h-3fa9c2d41b7e/@rpc/systemd/action"
+        );
+        assert!(!action_set_key("h-3fa9c2d41b7e").contains('*'));
     }
 
     #[test]
