@@ -622,6 +622,61 @@ mod tests {
         }
     }
 
+    /// The whole point of the probe: a host with service control **off** still
+    /// answers, and answers "off" — while exposing no write surface at all.
+    ///
+    /// Both halves matter. Without the reply, a caller cannot tell a read-only
+    /// host from an offline one and has to guess whether to offer controls.
+    /// Without the second assertion, the probe could quietly have become a
+    /// reason to declare the writable procedures.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_disabled_sensor_answers_the_probe_and_serves_no_write_surface() {
+        // Unique prefix so parallel test runs don't cross-talk.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let producer = format!("test_{nanos}/systemd");
+
+        // Multicast scouting OFF. A default-config session joins whatever mesh
+        // it can reach — including a live fleet on the same host — so a test
+        // that scouts is not a test, it is a participant (RFC 09 §0.1).
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .expect("disable multicast scouting");
+        let session = Arc::new(zenoh::open(config).await.expect("open zenoh session"));
+
+        // Default config: actions disabled. `run` returns straight after
+        // spawning the probe, so this needs no D-Bus and no privileges.
+        run(session.clone(), producer.clone(), ActionsConfig::default()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let replies = session
+            .get(&capability_key(&producer, ACTION_TOPIC))
+            .timeout(std::time::Duration::from_secs(5))
+            .await
+            .expect("get capability");
+        let reply = replies.recv_async().await.expect("the probe must answer");
+        let sample = reply.result().expect("ok reply");
+        let cap: ActionCapability =
+            serde_json::from_slice(&sample.payload().to_bytes()).expect("decode ActionCapability");
+        assert!(!cap.enabled, "a read-only host says so out loud");
+        assert!(cap.verbs.is_empty());
+        assert!(cap.allow_units.is_empty());
+
+        // …and the writable procedure is not declared, so nobody answers it.
+        let replies = session
+            .get(&command_key(&producer, ACTION_TOPIC))
+            .timeout(std::time::Duration::from_secs(1))
+            .await
+            .expect("get action/set");
+        assert!(
+            replies.recv_async().await.is_err(),
+            "a disabled sensor must expose no write surface"
+        );
+    }
+
     #[tokio::test]
     async fn history_is_bounded_and_newest_first() {
         let h = History::new(2);

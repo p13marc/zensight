@@ -615,6 +615,117 @@ mod tests {
         );
     }
 
+    /// End-to-end against the **live** system bus: the inventory read, the
+    /// `ListUnitFiles` enablement join, and the unit-file reader.
+    ///
+    /// `#[ignore]`d because it needs a running systemd and a reachable system
+    /// D-Bus, which a build container generally has neither of. Run it on a
+    /// real host with:
+    ///
+    /// ```text
+    /// cargo test -p zensight-sensor-systemd -- --ignored --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a live systemd + system D-Bus"]
+    async fn live_inventory_carries_enablement_state() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let producer = format!("test_{nanos}/systemd");
+
+        // Scouting off: a test that joins the local mesh is a participant, not
+        // a test (RFC 09 §0.1).
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .expect("disable multicast scouting");
+        let session = Arc::new(zenoh::open(config).await.expect("open zenoh session"));
+
+        tokio::spawn(run(
+            session.clone(),
+            producer.clone(),
+            EventState::new(16),
+            crate::config::CgroupConfig::default(),
+            true,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let replies = session
+            .get(&zensight_common::command::query_key(&producer, "units"))
+            .timeout(std::time::Duration::from_secs(10))
+            .await
+            .expect("get units");
+        let reply = replies.recv_async().await.expect("one reply");
+        let sample = reply.result().expect("ok reply");
+        let units: Vec<UnitRecord> =
+            serde_json::from_slice(&sample.payload().to_bytes()).expect("decode Vec<UnitRecord>");
+
+        assert!(!units.is_empty(), "a live host runs units");
+        // The join is best-effort per unit (transient and generated units have
+        // no unit file), so assert on the population, not on any one row.
+        let with_state = units.iter().filter(|u| u.unit_file_state.is_some()).count();
+        assert!(
+            with_state > 0,
+            "ListUnitFiles join produced no enablement state for any of {} units",
+            units.len()
+        );
+        eprintln!(
+            "live: {} units, {with_state} with enablement state",
+            units.len()
+        );
+
+        // Read a real unit file off this host. Pick an enabled .service rather
+        // than hardcoding a name — unit sets differ per distro.
+        let target = units
+            .iter()
+            .find(|u| u.name.ends_with(".service") && u.unit_file_state.is_some())
+            .map(|u| u.name.clone())
+            .expect("a live host has at least one installed .service");
+
+        let key = zensight_common::command::nested_query_key(&producer, "unit", "file");
+        let replies = session
+            .get(&format!("{key}?name={target}"))
+            .timeout(std::time::Duration::from_secs(10))
+            .await
+            .expect("get unit/file");
+        let reply = replies.recv_async().await.expect("one reply");
+        let sample = reply.result().expect("ok reply");
+        let file: Option<zensight_common::query_detail::UnitFile> =
+            serde_json::from_slice(&sample.payload().to_bytes()).expect("decode UnitFile");
+        let file = file.expect("the unit resolves");
+
+        assert_eq!(file.name, target);
+        assert!(
+            file.fragment_path.is_some(),
+            "an installed unit has a fragment path"
+        );
+        let body = file.fragment.as_deref().unwrap_or_default();
+        assert!(!body.is_empty(), "the fragment has content");
+        assert!(
+            !file.truncated,
+            "a single unit file is nowhere near the 128 KiB cap"
+        );
+        // Whatever the sensor shipped must have no unredacted secret assignment
+        // left in it — the redactor ran on real input, not a fixture.
+        for line in body.lines() {
+            if let Some((k, _)) = line.split_once('=')
+                && zensight_sensor_core::is_secret_key(k.trim(), &[])
+            {
+                assert!(
+                    line.contains(zensight_sensor_core::REDACTED_MARKER),
+                    "secret-looking directive shipped unredacted: {line}"
+                );
+            }
+        }
+        eprintln!(
+            "live: read {target} ({} bytes, {} drop-ins, redacted={})",
+            body.len(),
+            file.dropins.len(),
+            file.redacted
+        );
+    }
+
     #[test]
     fn budget_trimming_keeps_valid_utf8_and_reports_the_cut() {
         let (kept, cut) = take_within_budget("abcdef".to_string(), 10);
