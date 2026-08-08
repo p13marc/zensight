@@ -108,7 +108,10 @@ verb — so the reply carries `needs_daemon_reload: true` and the operator decid
   denylist the debug bundle uses, the reply is capped at 128 KiB, and both facts
   are flagged in the payload (`redacted`/`truncated`) so a reader never mistakes
   it for the file as it exists on disk. Paths are resolved from D-Bus
-  `FragmentPath`/`DropInPaths`, never from the request.
+  `FragmentPath`/`DropInPaths`, never from the request. A sensor in a container
+  with the host's system bus mounted will name fragment paths it cannot open —
+  it sees its own filesystem, not the host's — and replies with the path but no
+  `fragment`; that is a visibility limit, not an error.
 
 ### The capability probe is served even when actions are off
 

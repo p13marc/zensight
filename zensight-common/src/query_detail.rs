@@ -570,7 +570,13 @@ pub struct SocketRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UnitRecord {
     pub name: String,
+    /// Empty for an installed-but-unloaded unit: the description lives in the
+    /// unit file, and reading it would mean loading every unit on the host.
     pub description: String,
+    /// systemd's `LoadState` (`loaded`/`masked`/`not-found`/…), or the ZenSight
+    /// value `not-loaded` for a unit that is installed on disk but that the
+    /// manager has not loaded — those rows come from `ListUnitFiles`, not
+    /// `ListUnits`.
     pub load_state: String,
     pub active_state: String,
     pub sub_state: String,

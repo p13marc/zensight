@@ -944,6 +944,12 @@ fn action_cell<'a>(d: &'a SystemdDetailState, unit: &UnitRecord) -> Element<'a, 
             .size(font::CAPTION)
             .style(dim)
             .into(),
+        // No buttons at all: unlike an allowlist refusal, this is not something
+        // a host could ever permit.
+        ActionGate::Template => text("template — act on an instance")
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
         // Show the controls, inert, and say why — hiding them would silently
         // strip working buttons from a pre-1.4 sensor that does have actions on.
         ActionGate::Unknown => {

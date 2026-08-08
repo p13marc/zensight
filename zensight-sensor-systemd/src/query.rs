@@ -4,7 +4,7 @@
 //! demand, never streamed. Mirrors the netlink `@rpc/netlink/*` pattern.
 //!
 //! Procedures (under `…/@rpc/systemd/`):
-//! - `units`            → `Vec<UnitRecord>` (all loaded units)
+//! - `units`            → `Vec<UnitRecord>` (loaded units + installed-but-unloaded)
 //! - `failed`           → `Vec<UnitRecord>` (only `active_state == failed`)
 //! - `unit?name=<name>` → `UnitDetail` (full props + deps), or `null` if unknown
 
@@ -48,6 +48,72 @@ pub fn enablement_index(
             (!name.is_empty()).then(|| (name.to_string(), state.clone()))
         })
         .collect()
+}
+
+/// `load_state` for a unit that is installed on disk but not loaded.
+///
+/// Not a systemd value — systemd has no `LoadState` for "not in memory", since
+/// there is no in-memory object to ask — so it is spelled distinctly instead of
+/// borrowing `stub`, which means something else (loaded, not yet configured).
+pub const NOT_LOADED: &str = "not-loaded";
+
+/// The host's unit inventory: everything `ListUnits` has in memory, plus every
+/// installed unit file the manager has not loaded.
+///
+/// `ListUnits` reports only what systemd currently holds in memory, so a service
+/// that is disabled and has not run this boot — `sshd.service` on a laptop — is
+/// simply absent from it. That is the right answer for "what is systemd doing"
+/// and the wrong one for "does this host have sshd", which is what an operator
+/// types into the filter box before starting it. Folding `ListUnitFiles` in
+/// makes the table an inventory rather than a snapshot of the loaded set.
+///
+/// Unloaded rows carry `active_state: inactive` / `sub_state: dead`, which is
+/// what systemd itself reports the moment it loads such a unit, so the state
+/// chips keep working. `failed_only` never takes this path: a unit that was
+/// never loaded cannot have failed.
+pub fn inventory(
+    listed: &[ListedUnit],
+    files: &[crate::dbus::UnitFileEntry],
+    failed_only: bool,
+) -> Vec<UnitRecord> {
+    let enablement = enablement_index(files);
+    let mut records: Vec<UnitRecord> = listed
+        .iter()
+        .filter(|u| !failed_only || u.3 == "failed")
+        .map(|u| unit_record(u, &enablement))
+        .collect();
+    if failed_only {
+        return records;
+    }
+
+    let loaded: std::collections::HashSet<&str> = listed.iter().map(|u| u.0.as_str()).collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (path, state) in files {
+        let Some(name) = path.rsplit('/').next().filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        // Two paths can share a basename (a `/etc` override of a `/usr` unit);
+        // the loaded set and `seen` between them keep one row per unit.
+        if loaded.contains(name) || !seen.insert(name) {
+            continue;
+        }
+        records.push(UnitRecord {
+            name: name.to_string(),
+            // Descriptions live in the unit file, which we would have to load
+            // (one D-Bus call per unit, hundreds of them) to read. An empty
+            // description is cheaper and more honest than a guessed one.
+            description: String::new(),
+            load_state: NOT_LOADED.to_string(),
+            active_state: "inactive".to_string(),
+            sub_state: "dead".to_string(),
+            job: None,
+            unit_file_state: Some(state.clone()),
+        });
+    }
+    // The merged set has no natural order (D-Bus order, then unit-file order),
+    // so give it one the table can rely on before any client-side sort.
+    records.sort_by(|a, b| a.name.cmp(&b.name));
+    records
 }
 
 /// Extract a query parameter value from a raw `k=v&k2=v2` parameter string.
@@ -279,20 +345,16 @@ async fn list_records(manager: &ManagerProxy<'_>, failed_only: bool) -> Vec<Unit
             return Vec::new();
         }
     };
-    // Best-effort: a host that refuses ListUnitFiles still gets its inventory,
-    // just without enablement state.
-    let enablement = match manager.list_unit_files().await {
-        Ok(files) => enablement_index(&files),
+    // Best-effort: a host that refuses ListUnitFiles still gets its loaded
+    // units, just without enablement state or the unloaded half.
+    let files = match manager.list_unit_files().await {
+        Ok(files) => files,
         Err(e) => {
             tracing::warn!(error = %e, "query: ListUnitFiles failed; enablement omitted");
-            std::collections::HashMap::new()
+            Vec::new()
         }
     };
-    listed
-        .iter()
-        .filter(|u| !failed_only || u.3 == "failed")
-        .map(|u| unit_record(u, &enablement))
-        .collect()
+    inventory(&listed, &files, failed_only)
 }
 
 /// Build the full [`UnitDetail`] for `name`, or `None` if it can't be resolved.
@@ -550,6 +612,77 @@ mod tests {
         assert_eq!(r2.job, None);
     }
 
+    /// The bug this merge exists for: a disabled service that has not run this
+    /// boot is absent from `ListUnits`, so filtering the table for "sshd" found
+    /// nothing on a host that plainly has sshd installed.
+    #[test]
+    fn inventory_lists_an_installed_unit_the_manager_has_not_loaded() {
+        let listed = vec![listed("dbus.service", "active", "")];
+        let files = vec![
+            (
+                "/usr/lib/systemd/system/sshd.service".to_string(),
+                "disabled".to_string(),
+            ),
+            (
+                "/usr/lib/systemd/system/dbus.service".to_string(),
+                "static".to_string(),
+            ),
+        ];
+        let inv = inventory(&listed, &files, false);
+        let sshd = inv
+            .iter()
+            .find(|r| r.name == "sshd.service")
+            .expect("an installed unit must be findable even when not loaded");
+        assert_eq!(sshd.load_state, NOT_LOADED);
+        assert_eq!(sshd.active_state, "inactive");
+        assert_eq!(sshd.sub_state, "dead");
+        assert_eq!(sshd.unit_file_state.as_deref(), Some("disabled"));
+
+        // The loaded unit keeps its real state and is not duplicated.
+        assert_eq!(inv.iter().filter(|r| r.name == "dbus.service").count(), 1);
+        let dbus = inv.iter().find(|r| r.name == "dbus.service").unwrap();
+        assert_eq!(dbus.load_state, "loaded");
+        assert_eq!(dbus.active_state, "active");
+        // Sorted by name, so the table has an order before anyone clicks a header.
+        assert_eq!(
+            inv.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["dbus.service", "sshd.service"]
+        );
+    }
+
+    #[test]
+    fn inventory_dedupes_an_etc_override_of_a_usr_unit() {
+        let files = vec![
+            (
+                "/usr/lib/systemd/system/nginx.service".to_string(),
+                "disabled".to_string(),
+            ),
+            (
+                "/etc/systemd/system/nginx.service".to_string(),
+                "enabled".to_string(),
+            ),
+        ];
+        let inv = inventory(&[], &files, false);
+        assert_eq!(inv.len(), 1, "one row per unit, not one per path");
+    }
+
+    /// `failed` is a view of what systemd is running, not of what is installed:
+    /// a unit that was never loaded cannot have failed.
+    #[test]
+    fn failed_only_never_gains_unloaded_units() {
+        let listed = vec![
+            listed("broken.service", "failed", ""),
+            listed("fine.service", "active", ""),
+        ];
+        let files = vec![(
+            "/usr/lib/systemd/system/sshd.service".to_string(),
+            "disabled".to_string(),
+        )];
+        let inv = inventory(&listed, &files, true);
+        assert_eq!(inv.len(), 1);
+        assert_eq!(inv[0].name, "broken.service");
+    }
+
     #[test]
     fn enablement_joins_list_unit_files_by_basename() {
         let files = vec![
@@ -670,38 +803,76 @@ mod tests {
             "ListUnitFiles join produced no enablement state for any of {} units",
             units.len()
         );
+        // The inventory half: a real host always has units installed that the
+        // manager has not loaded, and they must be here — this is the whole
+        // reason the table can answer "does this host have sshd?".
+        let unloaded = units.iter().filter(|u| u.load_state == NOT_LOADED).count();
+        assert!(
+            unloaded > 0,
+            "no installed-but-unloaded units among {} — ListUnitFiles was not merged in",
+            units.len()
+        );
+        // A real host has `/etc` overrides of `/usr` units, so the merge has
+        // genuine basename collisions to survive here that a fixture does not.
+        let distinct: std::collections::HashSet<&str> =
+            units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(
+            distinct.len(),
+            units.len(),
+            "the inventory listed a unit more than once"
+        );
         eprintln!(
-            "live: {} units, {with_state} with enablement state",
+            "live: {} units ({unloaded} installed but not loaded), {with_state} with enablement state",
             units.len()
         );
 
-        // Read a real unit file off this host. Pick an enabled .service rather
-        // than hardcoding a name — unit sets differ per distro.
-        let target = units
-            .iter()
-            .find(|u| u.name.ends_with(".service") && u.unit_file_state.is_some())
-            .map(|u| u.name.clone())
-            .expect("a live host has at least one installed .service");
-
+        // Read a real unit file off this host. Names are not hardcoded — unit
+        // sets differ per distro — and the first candidate is not necessarily
+        // readable: a sensor in a container talks to the host's systemd over the
+        // mounted bus but sees only its own filesystem, so D-Bus names a
+        // fragment path that is not there. Walk candidates until one has
+        // content, which is also what makes this test portable.
         let key = zensight_common::command::nested_query_key(&producer, "unit", "file");
-        let replies = session
-            .get(&format!("{key}?name={target}"))
-            .timeout(std::time::Duration::from_secs(10))
-            .await
-            .expect("get unit/file");
-        let reply = replies.recv_async().await.expect("one reply");
-        let sample = reply.result().expect("ok reply");
-        let file: Option<zensight_common::query_detail::UnitFile> =
-            serde_json::from_slice(&sample.payload().to_bytes()).expect("decode UnitFile");
-        let file = file.expect("the unit resolves");
-
-        assert_eq!(file.name, target);
+        let candidates: Vec<String> = units
+            .iter()
+            .filter(|u| u.name.ends_with(".service") && u.unit_file_state.is_some())
+            .map(|u| u.name.clone())
+            .collect();
         assert!(
-            file.fragment_path.is_some(),
-            "an installed unit has a fragment path"
+            !candidates.is_empty(),
+            "a live host has at least one installed .service"
         );
+
+        let mut read = None;
+        let mut resolved = 0usize;
+        for target in candidates.iter().take(40) {
+            let replies = session
+                .get(&format!("{key}?name={target}"))
+                .timeout(std::time::Duration::from_secs(10))
+                .await
+                .expect("get unit/file");
+            let reply = replies.recv_async().await.expect("one reply");
+            let sample = reply.result().expect("ok reply");
+            let file: Option<zensight_common::query_detail::UnitFile> =
+                serde_json::from_slice(&sample.payload().to_bytes()).expect("decode UnitFile");
+            let Some(file) = file else { continue };
+            assert_eq!(&file.name, target);
+            resolved += 1;
+            assert!(
+                file.fragment_path.is_some(),
+                "an installed unit has a fragment path"
+            );
+            if file.fragment.as_deref().is_some_and(|f| !f.is_empty()) {
+                read = Some((target.clone(), file));
+                break;
+            }
+        }
+        assert!(resolved > 0, "no installed .service resolved over the bus");
+        let (target, file) = read.expect(
+            "no unit file was readable — every candidate fragment path was absent or empty",
+        );
+
         let body = file.fragment.as_deref().unwrap_or_default();
-        assert!(!body.is_empty(), "the fragment has content");
         assert!(
             !file.truncated,
             "a single unit file is nowhere near the 128 KiB cap"

@@ -74,12 +74,25 @@ Never streamed — served on request as GETs on
 
 | Topic | Reply | Notes |
 |-------|-------|-------|
-| `units` | `Vec<UnitRecord>` | all units |
-| `failed` | `Vec<UnitRecord>` | failed units only |
+| `units` | `Vec<UnitRecord>` | the host's unit **inventory** (see below) |
+| `failed` | `Vec<UnitRecord>` | failed units only — loaded units, never the unloaded half |
 | `unit?name=<u>` | `UnitDetail` | props + deps + identity fields (below) |
 | `timers` | `Vec<TimerRecord>` | with an `overdue` flag (#279) |
 | `events` | recent control-plane timeline | the bounded event ring |
 | `cgroups[?path=<rel>]` | `CgroupNode` tree | `systemd-cgls`-style slice→service→scope walk |
+
+**`units` is an inventory, not a snapshot (since 1.4).** `ListUnits` reports only
+what the manager currently holds in memory, so a service that is disabled and has
+not run this boot (`sshd.service` on a desktop) is absent from it — which makes it
+unfindable in the frontend's Units table, the one place an operator would go to
+start it. The reply therefore merges `ListUnitFiles` in: installed units the
+manager has not loaded appear with `load_state = "not-loaded"` (a ZenSight value —
+systemd has no `LoadState` for "not in memory"), `active_state = "inactive"`,
+`sub_state = "dead"`, an empty `description` (reading it would mean loading every
+unit), and their real `unit_file_state`. Templates (`getty@.service`) are listed
+because they are worth finding, but the frontend offers no actions on them — only
+an instance can be started. `failed` is unaffected: a unit that was never loaded
+cannot have failed.
 
 **`unit?name=` identity fields (#303, detail-only):** `main_pid` +
 `main_pid_start_time` (the `(pid, start_time)` pair joining to a sysinfo process

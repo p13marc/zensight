@@ -97,6 +97,18 @@ pub enum ActionGate {
     Allowed(Vec<Verb>),
     /// An action on this unit is in flight — no re-arming until it resolves.
     Busy(Verb),
+    /// A template (`getty@.service`): a pattern, not a unit. No host can start
+    /// it — only an instance of it — so the row offers nothing to press.
+    Template,
+}
+
+/// Whether `unit` is a template (`getty@.service`) rather than a real unit.
+///
+/// The stem ends with `@` only when the instance name is empty, so an actual
+/// instance (`getty@tty1.service`) is correctly not a template.
+pub fn is_template(unit: &str) -> bool {
+    unit.rsplit_once('.')
+        .is_some_and(|(stem, _)| stem.ends_with('@'))
 }
 
 /// The unit type the table shows until told otherwise.
@@ -194,6 +206,11 @@ impl SystemdDetailState {
             && busy_unit == unit
         {
             return ActionGate::Busy(*verb);
+        }
+        // Independent of the host's gate: a template is not a startable unit
+        // anywhere. The inventory lists them because they are worth finding.
+        if is_template(unit) {
+            return ActionGate::Template;
         }
         let Some(cap) = self.capability.ready() else {
             return ActionGate::Unknown;
@@ -504,6 +521,29 @@ mod tests {
             }
             other => panic!("expected Allowed, got {other:?}"),
         }
+    }
+
+    /// The inventory lists templates so they can be found, but nothing can act
+    /// on one — not even a host that allowlists it.
+    #[test]
+    fn gate_offers_nothing_on_a_template() {
+        let mut st = SystemdDetailState::default();
+        st.capability = Fetch::Ready(cap(true, &["*"]));
+        assert_eq!(st.action_gate("getty@.service"), ActionGate::Template);
+        // An instance of that template is a real unit and stays actionable.
+        assert!(matches!(
+            st.action_gate("getty@tty1.service"),
+            ActionGate::Allowed(_)
+        ));
+    }
+
+    #[test]
+    fn template_detection_needs_an_empty_instance_name() {
+        assert!(is_template("getty@.service"));
+        assert!(is_template("sshd@.socket"));
+        assert!(!is_template("getty@tty1.service"));
+        assert!(!is_template("nginx.service"));
+        assert!(!is_template("weird@"));
     }
 
     #[test]

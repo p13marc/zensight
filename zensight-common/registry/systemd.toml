@@ -441,7 +441,7 @@ kind = "read"
 reply = "Vec<UnitRecord>"
 idempotent = true
 since = "1.0"
-description = "unit table"
+description = "unit inventory: loaded units (ListUnits) merged with installed-but-unloaded unit files (ListUnitFiles, load_state=not-loaded), since 1.4"
 
 [[procedure]]
 path = "failed"
