@@ -47,7 +47,10 @@ impl Verb {
     /// `JobRemoved`. `EnableUnitFiles`/`DisableUnitFiles`/`Reload` return no job
     /// object path at all, so their outcome is known the moment the call returns.
     pub fn enqueues_job(&self) -> bool {
-        matches!(self, Verb::Start | Verb::Stop | Verb::Restart | Verb::Reload)
+        matches!(
+            self,
+            Verb::Start | Verb::Stop | Verb::Restart | Verb::Reload
+        )
     }
 
     /// Whether this verb acts on a named unit. Only `daemon-reload` does not —

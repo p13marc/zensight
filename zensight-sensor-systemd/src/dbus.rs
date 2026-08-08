@@ -22,6 +22,15 @@ pub type ListedUnit = (
     OwnedObjectPath,
 );
 
+/// One `ListUnitFiles` row: `(unit_file_path, state)`, where state is
+/// `enabled`/`disabled`/`static`/`masked`/`generated`/…
+pub type UnitFileEntry = (String, String);
+
+/// One symlink change from `EnableUnitFiles`/`DisableUnitFiles`:
+/// `(change_type, symlink_path, destination)`. `change_type` is `symlink` or
+/// `unlink`; `destination` is empty for an unlink.
+pub type UnitFileChangeTuple = (String, String, String);
+
 /// The `org.freedesktop.systemd1.Manager` subset we use: scalar counters, the six
 /// boot monotonic timestamps, `ListUnits`, `LoadUnit`, and `Subscribe` + signals.
 #[zbus::proxy(
@@ -54,6 +63,9 @@ pub trait Manager {
     fn finish_timestamp_monotonic(&self) -> zbus::Result<u64>;
 
     fn list_units(&self) -> zbus::Result<Vec<ListedUnit>>;
+    /// Every *installed* unit file and its enablement state — one call for the
+    /// whole host, unlike `GetUnitFileState`, which is per unit.
+    fn list_unit_files(&self) -> zbus::Result<Vec<UnitFileEntry>>;
     /// Resolve (loading if needed) a unit name to its object path.
     fn load_unit(&self, name: &str) -> zbus::Result<OwnedObjectPath>;
 
@@ -63,6 +75,29 @@ pub trait Manager {
     fn stop_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
     fn restart_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
     fn reload_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+
+    // ── Unit-file and manager control. These enqueue **no job**, so there is no
+    // `JobRemoved` to await: the call returning *is* the outcome. They also need
+    // different polkit actions than the four above (`manage-unit-files` and
+    // `reload-daemon` rather than `manage-units`), which is why they sit behind
+    // their own config switches. ──
+    /// `(files, runtime, force) -> (carries_install_info, changes)`. `runtime`
+    /// false writes symlinks under `/etc` (persistent across reboots).
+    fn enable_unit_files(
+        &self,
+        files: &[&str],
+        runtime: bool,
+        force: bool,
+    ) -> zbus::Result<(bool, Vec<UnitFileChangeTuple>)>;
+    /// `(files, runtime) -> changes`.
+    fn disable_unit_files(
+        &self,
+        files: &[&str],
+        runtime: bool,
+    ) -> zbus::Result<Vec<UnitFileChangeTuple>>;
+    /// daemon-reload: re-read every unit file from disk. Manager-wide, so it
+    /// takes no unit and cannot be scoped by the unit allowlist.
+    fn reload(&self) -> zbus::Result<()>;
 
     /// Enable emission of `UnitNew`/`UnitRemoved`/`JobNew`/`JobRemoved` signals.
     fn subscribe(&self) -> zbus::Result<()>;

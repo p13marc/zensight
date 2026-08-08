@@ -16,7 +16,11 @@ use crate::dbus::{ListedUnit, ManagerProxy, ServiceProxy, TimerProxy, UnitProxy}
 use crate::events::EventState;
 
 /// Map one `ListUnits` row to a [`UnitRecord`] (pure — unit-testable).
-pub fn unit_record(u: &ListedUnit) -> UnitRecord {
+/// `enablement` is the `ListUnitFiles` join built by [`enablement_index`].
+pub fn unit_record(
+    u: &ListedUnit,
+    enablement: &std::collections::HashMap<String, String>,
+) -> UnitRecord {
     UnitRecord {
         name: u.0.clone(),
         description: u.1.clone(),
@@ -24,7 +28,26 @@ pub fn unit_record(u: &ListedUnit) -> UnitRecord {
         active_state: u.3.clone(),
         sub_state: u.4.clone(),
         job: (!u.8.is_empty()).then(|| u.8.clone()),
+        unit_file_state: enablement.get(&u.0).cloned(),
     }
+}
+
+/// Index `ListUnitFiles` rows by unit name for the [`unit_record`] join.
+///
+/// `ListUnitFiles` reports absolute paths (`/usr/lib/systemd/system/nginx.service`)
+/// while `ListUnits` reports bare names, so the join key is the path's basename.
+/// One D-Bus call covers the whole host — `GetUnitFileState` would be one call
+/// per unit, i.e. hundreds.
+pub fn enablement_index(
+    files: &[crate::dbus::UnitFileEntry],
+) -> std::collections::HashMap<String, String> {
+    files
+        .iter()
+        .filter_map(|(path, state)| {
+            let name = path.rsplit('/').next()?;
+            (!name.is_empty()).then(|| (name.to_string(), state.clone()))
+        })
+        .collect()
 }
 
 /// Extract a query parameter value from a raw `k=v&k2=v2` parameter string.
@@ -224,10 +247,19 @@ async fn list_records(manager: &ManagerProxy<'_>, failed_only: bool) -> Vec<Unit
             return Vec::new();
         }
     };
+    // Best-effort: a host that refuses ListUnitFiles still gets its inventory,
+    // just without enablement state.
+    let enablement = match manager.list_unit_files().await {
+        Ok(files) => enablement_index(&files),
+        Err(e) => {
+            tracing::warn!(error = %e, "query: ListUnitFiles failed; enablement omitted");
+            std::collections::HashMap::new()
+        }
+    };
     listed
         .iter()
         .filter(|u| !failed_only || u.3 == "failed")
-        .map(unit_record)
+        .map(|u| unit_record(u, &enablement))
         .collect()
 }
 
@@ -356,14 +388,39 @@ mod tests {
 
     #[test]
     fn unit_record_maps_fields_and_job() {
-        let r = unit_record(&listed("sshd.service", "active", "start"));
+        let none = std::collections::HashMap::new();
+        let r = unit_record(&listed("sshd.service", "active", "start"), &none);
         assert_eq!(r.name, "sshd.service");
         assert_eq!(r.description, "sshd.service desc");
         assert_eq!(r.active_state, "active");
         assert_eq!(r.job.as_deref(), Some("start"));
         // No job → None.
-        let r2 = unit_record(&listed("idle.service", "active", ""));
+        let r2 = unit_record(&listed("idle.service", "active", ""), &none);
         assert_eq!(r2.job, None);
+    }
+
+    #[test]
+    fn enablement_joins_list_unit_files_by_basename() {
+        let files = vec![
+            (
+                "/usr/lib/systemd/system/sshd.service".to_string(),
+                "enabled".to_string(),
+            ),
+            (
+                "/usr/lib/systemd/system/rescue.service".to_string(),
+                "static".to_string(),
+            ),
+        ];
+        let idx = enablement_index(&files);
+        assert_eq!(
+            unit_record(&listed("sshd.service", "active", ""), &idx).unit_file_state,
+            Some("enabled".to_string())
+        );
+        // A unit with no installed unit file (transient/generated) simply has none.
+        assert_eq!(
+            unit_record(&listed("session-2.scope", "active", ""), &idx).unit_file_state,
+            None
+        );
     }
 
     #[test]

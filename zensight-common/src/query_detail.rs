@@ -577,6 +577,11 @@ pub struct UnitRecord {
     /// Queued job type for this unit (`start`/`stop`/…), or `None` if idle.
     #[serde(default)]
     pub job: Option<String>,
+    /// Unit-file enablement (`enabled`/`disabled`/`static`/`masked`/…) from
+    /// `ListUnitFiles`, or `None` for a unit with no installed unit file (and
+    /// from pre-1.4 sensors, which did not report it).
+    #[serde(default)]
+    pub unit_file_state: Option<String>,
 }
 
 /// Full detail for one systemd unit (#274), served from `@rpc/systemd/unit?name=<u>`:

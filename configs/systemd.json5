@@ -83,6 +83,17 @@
     //   enabled: false,
     //   allow_units: ["nginx.service", "app-*.service"],
     //   job_timeout_secs: 30,
+    //
+    //   // enable/disable write symlinks under /etc that survive a reboot, and
+    //   // need the manage-unit-files polkit action rather than manage-units —
+    //   // so granting start/stop does not silently grant them.
+    //   allow_unit_files: false,
+    //   // daemon-reload is manager-wide: it names no unit, so allow_units
+    //   // cannot scope it and this switch is its only gate. Needs the
+    //   // reload-daemon polkit action.
+    //   allow_daemon_reload: false,
+    //
+    //   history_capacity: 64,   // audit ring served on @rpc/systemd/actions
     // },
 
     collect: {

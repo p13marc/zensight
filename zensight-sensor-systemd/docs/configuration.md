@@ -93,11 +93,33 @@ authorization model are security-sensitive.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `enabled` | false | master switch; when false, no `@rpc/systemd/action` procedure is declared |
-| `allow_units` | `[]` | unit-name globs a `start/stop/restart/reload` may target; **empty = reject all** |
+| `enabled` | false | master switch; when false, no writable `@rpc/systemd/action` procedure is declared |
+| `allow_units` | `[]` | unit-name globs a unit-scoped verb may target; **empty = reject all** |
 | `job_timeout_secs` | 30 | bounded wait for the `JobRemoved` completion result |
+| `allow_unit_files` | **false** | additionally permit `enable`/`disable` |
+| `allow_daemon_reload` | **false** | additionally permit `daemon-reload` |
+| `history_capacity` | 64 | bounded action ring served on `@rpc/systemd/actions` |
 
-Authorization for the underlying manage-units call is delegated to
-systemd/polkit — run as root, or add a scoped polkit rule granting
-`org.freedesktop.systemd1.manage-units` for the allowlisted units. The allowlist
-is defence-in-depth on top of polkit, not a substitute for it.
+The three switches are separate because the verbs they gate need three
+*different* polkit actions and have three different blast radii:
+
+| Verbs | Gated by | polkit action | Persists across reboot |
+|-------|----------|---------------|------------------------|
+| `start` `stop` `restart` `reload` | `enabled` + `allow_units` | `org.freedesktop.systemd1.manage-units` | no |
+| `enable` `disable` | + `allow_unit_files` | `org.freedesktop.systemd1.manage-unit-files` | **yes** |
+| `daemon-reload` | + `allow_daemon_reload` | `org.freedesktop.systemd1.reload-daemon` | n/a (manager-wide) |
+
+`daemon-reload` takes no unit, so `allow_units` cannot scope it — its own switch
+is the only gate, which is why it is separate. Granting start/stop must not
+silently grant persistent boot-order changes, which is why `enable`/`disable`
+are separate too.
+
+Authorization for the underlying call is delegated to systemd/polkit — run as
+root, or add a scoped polkit rule granting the action from the table above for
+the allowlisted units. The allowlist is defence-in-depth on top of polkit, not a
+substitute for it.
+
+Regardless of these switches, `@rpc/systemd/action/capability` is **always**
+served, replying `{"enabled": false, …}` on a read-only host. It is a read-only
+probe naming no units, and it exists so a caller can tell "this host refuses"
+from "nobody answered".
