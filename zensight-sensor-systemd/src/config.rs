@@ -97,6 +97,27 @@ pub struct ActionsConfig {
     /// Bounded wait (seconds) for the `JobRemoved` completion result.
     #[serde(default = "default_job_timeout_secs")]
     pub job_timeout_secs: u64,
+    /// Permit `enable`/`disable`. Separate from the master switch because these
+    /// write symlinks that survive a reboot and need a different polkit action
+    /// (`manage-unit-files`), so granting start/stop must not silently grant
+    /// persistent boot-order changes. Still subject to `allow_units`.
+    #[serde(default)]
+    pub allow_unit_files: bool,
+    /// Permit `daemon-reload`. Separate again: it is manager-wide, so
+    /// `allow_units` cannot scope it, and it needs the `reload-daemon` polkit
+    /// action.
+    #[serde(default)]
+    pub allow_daemon_reload: bool,
+    /// How many past action outcomes to keep for the audit timeline served on
+    /// `@rpc/systemd/actions`.
+    #[serde(default = "default_history_capacity")]
+    pub history_capacity: usize,
+    /// Serve unit-file contents on `@rpc/systemd/unit/file`. Off by default:
+    /// unit files routinely carry credentials in `Environment=` lines. Secret-
+    /// looking assignments are redacted before the reply leaves the host, but
+    /// that is a denylist, not a proof, so the surface stays opt-in.
+    #[serde(default)]
+    pub expose_unit_files: bool,
 }
 
 impl Default for ActionsConfig {
@@ -105,8 +126,16 @@ impl Default for ActionsConfig {
             enabled: false,
             allow_units: Vec::new(),
             job_timeout_secs: default_job_timeout_secs(),
+            allow_unit_files: false,
+            allow_daemon_reload: false,
+            history_capacity: default_history_capacity(),
+            expose_unit_files: false,
         }
     }
+}
+
+fn default_history_capacity() -> usize {
+    64
 }
 
 fn default_job_timeout_secs() -> u64 {

@@ -36,6 +36,36 @@ pub fn status_key(producer: &str, topic: &str) -> String {
         .into()
 }
 
+/// The capability-probe read for a control topic:
+/// `…/@rpc/<producer>/<topic>/capability`.
+///
+/// A gated topic serves this **whether or not the gate is open**, so a caller
+/// can tell "this host refuses" from "nobody answered". Silence is not a usable
+/// signal: it is emitted equally by a disabled gate, an offline host, an older
+/// build, and a sensor busy serving someone else's long-running write.
+///
+/// # Example
+/// ```
+/// use zensight_common::command::capability_key;
+/// let k = capability_key("systemd", "action");
+/// assert!(k.ends_with("/@rpc/systemd/action/capability"));
+/// ```
+pub fn capability_key(producer: &str, topic: &str) -> String {
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&[topic, "capability"])
+        .into()
+}
+
+/// A two-chunk detail read: `…/@rpc/<producer>/<topic>/<sub>`.
+///
+/// For procedures that group under a parent topic (`unit/file` beside `unit`)
+/// rather than adding a top-level name.
+pub fn nested_query_key(producer: &str, topic: &str, sub: &str) -> String {
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&[topic, sub])
+        .into()
+}
+
 /// The on-demand detail-read procedure: `…/@rpc/<producer>/<topic>`.
 /// High-cardinality detail (flow tables, socket lists, …) is served here on
 /// request, never streamed onto the telemetry bus (RFC 04 R3). Same key

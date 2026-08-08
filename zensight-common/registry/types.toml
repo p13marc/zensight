@@ -6,6 +6,9 @@
 [types.Ack]
 kind = "json-schema"
 
+[types.ActionCapability]
+kind = "json-schema"
+
 [types.ActionStatus]
 kind = "json-schema"
 
@@ -118,6 +121,12 @@ kind = "json-schema"
 kind = "json-schema"
 
 [types.UnitDetail]
+kind = "json-schema"
+
+[types.UnitFile]
+kind = "json-schema"
+
+[types."Vec<ActionStatus>"]
 kind = "json-schema"
 
 [types."Vec<AddressRecord>"]

@@ -13666,6 +13666,7 @@ name = "zensight-common"
 version = "0.10.1"
 dependencies = [
  "ciborium",
+ "glob",
  "json5",
  "schemars 1.2.1",
  "serde",

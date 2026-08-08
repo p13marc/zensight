@@ -9,6 +9,7 @@
 //! - [`keyexpr`] - Key expression builders and parsers
 //! - [`error`] - Error types
 
+pub mod action;
 pub mod alert;
 pub mod artifact;
 pub mod bandwidth;
@@ -38,6 +39,7 @@ pub mod stream;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root
+pub use action::{ActionCapability, ActionStatus, ServiceAction, UnitFileChange, Verb};
 pub use alert::{Alert, AlertKind, AlertSeverity, AlertState};
 pub use artifact::{
     ArtifactKind, ArtifactOptions, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, Entry,

@@ -101,9 +101,14 @@ zensight/v1/@catalog/…                                   the identity catalog
 - **Fleet-wide writes are explicit** (RFC 05 amendment G2): a write procedure
   is origin-scoped unless its registry entry says `fanout = "allowed"`. The
   operator-console fleet pushes (logs filter + sentinel rules, systemd
-  action/expectations, netlink expectations, netring
+  expectations, netlink expectations, netring
   capture/detectors/filter/threat-intel, parallax stream) carry that marker
   deliberately; everything else refuses a wildcard origin at the type level.
+  `systemd action/set` also carries it, but for `zenctl` only — the marker
+  sanctions a typed, scriptable, logged fleet push. The GUI is strictly
+  origin-scoped there: a per-row restart button that could widen to every host
+  is a blast radius nobody asked for, so its key builders take a concrete origin
+  and a wildcard action key cannot be spelled.
 - **Bus explorer**: [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) is the `busctl`/`d-feet`
   equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
   `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply

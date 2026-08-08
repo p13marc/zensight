@@ -68,6 +68,9 @@ pub enum SpecializedTab {
     Timers,
     Sentinel,
     Cgroups,
+    /// Service-control audit timeline (#283). Only rendered on a host that
+    /// advertises service control, so it is never a dead tab.
+    Actions,
 }
 
 /// Number of trailing history samples to render in an inline sparkline (#44).

@@ -8,12 +8,19 @@ use iced::{Element, Length, Theme};
 use zensight_common::TelemetryValue;
 use zensight_common::query_detail::{CgroupNode, UnitRecord};
 
+use zensight_common::action::Verb;
+
 use crate::message::Message;
-use crate::view::components::{TabItem, badge, card, empty_state, section_header, tabbed_view};
+use crate::view::components::{
+    Column as DataColumn, DataTable, SortKey, TabItem, badge, card, empty_state, section_header,
+    tabbed_view,
+};
 use crate::view::device::DeviceDetailState;
 use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
-use crate::view::specialized::systemd_detail::{SystemdDetailTopic, SystemdEventRecord};
+use crate::view::specialized::systemd_detail::{
+    ActionGate, SystemdDetailState, SystemdDetailTopic, SystemdEventRecord, UNIT_TYPES,
+};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -53,6 +60,15 @@ fn systemd_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
         TabItem::new(Sentinel, "Sentinel"),
         TabItem::new(Events, "Events"),
         TabItem::new(Cgroups, "cgroups"),
+        // Only on a host that actually offers service control — an audit
+        // timeline that can never have entries is just a dead tab.
+        TabItem::new(Actions, "Actions").visible(
+            state
+                .systemd_detail
+                .capability
+                .ready()
+                .is_some_and(|c| c.enabled),
+        ),
     ]
     .into_iter()
     .map(|t| {
@@ -73,6 +89,7 @@ fn systemd_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         Sentinel => render_sentinel_tab(state),
         Events => render_events_tab(state),
         Cgroups => render_cgroups_tab(state),
+        Actions => render_actions_tab(state),
         // Overview is the default for any non-systemd remembered tab.
         _ => render_overview(state),
     };
@@ -179,79 +196,38 @@ fn stat<'a>(label: &'a str, value: f64) -> Element<'a, Message> {
 
 fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     let d = &state.systemd_detail;
-    let header = row![
-        section_header("Units", None),
-        refresh_button(SystemdDetailTopic::Units),
-    ]
-    .spacing(space::SM)
-    .align_y(iced::Alignment::Center);
-
-    let filters = row![
-        filter_chip("all", d.unit_state_filter.is_none(), None),
-        filter_chip(
-            "active",
-            d.unit_state_filter.as_deref() == Some("active"),
-            Some("active")
-        ),
-        filter_chip(
-            "failed",
-            d.unit_state_filter.as_deref() == Some("failed"),
-            Some("failed")
-        ),
-        filter_chip(
-            "inactive",
-            d.unit_state_filter.as_deref() == Some("inactive"),
-            Some("inactive"),
-        ),
-    ]
-    .spacing(space::XS);
+    let mut actions = row![refresh_button(SystemdDetailTopic::Units)].spacing(space::XS);
+    // daemon-reload is manager-wide, so it belongs to the table, not a row.
+    if d.permits_daemon_reload() {
+        actions = actions.push(daemon_reload_control(d.pending_action.as_ref()));
+    }
+    let header = row![section_header("Units", None), actions]
+        .spacing(space::SM)
+        .align_y(iced::Alignment::Center);
 
     let body = fetch_body(&d.units, SystemdDetailTopic::Units, |units| {
-        let filter = d.unit_state_filter.as_deref();
-        let rows: Vec<&UnitRecord> = units
-            .iter()
-            .filter(|u| filter.is_none_or(|f| u.active_state == f))
-            .collect();
-        if rows.is_empty() {
-            return empty_state("No matching units.", None);
+        if units.is_empty() {
+            return empty_state("This host reported no units.", None);
         }
-        let mut list = column![table_header(&[
-            "Unit",
-            "Active",
-            "Sub",
-            "Load",
-            "Description",
-            "Actions"
-        ])]
-        .spacing(2);
-        for u in rows.iter().take(400) {
-            // The unit name is the identity drill-down chip (#313): clicking
-            // fetches `@rpc/systemd/unit?name=` and opens the panel above the table.
-            let name_chip: Element<'_, Message> = iced::widget::container(
-                button(text(u.name.clone()).size(font::CAPTION))
-                    .padding([2, 6])
-                    .style(iced::widget::button::text)
-                    .on_press(Message::SystemdSelectUnit(Some(u.name.clone()))),
-            )
-            .width(Length::FillPortion(3))
-            .into();
-            list = list.push(
-                row![
-                    name_chip,
-                    state_cell(&u.active_state, 1),
-                    cell(&u.sub_state, 1),
-                    cell(&u.load_state, 1),
-                    cell(&u.description, 3),
-                    action_cell(u, d.pending_action.as_ref()),
-                ]
-                .spacing(space::SM)
-                .align_y(iced::Alignment::Center),
-            );
-        }
-        column![list, count_note(rows.len(), "units")]
-            .spacing(space::SM)
-            .into()
+        let table = DataTable::new(unit_columns(state))
+            // Chips narrow what the table is about; the filter box searches
+            // within that.
+            .retain(move |u: &UnitRecord| d.chips_admit(u))
+            .searchable(|u: &UnitRecord| format!("{} {}", u.name, u.description))
+            .on_sort(Message::SystemdUnitsTableSort)
+            .on_filter(Message::SystemdUnitsTableFilter)
+            .on_more(Message::SystemdUnitsTableMore)
+            .noun("units")
+            .view(units, &d.units_table);
+        column![table].into()
     });
+
+    let mut panel = column![header, state_chips(d), type_chips(d)].spacing(space::SM);
+    // One explanation per table rather than one per row.
+    if let Some(note) = gate_note(d) {
+        panel = panel.push(note);
+    }
+    panel = panel.push(body);
 
     let mut col = column![].spacing(space::MD);
     // Identity drill-down panel (#313): the selected unit's join keys
@@ -259,7 +235,115 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     if let Some(unit) = &d.selected_unit {
         col = col.push(card(render_unit_detail_panel(state, unit)));
     }
-    col.push(card(column![header, filters, body].spacing(space::SM)))
+    col.push(card(panel))
+}
+
+/// The Units table's columns. The `Actions` column is omitted entirely on a host
+/// that answered "service control is off" — a column of permanently dead buttons
+/// is worse than no column.
+fn unit_columns(state: &DeviceDetailState) -> Vec<DataColumn<'_, UnitRecord, Message>> {
+    let d = &state.systemd_detail;
+    let mut cols = vec![
+        // The unit name is the identity drill-down chip (#313): clicking fetches
+        // `@rpc/systemd/unit?name=` and opens the panel above the table.
+        DataColumn::fill("Unit", 3, |u: &UnitRecord| {
+            button(text(u.name.clone()).size(font::CAPTION))
+                .padding([2, 6])
+                .style(iced::widget::button::text)
+                .on_press(Message::SystemdSelectUnit(Some(u.name.clone())))
+                .into()
+        })
+        .sortable(|u: &UnitRecord| SortKey::Text(u.name.clone())),
+        DataColumn::fill("Active", 1, |u: &UnitRecord| state_text(&u.active_state))
+            .sortable(|u: &UnitRecord| SortKey::Text(u.active_state.clone())),
+        DataColumn::fill("Sub", 1, |u: &UnitRecord| plain(&u.sub_state))
+            .sortable(|u: &UnitRecord| SortKey::Text(u.sub_state.clone())),
+        DataColumn::fill("Load", 1, |u: &UnitRecord| plain(&u.load_state))
+            .sortable(|u: &UnitRecord| SortKey::Text(u.load_state.clone())),
+        DataColumn::fill("Enabled", 1, |u: &UnitRecord| {
+            plain(u.unit_file_state.as_deref().unwrap_or("—"))
+        })
+        .sortable(|u: &UnitRecord| SortKey::Text(u.unit_file_state.clone().unwrap_or_default())),
+        DataColumn::fill("Description", 3, |u: &UnitRecord| plain(&u.description))
+            .sortable(|u: &UnitRecord| SortKey::Text(u.description.clone())),
+    ];
+    if !matches!(d.capability.ready(), Some(c) if !c.enabled) {
+        cols.push(DataColumn::fill("Actions", 3, move |u: &UnitRecord| {
+            action_cell(d, u)
+        }));
+    }
+    cols
+}
+
+/// Active-state chips, derived from the states actually present rather than a
+/// fixed four — `activating`/`reloading` are already colour-coded in the table,
+/// so they should be selectable too.
+fn state_chips(d: &SystemdDetailState) -> Element<'_, Message> {
+    let mut present: Vec<&str> = d
+        .units
+        .ready()
+        .map(|units| {
+            units
+                .iter()
+                .filter(|u| {
+                    d.unit_type_filter
+                        .as_deref()
+                        .is_none_or(|s| u.name.ends_with(s))
+                })
+                .map(|u| u.active_state.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    // Keep a selected state visible even once nothing is in it, or the chip that
+    // produced an empty table would vanish and strand the operator.
+    if let Some(f) = d.unit_state_filter.as_deref()
+        && !present.contains(&f)
+    {
+        present.push(f);
+    }
+    let mut r = row![filter_chip("all", d.unit_state_filter.is_none(), None)].spacing(space::XS);
+    for s in present {
+        r = r.push(filter_chip_owned(
+            s.to_string(),
+            d.unit_state_filter.as_deref() == Some(s),
+            Some(s.to_string()),
+        ));
+    }
+    r.into()
+}
+
+fn type_chips(d: &SystemdDetailState) -> Element<'_, Message> {
+    let mut r = row![type_chip("all types", d.unit_type_filter.is_none(), None)].spacing(space::XS);
+    for t in UNIT_TYPES {
+        r = r.push(type_chip(
+            t,
+            d.unit_type_filter.as_deref() == Some(t),
+            Some(t.to_string()),
+        ));
+    }
+    r.into()
+}
+
+/// The one-line explanation of this host's gate, when there is something to say.
+fn gate_note(d: &SystemdDetailState) -> Option<Element<'_, Message>> {
+    let note = match d.capability {
+        Fetch::Ready(ref c) if !c.enabled => {
+            "Service control is disabled on this host — the sensor is read-only.".to_string()
+        }
+        Fetch::Ready(ref c) if c.allow_units.is_empty() => {
+            "Service control is enabled but its allowlist is empty, so every unit is refused."
+                .to_string()
+        }
+        Fetch::Ready(ref c) => format!("Service control allows: {}", c.allow_units.join(", ")),
+        Fetch::Error(_) => {
+            "This host did not answer the service-control probe — actions may be unavailable."
+                .to_string()
+        }
+        _ => return None,
+    };
+    Some(text(note).size(font::CAPTION).style(dim).into())
 }
 
 /// The unit identity drill-down (#313): description/state plus the cross-view
@@ -378,7 +462,81 @@ fn render_unit_detail_panel<'a>(
         }
     };
 
-    column![header, body].spacing(space::SM).into()
+    column![header, body, unit_file_section(d, unit)]
+        .spacing(space::SM)
+        .into()
+}
+
+/// The unit's on-disk definition, behind a toggle.
+///
+/// Opt-in per host (`actions.expose_unit_files`), so a sensor that does not
+/// serve it answers nothing and the panel says so rather than spinning.
+fn unit_file_section<'a>(d: &'a SystemdDetailState, unit: &'a str) -> Element<'a, Message> {
+    match &d.unit_file {
+        Fetch::Idle => button(text("View unit file").size(font::CAPTION))
+            .padding([2, 8])
+            .style(iced::widget::button::secondary)
+            .on_press(Message::SystemdFetchUnitFile(unit.to_string()))
+            .into(),
+        Fetch::Loading => text("Reading unit file…")
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+        Fetch::Error(e) => text(format!("Unit file unavailable: {e}"))
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+        Fetch::Ready(file) => {
+            let mut colm = column![
+                row![
+                    section_header("Unit file", None),
+                    button(text("Hide").size(font::CAPTION))
+                        .padding([2, 8])
+                        .style(iced::widget::button::text)
+                        .on_press(Message::SystemdHideUnitFile),
+                ]
+                .spacing(space::SM)
+                .align_y(iced::Alignment::Center)
+            ]
+            .spacing(space::XS);
+            // Say plainly that this is not the file as it exists on disk.
+            if file.redacted {
+                colm = colm.push(
+                    text("Secret-looking assignments have been redacted by the sensor.")
+                        .size(font::CAPTION)
+                        .style(dim),
+                );
+            }
+            if file.truncated {
+                colm = colm.push(
+                    text("Content was truncated at the sensor's size cap.")
+                        .size(font::CAPTION)
+                        .style(dim),
+                );
+            }
+            if let Some(body) = &file.fragment {
+                let path = file.fragment_path.as_deref().unwrap_or("(fragment)");
+                colm = colm.push(text(path.to_string()).size(font::CAPTION).style(dim));
+                colm = colm.push(text(body.clone()).size(font::CAPTION));
+            }
+            for (path, body) in &file.dropins {
+                colm = colm.push(
+                    text(format!("drop-in: {path}"))
+                        .size(font::CAPTION)
+                        .style(dim),
+                );
+                colm = colm.push(text(body.clone()).size(font::CAPTION));
+            }
+            if file.fragment.is_none() && file.dropins.is_empty() {
+                colm = colm.push(
+                    text("This unit has no unit file (generated or transient).")
+                        .size(font::CAPTION)
+                        .style(dim),
+                );
+            }
+            scrollable(colm).height(Length::Fixed(320.0)).into()
+        }
+    }
 }
 
 // ── Timers ────────────────────────────────────────────────────────────────────
@@ -496,6 +654,91 @@ fn event_row(e: &SystemdEventRecord) -> Element<'_, Message> {
     .into()
 }
 
+// ── Service-control audit timeline (#283) ─────────────────────────────────────
+
+fn render_actions_tab(state: &DeviceDetailState) -> Column<'_, Message> {
+    let d = &state.systemd_detail;
+    let header = row![
+        section_header("Service-control audit", None),
+        refresh_button(SystemdDetailTopic::Actions),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
+
+    let body = fetch_body(&d.actions, SystemdDetailTopic::Actions, |actions| {
+        if actions.is_empty() {
+            return empty_state("No service actions have been attempted on this host.", None);
+        }
+        let mut list = column![table_header(&["When", "Verb", "Unit", "Outcome"])].spacing(2);
+        for a in actions.iter().take(200) {
+            list = list.push(action_row(a));
+        }
+        list.into()
+    });
+
+    let note = text(
+        "Every attempt is recorded, refused ones included; the sensor also writes each to its audit log.",
+    )
+    .size(font::CAPTION)
+    .style(dim);
+
+    column![card(column![header, note, body].spacing(space::SM))].spacing(space::MD)
+}
+
+fn action_row(a: &zensight_common::action::ActionStatus) -> Element<'_, Message> {
+    // Refusals and failures must be legible as such at a glance, not inferred
+    // from an absent word.
+    let (outcome, tone) = match (a.accepted, a.result.as_deref()) {
+        (false, _) => (
+            format!("refused: {}", a.error.as_deref().unwrap_or("no reason")),
+            Tone::Bad,
+        ),
+        (true, Some("done")) | (true, Some("applied")) => {
+            let hint = if a.needs_daemon_reload {
+                " (needs daemon-reload)"
+            } else {
+                ""
+            };
+            (format!("done{hint}"), Tone::Good)
+        }
+        (true, Some(other)) => (other.to_string(), Tone::Bad),
+        (true, None) => ("issued, outcome unknown".to_string(), Tone::Warn),
+    };
+    row![
+        cell(&fmt_unix(a.ts_unix.max(0) as u64), 2),
+        cell(a.verb.as_str(), 1),
+        cell(if a.unit.is_empty() { "—" } else { &a.unit }, 3),
+        toned(outcome, tone, 3),
+    ]
+    .spacing(space::SM)
+    .into()
+}
+
+#[derive(Clone, Copy)]
+enum Tone {
+    Good,
+    Warn,
+    Bad,
+}
+
+fn toned<'a>(value: String, tone: Tone, portion: u16) -> Element<'a, Message> {
+    let styled = move |t: &Theme| {
+        let c = theme::colors(t);
+        text::Style {
+            color: Some(match tone {
+                Tone::Good => c.status_healthy(),
+                Tone::Warn => c.status_warning(),
+                Tone::Bad => c.status_error(),
+            }),
+        }
+    };
+    text(value)
+        .size(font::CAPTION)
+        .width(Length::FillPortion(portion))
+        .style(styled)
+        .into()
+}
+
 // ── cgroups tree ──────────────────────────────────────────────────────────────
 
 fn render_cgroups_tab(state: &DeviceDetailState) -> Column<'_, Message> {
@@ -577,17 +820,39 @@ fn load_button<'a>(topic: SystemdDetailTopic, label: &'a str) -> Element<'a, Mes
 }
 
 fn filter_chip<'a>(label: &'a str, active: bool, value: Option<&'a str>) -> Element<'a, Message> {
-    let mut b = button(text(label).size(font::CAPTION))
-        .on_press(Message::SystemdSetUnitFilter(value.map(str::to_string)))
-        .padding([space::XS as u16, space::SM as u16]);
-    b = if active {
-        b.style(iced::widget::button::primary)
-    } else {
-        b.style(iced::widget::button::text)
-    };
-    b.into()
+    filter_chip_owned(label.to_string(), active, value.map(str::to_string))
 }
 
+fn filter_chip_owned<'a>(
+    label: String,
+    active: bool,
+    value: Option<String>,
+) -> Element<'a, Message> {
+    chip(label, active, Message::SystemdSetUnitFilter(value))
+}
+
+fn type_chip<'a>(label: &str, active: bool, value: Option<String>) -> Element<'a, Message> {
+    chip(
+        label.to_string(),
+        active,
+        Message::SystemdSetUnitTypeFilter(value),
+    )
+}
+
+fn chip<'a>(label: String, active: bool, on_press: Message) -> Element<'a, Message> {
+    let b = button(text(label).size(font::CAPTION))
+        .on_press(on_press)
+        .padding([space::XS as u16, space::SM as u16]);
+    if active {
+        b.style(iced::widget::button::primary).into()
+    } else {
+        b.style(iced::widget::button::text).into()
+    }
+}
+
+/// Hand-rolled header for the Timers and cgroups tabs, which are small,
+/// fixed-shape lists rather than searchable tables. The Units tab uses
+/// [`DataTable`] instead.
 fn table_header<'a>(labels: &[&'a str]) -> Element<'a, Message> {
     // The portion weights mirror the data rows (name columns wider).
     let mut r = row![].spacing(space::SM);
@@ -613,37 +878,132 @@ fn header_weights(n: usize) -> Vec<u16> {
     }
 }
 
-/// Per-unit service-control cell (#283): start/stop/restart buttons that arm an
-/// inline confirm — the sensor side is allowlisted and off by default, so the
-/// confirmed command may still come back rejected (surfaced via toast).
-fn action_cell<'a>(unit: &UnitRecord, pending: Option<&(String, String)>) -> Element<'a, Message> {
-    let tiny = |label: &'a str| button(text(label).size(font::CAPTION)).padding([2, 6]);
-    let inner: Element<'a, Message> = match pending {
-        Some((verb, armed_unit)) if armed_unit == &unit.name => row![
+/// A bare table cell. Unlike [`cell`], it sets no width: `DataTable` wraps every
+/// cell in a container of the column's width.
+fn plain<'a>(value: &str) -> Element<'a, Message> {
+    text(value.to_string()).size(font::CAPTION).into()
+}
+
+/// [`state_cell`] without the width, for `DataTable` columns.
+fn state_text<'a>(state: &str) -> Element<'a, Message> {
+    let owned = state.to_string();
+    let styled = move |t: &Theme| {
+        let c = theme::colors(t);
+        let color = match owned.as_str() {
+            "active" => c.status_healthy(),
+            "failed" => c.status_error(),
+            "activating" | "deactivating" | "reloading" => c.status_warning(),
+            _ => c.text_muted(),
+        };
+        text::Style { color: Some(color) }
+    };
+    text(state.to_string())
+        .size(font::CAPTION)
+        .style(styled)
+        .into()
+}
+
+/// A small action button. Without an `on_press` iced renders it disabled, which
+/// is how a known-refused verb is shown: present, so the operator can see the
+/// control exists, but visibly not available.
+fn tiny_button<'a>(label: String, on_press: Option<Message>) -> iced::widget::Button<'a, Message> {
+    let b = button(text(label).size(font::CAPTION)).padding([2, 6]);
+    match on_press {
+        Some(m) => b.on_press(m),
+        None => b,
+    }
+}
+
+/// Per-unit service-control cell (#283), rendered from the host's advertised
+/// gate rather than optimistically.
+///
+/// Previously these buttons were always live, so on a read-only host — the
+/// default — every click failed, and the operator learned that from an error
+/// toast a second and a half later. Now the row says up front what this host
+/// will accept for this unit.
+fn action_cell<'a>(d: &'a SystemdDetailState, unit: &UnitRecord) -> Element<'a, Message> {
+    // An armed action takes over the cell regardless of gate: it is mid-dialogue.
+    if let Some((verb, armed)) = d.pending_action.as_ref()
+        && armed == &unit.name
+    {
+        return row![
             text(format!("{verb}?")).size(font::CAPTION),
-            tiny("confirm").on_press(Message::SystemdUnitActionConfirm),
-            tiny("cancel").on_press(Message::SystemdUnitActionCancel),
+            tiny_button("confirm".into(), Some(Message::SystemdUnitActionConfirm)),
+            tiny_button("cancel".into(), Some(Message::SystemdUnitActionCancel)),
+        ]
+        .spacing(space::XS)
+        .align_y(iced::Alignment::Center)
+        .into();
+    }
+
+    match d.action_gate(&unit.name) {
+        // The whole column is dropped in this case; this arm only guards the
+        // gap between the probe answering and the next render.
+        ActionGate::Disabled => text("—").size(font::CAPTION).style(dim).into(),
+        ActionGate::Busy(verb) => text(format!("{verb}ing…"))
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+        // No buttons at all: unlike an allowlist refusal, this is not something
+        // a host could ever permit.
+        ActionGate::Template => text("template — act on an instance")
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+        // Show the controls, inert, and say why — hiding them would silently
+        // strip working buttons from a pre-1.4 sensor that does have actions on.
+        ActionGate::Unknown => {
+            disabled_verbs(&[Verb::Start, Verb::Stop, Verb::Restart], "probing…")
+        }
+        ActionGate::NotAllowed => {
+            disabled_verbs(&[Verb::Start, Verb::Stop, Verb::Restart], "not allowlisted")
+        }
+        ActionGate::Allowed(verbs) => {
+            let mut r = row![].spacing(space::XS).align_y(iced::Alignment::Center);
+            for verb in verbs {
+                r = r.push(tiny_button(
+                    verb.to_string(),
+                    Some(Message::SystemdUnitActionArm {
+                        verb,
+                        unit: unit.name.clone(),
+                    }),
+                ));
+            }
+            r.into()
+        }
+    }
+}
+
+/// Inert verb buttons plus the reason they are inert.
+fn disabled_verbs<'a>(verbs: &[Verb], why: &'a str) -> Element<'a, Message> {
+    let mut r = row![].spacing(space::XS).align_y(iced::Alignment::Center);
+    for verb in verbs {
+        r = r.push(tiny_button(verb.to_string(), None));
+    }
+    r.push(text(why).size(font::CAPTION).style(dim)).into()
+}
+
+/// The manager-wide daemon-reload control, armed and confirmed like a row action
+/// but carrying no unit.
+fn daemon_reload_control<'a>(pending: Option<&(Verb, String)>) -> Element<'a, Message> {
+    match pending {
+        Some((Verb::DaemonReload, _)) => row![
+            text("daemon-reload?").size(font::CAPTION),
+            tiny_button("confirm".into(), Some(Message::SystemdUnitActionConfirm)),
+            tiny_button("cancel".into(), Some(Message::SystemdUnitActionCancel)),
         ]
         .spacing(space::XS)
         .align_y(iced::Alignment::Center)
         .into(),
-        _ => {
-            let arm = |verb: &str| Message::SystemdUnitActionArm {
-                verb: verb.to_string(),
-                unit: unit.name.clone(),
-            };
-            row![
-                tiny("start").on_press(arm("start")),
-                tiny("stop").on_press(arm("stop")),
-                tiny("restart").on_press(arm("restart")),
-            ]
-            .spacing(space::XS)
-            .into()
-        }
-    };
-    iced::widget::container(inner)
-        .width(Length::FillPortion(2))
-        .into()
+        _ => tiny_button(
+            "daemon-reload".into(),
+            Some(Message::SystemdUnitActionArm {
+                verb: Verb::DaemonReload,
+                unit: String::new(),
+            }),
+        )
+        .into(),
+    }
 }
 
 fn cell<'a>(value: &str, portion: u16) -> Element<'a, Message> {
@@ -660,25 +1020,6 @@ fn container_cell<'a>(inner: Element<'a, Message>) -> Element<'a, Message> {
 }
 
 /// A unit-state cell tinted by state (green active / red failed / muted else).
-fn state_cell<'a>(state: &str, portion: u16) -> Element<'a, Message> {
-    let owned = state.to_string();
-    let styled = move |t: &Theme| {
-        let c = theme::colors(t);
-        let color = match owned.as_str() {
-            "active" => c.status_healthy(),
-            "failed" => c.status_error(),
-            "activating" | "deactivating" | "reloading" => c.status_warning(),
-            _ => c.text_muted(),
-        };
-        text::Style { color: Some(color) }
-    };
-    text(state.to_string())
-        .size(font::CAPTION)
-        .width(Length::FillPortion(portion))
-        .style(styled)
-        .into()
-}
-
 fn count_note<'a>(n: usize, noun: &'a str) -> Element<'a, Message> {
     text(format!("{n} {noun}"))
         .size(font::CAPTION)
