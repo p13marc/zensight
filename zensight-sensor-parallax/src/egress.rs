@@ -1,10 +1,11 @@
 //! Pure transport: pull encoded buffers from an [`AppSinkHandle`], publish
 //! them on a [`RawMediaPublisher`] with a CBOR [`FrameMeta`] attachment.
 //!
-//! `pull_buffer_timeout` blocks a thread, so every pull is bridged through
-//! `spawn_blocking`; the publish itself is async. The loop ends on pipeline
-//! EOS (clean) or on the first pull/publish error — the caller reports the
-//! outcome to the session actor as an `EgressEnded` message.
+//! Pulls are native async since parallax 0.6 (`pull_buffer_timeout` awaits
+//! instead of parking a thread), so pull and publish share the task. The
+//! loop ends on pipeline EOS (clean) or on the first pull/publish error —
+//! the caller reports the outcome to the session actor as an `EgressEnded`
+//! message.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,7 +21,7 @@ use zensight_sensor_core::RawMediaPublisher;
 use crate::annexb;
 use crate::stats::StreamStats;
 
-/// How long one blocking pull waits before re-checking for EOS/abort.
+/// How long one pull waits before re-checking for EOS/abort.
 const PULL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Watchdog: a freshly opened profile that produces no frame at all within
@@ -107,13 +108,7 @@ async fn run_with_watchdog(
     let h264 = !preview && encoding == Encoding::VIDEO_H264;
     let mut param_sets: Option<Vec<u8>> = None;
     loop {
-        let pull_sink = sink.clone();
-        let pulled =
-            tokio::task::spawn_blocking(move || pull_sink.pull_buffer_timeout(Some(PULL_TIMEOUT)))
-                .await
-                .map_err(|e| format!("egress pull task panicked: {e}"))?;
-
-        let buffer = match pulled {
+        let buffer = match sink.pull_buffer_timeout(PULL_TIMEOUT).await {
             Ok(Some(buffer)) => buffer,
             Ok(None) => {
                 if sink.is_eos() {
