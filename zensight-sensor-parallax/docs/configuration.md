@@ -18,7 +18,7 @@ Minimal:
 | `test_sources` | `[]` | Synthetic `VideoTestSrc` patterns (see below). |
 | `preview.fps` | `2` | JPEG preview frame rate (thumbnails, not video). |
 | `preview.quality` | `75` | JPEG quality 1–100. |
-| `preview.max_height` | `360` | Aspect-preserving cap on the thumbnail height; `null` = source size. A 1080p camera's thumbnail is otherwise a 1080p JPEG. |
+| `preview.max_height` | `360` | Aspect-preserving cap on the thumbnail height; `null` = source size. A 1080p camera's thumbnail is otherwise a 1080p JPEG. Applies to every preview that re-encodes; the V4L2 MJPG passthrough forwards the camera's JPEG verbatim, uncapped. |
 | `video.gop_frames` | `60` | Keyframe (IDR) interval in frames, shared by every tier. |
 | `video.default_tier` | `"medium"` | The tier an `open_stream` with no explicit `tier` resolves to. |
 | `video.tiers` | low/medium/high (see below) | The bandwidth-tier ladder — the heart of demand-driven simulcast (#494). |

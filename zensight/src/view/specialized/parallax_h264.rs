@@ -307,7 +307,7 @@ mod real {
         #[test]
         fn encode_decode_round_trip_produces_rgba() {
             let (w, h) = (64u32, 48u32);
-            // 0.3.0: the config carries no geometry — dimensions travel with
+            // parallax 0.6: the config carries no geometry — dimensions travel with
             // the frame data (`encode_yuv420_at`), so a resolution switch is a
             // clean IDR with no configured size to contradict.
             let mut encoder = H264Encoder::new(

@@ -1181,14 +1181,11 @@ async fn rtsp_feed(mut rtsp: RtspSession, feed: AppSrcHandle, stream: String) {
     loop {
         match rtsp.next_buffer().await {
             Ok(Some(buffer)) => {
-                if feed.is_full() {
-                    continue; // shed the frame
-                }
-                if feed
-                    .push_buffer_timeout(buffer, Some(Duration::from_millis(50)))
-                    .is_err()
-                {
-                    break;
+                // Non-blocking push (parallax 0.6): a full queue hands the
+                // buffer back — shed it, never back the network reader up.
+                match feed.try_push_buffer(buffer) {
+                    Ok(_queued_or_shed) => {}
+                    Err(_) => break, // pipeline is EOS/flushing
                 }
             }
             Ok(None) => {
