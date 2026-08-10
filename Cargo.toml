@@ -79,7 +79,7 @@ if-addrs = "0.14"
 glob = "0.3"
 
 # Configuration
-json5 = "0.4"
+json5 = "1.0"
 
 # Logging
 tracing = "0.1"
