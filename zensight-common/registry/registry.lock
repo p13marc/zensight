@@ -1,0 +1,552 @@
+# registry.lock — the RFC 08 §3.1 compatibility snapshot.
+# Regenerate with `zenctl registry lock <dir>` after additive edits;
+# an incompatible edit (changed type/class/kind/shape on an existing
+# path) is refused — retire through [[deprecated]] and add a sibling
+# instead (RFC 08 §3).
+procedure	catalog	describe	read	-	SchemaSet
+procedure	catalog	introspect	read	-	RegistrySlice
+procedure	catalog	link	write	-	OperatorAssertion
+procedure	catalog	names	read	-	Vec<NameVal>
+procedure	catalog	unlink	write	-	OperatorAssertion
+procedure	gnmi	artifact/cancel	write	-	Ack
+procedure	gnmi	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	gnmi	artifact/status	read	-	ArtifactStatus
+procedure	gnmi	describe	read	-	SchemaSet
+procedure	gnmi	introspect	read	-	RegistrySlice
+procedure	logs	artifact/cancel	write	-	Ack
+procedure	logs	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	logs	artifact/status	read	-	ArtifactStatus
+procedure	logs	describe	read	-	SchemaSet
+procedure	logs	events	read	-	Vec<LogRecord>
+procedure	logs	filter	read	-	TopicStatus
+procedure	logs	filter/set	write	TopicConfig	Ack
+procedure	logs	introspect	read	-	RegistrySlice
+procedure	logs	rules	read	-	RulesStatus
+procedure	logs	rules/set	write	LogRulesConfig	Ack
+procedure	modbus	artifact/cancel	write	-	Ack
+procedure	modbus	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	modbus	artifact/status	read	-	ArtifactStatus
+procedure	modbus	describe	read	-	SchemaSet
+procedure	modbus	introspect	read	-	RegistrySlice
+procedure	netflow	artifact/cancel	write	-	Ack
+procedure	netflow	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	netflow	artifact/status	read	-	ArtifactStatus
+procedure	netflow	describe	read	-	SchemaSet
+procedure	netflow	flows	read	-	Vec<FlowRecord>
+procedure	netflow	introspect	read	-	RegistrySlice
+procedure	netlink	addresses	read	-	Vec<AddressRecord>
+procedure	netlink	artifact/cancel	write	-	Ack
+procedure	netlink	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	netlink	artifact/status	read	-	ArtifactStatus
+procedure	netlink	bandwidth	read	-	Vec<BandwidthRecord>
+procedure	netlink	collection	read	-	TopicStatus
+procedure	netlink	collection/set	write	CollectionConfig	Ack
+procedure	netlink	connections	read	-	Vec<ConnectionRecord>
+procedure	netlink	describe	read	-	SchemaSet
+procedure	netlink	events	read	-	Vec<EventRecord>
+procedure	netlink	expectations	read	-	TopicStatus
+procedure	netlink	expectations/set	write	ExpectationCommand	Ack
+procedure	netlink	introspect	read	-	RegistrySlice
+procedure	netlink	neighbors	read	-	Vec<NeighborRecord>
+procedure	netlink	nft	read	-	Vec<NftRecord>
+procedure	netlink	retransmits	read	-	Vec<RetransmitRecord>
+procedure	netlink	route_changes	read	-	Vec<RouteChangeRecord>
+procedure	netlink	routes	read	-	Vec<RouteRecord>
+procedure	netlink	sockets	read	-	Vec<SocketRecord>
+procedure	netlink	tc	read	-	Vec<TcRecord>
+procedure	netlink	xfrm	read	-	Vec<XfrmRecord>
+procedure	netring	artifact/cancel	write	-	Ack
+procedure	netring	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	netring	artifact/status	read	-	ArtifactStatus
+procedure	netring	assets	read	-	Vec<AssetRecord>
+procedure	netring	bandwidth	read	-	Vec<BandwidthRecord>
+procedure	netring	capture_disk	read	-	CaptureDiskStatus
+procedure	netring	capture_disk/set	write	CaptureDiskCommand	Ack
+procedure	netring	capture_filter	read	-	TopicStatus
+procedure	netring	capture_filter/set	write	FilterConfig	Ack
+procedure	netring	captures	read	-	Vec<CaptureRecord>
+procedure	netring	describe	read	-	SchemaSet
+procedure	netring	detectors	read	-	TopicStatus
+procedure	netring	detectors/set	write	DetectorConfig	Ack
+procedure	netring	dns	read	-	Vec<DnsRecord>
+procedure	netring	elephant_flows	read	-	Vec<FlowRecord>
+procedure	netring	encrypted_dns	read	-	Vec<EncryptedDnsRecord>
+procedure	netring	flows	read	-	Vec<FlowRecord>
+procedure	netring	http	read	-	Vec<HttpRecord>
+procedure	netring	introspect	read	-	RegistrySlice
+procedure	netring	ipfix	read	-	Vec<IpfixRecord>
+procedure	netring	ja4h	read	-	Vec<Ja4hRecord>
+procedure	netring	matrix	read	-	Vec<MatrixRecord>
+procedure	netring	quic	read	-	Vec<QuicRecord>
+procedure	netring	ssh	read	-	Vec<SshRecord>
+procedure	netring	talkers	read	-	Vec<TalkerRecord>
+procedure	netring	threat_intel	read	-	TopicStatus
+procedure	netring	threat_intel/set	write	ThreatIntelConfig	Ack
+procedure	netring	tls	read	-	Vec<TlsRecord>
+procedure	parallax	artifact/cancel	write	-	Ack
+procedure	parallax	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	parallax	artifact/status	read	-	ArtifactStatus
+procedure	parallax	describe	read	-	SchemaSet
+procedure	parallax	introspect	read	-	RegistrySlice
+procedure	parallax	stream/set	write	Command<StreamControl>	Ack
+procedure	parallax	streams	read	-	Vec<StreamDescriptor>
+procedure	snmp	artifact/cancel	write	-	Ack
+procedure	snmp	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	snmp	artifact/status	read	-	ArtifactStatus
+procedure	snmp	describe	read	-	SchemaSet
+procedure	snmp	introspect	read	-	RegistrySlice
+procedure	sysinfo	artifact/cancel	write	-	Ack
+procedure	sysinfo	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	sysinfo	artifact/status	read	-	ArtifactStatus
+procedure	sysinfo	describe	read	-	SchemaSet
+procedure	sysinfo	introspect	read	-	RegistrySlice
+procedure	sysinfo	latency	read	-	LatencyReport
+procedure	sysinfo	processes	read	-	Vec<ProcessRecord>
+procedure	systemd	action	read	-	ActionStatus
+procedure	systemd	action/capability	read	-	ActionCapability
+procedure	systemd	action/set	write	ServiceAction	ActionStatus
+procedure	systemd	actions	read	-	Vec<ActionStatus>
+procedure	systemd	artifact/cancel	write	-	Ack
+procedure	systemd	artifact/request	write	ArtifactRequest	ArtifactAck
+procedure	systemd	artifact/status	read	-	ArtifactStatus
+procedure	systemd	cgroups	read	-	CgroupNode
+procedure	systemd	describe	read	-	SchemaSet
+procedure	systemd	events	read	-	Vec<EventRecord>
+procedure	systemd	expectations	read	-	TopicStatus
+procedure	systemd	expectations/set	write	ExpectationsConfig	Ack
+procedure	systemd	failed	read	-	Vec<UnitRecord>
+procedure	systemd	introspect	read	-	RegistrySlice
+procedure	systemd	timers	read	-	Vec<TimerRecord>
+procedure	systemd	unit	read	-	UnitDetail
+procedure	systemd	unit/file	read	-	UnitFile
+procedure	systemd	units	read	-	Vec<UnitRecord>
+subject	catalog	alias/{old_id}	state	AliasRecord
+subject	catalog	assertion/{id}	state	OperatorAssertion
+subject	catalog	entity/{entity_id}	state	HostEntity
+subject	catalog	pdns/{ip_slug}	state	PdnsRecord
+subject	gnmi	artifact/{kind}	state	ArtifactStatus
+subject	gnmi	errors	state	ErrorReport
+subject	gnmi	evidence/self	state	HostEvidence
+subject	gnmi	health	state	HealthSnapshot
+subject	gnmi	sensor	state	SensorInfo
+subject	gnmi	{device}/{path...}	telemetry	TelemetryPoint
+subject	logs	alert/{alert_key}	state	Alert
+subject	logs	artifact/{kind}	state	ArtifactStatus
+subject	logs	by_severity/{severity}	telemetry	TelemetryPoint
+subject	logs	by_template/{template}/count_total	telemetry	TelemetryPoint
+subject	logs	by_template/{template}/errors_total	telemetry	TelemetryPoint
+subject	logs	by_unit/{unit}/burn_rate	telemetry	TelemetryPoint
+subject	logs	by_unit/{unit}/error_ratio	telemetry	TelemetryPoint
+subject	logs	by_unit/{unit}/errors_total	telemetry	TelemetryPoint
+subject	logs	by_unit/{unit}/messages_total	telemetry	TelemetryPoint
+subject	logs	errors	state	ErrorReport
+subject	logs	errors_total	telemetry	TelemetryPoint
+subject	logs	evidence/device/{device}	state	HostEvidence
+subject	logs	evidence/self	state	HostEvidence
+subject	logs	health	state	HealthSnapshot
+subject	logs	ingest/dropped_ratio	telemetry	TelemetryPoint
+subject	logs	ingest/dropped_total	telemetry	TelemetryPoint
+subject	logs	ingest/parse_failed_total	telemetry	TelemetryPoint
+subject	logs	ingest/parsed_total	telemetry	TelemetryPoint
+subject	logs	ingest/received_total	telemetry	TelemetryPoint
+subject	logs	journald/dropped_total	telemetry	TelemetryPoint
+subject	logs	journald/published_total	telemetry	TelemetryPoint
+subject	logs	journald/read_total	telemetry	TelemetryPoint
+subject	logs	journald/sampled_out_total	telemetry	TelemetryPoint
+subject	logs	sensor	state	SensorInfo
+subject	logs	store/oldest_age_secs	telemetry	TelemetryPoint
+subject	logs	store/records	telemetry	TelemetryPoint
+subject	logs	store/write_drops_total	telemetry	TelemetryPoint
+subject	logs	units_in_failure	telemetry	TelemetryPoint
+subject	logs	warnings_total	telemetry	TelemetryPoint
+subject	modbus	artifact/{kind}	state	ArtifactStatus
+subject	modbus	errors	state	ErrorReport
+subject	modbus	evidence/self	state	HostEvidence
+subject	modbus	health	state	HealthSnapshot
+subject	modbus	sensor	state	SensorInfo
+subject	modbus	{device}/{metric...}	telemetry	TelemetryPoint
+subject	netflow	artifact/{kind}	state	ArtifactStatus
+subject	netflow	errors	state	ErrorReport
+subject	netflow	evidence/self	state	HostEvidence
+subject	netflow	health	state	HealthSnapshot
+subject	netflow	sensor	state	SensorInfo
+subject	netflow	{exporter}/{metric...}	telemetry	TelemetryPoint
+subject	netlink	addresses/global_count	telemetry	TelemetryPoint
+subject	netlink	addresses/ipv4_count	telemetry	TelemetryPoint
+subject	netlink	addresses/ipv6_count	telemetry	TelemetryPoint
+subject	netlink	addresses/total	telemetry	TelemetryPoint
+subject	netlink	alert/{alert_key}	state	Alert
+subject	netlink	artifact/{kind}	state	ArtifactStatus
+subject	netlink	conntrack/by_proto/{proto}	telemetry	TelemetryPoint
+subject	netlink	conntrack/entries	telemetry	TelemetryPoint
+subject	netlink	conntrack/max	telemetry	TelemetryPoint
+subject	netlink	conntrack/utilization	telemetry	TelemetryPoint
+subject	netlink	diagnostics/bottleneck	telemetry	TelemetryPoint
+subject	netlink	diagnostics/bottleneck_score	telemetry	TelemetryPoint
+subject	netlink	diagnostics/issues/{severity}	telemetry	TelemetryPoint
+subject	netlink	errors	state	ErrorReport
+subject	netlink	ethtool/{iface}/autoneg	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/carrier	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/duplex	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/eee/active	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/eee/enabled	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/features/{feature}	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/fec/auto	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/fec/modes	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/full_duplex	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/pause/autoneg	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/pause/rx	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/pause/rx_frames	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/pause/tx	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/pause/tx_frames	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/rings/rx	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/rings/rx_max	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/rings/tx	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/rings/tx_max	telemetry	TelemetryPoint
+subject	netlink	ethtool/{iface}/speed_mbps	telemetry	TelemetryPoint
+subject	netlink	events/{family}/{action}	telemetry	TelemetryPoint
+subject	netlink	evidence/device/{device}	state	HostEvidence
+subject	netlink	evidence/self	state	HostEvidence
+subject	netlink	health	state	HealthSnapshot
+subject	netlink	iface/{iface}/carrier	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/collisions	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/info	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/mtu	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/multicast	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/oper_state	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/rx_bytes	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/rx_dropped	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/rx_errors	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/rx_packets	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/tx_bytes	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/tx_dropped	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/tx_errors	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/tx_packets	telemetry	TelemetryPoint
+subject	netlink	iface/{iface}/up	telemetry	TelemetryPoint
+subject	netlink	neighbors/by_state/{state}	telemetry	TelemetryPoint
+subject	netlink	neighbors/total	telemetry	TelemetryPoint
+subject	netlink	nft/bytes_total	telemetry	TelemetryPoint
+subject	netlink	nft/chains_total	telemetry	TelemetryPoint
+subject	netlink	nft/packets_total	telemetry	TelemetryPoint
+subject	netlink	nft/rules_total	telemetry	TelemetryPoint
+subject	netlink	nft/tables_total	telemetry	TelemetryPoint
+subject	netlink	nft/{family}/{table}/bytes	telemetry	TelemetryPoint
+subject	netlink	nft/{family}/{table}/chains	telemetry	TelemetryPoint
+subject	netlink	nft/{family}/{table}/packets	telemetry	TelemetryPoint
+subject	netlink	nft/{family}/{table}/rules	telemetry	TelemetryPoint
+subject	netlink	routes/default_v4_flaps_total	telemetry	TelemetryPoint
+subject	netlink	routes/default_v4_gw	telemetry	TelemetryPoint
+subject	netlink	routes/default_v4_present	telemetry	TelemetryPoint
+subject	netlink	routes/default_v6_present	telemetry	TelemetryPoint
+subject	netlink	routes/ipv4_count	telemetry	TelemetryPoint
+subject	netlink	routes/ipv6_count	telemetry	TelemetryPoint
+subject	netlink	routes/total	telemetry	TelemetryPoint
+subject	netlink	sensor	state	SensorInfo
+subject	netlink	sockets/tcp/by_cong/{algo}	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/bytes_retrans_total	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/close_wait	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/connlat_us_p50	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/connlat_us_p95	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/delivery_rate_p50	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/delivery_rate_p95	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/established	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/listen	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/lost_total	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/max_rtt_us	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/mem/rcv_buf_total	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/mem/snd_buf_total	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/pacing_rate_p50	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/pacing_rate_p95	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/rcv_rtt_p50_us	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/rcv_rtt_p95_us	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/reordered_total	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/retransmits_total	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/rtt_p50_us	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/rtt_p95_us	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/syn_sent	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/time_wait	telemetry	TelemetryPoint
+subject	netlink	sockets/tcp/total_retrans_total	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/aqm_class	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/{kind}/backlog_bytes	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/{kind}/backlog_pkts	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/{kind}/bytes	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/{kind}/drops	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/{kind}/health_score	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/{kind}/overlimits	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/{kind}/packets	telemetry	TelemetryPoint
+subject	netlink	tc/{iface}/{kind}/requeues	telemetry	TelemetryPoint
+subject	netlink	wireguard/{iface}/peers	telemetry	TelemetryPoint
+subject	netlink	wireguard/{iface}/{peer}/last_handshake_age_s	telemetry	TelemetryPoint
+subject	netlink	wireguard/{iface}/{peer}/rx_bytes	telemetry	TelemetryPoint
+subject	netlink	wireguard/{iface}/{peer}/tx_bytes	telemetry	TelemetryPoint
+subject	netlink	wireguard/{iface}/{peer}/up	telemetry	TelemetryPoint
+subject	netlink	xfrm/policy/total	telemetry	TelemetryPoint
+subject	netlink	xfrm/sa/by_mode/{mode}	telemetry	TelemetryPoint
+subject	netlink	xfrm/sa/by_proto/{proto}	telemetry	TelemetryPoint
+subject	netlink	xfrm/sa/total	telemetry	TelemetryPoint
+subject	netring	alert/{alert_key}	state	Alert
+subject	netring	anomaly/{kind}/total	telemetry	TelemetryPoint
+subject	netring	artifact/{kind}	state	ArtifactStatus
+subject	netring	assets/discovered	telemetry	TelemetryPoint
+subject	netring	bandwidth/{app}/bytes_per_sec	telemetry	TelemetryPoint
+subject	netring	capture/backend	telemetry	TelemetryPoint
+subject	netring	capture/disk/dropped	telemetry	TelemetryPoint
+subject	netring	capture/disk/evictions	telemetry	TelemetryPoint
+subject	netring	capture/disk/mode	telemetry	TelemetryPoint
+subject	netring	capture/disk/retained_bytes	telemetry	TelemetryPoint
+subject	netring	capture/disk/retained_files	telemetry	TelemetryPoint
+subject	netring	capture/disk/ring_bytes	telemetry	TelemetryPoint
+subject	netring	capture/disk/ring_packets	telemetry	TelemetryPoint
+subject	netring	capture/disk/triggers	telemetry	TelemetryPoint
+subject	netring	capture/events	telemetry	TelemetryPoint
+subject	netring	capture/focus/bytes	telemetry	TelemetryPoint
+subject	netring	capture/focus/packets	telemetry	TelemetryPoint
+subject	netring	capture/{source}/drop_rate	telemetry	TelemetryPoint
+subject	netring	capture/{source}/drops	telemetry	TelemetryPoint
+subject	netring	capture/{source}/freezes	telemetry	TelemetryPoint
+subject	netring	capture/{source}/packets	telemetry	TelemetryPoint
+subject	netring	capture/{source}/shed/active	telemetry	TelemetryPoint
+subject	netring	capture/{source}/shed/new_flows_total	telemetry	TelemetryPoint
+subject	netring	capture/{source}/shed/sampled_total	telemetry	TelemetryPoint
+subject	netring	capture/{source}/xdp/rx_dropped	telemetry	TelemetryPoint
+subject	netring	capture/{source}/xdp/rx_fill_ring_empty_descs	telemetry	TelemetryPoint
+subject	netring	capture/{source}/xdp/rx_invalid_descs	telemetry	TelemetryPoint
+subject	netring	capture/{source}/xdp/rx_ring_full	telemetry	TelemetryPoint
+subject	netring	capture/{source}/xdp/tx_invalid_descs	telemetry	TelemetryPoint
+subject	netring	capture/{source}/xdp/tx_ring_empty_descs	telemetry	TelemetryPoint
+subject	netring	dns/encrypted/distinct	telemetry	TelemetryPoint
+subject	netring	dns/encrypted/doh	telemetry	TelemetryPoint
+subject	netring	dns/encrypted/doq	telemetry	TelemetryPoint
+subject	netring	dns/encrypted/dot	telemetry	TelemetryPoint
+subject	netring	dns/encrypted/unknown_resolver	telemetry	TelemetryPoint
+subject	netring	dns/queries_total	telemetry	TelemetryPoint
+subject	netring	dns/query_rtt_p50_ms	telemetry	TelemetryPoint
+subject	netring	dns/query_rtt_p95_ms	telemetry	TelemetryPoint
+subject	netring	dns/query_rtt_p99_ms	telemetry	TelemetryPoint
+subject	netring	dns/responses_by_rcode/{rcode}	telemetry	TelemetryPoint
+subject	netring	dns/unanswered_total	telemetry	TelemetryPoint
+subject	netring	errors	state	ErrorReport
+subject	netring	evidence/device/{device}	state	HostEvidence
+subject	netring	evidence/names/{ip_slug}	state	NameObservation
+subject	netring	evidence/self	state	HostEvidence
+subject	netring	flow/active	telemetry	TelemetryPoint
+subject	netring	flow/by_l4/{proto}/bytes_total	telemetry	TelemetryPoint
+subject	netring	flow/by_l4/{proto}/flows_total	telemetry	TelemetryPoint
+subject	netring	flow/bytes_total	telemetry	TelemetryPoint
+subject	netring	flow/ended_total	telemetry	TelemetryPoint
+subject	netring	flow/packets_total	telemetry	TelemetryPoint
+subject	netring	flow/red/{quantile}	telemetry	TelemetryPoint
+subject	netring	flow/retransmits_total	telemetry	TelemetryPoint
+subject	netring	flow/started_total	telemetry	TelemetryPoint
+subject	netring	health	state	HealthSnapshot
+subject	netring	http/latency_p50_ms	telemetry	TelemetryPoint
+subject	netring	http/latency_p95_ms	telemetry	TelemetryPoint
+subject	netring	http/methods/{method}	telemetry	TelemetryPoint
+subject	netring	http/requests_total	telemetry	TelemetryPoint
+subject	netring	http/status_2xx_total	telemetry	TelemetryPoint
+subject	netring	http/status_3xx_total	telemetry	TelemetryPoint
+subject	netring	http/status_4xx_total	telemetry	TelemetryPoint
+subject	netring	http/status_5xx_total	telemetry	TelemetryPoint
+subject	netring	icmp/by_kind/{kind}	telemetry	TelemetryPoint
+subject	netring	icmp/mtu_signal_total	telemetry	TelemetryPoint
+subject	netring	icmp/time_exceeded_total	telemetry	TelemetryPoint
+subject	netring	icmp/unreachable_total	telemetry	TelemetryPoint
+subject	netring	quic/distinct_sni	telemetry	TelemetryPoint
+subject	netring	sensor	state	SensorInfo
+subject	netring	ssh/distinct_hassh	telemetry	TelemetryPoint
+subject	netring	tcp/closed_fin_total	telemetry	TelemetryPoint
+subject	netring	tcp/closed_idle_total	telemetry	TelemetryPoint
+subject	netring	tcp/closed_rst_total	telemetry	TelemetryPoint
+subject	netring	tcp/refused_total	telemetry	TelemetryPoint
+subject	netring	tcp/resets_total	telemetry	TelemetryPoint
+subject	netring	tls/distinct_fingerprints	telemetry	TelemetryPoint
+subject	netring	tls/handshakes_total	telemetry	TelemetryPoint
+subject	netring	tls/pq_ratio	telemetry	TelemetryPoint
+subject	parallax	alert/{alert_key}	state	Alert
+subject	parallax	artifact/{kind}	state	ArtifactStatus
+subject	parallax	errors	state	ErrorReport
+subject	parallax	evidence/self	state	HostEvidence
+subject	parallax	health	state	HealthSnapshot
+subject	parallax	sensor	state	SensorInfo
+subject	parallax	stream/{stream}	state	StreamStatus
+subject	parallax	streams/advertised	telemetry	TelemetryPoint
+subject	parallax	{stream}/stats/drops	telemetry	TelemetryPoint
+subject	parallax	{stream}/stats/encode_ms	telemetry	TelemetryPoint
+subject	parallax	{stream}/stats/fps	telemetry	TelemetryPoint
+subject	parallax	{stream}/stats/kbps	telemetry	TelemetryPoint
+subject	parallax	{stream}/stats/viewers	telemetry	TelemetryPoint
+subject	snmp	alert/{alert_key}	state	Alert
+subject	snmp	artifact/{kind}	state	ArtifactStatus
+subject	snmp	discovery	state	DiscoveryReport
+subject	snmp	errors	state	ErrorReport
+subject	snmp	evidence/device/{device}	state	HostEvidence
+subject	snmp	evidence/self	state	HostEvidence
+subject	snmp	health	state	HealthSnapshot
+subject	snmp	sensor	state	SensorInfo
+subject	snmp	{device}/interfaces	state	InterfaceTable
+subject	snmp	{device}/trap/{id}	events	EventRecord
+subject	snmp	{device}/{metric...}	telemetry	TelemetryPoint
+subject	sysinfo	alert/{alert_key}	state	Alert
+subject	sysinfo	artifact/{kind}	state	ArtifactStatus
+subject	sysinfo	battery/{name}/capacity	telemetry	TelemetryPoint
+subject	sysinfo	battery/{name}/status	telemetry	TelemetryPoint
+subject	sysinfo	cgroup/cpu/nr_throttled	telemetry	TelemetryPoint
+subject	sysinfo	cgroup/cpu/throttled_usec	telemetry	TelemetryPoint
+subject	sysinfo	cgroup/memory/current	telemetry	TelemetryPoint
+subject	sysinfo	cgroup/memory/max	telemetry	TelemetryPoint
+subject	sysinfo	cgroup/memory/oom_kills_total	telemetry	TelemetryPoint
+subject	sysinfo	cgroup/memory/oom_total	telemetry	TelemetryPoint
+subject	sysinfo	cgroup/memory/used_percent	telemetry	TelemetryPoint
+subject	sysinfo	cgroup/{resource}/pressure/{stat}	telemetry	TelemetryPoint
+subject	sysinfo	cpu/schedstat/run_delay_ns_total	telemetry	TelemetryPoint
+subject	sysinfo	cpu/times/{component}	telemetry	TelemetryPoint
+subject	sysinfo	cpu/usage	telemetry	TelemetryPoint
+subject	sysinfo	cpu/{core}/frequency	telemetry	TelemetryPoint
+subject	sysinfo	cpu/{core}/usage	telemetry	TelemetryPoint
+subject	sysinfo	disk/md/{array}/active_disks	telemetry	TelemetryPoint
+subject	sysinfo	disk/md/{array}/degraded	telemetry	TelemetryPoint
+subject	sysinfo	disk/md/{array}/failed_disks	telemetry	TelemetryPoint
+subject	sysinfo	disk/md/{array}/state	telemetry	TelemetryPoint
+subject	sysinfo	disk/md/{array}/total_disks	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/queue_depth	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/read_bytes	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/read_iops	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/read_ops	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/read_rate	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/time_ms	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/util_percent	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/write_bytes	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/write_iops	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/write_ops	telemetry	TelemetryPoint
+subject	sysinfo	disk/{device}/io/write_rate	telemetry	TelemetryPoint
+subject	sysinfo	disk/{mount}/available	telemetry	TelemetryPoint
+subject	sysinfo	disk/{mount}/inode_used_percent	telemetry	TelemetryPoint
+subject	sysinfo	disk/{mount}/inodes_free	telemetry	TelemetryPoint
+subject	sysinfo	disk/{mount}/inodes_total	telemetry	TelemetryPoint
+subject	sysinfo	disk/{mount}/inodes_used	telemetry	TelemetryPoint
+subject	sysinfo	disk/{mount}/total	telemetry	TelemetryPoint
+subject	sysinfo	disk/{mount}/usage_percent	telemetry	TelemetryPoint
+subject	sysinfo	disk/{mount}/used	telemetry	TelemetryPoint
+subject	sysinfo	errors	state	ErrorReport
+subject	sysinfo	evidence/self	state	HostEvidence
+subject	sysinfo	health	state	HealthSnapshot
+subject	sysinfo	memory/available	telemetry	TelemetryPoint
+subject	sysinfo	memory/buffers	telemetry	TelemetryPoint
+subject	sysinfo	memory/cached	telemetry	TelemetryPoint
+subject	sysinfo	memory/dirty	telemetry	TelemetryPoint
+subject	sysinfo	memory/edac/{controller}/correctable_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/edac/{controller}/uncorrectable_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/oom_kills_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/page_faults_major_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/page_faults_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/paging_in_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/paging_out_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/pgpgin_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/pgpgout_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/slab	telemetry	TelemetryPoint
+subject	sysinfo	memory/swap_percent	telemetry	TelemetryPoint
+subject	sysinfo	memory/swap_total	telemetry	TelemetryPoint
+subject	sysinfo	memory/swap_used	telemetry	TelemetryPoint
+subject	sysinfo	memory/total	telemetry	TelemetryPoint
+subject	sysinfo	memory/usage_percent	telemetry	TelemetryPoint
+subject	sysinfo	memory/used	telemetry	TelemetryPoint
+subject	sysinfo	memory/writeback	telemetry	TelemetryPoint
+subject	sysinfo	network/conntrack/count	telemetry	TelemetryPoint
+subject	sysinfo	network/conntrack/max	telemetry	TelemetryPoint
+subject	sysinfo	network/conntrack/utilization_percent	telemetry	TelemetryPoint
+subject	sysinfo	network/sockets/tcp_inuse	telemetry	TelemetryPoint
+subject	sysinfo	network/sockets/tcp_mem_pages	telemetry	TelemetryPoint
+subject	sysinfo	network/sockets/udp_inuse	telemetry	TelemetryPoint
+subject	sysinfo	network/sockets/used	telemetry	TelemetryPoint
+subject	sysinfo	network/softnet/dropped_total	telemetry	TelemetryPoint
+subject	sysinfo	network/softnet/processed_total	telemetry	TelemetryPoint
+subject	sysinfo	network/softnet/squeezed_total	telemetry	TelemetryPoint
+subject	sysinfo	network/tcp/listen_drops_total	telemetry	TelemetryPoint
+subject	sysinfo	network/tcp/listen_overflows_total	telemetry	TelemetryPoint
+subject	sysinfo	network/tcp/retrans_segs_total	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/multicast	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/rx_bytes	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/rx_dropped	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/rx_errors	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/rx_fifo	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/rx_frame	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/rx_packets	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/rx_rate	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/tx_bytes	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/tx_carrier	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/tx_colls	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/tx_dropped	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/tx_errors	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/tx_fifo	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/tx_packets	telemetry	TelemetryPoint
+subject	sysinfo	network/{iface}/tx_rate	telemetry	TelemetryPoint
+subject	sysinfo	power/rapl/{zone}/watts	telemetry	TelemetryPoint
+subject	sysinfo	pressure/{resource}/{stat}	telemetry	TelemetryPoint
+subject	sysinfo	process/{rank}/cpu	telemetry	TelemetryPoint
+subject	sysinfo	process/{rank}/memory	telemetry	TelemetryPoint
+subject	sysinfo	sensor	state	SensorInfo
+subject	sysinfo	sensors/{chip}/{label}/critical	telemetry	TelemetryPoint
+subject	sysinfo	sensors/{chip}/{label}/max	telemetry	TelemetryPoint
+subject	sysinfo	sensors/{chip}/{label}/rpm	telemetry	TelemetryPoint
+subject	sysinfo	sensors/{chip}/{label}/temp	telemetry	TelemetryPoint
+subject	sysinfo	system/boot_time	telemetry	TelemetryPoint
+subject	sysinfo	system/context_switches_total	telemetry	TelemetryPoint
+subject	sysinfo	system/entropy_avail	telemetry	TelemetryPoint
+subject	sysinfo	system/file_descriptors_max	telemetry	TelemetryPoint
+subject	sysinfo	system/file_descriptors_used	telemetry	TelemetryPoint
+subject	sysinfo	system/file_descriptors_used_percent	telemetry	TelemetryPoint
+subject	sysinfo	system/forks_total	telemetry	TelemetryPoint
+subject	sysinfo	system/health_state	telemetry	TelemetryPoint
+subject	sysinfo	system/load	telemetry	TelemetryPoint
+subject	sysinfo	system/processes_total	telemetry	TelemetryPoint
+subject	sysinfo	system/processes_zombie	telemetry	TelemetryPoint
+subject	sysinfo	system/procs_blocked	telemetry	TelemetryPoint
+subject	sysinfo	system/procs_running	telemetry	TelemetryPoint
+subject	sysinfo	system/saturation_score	telemetry	TelemetryPoint
+subject	sysinfo	system/uptime	telemetry	TelemetryPoint
+subject	sysinfo	tcp/{state}	telemetry	TelemetryPoint
+subject	sysinfo	{cpu}/schedstat/run_delay_ns_total	telemetry	TelemetryPoint
+subject	sysinfo	{cpu}/times/{component}	telemetry	TelemetryPoint
+subject	systemd	alert/{alert_key}	state	Alert
+subject	systemd	artifact/{kind}	state	ArtifactStatus
+subject	systemd	boot/{phase}	telemetry	TelemetryPoint
+subject	systemd	errors	state	ErrorReport
+subject	systemd	events/{kind}	telemetry	TelemetryPoint
+subject	systemd	evidence/self	state	HostEvidence
+subject	systemd	health	state	HealthSnapshot
+subject	systemd	journal/disk_available_bytes	telemetry	TelemetryPoint
+subject	systemd	journal/disk_usage_bytes	telemetry	TelemetryPoint
+subject	systemd	manager/n_failed_units	telemetry	TelemetryPoint
+subject	systemd	manager/n_installed_jobs	telemetry	TelemetryPoint
+subject	systemd	manager/n_jobs	telemetry	TelemetryPoint
+subject	systemd	manager/n_names	telemetry	TelemetryPoint
+subject	systemd	mounts/failed	telemetry	TelemetryPoint
+subject	systemd	mounts/mounted	telemetry	TelemetryPoint
+subject	systemd	mounts/total	telemetry	TelemetryPoint
+subject	systemd	other/units_total	telemetry	TelemetryPoint
+subject	systemd	sensor	state	SensorInfo
+subject	systemd	unit/{unit}/active	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/active_since_usec	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/cpu_usec	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/exit_code	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/io_read_bytes	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/io_write_bytes	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/ip_accounting	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/ip_egress_bps	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/ip_egress_bytes	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/ip_ingress_bps	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/ip_ingress_bytes	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/last_trigger_usec	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/mem_bytes	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/n_accepted	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/n_connections	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/n_refused	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/next_trigger_usec	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/restarts_total	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/state	telemetry	TelemetryPoint
+subject	systemd	unit/{unit}/tasks	telemetry	TelemetryPoint
+subject	systemd	units/active	telemetry	TelemetryPoint
+subject	systemd	units/failed	telemetry	TelemetryPoint
+subject	systemd	units/inactive	telemetry	TelemetryPoint
+subject	systemd	units/loaded	telemetry	TelemetryPoint
+subject	systemd	units/total	telemetry	TelemetryPoint
