@@ -3839,7 +3839,7 @@ impl ZenSight {
             }
         });
         let dir = std::env::temp_dir().join("zensight-downloads");
-        // zblob 0.2 has the *caller* choose the destination file — a remote
+        // zblob has the *caller* choose the destination file — a remote
         // party must not pick where bytes land. Staging under the artifact id
         // keeps the served filename advisory until the Save-as dialog.
         let mut job = crate::view::artifact_fetch::ArtifactJob::new(
@@ -4030,11 +4030,18 @@ impl ZenSight {
             if let Some((bp, dest)) = blob {
                 // `delete_partial` takes the destination *file* — the sidecar
                 // and `.part` are named after it, not after the id. Prefixes
-                // are typed since 0.3; a malformed one just skips this
-                // best-effort cleanup.
-                if let Ok(prefix) = zblob::QueryPrefix::new(bp) {
-                    let client = zblob::BlobClient::new(&session, prefix);
-                    client.delete_partial(&dest).await;
+                // are typed since 0.3; a malformed one skips this best-effort
+                // cleanup, but *logged*, so "best-effort" stays honest. (In
+                // practice unreachable: a partial only exists if this same
+                // string already built a client on the download path.)
+                match zblob::QueryPrefix::new(bp) {
+                    Ok(prefix) => {
+                        let client = zblob::BlobClient::new(&session, prefix);
+                        client.delete_partial(&dest).await;
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "skipping partial cleanup: unusable prefix");
+                    }
                 }
             }
             // Best-effort hint to the sensor (free the TTL'd artifact now) —

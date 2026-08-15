@@ -596,7 +596,7 @@ impl RedbContentStore {
     }
 }
 
-/// The chunk-key prefix. zblob wire v2 is BLAKE3-only, so this is the `<algo>`
+/// The chunk-key prefix. zblob's wire is BLAKE3-only, so this is the `<algo>`
 /// segment of RFC 07 §2.4's `store/<algo>/<hash>`. It changed from `sha256/`
 /// with the 0.2 bump: dedup is per-algorithm, so keys minted under the old
 /// digest name a different address space and are simply cold — the store

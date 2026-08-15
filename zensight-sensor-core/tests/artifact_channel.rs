@@ -155,7 +155,7 @@ async fn report_and_snapshot_on_one_channel() {
     })
     .await
     .expect("report never became Ready");
-    assert_eq!(manifest.id.as_str(), report_id.to_string().to_lowercase());
+    assert_eq!(manifest.id.as_str(), report_id.to_string());
 
     let dest = tempfile::tempdir().unwrap();
     let path = dest.path().join("report.tar.zst");

@@ -518,12 +518,26 @@ pub fn download_stream(
                 }
             }
             let sink = Sink(tx);
+            // A delivery's prefixes arrive **off the network** (the sensor's
+            // `ArtifactStatus`), and `QueryPrefix` deliberately admits
+            // single-segment wildcards because probing needs them — so
+            // concreteness is checked here, where a fetch begins. A
+            // wildcard-origin *fetch* is RFC 07 §3's amplification: every
+            // matching holder ships the full payload and nothing cancels the
+            // replies in flight.
+            let concrete = |prefix: String| -> zblob::Result<zblob::QueryPrefix> {
+                let p = zblob::QueryPrefix::new(prefix)?;
+                if !p.is_concrete() {
+                    return Err(zblob::BlobError::Usage(format!(
+                        "refusing a wildcard-origin bulk fetch on {:?} (RFC 07 §3)",
+                        p.as_str()
+                    )));
+                }
+                Ok(p)
+            };
             match delivery {
                 Delivery::Blob { manifest, blob_prefix } => {
-                    // A delivery's prefix names one concrete origin; 0.3's
-                    // typed prefix makes that a checked property rather than
-                    // string hygiene.
-                    let client = BlobClient::new(&session, zblob::QueryPrefix::new(blob_prefix)?);
+                    let client = BlobClient::new(&session, concrete(blob_prefix)?);
                     let req = DownloadRequest::pinned(manifest.id.to_string(), manifest.root);
                     client
                         .download_to(&req, &dest)
@@ -539,8 +553,8 @@ pub fn download_stream(
                 } => {
                     let client = TreeClient::new(
                         &session,
-                        zblob::QueryPrefix::new(store_prefix)?,
-                        zblob::QueryPrefix::new(tree_prefix)?,
+                        concrete(store_prefix)?,
+                        concrete(tree_prefix)?,
                     );
                     let req = DownloadRequest::by_root(root);
                     client
