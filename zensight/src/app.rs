@@ -3839,7 +3839,7 @@ impl ZenSight {
             }
         });
         let dir = std::env::temp_dir().join("zensight-downloads");
-        // zblob 0.2 has the *caller* choose the destination file — a remote
+        // zblob has the *caller* choose the destination file — a remote
         // party must not pick where bytes land. Staging under the artifact id
         // keeps the served filename advisory until the Save-as dialog.
         let mut job = crate::view::artifact_fetch::ArtifactJob::new(
@@ -3898,8 +3898,10 @@ impl ZenSight {
                         if let Some(name) = &manifest.filename {
                             job.filename = Some(name.clone());
                         }
-                        // v2 manifests carry sizes, not a chunk count.
-                        manifest.total_len.div_ceil(manifest.chunk_size as u64)
+                        // The chunk count is the reference client's own
+                        // arithmetic since 0.3; a manifest with impossible
+                        // sizing renders as 0 rather than a made-up total.
+                        manifest.chunk_count().map(u64::from).unwrap_or(0)
                     }
                     Delivery::Tree { summary, .. } => summary.file_count.max(1),
                 };
@@ -4026,10 +4028,21 @@ impl ZenSight {
         };
         Some(Task::future(async move {
             if let Some((bp, dest)) = blob {
-                // 0.2's `delete_partial` takes the destination *file* — the
-                // sidecar and `.part` are named after it, not after the id.
-                let client = zblob::BlobClient::new(session.clone(), bp);
-                client.delete_partial(&dest).await;
+                // `delete_partial` takes the destination *file* — the sidecar
+                // and `.part` are named after it, not after the id. Prefixes
+                // are typed since 0.3; a malformed one skips this best-effort
+                // cleanup, but *logged*, so "best-effort" stays honest. (In
+                // practice unreachable: a partial only exists if this same
+                // string already built a client on the download path.)
+                match zblob::QueryPrefix::new(bp) {
+                    Ok(prefix) => {
+                        let client = zblob::BlobClient::new(&session, prefix);
+                        client.delete_partial(&dest).await;
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "skipping partial cleanup: unusable prefix");
+                    }
+                }
             }
             // Best-effort hint to the sensor (free the TTL'd artifact now) —
             // the cancel write procedure takes `?id=<ulid>` (RFC 05).

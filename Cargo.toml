@@ -124,8 +124,9 @@ schemars = "1"
 zensight-sensor-core = { path = "zensight-sensor-core" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # graduated from in-tree `zenoh-blob/` — epic #193; renamed on extraction).
-# 0.2 is wire v2: BLAKE3 + bao verified streaming, postcard control messages,
-# chunk-range resume. v1 and v2 peers deliberately do not interoperate, so a
-# fleet upgrades sensors and frontend together.
-zblob = "0.2.0"
+# 0.3 is wire v3: BLAKE3 + bao verified streaming, one postcard encoding,
+# typed serve/query prefixes, batched tier-2 fetch and probes. v2 and v3 peers
+# deliberately do not interoperate (chunk addresses are unchanged, so stores
+# stay warm), so a fleet upgrades sensors and frontend together.
+zblob = "0.3.0"
 

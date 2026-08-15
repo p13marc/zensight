@@ -518,11 +518,32 @@ pub fn download_stream(
                 }
             }
             let sink = Sink(tx);
+            // A delivery's prefixes arrive **off the network** (the sensor's
+            // `ArtifactStatus`), and `QueryPrefix` deliberately admits
+            // single-segment wildcards because probing needs them — so
+            // concreteness is checked here, where a fetch begins. A
+            // wildcard-origin *fetch* is RFC 07 §3's amplification: every
+            // matching holder ships the full payload and nothing cancels the
+            // replies in flight.
+            let concrete = |prefix: String| -> zblob::Result<zblob::QueryPrefix> {
+                let p = zblob::QueryPrefix::new(prefix)?;
+                if !p.is_concrete() {
+                    return Err(zblob::BlobError::Usage(format!(
+                        "refusing a wildcard-origin bulk fetch on {:?} (RFC 07 §3)",
+                        p.as_str()
+                    )));
+                }
+                Ok(p)
+            };
             match delivery {
                 Delivery::Blob { manifest, blob_prefix } => {
-                    let client = BlobClient::new(session, blob_prefix);
-                    let req = DownloadRequest::pinned(manifest.id, manifest.root);
-                    client.download_to(&req, &dest, &sink, &cancel).await
+                    let client = BlobClient::new(&session, concrete(blob_prefix)?);
+                    let req = DownloadRequest::pinned(manifest.id.to_string(), manifest.root);
+                    client
+                        .download_to(&req, &dest)
+                        .progress(&sink)
+                        .cancel(&cancel)
+                        .await
                 }
                 Delivery::Tree {
                     root,
@@ -530,10 +551,16 @@ pub fn download_stream(
                     tree_prefix,
                     ..
                 } => {
-                    let client = TreeClient::new(session, store_prefix, tree_prefix);
+                    let client = TreeClient::new(
+                        &session,
+                        concrete(store_prefix)?,
+                        concrete(tree_prefix)?,
+                    );
                     let req = DownloadRequest::by_root(root);
                     client
-                        .download_tree(&req, &dest, &store, &sink, &cancel)
+                        .download_tree(&req, &dest, &store)
+                        .progress(&sink)
+                        .cancel(&cancel)
                         .await
                 }
             }
@@ -580,12 +607,25 @@ pub fn download_blob_direct(
     cancel: CancelToken,
 ) -> impl Stream<Item = Message> {
     async_stream::stream! {
-        if blob_prefix.contains('*') {
-            yield Message::ArtifactDownloaded(Err(format!(
-                "refusing a wildcard-origin bulk fetch on {blob_prefix:?} (RFC 07 §3)"
-            )));
-            return;
-        }
+        // The typed prefix replaces the old `contains('*')` string hygiene:
+        // `QueryPrefix` validates the shape, and `is_concrete()` is the RFC 07
+        // §3 question — a fetch fans out to every matching holder, so it must
+        // name exactly one.
+        let prefix = match zblob::QueryPrefix::new(blob_prefix.clone()) {
+            Ok(p) if p.is_concrete() => p,
+            Ok(_) => {
+                yield Message::ArtifactDownloaded(Err(format!(
+                    "refusing a wildcard-origin bulk fetch on {blob_prefix:?} (RFC 07 §3)"
+                )));
+                return;
+            }
+            Err(e) => {
+                yield Message::ArtifactDownloaded(Err(format!(
+                    "`{blob_prefix}` is not a fetchable prefix: {e}"
+                )));
+                return;
+            }
+        };
         if root.is_none() {
             tracing::warn!(
                 id = %id,
@@ -603,12 +643,16 @@ pub fn download_blob_direct(
                 }
             }
             let sink = Sink(tx);
-            let client = BlobClient::new(session, blob_prefix);
+            let client = BlobClient::new(&session, prefix);
             let req = match root {
                 Some(r) => DownloadRequest::pinned(id, r),
                 None => DownloadRequest::new(id),
             };
-            client.download_to(&req, &dest, &sink, &cancel).await
+            client
+                .download_to(&req, &dest)
+                .progress(&sink)
+                .cancel(&cancel)
+                .await
         });
         while let Some(p) = rx.recv().await {
             if let Progress::Chunk { received, total, .. } = p {

@@ -155,11 +155,11 @@ async fn report_and_snapshot_on_one_channel() {
     })
     .await
     .expect("report never became Ready");
-    assert_eq!(manifest.id, report_id.to_string());
+    assert_eq!(manifest.id.as_str(), report_id.to_string());
 
     let dest = tempfile::tempdir().unwrap();
     let path = dest.path().join("report.tar.zst");
-    let client = BlobClient::new(session.clone(), blob_prefix);
+    let client = BlobClient::new(&session, zblob::QueryPrefix::new(blob_prefix).unwrap());
     let cancel = CancelToken::new();
     // Pinned to the manifest's root, which is the shape every consumer uses
     // (RFC 07 §2.1): the transfer fails rather than writing bytes whose
@@ -167,7 +167,7 @@ async fn report_and_snapshot_on_one_channel() {
     let req = DownloadRequest::pinned(report_id.to_string(), manifest.root);
     tokio::time::timeout(
         Duration::from_secs(10),
-        client.download_to(&req, &path, &(), &cancel),
+        client.download_to(&req, &path).cancel(&cancel),
     )
     .await
     .expect("blob download timed out")
@@ -182,7 +182,7 @@ async fn report_and_snapshot_on_one_channel() {
     assert!(
         tokio::time::timeout(
             Duration::from_secs(10),
-            client.download_to(&wrong, &decoy, &(), &cancel),
+            client.download_to(&wrong, &decoy).cancel(&cancel),
         )
         .await
         .expect("mispinned download timed out")
@@ -250,18 +250,18 @@ async fn report_and_snapshot_on_one_channel() {
     );
 
     let tdest = tempfile::tempdir().unwrap();
-    let tclient = TreeClient::new(session.clone(), store_prefix, tree_prefix);
+    let tclient = TreeClient::new(
+        &session,
+        zblob::QueryPrefix::new(store_prefix).unwrap(),
+        zblob::QueryPrefix::new(tree_prefix).unwrap(),
+    );
     let tstore: Arc<dyn zblob::ContentStore> = Arc::new(MemoryStore::new());
     let cancel = CancelToken::new();
     tokio::time::timeout(
         Duration::from_secs(10),
-        tclient.download_tree(
-            &DownloadRequest::by_root(root),
-            tdest.path(),
-            &tstore,
-            &(),
-            &cancel,
-        ),
+        tclient
+            .download_tree(&DownloadRequest::by_root(root), tdest.path(), &tstore)
+            .cancel(&cancel),
     )
     .await
     .expect("tree download timed out")
@@ -274,13 +274,13 @@ async fn report_and_snapshot_on_one_channel() {
     assert!(
         tokio::time::timeout(
             Duration::from_secs(10),
-            tclient.download_tree(
-                &DownloadRequest::by_root(zblob::Hash::of(b"no such tree")),
-                bogus.path(),
-                &tstore,
-                &(),
-                &cancel,
-            ),
+            tclient
+                .download_tree(
+                    &DownloadRequest::by_root(zblob::Hash::of(b"no such tree")),
+                    bogus.path(),
+                    &tstore,
+                )
+                .cancel(&cancel),
         )
         .await
         .expect("bogus-root download timed out")

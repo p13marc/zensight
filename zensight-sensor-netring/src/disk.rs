@@ -687,7 +687,7 @@ async fn finalize_recording(
                 expires_ms = Some(now_ms() + (cfg.artifact_ttl_secs as i64) * 1000);
                 expires =
                     Some(tokio::time::Instant::now() + Duration::from_secs(cfg.artifact_ttl_secs));
-                artifact_id = Some(manifest.id.clone());
+                artifact_id = Some(manifest.id.to_string());
                 artifact_prefix = Some(blob.prefix.clone());
                 artifact_root = Some(
                     zenkey::ContentHash::parse(&manifest.root.to_string())
