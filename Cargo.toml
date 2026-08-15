@@ -127,5 +127,5 @@ zensight-sensor-core = { path = "zensight-sensor-core" }
 # 0.2 is wire v2: BLAKE3 + bao verified streaming, postcard control messages,
 # chunk-range resume. v1 and v2 peers deliberately do not interoperate, so a
 # fleet upgrades sensors and frontend together.
-zblob = "0.2.0"
+zblob = "0.3.0"
 

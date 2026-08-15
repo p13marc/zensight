@@ -194,14 +194,20 @@ impl ArtifactChannel {
             .iter()
             .any(|p| p.delivery_kind() == DeliveryKind::Tree);
 
+        // Own-origin prefixes are concrete by construction, which is exactly
+        // what 0.3's `ServePrefix` demands — the expect documents the
+        // invariant rather than handling a case that cannot occur.
+        let serve = |prefix: String| {
+            zblob::ServePrefix::new(prefix).expect("own-origin prefix is concrete")
+        };
         let blob =
-            wants_blob.then(|| BlobServer::new(session.clone(), artifact_blob_prefix(&producer)));
+            wants_blob.then(|| BlobServer::new(&session, serve(artifact_blob_prefix(&producer))));
         let (store, tree_server) = if wants_tree {
             let store = Arc::new(MemoryStore::new());
             let tree_server = TreeServer::new(
-                session.clone(),
-                artifact_store_prefix(&producer),
-                artifact_tree_prefix(&producer),
+                &session,
+                serve(artifact_store_prefix(&producer)),
+                serve(artifact_tree_prefix(&producer)),
                 store.clone() as Arc<dyn ContentStore>,
             );
             (Some(store), Some(tree_server))
@@ -640,7 +646,14 @@ impl ArtifactChannel {
                          as a @blob/tree key (root {root})"
                     );
                 }
-                tree_server.register(index).await;
+                // `register` returns `Result` since 0.3: a large index is
+                // sharded into the store (RFC 07 §2.3 v1.17), and a failed
+                // shard write must fail the job rather than serve a snapshot
+                // whose index chunks are missing.
+                tree_server
+                    .register(index)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("registering the snapshot index: {e}"))?;
 
                 let state = ArtifactState::Ready {
                     id,

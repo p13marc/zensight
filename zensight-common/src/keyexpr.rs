@@ -604,39 +604,12 @@ mod tests {
         assert!(telemetry.intersects(&rollup));
     }
 
-    /// RFC 07 §3: a bulk fetch names a concrete origin. Nothing in this module
-    /// may hand out a `*`-origin `@blob` prefix — a probe prefix and a fetch
-    /// prefix are the same string, so the only durable defence is not to
-    /// produce one here at all. (`fleet_blob_prefix()` did, for one call site
-    /// that used it as a fetch; both are gone.)
-    ///
-    /// The guard is over the module's *output*, not over a name, so
-    /// reintroducing the shape under a different spelling fails too.
-    #[test]
-    fn no_key_builder_hands_out_a_wildcard_origin_blob_prefix() {
-        // Production code only — stop at `#[cfg(test)]`, exactly as the #466
-        // CI guards do (this file's own assertions mention the shape).
-        let src = include_str!("keyexpr.rs");
-        let offending = |code: &str| code.contains("@blob") && code.contains('*');
-        for (n, line) in src.lines().enumerate() {
-            if line.starts_with("#[cfg(test)]") {
-                break;
-            }
-            let code = line.split("//").next().unwrap_or("");
-            assert!(
-                !offending(code),
-                "keyexpr.rs:{}: a wildcard-origin @blob prefix is a forbidden \
-                 bulk-fetch shape (RFC 07 §3); carry the concrete origin on the \
-                 payload instead: {line}",
-                n + 1
-            );
-        }
-        // The control: the predicate does fire on the retired shape, so a green
-        // run means the shape is absent rather than the scan being vacuous.
-        assert!(offending(
-            r#"pub fn p() -> String { "v1/*/@blob/artifact".into() }"#
-        ));
-    }
+    // The `no_key_builder_hands_out_a_wildcard_origin_blob_prefix` source
+    // grep that lived here (RFC 07 §3, written after `fleet_blob_prefix()`'s
+    // bulk-fetch defect) is deleted with the zblob 0.3 port: the property is
+    // enforced by the type system now — a `ServePrefix` cannot be built from
+    // a wildcard, a fetch client takes a typed prefix, and the probe form is
+    // `zenkey::BlobProbePrefix`, which is not convertible to a key.
 
     /// #359 acceptance pin, v1: the media plane rides the `@media` verbatim
     /// plane chunk — invisible to BOTH the telemetry and state class
