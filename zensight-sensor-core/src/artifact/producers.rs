@@ -128,8 +128,20 @@ impl ArtifactProducer for SnapshotProducer {
             .limits
             .resolve(&dir)
             .ok_or_else(|| anyhow::anyhow!("unknown directory: {dir}"))?;
+        // Per-dir opt-in (config `incremental`): the lineage tag keys the
+        // channel's parent-index map and the durable tag file. The name is a
+        // zblob tag name (validated on `tags.set`); dir names are operator
+        // config, so an exotic one degrades to a warned, un-warm build.
+        let lineage = self
+            .limits
+            .dirs
+            .iter()
+            .find(|d| d.name == dir)
+            .filter(|d| d.incremental)
+            .map(|d| format!("snapshot-{}", d.name));
         Ok(Produced::Dir {
             path: PathBuf::from(path),
+            lineage,
         })
     }
 }

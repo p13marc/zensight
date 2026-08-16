@@ -30,7 +30,7 @@ use tokio::sync::{Mutex, watch};
 use ulid::Ulid;
 use zblob::{
     BlobServer, BlobSpec, CancelToken, CdcParams, ContentStore, DirStore, Hash, MemoryBlobSource,
-    MemoryStore, TreeIndex, TreeServer, build_tree, gc,
+    MemoryStore, TreeIndex, TreeServer, build_tree_from, gc,
 };
 use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
@@ -69,6 +69,13 @@ pub enum Produced {
     Dir {
         /// Absolute path of the directory to snapshot.
         path: PathBuf,
+        /// Durable lineage tag (e.g. `snapshot-pcaps`). `Some` opts this
+        /// build into incremental re-snapshotting: the channel keeps the
+        /// latest index per lineage as the parent for `build_tree_from`
+        /// (unchanged `(size, mtime)` files reuse their chunk references) and
+        /// tags it so its chunks survive sweeps — and, with a durable store,
+        /// restarts. `None` = a one-shot build, reclaimed once released.
+        lineage: Option<String>,
     },
     /// An in-memory payload → [`Delivery::Blob`], served straight from memory
     /// (`BlobServer::register_source` over a `MemoryBlobSource`) — nothing
@@ -195,6 +202,12 @@ pub struct ArtifactChannel {
     /// In-flight-download protection for the sweep (zblob's temp tags). The
     /// serving side never takes one, but `sweep` requires the registry.
     temps: Arc<gc::TempTags>,
+    /// Latest index per lineage tag — the `build_tree_from` parent. Held in
+    /// memory because a `TagRecord` keeps only root+chunks, not the entries
+    /// parent reuse matches against; after a restart the first build of each
+    /// lineage is full (but still dedups against a warm durable store by
+    /// chunk presence).
+    last_index: Arc<Mutex<HashMap<String, TreeIndex>>>,
     /// Keeps the volatile-mode tags directory alive (deleted on drop).
     _tags_dir: Option<Arc<tempfile::TempDir>>,
     tree_server: Option<TreeServer>,
@@ -303,6 +316,7 @@ impl ArtifactChannel {
             store,
             tags,
             temps: Arc::new(gc::TempTags::new()),
+            last_index: Arc::new(Mutex::new(HashMap::new())),
             _tags_dir: tags_dir,
             tree_server,
             state: Arc::new(Mutex::new(HashMap::new())),
@@ -725,7 +739,7 @@ impl ArtifactChannel {
                     },
                 ))
             }
-            Produced::Dir { path } => {
+            Produced::Dir { path, lineage } => {
                 let store = self
                     .store
                     .as_ref()
@@ -762,8 +776,25 @@ impl ArtifactChannel {
                          parameters: {e}"
                     )
                 })?;
+                // Incremental build: the lineage's previous index is the
+                // parent — unchanged `(size, mtime)` files reuse their chunk
+                // references instead of being re-read and re-hashed. The CDC
+                // guard is load-bearing, not defensive: `build_tree_from`
+                // *errors* on a parent cut with different parameters (a
+                // `chunk_size` config change between builds), and the right
+                // response is a full rebuild, not a failed job.
+                let parent = match &lineage {
+                    Some(tag) => self
+                        .last_index
+                        .lock()
+                        .await
+                        .get(tag)
+                        .filter(|p| p.cdc == cdc)
+                        .cloned(),
+                    None => None,
+                };
                 let index: TreeIndex = tokio::task::spawn_blocking(move || {
-                    build_tree(&path, build_id, &cdc, build_store.as_ref())
+                    build_tree_from(&path, build_id, &cdc, build_store.as_ref(), parent.as_ref())
                 })
                 .await?
                 .map_err(|e| anyhow::anyhow!("build tree: {e}"))?;
@@ -810,9 +841,41 @@ impl ArtifactChannel {
                 // shard write must fail the job rather than serve a snapshot
                 // whose index chunks are missing.
                 tree_server
-                    .register(index)
+                    .register(index.clone())
                     .await
                     .map_err(|e| anyhow::anyhow!("registering the snapshot index: {e}"))?;
+
+                // Lineage bookkeeping: replacing the tag atomically drops
+                // liveness of the previous snapshot's *unshared* chunks (the
+                // next sweep reclaims them) while keeping this one warm for
+                // the next incremental build. A tag failure is a warning, not
+                // a failed job — the snapshot is registered and downloadable
+                // either way, it just won't survive release/restart warm.
+                if let Some(tag) = &lineage {
+                    if let Some(tags) = &self.tags {
+                        let tags = tags.clone();
+                        let tag_name = tag.clone();
+                        let tag_index = index.clone();
+                        let tagged =
+                            tokio::task::spawn_blocking(move || tags.set(&tag_name, &tag_index))
+                                .await;
+                        match tagged {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::warn!(
+                                lineage = %tag, error = %e,
+                                "snapshot lineage tag failed; chunks will not stay warm"
+                            ),
+                            Err(e) => tracing::warn!(
+                                lineage = %tag, error = %e,
+                                "snapshot lineage tag task failed"
+                            ),
+                        }
+                    }
+                    self.last_index
+                        .lock()
+                        .await
+                        .insert(tag.clone(), index.clone());
+                }
 
                 let state = ArtifactState::Ready {
                     id,
@@ -942,6 +1005,10 @@ impl ArtifactChannel {
                 roots.push(index);
             }
         }
+        // Lineage parents ride along too: registration, tagging and this
+        // sweep are not atomic, so anything the channel still intends to
+        // build from must be marked live independently of the tag file.
+        roots.extend(self.last_index.lock().await.values().cloned());
         let store = store.clone();
         let tags = tags.clone();
         let temps = self.temps.clone();
@@ -973,6 +1040,7 @@ impl ArtifactChannel {
             store: self.store.clone(),
             tags: self.tags.clone(),
             temps: self.temps.clone(),
+            last_index: self.last_index.clone(),
             _tags_dir: self._tags_dir.clone(),
             tree_server: self.tree_server.clone(),
             state: self.state.clone(),
