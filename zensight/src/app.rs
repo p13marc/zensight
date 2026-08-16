@@ -2892,6 +2892,18 @@ impl ZenSight {
                 }
             }
 
+            Message::ArtifactHolderChosen(idx) => {
+                // Take the holder list out of the pick state; a stale index
+                // (state moved on) is ignored.
+                if let crate::view::artifact_fetch::ArtifactFetch::PickingHolder { holders } =
+                    std::mem::take(&mut self.artifact_fetch)
+                    && let Some(holder) = holders.into_iter().nth(idx)
+                    && let Some(task) = self.start_holder_download(holder.state)
+                {
+                    return task;
+                }
+            }
+
             Message::ArtifactRequested(result) => {
                 if let Some(task) = self.on_artifact_requested(result) {
                     return task;
@@ -3957,9 +3969,18 @@ impl ZenSight {
                             .push(ToastSeverity::Error, format!("Artifact failed: {e}"));
                         None
                     }
+                    1 => {
+                        let only = holders.remove(0);
+                        self.start_holder_download(only.state)
+                    }
                     _ => {
-                        let first = holders.remove(0);
-                        self.start_holder_download(first.state)
+                        // Several hosts produced under the shared id — hand
+                        // the operator the choice. NOT a striping case: each
+                        // host built its own artifact (divergent roots), so
+                        // these are alternatives, never one transfer's parts.
+                        self.artifact_fetch =
+                            crate::view::artifact_fetch::ArtifactFetch::PickingHolder { holders };
+                        None
                     }
                 }
             }

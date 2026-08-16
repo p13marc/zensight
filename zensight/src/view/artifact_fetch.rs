@@ -57,6 +57,13 @@ pub enum ArtifactFetch {
         /// Total units.
         total: u64,
     },
+    /// Several hosts produced their own artifact under the shared request id
+    /// — the operator picks which host's to download. Cancel is offered; the
+    /// unpicked hosts' artifacts simply age out by TTL.
+    PickingHolder {
+        /// One entry per producing origin.
+        holders: Vec<ArtifactHolder>,
+    },
     /// Verifying / reconstructing (done inside `zenoh-blob`) before save.
     Verifying,
     /// Saved to `path`.
@@ -73,6 +80,7 @@ impl ArtifactFetch {
             self,
             ArtifactFetch::Requesting
                 | ArtifactFetch::Generating { .. }
+                | ArtifactFetch::PickingHolder { .. }
                 | ArtifactFetch::Downloading { .. }
                 | ArtifactFetch::Verifying
         )
@@ -134,6 +142,12 @@ impl ArtifactFetch {
                 }
             }
             ArtifactFetch::Paused { got, total } => format!("Paused {got}/{total}"),
+            ArtifactFetch::PickingHolder { holders } => {
+                format!(
+                    "{} hosts produced this artifact — choose one",
+                    holders.len()
+                )
+            }
             ArtifactFetch::Verifying => match kind {
                 "snapshot" => "Reconstructing…".into(),
                 _ => "Verifying…".into(),
@@ -909,6 +923,33 @@ pub fn artifact_section<'a>(
     // progress while generating, chunk counts while downloading/paused).
     if is_this && fetch.is_busy() {
         let kind = active_kind.unwrap_or("report");
+        // The holder pick: one button per producing host (origin + size),
+        // plus Cancel. Rendered before the generic controls — this state has
+        // no progress to bar and no pause to offer.
+        if let ArtifactFetch::PickingHolder { holders } = fetch {
+            let col = column![text(fetch.label(kind)).size(font::CAPTION)].spacing(space::XS);
+            let mut btns = Row::new().spacing(space::SM).align_y(Alignment::Center);
+            for (i, h) in holders.iter().enumerate() {
+                let size = match &h.state {
+                    ArtifactState::Ready {
+                        delivery: Delivery::Blob { manifest, .. },
+                        ..
+                    } => crate::view::formatting::format_bytes(manifest.total_len as f64),
+                    ArtifactState::Ready {
+                        delivery: Delivery::Tree { summary, .. },
+                        ..
+                    } => crate::view::formatting::format_bytes(summary.total_bytes as f64),
+                    _ => String::new(),
+                };
+                btns = btns.push(
+                    button(text(format!("{} · {size}", h.origin)).size(font::CAPTION))
+                        .on_press(Message::ArtifactHolderChosen(i)),
+                );
+            }
+            btns = btns
+                .push(button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact));
+            return col.push(btns).into();
+        }
         let mut controls = row![text(fetch.label(kind)).size(font::CAPTION)]
             .spacing(space::MD)
             .align_y(Alignment::Center);

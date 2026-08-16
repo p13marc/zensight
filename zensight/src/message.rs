@@ -1065,6 +1065,9 @@ pub enum Message {
     },
     /// The artifact request resolved: a `Ready` state to download, or an error.
     ArtifactRequested(Result<Vec<zensight_common::ArtifactState>, String>),
+    /// The operator picked which host's artifact to download (index into the
+    /// `PickingHolder` state's holder list).
+    ArtifactHolderChosen(usize),
     /// Streaming download progress (units resolved / total).
     ArtifactProgress {
         /// Units resolved so far.
