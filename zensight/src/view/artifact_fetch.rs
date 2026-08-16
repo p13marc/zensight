@@ -64,6 +64,14 @@ pub enum ArtifactFetch {
         /// One entry per producing origin.
         holders: Vec<ArtifactHolder>,
     },
+    /// A tree artifact was verified pre-download (root-fetched index + holder
+    /// probe): show what it actually contains and who still serves it, then
+    /// let the operator pick a folder — before committing to a potentially
+    /// multi-gigabyte fetch, not after.
+    ConfirmingTree {
+        /// The verified summary.
+        verify: TreeVerify,
+    },
     /// Verifying / reconstructing (done inside `zenoh-blob`) before save.
     Verifying,
     /// Saved to `path`.
@@ -81,6 +89,7 @@ impl ArtifactFetch {
             ArtifactFetch::Requesting
                 | ArtifactFetch::Generating { .. }
                 | ArtifactFetch::PickingHolder { .. }
+                | ArtifactFetch::ConfirmingTree { .. }
                 | ArtifactFetch::Downloading { .. }
                 | ArtifactFetch::Verifying
         )
@@ -148,6 +157,11 @@ impl ArtifactFetch {
                     holders.len()
                 )
             }
+            ArtifactFetch::ConfirmingTree { verify } => format!(
+                "Verified snapshot: {} files, {}",
+                verify.file_count,
+                crate::view::formatting::format_bytes(verify.total_bytes as f64)
+            ),
             ArtifactFetch::Verifying => match kind {
                 "snapshot" => "Reconstructing…".into(),
                 _ => "Verifying…".into(),
@@ -516,6 +530,104 @@ fn poll_round_outcome(states: Vec<ArtifactState>) -> RoundOutcome {
         }
     }
     RoundOutcome::Pending
+}
+
+/// The verified pre-download summary of a tree artifact — built from the
+/// root-fetched index, never from the sensor's self-reported `TreeSummary`
+/// (which is display-only by its own contract).
+#[derive(Debug, Clone)]
+pub struct TreeVerify {
+    /// Files in the snapshot (from the verified index).
+    pub file_count: u64,
+    /// Total uncompressed bytes.
+    pub total_bytes: u64,
+    /// Distinct content-addressed chunks — the download's true unit count,
+    /// the same unit `Progress::Chunk` reports in.
+    pub distinct_chunks: u64,
+    /// The largest few entries (path, bytes), for the confirm card.
+    pub largest: Vec<(String, u64)>,
+    /// Who still serves the snapshot.
+    pub source: TreeSource,
+}
+
+/// Who answered for a verified snapshot.
+#[derive(Debug, Clone)]
+pub enum TreeSource {
+    /// The producing sensor is live (it answered the `have` probe).
+    Producer {
+        /// The answering origin's probe prefix.
+        origin: String,
+        /// Distinct chunks it holds.
+        present: u32,
+        /// Distinct chunks the snapshot references.
+        total: u32,
+    },
+    /// No live server answered the probe, but the index was still fetchable —
+    /// a router storage (or another replica) holds the snapshot. Storages
+    /// never answer `have` (they serve only stored PUT keys), so this verdict
+    /// is detected by the index fetch succeeding where the probe was silent.
+    RouterReplica,
+}
+
+/// Verify a tree artifact before committing to the fetch: probe who serves it
+/// (`<root>/have` — four numbers whatever the snapshot's size) and fetch the
+/// root-verified index (no chunk store needed). Both go to the delivery's own
+/// concrete prefixes; the index is pinned by construction, so the summary is
+/// trustworthy whoever answered.
+pub async fn verify_tree(
+    session: Arc<Session>,
+    root: zblob::Hash,
+    store_prefix: String,
+    tree_prefix: String,
+) -> Result<TreeVerify, String> {
+    let concrete = |prefix: String| -> Result<zblob::QueryPrefix, String> {
+        let p = zblob::QueryPrefix::new(prefix).map_err(|e| e.to_string())?;
+        if !p.is_concrete() {
+            return Err("refusing a wildcard-origin fetch prefix (RFC 07 §3)".into());
+        }
+        Ok(p)
+    };
+    let client = TreeClient::new(&session, concrete(store_prefix)?, concrete(tree_prefix)?);
+
+    let probes = client
+        .probe_snapshot(&root.to_string())
+        .await
+        .unwrap_or_default();
+    let index = match client.fetch_index_by_root(&root).await {
+        Ok(index) => index,
+        Err(e) if probes.is_empty() => {
+            return Err(format!(
+                "snapshot unreachable — producer offline and no replica answered ({e})"
+            ));
+        }
+        Err(e) => return Err(format!("snapshot index fetch failed: {e}")),
+    };
+
+    let mut largest: Vec<(String, u64)> = index
+        .files()
+        .map(|(path, size, _)| (path.to_string(), size))
+        .collect();
+    largest.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+    largest.truncate(5);
+
+    let source = probes
+        .iter()
+        .find(|(_, p)| p.have_index)
+        .or_else(|| probes.first())
+        .map(|(origin, p)| TreeSource::Producer {
+            origin: origin.as_str().to_string(),
+            present: p.chunks_present,
+            total: p.chunks_total,
+        })
+        .unwrap_or(TreeSource::RouterReplica);
+
+    Ok(TreeVerify {
+        file_count: index.file_count() as u64,
+        total_bytes: index.total_size(),
+        distinct_chunks: index.needed_chunks().len() as u64,
+        largest,
+        source,
+    })
 }
 
 /// One host's Ready artifact for the shared request id — the pick-a-holder
@@ -949,6 +1061,49 @@ pub fn artifact_section<'a>(
             btns = btns
                 .push(button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact));
             return col.push(btns).into();
+        }
+        // The verified pre-download confirm: what the snapshot actually
+        // contains (root-verified, not self-reported) and who still serves
+        // it, then the folder pick — before the multi-gigabyte fetch.
+        if let ArtifactFetch::ConfirmingTree { verify } = fetch {
+            let source_line = match &verify.source {
+                TreeSource::Producer {
+                    origin,
+                    present,
+                    total,
+                } => {
+                    if present >= total {
+                        format!("served by {origin} (all {total} chunks present)")
+                    } else {
+                        format!("served by {origin} ({present}/{total} chunks present)")
+                    }
+                }
+                TreeSource::RouterReplica => {
+                    "producer not answering — a router replica holds the snapshot".to_string()
+                }
+            };
+            let mut col = column![
+                text(fetch.label(kind)).size(font::CAPTION),
+                text(source_line).size(font::CAPTION),
+            ]
+            .spacing(space::XS);
+            for (path, size) in &verify.largest {
+                col = col.push(
+                    text(format!(
+                        "  {path} · {}",
+                        crate::view::formatting::format_bytes(*size as f64)
+                    ))
+                    .size(font::CAPTION),
+                );
+            }
+            let controls = row![
+                button(text("Choose folder & download").size(font::CAPTION))
+                    .on_press(Message::ArtifactTreeConfirmed),
+                button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact),
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center);
+            return col.push(controls).into();
         }
         let mut controls = row![text(fetch.label(kind)).size(font::CAPTION)]
             .spacing(space::MD)

@@ -2878,16 +2878,38 @@ impl ZenSight {
                 }
             }
 
-            Message::ArtifactDestChosen {
-                producer,
-                kind,
-                target_source,
-                dest,
-            } => {
-                if let Some(dest) = dest
-                    && let Some(task) =
-                        self.start_artifact_with_dest(producer, kind, target_source, dest)
-                {
+            Message::ArtifactTreeVerified(result) => match result {
+                Ok(verify) => {
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::ConfirmingTree { verify };
+                }
+                Err(e) => {
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
+                    self.toasts
+                        .push(ToastSeverity::Error, format!("Snapshot verify failed: {e}"));
+                }
+            },
+
+            Message::ArtifactTreeConfirmed => {
+                // The verify stays on screen while the picker is open; the
+                // state advances only once a folder is actually chosen.
+                if matches!(
+                    self.artifact_fetch,
+                    crate::view::artifact_fetch::ArtifactFetch::ConfirmingTree { .. }
+                ) {
+                    return Task::future(async move {
+                        let dest = rfd::AsyncFileDialog::new()
+                            .pick_folder()
+                            .await
+                            .map(|h| h.path().to_path_buf());
+                        Message::ArtifactTreeDestChosen { dest }
+                    });
+                }
+            }
+
+            Message::ArtifactTreeDestChosen { dest } => {
+                if let Some(task) = self.on_tree_dest_chosen(dest) {
                     return task;
                 }
             }
@@ -3812,27 +3834,13 @@ impl ZenSight {
                 .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
             return None;
         }
-        match &kind {
-            zensight_common::ArtifactKind::Snapshot { .. } => {
-                // Pick a destination folder first, then start the download.
-                Some(Task::future(async move {
-                    let dest = rfd::AsyncFileDialog::new()
-                        .pick_folder()
-                        .await
-                        .map(|h| h.path().to_path_buf());
-                    Message::ArtifactDestChosen {
-                        producer,
-                        kind,
-                        target_source,
-                        dest,
-                    }
-                }))
-            }
-            _ => {
-                let dest = std::env::temp_dir().join("zensight-downloads");
-                self.start_artifact_with_dest(producer, kind, target_source, dest)
-            }
-        }
+        // Every kind starts with the staging dir as a placeholder dest. A
+        // tree replaces it after its verified pre-download confirm — the
+        // folder picker moved *behind* verification, so the operator sees
+        // what the snapshot actually contains (and who still serves it)
+        // before choosing where multi-gigabyte output lands.
+        let dest = std::env::temp_dir().join("zensight-downloads");
+        self.start_artifact_with_dest(producer, kind, target_source, dest)
     }
 
     /// Build the job with the resolved `dest`, set Requesting, and spawn the
@@ -3847,14 +3855,6 @@ impl ZenSight {
     ) -> Option<Task<Message>> {
         let session = self.session.clone()?;
         let registry = self.command_registry.clone()?;
-        // A tree is reconstructed into a clearly-named subfolder of the picked dir.
-        let dest = match &kind {
-            zensight_common::ArtifactKind::Snapshot { dir } => {
-                let sensor = producer.as_str();
-                dest.join(format!("{sensor}-{dir}-snapshot"))
-            }
-            _ => dest,
-        };
         let job =
             crate::view::artifact_fetch::ArtifactJob::new(producer.clone(), kind.clone(), dest);
         let id = job.id;
@@ -4001,10 +4001,37 @@ impl ZenSight {
         use zensight_common::{ArtifactState, Delivery};
         match state {
             ArtifactState::Ready { delivery, .. } => {
+                self.artifact_job.as_mut()?.delivery = Some(delivery.clone());
+                // A tree detours through verification before any folder
+                // picker or transfer: the root-fetched index gives a real
+                // file list and chunk total (the sensor's self-reported
+                // TreeSummary is display-only by its own contract), and the
+                // holder probe says who still serves it.
+                if let Delivery::Tree {
+                    root,
+                    store_prefix,
+                    tree_prefix,
+                    ..
+                } = delivery
+                {
+                    let session = self.session.clone()?;
+                    self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Generating {
+                        detail: Some("Verifying snapshot…".to_string()),
+                        progress: None,
+                    };
+                    return Some(Task::future(async move {
+                        Message::ArtifactTreeVerified(
+                            crate::view::artifact_fetch::verify_tree(
+                                session,
+                                root,
+                                store_prefix,
+                                tree_prefix,
+                            )
+                            .await,
+                        )
+                    }));
+                }
                 let job = self.artifact_job.as_mut()?;
-                job.delivery = Some(delivery.clone());
-                // Total & filename depend on the delivery type (chunk count for a
-                // blob, file count for a tree — matching the old per-tier behavior).
                 let total = match &delivery {
                     Delivery::Blob { manifest, .. } => {
                         // The filename is advisory (the sensor's suggestion for
@@ -4021,7 +4048,7 @@ impl ZenSight {
                         // sizing renders as 0 rather than a made-up total.
                         manifest.chunk_count().map(u64::from).unwrap_or(0)
                     }
-                    Delivery::Tree { summary, .. } => summary.file_count.max(1),
+                    Delivery::Tree { .. } => unreachable!("trees detoured above"),
                 };
                 // `download_stream` takes the directory: a blob stages under
                 // its id inside it (zblob's `download_staged` convention), a
@@ -4176,6 +4203,43 @@ impl ZenSight {
                 .await;
             Message::ArtifactSaved(Ok(None))
         }))
+    }
+
+    /// The folder picker resolved for a confirmed tree: start the transfer
+    /// into a clearly-named subfolder of the picked directory, with the
+    /// verified distinct-chunk count as the progress denominator (the same
+    /// unit `Progress::Chunk` reports in — the self-reported file count it
+    /// replaces was a different unit entirely). Cancelling the picker keeps
+    /// the confirm card so the operator can pick again or cancel outright.
+    fn on_tree_dest_chosen(&mut self, dest: Option<std::path::PathBuf>) -> Option<Task<Message>> {
+        let crate::view::artifact_fetch::ArtifactFetch::ConfirmingTree { verify } =
+            &self.artifact_fetch
+        else {
+            return None;
+        };
+        let dest = dest?;
+        let total = verify.distinct_chunks;
+        let job = self.artifact_job.as_mut()?;
+        let delivery = job.delivery.clone()?;
+        // A tree is reconstructed into a clearly-named subfolder of the
+        // picked dir.
+        job.dest = match &job.kind {
+            zensight_common::ArtifactKind::Snapshot { dir } => {
+                let sensor = job.producer.as_str();
+                dest.join(format!("{sensor}-{dir}-snapshot"))
+            }
+            _ => dest,
+        };
+        let dest = job.dest.clone();
+        let cancel = job.cancel.clone();
+        self.artifact_fetch =
+            crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total };
+        let session = self.session.clone()?;
+        let store = self.content_store();
+        let temps = self.blob_temps.clone();
+        Some(Task::stream(crate::view::artifact_fetch::download_stream(
+            session, delivery, dest, store, temps, cancel,
+        )))
     }
 
     /// Tag the just-downloaded snapshot in the local chunk cache so its
