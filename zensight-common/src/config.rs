@@ -458,6 +458,15 @@ pub struct SnapshotDir {
     pub name: String,
     /// Absolute path on the sensor host this name resolves to.
     pub path: String,
+    /// Reuse the previous snapshot's chunk references for files whose size
+    /// and mtime are unchanged (restic-style incremental builds via zblob's
+    /// `build_tree_from`). **Off by default**: the `(size, mtime)` check
+    /// misses a same-length same-second rewrite — exactly a config-file edit
+    /// — so turn it on for append-mostly directories (pcap/log output),
+    /// never for `/etc`-style config trees. Requires `state_dir` for any
+    /// effect across restarts; within one process life it works either way.
+    #[serde(default)]
+    pub incremental: bool,
 }
 
 fn default_snapshot_max_bytes() -> u64 {
@@ -571,6 +580,14 @@ pub struct ArtifactSnapshotLimits {
     /// default 1:4:16 geometry).
     #[serde(default = "default_snapshot_chunk_size")]
     pub chunk_size: u32,
+    /// Directory for the durable snapshot chunk store + tags (zblob
+    /// `DirStore` + `SnapshotTags`, under `<state_dir>/{chunks,tags}`).
+    /// **Unset by default**: chunks live in memory and vanish on restart —
+    /// exactly the pre-0.11 behavior. Set it (e.g. a systemd
+    /// `StateDirectory=`) so several snapshots share one store, chunks
+    /// survive restarts, and repeated builds dedup against warm chunks.
+    #[serde(default)]
+    pub state_dir: Option<String>,
 }
 
 impl Default for ArtifactSnapshotLimits {
@@ -583,6 +600,7 @@ impl Default for ArtifactSnapshotLimits {
             cooldown_secs: default_report_cooldown(),
             ttl_secs: default_report_ttl(),
             chunk_size: default_snapshot_chunk_size(),
+            state_dir: None,
         }
     }
 }

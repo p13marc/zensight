@@ -90,6 +90,7 @@ async fn report_and_snapshot_on_one_channel() {
         dirs: vec![SnapshotDir {
             name: "snap".into(),
             path: src.path().to_string_lossy().to_string(),
+            incremental: false,
         }],
         ..Default::default()
     };
