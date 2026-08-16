@@ -533,6 +533,21 @@ pub fn media_video_key(
     codec: &str,
     tier: &str,
 ) -> String {
+    // Parallax is the registry's only `[[media]]` declarer, so a concrete
+    // origin rides the generated builder — the same one the sensor publishes
+    // with, which is what makes the two sides agree by construction. The
+    // fallback arm keeps two deliberate behaviors: a `*` origin (a viewer
+    // subscribing before the origin map fills — exact on every other chunk)
+    // and non-parallax protocols (sensor-core's generic media machinery).
+    if matches!(protocol, Protocol::Parallax)
+        && let Ok(o) = RemoteOrigin::parse(origin)
+    {
+        return registry::parallax::media_key_at(
+            &o,
+            &registry::parallax::Media::video(stream, codec, tier),
+        )
+        .into();
+    }
     format!(
         "v1/{}/@media/{}/{}/video/{}/{}",
         origin,
@@ -560,6 +575,16 @@ pub fn media_video_key(
 /// );
 /// ```
 pub fn media_preview_key(protocol: Protocol, origin: &str, stream: &str) -> String {
+    // Same delegation split as [`media_video_key`].
+    if matches!(protocol, Protocol::Parallax)
+        && let Ok(o) = RemoteOrigin::parse(origin)
+    {
+        return registry::parallax::media_key_at(
+            &o,
+            &registry::parallax::Media::preview_jpeg(stream),
+        )
+        .into();
+    }
     format!(
         "v1/{}/@media/{}/{}/preview/jpeg",
         origin,
