@@ -117,6 +117,9 @@ impl ArtifactProducer for SnapshotProducer {
     fn tree_max_files(&self) -> Option<u64> {
         Some(self.limits.max_files)
     }
+    fn store_state_dir(&self) -> Option<std::path::PathBuf> {
+        self.limits.state_dir.as_ref().map(std::path::PathBuf::from)
+    }
     async fn produce(&self, kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
         let ArtifactKind::Snapshot { dir } = kind else {
             anyhow::bail!("snapshot producer given a non-snapshot request");

@@ -29,8 +29,8 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 use ulid::Ulid;
 use zblob::{
-    BlobServer, BlobSpec, CancelToken, CdcParams, ContentStore, Hash, MemoryBlobSource,
-    MemoryStore, TreeIndex, TreeServer, build_tree,
+    BlobServer, BlobSpec, CancelToken, CdcParams, ContentStore, DirStore, Hash, MemoryBlobSource,
+    MemoryStore, TreeIndex, TreeServer, build_tree, gc,
 };
 use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
@@ -133,6 +133,14 @@ pub trait ArtifactProducer: Send + Sync + 'static {
         None
     }
 
+    /// For a `Tree` producer, the durable chunk-store directory
+    /// (`artifacts.snapshot.state_dir`). `None` (the default) keeps chunks in
+    /// memory, exactly the pre-durable behavior. The channel opens the store
+    /// from the first `Some` among its enabled Tree producers.
+    fn store_state_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Produce the artifact. Long-running producers must honor `ctx.cancel` and
     /// stream `ctx.progress`.
     async fn produce(&self, kind: ArtifactKind, ctx: ProduceCtx) -> anyhow::Result<Produced>;
@@ -175,8 +183,20 @@ pub struct ArtifactChannel {
     producers: HashMap<&'static str, Arc<dyn ArtifactProducer>>,
     /// Tier-1 blob server (present iff a `Blob` producer is registered).
     blob: Option<BlobServer>,
-    /// Tier-2 chunk store + tree server (present iff a `Tree` producer is registered).
-    store: Option<Arc<MemoryStore>>,
+    /// Tier-2 chunk store (present iff a `Tree` producer is registered): a
+    /// durable `DirStore` when `artifacts.snapshot.state_dir` is set, else a
+    /// `MemoryStore`. Either way it is shared by every snapshot and reclaimed
+    /// by mark-and-sweep, never cleared wholesale.
+    store: Option<Arc<dyn ContentStore>>,
+    /// Snapshot tags — the liveness marks [`gc::sweep`] keeps chunks for.
+    /// Durable beside the store, or in a channel-owned temp dir in volatile
+    /// mode so both modes run the same sweep path.
+    tags: Option<Arc<gc::SnapshotTags>>,
+    /// In-flight-download protection for the sweep (zblob's temp tags). The
+    /// serving side never takes one, but `sweep` requires the registry.
+    temps: Arc<gc::TempTags>,
+    /// Keeps the volatile-mode tags directory alive (deleted on drop).
+    _tags_dir: Option<Arc<tempfile::TempDir>>,
     tree_server: Option<TreeServer>,
     state: Arc<Mutex<HashMap<&'static str, KindRuntime>>>,
 }
@@ -216,17 +236,57 @@ impl ArtifactChannel {
         };
         let blob =
             wants_blob.then(|| BlobServer::new(&session, serve(artifact_blob_prefix(&producer))));
-        let (store, tree_server) = if wants_tree {
-            let store = Arc::new(MemoryStore::new());
+        let (store, tags, tags_dir, tree_server) = if wants_tree {
+            // A durable store when a Tree producer names a state dir; memory
+            // otherwise (the pre-durable behavior). A configured dir that
+            // fails to open falls back loudly — the sensor keeps serving, but
+            // the operator asked for durability and must hear it is missing.
+            let state_dir = enabled.iter().find_map(|p| p.store_state_dir());
+            let durable = state_dir.as_ref().and_then(|dir| {
+                let open = || -> std::io::Result<(Arc<dyn ContentStore>, gc::SnapshotTags)> {
+                    let store: Arc<dyn ContentStore> =
+                        Arc::new(DirStore::open(dir.join("chunks"))?);
+                    let tags = gc::SnapshotTags::open(dir.join("tags"))?;
+                    Ok((store, tags))
+                };
+                match open() {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::warn!(
+                            dir = %dir.display(), error = %e,
+                            "artifacts.snapshot.state_dir unusable — falling back to an \
+                             in-memory chunk store (snapshots will not survive restart)"
+                        );
+                        None
+                    }
+                }
+            });
+            let (store, tags, tags_dir) = match durable {
+                Some((store, tags)) => (store, Arc::new(tags), None),
+                None => {
+                    // Volatile mode runs the same tag/sweep machinery against
+                    // a private temp dir that dies with the channel. A host
+                    // whose temp dir is unwritable cannot produce artifacts
+                    // at all (the workdir is the same temp dir), so this
+                    // expect cannot newly fail anything that worked before.
+                    let dir = Arc::new(
+                        tempfile::tempdir().expect("a writable temp dir for snapshot tags"),
+                    );
+                    let tags = gc::SnapshotTags::open(dir.path().join("tags"))
+                        .expect("snapshot tags in a fresh private temp dir");
+                    let store: Arc<dyn ContentStore> = Arc::new(MemoryStore::new());
+                    (store, Arc::new(tags), Some(dir))
+                }
+            };
             let tree_server = TreeServer::new(
                 &session,
                 serve(artifact_store_prefix(&producer)),
                 serve(artifact_tree_prefix(&producer)),
-                store.clone() as Arc<dyn ContentStore>,
+                store.clone(),
             );
-            (Some(store), Some(tree_server))
+            (Some(store), Some(tags), tags_dir, Some(tree_server))
         } else {
-            (None, None)
+            (None, None, None, None)
         };
 
         let mut map = HashMap::new();
@@ -241,6 +301,9 @@ impl ArtifactChannel {
             producers: map,
             blob,
             store,
+            tags,
+            temps: Arc::new(gc::TempTags::new()),
+            _tags_dir: tags_dir,
             tree_server,
             state: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -294,6 +357,11 @@ impl ArtifactChannel {
                 .await
                 .map_err(|e| anyhow::anyhow!("spawn tree server: {e}"))?;
         }
+
+        // Reclaim crash leftovers: a durable store reopened after an unclean
+        // exit may hold chunks of a build that never registered or tagged —
+        // garbage by definition, swept before the first request.
+        self.sweep_store().await;
 
         let mut ttl_tick = tokio::time::interval(Duration::from_secs(5));
         tracing::info!(
@@ -557,6 +625,10 @@ impl ArtifactChannel {
                     kind: slug.to_string(),
                     reason: e.to_string(),
                 });
+                // A failed tree build may have streamed chunks into the
+                // shared store before erroring; sweep reclaims them (a no-op
+                // for blob kinds and for a store with no garbage).
+                self.sweep_store().await;
             }
         }
     }
@@ -662,14 +734,26 @@ impl ArtifactChannel {
                     .tree_server
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("no tree server for a Dir artifact"))?;
-                // Single live tree: drop the prior snapshot's chunks *before*
-                // building, because `build_tree` streams each new chunk into
-                // the store as it walks. (In 0.1 it returned the chunks and
-                // the caller put them, so clearing afterwards was correct;
-                // doing that here would erase the snapshot just built.)
-                store.clear();
+                // The store is shared by every snapshot and reclaimed by
+                // mark-and-sweep on release — never cleared wholesale, which
+                // is what lets chunks stay warm across builds (and across
+                // restarts, with a durable store) for cross-build dedup.
+                //
+                // Bounds are pre-checked on a metadata-only walk BEFORE
+                // chunking: the authoritative post-build checks below fire
+                // only after the whole tree has already streamed into the
+                // store, which for an over-limit directory means unbounded
+                // memory (volatile) or disk (durable) growth first.
+                {
+                    let walk_path = path.clone();
+                    let max_files = producer.tree_max_files();
+                    tokio::task::spawn_blocking(move || {
+                        preflight_tree_bounds(&walk_path, max_bytes, max_files)
+                    })
+                    .await??;
+                }
 
-                let build_store = store.clone() as Arc<dyn ContentStore>;
+                let build_store = store.clone();
                 let build_id = id.to_string();
                 let cdc = snapshot_cdc_params(chunk_size);
                 cdc.validate().map_err(|e| {
@@ -829,13 +913,52 @@ impl ArtifactChannel {
                 }
             }
             Cleanup::Tree(tree_id) => {
-                if let Some(store) = &self.store {
-                    store.clear();
-                }
                 if let Some(tree_server) = &self.tree_server {
                     tree_server.unregister(&tree_id).await;
                 }
+                // Mark-and-sweep instead of the old wholesale clear: only the
+                // released snapshot's *unshared* chunks go; chunks still
+                // referenced by another registered snapshot (or a lineage
+                // tag) stay warm.
+                self.sweep_store().await;
             }
+        }
+    }
+
+    /// Sweep the shared chunk store: keep every chunk referenced by a
+    /// currently registered snapshot index (`extra_roots` — registration and
+    /// tagging are not atomic, gc's documented rule), a snapshot tag, or an
+    /// in-flight temp tag; remove the rest. Blocking work runs off the
+    /// reactor. A channel with no tree store is a no-op.
+    async fn sweep_store(&self) {
+        let (Some(store), Some(tags), Some(tree_server)) =
+            (&self.store, &self.tags, &self.tree_server)
+        else {
+            return;
+        };
+        let mut roots = Vec::new();
+        for id in tree_server.registered().await {
+            if let Some(index) = tree_server.index(id.as_str()).await {
+                roots.push(index);
+            }
+        }
+        let store = store.clone();
+        let tags = tags.clone();
+        let temps = self.temps.clone();
+        let swept = tokio::task::spawn_blocking(move || {
+            gc::sweep(store.as_ref(), &tags, &temps, roots.iter())
+        })
+        .await;
+        match swept {
+            Ok(Ok(stats)) => {
+                tracing::debug!(
+                    removed = stats.removed,
+                    kept = stats.kept,
+                    "chunk-store sweep"
+                )
+            }
+            Ok(Err(e)) => tracing::warn!(error = %e, "chunk-store sweep failed"),
+            Err(e) => tracing::warn!(error = %e, "chunk-store sweep task failed"),
         }
     }
 
@@ -848,10 +971,51 @@ impl ArtifactChannel {
             producers: self.producers.clone(),
             blob: self.blob.clone(),
             store: self.store.clone(),
+            tags: self.tags.clone(),
+            temps: self.temps.clone(),
+            _tags_dir: self._tags_dir.clone(),
             tree_server: self.tree_server.clone(),
             state: self.state.clone(),
         }
     }
+}
+
+/// Metadata-only bounds check of a snapshot source tree, run BEFORE chunking
+/// so an over-limit directory fails early instead of first streaming itself
+/// into the chunk store. Advisory (files can change between walk and build);
+/// the post-build checks on the index remain authoritative.
+///
+/// Symlinks are not followed (matching `build_tree`, which records them as
+/// entries), so a link cannot cycle the walk or drag in an outside tree.
+fn preflight_tree_bounds(
+    root: &std::path::Path,
+    max_bytes: u64,
+    max_files: Option<u64>,
+) -> anyhow::Result<()> {
+    let mut total: u64 = 0;
+    let mut files: u64 = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let meta = entry.path().symlink_metadata()?;
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                files += 1;
+                total = total.saturating_add(meta.len());
+            }
+            if total > max_bytes {
+                anyhow::bail!("snapshot source (>{total} bytes) exceeds max_bytes ({max_bytes})");
+            }
+            if let Some(max) = max_files
+                && files > max
+            {
+                anyhow::bail!("snapshot source (>{files} files) exceeds max_files ({max})");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// CDC parameters for a snapshot build, derived from the configured average

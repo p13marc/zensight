@@ -31,6 +31,8 @@ chrono = "0.4"
 
 # Debug-report transfer + bundling (#196)
 zblob = { workspace = true }
+# Volatile-mode snapshot tags live in a channel-owned private temp dir.
+tempfile = { workspace = true }
 ulid = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }
@@ -44,5 +46,4 @@ hostname = { workspace = true }
 if-addrs = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio-test = "0.4"
