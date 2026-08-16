@@ -701,4 +701,169 @@ mod tests {
     fn test_all_telemetry_wildcard() {
         assert_eq!(all_telemetry_wildcard(), "v1/*/telemetry/**");
     }
+
+    /// Golden pins for every helper in this module, asserted against the
+    /// literal v1 spelling. These predate the delegation of the helper
+    /// bodies to zenkey 0.6's typed selectors / generated registry builders,
+    /// and are the acceptance criteria for that refactor: the wire bytes
+    /// must not move. Origin-parameterized helpers are pinned on a fixed
+    /// remote origin; PROFILE-derived keys (machine-minted origin) are
+    /// pinned against their explicit literal construction.
+    mod golden_v1_spellings {
+        use super::super::*;
+
+        const ORIGIN: &str = "h-3fa9c2d41b7e";
+
+        #[test]
+        fn class_and_family_wildcards() {
+            assert_eq!(all_telemetry_wildcard(), "v1/*/telemetry/**");
+            assert_eq!(all_state_wildcard(), "v1/*/state/**");
+            assert_eq!(all_events_wildcard(), "v1/*/events/**");
+            assert_eq!(all_health_wildcard(), "v1/*/state/*/health");
+            assert_eq!(all_alerts_wildcard(), "v1/*/state/*/alert/*");
+            assert_eq!(all_liveliness_wildcard(), "v1/*/state/*/alive");
+            assert_eq!(
+                all_device_liveliness_wildcard(),
+                "v1/*/state/*/device/*/alive"
+            );
+            assert_eq!(all_evidence_wildcard(), "v1/*/state/*/evidence/**");
+            assert_eq!(
+                all_name_evidence_wildcard(),
+                "v1/*/state/*/evidence/names/*"
+            );
+        }
+
+        #[test]
+        fn origin_scoped_selectors() {
+            assert_eq!(
+                origin_telemetry_wildcard(ORIGIN),
+                "v1/h-3fa9c2d41b7e/telemetry/**"
+            );
+            assert_eq!(origin_state_wildcard(ORIGIN), "v1/h-3fa9c2d41b7e/state/**");
+            assert_eq!(
+                origin_events_wildcard(ORIGIN),
+                "v1/h-3fa9c2d41b7e/events/**"
+            );
+            assert_eq!(
+                origin_alerts_wildcard(ORIGIN),
+                "v1/h-3fa9c2d41b7e/state/*/alert/*"
+            );
+            assert_eq!(
+                origin_liveliness_expr(ORIGIN),
+                "v1/h-3fa9c2d41b7e/state/*/alive"
+            );
+            assert_eq!(
+                origin_device_liveliness_expr(ORIGIN),
+                "v1/h-3fa9c2d41b7e/state/*/device/*/alive"
+            );
+        }
+
+        #[test]
+        fn rpc_keys() {
+            // A multi-chunk procedure, exactly as the GUI spells one.
+            assert_eq!(
+                fleet_rpc_key("netring", "artifact/cancel"),
+                "v1/*/@rpc/netring/artifact/cancel"
+            );
+            assert_eq!(
+                fleet_command_key("netring", "stream"),
+                "v1/*/@rpc/netring/stream/set"
+            );
+            assert_eq!(
+                origin_rpc_key(ORIGIN, "netring", "artifact/status"),
+                "v1/h-3fa9c2d41b7e/@rpc/netring/artifact/status"
+            );
+            assert_eq!(catalog_rpc_key("names"), "v1/@catalog/@rpc/names");
+            assert_eq!(catalog_rpc_key("link"), "v1/@catalog/@rpc/link");
+            assert_eq!(names_query_key(), "v1/@catalog/@rpc/names");
+        }
+
+        #[test]
+        fn catalog_subjects_and_wildcards() {
+            assert_eq!(
+                entity_key("h-0123456789ab"),
+                "v1/@catalog/state/entity/h-0123456789ab"
+            );
+            assert_eq!(
+                alias_key("h-0123456789ab"),
+                "v1/@catalog/state/alias/h-0123456789ab"
+            );
+            // The id shape `OperatorAssertion::id` actually produces.
+            assert_eq!(
+                assertion_key("link-h-0123456789ab-h-3fa9c2d41b7e"),
+                "v1/@catalog/state/assertion/link-h-0123456789ab-h-3fa9c2d41b7e"
+            );
+            assert_eq!(all_entity_wildcard(), "v1/@catalog/state/entity/*");
+            assert_eq!(all_alias_wildcard(), "v1/@catalog/state/alias/*");
+            assert_eq!(all_assertion_wildcard(), "v1/@catalog/state/assertion/*");
+            assert_eq!(entities_query_key(), "v1/@catalog/state/entity/*");
+            assert_eq!(correlator_alive_key(), "v1/@catalog/state/alive");
+        }
+
+        #[test]
+        fn catalog_claims() {
+            // The zid is lowercased at this boundary (zenoh zids are hex, but
+            // the wire form must be canonical either way).
+            assert_eq!(catalog_claim_key("A3F0"), "v1/@catalog/state/claim/a3f0");
+            assert_eq!(catalog_claims_wildcard(), "v1/@catalog/state/claim/*");
+        }
+
+        #[test]
+        fn pdns_keys() {
+            assert_eq!(pdns_key("10.0.0.9"), "v1/@catalog/state/pdns/10-0-0-9");
+            assert_eq!(
+                pdns_key("2001:db8::1"),
+                "v1/@catalog/state/pdns/2001-db8--1"
+            );
+            assert_eq!(all_pdns_wildcard(), "v1/@catalog/state/pdns/**");
+        }
+
+        #[test]
+        fn media_keys() {
+            assert_eq!(
+                media_video_key(Protocol::Parallax, ORIGIN, "cam0", "h264", "high"),
+                "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high"
+            );
+            assert_eq!(
+                media_preview_key(Protocol::Parallax, ORIGIN, "cam0"),
+                "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+            );
+        }
+
+        #[test]
+        fn profile_derived_evidence_keys() {
+            // The origin is machine-minted, so pin the exact construction:
+            // origin + literal spelling + the slugged device chunk.
+            let origin = crate::PROFILE.host_id().as_str().to_string();
+            assert_eq!(
+                host_evidence_key("netring", "AA:BB:CC:00:11:22"),
+                format!(
+                    "v1/{origin}/state/netring/evidence/device/{}",
+                    zenkey::slug::chunk_slug("AA:BB:CC:00:11:22")
+                )
+            );
+            assert_eq!(
+                name_observation_key("netring", "10-0-0-9"),
+                format!("v1/{origin}/state/netring/evidence/names/10-0-0-9")
+            );
+        }
+
+        #[test]
+        fn blob_prefixes() {
+            // PROFILE-derived; pin the literal tier spellings.
+            let origin = crate::PROFILE.host_id().as_str().to_string();
+            assert_eq!(
+                crate::artifact_blob_prefix("netring"),
+                format!("v1/{origin}/@blob/artifact")
+            );
+            assert_eq!(
+                crate::artifact_store_prefix("netring"),
+                format!("v1/{origin}/@blob/store")
+            );
+            assert_eq!(
+                crate::artifact_tree_prefix("netring"),
+                format!("v1/{origin}/@blob/tree")
+            );
+        }
+    }
 }
