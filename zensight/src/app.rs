@@ -3894,9 +3894,12 @@ impl ZenSight {
                     Delivery::Blob { manifest, .. } => {
                         // The filename is advisory (the sensor's suggestion for
                         // the Save-as dialog), so `None` just means "no
-                        // suggestion" — it never selects a path.
-                        if let Some(name) = &manifest.filename {
-                            job.filename = Some(name.clone());
+                        // suggestion" — it never selects a path. It is also
+                        // remote input: `suggested_filename()` reduces it to a
+                        // bare file name, so a hostile `../../x` never reaches
+                        // the dialog (zblob's docs: never use `filename` raw).
+                        if let Some(name) = manifest.suggested_filename() {
+                            job.filename = Some(name);
                         }
                         // The chunk count is the reference client's own
                         // arithmetic since 0.3; a manifest with impossible
