@@ -14,8 +14,8 @@ use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert,
 };
 use zensight_common::{
-    ArtifactReportLimits, ArtifactSnapshotLimits, SnapshotDir, artifact_request_key,
-    artifact_status_key,
+    ArtifactReportLimits, ArtifactSnapshotLimits, SnapshotDir, artifact_cancel_key,
+    artifact_request_key, artifact_status_key,
 };
 use zensight_sensor_core::artifact::{ProduceCtx, Produced};
 use zensight_sensor_core::{
@@ -199,6 +199,28 @@ async fn report_and_snapshot_on_one_channel() {
         names.push(e.unwrap().path().unwrap().to_string_lossy().to_string());
     }
     assert!(names.iter().any(|n| n == "config.json"));
+
+    // Cancelling a Ready report releases it: the in-memory blob is
+    // unregistered (Cleanup::Blob is unregister-only — there is no temp file
+    // to remove since the report is served from memory), so a fresh pinned
+    // download must now fail rather than resolve.
+    let replies = session
+        .get(format!("{}?id={report_id}", artifact_cancel_key(prefix)))
+        .await
+        .unwrap();
+    let reply = replies.recv_async().await.expect("cancel reply");
+    assert!(reply.result().is_ok(), "cancel refused: {reply:?}");
+    let after = dest.path().join("after-cancel.tar.zst");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            client.download_to(&req, &after).cancel(&cancel),
+        )
+        .await
+        .expect("post-cancel download timed out")
+        .is_err(),
+        "a released report must no longer be served"
+    );
 
     // --- Tier-2: request a snapshot, download the tree. ---
     let snap_id = Ulid::from_parts(2, 2);

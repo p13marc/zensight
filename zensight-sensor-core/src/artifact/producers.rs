@@ -52,7 +52,7 @@ impl ArtifactProducer for ReportProducer {
             _ => Err("report producer given a non-report request".into()),
         }
     }
-    async fn produce(&self, _kind: ArtifactKind, ctx: ProduceCtx) -> anyhow::Result<Produced> {
+    async fn produce(&self, _kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
         let inputs = BundleInputs {
             sensor_name: self.source.sensor_name(),
             source_id: self.source.source_id(),
@@ -63,12 +63,11 @@ impl ArtifactProducer for ReportProducer {
         };
         let max_bytes = self.common.max_bytes;
         let redact_extra = self.redact_extra.clone();
-        let dir = ctx.workdir.clone();
-        let (path, filename) = tokio::task::spawn_blocking(move || {
-            build_debug_bundle(inputs, max_bytes, &redact_extra, &dir)
+        let (data, filename) = tokio::task::spawn_blocking(move || {
+            build_debug_bundle(inputs, max_bytes, &redact_extra)
         })
         .await??;
-        Ok(Produced::File { path, filename })
+        Ok(Produced::Bytes { data, filename })
     }
 }
 

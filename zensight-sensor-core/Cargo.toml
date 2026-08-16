@@ -34,7 +34,6 @@ zblob = { workspace = true }
 ulid = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }
-tempfile = { workspace = true }
 
 # Artifact producer registry (#332)
 async-trait = { workspace = true }
@@ -45,4 +44,5 @@ hostname = { workspace = true }
 if-addrs = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio-test = "0.4"
