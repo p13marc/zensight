@@ -190,6 +190,15 @@ pub struct ZenSight {
     artifact_fetch: crate::view::artifact_fetch::ArtifactFetch,
     /// The in-flight download's identity (key prefix, kind, id, delivery, dest).
     artifact_job: Option<crate::view::artifact_fetch::ArtifactJob>,
+    /// Snapshot tags marking which downloaded trees keep their chunks warm in
+    /// the redb chunk cache (`None` in demo mode — no persistent store, no
+    /// sweeping). Lives beside the redb, in its own directory (zblob tag
+    /// files).
+    blob_tags: Option<std::sync::Arc<zblob::gc::SnapshotTags>>,
+    /// In-flight-download protection for chunk-cache sweeps: the TreeClient
+    /// registers fetched-but-unmaterialized chunks here so a concurrent sweep
+    /// cannot collect them out from under a running download.
+    blob_temps: std::sync::Arc<zblob::gc::TempTags>,
     /// Per-sensor advertised artifact kinds (`producer` → kinds + bounds/adverts).
     artifact_kinds: std::collections::HashMap<String, Vec<zensight_common::KindStatus>>,
     /// Per-sensor on-demand capture form state (`producer` → form), shared by
@@ -410,6 +419,25 @@ impl ZenSight {
             command_registry: None,
             artifact_fetch: crate::view::artifact_fetch::ArtifactFetch::default(),
             artifact_job: None,
+            blob_tags: if demo_mode {
+                None
+            } else {
+                // Beside metrics.redb; a failure to open just means no
+                // sweeping this session (warned), not a broken app.
+                dirs::data_dir()
+                    .map(|d| d.join("zensight").join("blob-tags"))
+                    .and_then(|dir| match zblob::gc::SnapshotTags::open(&dir) {
+                        Ok(t) => Some(std::sync::Arc::new(t)),
+                        Err(e) => {
+                            tracing::warn!(
+                                dir = %dir.display(), error = %e,
+                                "blob tag dir unusable; chunk cache will not be swept"
+                            );
+                            None
+                        }
+                    })
+            },
+            blob_temps: std::sync::Arc::new(zblob::gc::TempTags::new()),
             artifact_kinds: std::collections::HashMap::new(),
             capture_forms: std::collections::HashMap::new(),
             expectations: crate::view::expectations::ExpectationsState::default(),
@@ -2258,12 +2286,37 @@ impl ZenSight {
                         let batch = metric_batch.map(|(_, b)| b).unwrap_or_default();
                         let logs = log_batch.map(|(_, l)| l).unwrap_or_default();
                         let now_ms = zensight_common::current_timestamp_millis();
+                        // The chunk cache rides the same prune cadence
+                        // (samples and logs have retention; without this the
+                        // chunks table grows forever). Gated on the artifact
+                        // job being idle: pausing drops the download future
+                        // and with it the TempTag protecting its fetched
+                        // chunks, so sweeping past a paused job would eat its
+                        // resume state. (`is_busy` covers Paused.)
+                        let sweep_tags = (prune && !self.artifact_fetch.is_busy())
+                            .then(|| self.blob_tags.clone())
+                            .flatten();
+                        let sweep_temps = self.blob_temps.clone();
                         let flush = Task::future(async move {
                             // Map redb's large error to a String inside the blocking
                             // closure so the future's payload stays small.
                             let res = tokio::task::spawn_blocking(move || {
                                 let n = store.write_batch(&batch).map_err(|e| e.to_string())?;
                                 store.write_logs(&logs).map_err(|e| e.to_string())?;
+                                if let Some(tags) = &sweep_tags {
+                                    let chunks = crate::store::RedbContentStore::new(store.clone());
+                                    match zblob::gc::sweep(&chunks, tags, &sweep_temps, []) {
+                                        Ok(stats) => tracing::debug!(
+                                            removed = stats.removed,
+                                            kept = stats.kept,
+                                            "Swept the blob chunk cache"
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            "Blob chunk-cache sweep failed"
+                                        ),
+                                    }
+                                }
                                 if prune {
                                     let evicted = store.prune(now_ms).map_err(|e| e.to_string())?;
                                     let log_evicted = store
@@ -2875,6 +2928,14 @@ impl ZenSight {
                     return task;
                 }
             }
+
+            Message::BlobCacheTagged(result) => match result {
+                Ok(()) => tracing::debug!("Tagged the downloaded snapshot in the chunk cache"),
+                Err(e) => tracing::debug!(
+                    error = %e,
+                    "Could not tag the downloaded snapshot (cache stays cold for it)"
+                ),
+            },
 
             Message::ArtifactSaved(result) => match result {
                 Ok(Some(path)) => {
@@ -3914,8 +3975,9 @@ impl ZenSight {
                     crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total };
                 let session = self.session.clone()?;
                 let store = self.content_store();
+                let temps = self.blob_temps.clone();
                 Some(Task::stream(crate::view::artifact_fetch::download_stream(
-                    session, delivery, dest, store, cancel,
+                    session, delivery, dest, store, temps, cancel,
                 )))
             }
             Ok(_) => None, // request helper only returns Ready on success
@@ -3959,7 +4021,7 @@ impl ZenSight {
                     crate::view::artifact_fetch::ArtifactFetch::Saved(shown.clone());
                 self.toasts
                     .push(ToastSeverity::Success, format!("Snapshot saved to {shown}"));
-                None
+                self.tag_downloaded_tree()
             }
             Ok(temp_path) => {
                 // Blob: move the verified temp file via a Save-as dialog.
@@ -4009,8 +4071,9 @@ impl ZenSight {
         let cancel = job.reset_cancel();
         self.artifact_fetch =
             crate::view::artifact_fetch::ArtifactFetch::Downloading { got, total };
+        let temps = self.blob_temps.clone();
         Some(Task::stream(crate::view::artifact_fetch::download_stream(
-            session, delivery, dest, store, cancel,
+            session, delivery, dest, store, temps, cancel,
         )))
     }
 
@@ -4060,6 +4123,75 @@ impl ZenSight {
                 ))
                 .await;
             Message::ArtifactSaved(Ok(None))
+        }))
+    }
+
+    /// Tag the just-downloaded snapshot in the local chunk cache so its
+    /// chunks stay warm for re-download dedup, pruning download tags to the
+    /// newest few so the cache stays bounded (the periodic prune-cadence
+    /// sweep reclaims whatever the surviving tags no longer reference).
+    ///
+    /// The index is re-fetched by root — cheap (no chunk store involved) and
+    /// root-verified, so the tag records exactly what was downloaded.
+    fn tag_downloaded_tree(&self) -> Option<Task<Message>> {
+        /// Keep this many most-recent `dl-` tags (name order = age order:
+        /// the epoch-ms prefix is fixed-width for the foreseeable future).
+        const KEEP: usize = 8;
+        let tags = self.blob_tags.clone()?;
+        let session = self.session.clone()?;
+        let job = self.artifact_job.as_ref()?;
+        let zensight_common::Delivery::Tree {
+            root,
+            store_prefix,
+            tree_prefix,
+            ..
+        } = job.delivery.clone()?
+        else {
+            return None;
+        };
+        Some(Task::future(async move {
+            let run = async {
+                let concrete = |p: String| -> Result<zblob::QueryPrefix, String> {
+                    let p = zblob::QueryPrefix::new(p).map_err(|e| e.to_string())?;
+                    if !p.is_concrete() {
+                        return Err("non-concrete delivery prefix".into());
+                    }
+                    Ok(p)
+                };
+                let client = zblob::TreeClient::new(
+                    &session,
+                    concrete(store_prefix)?,
+                    concrete(tree_prefix)?,
+                );
+                let index = client
+                    .fetch_index_by_root(&root)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tokio::task::spawn_blocking(move || -> Result<(), String> {
+                    let name = format!(
+                        "dl-{}-{}",
+                        zensight_common::current_timestamp_millis(),
+                        &root.to_string()[..16]
+                    );
+                    tags.set(&name, &index).map_err(|e| e.to_string())?;
+                    let mut dl: Vec<String> = tags
+                        .list()
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .filter(|n| n.starts_with("dl-"))
+                        .collect();
+                    if dl.len() > KEEP {
+                        let stale = dl.len() - KEEP;
+                        for name in dl.drain(..stale) {
+                            let _ = tags.remove(&name);
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            };
+            Message::BlobCacheTagged(run.await)
         }))
     }
 

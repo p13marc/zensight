@@ -1077,6 +1077,9 @@ pub enum Message {
     ArtifactDownloaded(Result<std::path::PathBuf, String>),
     /// Outcome of the "Save as…" dialog for a downloaded blob artifact.
     ArtifactSaved(Result<Option<String>, String>),
+    /// Outcome of tagging a downloaded snapshot in the local chunk cache
+    /// (keeps its chunks warm for re-download dedup; log-only either way).
+    BlobCacheTagged(Result<(), String>),
     /// Pause the in-flight artifact download (keeps the partial; resumable).
     PauseArtifact,
     /// Resume a paused artifact download.

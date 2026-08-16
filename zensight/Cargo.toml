@@ -78,6 +78,7 @@ h264 = ["dep:parallax-pipeline"]
 
 [dev-dependencies]
 iced_test = "0.14"
+tempfile = { workspace = true }
 
 # =============================================================================
 # Package metadata for cargo-deb

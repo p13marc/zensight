@@ -1451,6 +1451,56 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The GC contract behind the periodic chunk-cache sweep (#131's chunk
+    /// half): chunks referenced by a snapshot tag survive, orphans go, and a
+    /// temp-tagged chunk (an in-flight download's) is protected.
+    #[test]
+    fn chunk_store_sweep_keeps_tagged_and_temp_tagged() {
+        use zblob::ContentStore;
+
+        let path = temp_db_path("sweep");
+        let persistent = PersistentStore::open(&path).expect("open");
+        let cs = RedbContentStore::new(persistent.clone());
+
+        // A real snapshot built straight into the redb-backed store, so the
+        // tag's chunk set is exactly what a downloaded tree would pin.
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.bin"), vec![1u8; 100_000]).unwrap();
+        let index =
+            zblob::build_tree(src.path(), "sweep-test", &zblob::CdcParams::default(), &cs).unwrap();
+
+        let tag_dir = tempfile::tempdir().unwrap();
+        let tags = zblob::gc::SnapshotTags::open(tag_dir.path()).unwrap();
+        tags.set("dl-1-abc", &index).unwrap();
+
+        let orphan = zblob::Hash::of(b"orphaned chunk");
+        cs.put(&orphan, b"orphaned chunk").unwrap();
+        let inflight = zblob::Hash::of(b"in-flight chunk");
+        cs.put(&inflight, b"in-flight chunk").unwrap();
+
+        let temps = zblob::gc::TempTags::new();
+        let _guard = temps.protect([inflight]);
+
+        let stats = zblob::gc::sweep(&cs, &tags, &temps, []).unwrap();
+        assert_eq!(stats.removed, 1, "exactly the orphan goes");
+        assert!(!cs.has(&orphan).unwrap(), "orphan swept");
+        assert!(cs.has(&inflight).unwrap(), "temp-tagged chunk survives");
+        for h in index.needed_chunks() {
+            assert!(cs.has(&h).unwrap(), "tagged snapshot chunk survives");
+        }
+
+        // Untag + drop the temp guard: everything is garbage now.
+        tags.remove("dl-1-abc").unwrap();
+        drop(_guard);
+        zblob::gc::sweep(&cs, &tags, &temps, []).unwrap();
+        assert!(
+            cs.hashes().unwrap().is_empty(),
+            "untagged store sweeps to empty"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn chunk_store_round_trip_and_persists() {
         use zblob::ContentStore;
