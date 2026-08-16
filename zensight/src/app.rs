@@ -3839,9 +3839,9 @@ impl ZenSight {
             }
         });
         let dir = std::env::temp_dir().join("zensight-downloads");
-        // zblob has the *caller* choose the destination file — a remote
-        // party must not pick where bytes land. Staging under the artifact id
-        // keeps the served filename advisory until the Save-as dialog.
+        // zblob has the *caller* choose where bytes land: `download_staged`
+        // stages under the blob id inside this directory, so the served
+        // filename stays advisory until the Save-as dialog.
         let mut job = crate::view::artifact_fetch::ArtifactJob::new(
             producer.clone(),
             zensight_common::ArtifactKind::Capture {
@@ -3857,10 +3857,7 @@ impl ZenSight {
             job.id = id;
         }
         job.filename = Some(filename);
-        // Same rule as every other blob fetch (see `blob_or_tree_dest_of`):
-        // the caller names the file, staged under the artifact id, so the
-        // sensor's filename stays advisory until the Save-as dialog.
-        let dest = job.dest.join(job.id.to_string());
+        let dir = job.dest.clone();
         let cancel = job.cancel.clone();
         self.artifact_job = Some(job);
         self.artifact_fetch =
@@ -3871,7 +3868,7 @@ impl ZenSight {
                 blob_prefix,
                 artifact_id,
                 root,
-                dest,
+                dir,
                 cancel,
             ),
         ))
@@ -3908,7 +3905,10 @@ impl ZenSight {
                     }
                     Delivery::Tree { summary, .. } => summary.file_count.max(1),
                 };
-                let dest = Self::blob_or_tree_dest_of(job, &delivery);
+                // `download_stream` takes the directory: a blob stages under
+                // its id inside it (zblob's `download_staged` convention), a
+                // tree materializes into it.
+                let dest = job.dest.clone();
                 let cancel = job.cancel.clone();
                 self.artifact_fetch =
                     crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total };
@@ -4001,10 +4001,11 @@ impl ZenSight {
         let store = self.content_store();
         let job = self.artifact_job.as_mut()?;
         let delivery = job.delivery.clone()?;
-        // Resume re-derives the destination the same way the first attempt
-        // did, so a blob resumes onto its own `.part` rather than starting a
+        // Resume hands `download_staged` the same directory as the first
+        // attempt; the staged path re-derives inside zblob (`dir.join(id)`),
+        // so a blob resumes onto its own `.part` rather than starting a
         // second one beside it.
-        let dest = Self::blob_or_tree_dest_of(job, &delivery);
+        let dest = job.dest.clone();
         let cancel = job.reset_cancel();
         self.artifact_fetch =
             crate::view::artifact_fetch::ArtifactFetch::Downloading { got, total };
@@ -4064,21 +4065,19 @@ impl ZenSight {
 
     /// Where this job's bytes land, per delivery tier.
     ///
-    /// `job.dest` is the directory the user (or the staging area) chose. zblob
-    /// 0.2 has the **caller** name the destination file for a blob — a remote
-    /// party must not pick where bytes land, so `Manifest::filename` stays
-    /// advisory and is only offered later, in the Save-as dialog. Staging
-    /// under the artifact id keeps the path a safe single segment. A tree
-    /// materializes into the directory itself.
-    ///
-    /// One function, used by the initial fetch, the resume, and the partial
-    /// cleanup, so those three cannot disagree about which file they mean.
+    /// `job.dest` is the directory the user (or the staging area) chose; the
+    /// transfer itself goes through zblob's `download_staged`, which stages a
+    /// blob at `dir.join(manifest.id)`. This helper MUST mirror that rule —
+    /// it exists for the one caller that needs the staged path *before* the
+    /// transfer resolves: cancel's `delete_partial`, which must name the same
+    /// file the transfer writes. A tree materializes into the directory
+    /// itself.
     fn blob_or_tree_dest_of(
         job: &crate::view::artifact_fetch::ArtifactJob,
         delivery: &zensight_common::Delivery,
     ) -> std::path::PathBuf {
         match delivery {
-            zensight_common::Delivery::Blob { .. } => job.dest.join(job.id.to_string()),
+            zensight_common::Delivery::Blob { manifest, .. } => job.dest.join(manifest.id.as_str()),
             zensight_common::Delivery::Tree { .. } => job.dest.clone(),
         }
     }

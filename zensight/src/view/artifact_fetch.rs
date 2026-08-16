@@ -485,13 +485,14 @@ async fn poll_status(
 
 /// Drive the right `zblob` client for `delivery` into `dest`, yielding
 /// [`Message::ArtifactProgress`] as chunks arrive and a final
-/// [`Message::ArtifactDownloaded`]. `store` (the local content store) is only used
-/// by the tree arm, so already-present chunks are skipped and a resume is free.
+/// [`Message::ArtifactDownloaded`] carrying the produced path. `store` (the
+/// local content store) is only used by the tree arm, so already-present
+/// chunks are skipped and a resume is free.
 ///
-/// `dest` is the **destination file** for a blob and the **destination root
-/// directory** for a tree. The caller always chooses it — a remote party must
-/// not pick where bytes land, so `Manifest::filename` is advisory and this
-/// function never joins it to a path.
+/// `dest` is the **staging directory** for a blob (`download_staged` stages
+/// under the blob id — the caller chooses where bytes land, and the manifest's
+/// advisory filename is only offered later, in the Save-as dialog) and the
+/// **destination root directory** for a tree.
 ///
 /// Both arms are **anchored**: the blob is pinned to `manifest.root` and the
 /// tree is fetched by root, so a wrong or tampered reply is rejected before it
@@ -511,8 +512,7 @@ pub fn download_stream(
         // a wrong total — and a slow repaint can no longer queue unboundedly
         // against a fast transfer.
         let (sink, mut rx) = zblob::progress_channel(64);
-        let ret = dest.clone();
-        let dl = tokio::spawn(async move {
+        let dl: tokio::task::JoinHandle<zblob::Result<PathBuf>> = tokio::spawn(async move {
             // A delivery's prefixes arrive **off the network** (the sensor's
             // `ArtifactStatus`), and `QueryPrefix` deliberately admits
             // single-segment wildcards because probing needs them — so
@@ -534,11 +534,15 @@ pub fn download_stream(
                 Delivery::Blob { manifest, blob_prefix } => {
                     let client = BlobClient::new(&session, concrete(blob_prefix)?);
                     let req = DownloadRequest::pinned(manifest.id.to_string(), manifest.root);
-                    client
-                        .download_to(&req, &dest)
+                    // `Staged.suggested` is deliberately discarded: the job
+                    // already holds the manifest's (sanitized) filename off
+                    // the sensor's ArtifactStatus for the Save-as dialog.
+                    let staged = client
+                        .download_staged(&req, &dest)
                         .progress(&sink)
                         .cancel(&cancel)
-                        .await
+                        .await?;
+                    Ok(staged.path)
                 }
                 Delivery::Tree {
                     root,
@@ -556,7 +560,8 @@ pub fn download_stream(
                         .download_tree(&req, &dest, &store)
                         .progress(&sink)
                         .cancel(&cancel)
-                        .await
+                        .await?;
+                    Ok(dest)
                 }
             }
         });
@@ -566,7 +571,7 @@ pub fn download_stream(
             }
         }
         match dl.await {
-            Ok(Ok(_stats)) => yield Message::ArtifactDownloaded(Ok(ret)),
+            Ok(Ok(path)) => yield Message::ArtifactDownloaded(Ok(path)),
             Ok(Err(e)) => yield Message::ArtifactDownloaded(Err(e.to_string())),
             Err(e) => yield Message::ArtifactDownloaded(Err(format!("download task failed: {e}"))),
         }
@@ -591,14 +596,15 @@ pub fn download_stream(
 /// because a record served by a pre-0.11 sensor carries no root; that case is
 /// trust-on-first-use and is logged as such rather than silently accepted.
 ///
-/// `dest` is the destination **file** — the caller chooses it, never the
-/// manifest's advisory filename.
+/// `dir` is the **staging directory** — `download_staged` stages under the
+/// blob id, so the caller chooses where bytes land and the record's filename
+/// stays advisory until the Save-as dialog.
 pub fn download_blob_direct(
     session: Arc<Session>,
     blob_prefix: String,
     id: String,
     root: Option<zblob::Hash>,
-    dest: PathBuf,
+    dir: PathBuf,
     cancel: CancelToken,
 ) -> impl Stream<Item = Message> {
     async_stream::stream! {
@@ -630,18 +636,20 @@ pub fn download_blob_direct(
         }
         // Same bounded, event-dropping adapter as `download_stream`.
         let (sink, mut rx) = zblob::progress_channel(64);
-        let ret = dest.clone();
-        let dl = tokio::spawn(async move {
+        let dl: tokio::task::JoinHandle<zblob::Result<PathBuf>> = tokio::spawn(async move {
             let client = BlobClient::new(&session, prefix);
             let req = match root {
                 Some(r) => DownloadRequest::pinned(id, r),
                 None => DownloadRequest::new(id),
             };
-            client
-                .download_to(&req, &dest)
+            // `Staged.suggested` is deliberately discarded: this path's
+            // Save-as name comes off the CaptureRecord that listed the blob.
+            let staged = client
+                .download_staged(&req, &dir)
                 .progress(&sink)
                 .cancel(&cancel)
-                .await
+                .await?;
+            Ok(staged.path)
         });
         while let Some(p) = rx.recv().await {
             if let Progress::Chunk { received, total, .. } = p {
@@ -649,7 +657,7 @@ pub fn download_blob_direct(
             }
         }
         match dl.await {
-            Ok(Ok(_stats)) => yield Message::ArtifactDownloaded(Ok(ret)),
+            Ok(Ok(path)) => yield Message::ArtifactDownloaded(Ok(path)),
             Ok(Err(e)) => yield Message::ArtifactDownloaded(Err(e.to_string())),
             Err(e) => yield Message::ArtifactDownloaded(Err(format!("download task failed: {e}"))),
         }
