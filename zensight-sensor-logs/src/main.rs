@@ -646,7 +646,11 @@ async fn main() -> Result<()> {
                         Err(_) => continue,
                     };
                 for (device, claim) in claims {
-                    let key = zensight_common::host_evidence_key("logs", &device);
+                    let key: String = zensight_common::registry::logs::key(
+                        &zensight_common::PROFILE.local_origin(),
+                        &zensight_common::registry::logs::Subject::evidence_device(&device),
+                    )
+                    .into();
                     if let Err(e) = ev_registry.publish_serializable(&key, &claim).await {
                         tracing::warn!(device = %device, error = %e, "evidence publish failed");
                     }

@@ -212,18 +212,13 @@ pub fn all_health_wildcard() -> String {
     "v1/*/state/*/health".to_string()
 }
 
-/// Build this host's v1 evidence key for one observed device (RFC 06 §4):
-/// `<base>/v1/<local-origin>/state/<sensor>/evidence/device/<device>`.
-/// The device chunk is slugged, so raw hostnames/IPs/MACs are safe inputs;
-/// consumers read the observed identity from the payload, not the key.
-pub fn host_evidence_key(sensor: &str, device: &str) -> String {
-    format!(
-        "v1/{}/state/{}/evidence/device/{}",
-        crate::PROFILE.host_id().as_str(),
-        sensor,
-        zenkey::slug::chunk_slug(device)
-    )
-}
+// `host_evidence_key(sensor, device)` and `name_observation_key(sensor, ip)`
+// lived here through 0.10 and are gone: they string-dispatched on the sensor
+// name, where every publisher knows its producer statically. Evidence
+// publishers now build their keys with the per-producer generated builders —
+// `registry::<producer>::key(&PROFILE.local_origin(),
+// &Subject::evidence_device(..))` — which slug identically (`Chunk::slug` is
+// `chunk_slug`) and additionally guarantee the subject is registered.
 
 /// Build a wildcard key expression for the whole evidence keyspace
 /// (`host/**` claims and `names/**` observation batches).
@@ -237,19 +232,6 @@ pub fn host_evidence_key(sensor: &str, device: &str) -> String {
 pub fn all_evidence_wildcard() -> String {
     // v1 (RFC 06 §4): evidence is ordinary per-origin state.
     "v1/*/state/*/evidence/**".to_string()
-}
-
-/// Build this host's v1 name-observation key for one observed IP (#307,
-/// RFC 06 §4): the ip is slugified (`.`/`:` → `-`) so updates for the same
-/// IP replace in place:
-/// `<base>/v1/<local-origin>/state/<sensor>/evidence/names/<ip-slug>`.
-pub fn name_observation_key(sensor: &str, ip_slug: &str) -> String {
-    format!(
-        "v1/{}/state/{}/evidence/names/{}",
-        crate::PROFILE.host_id().as_str(),
-        sensor,
-        ip_slug
-    )
 }
 
 /// Build a wildcard key expression for all passive-DNS name observations,
@@ -898,17 +880,30 @@ mod tests {
         #[test]
         fn profile_derived_evidence_keys() {
             // The origin is machine-minted, so pin the exact construction:
-            // origin + literal spelling + the slugged device chunk.
+            // origin + literal spelling + the slugged device chunk. These pin
+            // the generated per-producer builders the evidence publishers use
+            // (the string-dispatching keyexpr helpers they replaced are gone).
             let origin = crate::PROFILE.host_id().as_str().to_string();
+            let local = crate::PROFILE.local_origin();
+            let device_key: String = registry::netring::key(
+                &local,
+                &registry::netring::Subject::evidence_device("AA:BB:CC:00:11:22"),
+            )
+            .into();
             assert_eq!(
-                host_evidence_key("netring", "AA:BB:CC:00:11:22"),
+                device_key,
                 format!(
                     "v1/{origin}/state/netring/evidence/device/{}",
                     zenkey::slug::chunk_slug("AA:BB:CC:00:11:22")
                 )
             );
+            let names_key: String = registry::netring::key(
+                &local,
+                &registry::netring::Subject::evidence_names("10-0-0-9"),
+            )
+            .into();
             assert_eq!(
-                name_observation_key("netring", "10-0-0-9"),
+                names_key,
                 format!("v1/{origin}/state/netring/evidence/names/10-0-0-9")
             );
         }
