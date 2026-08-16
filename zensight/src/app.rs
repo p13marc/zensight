@@ -3939,11 +3939,47 @@ impl ZenSight {
     /// pick the transfer client off the delivery tag and kick off the stream.
     fn on_artifact_requested(
         &mut self,
-        result: Result<zensight_common::ArtifactState, String>,
+        result: Result<Vec<zensight_common::ArtifactState>, String>,
+    ) -> Option<Task<Message>> {
+        match result {
+            Ok(states) => {
+                // The request fanned out under one shared ULID, so several
+                // hosts may each have produced their own artifact for it —
+                // one holder per origin, read off the delivery's concrete
+                // prefix. A single holder proceeds exactly as before.
+                let mut holders = crate::view::artifact_fetch::holders_from_states(states);
+                match holders.len() {
+                    0 => {
+                        let e = "no usable artifact holder (malformed delivery)".to_string();
+                        self.artifact_fetch =
+                            crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
+                        self.toasts
+                            .push(ToastSeverity::Error, format!("Artifact failed: {e}"));
+                        None
+                    }
+                    _ => {
+                        let first = holders.remove(0);
+                        self.start_holder_download(first.state)
+                    }
+                }
+            }
+            Err(e) => {
+                self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
+                self.toasts
+                    .push(ToastSeverity::Error, format!("Artifact failed: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Kick off the transfer for one chosen holder's Ready state.
+    fn start_holder_download(
+        &mut self,
+        state: zensight_common::ArtifactState,
     ) -> Option<Task<Message>> {
         use zensight_common::{ArtifactState, Delivery};
-        match result {
-            Ok(ArtifactState::Ready { delivery, .. }) => {
+        match state {
+            ArtifactState::Ready { delivery, .. } => {
                 let job = self.artifact_job.as_mut()?;
                 job.delivery = Some(delivery.clone());
                 // Total & filename depend on the delivery type (chunk count for a
@@ -3980,13 +4016,8 @@ impl ZenSight {
                     session, delivery, dest, store, temps, cancel,
                 )))
             }
-            Ok(_) => None, // request helper only returns Ready on success
-            Err(e) => {
-                self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
-                self.toasts
-                    .push(ToastSeverity::Error, format!("Artifact failed: {e}"));
-                None
-            }
+            // Holders are built from Ready states only.
+            _ => None,
         }
     }
 

@@ -1064,7 +1064,7 @@ pub enum Message {
         progress: Option<f32>,
     },
     /// The artifact request resolved: a `Ready` state to download, or an error.
-    ArtifactRequested(Result<zensight_common::ArtifactState, String>),
+    ArtifactRequested(Result<Vec<zensight_common::ArtifactState>, String>),
     /// Streaming download progress (units resolved / total).
     ArtifactProgress {
         /// Units resolved so far.

@@ -420,27 +420,27 @@ pub fn request_and_stream_ready(
             &producer,
             "artifact/status",
         );
-        // Poll every 500ms for a scaled window (2 iters/sec).
+        // Poll every 500ms for a scaled window (2 iters/sec). The request
+        // fanned out under one shared ULID, so EVERY host running the
+        // producer may be building its own artifact for it — a round's
+        // outcome is decided over all of their states (`poll_round_outcome`),
+        // not whichever host answered first.
         let iters = (60 + extra_secs) * 2;
         for _ in 0..iters {
-            if let Some(state) = poll_status(&session, &status_key, &slug, id).await {
-                match state {
-                    ArtifactState::Ready { .. } => {
-                        yield Message::ArtifactRequested(Ok(state));
-                        return;
-                    }
-                    ArtifactState::Failed { reason, .. } => {
-                        yield Message::ArtifactRequested(Err(reason));
-                        return;
-                    }
-                    ArtifactState::Expired { .. } => {
-                        yield Message::ArtifactRequested(Err("artifact expired".into()));
-                        return;
-                    }
-                    ArtifactState::Generating { detail, progress, .. } => {
-                        yield Message::ArtifactGenerating { detail, progress };
-                    }
+            let states = poll_status_all(&session, &status_key, &slug, id).await;
+            match poll_round_outcome(states) {
+                RoundOutcome::Ready(ready) => {
+                    yield Message::ArtifactRequested(Ok(ready));
+                    return;
                 }
+                RoundOutcome::Generating { detail, progress } => {
+                    yield Message::ArtifactGenerating { detail, progress };
+                }
+                RoundOutcome::Failed(reason) => {
+                    yield Message::ArtifactRequested(Err(reason));
+                    return;
+                }
+                RoundOutcome::Pending => {}
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -448,22 +448,125 @@ pub fn request_and_stream_ready(
     }
 }
 
-/// GET the status queryable and return the current state iff it is for this
+/// The decision a status-poll round yields over every host's state.
+enum RoundOutcome {
+    /// At least one host is Ready and none is still Generating — done.
+    Ready(Vec<ArtifactState>),
+    /// Someone is still producing (the first one's progress is surfaced);
+    /// keep polling — a slower host is not dropped because a fast one
+    /// finished.
+    Generating {
+        /// Producer-reported progress line.
+        detail: Option<String>,
+        /// Producer-reported fraction.
+        progress: Option<f32>,
+    },
+    /// Every host that answered failed or expired — done, with the first
+    /// host's reason.
+    Failed(String),
+    /// No host has answered for this id yet.
+    Pending,
+}
+
+/// Decide a poll round: Ready-and-quiet completes with every Ready state;
+/// any Generating keeps waiting; a Failed/Expired counts only when no host
+/// is Ready or producing (one host's refusal must not mask another's
+/// artifact).
+fn poll_round_outcome(states: Vec<ArtifactState>) -> RoundOutcome {
+    if let Some(g) = states.iter().find_map(|s| match s {
+        ArtifactState::Generating {
+            detail, progress, ..
+        } => Some((detail.clone(), *progress)),
+        _ => None,
+    }) {
+        return RoundOutcome::Generating {
+            detail: g.0,
+            progress: g.1,
+        };
+    }
+    let ready: Vec<ArtifactState> = states
+        .iter()
+        .filter(|s| matches!(s, ArtifactState::Ready { .. }))
+        .cloned()
+        .collect();
+    if !ready.is_empty() {
+        return RoundOutcome::Ready(ready);
+    }
+    for s in states {
+        match s {
+            ArtifactState::Failed { reason, .. } => return RoundOutcome::Failed(reason),
+            ArtifactState::Expired { .. } => {
+                return RoundOutcome::Failed("artifact expired".into());
+            }
+            _ => {}
+        }
+    }
+    RoundOutcome::Pending
+}
+
+/// One host's Ready artifact for the shared request id — the pick-a-holder
+/// unit when several hosts produced under the same ULID.
+#[derive(Debug, Clone)]
+pub struct ArtifactHolder {
+    /// The producing host's origin chunk (`h-…`), read off the delivery's
+    /// concrete blob/tree prefix.
+    pub origin: String,
+    /// That host's full Ready state (delivery, expiry).
+    pub state: ArtifactState,
+}
+
+/// Reduce a Ready set to one holder per origin. The origin comes from the
+/// delivery's own concrete prefix — for trees every host has a *different
+/// root* (each built its own snapshot), so holders are alternatives to pick
+/// between, never stripes of one transfer. A malformed prefix is skipped: a
+/// holder the download path would refuse anyway is not worth offering.
+pub fn holders_from_states(states: Vec<ArtifactState>) -> Vec<ArtifactHolder> {
+    let mut out: Vec<ArtifactHolder> = Vec::new();
+    for state in states {
+        let ArtifactState::Ready { delivery, .. } = &state else {
+            continue;
+        };
+        let prefix = match delivery {
+            Delivery::Blob { blob_prefix, .. } => blob_prefix,
+            Delivery::Tree { tree_prefix, .. } => tree_prefix,
+        };
+        let Some(origin) = prefix
+            .split('/')
+            .nth(1)
+            .filter(|c| zenkey::origin::RemoteOrigin::parse(c).is_ok())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if out.iter().any(|h| h.origin == origin) {
+            continue;
+        }
+        out.push(ArtifactHolder { origin, state });
+    }
+    out
+}
+
+/// GET the status queryable and collect EVERY host's current state for this
 /// `slug` + `id` (a sensor lists one entry per kind it produces).
-async fn poll_status(
+///
+/// Fleet fan-in (RFC 05 §2.1): every host serving the producer replies, and
+/// every host may have accepted the shared request id — so all matching
+/// states come back, not the first. First-reply-wins silently dropped every
+/// other host's artifact.
+async fn poll_status_all(
     session: &Session,
     status_key: &str,
     slug: &str,
     id: Ulid,
-) -> Option<ArtifactState> {
-    // Fleet fan-in (RFC 05 §2.1): every host serving the producer replies,
-    // but only the one that accepted `id` carries its state — scan them all
-    // instead of trusting whichever host answered first.
-    let replies = session
+) -> Vec<ArtifactState> {
+    let mut out = Vec::new();
+    let Ok(replies) = session
         .get(status_key)
         .target(zenoh::query::QueryTarget::All)
         .await
-        .ok()?;
+    else {
+        return out;
+    };
     while let Ok(reply) = replies.recv_async().await {
         let Ok(sample) = reply.result() else { continue };
         let Ok(status) = serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
@@ -477,10 +580,10 @@ async fn poll_status(
             .and_then(|k| k.current)
             .filter(|s| s.id() == id)
         {
-            return Some(state);
+            out.push(state);
         }
     }
-    None
+    out
 }
 
 /// Drive the right `zblob` client for `delivery` into `dest`, yielding
@@ -1139,5 +1242,83 @@ mod tests {
                 .label("report")
                 .contains("boom")
         );
+    }
+
+    fn ready(origin: &str, kind: &str) -> ArtifactState {
+        ArtifactState::Ready {
+            id: Ulid::from_parts(1, 1),
+            kind: kind.into(),
+            delivery: Delivery::Tree {
+                root: zblob::Hash::of(origin.as_bytes()),
+                store_prefix: format!("v1/{origin}/@blob/store"),
+                tree_prefix: format!("v1/{origin}/@blob/tree"),
+                summary: zensight_common::TreeSummary {
+                    file_count: 1,
+                    total_bytes: 1,
+                },
+            },
+            expires_ms: 0,
+        }
+    }
+
+    /// The fan-in round rule: any Generating keeps waiting (a slow host is
+    /// not dropped because a fast one finished), Ready-and-quiet completes
+    /// with EVERY Ready state, and a failure counts only when nobody is
+    /// Ready or producing.
+    #[test]
+    fn poll_round_outcome_rules() {
+        let producing = ArtifactState::Generating {
+            id: Ulid::from_parts(1, 1),
+            kind: "snapshot".into(),
+            detail: None,
+            progress: Some(0.5),
+        };
+        let failed = ArtifactState::Failed {
+            id: Ulid::from_parts(1, 1),
+            kind: "snapshot".into(),
+            reason: "disk full".into(),
+        };
+
+        // Ready + Generating → keep polling.
+        assert!(matches!(
+            poll_round_outcome(vec![ready("h-3fa9c2d41b7e", "snapshot"), producing.clone()]),
+            RoundOutcome::Generating { .. }
+        ));
+        // Ready + Failed → the failure must not mask the artifact.
+        match poll_round_outcome(vec![failed.clone(), ready("h-3fa9c2d41b7e", "snapshot")]) {
+            RoundOutcome::Ready(states) => assert_eq!(states.len(), 1),
+            _ => panic!("a failure must not mask a Ready artifact"),
+        }
+        // Two Ready hosts → both come back.
+        match poll_round_outcome(vec![
+            ready("h-3fa9c2d41b7e", "snapshot"),
+            ready("h-0123456789ab", "snapshot"),
+        ]) {
+            RoundOutcome::Ready(states) => assert_eq!(states.len(), 2),
+            _ => panic!("both hosts' artifacts must come back"),
+        }
+        // Only failures → failed, with the reason.
+        assert!(matches!(
+            poll_round_outcome(vec![failed]),
+            RoundOutcome::Failed(r) if r == "disk full"
+        ));
+        // Nothing yet → pending.
+        assert!(matches!(poll_round_outcome(vec![]), RoundOutcome::Pending));
+    }
+
+    /// Holder reduction: one holder per origin, origin read off the concrete
+    /// delivery prefix, malformed prefixes skipped.
+    #[test]
+    fn holders_reduce_by_origin() {
+        let states = vec![
+            ready("h-3fa9c2d41b7e", "snapshot"),
+            ready("h-3fa9c2d41b7e", "snapshot"), // duplicate origin
+            ready("h-0123456789ab", "snapshot"),
+            ready("*", "snapshot"), // wildcard origin: not a fetchable holder
+        ];
+        let holders = holders_from_states(states);
+        assert_eq!(holders.len(), 2);
+        assert_eq!(holders[0].origin, "h-3fa9c2d41b7e");
+        assert_eq!(holders[1].origin, "h-0123456789ab");
     }
 }
