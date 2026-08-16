@@ -13,9 +13,7 @@ use iced::futures::Stream;
 use iced::widget::{Row, button, checkbox, column, row, text, text_input};
 use iced::{Alignment, Element, Length};
 use ulid::Ulid;
-use zblob::{
-    BlobClient, CancelToken, ContentStore, DownloadRequest, Progress, ProgressSink, TreeClient,
-};
+use zblob::{BlobClient, CancelToken, ContentStore, DownloadRequest, Progress, TreeClient};
 use zenoh::Session;
 use zensight_common::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
@@ -508,16 +506,13 @@ pub fn download_stream(
     cancel: CancelToken,
 ) -> impl Stream<Item = Message> {
     async_stream::stream! {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
+        // The crate's own bounded, event-dropping progress adapter: a Progress
+        // carries absolute counts, so a dropped event costs one repaint, never
+        // a wrong total — and a slow repaint can no longer queue unboundedly
+        // against a fast transfer.
+        let (sink, mut rx) = zblob::progress_channel(64);
         let ret = dest.clone();
         let dl = tokio::spawn(async move {
-            struct Sink(tokio::sync::mpsc::UnboundedSender<Progress>);
-            impl ProgressSink for Sink {
-                fn emit(&self, p: Progress) {
-                    let _ = self.0.send(p);
-                }
-            }
-            let sink = Sink(tx);
             // A delivery's prefixes arrive **off the network** (the sensor's
             // `ArtifactStatus`), and `QueryPrefix` deliberately admits
             // single-segment wildcards because probing needs them — so
@@ -633,16 +628,10 @@ pub fn download_blob_direct(
                  trust-on-first-use, see RFC 07 §2.1"
             );
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
+        // Same bounded, event-dropping adapter as `download_stream`.
+        let (sink, mut rx) = zblob::progress_channel(64);
         let ret = dest.clone();
         let dl = tokio::spawn(async move {
-            struct Sink(tokio::sync::mpsc::UnboundedSender<Progress>);
-            impl ProgressSink for Sink {
-                fn emit(&self, p: Progress) {
-                    let _ = self.0.send(p);
-                }
-            }
-            let sink = Sink(tx);
             let client = BlobClient::new(&session, prefix);
             let req = match root {
                 Some(r) => DownloadRequest::pinned(id, r),
