@@ -132,7 +132,12 @@ if [[ -n "$pcap_dir" ]]; then
     # threat.sigma's, and `mode: "off"` would reach zenoh's `mode: "peer"`.
     netring_seds+=(
         -e '/^      to_disk: \{/,/^      \},/ { s/mode: "off"/mode: "triggered"/; s#dir: null#dir: "'"$pcap_dir"'"#; }'
-        -e '/snapshot: \{/,/dirs: \[/ { s/enabled: false/enabled: true/; s#dirs: \[#dirs: [ { name: "pcaps", path: "'"$pcap_dir"'" },# }'
+        # The pcap dir is append-mostly — exactly the sanctioned case for
+        # `incremental` (build_tree_from parent reuse); the durable store
+        # lands beside the pcaps so repeated demo snapshots dedup and survive
+        # a sensor restart.
+        -e '/snapshot: \{/,/dirs: \[/ { s/enabled: false/enabled: true/; s#dirs: \[#dirs: [ { name: "pcaps", path: "'"$pcap_dir"'", incremental: true },# }'
+        -e 's#// state_dir: "/var/lib/zensight-netring/artifacts",#state_dir: "'"$pcap_dir"'-state",#'
     )
 fi
 sed -E "${netring_seds[@]}" "$configs_dir/netring.json5" > "$outdir/netring.json5"
