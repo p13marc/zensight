@@ -380,13 +380,24 @@ async fn exhausted_retries_recover_by_next_cycle() {
 // SNMPv3 matrix
 // ---------------------------------------------------------------------------
 
+/// A throwaway authoritative engine for the sim agent (0.17 requires one for
+/// any v3 role; no persistence in tests).
+fn test_engine(engine_id: Vec<u8>) -> async_snmp::AuthoritativeEngine {
+    async_snmp::AuthoritativeEngine::install(engine_id, |_| Ok::<(), std::convert::Infallible>(()))
+        .expect("install test engine")
+}
+
 /// Poll one sysName GET through the given client-side v3 security against an
 /// agent provisioned with `provision`; return whether a point arrived.
 async fn v3_roundtrip(
     security: SnmpV3Security,
     provision: impl FnOnce(async_snmp::AgentBuilder) -> async_snmp::AgentBuilder,
 ) -> bool {
-    let agent = SimAgent::start_with(base_mib(), provision).await;
+    // Default engine identity first; a test's `provision` may override it.
+    let agent = SimAgent::start_with(base_mib(), |b| {
+        provision(b.authoritative_engine(test_engine(b"\x80\x00\x00\x00\x01v3test".to_vec())))
+    })
+    .await;
     let mut device = v2c_device("v3dev", agent.addr());
     device.version = SnmpVersion::V3;
     device.security = Some(security);
@@ -497,8 +508,12 @@ async fn v3_auth_priv_sha1_aes128() {
         ),
         |b| {
             b.usm_user("monitor", |u| {
-                u.auth(AgentAuth::Sha1, b"authpass123")
-                    .privacy(AgentPriv::Aes128, b"privpass123")
+                u.auth_priv(
+                    AgentAuth::Sha1,
+                    b"authpass123",
+                    AgentPriv::Aes128,
+                    b"privpass123",
+                )
             })
         },
     )
@@ -517,8 +532,12 @@ async fn v3_auth_priv_sha256_aes128() {
         ),
         |b| {
             b.usm_user("monitor", |u| {
-                u.auth(AgentAuth::Sha256, b"authpass123")
-                    .privacy(AgentPriv::Aes128, b"privpass123")
+                u.auth_priv(
+                    AgentAuth::Sha256,
+                    b"authpass123",
+                    AgentPriv::Aes128,
+                    b"privpass123",
+                )
             })
         },
     )
@@ -537,8 +556,12 @@ async fn v3_auth_priv_sha256_aes256() {
         ),
         |b| {
             b.usm_user("monitor", |u| {
-                u.auth(AgentAuth::Sha256, b"authpass123")
-                    .privacy(AgentPriv::Aes256, b"privpass123")
+                u.auth_priv(
+                    AgentAuth::Sha256,
+                    b"authpass123",
+                    AgentPriv::Aes256,
+                    b"privpass123",
+                )
             })
         },
     )
@@ -572,8 +595,12 @@ async fn v3_wrong_priv_password_yields_nothing() {
         ),
         |b| {
             b.usm_user("monitor", |u| {
-                u.auth(AgentAuth::Sha256, b"authpass123")
-                    .privacy(AgentPriv::Aes128, b"privpass123")
+                u.auth_priv(
+                    AgentAuth::Sha256,
+                    b"authpass123",
+                    AgentPriv::Aes128,
+                    b"privpass123",
+                )
             })
         },
     )
@@ -587,7 +614,7 @@ async fn v3_wrong_priv_password_yields_nothing() {
 async fn v3_engine_rediscovery_after_agent_restart() {
     let provision = |engine: &'static [u8]| {
         move |b: async_snmp::AgentBuilder| {
-            b.engine_id(engine.to_vec())
+            b.authoritative_engine(test_engine(engine.to_vec()))
                 .usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123"))
         }
     };
@@ -643,7 +670,7 @@ async fn v3_configured_engine_id_polls() {
     security.engine_id = Some(engine_hex);
 
     let ok = v3_roundtrip(security, |b| {
-        b.engine_id(ENGINE.to_vec())
+        b.authoritative_engine(test_engine(ENGINE.to_vec()))
             .usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123"))
     })
     .await;
@@ -1459,11 +1486,17 @@ async fn trap_v3_authpriv_end_to_end() {
     .await;
 
     let sink_auth: async_snmp::Auth = async_snmp::Auth::usm("trapuser")
-        .auth(AgentAuth::Sha256, "authpass123")
-        .privacy(AgentPriv::Aes128, "privpass123")
+        .auth_priv(
+            AgentAuth::Sha256,
+            "authpass123",
+            AgentPriv::Aes128,
+            "privpass123",
+        )
         .into();
     let agent = SimAgent::start_with(SimMib::new(), |b| {
+        // 0.17: a v3 trap sink makes the agent authoritative — engine required.
         b.community(b"public")
+            .authoritative_engine(test_engine(b"\x80\x00\x00\x00\x01trapsend".to_vec()))
             .trap_sink(rig.addr.to_string(), sink_auth)
     })
     .await;

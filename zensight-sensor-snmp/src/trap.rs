@@ -89,6 +89,19 @@ impl TrapReceiver {
         if !self.config.communities.is_empty() {
             builder = builder.communities(&self.config.communities);
         }
+        if !self.config.users.is_empty() {
+            // async-snmp 0.17 requires local authoritative engine state for
+            // v3 receiving. Deliberately stateless: a fresh engine identity
+            // per process start makes inform senders re-handshake (unknown
+            // engine → rediscovery), whereas a persisted identity with a
+            // non-incrementing boots counter would trip their replay window.
+            let engine =
+                async_snmp::AuthoritativeEngine::install(async_snmp::generate_engine_id(), |_| {
+                    Ok::<(), std::convert::Infallible>(())
+                })
+                .map_err(|e| anyhow::anyhow!("v3 receiver engine setup failed: {e}"))?;
+            builder = builder.authoritative_engine(engine);
+        }
         for user in &self.config.users {
             builder = usm_user(builder, user);
         }
@@ -132,7 +145,6 @@ fn usm_user(
             AuthProtocol::Sha512 => Some(async_snmp::AuthProtocol::Sha512),
         };
         if let Some(proto) = auth {
-            u = u.auth(proto, auth_password.as_bytes());
             let privacy = match priv_protocol {
                 PrivProtocol::None => None,
                 PrivProtocol::Des => Some(async_snmp::PrivProtocol::Des),
@@ -140,9 +152,16 @@ fn usm_user(
                 PrivProtocol::Aes192 => Some(async_snmp::PrivProtocol::Aes192),
                 PrivProtocol::Aes256 => Some(async_snmp::PrivProtocol::Aes256),
             };
-            if let Some(cipher) = privacy {
-                u = u.privacy(cipher, priv_password.as_bytes());
-            }
+            // 0.17: authPriv is one constructor — `.privacy()` is gone.
+            u = match privacy {
+                Some(cipher) => u.auth_priv(
+                    proto,
+                    auth_password.as_bytes(),
+                    cipher,
+                    priv_password.as_bytes(),
+                ),
+                None => u.auth(proto, auth_password.as_bytes()),
+            };
         }
         u
     })

@@ -145,8 +145,9 @@ A configured `engine_id` (hex, `0x`/`:` tolerated) pre-seeds the engine cache
 and skips the discovery round-trip; it requires a literal `ip:port` device
 address (hostnames fall back to auto-discovery, the default). If a device
 comes back with a **different** engine identity (agent replaced/reset), the
-poller notices the all-auth-failure cycle and rebuilds its client to force
-rediscovery — no sensor restart needed.
+poller notices the all-auth-failure cycle and asks the client to rediscover
+the engine in place (`rediscover_engine`, async-snmp 0.17 / #577) — no
+sensor restart needed.
 
 ## Subnet discovery (#541)
 
