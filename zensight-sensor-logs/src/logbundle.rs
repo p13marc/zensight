@@ -90,7 +90,7 @@ impl ArtifactProducer for LogBundleProducer {
         }
     }
 
-    async fn produce(&self, kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
+    async fn produce(&self, kind: ArtifactKind, ctx: ProduceCtx) -> anyhow::Result<Produced> {
         let ArtifactKind::LogBundle {
             from,
             to,
@@ -204,8 +204,18 @@ impl ArtifactProducer for LogBundleProducer {
                 }
             }
 
+            // Surface a line-cap truncation on the artifact's Ready state
+            // (#602) — a caveat the operator only finds after decompressing
+            // the bundle arrives too late to change what they ask for.
+            if truncated {
+                ctx.note(format!(
+                    "truncated: {total} records matched, {} included (line cap)",
+                    included.len()
+                ));
+            }
+
             let mut written_bytes: u64 = 0;
-            for rec in included {
+            for (written_records, rec) in included.iter().enumerate() {
                 let line = match format {
                     LogBundleFormat::Jsonl => serde_json::to_string(rec)?,
                     LogBundleFormat::Text => format!(
@@ -219,9 +229,14 @@ impl ArtifactProducer for LogBundleProducer {
                 };
                 written_bytes += line.len() as u64 + 1;
                 if written_bytes > max_bytes {
-                    // Byte cap hit: stop; the manifest already exists (truncation
-                    // is best-effort flagged via the line cap; a byte-cap stop is
-                    // rarer). Break to keep a valid bundle.
+                    // Byte cap hit: stop to keep the bundle valid. The
+                    // in-bundle manifest was already written, so it cannot
+                    // record this one — the Ready note can (#602).
+                    ctx.note(format!(
+                        "truncated: byte cap ({max_bytes} B) reached after {written} of {} records",
+                        included.len(),
+                        written = written_records
+                    ));
                     break;
                 }
                 enc.write_all(line.as_bytes())?;
@@ -315,10 +330,12 @@ mod tests {
 
         let cancel = CancelToken::new();
         let (progress, _rx) = tokio::sync::watch::channel(ProgressUpdate::default());
+        let note_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
         let ctx = ProduceCtx {
             workdir: dir.path().to_path_buf(),
             cancel,
             progress,
+            note: note_sink.clone(),
         };
         let produced = p
             .produce(
@@ -358,5 +375,13 @@ mod tests {
                 .iter()
                 .all(|r| r["message"].as_str().unwrap().contains("boom"))
         );
+
+        // #602: the truncation is also reported on the artifact's Ready
+        // state, so the operator learns it without decompressing.
+        let note = note_sink.lock().unwrap().clone();
+        let note = note.expect("a truncated bundle records a caveat");
+        assert!(note.contains("truncated"), "{note}");
+        assert!(note.contains('4'), "matched count in the note: {note}");
+        assert!(note.contains('3'), "included count in the note: {note}");
     }
 }

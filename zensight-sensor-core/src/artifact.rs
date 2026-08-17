@@ -115,6 +115,25 @@ pub struct ProduceCtx {
     pub cancel: CancelToken,
     /// Send incremental progress here; the channel republishes it as `Generating`.
     pub progress: watch::Sender<ProgressUpdate>,
+    /// A caveat about the artifact actually produced (#602), surfaced on the
+    /// `Ready` state — e.g. `"truncated at 10000 lines"`. Set it with
+    /// [`note`](Self::note). Same shape as `progress` (a side channel the
+    /// producer writes and the channel reads) so no producer signature has to
+    /// change to gain one.
+    pub note: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl ProduceCtx {
+    /// Record a caveat to surface with the finished artifact (#602). Last
+    /// call wins; producers set it once, when they know a cap bit.
+    pub fn note(&self, note: impl Into<String>) {
+        *self.note.lock().unwrap_or_else(|e| e.into_inner()) = Some(note.into());
+    }
+
+    /// Take the recorded caveat out of a shared handle, if any.
+    fn take_note_from(note: &Arc<std::sync::Mutex<Option<String>>>) -> Option<String> {
+        note.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
 }
 
 /// A pluggable artifact producer. One instance is registered per kind on an
@@ -635,8 +654,12 @@ impl ArtifactChannel {
             workdir: self.workdir.path().to_path_buf(),
             cancel: cancel.clone(),
             progress: progress_tx,
+            note: Arc::new(std::sync::Mutex::new(None)),
         };
+        // The producer's caveat (#602) outlives the ctx it was written into.
+        let note = ctx.note.clone();
         let outcome = producer.produce(kind, ctx).await;
+        let note = ProduceCtx::take_note_from(&note);
         progress_relay.abort();
 
         // 0.3 refuses to re-register an id whose content changed ("use
@@ -663,7 +686,7 @@ impl ArtifactChannel {
         // Finalize: turn the produced artifact into a Delivery + Active record.
         let finalized = match outcome {
             Ok(_) if cancel.is_cancelled() => Err(anyhow::anyhow!("cancelled")),
-            Ok(produced) => self.finalize(id, slug, &producer, produced).await,
+            Ok(produced) => self.finalize(id, slug, &producer, produced, note).await,
             Err(e) => Err(e),
         };
 
@@ -704,6 +727,7 @@ impl ArtifactChannel {
         slug: &'static str,
         producer: &Arc<dyn ArtifactProducer>,
         produced: Produced,
+        note: Option<String>,
     ) -> anyhow::Result<(ArtifactState, Active)> {
         let ttl_secs = producer.common().ttl_secs;
         let chunk_size = producer.common().chunk_size;
@@ -740,6 +764,7 @@ impl ArtifactChannel {
                         blob_prefix: artifact_blob_prefix(),
                     },
                     expires_ms,
+                    note,
                 };
                 Ok((
                     state,
@@ -777,6 +802,7 @@ impl ArtifactChannel {
                         blob_prefix: artifact_blob_prefix(),
                     },
                     expires_ms,
+                    note,
                 };
                 Ok((
                     state,
@@ -958,6 +984,7 @@ impl ArtifactChannel {
                         summary,
                     },
                     expires_ms,
+                    note,
                 };
                 Ok((
                     state,

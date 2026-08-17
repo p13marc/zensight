@@ -355,7 +355,14 @@ logbundle: {
 
 Lines come from the durable store (#544) when enabled, plus the hot ring.
 Producer runs off the intake loop. `zenctl` can request the bundle headlessly;
-the GUI Export button (prefilled from the active Logs filter) rides with #554.
+the GUI Export button is prefilled from the active Logs filter (#554/#555) and
+offers the `jsonl`/`text` format choice (#602).
+
+When a cap bites, the bundle's own first-line manifest carries `truncated`
+**and** the producer reports it on the artifact's `Ready` state (`note`, #602),
+so the GUI shows *"Saved to … — truncated: N records matched, M included"*
+with the download. A byte-cap stop is only reportable this way: the in-bundle
+manifest is written before the write loop discovers it.
 
 ### `syslog.multiline` (#107, on by default)
 

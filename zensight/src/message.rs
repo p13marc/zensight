@@ -598,6 +598,8 @@ pub enum Message {
     SetSnmpEventSearch(String),
     /// Reset every trap-feed facet (#578).
     ClearSnmpEventFilters,
+    /// Flip the log-bundle export format between JSONL and text (#602).
+    ToggleLogExportFormat,
     /// Open the Alerts view scoped to one device (#578): the trap-feed row's
     /// pivot. Events carry no alert key, so the honest link is by source.
     OpenAlertsForSource(String),

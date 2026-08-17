@@ -63,6 +63,14 @@ stateDiagram-v2
   its TTL; a periodic reaper expires it, and `cancel` aborts an in-flight
   production or frees a `Ready` artifact early. Only one live artifact per kind is
   kept (a new one replaces the prior).
+- A producer that had to leave something out calls `ctx.note("…")` (#602); the
+  channel carries it onto `ArtifactState::Ready { note }` and the GUI shows it
+  with the download result. The transfer manifest describes the *bytes* — this
+  describes what those bytes omit, and a caveat an operator only finds after
+  decompressing arrives too late to change what they asked for. `note` is a
+  side channel on `ProduceCtx`, exactly like `progress`, so gaining one costs a
+  producer no signature change; it is serde-default on the wire, so an older
+  sensor (never sets it) and an older GUI (ignores it) both degrade cleanly.
 
 ### Request → produce → deliver → status
 

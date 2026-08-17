@@ -2546,6 +2546,7 @@ fn test_artifact_holder_pick() {
                 },
             },
             expires_ms: 0,
+            note: None,
         },
     };
     let picking = ArtifactFetch::PickingHolder {
@@ -3823,6 +3824,70 @@ fn test_logs_filtered_export_button_carries_filter() {
         }
         other => panic!("expected a LogBundle StartArtifact, got {other:?}"),
     }
+}
+
+/// #602: the export format is a visible choice next to the Export button,
+/// and the chosen format rides the request.
+#[test]
+fn test_logs_export_format_choice() {
+    use zensight::view::specialized::{LogExport, SyslogFilterState, logs_view};
+    use zensight_common::{ArtifactKind, LogBundleFormat};
+
+    let mut filter = SyslogFilterState::default();
+    filter.panel_open = true;
+    let export = Some(LogExport {
+        max_lines: 0,
+        busy: false,
+    });
+
+    // Default is JSONL, and the toggle advertises what it will produce.
+    let mut ui = simulator(logs_view(&[], &filter, export));
+    assert!(ui.find("as JSONL").is_ok());
+    ui.click("as JSONL").expect("format toggle");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::ToggleLogExportFormat))
+    );
+
+    // Flipped to text, the request carries it.
+    filter.export_format = LogBundleFormat::Text;
+    let mut ui = simulator(logs_view(&[], &filter, export));
+    assert!(ui.find("as text").is_ok());
+    ui.click("Export filtered logs").expect("click export");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    let format = msgs.iter().find_map(|m| match m {
+        Message::StartArtifact {
+            kind: ArtifactKind::LogBundle { format, .. },
+            ..
+        } => Some(*format),
+        _ => None,
+    });
+    assert_eq!(format, Some(LogBundleFormat::Text));
+}
+
+/// #602: a producer caveat on the finished artifact is shown with the result
+/// — an operator should not have to decompress a bundle to learn it was cut.
+#[test]
+fn test_artifact_saved_surfaces_producer_note() {
+    use zensight::view::artifact_fetch::ArtifactFetch;
+
+    let plain = ArtifactFetch::Saved {
+        path: "/tmp/logbundle.jsonl.zst".into(),
+        note: None,
+    };
+    assert_eq!(
+        plain.label("logbundle"),
+        "Saved to /tmp/logbundle.jsonl.zst"
+    );
+
+    let truncated = ArtifactFetch::Saved {
+        path: "/tmp/logbundle.jsonl.zst".into(),
+        note: Some("truncated: 5000 records matched, 1000 included (line cap)".into()),
+    };
+    let label = truncated.label("logbundle");
+    assert!(label.contains("Saved to /tmp/logbundle.jsonl.zst"));
+    assert!(label.contains("truncated: 5000 records matched"));
 }
 
 /// #554: the Logs-feed filter panel renders the time-range picker row (the
