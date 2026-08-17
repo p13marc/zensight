@@ -29,10 +29,11 @@ pub struct SnmpPoller {
     walks: Vec<String>,
     /// Persistent client (one UDP socket per device, every SNMP version).
     /// Timeout, retry, and GETBULK sizing are configured at build time;
-    /// v3 engine discovery/resync and tooBig recovery are handled inside.
+    /// v3 engine discovery/resync, engine replacement (`rediscover_engine`,
+    /// #577) and tooBig recovery are handled inside.
     ///
-    /// Behind a lock because the poller rebuilds it from `&self` when a v3
-    /// engine identity changes (see [`poll_once`](Self::poll_once)).
+    /// Behind a lock because [`cycle`](Self::cycle) rebuilds it from `&self`
+    /// when the initial build failed (device offline at startup).
     client: tokio::sync::RwLock<Option<Client<UdpHandle>>>,
     /// Counter→rate state (#527). Std mutex: locked only for synchronous
     /// bookkeeping, never across an await.
@@ -205,7 +206,7 @@ impl SnmpPoller {
 
     /// Build the persistent SNMP client for this device.
     pub async fn init(&mut self) -> Result<()> {
-        let client = self.build_client(true).await?;
+        let client = self.build_client().await?;
         *self.client.get_mut() = Some(client);
 
         tracing::info!(
@@ -218,10 +219,7 @@ impl SnmpPoller {
         Ok(())
     }
 
-    /// `seed_engine`: honor a configured v3 `engine_id`. Off on rebuilds —
-    /// a rebuild means the device's engine identity looks changed, so a
-    /// stale configured id must not short-circuit rediscovery.
-    async fn build_client(&self, seed_engine: bool) -> Result<Client<UdpHandle>> {
+    async fn build_client(&self) -> Result<Client<UdpHandle>> {
         let auth = build_auth(&self.device)?;
 
         let mut builder = Client::builder(self.device.address.as_str(), auth)
@@ -231,7 +229,9 @@ impl SnmpPoller {
             .retry(Retry::fixed(self.device.retries, Duration::ZERO))
             .max_repetitions(self.device.max_repetitions);
 
-        if seed_engine && let Some(cache) = seeded_engine_cache(&self.device) {
+        // Honor a configured v3 `engine_id`. If the device's identity ever
+        // changes underneath it, `rediscover_engine` replaces it in place.
+        if let Some(cache) = seeded_engine_cache(&self.device) {
             builder = builder.engine_cache(cache);
         }
 
@@ -248,21 +248,6 @@ impl SnmpPoller {
             .await
             .clone()
             .ok_or_else(|| anyhow!("SNMP client not initialized"))
-    }
-
-    /// Replace the client, dropping all cached v3 engine state — the recovery
-    /// path when a polled device comes back with a new engine identity (agent
-    /// replaced/reset), which the client itself cannot resynchronize from.
-    async fn rebuild_client(&self) {
-        match self.build_client(false).await {
-            Ok(client) => {
-                *self.client.write().await = Some(client);
-                tracing::info!(device = %self.device.name, "SNMP client rebuilt");
-            }
-            Err(e) => {
-                tracing::warn!(device = %self.device.name, error = %e, "Failed to rebuild SNMP client");
-            }
-        }
     }
 
     /// Run the polling loop (#539): randomized initial phase, ±jitter per
@@ -432,14 +417,20 @@ impl SnmpPoller {
         }
 
         // A whole v3 cycle failing authentication usually means the device's
-        // engine identity changed (agent replaced/reset) — the client cannot
-        // resynchronize that itself, so rebuild it to force rediscovery.
+        // engine identity changed (agent replaced/reset). async-snmp 0.17
+        // provides explicit engine replacement for exactly this (#577) — no
+        // more full client rebuild. A configured `engine_id` seed is
+        // deliberately not re-applied: the live peer is the authority now.
         if self.device.version == SnmpVersion::V3 && requests > 0 && auth_failures == requests {
             tracing::warn!(
                 device = %self.device.name,
-                "all requests failed authentication — rebuilding client to rediscover engine"
+                "all requests failed authentication — rediscovering engine identity"
             );
-            self.rebuild_client().await;
+            if let Ok(client) = self.client().await
+                && let Err(e) = client.rediscover_engine().await
+            {
+                tracing::warn!(device = %self.device.name, error = %e, "engine rediscovery failed");
+            }
         }
 
         Ok(CycleOutcome {
@@ -458,7 +449,7 @@ impl SnmpPoller {
         // A device that failed at startup (or lost its client) keeps
         // retrying with the same backoff policy instead of being dropped.
         if self.client().await.is_err() {
-            match self.build_client(true).await {
+            match self.build_client().await {
                 Ok(client) => {
                     *self.client.write().await = Some(client);
                     tracing::info!(device = %self.device.name, "SNMP client (re)built");
@@ -954,8 +945,8 @@ fn build_auth(device: &DeviceConfig) -> Result<Auth> {
                     let auth_password = config.auth_password.as_ref().ok_or_else(|| {
                         anyhow!("Authentication password required for auth protocol")
                     })?;
-                    usm = usm.auth(auth_proto, auth_password.clone());
-
+                    // 0.17: authPriv is one constructor (`auth_priv`) — the
+                    // separate `.privacy()` step is gone.
                     if priv_proto != PrivProtocol::None {
                         let priv_password = config.priv_password.as_ref().ok_or_else(|| {
                             anyhow!("Privacy password required for privacy protocol")
@@ -967,7 +958,14 @@ fn build_auth(device: &DeviceConfig) -> Result<Auth> {
                             PrivProtocol::Aes192 => async_snmp::PrivProtocol::Aes192,
                             PrivProtocol::Aes256 => async_snmp::PrivProtocol::Aes256,
                         };
-                        usm = usm.privacy(cipher, priv_password.clone());
+                        usm = usm.auth_priv(
+                            auth_proto,
+                            auth_password.clone(),
+                            cipher,
+                            priv_password.clone(),
+                        );
+                    } else {
+                        usm = usm.auth(auth_proto, auth_password.clone());
                     }
                 }
             }

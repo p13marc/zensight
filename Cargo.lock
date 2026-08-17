@@ -674,9 +674,9 @@ dependencies = [
 
 [[package]]
 name = "async-snmp"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95a4dab958a01191eafdf0ded772ad5ee5c9a849573351656bfd0e6cdd2e5bfa"
+checksum = "7fd3487ec298e057a28fb92858046936ccd40dadd07dfb63bc6255208920d394"
 dependencies = [
  "aes 0.9.1",
  "bytes",
