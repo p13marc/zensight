@@ -74,8 +74,10 @@ pub enum ArtifactFetch {
     },
     /// Verifying / reconstructing (done inside `zenoh-blob`) before save.
     Verifying,
-    /// Saved to `path`.
-    Saved(String),
+    /// Saved to `path`, with the producer's caveat about what the artifact
+    /// left out when there is one (#602) — a truncated bundle says so here,
+    /// not only inside itself.
+    Saved { path: String, note: Option<String> },
     /// Failed with a reason.
     Failed(String),
 }
@@ -166,7 +168,10 @@ impl ArtifactFetch {
                 "snapshot" => "Reconstructing…".into(),
                 _ => "Verifying…".into(),
             },
-            ArtifactFetch::Saved(p) => format!("Saved to {p}"),
+            ArtifactFetch::Saved { path, note } => match note {
+                Some(note) => format!("Saved to {path} — {note}"),
+                None => format!("Saved to {path}"),
+            },
             ArtifactFetch::Failed(e) => format!("Failed: {e}"),
         }
     }
@@ -322,6 +327,10 @@ pub struct ArtifactJob {
     pub delivery: Option<Delivery>,
     /// Suggested save filename (set once `Ready`, blob deliveries only).
     pub filename: Option<String>,
+    /// Producer caveat about what the artifact had to leave out (#602), set
+    /// once `Ready` — e.g. a truncated log bundle. Shown with the result, so
+    /// the operator learns it before opening the file rather than after.
+    pub note: Option<String>,
     /// Cancellation flag for the in-flight stream (pause/cancel).
     pub cancel: CancelToken,
     /// Where the bytes land: a temp dir for a blob, the chosen folder for a tree.
@@ -338,6 +347,7 @@ impl ArtifactJob {
             id: Ulid::new(),
             delivery: None,
             filename: None,
+            note: None,
             cancel: CancelToken::new(),
             dest,
         }
@@ -1247,7 +1257,12 @@ pub fn artifact_section<'a>(
     }
 
     // A finished-job status line on this card.
-    if is_this && matches!(fetch, ArtifactFetch::Saved(_) | ArtifactFetch::Failed(_)) {
+    if is_this
+        && matches!(
+            fetch,
+            ArtifactFetch::Saved { .. } | ArtifactFetch::Failed(_)
+        )
+    {
         let kind = active_kind.unwrap_or("report");
         col = col.push(text(fetch.label(kind)).size(font::CAPTION));
     }
@@ -1374,7 +1389,13 @@ mod tests {
             .is_active()
         );
         assert!(ArtifactFetch::Downloading { got: 1, total: 4 }.is_active());
-        assert!(!ArtifactFetch::Saved("x".into()).is_active());
+        assert!(
+            !ArtifactFetch::Saved {
+                path: "x".into(),
+                note: None
+            }
+            .is_active()
+        );
         assert!(!ArtifactFetch::Failed("x".into()).is_active());
         // Paused is not "active" (it offers Resume) but is "busy" (occupies card).
         let paused = ArtifactFetch::Paused { got: 1, total: 4 };
@@ -1482,6 +1503,7 @@ mod tests {
                 },
             },
             expires_ms: 0,
+            note: None,
         }
     }
 

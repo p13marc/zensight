@@ -239,6 +239,14 @@ pub enum ArtifactState {
         delivery: Delivery,
         /// TTL deadline, Unix epoch milliseconds.
         expires_ms: i64,
+        /// Producer caveat about the artifact that was actually made (#602),
+        /// e.g. `"truncated at 10000 lines"`. The transfer manifest describes
+        /// the *bytes*; this describes what those bytes had to leave out, and
+        /// a caveat an operator only discovers after decompressing is a
+        /// caveat that arrives too late. Serde-default, so an older sensor
+        /// (no note) and an older GUI (ignores it) both degrade cleanly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Production failed (or was cancelled mid-flight).
     Failed {
@@ -418,6 +426,7 @@ mod tests {
                 blob_prefix: "v1/h-3fa9c2d41b7e/@blob/artifact".into(),
             },
             expires_ms: 1,
+            note: None,
         };
         let json = serde_json::to_string(&blob).unwrap();
         assert!(json.contains("\"state\":\"ready\""));
@@ -439,6 +448,7 @@ mod tests {
                 },
             },
             expires_ms: 2,
+            note: None,
         };
         let json = serde_json::to_string(&tree).unwrap();
         assert!(json.contains("\"delivery\":\"tree\""));

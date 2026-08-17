@@ -200,6 +200,9 @@ pub struct SyslogFilterState {
     /// Absolute lower time bound (epoch ms) resolved from [`Self::time_range`],
     /// pushed to the events query (`from=`) and the filtered export. `None` = all.
     pub range_from: Option<i64>,
+    /// Bundle format the Export button requests (#602). JSONL keeps the
+    /// records machine-readable; text is what you paste into a ticket.
+    pub export_format: LogBundleFormat,
 }
 
 impl SyslogFilterState {
@@ -585,7 +588,7 @@ pub fn log_bundle_kind_from_filter(filter_state: &SyslogFilterState) -> Artifact
         unit,
         app: non_empty(&filter_state.app_filter),
         source: None,
-        format: LogBundleFormat::default(),
+        format: filter_state.export_format,
     }
 }
 
@@ -957,7 +960,18 @@ fn render_filter_panel<'a>(
                 target_source: None,
             });
         }
-        buttons_row = buttons_row.push(export_button);
+        // Format choice (#602) sits next to the button that uses it: JSONL for
+        // a machine, text for a ticket.
+        let format_toggle = button(
+            text(match filter_state.export_format {
+                LogBundleFormat::Jsonl => "as JSONL",
+                LogBundleFormat::Text => "as text",
+            })
+            .size(12),
+        )
+        .on_press(Message::ToggleLogExportFormat)
+        .style(iced::widget::button::text);
+        buttons_row = buttons_row.push(export_button).push(format_toggle);
     }
 
     // Honest caption when the active filter has dimensions the bundle can't carry.

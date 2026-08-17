@@ -1800,6 +1800,17 @@ impl ZenSight {
             Message::SetSnmpEventSearch(search) => {
                 self.dashboard.snmp_event_filter.search = search;
             }
+            Message::ToggleLogExportFormat => {
+                let fmt = &mut self.syslog_filter.export_format;
+                *fmt = match fmt {
+                    zensight_common::LogBundleFormat::Jsonl => {
+                        zensight_common::LogBundleFormat::Text
+                    }
+                    zensight_common::LogBundleFormat::Text => {
+                        zensight_common::LogBundleFormat::Jsonl
+                    }
+                };
+            }
             Message::ClearSnmpEventFilters => {
                 self.dashboard.snmp_event_filter.clear();
             }
@@ -3075,8 +3086,10 @@ impl ZenSight {
 
             Message::ArtifactSaved(result) => match result {
                 Ok(Some(path)) => {
-                    self.artifact_fetch =
-                        crate::view::artifact_fetch::ArtifactFetch::Saved(path.clone());
+                    self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Saved {
+                        path: path.clone(),
+                        note: self.artifact_job.as_ref().and_then(|j| j.note.clone()),
+                    };
                     self.toasts
                         .push(ToastSeverity::Success, format!("Artifact saved to {path}"));
                 }
@@ -4102,8 +4115,11 @@ impl ZenSight {
     ) -> Option<Task<Message>> {
         use zensight_common::{ArtifactState, Delivery};
         match state {
-            ArtifactState::Ready { delivery, .. } => {
-                self.artifact_job.as_mut()?.delivery = Some(delivery.clone());
+            ArtifactState::Ready { delivery, note, .. } => {
+                let job = self.artifact_job.as_mut()?;
+                job.delivery = Some(delivery.clone());
+                // The producer's caveat (#602) rides to the result line.
+                job.note = note.clone();
                 // A tree detours through verification before any folder
                 // picker or transfer: the root-fetched index gives a real
                 // file list and chunk total (the sensor's self-reported
@@ -4198,8 +4214,10 @@ impl ZenSight {
             Ok(path) if is_tree => {
                 // Tree already reconstructed into the chosen folder.
                 let shown = path.display().to_string();
-                self.artifact_fetch =
-                    crate::view::artifact_fetch::ArtifactFetch::Saved(shown.clone());
+                self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Saved {
+                    path: shown.clone(),
+                    note: self.artifact_job.as_ref().and_then(|j| j.note.clone()),
+                };
                 self.toasts
                     .push(ToastSeverity::Success, format!("Snapshot saved to {shown}"));
                 self.tag_downloaded_tree()

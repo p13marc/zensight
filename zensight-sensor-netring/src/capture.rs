@@ -558,6 +558,7 @@ mod tests {
                 workdir: std::env::temp_dir(),
                 cancel: cancel.clone(),
                 progress,
+                note: Default::default(),
             },
             cancel,
         )
