@@ -16,7 +16,7 @@
 # it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "2.5"
+version = "2.6"
 app = "zensight"
 convention = 1
 
@@ -136,6 +136,13 @@ class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "entries sampled out"
+
+[[subject]]
+path = "journald/self_excluded_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.6"
+description = "entries dropped by self/deny-list exclusion (#625)"
 
 [[subject]]
 path = "by_unit/{unit}/messages_total"

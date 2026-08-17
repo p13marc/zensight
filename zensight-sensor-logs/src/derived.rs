@@ -259,6 +259,10 @@ impl LogAggregator {
             points.push(counter("journald/published_total".into(), s.published));
             points.push(counter("journald/dropped_total".into(), s.dropped));
             points.push(counter("journald/sampled_out_total".into(), s.sampled_out));
+            points.push(counter(
+                "journald/self_excluded_total".into(),
+                s.self_excluded,
+            ));
         }
 
         points

@@ -84,6 +84,21 @@ journal, so filtered entries are never decoded or transported. Configured under
 The static/dynamic message filters above still apply on top of journald entries
 after they are read.
 
+### Client-side exclusion (#625)
+
+libsystemd matches are include-only — there is no negative match — so two
+exclusions run in the reader itself, before rate limiting and decode:
+
+| Field | Effect |
+|---|---|
+| `exclude_self` (default **true**) | drop entries whose `_SYSTEMD_UNIT` or `SYSLOG_IDENTIFIER` starts with `zensight-sensor` |
+| `exclude_units` | drop these exact `_SYSTEMD_UNIT` names |
+
+`exclude_self` breaks the self-ingestion feedback loop: the bundle's stdout
+lands in the journal the sensor tails, so every line it logs became traffic it
+published (on the deployed fleet, ~25k zenoh WARNs/day/VM — #625/#626).
+Dropped entries are counted as `journald/self_excluded_total`.
+
 ## Known-event detection (journald, #61)
 
 `journald.detect_events` (default on) matches well-known systemd events —

@@ -153,6 +153,7 @@ subject	logs	journald/dropped_total	telemetry	TelemetryPoint
 subject	logs	journald/published_total	telemetry	TelemetryPoint
 subject	logs	journald/read_total	telemetry	TelemetryPoint
 subject	logs	journald/sampled_out_total	telemetry	TelemetryPoint
+subject	logs	journald/self_excluded_total	telemetry	TelemetryPoint
 subject	logs	sensor	state	SensorInfo
 subject	logs	store/oldest_age_secs	telemetry	TelemetryPoint
 subject	logs	store/records	telemetry	TelemetryPoint

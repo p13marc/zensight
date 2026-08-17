@@ -526,7 +526,7 @@ async fn main() -> Result<()> {
     let store_cfg = &syslog_config.store;
     let (log_store, store_tx, store_counters) = if store_cfg.enabled {
         match store::resolve_store_path(store_cfg.path.as_deref()) {
-            Some(path) => match store::LogStore::open(&path) {
+            Some(path) => match store::LogStore::open(&path, store_cfg.cache_bytes) {
                 Ok(s) => {
                     let store = Arc::new(s);
                     let counters = Arc::new(store::StoreCounters::default());
