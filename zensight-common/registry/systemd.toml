@@ -4,7 +4,7 @@
 # Source: src/map.rs, src/collector.rs (boot/manager/units), src/events.rs.
 
 [registry]
-version = "1.3"
+version = "1.4"
 app = "zensight"
 convention = 1
 
@@ -409,23 +409,39 @@ kind = "read"
 reply = "ActionStatus"
 idempotent = true
 since = "1.0"
-description = "gated-action switch state + last action outcome"
+description = "the most recent action outcome, or null if none has run"
+[[procedure]]
+path = "action/capability"
+kind = "read"
+reply = "ActionCapability"
+idempotent = true
+since = "1.4"
+description = "service-control gate state: enabled flag, allowlist globs, permitted verbs, job timeout — served even when actions are disabled, so 'off' is an answer and not a silence"
+[[procedure]]
+path = "actions"
+kind = "read"
+reply = "Vec<ActionStatus>"
+idempotent = true
+since = "1.4"
+description = "bounded ring of recent action outcomes (operator audit timeline)"
 [[procedure]]
 path = "action/set"
 kind = "write"
-fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
+fanout = "allowed"  # zenctl fleet push (G2); the GUI is strictly origin-scoped
 request = "ServiceAction"
-reply = "Ack"
+# Was declared "Ack"; the sensor has always replied the full outcome
+# (src/action.rs), so the declaration — not the implementation — was wrong.
+reply = "ActionStatus"
 idempotent = false
 since = "1.0"
-description = "gated service control {verb,unit} — default OFF, allowlist + polkit; refuses with error/gated"
+description = "gated service control {verb,unit} — default OFF, allowlist + polkit; blocks until the job completes or actions.job_timeout_secs elapses; refuses with error/gated"
 [[procedure]]
 path = "units"
 kind = "read"
 reply = "Vec<UnitRecord>"
 idempotent = true
 since = "1.0"
-description = "unit table"
+description = "unit inventory: loaded units (ListUnits) merged with installed-but-unloaded unit files (ListUnitFiles, load_state=not-loaded), since 1.4"
 
 [[procedure]]
 path = "failed"
@@ -442,6 +458,14 @@ reply = "UnitDetail"
 idempotent = true
 since = "1.0"
 description = "one unit's detail (?name=<u>)"
+
+[[procedure]]
+path = "unit/file"
+kind = "read"
+reply = "UnitFile"
+idempotent = true
+since = "1.4"
+description = "one unit's fragment + drop-in contents (?name=<u>) — opt-in (actions.expose_unit_files), secret-looking assignments redacted, size-capped"
 
 [[procedure]]
 path = "timers"
@@ -471,7 +495,8 @@ description = "cgroup subtree (?path=<rel>)"
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2
 # snapshot TreeServer/store. Endpoints list what the server actually serves:
 # no `push` (never enabled — RFC 07 §2.2 keeps it off by default) and no
-# `fanout` (zblob feature off). Shapes must agree app-wide (every producer
+# `fanout` (zblob feature off; experimental since RFC 07 v1.17 demoted it to
+# Appendix A). Shapes must agree app-wide (every producer
 # declares the same three families); prose is per-producer.
 [[blob]]
 tier = "artifact"

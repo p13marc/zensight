@@ -10,7 +10,6 @@
 //! Packaging runs off the capture/poll path (`spawn_blocking`), is bounded, and
 //! the bundle's config is **redacted** of secrets.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -117,12 +116,20 @@ const REDACT_EXACT: &[&str] = &[
 
 const REDACTED: &str = "***REDACTED***";
 
-fn is_secret_key(key: &str, extra: &[String]) -> bool {
+/// Whether `key` names a value that must not leave the host.
+///
+/// Public so callers redacting *text* rather than JSON — systemd unit files,
+/// whose `Environment=` lines routinely carry credentials — apply exactly the
+/// same denylist as [`redact`] instead of inventing a second one.
+pub fn is_secret_key(key: &str, extra: &[String]) -> bool {
     let lk = key.to_ascii_lowercase();
     REDACT_CONTAINS.iter().any(|p| lk.contains(p))
         || REDACT_EXACT.iter().any(|p| lk == *p)
         || extra.iter().any(|p| lk.contains(&p.to_ascii_lowercase()))
 }
+
+/// The marker substituted for a redacted value.
+pub const REDACTED_MARKER: &str = REDACTED;
 
 /// Recursively replace any object value whose key looks secret with a redaction
 /// marker. Generic over every sensor config (they share no supertype but all
@@ -157,16 +164,16 @@ pub(crate) struct BundleInputs {
     pub(crate) created_ms: i64,
 }
 
-/// Build a `tar.zst` debug bundle into a temp file under `dir`, returning its
-/// path + suggested filename. Runs in `spawn_blocking` (it's synchronous I/O).
-/// Enforces `max_bytes` on the uncompressed entry sizes and redacts the config
-/// (built-in denylist plus `redact_extra`).
+/// Build a `tar.zst` debug bundle in memory, returning its bytes + suggested
+/// filename. Runs in `spawn_blocking` (serialization + compression are CPU
+/// work). Enforces `max_bytes` on the uncompressed entry sizes and redacts
+/// the config (built-in denylist plus `redact_extra`). Nothing touches disk:
+/// the bundle is served straight from memory (`Produced::Bytes`).
 pub(crate) fn build_debug_bundle(
     mut inputs: BundleInputs,
     max_bytes: u64,
     redact_extra: &[String],
-    dir: &Path,
-) -> std::io::Result<(PathBuf, String)> {
+) -> std::io::Result<(Vec<u8>, String)> {
     redact(&mut inputs.config, redact_extra);
 
     let meta = serde_json::json!({
@@ -198,12 +205,7 @@ pub(crate) fn build_debug_bundle(
         )));
     }
 
-    let tmp = tempfile::Builder::new()
-        .prefix("zsreport-")
-        .suffix(".tar.zst")
-        .tempfile_in(dir)?;
-    let file = tmp.reopen()?;
-    let encoder = zstd::Encoder::new(file, 3)?;
+    let encoder = zstd::Encoder::new(Vec::new(), 3)?;
     let mut builder = tar::Builder::new(encoder);
     let mtime = (inputs.created_ms / 1000).max(0) as u64;
     for (name, data) in &serialized {
@@ -215,7 +217,7 @@ pub(crate) fn build_debug_bundle(
         builder.append_data(&mut header, name, data.as_slice())?;
     }
     let encoder = builder.into_inner()?;
-    encoder.finish()?;
+    let data = encoder.finish()?;
 
     let filename = format!(
         "zensight-debug-{}-{}-{}.tar.zst",
@@ -223,8 +225,7 @@ pub(crate) fn build_debug_bundle(
         sanitize(&inputs.source_id),
         inputs.created_ms
     );
-    let (_file, path) = tmp.keep().map_err(|e| e.error)?;
-    Ok((path, filename))
+    Ok((data, filename))
 }
 
 /// Make a string safe for a filename segment.
@@ -267,7 +268,6 @@ mod tests {
 
     #[test]
     fn build_bundle_is_a_valid_tar_zst_with_redaction() {
-        let dir = tempfile::tempdir().unwrap();
         let inputs = BundleInputs {
             sensor_name: "netlink".into(),
             source_id: "host1".into(),
@@ -276,14 +276,11 @@ mod tests {
             counters: serde_json::json!({ "received": 10 }),
             created_ms: 1_700_000_000_000,
         };
-        let (path, filename) =
-            build_debug_bundle(inputs, 64 * 1024 * 1024, &[], dir.path()).unwrap();
+        let (data, filename) = build_debug_bundle(inputs, 64 * 1024 * 1024, &[]).unwrap();
         assert!(filename.starts_with("zensight-debug-netlink-host1-"));
-        assert!(path.exists());
 
         // Decompress + untar and check entries + redaction.
-        let f = std::fs::File::open(&path).unwrap();
-        let dec = zstd::Decoder::new(f).unwrap();
+        let dec = zstd::Decoder::new(&data[..]).unwrap();
         let mut ar = tar::Archive::new(dec);
         let mut found = std::collections::HashMap::new();
         for entry in ar.entries().unwrap() {
@@ -303,7 +300,6 @@ mod tests {
 
     #[test]
     fn build_bundle_enforces_max_bytes() {
-        let dir = tempfile::tempdir().unwrap();
         let big = "x".repeat(2000);
         let inputs = BundleInputs {
             sensor_name: "s".into(),
@@ -313,6 +309,6 @@ mod tests {
             counters: serde_json::json!({}),
             created_ms: 1,
         };
-        assert!(build_debug_bundle(inputs, 100, &[], dir.path()).is_err());
+        assert!(build_debug_bundle(inputs, 100, &[]).is_err());
     }
 }

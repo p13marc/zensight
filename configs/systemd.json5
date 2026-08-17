@@ -83,6 +83,24 @@
     //   enabled: false,
     //   allow_units: ["nginx.service", "app-*.service"],
     //   job_timeout_secs: 30,
+    //
+    //   // enable/disable write symlinks under /etc that survive a reboot, and
+    //   // need the manage-unit-files polkit action rather than manage-units —
+    //   // so granting start/stop does not silently grant them.
+    //   allow_unit_files: false,
+    //   // daemon-reload is manager-wide: it names no unit, so allow_units
+    //   // cannot scope it and this switch is its only gate. Needs the
+    //   // reload-daemon polkit action.
+    //   allow_daemon_reload: false,
+    //
+    //   history_capacity: 64,   // audit ring served on @rpc/systemd/actions
+    //
+    //   // Serve unit-file contents on @rpc/systemd/unit/file. A *read* surface,
+    //   // independent of `enabled`. Off by default because unit files routinely
+    //   // carry credentials in Environment= lines; secret-looking assignments
+    //   // are redacted and the reply is capped, but that is a denylist, not a
+    //   // proof. Review your unit files before turning this on.
+    //   expose_unit_files: false,
     // },
 
     collect: {

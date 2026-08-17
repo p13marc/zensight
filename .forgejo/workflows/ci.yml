@@ -24,7 +24,7 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
       - uses: https://github.com/dtolnay/rust-toolchain@1.97
@@ -36,7 +36,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
       - uses: https://github.com/dtolnay/rust-toolchain@1.97

@@ -89,16 +89,25 @@ pub fn build_config(config: &ZenohConfig) -> Result<zenoh::Config> {
         .insert_json5("timestamping/enabled", "true")
         .map_err(|e| Error::Config(format!("Failed to enable timestamping: {}", e)))?;
 
-    // Isolated runs (tests, smoke, pinned-endpoint deployments) turn
-    // multicast scouting off so the session can NEVER join a mesh beyond its
-    // explicit endpoints. Gossip stays on: it only propagates within the
-    // already-connected graph, and hub-and-spoke deployments rely on it
-    // (RFC 09 §0.1 — the two are independent switches, and disabling both is
-    // what silently breaks spoke-to-spoke discovery).
-    if !config.scouting {
+    // Scouting is two independent switches (RFC 09 §0.1): multicast finds
+    // strangers, gossip propagates locators within the already-connected
+    // graph (what lets spokes of a hub find each other). Explicit config/env
+    // wins; unset resolves mode-aware (#626): a client with explicit connect
+    // endpoints turns BOTH off — it dials its router and never needs
+    // discovery, and on an mTLS-only mesh every gossiped peer locator is a
+    // failed plain-TCP dial WARN every few seconds — while peers (and
+    // connect-less clients, which need multicast to find a router at all)
+    // keep Zenoh's on-defaults.
+    let (multicast_on, gossip_on) = config.effective_scouting();
+    if !multicast_on {
         zenoh_config
             .insert_json5("scouting/multicast/enabled", "false")
             .map_err(|e| Error::Config(format!("Failed to disable multicast scouting: {}", e)))?;
+    }
+    if !gossip_on {
+        zenoh_config
+            .insert_json5("scouting/gossip/enabled", "false")
+            .map_err(|e| Error::Config(format!("Failed to disable gossip scouting: {}", e)))?;
     }
 
     // TLS material for `tls/…` endpoints, mapped onto Zenoh's
@@ -161,11 +170,13 @@ pub async fn connect(config: &ZenohConfig) -> Result<Session> {
     let config = &config.clone().with_env_overrides();
     let zenoh_config = build_config(config)?;
 
+    let (multicast, gossip) = config.effective_scouting();
     tracing::info!(
         mode = %config.mode,
         connect = ?config.connect,
         listen = ?config.listen,
-        scouting = config.scouting,
+        scouting = multicast,
+        gossip,
         namespace = %config.namespace,
         tls = config.tls.is_some(),
         mtls = config.tls.as_ref().is_some_and(|t| t.enable_mtls),
@@ -234,6 +245,47 @@ mod tests {
                 "unhelpful error for {bad:?}: {err}"
             );
         }
+    }
+
+    /// #626: a client with explicit connect endpoints must reach the wire
+    /// with both scouting mechanisms off — the WARN-every-2s storm on an
+    /// mTLS-only mesh is gossip handing the client peer locators it can
+    /// never dial.
+    #[test]
+    fn a_connected_client_disables_scouting_and_gossip() {
+        let c = build_config(&ZenohConfig {
+            mode: "client".into(),
+            connect: vec!["tls/10.10.0.30:7447".into()],
+            ..Default::default()
+        })
+        .expect("client config builds");
+        let json: serde_json::Value = serde_json::from_str(&c.to_string()).unwrap();
+        assert_eq!(json["scouting"]["multicast"]["enabled"], false);
+        assert_eq!(json["scouting"]["gossip"]["enabled"], false);
+    }
+
+    /// The peer default is untouched: both switches stay on Zenoh's own
+    /// defaults (no explicit insert), and an explicit opt-in beats the
+    /// client auto-off.
+    #[test]
+    fn peer_default_and_explicit_opt_in_keep_scouting_on() {
+        let peer = build_config(&ZenohConfig::default()).expect("peer config builds");
+        let json: serde_json::Value = serde_json::from_str(&peer.to_string()).unwrap();
+        // Zenoh's own defaults are on; we must not have inserted `false`.
+        assert_ne!(json["scouting"]["multicast"]["enabled"], false);
+        assert_ne!(json["scouting"]["gossip"]["enabled"], false);
+
+        let opted = build_config(&ZenohConfig {
+            mode: "client".into(),
+            connect: vec!["tls/10.10.0.30:7447".into()],
+            scouting: Some(true),
+            gossip: Some(true),
+            ..Default::default()
+        })
+        .expect("opted-in client builds");
+        let json: serde_json::Value = serde_json::from_str(&opted.to_string()).unwrap();
+        assert_ne!(json["scouting"]["multicast"]["enabled"], false);
+        assert_ne!(json["scouting"]["gossip"]["enabled"], false);
     }
 
     #[test]

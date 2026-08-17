@@ -76,6 +76,9 @@ pub struct JournaldStats {
     pub dropped: AtomicU64,
     /// Entries shed by the rate limiter (over `max_eps`).
     pub sampled_out: AtomicU64,
+    /// Entries dropped by self/deny-list exclusion (#625) — the bundle's own
+    /// output (`exclude_self`) or a configured `exclude_units` unit.
+    pub self_excluded: AtomicU64,
     /// Entries we failed to read/decode (tolerated, not fatal).
     pub decode_errors: AtomicU64,
     /// `wait()` invalidations (journal rotation / files added-removed).
@@ -96,6 +99,7 @@ impl JournaldStats {
             published: self.published.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             sampled_out: self.sampled_out.load(Ordering::Relaxed),
+            self_excluded: self.self_excluded.load(Ordering::Relaxed),
             decode_errors: self.decode_errors.load(Ordering::Relaxed),
             invalidations: self.invalidations.load(Ordering::Relaxed),
         }
@@ -109,6 +113,7 @@ pub struct JournaldStatsSnapshot {
     pub published: u64,
     pub dropped: u64,
     pub sampled_out: u64,
+    pub self_excluded: u64,
     pub decode_errors: u64,
     pub invalidations: u64,
 }

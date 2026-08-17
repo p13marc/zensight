@@ -198,6 +198,16 @@ impl MibResolver {
             .sort_by_key(|b| std::cmp::Reverse(b.0.len()));
     }
 
+    /// OID prefix match on chunk boundaries (#581): `1.3.6.1.2.2.1.1` matches
+    /// `1.3.6.1.2.2.1.1.3` but not `1.3.6.1.2.2.1.10.3` — a plain
+    /// `starts_with` string-matches the latter, silently resolving an
+    /// unregistered sibling column to the wrong name/syntax whenever the
+    /// longer column isn't also registered.
+    fn matches_prefix(oid: &str, prefix: &str) -> bool {
+        oid == prefix
+            || (oid.starts_with(prefix) && oid.as_bytes().get(prefix.len()) == Some(&b'.'))
+    }
+
     /// Resolve an OID to a human-readable name.
     ///
     /// Returns the mapped name if found, otherwise returns the original OID.
@@ -209,7 +219,7 @@ impl MibResolver {
 
         // Check prefix matches for table entries
         for (prefix, entry) in &self.prefix_mappings {
-            if oid.starts_with(prefix) {
+            if Self::matches_prefix(oid, prefix) {
                 let suffix = &oid[prefix.len()..];
                 let index = suffix.trim_start_matches('.');
 
@@ -234,7 +244,7 @@ impl MibResolver {
             return entry.syntax.as_deref();
         }
         for (prefix, entry) in &self.prefix_mappings {
-            if oid.starts_with(prefix) {
+            if Self::matches_prefix(oid, prefix) {
                 return entry.syntax.as_deref();
             }
         }
@@ -826,6 +836,42 @@ mod tests {
             resolver.resolve("1.3.6.1.4.1.9.9.999.0"),
             "1.3.6.1.4.1.9.9.999.0"
         );
+    }
+
+    /// #581: prefix matching must respect OID chunk boundaries. With only
+    /// column ...1 (ifIndex) registered, an instance of the *unregistered*
+    /// sibling column ...10 (ifInOctets) is a string-prefix match of it —
+    /// `starts_with` alone resolves it to `ifIndex.0.3` / the wrong syntax,
+    /// silently.
+    #[test]
+    fn prefix_match_respects_dot_boundaries() {
+        let mut resolver = MibResolver::new();
+        resolver.load_definition(MibDefinition {
+            module: "TEST-MIB".to_string(),
+            description: None,
+            oids: HashMap::from([(
+                "1.3.6.1.2.1.2.2.1.1".to_string(),
+                OidEntry {
+                    name: "ifIndex".to_string(),
+                    module: None,
+                    description: None,
+                    syntax: Some("INTEGER".to_string()),
+                    is_table_entry: true,
+                },
+            )]),
+        });
+
+        // The registered column still resolves, with its index.
+        assert_eq!(resolver.resolve("1.3.6.1.2.1.2.2.1.1.3"), "ifIndex.3");
+        assert_eq!(resolver.syntax("1.3.6.1.2.1.2.2.1.1.3"), Some("INTEGER"));
+
+        // An adjacent, unregistered column that is a string prefix match
+        // (...1 vs ...10) must fall through untouched.
+        assert_eq!(
+            resolver.resolve("1.3.6.1.2.1.2.2.1.10.3"),
+            "1.3.6.1.2.1.2.2.1.10.3"
+        );
+        assert_eq!(resolver.syntax("1.3.6.1.2.1.2.2.1.10.3"), None);
     }
 
     #[test]

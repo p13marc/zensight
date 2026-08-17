@@ -247,7 +247,7 @@ async fn durable_store_serves_paginated_time_range() {
     }
 
     let dir = tempdir();
-    let store = Arc::new(LogStore::open(dir.join("logs.redb")).unwrap());
+    let store = Arc::new(LogStore::open(dir.join("logs.redb"), 8 * 1024 * 1024).unwrap());
     // 20 records across ts 1000..1019.
     let recs: Vec<LogRecord> = (0..20)
         .map(|i| rec(1000 + i, i as u64, &format!("line {i}")))
@@ -332,7 +332,7 @@ async fn server_side_search_filters_the_store() {
     }
 
     let dir = tempdir();
-    let store = Arc::new(LogStore::open(dir.join("logs.redb")).unwrap());
+    let store = Arc::new(LogStore::open(dir.join("logs.redb"), 8 * 1024 * 1024).unwrap());
     store
         .write_batch(&[
             rec(1000, 0, "info", 9, "startup ok"),

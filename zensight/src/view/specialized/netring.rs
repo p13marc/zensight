@@ -944,8 +944,9 @@ fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Messa
                 let size = format_bytes(rec.bytes as f64);
                 // A download needs the id *and* the origin holding it: a bulk
                 // fetch must name a literal origin (RFC 07 §3), and a sensor
-                // too old to say which one is also too old to serve wire v2 at
-                // all — so there is nothing a wildcard would buy here.
+                // too old to say which one is also too old to serve this wire
+                // version at all — so there is nothing a wildcard would buy
+                // here.
                 let action: Element<'_, Message> = match (&rec.artifact_id, &rec.artifact_prefix) {
                     (Some(id), Some(prefix)) => button(text("Download").size(font::CAPTION))
                         .padding([3, 9])

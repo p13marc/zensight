@@ -570,13 +570,50 @@ pub struct SocketRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UnitRecord {
     pub name: String,
+    /// Empty for an installed-but-unloaded unit: the description lives in the
+    /// unit file, and reading it would mean loading every unit on the host.
     pub description: String,
+    /// systemd's `LoadState` (`loaded`/`masked`/`not-found`/…), or the ZenSight
+    /// value `not-loaded` for a unit that is installed on disk but that the
+    /// manager has not loaded — those rows come from `ListUnitFiles`, not
+    /// `ListUnits`.
     pub load_state: String,
     pub active_state: String,
     pub sub_state: String,
     /// Queued job type for this unit (`start`/`stop`/…), or `None` if idle.
     #[serde(default)]
     pub job: Option<String>,
+    /// Unit-file enablement (`enabled`/`disabled`/`static`/`masked`/…) from
+    /// `ListUnitFiles`, or `None` for a unit with no installed unit file (and
+    /// from pre-1.4 sensors, which did not report it).
+    #[serde(default)]
+    pub unit_file_state: Option<String>,
+}
+
+/// One unit's on-disk definition, served from `@rpc/systemd/unit/file?name=<u>`.
+///
+/// Opt-in (`actions.expose_unit_files`) because unit files routinely carry
+/// credentials in `Environment=` lines; the sensor redacts those before they
+/// reach the bus. Paths are resolved from D-Bus `FragmentPath`/`DropInPaths`,
+/// never from the request, so there is no traversal surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UnitFile {
+    pub name: String,
+    /// The main unit file's path, if the unit has one (generated and transient
+    /// units do not).
+    #[serde(default)]
+    pub fragment_path: Option<String>,
+    #[serde(default)]
+    pub fragment: Option<String>,
+    /// Drop-ins, in systemd's own override order: `(path, contents)`.
+    #[serde(default)]
+    pub dropins: Vec<(String, String)>,
+    /// Whether the size cap dropped content.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Whether any line was redacted, so the reader knows this is not verbatim.
+    #[serde(default)]
+    pub redacted: bool,
 }
 
 /// Full detail for one systemd unit (#274), served from `@rpc/systemd/unit?name=<u>`:

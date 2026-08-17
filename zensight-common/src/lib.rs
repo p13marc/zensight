@@ -9,6 +9,7 @@
 //! - [`keyexpr`] - Key expression builders and parsers
 //! - [`error`] - Error types
 
+pub mod action;
 pub mod alert;
 pub mod artifact;
 pub mod bandwidth;
@@ -38,6 +39,7 @@ pub mod stream;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root
+pub use action::{ActionCapability, ActionStatus, ServiceAction, UnitFileChange, Verb};
 pub use alert::{Alert, AlertKind, AlertSeverity, AlertState};
 pub use artifact::{
     ArtifactKind, ArtifactOptions, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, Entry,
@@ -74,9 +76,9 @@ pub use keyexpr::{
     all_health_wildcard, all_liveliness_wildcard, all_name_evidence_wildcard, all_pdns_wildcard,
     all_state_wildcard, all_telemetry_wildcard, assertion_key, catalog_claim_key,
     catalog_claims_wildcard, catalog_rpc_key, correlator_alive_key, entities_query_key, entity_key,
-    fleet_command_key, fleet_rpc_key, host_evidence_key, is_telemetry_key, media_preview_key,
-    media_video_key, name_observation_key, names_query_key, origin_rpc_key, parse_full_key,
-    parse_key, pdns_key, refine_full_key, refine_key, validate_relative_selector,
+    fleet_command_key, fleet_rpc_key, is_telemetry_key, media_preview_key, media_video_key,
+    names_query_key, origin_rpc_key, parse_full_key, parse_key, pdns_key, refine_full_key,
+    refine_key, validate_relative_selector,
 };
 pub use publisher_registry::PublisherRegistry;
 pub use qos::QosClass;

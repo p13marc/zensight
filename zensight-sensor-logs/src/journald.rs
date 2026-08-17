@@ -126,6 +126,30 @@ fn open(cfg: &JournaldConfig) -> std::io::Result<Journal> {
     }
 }
 
+/// Unit/identifier prefix that marks the bundle's own output (#625).
+const SELF_PREFIX: &str = "zensight-sensor";
+
+/// Client-side exclusion (#625): the negative match libsystemd doesn't have.
+///
+/// With `exclude_self` on (the default), entries whose `_SYSTEMD_UNIT` or
+/// `SYSLOG_IDENTIFIER` starts with `zensight-sensor` are dropped — the
+/// bundle tailing its own stdout is a feedback loop (each line it logs
+/// becomes traffic it publishes, which produces more lines; on the deployed
+/// fleet the loop was ~25k zenoh WARNs/day re-ingested, #625/#626).
+/// `exclude_units` extends this with exact unit names.
+fn is_excluded(record: &JournalRecord, cfg: &JournaldConfig) -> bool {
+    let unit = record.get("_SYSTEMD_UNIT").map(String::as_str);
+    if cfg.exclude_self {
+        let ident = record.get("SYSLOG_IDENTIFIER").map(String::as_str);
+        if unit.is_some_and(|u| u.starts_with(SELF_PREFIX))
+            || ident.is_some_and(|i| i.starts_with(SELF_PREFIX))
+        {
+            return true;
+        }
+    }
+    unit.is_some_and(|u| cfg.exclude_units.iter().any(|e| e == u))
+}
+
 /// Compile the declarative server-side filters (#59) into journald match pairs.
 ///
 /// Pure (no journal handle) so the priority OR-expansion is unit-testable.
@@ -217,6 +241,13 @@ fn run(
             advanced = true;
             total_read += 1;
             JournaldStats::inc(&stats.read);
+
+            // Self/deny-list exclusion (#625), before the rate limiter so
+            // excluded spam can't eat the budget of wanted entries.
+            if is_excluded(&record, cfg) {
+                JournaldStats::inc(&stats.self_excluded);
+                continue;
+            }
 
             // Rate limit (#62): shed over-budget entries (sampled-out), keeping
             // 1-in-N. Done before mapping so we don't pay decode cost on shed.
@@ -640,6 +671,55 @@ fn datetime_from_usec(usec: u64) -> Option<chrono::DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record(pairs: &[(&str, &str)]) -> JournalRecord {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// #625: the bundle's own output is dropped by default — by unit and by
+    /// identifier (container stdout often has only the identifier) — while
+    /// everything else, including other zensight units like the GUI, passes.
+    #[test]
+    fn self_exclusion_drops_own_output_by_default() {
+        let cfg = JournaldConfig::default();
+        assert!(cfg.exclude_self, "self-exclusion must default on");
+        for own in [
+            record(&[("_SYSTEMD_UNIT", "zensight-sensor-logs.service")]),
+            record(&[("_SYSTEMD_UNIT", "zensight-sensors.service")]),
+            record(&[("SYSLOG_IDENTIFIER", "zensight-sensor-netring")]),
+        ] {
+            assert!(is_excluded(&own, &cfg), "{own:?}");
+        }
+        for other in [
+            record(&[("_SYSTEMD_UNIT", "sshd.service")]),
+            record(&[("_SYSTEMD_UNIT", "zensight.service")]),
+            record(&[("SYSLOG_IDENTIFIER", "kernel")]),
+            record(&[]),
+        ] {
+            assert!(!is_excluded(&other, &cfg), "{other:?}");
+        }
+    }
+
+    /// The escape hatch and the deny-list: exclude_self off lets own output
+    /// through; exclude_units drops exact unit names regardless.
+    #[test]
+    fn exclusion_config_overrides() {
+        let cfg = JournaldConfig {
+            exclude_self: false,
+            exclude_units: vec!["chatty.service".into()],
+            ..Default::default()
+        };
+        let own = record(&[("_SYSTEMD_UNIT", "zensight-sensor-logs.service")]);
+        assert!(!is_excluded(&own, &cfg));
+        let listed = record(&[("_SYSTEMD_UNIT", "chatty.service")]);
+        assert!(is_excluded(&listed, &cfg));
+        // Exact match, not prefix: a sibling unit passes.
+        let sibling = record(&[("_SYSTEMD_UNIT", "chatty2.service")]);
+        assert!(!is_excluded(&sibling, &cfg));
+    }
 
     #[test]
     fn rate_limiter_unlimited_when_no_max() {

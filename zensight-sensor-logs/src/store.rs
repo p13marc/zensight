@@ -31,12 +31,18 @@ pub struct LogStore {
 }
 
 impl LogStore {
-    /// Open (creating if absent) the store at `path`, ensuring the table exists.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
+    /// Open (creating if absent) the store at `path`, ensuring the table
+    /// exists, with an explicit redb page-cache budget (`store.cache_bytes`).
+    /// The budget is a required parameter because redb's own default is
+    /// 1 GiB (#625) — on the small hosts this sensor targets, that reads as
+    /// a slow multi-day RSS climb toward OOM as the database grows.
+    pub fn open(path: impl AsRef<Path>, cache_bytes: usize) -> Result<Self, redb::Error> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent).map_err(redb::StorageError::from)?;
         }
-        let db = Database::create(path)?;
+        let db = redb::Builder::new()
+            .set_cache_size(cache_bytes)
+            .create(path)?;
         let txn = db.begin_write()?;
         {
             let _ = txn.open_table(LOGS_TABLE)?;
@@ -304,7 +310,7 @@ mod tests {
 
     fn tmp_store() -> (LogStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = LogStore::open(dir.path().join("logs.redb")).unwrap();
+        let store = LogStore::open(dir.path().join("logs.redb"), 8 * 1024 * 1024).unwrap();
         (store, dir)
     }
 
@@ -396,12 +402,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("logs.redb");
         {
-            let s = LogStore::open(&path).unwrap();
+            let s = LogStore::open(&path, 8 * 1024 * 1024).unwrap();
             s.write_batch(&[rec(&uid(4000, 0), 4000, "persisted")])
                 .unwrap();
         }
         // Reopen: the record survives (restart-durability).
-        let s2 = LogStore::open(&path).unwrap();
+        let s2 = LogStore::open(&path, 8 * 1024 * 1024).unwrap();
         let out = s2.query(i64::MIN, i64::MAX, None, 10).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].message, "persisted");

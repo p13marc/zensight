@@ -1160,9 +1160,9 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.8.5"
+version = "1.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce"
+checksum = "76ae7bad254120e9e4c63bafc385310756f90c484eac0e36b8317cf09cb92a77"
 dependencies = [
  "arrayref",
  "arrayvec",
@@ -4554,6 +4554,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "json5"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
+dependencies = [
+ "serde",
+ "ucd-trie",
+]
+
+[[package]]
 name = "jsonwebtoken"
 version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6337,9 +6347,9 @@ dependencies = [
 
 [[package]]
 name = "parallax-pipeline"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbc873ef2f2d11d3d22c57c52209a0cc516c31d2542601b4a054e950286f98bb"
+checksum = "a3b7cc62b7a0832ad8ddcfefd8e2c2df23127489025d20c94f4adf57e29165ed"
 dependencies = [
  "anyhow",
  "bytes",
@@ -11301,7 +11311,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "869a93e8a7286e339e1128630051d82babbcd75d585975af07b9f3327220e60e"
 dependencies = [
- "json5",
+ "json5 0.4.1",
  "serde",
  "serde_json",
  "validated_struct_macros",
@@ -12975,9 +12985,9 @@ dependencies = [
 
 [[package]]
 name = "zblob"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19c452dba4cfdf346a719c90ed8a598db57f13b16ff5ade31c15d5c5f6214ec1"
+checksum = "8ccb97dfe8de42299a32fc31a61df623298d4624e0868852ad2a2f780c39a946"
 dependencies = [
  "bao-tree",
  "blake3",
@@ -12987,6 +12997,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "zenoh",
 ]
 
@@ -13054,9 +13065,9 @@ dependencies = [
 
 [[package]]
 name = "zenkey"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "847acfb210435c29f9f93603cff56992b915cec0ba7c32d438621a04e31ea190"
+checksum = "0c58cba1e192770ebd883ec660821a83ffd287c48019e2b562baf7803ad33655"
 dependencies = [
  "base64",
  "dirs 5.0.1",
@@ -13073,9 +13084,9 @@ dependencies = [
 
 [[package]]
 name = "zenkey-build"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cdf7a095396225bb9536a997d7dd21d1ff3d74c3e05f4c454721df043fe3219"
+checksum = "a9a6619eb70bfd1cd027db428f579f9497128ea150bdd4895a3b57012bdc39fc"
 dependencies = [
  "thiserror 2.0.19",
  "toml 0.8.23",
@@ -13104,7 +13115,7 @@ dependencies = [
  "futures",
  "git-version",
  "itertools",
- "json5",
+ "json5 0.4.1",
  "lazy_static",
  "nonempty-collections",
  "once_cell",
@@ -13175,7 +13186,7 @@ version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8672f4eaf88fd486f0503c59d19edfc25e7dd689bccd90d3cb731a5f627e0df"
 dependencies = [
- "json5",
+ "json5 0.4.1",
  "nonempty-collections",
  "num_cpus",
  "secrecy",
@@ -13626,13 +13637,13 @@ dependencies = [
  "anyhow",
  "async-stream",
  "chrono",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "flume",
  "iced",
  "iced_anim",
  "iced_test",
  "image",
- "json5",
+ "json5 1.3.1",
  "notify-rust",
  "parallax-pipeline",
  "rand 0.9.5",
@@ -13641,6 +13652,7 @@ dependencies = [
  "rfd 0.15.4",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -13658,7 +13670,8 @@ name = "zensight-common"
 version = "0.10.1"
 dependencies = [
  "ciborium",
- "json5",
+ "glob",
+ "json5 1.3.1",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -13682,7 +13695,7 @@ dependencies = [
  "ciborium",
  "clap",
  "flume",
- "json5",
+ "json5 1.3.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13703,7 +13716,7 @@ dependencies = [
  "anyhow",
  "ciborium",
  "clap",
- "json5",
+ "json5 1.3.1",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -13728,7 +13741,7 @@ dependencies = [
  "ciborium",
  "clap",
  "glob",
- "json5",
+ "json5 1.3.1",
  "parking_lot",
  "prometheus-client",
  "prost 0.14.4",
@@ -13753,7 +13766,7 @@ version = "0.10.1"
 dependencies = [
  "anyhow",
  "clap",
- "json5",
+ "json5 1.3.1",
  "re_log_encoding",
  "re_log_types",
  "rerun",
@@ -13777,10 +13790,10 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "hostname",
  "if-addrs",
- "json5",
+ "json5 1.3.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13809,7 +13822,7 @@ dependencies = [
  "ciborium",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rustls-pemfile",
@@ -13839,7 +13852,7 @@ dependencies = [
  "clap",
  "glob",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "libc",
  "once_cell",
  "rcgen",
@@ -13875,7 +13888,7 @@ dependencies = [
  "chrono",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -13896,7 +13909,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "netflow_parser",
  "serde",
  "serde_json",
@@ -13919,7 +13932,7 @@ dependencies = [
  "aya-log",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "libc",
  "nlink",
  "serde",
@@ -13961,7 +13974,7 @@ dependencies = [
  "clap",
  "flowscope",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "netring",
  "nlink",
  "pcap-file",
@@ -13986,7 +13999,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "parallax-pipeline",
  "serde",
  "serde_json",
@@ -14009,7 +14022,7 @@ dependencies = [
  "bytes",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "mib-rs",
  "rand 0.9.5",
  "serde",
@@ -14034,7 +14047,7 @@ dependencies = [
  "chrono",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "libc",
  "procfs",
  "rustix 1.1.4",
@@ -14075,7 +14088,7 @@ dependencies = [
  "futures-util",
  "glob",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "rustix 0.38.44",
  "serde",
  "serde_json",

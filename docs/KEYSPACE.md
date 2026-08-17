@@ -101,9 +101,14 @@ zensight/v1/@catalog/…                                   the identity catalog
 - **Fleet-wide writes are explicit** (RFC 05 amendment G2): a write procedure
   is origin-scoped unless its registry entry says `fanout = "allowed"`. The
   operator-console fleet pushes (logs filter + sentinel rules, systemd
-  action/expectations, netlink expectations, netring
+  expectations, netlink expectations, netring
   capture/detectors/filter/threat-intel, parallax stream) carry that marker
   deliberately; everything else refuses a wildcard origin at the type level.
+  `systemd action/set` also carries it, but for `zenctl` only — the marker
+  sanctions a typed, scriptable, logged fleet push. The GUI is strictly
+  origin-scoped there: a per-row restart button that could widen to every host
+  is a blast radius nobody asked for, so its key builders take a concrete origin
+  and a wildcard action key cannot be spelled.
 - **Bus explorer**: [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) is the `busctl`/`d-feet`
   equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
   `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply
@@ -192,8 +197,10 @@ bus). It observes the base-less wire by default; set
 sensors at it with `ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17471
 ZENSIGHT_ZENOH_SCOUTING=false` (the `zenoh.scouting` config knob / env
 override disables multicast discovery so a session can never join a mesh
-beyond its explicit endpoints; gossip stays on — it only propagates within
-the connected graph).
+beyond its explicit endpoints; gossip has its own `zenoh.gossip` /
+`ZENSIGHT_ZENOH_GOSSIP` switch — it only propagates within the connected
+graph. Unset, both default mode-aware: off for a client with explicit
+`connect` endpoints, on otherwise — #626).
 
 Session config, storage recipes (latest/catalog/timeseries/pdns), ACL, and
 constrained-link profiles: RFC [09](https://github.com/p13marc/zenkey/blob/main/rfcs/09-operations.md).

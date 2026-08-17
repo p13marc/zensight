@@ -697,13 +697,17 @@ impl SessionManager {
             }
         };
 
-        // Declare the media publisher on the profile's concrete key.
-        let key = {
-            let ctx = self.publisher.v1();
-            match profile {
-                Profile::Video(idx) => ctx.media_video_key(stream, "h264", self.tier_name(idx)),
-                Profile::Preview => ctx.media_key(&[stream, "preview", "jpeg"]),
-            }
+        // Declare the media publisher on the profile's concrete key — built
+        // with the generated registry `Media` builders, so what this sensor
+        // publishes and what the viewer subscribes to agree with the
+        // `[[media]]` declarations in parallax.toml by construction.
+        let key: String = {
+            use zensight_common::registry::parallax::{Media, media_key};
+            let m = match profile {
+                Profile::Video(idx) => Media::video(stream, "h264", self.tier_name(idx)),
+                Profile::Preview => Media::preview_jpeg(stream),
+            };
+            media_key(&zensight_common::PROFILE.local_origin(), &m).into()
         };
         let media = match self.publisher.raw_media_publisher(key.clone()).await {
             Ok(p) => Arc::new(p),
@@ -1181,14 +1185,11 @@ async fn rtsp_feed(mut rtsp: RtspSession, feed: AppSrcHandle, stream: String) {
     loop {
         match rtsp.next_buffer().await {
             Ok(Some(buffer)) => {
-                if feed.is_full() {
-                    continue; // shed the frame
-                }
-                if feed
-                    .push_buffer_timeout(buffer, Some(Duration::from_millis(50)))
-                    .is_err()
-                {
-                    break;
+                // Non-blocking push (parallax 0.6): a full queue hands the
+                // buffer back — shed it, never back the network reader up.
+                match feed.try_push_buffer(buffer) {
+                    Ok(_queued_or_shed) => {}
+                    Err(_) => break, // pipeline is EOS/flushing
                 }
             }
             Ok(None) => {

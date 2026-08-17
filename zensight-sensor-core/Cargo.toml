@@ -31,10 +31,11 @@ chrono = "0.4"
 
 # Debug-report transfer + bundling (#196)
 zblob = { workspace = true }
+# Volatile-mode snapshot tags live in a channel-owned private temp dir.
+tempfile = { workspace = true }
 ulid = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }
-tempfile = { workspace = true }
 
 # Artifact producer registry (#332)
 async-trait = { workspace = true }

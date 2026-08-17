@@ -24,7 +24,7 @@
       max_bytes: 67108864,   // 64 MiB cap on the (uncompressed) bundle
       cooldown_secs: 30,     // min gap between generations
       ttl_secs: 600,         // how long a generated bundle stays downloadable
-      chunk_size: 524288,    // 512 KiB transfer chunk (clamped 256 KiB–1 MiB)
+      chunk_size: 524288,    // 512 KiB transfer chunk (zblob validates: 64 KiB–4 MiB, 16 KiB-aligned)
     },
   },
 
@@ -52,6 +52,14 @@
 
       // detect_events defaults to true: coredump / unit-failed / OOM journal
       // events (matched by MESSAGE_ID) are raised as alerts on state/logs/alert/*.
+
+      // Self-exclusion (#625), on by default: entries whose _SYSTEMD_UNIT or
+      // SYSLOG_IDENTIFIER starts with `zensight-sensor` are dropped in the
+      // reader — the bundle tailing its own stdout is a feedback loop.
+      // exclude_self: true,
+      // Extra exact unit names to drop client-side (libsystemd has no
+      // negative match); counted as journald/self_excluded_total.
+      // exclude_units: ["noisy.service"],
 
       // Robustness under storms / rotation (#62). The reader feeds a bounded
       // channel; pick what happens when it fills:
@@ -96,6 +104,9 @@
       flush_interval_secs: 2,
       prune_interval_secs: 300,
       queue_capacity: 100000, // writer-channel bound; full → drop + count
+      // redb page-cache budget in bytes (#625). redb's own default is 1 GiB,
+      // which reads as a slow RSS climb toward OOM on small hosts.
+      // cache_bytes: 67108864, // 64 MiB (the default)
     },
 
     // Log sentinel (#543): declarative pattern→alert rules, also managed at

@@ -11,7 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 use zenkey::V1Context;
-use zenkey::grammar::BlobTier;
 
 /// The write procedure for a control topic: `…/@rpc/<producer>/<topic>/set`.
 ///
@@ -33,6 +32,36 @@ pub fn command_key(producer: &str, topic: &str) -> String {
 pub fn status_key(producer: &str, topic: &str) -> String {
     V1Context::for_producer(&crate::PROFILE, producer)
         .rpc_key(&[topic])
+        .into()
+}
+
+/// The capability-probe read for a control topic:
+/// `…/@rpc/<producer>/<topic>/capability`.
+///
+/// A gated topic serves this **whether or not the gate is open**, so a caller
+/// can tell "this host refuses" from "nobody answered". Silence is not a usable
+/// signal: it is emitted equally by a disabled gate, an offline host, an older
+/// build, and a sensor busy serving someone else's long-running write.
+///
+/// # Example
+/// ```
+/// use zensight_common::command::capability_key;
+/// let k = capability_key("systemd", "action");
+/// assert!(k.ends_with("/@rpc/systemd/action/capability"));
+/// ```
+pub fn capability_key(producer: &str, topic: &str) -> String {
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&[topic, "capability"])
+        .into()
+}
+
+/// A two-chunk detail read: `…/@rpc/<producer>/<topic>/<sub>`.
+///
+/// For procedures that group under a parent topic (`unit/file` beside `unit`)
+/// rather than adding a top-level name.
+pub fn nested_query_key(producer: &str, topic: &str, sub: &str) -> String {
+    V1Context::for_producer(&crate::PROFILE, producer)
+        .rpc_key(&[topic, sub])
         .into()
 }
 
@@ -71,25 +100,45 @@ pub fn artifact_cancel_key(producer: &str) -> String {
 
 /// Tier-1 blob prefix: `<base>/v1/<origin>/@blob/artifact` — a produced
 /// artifact's manifest + chunks live under `…/artifact/<id>/**` (RFC 07 §2).
-pub fn artifact_blob_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .blob_prefix(BlobTier::Artifact)
+///
+/// Blob keys carry no producer chunk, so unlike the `@rpc` builders above
+/// these take no producer — the tier + the local origin is the whole address
+/// (`registry::blob::Tier`, generated from the `[[blob]]` declarations).
+pub fn artifact_blob_prefix() -> String {
+    crate::registry::blob::Tier::Artifact
+        .prefix_at(&crate::PROFILE.local_origin())
         .into()
 }
 
 /// Tier-2 content-store prefix: `<base>/v1/<origin>/@blob/store` — chunks
 /// at `…/store/<algo>/<hash>`, immutable ⇒ cacheable fleet-wide.
-pub fn artifact_store_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .blob_prefix(BlobTier::Store)
+pub fn artifact_store_prefix() -> String {
+    crate::registry::blob::Tier::Store
+        .prefix_at(&crate::PROFILE.local_origin())
         .into()
 }
 
 /// Tier-2 tree-index prefix: `<base>/v1/<origin>/@blob/tree`.
-pub fn artifact_tree_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .blob_prefix(BlobTier::Tree)
+pub fn artifact_tree_prefix() -> String {
+    crate::registry::blob::Tier::Tree
+        .prefix_at(&crate::PROFILE.local_origin())
         .into()
+}
+
+/// The `*`-origin Tier-1 artifact **probe** prefix (RFC 07 §2.5), as the
+/// typed query prefix a probing [`zblob::BlobClient`] takes.
+///
+/// This lives here — next to the tier builders — and not in `keyexpr.rs`,
+/// whose guard posture rightly refuses any stringly `@blob` + `*` spelling:
+/// a probe prefix and a fetch prefix are interchangeable as strings, which is
+/// exactly how a probe becomes §3's wildcard-origin bulk fetch. The value
+/// stays behind `zenkey::BlobProbePrefix` (not convertible to a `Key`) until
+/// the final conversion into zblob's own probe-capable type.
+pub fn fleet_artifact_probe_prefix() -> zblob::QueryPrefix {
+    zblob::QueryPrefix::new(
+        zenkey::BlobProbePrefix::new(zenkey::grammar::BlobTier::Artifact).as_str(),
+    )
+    .expect("the generated probe prefix is a valid query prefix")
 }
 
 /// Optional envelope carrying a correlation id alongside a command body.
@@ -134,11 +183,11 @@ mod tests {
         assert!(artifact_request_key(p).ends_with("/@rpc/netlink/artifact/request"));
         assert!(artifact_status_key(p).ends_with("/@rpc/netlink/artifact/status"));
         assert!(artifact_cancel_key(p).ends_with("/@rpc/netlink/artifact/cancel"));
-        assert!(artifact_blob_prefix(p).ends_with("/@blob/artifact"));
-        assert!(artifact_store_prefix(p).ends_with("/@blob/store"));
-        assert!(artifact_tree_prefix(p).ends_with("/@blob/tree"));
+        assert!(artifact_blob_prefix().ends_with("/@blob/artifact"));
+        assert!(artifact_store_prefix().ends_with("/@blob/store"));
+        assert!(artifact_tree_prefix().ends_with("/@blob/tree"));
         // Control procedures and blob delivery live on different planes.
-        assert!(!artifact_request_key(p).starts_with(&artifact_blob_prefix(p)));
+        assert!(!artifact_request_key(p).starts_with(&artifact_blob_prefix()));
     }
 
     #[test]

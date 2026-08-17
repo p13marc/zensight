@@ -71,7 +71,7 @@ pub use health::{
 pub use identity::{HostIdentity, SharedIdentity};
 pub use liveliness::LivelinessManager;
 pub use publisher::{Publisher, RawMediaPublisher};
-pub use report::{DebugBundleSource, SimpleBundleSource, redact};
+pub use report::{DebugBundleSource, REDACTED_MARKER, SimpleBundleSource, is_secret_key, redact};
 pub use runner::SensorRunner;
 pub use scrub::{ArgScrubber, CMDLINE_CAP_BYTES};
 pub use secret::{resolve_secret, resolve_secret_opt};

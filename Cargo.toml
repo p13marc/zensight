@@ -73,8 +73,13 @@ async-trait = "0.1"
 hostname = "0.4"
 if-addrs = "0.14"
 
+# Unit-name globbing: the systemd watchlist (#273) and the service-control
+# allowlist (#283). Promoted to a workspace dep so the sensor's gate and the
+# frontend's preview of it cannot compile against different glob semantics.
+glob = "0.3"
+
 # Configuration
-json5 = "0.4"
+json5 = "1.0"
 
 # Logging
 tracing = "0.1"
@@ -88,7 +93,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 
 # Platform utilities
-dirs = "5"
+dirs = "6"
 # Native file dialogs (export save-as, #37). xdg-portal backend avoids a hard
 # GTK system-lib dependency (uses the desktop portal over D-Bus via ashpd).
 # rfd backend: async-std, NOT tokio — iced_tester (the `tester` feature) pulls
@@ -113,14 +118,16 @@ zensight-common = { path = "zensight-common" }
 # The keyspace convention crate — external since the zenkey extraction (RFC set
 # + zenctl live there too). crates.io dep (#517); registry TOMLs live in-repo
 # (zensight-common/registry/), compiled at build time by zenkey-build.
-zenkey = "0.4"
-zenkey-build = "0.4"
+zenkey = "0.6"
+zenkey-build = "0.6"
 schemars = "1"
 zensight-sensor-core = { path = "zensight-sensor-core" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # graduated from in-tree `zenoh-blob/` — epic #193; renamed on extraction).
-# 0.2 is wire v2: BLAKE3 + bao verified streaming, postcard control messages,
-# chunk-range resume. v1 and v2 peers deliberately do not interoperate, so a
-# fleet upgrades sensors and frontend together.
-zblob = "0.2.0"
+# 0.3 is wire v3: BLAKE3 + bao verified streaming, one postcard encoding,
+# typed serve/query prefixes, batched tier-2 fetch and probes. v2 and v3 peers
+# deliberately do not interoperate (chunk addresses are unchanged, so stores
+# stay warm), so a fleet upgrades sensors and frontend together.
+zblob = "0.3.0"
+
 

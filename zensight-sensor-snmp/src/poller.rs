@@ -418,7 +418,11 @@ impl SnmpPoller {
                     let mut known = known.write().unwrap();
                     known.extend(claim.ips.iter().cloned());
                 }
-                let key = zensight_common::host_evidence_key("snmp", &self.device.name);
+                let key: String = zensight_common::registry::snmp::key(
+                    &zensight_common::PROFILE.local_origin(),
+                    &zensight_common::registry::snmp::Subject::evidence_device(&self.device.name),
+                )
+                .into();
                 if let Err(e) = registry.publish_serializable(&key, &claim).await {
                     tracing::warn!(device = %self.device.name, error = %e, "evidence publish failed");
                 }

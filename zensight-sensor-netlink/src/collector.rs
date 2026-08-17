@@ -634,7 +634,11 @@ impl Collector {
 
         let mut published = Vec::with_capacity(to_publish.len());
         for claim in to_publish {
-            let key = zensight_common::host_evidence_key("netlink", &claim.source);
+            let key: String = zensight_common::registry::netlink::key(
+                &zensight_common::PROFILE.local_origin(),
+                &zensight_common::registry::netlink::Subject::evidence_device(&claim.source),
+            )
+            .into();
             if let Err(e) = self.registry.publish_serializable(&key, &claim).await {
                 tracing::warn!(error = %e, source = %claim.source, "netlink: neighbor-evidence publish failed");
                 continue;

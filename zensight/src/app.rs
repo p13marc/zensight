@@ -190,6 +190,15 @@ pub struct ZenSight {
     artifact_fetch: crate::view::artifact_fetch::ArtifactFetch,
     /// The in-flight download's identity (key prefix, kind, id, delivery, dest).
     artifact_job: Option<crate::view::artifact_fetch::ArtifactJob>,
+    /// Snapshot tags marking which downloaded trees keep their chunks warm in
+    /// the redb chunk cache (`None` in demo mode — no persistent store, no
+    /// sweeping). Lives beside the redb, in its own directory (zblob tag
+    /// files).
+    blob_tags: Option<std::sync::Arc<zblob::gc::SnapshotTags>>,
+    /// In-flight-download protection for chunk-cache sweeps: the TreeClient
+    /// registers fetched-but-unmaterialized chunks here so a concurrent sweep
+    /// cannot collect them out from under a running download.
+    blob_temps: std::sync::Arc<zblob::gc::TempTags>,
     /// Per-sensor advertised artifact kinds (`producer` → kinds + bounds/adverts).
     artifact_kinds: std::collections::HashMap<String, Vec<zensight_common::KindStatus>>,
     /// Per-sensor on-demand capture form state (`producer` → form), shared by
@@ -246,6 +255,22 @@ pub struct ZenSight {
     firing_by_source: std::collections::HashMap<String, usize>,
 }
 
+/// Decode an `@rpc` reply-error payload into its `(error, message)` pair
+/// (RFC 05 §3's namespaced refusal, e.g. `error/gated`).
+///
+/// Shared by every write path so a refusal reads the same however it was sent.
+fn parse_rpc_error(payload: &[u8]) -> (String, String) {
+    serde_json::from_slice::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| {
+            Some((
+                v.get("error")?.as_str()?.to_string(),
+                v.get("message")?.as_str()?.to_string(),
+            ))
+        })
+        .unwrap_or_else(|| ("error".to_string(), "refused".to_string()))
+}
+
 impl ZenSight {
     /// Boot the ZenSight application (called by iced::application).
     pub fn boot(demo_mode: bool) -> (Self, Task<Message>) {
@@ -259,7 +284,10 @@ impl ZenSight {
             mode: persistent.zenoh_mode.clone(),
             connect: persistent.zenoh_connect.clone(),
             listen: persistent.zenoh_listen.clone(),
-            scouting: true,
+            // Unset = mode-aware (#626): scouting off for a client with
+            // explicit connect endpoints, on otherwise.
+            scouting: None,
+            gossip: None,
             // The deployment base (#466) is not a GUI setting: it names the
             // deployment and comes ONLY from `ZENSIGHT_ZENOH_NAMESPACE` — not
             // from a text box. Empty (the default) means no session namespace:
@@ -394,6 +422,25 @@ impl ZenSight {
             command_registry: None,
             artifact_fetch: crate::view::artifact_fetch::ArtifactFetch::default(),
             artifact_job: None,
+            blob_tags: if demo_mode {
+                None
+            } else {
+                // Beside metrics.redb; a failure to open just means no
+                // sweeping this session (warned), not a broken app.
+                dirs::data_dir()
+                    .map(|d| d.join("zensight").join("blob-tags"))
+                    .and_then(|dir| match zblob::gc::SnapshotTags::open(&dir) {
+                        Ok(t) => Some(std::sync::Arc::new(t)),
+                        Err(e) => {
+                            tracing::warn!(
+                                dir = %dir.display(), error = %e,
+                                "blob tag dir unusable; chunk cache will not be swept"
+                            );
+                            None
+                        }
+                    })
+            },
+            blob_temps: std::sync::Arc::new(zblob::gc::TempTags::new()),
             artifact_kinds: std::collections::HashMap::new(),
             capture_forms: std::collections::HashMap::new(),
             expectations: crate::view::expectations::ExpectationsState::default(),
@@ -1079,6 +1126,64 @@ impl ZenSight {
             Message::SystemdSetUnitFilter(filter) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.systemd_detail.unit_state_filter = filter;
+                    device.systemd_detail.units_table.limit =
+                        crate::view::components::data_table::DEFAULT_LIMIT;
+                }
+            }
+            Message::SystemdSetUnitTypeFilter(filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_type_filter = filter;
+                    device.systemd_detail.units_table.limit =
+                        crate::view::components::data_table::DEFAULT_LIMIT;
+                }
+            }
+            Message::SystemdUnitsTableSort(col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.units_table.toggle_sort(col);
+                }
+            }
+            Message::SystemdUnitsTableFilter(f) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.units_table.set_filter(f);
+                }
+            }
+            Message::SystemdUnitsTableMore => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.units_table.load_more();
+                }
+            }
+            Message::SystemdFetchUnitFile(unit) => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_file = Fetch::Loading;
+                }
+                return ControlFlow::Break(self.query_systemd_unit_file(unit));
+            }
+            Message::SystemdUnitFileReceived(result) => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_file = match result {
+                        Ok(f) => Fetch::Ready(f),
+                        Err(e) => Fetch::Error(e),
+                    };
+                }
+            }
+            Message::SystemdHideUnitFile => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_file = Fetch::Idle;
+                }
+            }
+            Message::FetchSystemdActionCapability => {
+                return ControlFlow::Break(self.query_systemd_action_capability());
+            }
+            Message::SystemdActionCapabilityReceived(result) => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.capability = match result {
+                        Ok(cap) => Fetch::Ready(cap),
+                        Err(e) => Fetch::Error(e),
+                    };
                 }
             }
             Message::SystemdUnitActionArm { verb, unit } => {
@@ -1091,18 +1196,41 @@ impl ZenSight {
                     device.systemd_detail.pending_action = None;
                 }
             }
+            Message::SystemdUnitActionResult(result) => {
+                return ControlFlow::Break(self.apply_systemd_action_result(result));
+            }
             Message::SystemdUnitActionConfirm => {
                 if let Some((verb, unit)) = self
                     .selected_device
                     .as_mut()
                     .and_then(|d| d.systemd_detail.pending_action.take())
                 {
-                    let key = zensight_common::fleet_command_key("systemd", "action");
-                    let command = serde_json::json!({ "verb": verb, "unit": unit });
-                    return ControlFlow::Break(
-                        self.send_command(key, &command, format!("Sent {verb} {unit}"))
-                            .chain(self.query_systemd_action_status()),
-                    );
+                    // Addressed to the drilled-in host only. There is deliberately
+                    // no fleet fallback: a wildcard here would restart the unit on
+                    // every host serving the sensor, so an unresolvable origin
+                    // refuses rather than widening the blast radius.
+                    let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Systemd)
+                    else {
+                        return ControlFlow::Break(Task::done(Message::CommandFeedback {
+                            success: false,
+                            message: "No host selected — refusing to broadcast a service action"
+                                .to_string(),
+                        }));
+                    };
+                    let key = crate::view::specialized::systemd_detail::action_set_key(&origin);
+                    let timeout = self
+                        .selected_device
+                        .as_ref()
+                        .map(|d| d.systemd_detail.action_timeout())
+                        .unwrap_or_else(|| std::time::Duration::from_secs(35));
+                    let command = zensight_common::action::ServiceAction {
+                        verb,
+                        unit: unit.clone(),
+                    };
+                    if let Some(device) = self.selected_device.as_mut() {
+                        device.systemd_detail.action_inflight = Some((verb, unit));
+                    }
+                    return ControlFlow::Break(self.call_systemd_action(key, command, timeout));
                 }
             }
 
@@ -1115,6 +1243,9 @@ impl ZenSight {
                         Some(_) => Fetch::Loading,
                         None => Fetch::Idle,
                     };
+                    // Collapse the file panel: it belongs to the unit that was
+                    // selected, not the one now selected.
+                    device.systemd_detail.unit_file = Fetch::Idle;
                 }
                 if let Some(unit) = unit {
                     return ControlFlow::Break(self.query_systemd_unit_detail(unit));
@@ -2119,7 +2250,15 @@ impl ZenSight {
                 // Topology refresh (#391): while the map is open, re-pull
                 // matrix/flows/neighbors every ~10 s so edge rates stay live.
                 let topo_fetch = self.maybe_refresh_topology();
+                // Units refresh (#283): while the systemd Units tab is open,
+                // re-pull it when the host reports a unit job completing.
+                let units_fetch = self.maybe_refresh_systemd_units();
                 let log_fetch = match (log_fetch, topo_fetch) {
+                    (Some(a), Some(b)) => Some(Task::batch([a, b])),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                };
+                let log_fetch = match (log_fetch, units_fetch) {
                     (Some(a), Some(b)) => Some(Task::batch([a, b])),
                     (Some(a), None) | (None, Some(a)) => Some(a),
                     (None, None) => None,
@@ -2150,12 +2289,37 @@ impl ZenSight {
                         let batch = metric_batch.map(|(_, b)| b).unwrap_or_default();
                         let logs = log_batch.map(|(_, l)| l).unwrap_or_default();
                         let now_ms = zensight_common::current_timestamp_millis();
+                        // The chunk cache rides the same prune cadence
+                        // (samples and logs have retention; without this the
+                        // chunks table grows forever). Gated on the artifact
+                        // job being idle: pausing drops the download future
+                        // and with it the TempTag protecting its fetched
+                        // chunks, so sweeping past a paused job would eat its
+                        // resume state. (`is_busy` covers Paused.)
+                        let sweep_tags = (prune && !self.artifact_fetch.is_busy())
+                            .then(|| self.blob_tags.clone())
+                            .flatten();
+                        let sweep_temps = self.blob_temps.clone();
                         let flush = Task::future(async move {
                             // Map redb's large error to a String inside the blocking
                             // closure so the future's payload stays small.
                             let res = tokio::task::spawn_blocking(move || {
                                 let n = store.write_batch(&batch).map_err(|e| e.to_string())?;
                                 store.write_logs(&logs).map_err(|e| e.to_string())?;
+                                if let Some(tags) = &sweep_tags {
+                                    let chunks = crate::store::RedbContentStore::new(store.clone());
+                                    match zblob::gc::sweep(&chunks, tags, &sweep_temps, []) {
+                                        Ok(stats) => tracing::debug!(
+                                            removed = stats.removed,
+                                            kept = stats.kept,
+                                            "Swept the blob chunk cache"
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            "Blob chunk-cache sweep failed"
+                                        ),
+                                    }
+                                }
                                 if prune {
                                     let evicted = store.prune(now_ms).map_err(|e| e.to_string())?;
                                     let log_evicted = store
@@ -2717,15 +2881,49 @@ impl ZenSight {
                 }
             }
 
-            Message::ArtifactDestChosen {
-                producer,
-                kind,
-                target_source,
-                dest,
-            } => {
-                if let Some(dest) = dest
-                    && let Some(task) =
-                        self.start_artifact_with_dest(producer, kind, target_source, dest)
+            Message::ArtifactTreeVerified(result) => match result {
+                Ok(verify) => {
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::ConfirmingTree { verify };
+                }
+                Err(e) => {
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
+                    self.toasts
+                        .push(ToastSeverity::Error, format!("Snapshot verify failed: {e}"));
+                }
+            },
+
+            Message::ArtifactTreeConfirmed => {
+                // The verify stays on screen while the picker is open; the
+                // state advances only once a folder is actually chosen.
+                if matches!(
+                    self.artifact_fetch,
+                    crate::view::artifact_fetch::ArtifactFetch::ConfirmingTree { .. }
+                ) {
+                    return Task::future(async move {
+                        let dest = rfd::AsyncFileDialog::new()
+                            .pick_folder()
+                            .await
+                            .map(|h| h.path().to_path_buf());
+                        Message::ArtifactTreeDestChosen { dest }
+                    });
+                }
+            }
+
+            Message::ArtifactTreeDestChosen { dest } => {
+                if let Some(task) = self.on_tree_dest_chosen(dest) {
+                    return task;
+                }
+            }
+
+            Message::ArtifactHolderChosen(idx) => {
+                // Take the holder list out of the pick state; a stale index
+                // (state moved on) is ignored.
+                if let crate::view::artifact_fetch::ArtifactFetch::PickingHolder { holders } =
+                    std::mem::take(&mut self.artifact_fetch)
+                    && let Some(holder) = holders.into_iter().nth(idx)
+                    && let Some(task) = self.start_holder_download(holder.state)
                 {
                     return task;
                 }
@@ -2762,11 +2960,33 @@ impl ZenSight {
                 }
             }
 
+            Message::ArtifactVerifying => {
+                // Only while actively downloading (a stale event from a
+                // cancelled job must not resurrect the busy state). The
+                // post-resolve assignment in `on_artifact_downloaded` keeps
+                // covering the blob Save-as phase; this arrives earlier, when
+                // a tree download starts verify/materialize (#624).
+                if matches!(
+                    self.artifact_fetch,
+                    crate::view::artifact_fetch::ArtifactFetch::Downloading { .. }
+                ) {
+                    self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Verifying;
+                }
+            }
+
             Message::ArtifactDownloaded(result) => {
                 if let Some(task) = self.on_artifact_downloaded(result) {
                     return task;
                 }
             }
+
+            Message::BlobCacheTagged(result) => match result {
+                Ok(()) => tracing::debug!("Tagged the downloaded snapshot in the chunk cache"),
+                Err(e) => tracing::debug!(
+                    error = %e,
+                    "Could not tag the downloaded snapshot (cache stays cold for it)"
+                ),
+            },
 
             Message::ArtifactSaved(result) => match result {
                 Ok(Some(path)) => {
@@ -3601,20 +3821,10 @@ impl ZenSight {
                         message: ok_message,
                     },
                     Err(err) => {
-                        let detail =
-                            serde_json::from_slice::<serde_json::Value>(&err.payload().to_bytes())
-                                .ok()
-                                .and_then(|v| {
-                                    Some(format!(
-                                        "{}: {}",
-                                        v.get("error")?.as_str()?,
-                                        v.get("message")?.as_str()?
-                                    ))
-                                })
-                                .unwrap_or_else(|| "refused".to_string());
+                        let (error, message) = parse_rpc_error(&err.payload().to_bytes());
                         Message::CommandFeedback {
                             success: false,
-                            message: format!("Command refused — {detail}"),
+                            message: format!("Command refused — {error}: {message}"),
                         }
                     }
                 },
@@ -3641,27 +3851,13 @@ impl ZenSight {
                 .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
             return None;
         }
-        match &kind {
-            zensight_common::ArtifactKind::Snapshot { .. } => {
-                // Pick a destination folder first, then start the download.
-                Some(Task::future(async move {
-                    let dest = rfd::AsyncFileDialog::new()
-                        .pick_folder()
-                        .await
-                        .map(|h| h.path().to_path_buf());
-                    Message::ArtifactDestChosen {
-                        producer,
-                        kind,
-                        target_source,
-                        dest,
-                    }
-                }))
-            }
-            _ => {
-                let dest = std::env::temp_dir().join("zensight-downloads");
-                self.start_artifact_with_dest(producer, kind, target_source, dest)
-            }
-        }
+        // Every kind starts with the staging dir as a placeholder dest. A
+        // tree replaces it after its verified pre-download confirm — the
+        // folder picker moved *behind* verification, so the operator sees
+        // what the snapshot actually contains (and who still serves it)
+        // before choosing where multi-gigabyte output lands.
+        let dest = std::env::temp_dir().join("zensight-downloads");
+        self.start_artifact_with_dest(producer, kind, target_source, dest)
     }
 
     /// Build the job with the resolved `dest`, set Requesting, and spawn the
@@ -3676,14 +3872,6 @@ impl ZenSight {
     ) -> Option<Task<Message>> {
         let session = self.session.clone()?;
         let registry = self.command_registry.clone()?;
-        // A tree is reconstructed into a clearly-named subfolder of the picked dir.
-        let dest = match &kind {
-            zensight_common::ArtifactKind::Snapshot { dir } => {
-                let sensor = producer.as_str();
-                dest.join(format!("{sensor}-{dir}-snapshot"))
-            }
-            _ => dest,
-        };
         let job =
             crate::view::artifact_fetch::ArtifactJob::new(producer.clone(), kind.clone(), dest);
         let id = job.id;
@@ -3741,9 +3929,9 @@ impl ZenSight {
             }
         });
         let dir = std::env::temp_dir().join("zensight-downloads");
-        // zblob 0.2 has the *caller* choose the destination file — a remote
-        // party must not pick where bytes land. Staging under the artifact id
-        // keeps the served filename advisory until the Save-as dialog.
+        // zblob has the *caller* choose where bytes land: `download_staged`
+        // stages under the blob id inside this directory, so the served
+        // filename stays advisory until the Save-as dialog.
         let mut job = crate::view::artifact_fetch::ArtifactJob::new(
             producer.clone(),
             zensight_common::ArtifactKind::Capture {
@@ -3759,10 +3947,7 @@ impl ZenSight {
             job.id = id;
         }
         job.filename = Some(filename);
-        // Same rule as every other blob fetch (see `blob_or_tree_dest_of`):
-        // the caller names the file, staged under the artifact id, so the
-        // sensor's filename stays advisory until the Save-as dialog.
-        let dest = job.dest.join(job.id.to_string());
+        let dir = job.dest.clone();
         let cancel = job.cancel.clone();
         self.artifact_job = Some(job);
         self.artifact_fetch =
@@ -3773,7 +3958,7 @@ impl ZenSight {
                 blob_prefix,
                 artifact_id,
                 root,
-                dest,
+                dir,
                 cancel,
             ),
         ))
@@ -3783,45 +3968,121 @@ impl ZenSight {
     /// pick the transfer client off the delivery tag and kick off the stream.
     fn on_artifact_requested(
         &mut self,
-        result: Result<zensight_common::ArtifactState, String>,
+        result: Result<Vec<zensight_common::ArtifactState>, String>,
     ) -> Option<Task<Message>> {
-        use zensight_common::{ArtifactState, Delivery};
         match result {
-            Ok(ArtifactState::Ready { delivery, .. }) => {
-                let job = self.artifact_job.as_mut()?;
-                job.delivery = Some(delivery.clone());
-                // Total & filename depend on the delivery type (chunk count for a
-                // blob, file count for a tree — matching the old per-tier behavior).
-                let total = match &delivery {
-                    Delivery::Blob { manifest, .. } => {
-                        // The filename is advisory (the sensor's suggestion for
-                        // the Save-as dialog), so `None` just means "no
-                        // suggestion" — it never selects a path.
-                        if let Some(name) = &manifest.filename {
-                            job.filename = Some(name.clone());
-                        }
-                        // v2 manifests carry sizes, not a chunk count.
-                        manifest.total_len.div_ceil(manifest.chunk_size as u64)
+            Ok(states) => {
+                // The request fanned out under one shared ULID, so several
+                // hosts may each have produced their own artifact for it —
+                // one holder per origin, read off the delivery's concrete
+                // prefix. A single holder proceeds exactly as before.
+                let mut holders = crate::view::artifact_fetch::holders_from_states(states);
+                match holders.len() {
+                    0 => {
+                        let e = "no usable artifact holder (malformed delivery)".to_string();
+                        self.artifact_fetch =
+                            crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
+                        self.toasts
+                            .push(ToastSeverity::Error, format!("Artifact failed: {e}"));
+                        None
                     }
-                    Delivery::Tree { summary, .. } => summary.file_count.max(1),
-                };
-                let dest = Self::blob_or_tree_dest_of(job, &delivery);
-                let cancel = job.cancel.clone();
-                self.artifact_fetch =
-                    crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total };
-                let session = self.session.clone()?;
-                let store = self.content_store();
-                Some(Task::stream(crate::view::artifact_fetch::download_stream(
-                    session, delivery, dest, store, cancel,
-                )))
+                    1 => {
+                        let only = holders.remove(0);
+                        self.start_holder_download(only.state)
+                    }
+                    _ => {
+                        // Several hosts produced under the shared id — hand
+                        // the operator the choice. NOT a striping case: each
+                        // host built its own artifact (divergent roots), so
+                        // these are alternatives, never one transfer's parts.
+                        self.artifact_fetch =
+                            crate::view::artifact_fetch::ArtifactFetch::PickingHolder { holders };
+                        None
+                    }
+                }
             }
-            Ok(_) => None, // request helper only returns Ready on success
             Err(e) => {
                 self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
                 self.toasts
                     .push(ToastSeverity::Error, format!("Artifact failed: {e}"));
                 None
             }
+        }
+    }
+
+    /// Kick off the transfer for one chosen holder's Ready state.
+    fn start_holder_download(
+        &mut self,
+        state: zensight_common::ArtifactState,
+    ) -> Option<Task<Message>> {
+        use zensight_common::{ArtifactState, Delivery};
+        match state {
+            ArtifactState::Ready { delivery, .. } => {
+                self.artifact_job.as_mut()?.delivery = Some(delivery.clone());
+                // A tree detours through verification before any folder
+                // picker or transfer: the root-fetched index gives a real
+                // file list and chunk total (the sensor's self-reported
+                // TreeSummary is display-only by its own contract), and the
+                // holder probe says who still serves it.
+                if let Delivery::Tree {
+                    root,
+                    store_prefix,
+                    tree_prefix,
+                    ..
+                } = delivery
+                {
+                    let session = self.session.clone()?;
+                    self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Generating {
+                        detail: Some("Verifying snapshot…".to_string()),
+                        progress: None,
+                    };
+                    return Some(Task::future(async move {
+                        Message::ArtifactTreeVerified(
+                            crate::view::artifact_fetch::verify_tree(
+                                session,
+                                root,
+                                store_prefix,
+                                tree_prefix,
+                            )
+                            .await,
+                        )
+                    }));
+                }
+                let job = self.artifact_job.as_mut()?;
+                let total = match &delivery {
+                    Delivery::Blob { manifest, .. } => {
+                        // The filename is advisory (the sensor's suggestion for
+                        // the Save-as dialog), so `None` just means "no
+                        // suggestion" — it never selects a path. It is also
+                        // remote input: `suggested_filename()` reduces it to a
+                        // bare file name, so a hostile `../../x` never reaches
+                        // the dialog (zblob's docs: never use `filename` raw).
+                        if let Some(name) = manifest.suggested_filename() {
+                            job.filename = Some(name);
+                        }
+                        // The chunk count is the reference client's own
+                        // arithmetic since 0.3; a manifest with impossible
+                        // sizing renders as 0 rather than a made-up total.
+                        manifest.chunk_count().map(u64::from).unwrap_or(0)
+                    }
+                    Delivery::Tree { .. } => unreachable!("trees detoured above"),
+                };
+                // `download_stream` takes the directory: a blob stages under
+                // its id inside it (zblob's `download_staged` convention), a
+                // tree materializes into it.
+                let dest = job.dest.clone();
+                let cancel = job.cancel.clone();
+                self.artifact_fetch =
+                    crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total };
+                let session = self.session.clone()?;
+                let store = self.content_store();
+                let temps = self.blob_temps.clone();
+                Some(Task::stream(crate::view::artifact_fetch::download_stream(
+                    session, delivery, dest, store, temps, cancel,
+                )))
+            }
+            // Holders are built from Ready states only.
+            _ => None,
         }
     }
 
@@ -3856,7 +4117,7 @@ impl ZenSight {
                     crate::view::artifact_fetch::ArtifactFetch::Saved(shown.clone());
                 self.toasts
                     .push(ToastSeverity::Success, format!("Snapshot saved to {shown}"));
-                None
+                self.tag_downloaded_tree()
             }
             Ok(temp_path) => {
                 // Blob: move the verified temp file via a Save-as dialog.
@@ -3898,15 +4159,17 @@ impl ZenSight {
         let store = self.content_store();
         let job = self.artifact_job.as_mut()?;
         let delivery = job.delivery.clone()?;
-        // Resume re-derives the destination the same way the first attempt
-        // did, so a blob resumes onto its own `.part` rather than starting a
+        // Resume hands `download_staged` the same directory as the first
+        // attempt; the staged path re-derives inside zblob (`dir.join(id)`),
+        // so a blob resumes onto its own `.part` rather than starting a
         // second one beside it.
-        let dest = Self::blob_or_tree_dest_of(job, &delivery);
+        let dest = job.dest.clone();
         let cancel = job.reset_cancel();
         self.artifact_fetch =
             crate::view::artifact_fetch::ArtifactFetch::Downloading { got, total };
+        let temps = self.blob_temps.clone();
         Some(Task::stream(crate::view::artifact_fetch::download_stream(
-            session, delivery, dest, store, cancel,
+            session, delivery, dest, store, temps, cancel,
         )))
     }
 
@@ -3928,10 +4191,21 @@ impl ZenSight {
         };
         Some(Task::future(async move {
             if let Some((bp, dest)) = blob {
-                // 0.2's `delete_partial` takes the destination *file* — the
-                // sidecar and `.part` are named after it, not after the id.
-                let client = zblob::BlobClient::new(session.clone(), bp);
-                client.delete_partial(&dest).await;
+                // `delete_partial` takes the destination *file* — the sidecar
+                // and `.part` are named after it, not after the id. Prefixes
+                // are typed since 0.3; a malformed one skips this best-effort
+                // cleanup, but *logged*, so "best-effort" stays honest. (In
+                // practice unreachable: a partial only exists if this same
+                // string already built a client on the download path.)
+                match zblob::QueryPrefix::new(bp) {
+                    Ok(prefix) => {
+                        let client = zblob::BlobClient::new(&session, prefix);
+                        client.delete_partial(&dest).await;
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "skipping partial cleanup: unusable prefix");
+                    }
+                }
             }
             // Best-effort hint to the sensor (free the TTL'd artifact now) —
             // the cancel write procedure takes `?id=<ulid>` (RFC 05).
@@ -3948,23 +4222,127 @@ impl ZenSight {
         }))
     }
 
+    /// The folder picker resolved for a confirmed tree: start the transfer
+    /// into a clearly-named subfolder of the picked directory, with the
+    /// verified distinct-chunk count as the progress denominator (the same
+    /// unit `Progress::Chunk` reports in — the self-reported file count it
+    /// replaces was a different unit entirely). Cancelling the picker keeps
+    /// the confirm card so the operator can pick again or cancel outright.
+    fn on_tree_dest_chosen(&mut self, dest: Option<std::path::PathBuf>) -> Option<Task<Message>> {
+        let crate::view::artifact_fetch::ArtifactFetch::ConfirmingTree { verify } =
+            &self.artifact_fetch
+        else {
+            return None;
+        };
+        let dest = dest?;
+        let total = verify.distinct_chunks;
+        let job = self.artifact_job.as_mut()?;
+        let delivery = job.delivery.clone()?;
+        // A tree is reconstructed into a clearly-named subfolder of the
+        // picked dir.
+        job.dest = match &job.kind {
+            zensight_common::ArtifactKind::Snapshot { dir } => {
+                let sensor = job.producer.as_str();
+                dest.join(format!("{sensor}-{dir}-snapshot"))
+            }
+            _ => dest,
+        };
+        let dest = job.dest.clone();
+        let cancel = job.cancel.clone();
+        self.artifact_fetch =
+            crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total };
+        let session = self.session.clone()?;
+        let store = self.content_store();
+        let temps = self.blob_temps.clone();
+        Some(Task::stream(crate::view::artifact_fetch::download_stream(
+            session, delivery, dest, store, temps, cancel,
+        )))
+    }
+
+    /// Tag the just-downloaded snapshot in the local chunk cache so its
+    /// chunks stay warm for re-download dedup, pruning download tags to the
+    /// newest few so the cache stays bounded (the periodic prune-cadence
+    /// sweep reclaims whatever the surviving tags no longer reference).
+    ///
+    /// The index is re-fetched by root — cheap (no chunk store involved) and
+    /// root-verified, so the tag records exactly what was downloaded.
+    fn tag_downloaded_tree(&self) -> Option<Task<Message>> {
+        /// Keep this many most-recent `dl-` tags (name order = age order:
+        /// the epoch-ms prefix is fixed-width for the foreseeable future).
+        const KEEP: usize = 8;
+        let tags = self.blob_tags.clone()?;
+        let session = self.session.clone()?;
+        let job = self.artifact_job.as_ref()?;
+        let zensight_common::Delivery::Tree {
+            root,
+            store_prefix,
+            tree_prefix,
+            ..
+        } = job.delivery.clone()?
+        else {
+            return None;
+        };
+        Some(Task::future(async move {
+            let run = async {
+                let concrete = |p: String| -> Result<zblob::QueryPrefix, String> {
+                    let p = zblob::QueryPrefix::new(p).map_err(|e| e.to_string())?;
+                    if !p.is_concrete() {
+                        return Err("non-concrete delivery prefix".into());
+                    }
+                    Ok(p)
+                };
+                let client = zblob::TreeClient::new(
+                    &session,
+                    concrete(store_prefix)?,
+                    concrete(tree_prefix)?,
+                );
+                let index = client
+                    .fetch_index_by_root(&root)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tokio::task::spawn_blocking(move || -> Result<(), String> {
+                    let name = format!(
+                        "dl-{}-{}",
+                        zensight_common::current_timestamp_millis(),
+                        &root.to_string()[..16]
+                    );
+                    tags.set(&name, &index).map_err(|e| e.to_string())?;
+                    let mut dl: Vec<String> = tags
+                        .list()
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .filter(|n| n.starts_with("dl-"))
+                        .collect();
+                    if dl.len() > KEEP {
+                        let stale = dl.len() - KEEP;
+                        for name in dl.drain(..stale) {
+                            let _ = tags.remove(&name);
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            };
+            Message::BlobCacheTagged(run.await)
+        }))
+    }
+
     /// Where this job's bytes land, per delivery tier.
     ///
-    /// `job.dest` is the directory the user (or the staging area) chose. zblob
-    /// 0.2 has the **caller** name the destination file for a blob — a remote
-    /// party must not pick where bytes land, so `Manifest::filename` stays
-    /// advisory and is only offered later, in the Save-as dialog. Staging
-    /// under the artifact id keeps the path a safe single segment. A tree
-    /// materializes into the directory itself.
-    ///
-    /// One function, used by the initial fetch, the resume, and the partial
-    /// cleanup, so those three cannot disagree about which file they mean.
+    /// `job.dest` is the directory the user (or the staging area) chose; the
+    /// transfer itself goes through zblob's `download_staged`, which stages a
+    /// blob at `dir.join(manifest.id)`. This helper MUST mirror that rule —
+    /// it exists for the one caller that needs the staged path *before* the
+    /// transfer resolves: cancel's `delete_partial`, which must name the same
+    /// file the transfer writes. A tree materializes into the directory
+    /// itself.
     fn blob_or_tree_dest_of(
         job: &crate::view::artifact_fetch::ArtifactJob,
         delivery: &zensight_common::Delivery,
     ) -> std::path::PathBuf {
         match delivery {
-            zensight_common::Delivery::Blob { .. } => job.dest.join(job.id.to_string()),
+            zensight_common::Delivery::Blob { manifest, .. } => job.dest.join(manifest.id.as_str()),
             zensight_common::Delivery::Tree { .. } => job.dest.clone(),
         }
     }
@@ -4077,63 +4455,267 @@ impl ZenSight {
         })
     }
 
-    /// Poll `@rpc/systemd/action` after sending a unit action (#283) and toast the
-    /// outcome. The short delay lets the sensor's async `JobRemoved` tracking
-    /// resolve first, so the toast usually carries the real job result.
-    fn query_systemd_action_status(&self) -> Task<Message> {
+    /// Issue a service action and wait for the sensor's own outcome.
+    ///
+    /// The `action/set` reply *is* the `ActionStatus`, produced after the sensor
+    /// tracked the D-Bus job to completion — so there is nothing to poll for.
+    /// This replaces a fixed 1.5 s sleep followed by a fleet-wide status read,
+    /// which could report a different host's last action and reported an unknown
+    /// outcome as success.
+    ///
+    /// `timeout` is sized from the host's advertised `job_timeout_secs`
+    /// (`SystemdDetailState::action_timeout`) rather than the 5 s `send_command`
+    /// uses, because the sensor legitimately blocks for the length of the job.
+    fn call_systemd_action(
+        &self,
+        key: String,
+        command: zensight_common::action::ServiceAction,
+        timeout: std::time::Duration,
+    ) -> Task<Message> {
+        use crate::view::specialized::systemd_detail::ActionFailure;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SystemdUnitActionResult(Err(
+                ActionFailure::Transport("Not connected to Zenoh".to_string()),
+            )));
+        };
+        let payload = match serde_json::to_vec(&command) {
+            Ok(p) => p,
+            Err(e) => {
+                return Task::done(Message::SystemdUnitActionResult(Err(
+                    ActionFailure::Transport(format!("Failed to encode action: {e}")),
+                )));
+            }
+        };
+        Task::future(async move {
+            let started = std::time::Instant::now();
+            // A concrete single-origin key has exactly one queryable, so
+            // BestMatching is the honest target here; QueryTarget::All is for
+            // fleet fan-in (RFC 05 §2.1).
+            let replies = match session
+                .get(&key)
+                .payload(payload)
+                .target(zenoh::query::QueryTarget::BestMatching)
+                .timeout(timeout)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return Message::SystemdUnitActionResult(Err(ActionFailure::Transport(
+                        e.to_string(),
+                    )));
+                }
+            };
+            let outcome = match replies.recv_async().await {
+                Ok(reply) => match reply.result() {
+                    Ok(sample) => {
+                        match zensight_common::decode_auto::<zensight_common::action::ActionStatus>(
+                            &sample.payload().to_bytes(),
+                        ) {
+                            Ok(status) => Ok(status),
+                            Err(e) => Err(ActionFailure::Transport(format!(
+                                "Undecodable action reply: {e}"
+                            ))),
+                        }
+                    }
+                    Err(err) => {
+                        let (error, message) = parse_rpc_error(&err.payload().to_bytes());
+                        Err(ActionFailure::Refused { error, message })
+                    }
+                },
+                // Zenoh reports "nobody served the key" and "the deadline
+                // elapsed" identically, as a closed reply channel. Elapsed time
+                // against the deadline is the only way to tell them apart — a
+                // heuristic, but the two need very different wording: one is an
+                // error, the other is a job that may well be succeeding.
+                Err(_) => {
+                    let waited = started.elapsed();
+                    if waited + std::time::Duration::from_millis(250) >= timeout {
+                        Err(ActionFailure::StillRunning {
+                            waited_secs: waited.as_secs(),
+                        })
+                    } else {
+                        Err(ActionFailure::NotServed)
+                    }
+                }
+            };
+            Message::SystemdUnitActionResult(outcome)
+        })
+    }
+
+    /// Toast a finished action and refresh what it changed.
+    fn apply_systemd_action_result(
+        &mut self,
+        result: Result<
+            zensight_common::action::ActionStatus,
+            crate::view::specialized::systemd_detail::ActionFailure,
+        >,
+    ) -> Task<Message> {
+        use crate::view::specialized::systemd_detail::{ActionFailure, SystemdDetailTopic};
+        use crate::view::toast::ToastSeverity;
+        if let Some(device) = self.selected_device.as_mut() {
+            device.systemd_detail.action_inflight = None;
+        }
+        // Whether the host's state may have moved. `StillRunning` counts: that is
+        // exactly the case where the unit's own state is the only ground truth
+        // available to us.
+        let mut refresh = matches!(&result, Err(ActionFailure::StillRunning { .. }));
+        let (severity, message) = match result {
+            Ok(status) => {
+                refresh |= status.accepted;
+                let what = if status.unit.is_empty() {
+                    status.verb.to_string()
+                } else {
+                    format!("{} {}", status.verb, status.unit)
+                };
+                match (status.accepted, status.result.as_deref()) {
+                    (false, _) => (
+                        ToastSeverity::Error,
+                        format!(
+                            "{what} refused: {}",
+                            status.error.unwrap_or_else(|| "no reason given".into())
+                        ),
+                    ),
+                    (true, Some("done")) | (true, Some("applied")) => {
+                        let hint = if status.needs_daemon_reload {
+                            " — run daemon-reload for systemd to pick it up"
+                        } else {
+                            ""
+                        };
+                        (ToastSeverity::Success, format!("{what}: done{hint}"))
+                    }
+                    (true, Some(other)) => (
+                        ToastSeverity::Error,
+                        format!(
+                            "{what}: {other}{}",
+                            status
+                                .error
+                                .map(|e| format!(" — {e}"))
+                                .unwrap_or_default()
+                        ),
+                    ),
+                    // Accepted, but the sensor's own job wait elapsed. Not a
+                    // success: the previous code reported exactly this case as
+                    // one.
+                    (true, None) => (
+                        ToastSeverity::Warning,
+                        format!("{what}: issued, outcome unknown (the sensor's job wait elapsed)"),
+                    ),
+                }
+            }
+            Err(ActionFailure::Refused { error, message }) => {
+                (ToastSeverity::Error, format!("Refused — {error}: {message}"))
+            }
+            Err(ActionFailure::NotServed) => (
+                ToastSeverity::Error,
+                "No service-control endpoint on this host — actions are disabled or the sensor is offline"
+                    .to_string(),
+            ),
+            Err(ActionFailure::StillRunning { waited_secs }) => (
+                ToastSeverity::Warning,
+                format!("No reply within {waited_secs}s — the job may still be running"),
+            ),
+            Err(ActionFailure::Transport(e)) => (ToastSeverity::Error, format!("Action failed: {e}")),
+        };
+        self.toasts.push(severity, message);
+        if !refresh {
+            return Task::none();
+        }
+        // Refresh immediately rather than sleeping first: a value one poll stale
+        // resolves visibly, and a sleep here is the anti-pattern this replaced.
+        let mut tasks = vec![self.query_systemd_detail(SystemdDetailTopic::Units)];
+        if let Some(unit) = self
+            .selected_device
+            .as_ref()
+            .and_then(|d| d.systemd_detail.selected_unit.clone())
+        {
+            tasks.push(self.query_systemd_unit_detail(unit));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Read one unit's on-disk definition. A host that has not opted in serves
+    /// no such procedure, so the absence of a reply is the honest answer.
+    fn query_systemd_unit_file(&self, unit: String) -> Task<Message> {
+        use crate::view::specialized::systemd_detail::{fetch_one, unit_file_key};
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SystemdUnitFileReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        let key = unit_file_key(
+            self.selected_origin_for(zensight_common::Protocol::Systemd)
+                .as_deref(),
+            &unit,
+        );
+        Task::future(async move {
+            let file = fetch_one::<zensight_common::query_detail::UnitFile>(session, key).await;
+            Message::SystemdUnitFileReceived(file.ok_or_else(|| {
+                "this host does not serve unit files (actions.expose_unit_files is off)".to_string()
+            }))
+        })
+    }
+
+    /// Re-pull the Units table when the host reports that a unit job finished.
+    ///
+    /// The sensor already streams `events/job_removed_total`, so this needs no
+    /// new wire surface: a change in that counter means some unit's state moved,
+    /// whether ZenSight caused it or someone ran `systemctl` over SSH. Without
+    /// this the table silently showed whatever was true when it was last
+    /// fetched.
+    ///
+    /// Runs off the 1 Hz tick, so it is inherently rate-limited, and skips while
+    /// a fetch is already in flight.
+    fn maybe_refresh_systemd_units(&mut self) -> Option<Task<Message>> {
+        use crate::view::specialized::SpecializedTab;
+        use crate::view::specialized::fetch::Fetch;
+        use crate::view::specialized::systemd_detail::SystemdDetailTopic;
+
+        let device = self.selected_device.as_mut()?;
+        if device.device_id.protocol != zensight_common::Protocol::Systemd
+            || device.specialized_tab != SpecializedTab::Units
+        {
+            return None;
+        }
+        let jobs = match device
+            .metrics
+            .get("events/job_removed_total")
+            .map(|p| &p.value)
+        {
+            Some(zensight_common::TelemetryValue::Counter(v)) => *v as f64,
+            Some(zensight_common::TelemetryValue::Gauge(v)) => *v,
+            _ => return None,
+        };
+        let moved = device.systemd_detail.job_events_seen != Some(jobs);
+        // Seed on first sight rather than refreshing: arriving at a host that
+        // has restarted units at some point in its life is not news.
+        let first_sight = device.systemd_detail.job_events_seen.is_none();
+        device.systemd_detail.job_events_seen = Some(jobs);
+        if !moved || first_sight || matches!(device.systemd_detail.units, Fetch::Loading) {
+            return None;
+        }
+        Some(self.query_systemd_detail(SystemdDetailTopic::Units))
+    }
+
+    /// Ask the drilled-in host what service control it permits (#283). Every
+    /// 1.4+ sensor answers, enabled or not.
+    fn query_systemd_action_capability(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::fleet_rpc_key("systemd", "action");
+        let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Systemd) else {
+            return Task::done(Message::SystemdActionCapabilityReceived(Err(
+                "No systemd host selected".to_string(),
+            )));
+        };
+        let key = crate::view::specialized::systemd_detail::action_capability_key(&origin);
         Task::future(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            let no_reply = Message::CommandFeedback {
-                success: false,
-                message: "No systemd sensor replied with an action status — are actions enabled?"
-                    .to_string(),
-            };
-            match session.get(&key).await {
-                Ok(replies) => {
-                    if let Ok(reply) = replies.recv_async().await
-                        && let Ok(sample) = reply.result()
-                        && let Ok(status) = serde_json::from_slice::<serde_json::Value>(
-                            &sample.payload().to_bytes(),
-                        )
-                    {
-                        let accepted = status["accepted"].as_bool().unwrap_or(false);
-                        let unit = status["unit"].as_str().unwrap_or("?").to_string();
-                        let verb = status["verb"].as_str().unwrap_or("?").to_string();
-                        let result = status["result"].as_str().map(str::to_string);
-                        let error = status["error"].as_str().map(str::to_string);
-                        let (success, message) = match (accepted, result, error) {
-                            (false, _, reason) => (
-                                false,
-                                format!(
-                                    "{verb} {unit} rejected: {}",
-                                    reason.unwrap_or_else(|| "actions disabled".into())
-                                ),
-                            ),
-                            (true, Some(r), _) if r == "done" => {
-                                (true, format!("{verb} {unit}: done"))
-                            }
-                            (true, Some(r), e) => (
-                                false,
-                                format!(
-                                    "{verb} {unit}: {r}{}",
-                                    e.map(|e| format!(" — {e}")).unwrap_or_default()
-                                ),
-                            ),
-                            (true, None, _) => (true, format!("{verb} {unit} accepted (pending)")),
-                        };
-                        return Message::CommandFeedback { success, message };
-                    }
-                    no_reply
-                }
-                Err(e) => Message::CommandFeedback {
-                    success: false,
-                    message: format!("Action status query failed: {e}"),
-                },
-            }
+            let cap = crate::view::specialized::systemd_detail::fetch_one::<
+                zensight_common::action::ActionCapability,
+            >(session, key)
+            .await;
+            Message::SystemdActionCapabilityReceived(
+                cap.ok_or_else(|| "This host did not answer the service-control probe".to_string()),
+            )
         })
     }
 
@@ -4239,6 +4821,7 @@ impl ZenSight {
             SpecializedTab::Timers => SystemdDetailTopic::Timers,
             SpecializedTab::Events => SystemdDetailTopic::Events,
             SpecializedTab::Cgroups => SystemdDetailTopic::Cgroups,
+            SpecializedTab::Actions => SystemdDetailTopic::Actions,
             _ => return None,
         };
         // Only prefetch when we haven't already loaded/started this channel.
@@ -4247,11 +4830,20 @@ impl ZenSight {
             SystemdDetailTopic::Timers => !matches!(device.systemd_detail.timers, Fetch::Idle),
             SystemdDetailTopic::Events => !matches!(device.systemd_detail.events, Fetch::Idle),
             SystemdDetailTopic::Cgroups => !matches!(device.systemd_detail.cgroups, Fetch::Idle),
+            SystemdDetailTopic::Actions => !matches!(device.systemd_detail.actions, Fetch::Idle),
         };
+        // The Units tab also needs to know what this host permits before it can
+        // decide which controls to offer.
+        let probe = (tab == SpecializedTab::Units
+            && matches!(device.systemd_detail.capability, Fetch::Idle))
+        .then(|| self.query_systemd_action_capability());
         if already {
-            return None;
+            return probe;
         }
-        Some(self.query_systemd_detail(topic))
+        Some(match probe {
+            Some(probe) => Task::batch([self.query_systemd_detail(topic), probe]),
+            None => self.query_systemd_detail(topic),
+        })
     }
 
     /// Fetch a systemd on-demand detail channel and wrap the outcome (#281).
@@ -4288,6 +4880,9 @@ impl ZenSight {
                 SystemdDetailTopic::Cgroups => {
                     Some(SystemdDetailData::Cgroups(fetch_one(session, key).await))
                 }
+                SystemdDetailTopic::Actions => fetch_records(session, key)
+                    .await
+                    .map(SystemdDetailData::Actions),
             };
             let result =
                 data.ok_or_else(|| format!("No systemd sensor responded for {}", topic.label()));
@@ -6997,7 +7592,9 @@ impl ZenSight {
                 mode: self.settings.zenoh_mode.as_str().to_string(),
                 connect: self.settings.connect_endpoints(),
                 listen: self.settings.listen_endpoints(),
-                scouting: true,
+                // Unset = mode-aware (#626), as in boot().
+                scouting: None,
+                gossip: None,
                 // The base comes from `ZENSIGHT_ZENOH_NAMESPACE` inside
                 // `session::connect`; empty = base-less deployment (see boot()).
                 namespace: String::new(),

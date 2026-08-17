@@ -183,7 +183,7 @@ impl<E: Element> Element for TimedElement<E> {
     }
 }
 
-/// Live control handles for a running pipeline (parallax 0.3.0).
+/// Live control handles for a running pipeline (parallax 0.6).
 ///
 /// The unified executor **moves** every element into its task at
 /// `Executor::start()`, so a live element is unreachable except through a
@@ -207,6 +207,10 @@ pub struct PipelineControls {
     pub preview_quality: Option<JpegQualityControl>,
     /// Live preview framerate (the preview-path `Throttle`).
     pub preview_rate: Option<ThrottleControl>,
+    /// Live preview downscale target (`set_max_height`). Present on preview
+    /// graphs that re-encode; the MJPG passthrough has no scaler (the camera's
+    /// JPEG bytes are forwarded verbatim).
+    pub preview_scale: Option<ScaleControl>,
 }
 
 /// A constructed (not yet started) profile pipeline.
@@ -234,7 +238,7 @@ pub struct BuiltPipeline {
 /// are shed (live video: never let the feeder back up).
 const FEED_QUEUE: usize = 8;
 
-/// The H.264 encoder config for a video graph (parallax 0.3.0).
+/// The H.264 encoder config for a video graph (parallax 0.6).
 ///
 /// Dimensions are **not** set here — geometry travels in-band, stamped into
 /// buffer metadata by the upstream `VideoScale`/`VideoConvert`, and the encoder
@@ -274,7 +278,7 @@ pub struct VideoParams {
 }
 
 /// A `VideoScale` element plus its live `ScaleControl`, seeded with the initial
-/// `max_height` (aspect-preserving, never upscales — parallax 0.3.0). A `None`
+/// `max_height` (aspect-preserving, never upscales — parallax 0.6). A `None`
 /// cap leaves the scaler in passthrough; the session actor can retarget it live.
 fn build_scale(max_height: Option<u32>) -> (VideoScale, ScaleControl) {
     let scale = VideoScale::new();
@@ -503,8 +507,9 @@ pub fn build_rtsp_video_passthrough(dimensions: Option<(u32, u32)>) -> Result<Bu
 }
 
 /// Build the RTSP preview-profile pipeline: decode the camera's H.264,
-/// throttle to the preview fps, convert to RGB, and JPEG-encode. Needs the
-/// stream dimensions (from the SDP) to size the JPEG encoder.
+/// throttle to the preview fps, downscale to `preview.max_height`, convert
+/// to RGB, and JPEG-encode. Needs the stream dimensions (from the SDP) for
+/// the advertised `FrameMeta` size.
 pub fn build_rtsp_preview(
     width: u32,
     height: u32,
@@ -515,13 +520,15 @@ pub fn build_rtsp_preview(
     let feed = src.handle();
     let decoder = H264Decoder::new().context("create H.264 decoder")?;
     // Decode everything (delta frames need their references), THEN drop down
-    // to the preview rate before the expensive convert+encode.
+    // to the preview rate before the expensive scale+convert+encode.
     let throttle = Throttle::rate(preview.fps as f64);
     let preview_rate = throttle.control();
+    // Scale while still I420 (decoder output): convert + JPEG then run on the
+    // capped size instead of the camera's native one.
+    let (scale, preview_scale) = build_scale(preview.max_height);
     let convert = VideoConvertElement::new()
         .with_input_format(ConvFormat::I420)
-        .with_output_format(ConvFormat::Rgb24)
-        .with_size(width, height);
+        .with_output_format(ConvFormat::Rgb24);
     let encoder = JpegEncoder::new()
         .with_color_type(ColorType::Rgb)
         .with_quality(preview.quality);
@@ -535,6 +542,7 @@ pub fn build_rtsp_preview(
     let src_id = pipeline.add_source("rtsp-feed", src);
     let dec_id = pipeline.add_filter("h264-decoder", decoder);
     let thr_id = pipeline.add_filter("preview-throttle", throttle);
+    let scale_id = pipeline.add_filter("preview-scale", scale);
     let conv_id = pipeline.add_filter("convert-rgb", convert);
     let enc_id = pipeline.add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
     let sink_id = pipeline.add_sink("app-sink", sink);
@@ -543,8 +551,11 @@ pub fn build_rtsp_preview(
         .link(dec_id, thr_id)
         .context("link decoder→throttle")?;
     pipeline
-        .link(thr_id, conv_id)
-        .context("link throttle→convert")?;
+        .link(thr_id, scale_id)
+        .context("link throttle→scale")?;
+    pipeline
+        .link(scale_id, conv_id)
+        .context("link scale→convert")?;
     pipeline
         .link(conv_id, enc_id)
         .context("link convert→encoder")?;
@@ -552,18 +563,20 @@ pub fn build_rtsp_preview(
         .link(enc_id, sink_id)
         .context("link encoder→sink")?;
 
+    let (out_w, out_h) = capped_dimensions(width, height, preview.max_height);
     Ok(BuiltPipeline {
         pipeline,
         sink: sink_handle,
         controls: PipelineControls {
             preview_quality: Some(preview_quality),
             preview_rate: Some(preview_rate),
+            preview_scale: Some(preview_scale),
             ..Default::default()
         },
         stop,
         feed: Some(feed),
-        width,
-        height,
+        width: out_w,
+        height: out_h,
     })
 }
 
@@ -581,13 +594,14 @@ pub fn build_preview(
             ..
         } => {
             // Generate directly at the preview fps — no throttle needed, and
-            // Rgb24 output feeds the JPEG encoder without conversion.
+            // Rgb24 output scales and feeds the JPEG encoder without conversion.
             let src = VideoTestSrc::new()
                 .with_pattern(parse_pattern(pattern))
                 .with_resolution(*width, *height)
                 .with_framerate(preview.fps, 1)
                 .live(true);
 
+            let (scale, preview_scale) = build_scale(preview.max_height);
             let encoder = JpegEncoder::new()
                 .with_color_type(ColorType::Rgb)
                 .with_quality(preview.quality);
@@ -600,25 +614,31 @@ pub fn build_preview(
 
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("test-src", src);
+            let scale_id = pipeline.add_filter("preview-scale", scale);
             let enc_id =
                 pipeline.add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
             let sink_id = pipeline.add_sink("app-sink", sink);
-            pipeline.link(src_id, enc_id).context("link src→encoder")?;
+            pipeline.link(src_id, scale_id).context("link src→scale")?;
+            pipeline
+                .link(scale_id, enc_id)
+                .context("link scale→encoder")?;
             pipeline
                 .link(enc_id, sink_id)
                 .context("link encoder→sink")?;
 
+            let (out_w, out_h) = capped_dimensions(*width, *height, preview.max_height);
             Ok(BuiltPipeline {
                 pipeline,
                 sink: sink_handle,
                 controls: PipelineControls {
                     preview_quality: Some(preview_quality),
+                    preview_scale: Some(preview_scale),
                     ..Default::default()
                 },
                 stop,
                 feed: None,
-                width: *width,
-                height: *height,
+                width: out_w,
+                height: out_h,
             })
         }
         SourceKind::V4l2 { device } => {
@@ -630,8 +650,10 @@ pub fn build_preview(
             // then pay for any decode/convert/encode.
             let throttle = Throttle::rate(preview.fps as f64);
             let preview_rate = throttle.control();
-            // Only the YUYV path re-encodes, so only it exposes a quality knob.
+            // Only the YUYV path re-encodes, so only it exposes quality and
+            // scale knobs (MJPG forwards the camera's JPEG bytes verbatim).
             let mut preview_quality = None;
+            let mut preview_scale = None;
 
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
@@ -642,20 +664,26 @@ pub fn build_preview(
             let thr_id = pipeline.add_filter("preview-throttle", throttle);
             let sink_id = pipeline.add_sink("app-sink", sink);
             pipeline.link(src_id, thr_id).context("link src→throttle")?;
-            match &fourcc {
-                // Camera already produces JPEG frames: pure passthrough.
+            let (out_w, out_h) = match &fourcc {
+                // Camera already produces JPEG frames: pure passthrough (no
+                // scaler — `preview.max_height` cannot apply here).
                 b"MJPG" => {
                     pipeline
                         .link(thr_id, sink_id)
                         .context("link throttle→sink")?;
+                    (w, h)
                 }
                 b"YUYV" => {
+                    // Scale while still YUYV: convert + JPEG then run on the
+                    // capped size instead of the native one.
+                    let (scale, scale_ctl) = build_scale(preview.max_height);
+                    preview_scale = Some(scale_ctl);
+                    let scale_id = pipeline.add_filter("preview-scale", scale);
                     let conv_id = pipeline.add_filter(
                         "convert-rgb",
                         VideoConvertElement::new()
                             .with_input_format(ConvFormat::Yuyv)
-                            .with_output_format(ConvFormat::Rgb24)
-                            .with_size(w, h),
+                            .with_output_format(ConvFormat::Rgb24),
                     );
                     stats.tighten_budget(1_000_000_000 / preview.fps.max(1) as u64);
                     let encoder = JpegEncoder::new()
@@ -665,20 +693,24 @@ pub fn build_preview(
                     let enc_id = pipeline
                         .add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
                     pipeline
-                        .link(thr_id, conv_id)
-                        .context("link throttle→convert")?;
+                        .link(thr_id, scale_id)
+                        .context("link throttle→scale")?;
+                    pipeline
+                        .link(scale_id, conv_id)
+                        .context("link scale→convert")?;
                     pipeline
                         .link(conv_id, enc_id)
                         .context("link convert→encoder")?;
                     pipeline
                         .link(enc_id, sink_id)
                         .context("link encoder→sink")?;
+                    capped_dimensions(w, h, preview.max_height)
                 }
                 other => bail!(
                     "unsupported v4l2 pixel format {:?} on {device}",
                     String::from_utf8_lossy(other)
                 ),
-            }
+            };
 
             Ok(BuiltPipeline {
                 pipeline,
@@ -686,12 +718,13 @@ pub fn build_preview(
                 controls: PipelineControls {
                     preview_quality,
                     preview_rate: Some(preview_rate),
+                    preview_scale,
                     ..Default::default()
                 },
                 stop,
                 feed: None,
-                width: w,
-                height: h,
+                width: out_w,
+                height: out_h,
             })
         }
         SourceKind::Rtsp { .. } => {
@@ -787,32 +820,27 @@ mod tests {
             .start(&mut built.pipeline)
             .expect("start pipeline");
         let sink = built.sink.clone();
-        let frames = tokio::task::spawn_blocking(move || {
-            let mut out = Vec::new();
-            for _ in 0..200 {
-                match sink.pull_buffer_timeout(Some(Duration::from_millis(500))) {
-                    Ok(Some(buf)) => {
-                        out.push(PulledFrame {
-                            head: buf.as_bytes()[..8.min(buf.len())].to_vec(),
-                            keyframe: buf.metadata().is_keyframe(),
-                            sequence: buf.metadata().sequence,
-                        });
-                        if out.len() >= count {
-                            break;
-                        }
+        let mut frames = Vec::new();
+        for _ in 0..200 {
+            match sink.pull_buffer_timeout(Duration::from_millis(500)).await {
+                Ok(Some(buf)) => {
+                    frames.push(PulledFrame {
+                        head: buf.as_bytes()[..8.min(buf.len())].to_vec(),
+                        keyframe: buf.metadata().is_keyframe(),
+                        sequence: buf.metadata().sequence,
+                    });
+                    if frames.len() >= count {
+                        break;
                     }
-                    Ok(None) => {
-                        if sink.is_eos() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
                 }
+                Ok(None) => {
+                    if sink.is_eos() {
+                        break;
+                    }
+                }
+                Err(_) => break,
             }
-            out
-        })
-        .await
-        .expect("pull task");
+        }
 
         built.stop.stop();
         tokio::time::timeout(Duration::from_secs(10), handle.wait())
@@ -851,6 +879,57 @@ mod tests {
         }
     }
 
+    /// The dimensions a JPEG's SOF segment declares.
+    fn jpeg_sof_dimensions(jpeg: &[u8]) -> Option<(u32, u32)> {
+        let mut i = 2; // past SOI
+        while i + 9 <= jpeg.len() {
+            if jpeg[i] != 0xFF {
+                return None; // lost sync — not a marker
+            }
+            let marker = jpeg[i + 1];
+            if (0xC0..=0xC3).contains(&marker) {
+                let h = u16::from_be_bytes([jpeg[i + 5], jpeg[i + 6]]) as u32;
+                let w = u16::from_be_bytes([jpeg[i + 7], jpeg[i + 8]]) as u32;
+                return Some((w, h));
+            }
+            let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+            i += 2 + len;
+        }
+        None
+    }
+
+    /// `preview.max_height` genuinely shrinks the preview: the encoded JPEG's
+    /// own SOF dimensions must equal the ADVERTISED size (`capped_dimensions`
+    /// → catalogue / `FrameMeta`), same contract the video tiers pin in
+    /// `scaled_tier_decodes_like_the_gui`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn preview_max_height_caps_the_jpeg() {
+        let built = build_preview(
+            &test_kind(15),
+            &PreviewConfig {
+                fps: 10,
+                quality: 75,
+                max_height: Some(120),
+            },
+            &Arc::default(),
+        )
+        .expect("build preview");
+        assert!(
+            built.controls.preview_scale.is_some(),
+            "re-encoding previews expose a live scale knob"
+        );
+        let advertised = (built.width, built.height);
+        assert_eq!(advertised, capped_dimensions(320, 240, Some(120)));
+
+        let frames = pull_full_aus(built, 2).await;
+        assert!(!frames.is_empty(), "no preview frames");
+        let encoded = jpeg_sof_dimensions(&frames[0]).expect("JPEG must carry an SOF");
+        assert_eq!(
+            encoded, advertised,
+            "advertised preview size must equal the encoded size"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_video_pipeline_emits_h264_with_keyframe() {
         let stats: Arc<StreamStats> = Arc::default();
@@ -885,28 +964,23 @@ mod tests {
             .start(&mut built.pipeline)
             .expect("start pipeline");
         let sink = built.sink.clone();
-        let aus = tokio::task::spawn_blocking(move || {
-            let mut out: Vec<Vec<u8>> = Vec::new();
-            for _ in 0..200 {
-                match sink.pull_buffer_timeout(Some(Duration::from_millis(500))) {
-                    Ok(Some(buf)) => {
-                        out.push(buf.as_bytes().to_vec());
-                        if out.len() >= count {
-                            break;
-                        }
+        let mut aus: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..200 {
+            match sink.pull_buffer_timeout(Duration::from_millis(500)).await {
+                Ok(Some(buf)) => {
+                    aus.push(buf.as_bytes().to_vec());
+                    if aus.len() >= count {
+                        break;
                     }
-                    Ok(None) => {
-                        if sink.is_eos() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
                 }
+                Ok(None) => {
+                    if sink.is_eos() {
+                        break;
+                    }
+                }
+                Err(_) => break,
             }
-            out
-        })
-        .await
-        .expect("pull task");
+        }
         built.stop.stop();
         let _ = tokio::time::timeout(Duration::from_secs(10), handle.wait()).await;
         aus
@@ -1082,31 +1156,27 @@ mod tests {
                 MemoryHandle::with_len(slot, payload.len()),
                 metadata,
             ))
+            .await
             .expect("push");
         }
         feed.end_stream();
 
-        let frames = tokio::task::spawn_blocking(move || {
-            let mut out = Vec::new();
-            for _ in 0..100 {
-                match sink.pull_buffer_timeout(Some(Duration::from_millis(200))) {
-                    Ok(Some(buf)) => out.push((
-                        buf.as_bytes().to_vec(),
-                        buf.metadata().is_keyframe(),
-                        buf.metadata().sequence,
-                    )),
-                    Ok(None) => {
-                        if sink.is_eos() {
-                            break;
-                        }
+        let mut frames = Vec::new();
+        for _ in 0..100 {
+            match sink.pull_buffer_timeout(Duration::from_millis(200)).await {
+                Ok(Some(buf)) => frames.push((
+                    buf.as_bytes().to_vec(),
+                    buf.metadata().is_keyframe(),
+                    buf.metadata().sequence,
+                )),
+                Ok(None) => {
+                    if sink.is_eos() {
+                        break;
                     }
-                    Err(_) => break,
                 }
+                Err(_) => break,
             }
-            out
-        })
-        .await
-        .expect("pull task");
+        }
 
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].0, vec![0x00, 0x00, 0x00, 0x01, 0x65, 0]);

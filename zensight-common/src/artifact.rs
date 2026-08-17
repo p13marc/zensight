@@ -406,13 +406,14 @@ mod tests {
             kind: "report".into(),
             delivery: Delivery::Blob {
                 manifest: Manifest {
-                    version: 2,
-                    id: "00000000000000000000000009".into(),
+                    version: zblob::wire::WIRE_VERSION,
+                    id: zblob::BlobId::new("00000000000000000000000009").unwrap(),
                     filename: Some("zensight-debug.tar.zst".into()),
                     total_len: 1024,
                     chunk_size: 64 * 1024,
                     root: zblob::Hash::of(b"zensight-debug"),
                     created_ms: 1,
+                    ext: zblob::wire::Ext::default(),
                 },
                 blob_prefix: "v1/h-3fa9c2d41b7e/@blob/artifact".into(),
             },

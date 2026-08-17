@@ -107,7 +107,8 @@ description = "advertised artifact kinds + the in-flight/ready state per kind (R
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2
 # snapshot TreeServer/store. Endpoints list what the server actually serves:
 # no `push` (never enabled — RFC 07 §2.2 keeps it off by default) and no
-# `fanout` (zblob feature off). Shapes must agree app-wide (every producer
+# `fanout` (zblob feature off; experimental since RFC 07 v1.17 demoted it to
+# Appendix A). Shapes must agree app-wide (every producer
 # declares the same three families); prose is per-producer.
 [[blob]]
 tier = "artifact"

@@ -596,7 +596,7 @@ impl RedbContentStore {
     }
 }
 
-/// The chunk-key prefix. zblob wire v2 is BLAKE3-only, so this is the `<algo>`
+/// The chunk-key prefix. zblob's wire is BLAKE3-only, so this is the `<algo>`
 /// segment of RFC 07 §2.4's `store/<algo>/<hash>`. It changed from `sha256/`
 /// with the 0.2 bump: dedup is per-algorithm, so keys minted under the old
 /// digest name a different address space and are simply cold — the store
@@ -604,17 +604,19 @@ impl RedbContentStore {
 const CHUNK_ALGO: &str = "blake3";
 
 impl zblob::ContentStore for RedbContentStore {
-    fn has(&self, hash: &zblob::Hash) -> bool {
+    // 0.3's trait returns `io::Result` from the read paths too, so a failing
+    // redb read is a reported error rather than a silent "not cached" that
+    // would send the client back to the network forever.
+    fn has(&self, hash: &zblob::Hash) -> std::io::Result<bool> {
         self.store
             .has_chunk(&format!("{CHUNK_ALGO}/{hash}"))
-            .unwrap_or(false)
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
-    fn get(&self, hash: &zblob::Hash) -> Option<Vec<u8>> {
+    fn get(&self, hash: &zblob::Hash) -> std::io::Result<Option<Vec<u8>>> {
         self.store
             .read_chunk(&format!("{CHUNK_ALGO}/{hash}"))
-            .ok()
-            .flatten()
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     fn put(&self, hash: &zblob::Hash, bytes: &[u8]) -> std::io::Result<()> {
@@ -627,16 +629,22 @@ impl zblob::ContentStore for RedbContentStore {
     /// erroring the sweep: this table has held `sha256/…` keys from before the
     /// 0.2 bump, and a garbage-collection input that refuses to enumerate is
     /// worse than one that reports only what it understands.
-    fn hashes(&self) -> std::io::Result<Vec<zblob::Hash>> {
+    fn for_each_hash(
+        &self,
+        f: &mut dyn FnMut(zblob::Hash) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
         let keys = self
             .store
             .chunk_keys()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        Ok(keys
+        for hash in keys
             .iter()
             .filter_map(|k| k.strip_prefix(CHUNK_ALGO).and_then(|r| r.strip_prefix('/')))
             .filter_map(|hex| hex.parse::<zblob::Hash>().ok())
-            .collect())
+        {
+            f(hash)?;
+        }
+        Ok(())
     }
 
     fn remove(&self, hash: &zblob::Hash) -> std::io::Result<bool> {
@@ -1443,6 +1451,56 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The GC contract behind the periodic chunk-cache sweep (#131's chunk
+    /// half): chunks referenced by a snapshot tag survive, orphans go, and a
+    /// temp-tagged chunk (an in-flight download's) is protected.
+    #[test]
+    fn chunk_store_sweep_keeps_tagged_and_temp_tagged() {
+        use zblob::ContentStore;
+
+        let path = temp_db_path("sweep");
+        let persistent = PersistentStore::open(&path).expect("open");
+        let cs = RedbContentStore::new(persistent.clone());
+
+        // A real snapshot built straight into the redb-backed store, so the
+        // tag's chunk set is exactly what a downloaded tree would pin.
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.bin"), vec![1u8; 100_000]).unwrap();
+        let index =
+            zblob::build_tree(src.path(), "sweep-test", &zblob::CdcParams::default(), &cs).unwrap();
+
+        let tag_dir = tempfile::tempdir().unwrap();
+        let tags = zblob::gc::SnapshotTags::open(tag_dir.path()).unwrap();
+        tags.set("dl-1-abc", &index).unwrap();
+
+        let orphan = zblob::Hash::of(b"orphaned chunk");
+        cs.put(&orphan, b"orphaned chunk").unwrap();
+        let inflight = zblob::Hash::of(b"in-flight chunk");
+        cs.put(&inflight, b"in-flight chunk").unwrap();
+
+        let temps = zblob::gc::TempTags::new();
+        let _guard = temps.protect([inflight]);
+
+        let stats = zblob::gc::sweep(&cs, &tags, &temps, []).unwrap();
+        assert_eq!(stats.removed, 1, "exactly the orphan goes");
+        assert!(!cs.has(&orphan).unwrap(), "orphan swept");
+        assert!(cs.has(&inflight).unwrap(), "temp-tagged chunk survives");
+        for h in index.needed_chunks() {
+            assert!(cs.has(&h).unwrap(), "tagged snapshot chunk survives");
+        }
+
+        // Untag + drop the temp guard: everything is garbage now.
+        tags.remove("dl-1-abc").unwrap();
+        drop(_guard);
+        zblob::gc::sweep(&cs, &tags, &temps, []).unwrap();
+        assert!(
+            cs.hashes().unwrap().is_empty(),
+            "untagged store sweeps to empty"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn chunk_store_round_trip_and_persists() {
         use zblob::ContentStore;
@@ -1454,22 +1512,25 @@ mod tests {
         let bytes = b"tier-2 chunk bytes";
         let hash = zblob::Hash::of(bytes);
 
-        // Missing → put → present → readable.
-        assert!(!cs.has(&hash));
-        assert!(cs.get(&hash).is_none());
+        // Missing → put → present → readable. (0.3's trait returns
+        // `io::Result` from the read paths too, so the unwraps here are the
+        // "store is healthy" half of each assertion.)
+        assert!(!cs.has(&hash).unwrap());
+        assert!(cs.get(&hash).unwrap().is_none());
         cs.put(&hash, bytes).unwrap();
-        assert!(cs.has(&hash));
-        assert_eq!(cs.get(&hash).unwrap(), bytes);
+        assert!(cs.has(&hash).unwrap());
+        assert_eq!(cs.get(&hash).unwrap().unwrap(), bytes);
         // Idempotent re-put.
         cs.put(&hash, bytes).unwrap();
-        assert_eq!(cs.get(&hash).unwrap(), bytes);
+        assert_eq!(cs.get(&hash).unwrap().unwrap(), bytes);
 
-        // `hashes()` and `remove()` (the 0.2 trait methods) agree with the
-        // rest: a store that enumerates a chunk `get` cannot return, or keeps
-        // one `remove` claimed to drop, breaks garbage collection silently.
+        // `hashes()` (now derived from `for_each_hash`) and `remove()` agree
+        // with the rest: a store that enumerates a chunk `get` cannot return,
+        // or keeps one `remove` claimed to drop, breaks garbage collection
+        // silently.
         assert_eq!(cs.hashes().unwrap(), vec![hash]);
         assert!(cs.remove(&hash).unwrap(), "remove reports it was present");
-        assert!(!cs.has(&hash));
+        assert!(!cs.has(&hash).unwrap());
         assert!(cs.hashes().unwrap().is_empty());
         assert!(!cs.remove(&hash).unwrap(), "second remove is a no-op");
         cs.put(&hash, bytes).unwrap();
@@ -1485,8 +1546,8 @@ mod tests {
         drop(persistent);
         let reopened = PersistentStore::open(&path).expect("reopen");
         let cs2 = RedbContentStore::new(reopened);
-        assert!(cs2.has(&hash));
-        assert_eq!(cs2.get(&hash).unwrap(), bytes);
+        assert!(cs2.has(&hash).unwrap());
+        assert_eq!(cs2.get(&hash).unwrap().unwrap(), bytes);
 
         let _ = std::fs::remove_file(&path);
     }

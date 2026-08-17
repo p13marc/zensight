@@ -15,6 +15,9 @@ KillSignal=SIGTERM
 TimeoutStopSec=20s
 # Run unprivileged under a transient system user, with a minimal sandbox.
 DynamicUser=yes
+# Durable artifact chunk store (artifacts.snapshot.state_dir):
+# /var/lib/zensight-netring — the only writable path under ProtectSystem=strict.
+StateDirectory=zensight-netring
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

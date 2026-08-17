@@ -47,15 +47,15 @@ deferred optimisation.
 
 The video path stamps geometry into the pipeline `Metadata` and inserts a
 scaler + throttle before the encoder, so the tier's resolution and framerate are
-enforced in-pipeline (parallax 0.3.0: encoders/scaler take **no** dimensions at
+enforced in-pipeline (parallax 0.6: encoders/scaler take **no** dimensions at
 construction — geometry travels in the data):
 
 | Source | video tier (h264/`<tier>`) | preview profile (jpeg) |
 |--------|----------------------------|------------------------|
 | Test | `VideoTestSrc` (Rgb24, live) → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `VideoTestSrc` (preview fps, live) → `VideoScale` → `JpegEncoder`(Rgb) → `AppSink` |
-| V4L2 MJPG | `V4l2Src` → `JpegDecoder` → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `V4l2Src` → `Throttle` → `AppSink` (MJPG passthrough) |
-| V4L2 YUYV | `V4l2Src` → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `V4l2Src` → `Throttle` → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
-| RTSP H.264 | `RtspSrc` → `AppSink` (**passthrough** — no re-encode, no scale) | `RtspSrc` → `H264Decoder` → `Throttle` → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
+| V4L2 MJPG | `V4l2Src` → `JpegDecoder` → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `V4l2Src` → `Throttle` → `AppSink` (MJPG passthrough — no scaler, `preview.max_height` does not apply) |
+| V4L2 YUYV | `V4l2Src` → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `V4l2Src` → `Throttle` → `VideoScale`(Yuyv) → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
+| RTSP H.264 | `RtspSrc` → `AppSink` (**passthrough** — no re-encode, no scale) | `RtspSrc` → `H264Decoder` → `Throttle` → `VideoScale`(I420) → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
 
 Notes:
 
@@ -72,7 +72,10 @@ Notes:
   bitrate target with skip-frames off).
 - JPEG previews are always flagged `keyframe: true` in `FrameMeta` (every
   JPEG is independently decodable). The preview scaler caps the thumbnail at
-  `preview.max_height`.
+  `preview.max_height` on every path that re-encodes; the one exception is
+  the V4L2 MJPG passthrough, which forwards the camera's JPEG bytes verbatim
+  at whatever size the camera produces. The scaler sits before the RGB
+  convert (still YUYV/I420), so convert + JPEG run on the capped size.
 
 ## Live control (no teardown) — #496
 
@@ -85,8 +88,9 @@ their elements **before** the executor starts:
   inner encoder and start a fresh IDR (a clean decoder entry point). Rate-limit
   these knobs; bitrate can change every frame.
 - **framerate** — the `Throttle`'s target rate.
-- **preview quality / preview fps** — the JPEG encoder's quality and the preview
-  `Throttle`.
+- **preview quality / preview fps / preview size** — the JPEG encoder's
+  quality, the preview `Throttle`, and the preview scaler's `max_height`
+  (absent on the MJPG passthrough preview, which has no scaler).
 
 ## Keyframe control
 
@@ -225,7 +229,7 @@ Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
   timeout) stalls no stream commands, no `@rpc/parallax/streams` replies, and no
   `state/parallax/stream/<stream>` doc updates. If the SDP carries no video
   dimensions, `FrameMeta.width/height` are `0` (= unknown) and the JPEG preview
-  cannot be opened (the encoder needs a size).
+  cannot be opened (the advertised `FrameMeta`/catalogue size would be a lie).
 - **`max_height` is now real** for encoder-backed sources (test patterns and
   V4L2): the inserted `VideoScale` caps the encoded height aspect-preserving
   (never upscaling) per tier, and the cap is a live `ScaleControl` (a resolution

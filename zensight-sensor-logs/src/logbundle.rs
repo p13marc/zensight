@@ -8,7 +8,6 @@
 //! JSON manifest (query, counts, range, truncation).
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -91,7 +90,7 @@ impl ArtifactProducer for LogBundleProducer {
         }
     }
 
-    async fn produce(&self, kind: ArtifactKind, ctx: ProduceCtx) -> anyhow::Result<Produced> {
+    async fn produce(&self, kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
         let ArtifactKind::LogBundle {
             from,
             to,
@@ -122,7 +121,6 @@ impl ArtifactProducer for LogBundleProducer {
         let ring = self.ring.clone();
         let source_filter = source.clone();
         let host = self.host.clone();
-        let workdir = ctx.workdir.clone();
         let query = serde_json::json!({
             "from": from, "to": to, "pattern": pattern, "severity_min": severity_min,
             "unit": unit, "app": app, "source": source,
@@ -172,9 +170,11 @@ impl ArtifactProducer for LogBundleProducer {
                     LogBundleFormat::Text => "txt",
                 }
             );
-            let path: PathBuf = workdir.join(&filename);
-            let file = std::fs::File::create(&path)?;
-            let mut enc = zstd::stream::write::Encoder::new(file, 3)?;
+            // The bundle is built into memory and served from it
+            // (`Produced::Bytes`): the write loop below is bounded by
+            // `max_bytes`, so the buffer is too — and nothing lands at a
+            // predictable path in the shared system temp dir anymore.
+            let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3)?;
 
             let manifest = Manifest {
                 kind: "logbundle",
@@ -227,8 +227,8 @@ impl ArtifactProducer for LogBundleProducer {
                 enc.write_all(line.as_bytes())?;
                 enc.write_all(b"\n")?;
             }
-            enc.finish()?;
-            Ok(Produced::File { path, filename })
+            let data = enc.finish()?;
+            Ok(Produced::Bytes { data, filename })
         })
         .await?
     }
@@ -286,7 +286,8 @@ mod tests {
         use zensight_sensor_core::{ProduceCtx, ProgressUpdate};
 
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(LogStore::open(dir.path().join("logs.redb")).unwrap());
+        let store =
+            Arc::new(LogStore::open(dir.path().join("logs.redb"), 8 * 1024 * 1024).unwrap());
         // 5 lines; 4 contain "boom" (matcher target).
         let recs: Vec<LogRecord> = (0..5)
             .map(|i| LogRecord {
@@ -335,14 +336,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let Produced::File { path, filename } = produced else {
-            panic!("expected a file");
+        let Produced::Bytes { data, filename } = produced else {
+            panic!("expected an in-memory bundle");
         };
         assert!(filename.ends_with(".jsonl.zst"));
 
         // Decompress + parse: first line = manifest, then <= max_lines records.
-        let mut dec =
-            zstd::stream::read::Decoder::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut dec = zstd::stream::read::Decoder::new(&data[..]).unwrap();
         let mut out = String::new();
         dec.read_to_string(&mut out).unwrap();
         let mut lines = out.lines();

@@ -2,6 +2,15 @@ use crate::telemetry::Protocol;
 
 use crate::registry::{self, AnySubject};
 use zenkey::grammar::{self, Class, ClassOrPlane, Origin, StructuralKey};
+use zenkey::origin::{RemoteOrigin, ServiceOrigin};
+use zenkey::selector::{self, Scope};
+
+/// Split a caller-side procedure path (`"artifact/cancel"`) into the chunk
+/// slice zenkey's selector builders take. The chunks are registry constants,
+/// so an illegal one is a programmer error — zenkey asserts it eagerly.
+fn proc_chunks(procedure: &str) -> Vec<&str> {
+    procedure.split('/').collect()
+}
 
 // ---------------------------------------------------------------------------
 // Parsing: base-relative for applications, full-key for un-namespaced tools.
@@ -125,7 +134,7 @@ pub fn validate_relative_selector(ke: &str) -> std::result::Result<(), String> {
 pub fn all_telemetry_wildcard() -> String {
     // v1 (RFC 04): the telemetry class selector — nothing to discard
     // client-side (incumbent pain P6 retired).
-    "v1/*/telemetry/**".to_string()
+    selector::all_telemetry(Scope::fleet()).into()
 }
 
 /// Caller-side fleet procedure selector (RFC 05 §2): GET
@@ -133,7 +142,7 @@ pub fn all_telemetry_wildcard() -> String {
 /// the producer. Callers MUST use query target `All` (RFC 05 §2.1) —
 /// `BestMatching` can short-circuit the fan-in.
 pub fn fleet_rpc_key(producer: &str, procedure: &str) -> String {
-    format!("v1/*/@rpc/{}/{}", producer, procedure)
+    selector::fleet_rpc(producer, &proc_chunks(procedure)).into()
 }
 
 /// Caller-side fleet write selector: the `<topic>/set` procedure fleet-wide.
@@ -166,18 +175,23 @@ pub fn fleet_command_key(producer: &str, topic: &str) -> String {
 /// host's producer — use when the origin is already known (e.g. a drill-down
 /// view), [`fleet_rpc_key`] otherwise.
 pub fn origin_rpc_key(origin: &str, producer: &str, procedure: &str) -> String {
-    format!("v1/{origin}/@rpc/{producer}/{procedure}")
+    match RemoteOrigin::parse(origin) {
+        Ok(o) => selector::rpc_at(&o, producer, &proc_chunks(procedure)).into(),
+        // A malformed origin never parsed before either — the legacy spelling
+        // simply matched nothing, which is exactly the behavior to keep.
+        Err(_) => format!("v1/{origin}/@rpc/{producer}/{procedure}"),
+    }
 }
 
 /// Build a wildcard key expression for the whole fleet state plane.
 pub fn all_state_wildcard() -> String {
     // v1 (RFC 04): the whole fleet state plane, one selector.
-    "v1/*/state/**".to_string()
+    selector::all_state(Scope::fleet()).into()
 }
 
 /// Build a wildcard key expression for the whole fleet events plane (#536).
 pub fn all_events_wildcard() -> String {
-    "v1/*/events/**".to_string()
+    selector::all_events(Scope::fleet()).into()
 }
 
 /// Build a wildcard key expression for all sensor health data.
@@ -191,21 +205,20 @@ pub fn all_events_wildcard() -> String {
 /// assert_eq!(all_health_wildcard(), "v1/*/state/*/health");
 /// ```
 pub fn all_health_wildcard() -> String {
+    // Hand-spelled: zenkey 0.6 has no cross-producer common-family selector —
+    // the generated `Family::Health.selector(scope)` interpolates one
+    // producer's name literal, not `*`. (Upstream candidate: a
+    // `selector::common_family(scope, family)`.)
     "v1/*/state/*/health".to_string()
 }
 
-/// Build this host's v1 evidence key for one observed device (RFC 06 §4):
-/// `<base>/v1/<local-origin>/state/<sensor>/evidence/device/<device>`.
-/// The device chunk is slugged, so raw hostnames/IPs/MACs are safe inputs;
-/// consumers read the observed identity from the payload, not the key.
-pub fn host_evidence_key(sensor: &str, device: &str) -> String {
-    format!(
-        "v1/{}/state/{}/evidence/device/{}",
-        crate::PROFILE.host_id().as_str(),
-        sensor,
-        zenkey::slug::chunk_slug(device)
-    )
-}
+// `host_evidence_key(sensor, device)` and `name_observation_key(sensor, ip)`
+// lived here through 0.10 and are gone: they string-dispatched on the sensor
+// name, where every publisher knows its producer statically. Evidence
+// publishers now build their keys with the per-producer generated builders —
+// `registry::<producer>::key(&PROFILE.local_origin(),
+// &Subject::evidence_device(..))` — which slug identically (`Chunk::slug` is
+// `chunk_slug`) and additionally guarantee the subject is registered.
 
 /// Build a wildcard key expression for the whole evidence keyspace
 /// (`host/**` claims and `names/**` observation batches).
@@ -219,19 +232,6 @@ pub fn host_evidence_key(sensor: &str, device: &str) -> String {
 pub fn all_evidence_wildcard() -> String {
     // v1 (RFC 06 §4): evidence is ordinary per-origin state.
     "v1/*/state/*/evidence/**".to_string()
-}
-
-/// Build this host's v1 name-observation key for one observed IP (#307,
-/// RFC 06 §4): the ip is slugified (`.`/`:` → `-`) so updates for the same
-/// IP replace in place:
-/// `<base>/v1/<local-origin>/state/<sensor>/evidence/names/<ip-slug>`.
-pub fn name_observation_key(sensor: &str, ip_slug: &str) -> String {
-    format!(
-        "v1/{}/state/{}/evidence/names/{}",
-        crate::PROFILE.host_id().as_str(),
-        sensor,
-        ip_slug
-    )
 }
 
 /// Build a wildcard key expression for all passive-DNS name observations,
@@ -264,20 +264,22 @@ pub fn all_name_evidence_wildcard() -> String {
 /// ```
 pub fn entity_key(entity_id: &str) -> String {
     // v1 (RFC 06 §5): a catalog conclusion under the verbatim service origin.
-    format!("v1/@catalog/state/entity/{}", entity_id)
+    // Entity ids are `h-<12hex>` — already chunk-legal, so the generated
+    // constructor's slug is a no-op.
+    registry::catalog::key(&registry::catalog::Subject::entity(entity_id)).into()
 }
 
 /// Build the alias-record key (RFC 06 §5): old-id → entity-id re-pointing on
 /// merges/upgrades, published by the catalog as its own key family.
 pub fn alias_key(old_id: &str) -> String {
-    format!("v1/@catalog/state/alias/{}", old_id)
+    registry::catalog::key(&registry::catalog::Subject::alias(old_id)).into()
 }
 
 /// Wildcard over the alias family — what a UI subscribes to so an operator's
 /// merge is *visible* (RFC 06 §5.1 step 1). Without this a link is a no-op as
 /// far as the product is concerned.
 pub fn all_alias_wildcard() -> String {
-    "v1/@catalog/state/alias/*".to_string()
+    registry::catalog::Family::Alias.selector().into()
 }
 
 /// Build the operator-assertion key (#473): an explicit operator statement about
@@ -290,12 +292,14 @@ pub fn all_alias_wildcard() -> String {
 /// state subject means a restarted correlator re-seeds it through exactly the
 /// same path as everything else.
 pub fn assertion_key(id: &str) -> String {
-    format!("v1/@catalog/state/assertion/{}", id)
+    // Ids are `link-<old>-<new>` / `unlink-<old>-<new>` over host ids —
+    // chunk-legal, so the constructor's slug is a no-op.
+    registry::catalog::key(&registry::catalog::Subject::assertion(id)).into()
 }
 
 /// Wildcard over the assertion family — the correlator's own re-seed selector.
 pub fn all_assertion_wildcard() -> String {
-    "v1/@catalog/state/assertion/*".to_string()
+    registry::catalog::Family::Assertion.selector().into()
 }
 
 /// Build a wildcard key expression for the whole entity keyspace — the
@@ -309,7 +313,7 @@ pub fn all_assertion_wildcard() -> String {
 /// ```
 pub fn all_entity_wildcard() -> String {
     // v1 (RFC 06 §5): the catalog's entity documents.
-    "v1/@catalog/state/entity/*".to_string()
+    registry::catalog::Family::Entity.selector().into()
 }
 
 /// Build the queryable key a late joiner GETs to seed the full current entity
@@ -324,14 +328,14 @@ pub fn all_entity_wildcard() -> String {
 pub fn entities_query_key() -> String {
     // v1 (RFC 05 §4): the seed IS the state selector — the catalog answers
     // it storage-shaped (one reply per entity on its concrete key).
-    "v1/@catalog/state/entity/*".to_string()
+    registry::catalog::Family::Entity.selector().into()
 }
 
 /// Build a catalog procedure key (RFC 06 §5): the catalog is a service
 /// origin, so its procedures ride `<base>/v1/@catalog/@rpc/<procedure>`
 /// with no producer chunk.
 pub fn catalog_rpc_key(procedure: &str) -> String {
-    format!("v1/@catalog/@rpc/{}", procedure)
+    selector::service_rpc(&ServiceOrigin::catalog(), &proc_chunks(procedure)).into()
 }
 
 /// Build the queryable key for on-demand IP→name resolution (selector
@@ -345,8 +349,9 @@ pub fn catalog_rpc_key(procedure: &str) -> String {
 /// assert_eq!(names_query_key(), "v1/@catalog/@rpc/names");
 /// ```
 pub fn names_query_key() -> String {
-    // v1 (RFC 06 §5): on-demand name resolution is a catalog procedure.
-    catalog_rpc_key("names")
+    // v1 (RFC 06 §5): on-demand name resolution is a catalog procedure —
+    // this is the registry's own generated builder for it.
+    registry::catalog::names_key().into()
 }
 
 /// Build the correlator's liveliness-token key. A second correlator instance
@@ -361,16 +366,24 @@ pub fn names_query_key() -> String {
 /// ```
 pub fn correlator_alive_key() -> String {
     // v1 (RFC 04 §5): declared by the elected catalog owner only.
-    "v1/@catalog/state/alive".to_string()
+    selector::service_alive(&ServiceOrigin::catalog()).into()
 }
 
 /// Build a catalog ownership-claim token key (RFC 06 §5.3). Every candidate
 /// declares one; the lexically-lowest claim chunk wins the election.
+///
+/// Hand-spelled: `claim/{zid}` is *deliberately not registered* (see the
+/// header comment of `registry/catalog.toml`) — it is a liveliness token, not
+/// a data surface, and zenkey-build has no token/liveliness section yet, so
+/// there is no generated builder for it. The zid is lowercased here because
+/// `Chunk::slug` escapes rather than folds case, and the wire form must stay
+/// the canonical lowercase.
 pub fn catalog_claim_key(zid: &str) -> String {
     format!("v1/@catalog/state/claim/{}", zid.to_ascii_lowercase())
 }
 
 /// The claim-set selector (liveliness) the election and standbys watch.
+/// Hand-spelled for the same reason as [`catalog_claim_key`].
 pub fn catalog_claims_wildcard() -> String {
     "v1/@catalog/state/claim/*".to_string()
 }
@@ -386,6 +399,8 @@ pub fn catalog_claims_wildcard() -> String {
 /// assert_eq!(all_alerts_wildcard(), "v1/*/state/*/alert/*");
 /// ```
 pub fn all_alerts_wildcard() -> String {
+    // Hand-spelled: no cross-producer common-family selector in zenkey 0.6
+    // (see [`all_health_wildcard`]).
     "v1/*/state/*/alert/*".to_string()
 }
 
@@ -407,29 +422,51 @@ pub fn all_alerts_wildcard() -> String {
 // would collapse them onto one subscriber.
 // ---------------------------------------------------------------------------
 
+/// Resolve a wire-received origin into a selector scope. A malformed origin
+/// falls back to the legacy literal spelling via the caller's `format!` arm —
+/// such a selector never parsed before either and simply matched nothing,
+/// which is the behavior to keep for a focus target read off the wire.
+fn origin_scope(origin: &str) -> Option<Scope> {
+    RemoteOrigin::parse(origin).ok().map(|o| Scope::origin(&o))
+}
+
 /// Every telemetry key published by one host.
 pub fn origin_telemetry_wildcard(origin: &str) -> String {
-    format!("v1/{origin}/telemetry/**")
+    match origin_scope(origin) {
+        Some(scope) => selector::all_telemetry(scope).into(),
+        None => format!("v1/{origin}/telemetry/**"),
+    }
 }
 
 /// Every state key published by one host.
 pub fn origin_state_wildcard(origin: &str) -> String {
-    format!("v1/{origin}/state/**")
+    match origin_scope(origin) {
+        Some(scope) => selector::all_state(scope).into(),
+        None => format!("v1/{origin}/state/**"),
+    }
 }
 
-/// One host's firing alerts (the late-joiner seed GET).
+/// One host's firing alerts (the late-joiner seed GET). Hand-spelled tail: no
+/// cross-producer common-family selector in zenkey 0.6 (see
+/// [`all_health_wildcard`]).
 pub fn origin_alerts_wildcard(origin: &str) -> String {
     format!("v1/{origin}/state/*/alert/*")
 }
 
 /// One host's events plane (#536).
 pub fn origin_events_wildcard(origin: &str) -> String {
-    format!("v1/{origin}/events/**")
+    match origin_scope(origin) {
+        Some(scope) => selector::all_events(scope).into(),
+        None => format!("v1/{origin}/events/**"),
+    }
 }
 
 /// One host's sensor liveliness tokens.
 pub fn origin_liveliness_expr(origin: &str) -> String {
-    format!("v1/{origin}/state/*/alive")
+    match origin_scope(origin) {
+        Some(scope) => selector::all_liveliness(scope).into(),
+        None => format!("v1/{origin}/state/*/alive"),
+    }
 }
 
 /// One host's device liveliness tokens.
@@ -453,11 +490,12 @@ pub fn origin_device_liveliness_expr(origin: &str) -> String {
 /// assert_eq!(all_liveliness_wildcard(), "v1/*/state/*/alive");
 /// ```
 pub fn all_liveliness_wildcard() -> String {
-    "v1/*/state/*/alive".to_string()
+    selector::all_liveliness(Scope::fleet()).into()
 }
 
 /// The whole fleet's device liveliness tokens (producers that track downstream
-/// devices — RFC 04 §5).
+/// devices — RFC 04 §5). Hand-spelled: `selector::all_liveliness` covers only
+/// the producer-token shape (`state/*/alive`), not the device rung.
 pub fn all_device_liveliness_wildcard() -> String {
     "v1/*/state/*/device/*/alive".to_string()
 }
@@ -495,6 +533,21 @@ pub fn media_video_key(
     codec: &str,
     tier: &str,
 ) -> String {
+    // Parallax is the registry's only `[[media]]` declarer, so a concrete
+    // origin rides the generated builder — the same one the sensor publishes
+    // with, which is what makes the two sides agree by construction. The
+    // fallback arm keeps two deliberate behaviors: a `*` origin (a viewer
+    // subscribing before the origin map fills — exact on every other chunk)
+    // and non-parallax protocols (sensor-core's generic media machinery).
+    if matches!(protocol, Protocol::Parallax)
+        && let Ok(o) = RemoteOrigin::parse(origin)
+    {
+        return registry::parallax::media_key_at(
+            &o,
+            &registry::parallax::Media::video(stream, codec, tier),
+        )
+        .into();
+    }
     format!(
         "v1/{}/@media/{}/{}/video/{}/{}",
         origin,
@@ -522,6 +575,16 @@ pub fn media_video_key(
 /// );
 /// ```
 pub fn media_preview_key(protocol: Protocol, origin: &str, stream: &str) -> String {
+    // Same delegation split as [`media_video_key`].
+    if matches!(protocol, Protocol::Parallax)
+        && let Ok(o) = RemoteOrigin::parse(origin)
+    {
+        return registry::parallax::media_key_at(
+            &o,
+            &registry::parallax::Media::preview_jpeg(stream),
+        )
+        .into();
+    }
     format!(
         "v1/{}/@media/{}/{}/preview/jpeg",
         origin,
@@ -559,8 +622,12 @@ fn ip_slug(ip: &str) -> String {
 /// assert_eq!(pdns_key("2001:db8::1"), "v1/@catalog/state/pdns/2001-db8--1");
 /// ```
 pub fn pdns_key(ip: &str) -> String {
-    // v1 (RFC 06 §5.2): catalog state; the historical tier is a storage choice.
-    format!("v1/@catalog/state/pdns/{}", ip_slug(ip))
+    // v1 (RFC 06 §5.2): catalog state; the historical tier is a storage
+    // choice. The value handed to the generated constructor is the
+    // *pre-slugged* form: `Chunk::slug` treats `.` as a legal chunk char, so
+    // a dotted IPv4 passed raw would land on the wire dotted — a different
+    // key than every existing pdns record.
+    registry::catalog::key(&registry::catalog::Subject::pdns(ip_slug(ip))).into()
 }
 
 /// Build the wildcard key for the whole historical passive-DNS tier
@@ -574,6 +641,11 @@ pub fn pdns_key(ip: &str) -> String {
 /// assert_eq!(all_pdns_wildcard(), "v1/@catalog/state/pdns/**");
 /// ```
 pub fn all_pdns_wildcard() -> String {
+    // Hand-spelled: the generated `Family::Pdns.selector()` is the narrower
+    // single-chunk `…/pdns/*`. Semantically equivalent for the registered
+    // family, but byte-different — and this string configures router-side
+    // storage selectors, so narrowing it is a deliberate change, not a
+    // refactor.
     "v1/@catalog/state/pdns/**".to_string()
 }
 
@@ -604,39 +676,12 @@ mod tests {
         assert!(telemetry.intersects(&rollup));
     }
 
-    /// RFC 07 §3: a bulk fetch names a concrete origin. Nothing in this module
-    /// may hand out a `*`-origin `@blob` prefix — a probe prefix and a fetch
-    /// prefix are the same string, so the only durable defence is not to
-    /// produce one here at all. (`fleet_blob_prefix()` did, for one call site
-    /// that used it as a fetch; both are gone.)
-    ///
-    /// The guard is over the module's *output*, not over a name, so
-    /// reintroducing the shape under a different spelling fails too.
-    #[test]
-    fn no_key_builder_hands_out_a_wildcard_origin_blob_prefix() {
-        // Production code only — stop at `#[cfg(test)]`, exactly as the #466
-        // CI guards do (this file's own assertions mention the shape).
-        let src = include_str!("keyexpr.rs");
-        let offending = |code: &str| code.contains("@blob") && code.contains('*');
-        for (n, line) in src.lines().enumerate() {
-            if line.starts_with("#[cfg(test)]") {
-                break;
-            }
-            let code = line.split("//").next().unwrap_or("");
-            assert!(
-                !offending(code),
-                "keyexpr.rs:{}: a wildcard-origin @blob prefix is a forbidden \
-                 bulk-fetch shape (RFC 07 §3); carry the concrete origin on the \
-                 payload instead: {line}",
-                n + 1
-            );
-        }
-        // The control: the predicate does fire on the retired shape, so a green
-        // run means the shape is absent rather than the scan being vacuous.
-        assert!(offending(
-            r#"pub fn p() -> String { "v1/*/@blob/artifact".into() }"#
-        ));
-    }
+    // The `no_key_builder_hands_out_a_wildcard_origin_blob_prefix` source
+    // grep that lived here (RFC 07 §3, written after `fleet_blob_prefix()`'s
+    // bulk-fetch defect) is deleted with the zblob 0.3 port: the property is
+    // enforced by the type system now — a `ServePrefix` cannot be built from
+    // a wildcard, a fetch client takes a typed prefix, and the probe form is
+    // `zenkey::BlobProbePrefix`, which is not convertible to a key.
 
     /// #359 acceptance pin, v1: the media plane rides the `@media` verbatim
     /// plane chunk — invisible to BOTH the telemetry and state class
@@ -727,5 +772,183 @@ mod tests {
     #[test]
     fn test_all_telemetry_wildcard() {
         assert_eq!(all_telemetry_wildcard(), "v1/*/telemetry/**");
+    }
+
+    /// Golden pins for every helper in this module, asserted against the
+    /// literal v1 spelling. These predate the delegation of the helper
+    /// bodies to zenkey 0.6's typed selectors / generated registry builders,
+    /// and are the acceptance criteria for that refactor: the wire bytes
+    /// must not move. Origin-parameterized helpers are pinned on a fixed
+    /// remote origin; PROFILE-derived keys (machine-minted origin) are
+    /// pinned against their explicit literal construction.
+    mod golden_v1_spellings {
+        use super::super::*;
+
+        const ORIGIN: &str = "h-3fa9c2d41b7e";
+
+        #[test]
+        fn class_and_family_wildcards() {
+            assert_eq!(all_telemetry_wildcard(), "v1/*/telemetry/**");
+            assert_eq!(all_state_wildcard(), "v1/*/state/**");
+            assert_eq!(all_events_wildcard(), "v1/*/events/**");
+            assert_eq!(all_health_wildcard(), "v1/*/state/*/health");
+            assert_eq!(all_alerts_wildcard(), "v1/*/state/*/alert/*");
+            assert_eq!(all_liveliness_wildcard(), "v1/*/state/*/alive");
+            assert_eq!(
+                all_device_liveliness_wildcard(),
+                "v1/*/state/*/device/*/alive"
+            );
+            assert_eq!(all_evidence_wildcard(), "v1/*/state/*/evidence/**");
+            assert_eq!(
+                all_name_evidence_wildcard(),
+                "v1/*/state/*/evidence/names/*"
+            );
+        }
+
+        #[test]
+        fn origin_scoped_selectors() {
+            assert_eq!(
+                origin_telemetry_wildcard(ORIGIN),
+                "v1/h-3fa9c2d41b7e/telemetry/**"
+            );
+            assert_eq!(origin_state_wildcard(ORIGIN), "v1/h-3fa9c2d41b7e/state/**");
+            assert_eq!(
+                origin_events_wildcard(ORIGIN),
+                "v1/h-3fa9c2d41b7e/events/**"
+            );
+            assert_eq!(
+                origin_alerts_wildcard(ORIGIN),
+                "v1/h-3fa9c2d41b7e/state/*/alert/*"
+            );
+            assert_eq!(
+                origin_liveliness_expr(ORIGIN),
+                "v1/h-3fa9c2d41b7e/state/*/alive"
+            );
+            assert_eq!(
+                origin_device_liveliness_expr(ORIGIN),
+                "v1/h-3fa9c2d41b7e/state/*/device/*/alive"
+            );
+        }
+
+        #[test]
+        fn rpc_keys() {
+            // A multi-chunk procedure, exactly as the GUI spells one.
+            assert_eq!(
+                fleet_rpc_key("netring", "artifact/cancel"),
+                "v1/*/@rpc/netring/artifact/cancel"
+            );
+            assert_eq!(
+                fleet_command_key("netring", "stream"),
+                "v1/*/@rpc/netring/stream/set"
+            );
+            assert_eq!(
+                origin_rpc_key(ORIGIN, "netring", "artifact/status"),
+                "v1/h-3fa9c2d41b7e/@rpc/netring/artifact/status"
+            );
+            assert_eq!(catalog_rpc_key("names"), "v1/@catalog/@rpc/names");
+            assert_eq!(catalog_rpc_key("link"), "v1/@catalog/@rpc/link");
+            assert_eq!(names_query_key(), "v1/@catalog/@rpc/names");
+        }
+
+        #[test]
+        fn catalog_subjects_and_wildcards() {
+            assert_eq!(
+                entity_key("h-0123456789ab"),
+                "v1/@catalog/state/entity/h-0123456789ab"
+            );
+            assert_eq!(
+                alias_key("h-0123456789ab"),
+                "v1/@catalog/state/alias/h-0123456789ab"
+            );
+            // The id shape `OperatorAssertion::id` actually produces.
+            assert_eq!(
+                assertion_key("link-h-0123456789ab-h-3fa9c2d41b7e"),
+                "v1/@catalog/state/assertion/link-h-0123456789ab-h-3fa9c2d41b7e"
+            );
+            assert_eq!(all_entity_wildcard(), "v1/@catalog/state/entity/*");
+            assert_eq!(all_alias_wildcard(), "v1/@catalog/state/alias/*");
+            assert_eq!(all_assertion_wildcard(), "v1/@catalog/state/assertion/*");
+            assert_eq!(entities_query_key(), "v1/@catalog/state/entity/*");
+            assert_eq!(correlator_alive_key(), "v1/@catalog/state/alive");
+        }
+
+        #[test]
+        fn catalog_claims() {
+            // The zid is lowercased at this boundary (zenoh zids are hex, but
+            // the wire form must be canonical either way).
+            assert_eq!(catalog_claim_key("A3F0"), "v1/@catalog/state/claim/a3f0");
+            assert_eq!(catalog_claims_wildcard(), "v1/@catalog/state/claim/*");
+        }
+
+        #[test]
+        fn pdns_keys() {
+            assert_eq!(pdns_key("10.0.0.9"), "v1/@catalog/state/pdns/10-0-0-9");
+            assert_eq!(
+                pdns_key("2001:db8::1"),
+                "v1/@catalog/state/pdns/2001-db8--1"
+            );
+            assert_eq!(all_pdns_wildcard(), "v1/@catalog/state/pdns/**");
+        }
+
+        #[test]
+        fn media_keys() {
+            assert_eq!(
+                media_video_key(Protocol::Parallax, ORIGIN, "cam0", "h264", "high"),
+                "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high"
+            );
+            assert_eq!(
+                media_preview_key(Protocol::Parallax, ORIGIN, "cam0"),
+                "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+            );
+        }
+
+        #[test]
+        fn profile_derived_evidence_keys() {
+            // The origin is machine-minted, so pin the exact construction:
+            // origin + literal spelling + the slugged device chunk. These pin
+            // the generated per-producer builders the evidence publishers use
+            // (the string-dispatching keyexpr helpers they replaced are gone).
+            let origin = crate::PROFILE.host_id().as_str().to_string();
+            let local = crate::PROFILE.local_origin();
+            let device_key: String = registry::netring::key(
+                &local,
+                &registry::netring::Subject::evidence_device("AA:BB:CC:00:11:22"),
+            )
+            .into();
+            assert_eq!(
+                device_key,
+                format!(
+                    "v1/{origin}/state/netring/evidence/device/{}",
+                    zenkey::slug::chunk_slug("AA:BB:CC:00:11:22")
+                )
+            );
+            let names_key: String = registry::netring::key(
+                &local,
+                &registry::netring::Subject::evidence_names("10-0-0-9"),
+            )
+            .into();
+            assert_eq!(
+                names_key,
+                format!("v1/{origin}/state/netring/evidence/names/10-0-0-9")
+            );
+        }
+
+        #[test]
+        fn blob_prefixes() {
+            // PROFILE-derived; pin the literal tier spellings.
+            let origin = crate::PROFILE.host_id().as_str().to_string();
+            assert_eq!(
+                crate::artifact_blob_prefix(),
+                format!("v1/{origin}/@blob/artifact")
+            );
+            assert_eq!(
+                crate::artifact_store_prefix(),
+                format!("v1/{origin}/@blob/store")
+            );
+            assert_eq!(
+                crate::artifact_tree_prefix(),
+                format!("v1/{origin}/@blob/tree")
+            );
+        }
     }
 }

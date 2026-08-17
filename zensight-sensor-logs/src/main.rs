@@ -526,7 +526,7 @@ async fn main() -> Result<()> {
     let store_cfg = &syslog_config.store;
     let (log_store, store_tx, store_counters) = if store_cfg.enabled {
         match store::resolve_store_path(store_cfg.path.as_deref()) {
-            Some(path) => match store::LogStore::open(&path) {
+            Some(path) => match store::LogStore::open(&path, store_cfg.cache_bytes) {
                 Ok(s) => {
                     let store = Arc::new(s);
                     let counters = Arc::new(store::StoreCounters::default());
@@ -646,7 +646,11 @@ async fn main() -> Result<()> {
                         Err(_) => continue,
                     };
                 for (device, claim) in claims {
-                    let key = zensight_common::host_evidence_key("logs", &device);
+                    let key: String = zensight_common::registry::logs::key(
+                        &zensight_common::PROFILE.local_origin(),
+                        &zensight_common::registry::logs::Subject::evidence_device(&device),
+                    )
+                    .into();
                     if let Err(e) = ev_registry.publish_serializable(&key, &claim).await {
                         tracing::warn!(device = %device, error = %e, "evidence publish failed");
                     }

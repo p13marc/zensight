@@ -255,6 +255,7 @@ store: {
   flush_interval_secs: 2,   // ...or at least this often
   prune_interval_secs: 300, // prune + health cadence
   queue_capacity: 100000,   // writer-channel bound; full → drop + count (never block intake)
+  cache_bytes: 67108864,    // redb page-cache budget; redb's own default is 1 GiB (#625)
 }
 ```
 

@@ -16,7 +16,7 @@
 # it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "2.5"
+version = "2.6"
 app = "zensight"
 convention = 1
 
@@ -136,6 +136,13 @@ class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "entries sampled out"
+
+[[subject]]
+path = "journald/self_excluded_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "2.6"
+description = "entries dropped by self/deny-list exclusion (#625)"
 
 [[subject]]
 path = "by_unit/{unit}/messages_total"
@@ -435,7 +442,8 @@ reason = "the producer chunk already names the producer (#470)"
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2
 # snapshot TreeServer/store. Endpoints list what the server actually serves:
 # no `push` (never enabled — RFC 07 §2.2 keeps it off by default) and no
-# `fanout` (zblob feature off). Shapes must agree app-wide (every producer
+# `fanout` (zblob feature off; experimental since RFC 07 v1.17 demoted it to
+# Appendix A). Shapes must agree app-wide (every producer
 # declares the same three families); prose is per-producer.
 [[blob]]
 tier = "artifact"

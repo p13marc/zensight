@@ -282,18 +282,45 @@ pub enum Message {
     ),
     /// Units table (#281): set the active-state filter (`None` = all).
     SystemdSetUnitFilter(Option<String>),
-    /// Arm a unit action (#283): the row's start/stop/restart buttons swap to an
-    /// inline confirm/cancel pair until resolved.
+    /// Units table: set the unit-type suffix filter (`None` = every type).
+    SystemdSetUnitTypeFilter(Option<String>),
+    /// Units table: sort on a column (toggles direction if already active).
+    SystemdUnitsTableSort(usize),
+    /// Units table: the filter-box text changed.
+    SystemdUnitsTableFilter(String),
+    /// Units table: reveal another page of rows.
+    SystemdUnitsTableMore,
+    /// Read the selected unit's on-disk definition (opt-in per host).
+    SystemdFetchUnitFile(String),
+    /// The unit-file reply, or why there wasn't one.
+    SystemdUnitFileReceived(Result<zensight_common::query_detail::UnitFile, String>),
+    /// Collapse the unit-file panel.
+    SystemdHideUnitFile,
+    /// Fetch this host's advertised service-control gate (#283) so the Units tab
+    /// can render what it will actually accept.
+    FetchSystemdActionCapability,
+    /// The service-control probe's reply, or why there wasn't one.
+    SystemdActionCapabilityReceived(Result<zensight_common::action::ActionCapability, String>),
+    /// Arm a unit action (#283): the row's buttons swap to an inline
+    /// confirm/cancel pair until resolved. `unit` is empty for `daemon-reload`.
     SystemdUnitActionArm {
-        verb: String,
+        verb: zensight_common::action::Verb,
         unit: String,
     },
     /// Cancel the armed unit action (#283).
     SystemdUnitActionCancel,
-    /// Send the armed unit action as `{verb, unit}` via
-    /// `@rpc/systemd/action/set` (#283), then poll `@rpc/systemd/action`
-    /// for the job outcome. The sensor refuses unless `actions.enabled` is set.
+    /// Send the armed unit action as `{verb, unit}` via the drilled-in host's
+    /// `@rpc/systemd/action/set` (#283). The sensor refuses unless the action is
+    /// gated open.
     SystemdUnitActionConfirm,
+    /// The `action/set` reply: the sensor's own `ActionStatus`, produced *after*
+    /// it tracked the D-Bus job to completion, or why none arrived.
+    SystemdUnitActionResult(
+        Result<
+            zensight_common::action::ActionStatus,
+            crate::view::specialized::systemd_detail::ActionFailure,
+        >,
+    ),
 
     /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),
@@ -1014,16 +1041,16 @@ pub enum Message {
         /// `None` fans out to every host running this protocol.
         target_source: Option<String>,
     },
-    /// The destination-folder picker resolved for a tree artifact (`None` = the
-    /// user cancelled). Only tree kinds (snapshots) pick a folder first; blobs go
+    /// A Ready tree artifact was verified pre-download (root-fetched index +
+    /// holder probe) — or the verification failed, before any folder picker
+    /// opened or any chunk moved.
+    ArtifactTreeVerified(Result<crate::view::artifact_fetch::TreeVerify, String>),
+    /// The operator confirmed the verified tree — open the folder picker.
+    ArtifactTreeConfirmed,
+    /// The destination-folder picker resolved for a confirmed tree artifact
+    /// (`None` = the user cancelled). Blobs never pick a folder — they stage
     /// to a temp dir then a Save-as dialog.
-    ArtifactDestChosen {
-        /// Producer name.
-        producer: String,
-        /// What to produce.
-        kind: zensight_common::ArtifactKind,
-        /// Target one sensor instance, threaded from `StartArtifact`.
-        target_source: Option<String>,
+    ArtifactTreeDestChosen {
         /// Chosen destination folder, or `None` if cancelled.
         dest: Option<std::path::PathBuf>,
     },
@@ -1037,7 +1064,10 @@ pub enum Message {
         progress: Option<f32>,
     },
     /// The artifact request resolved: a `Ready` state to download, or an error.
-    ArtifactRequested(Result<zensight_common::ArtifactState, String>),
+    ArtifactRequested(Result<Vec<zensight_common::ArtifactState>, String>),
+    /// The operator picked which host's artifact to download (index into the
+    /// `PickingHolder` state's holder list).
+    ArtifactHolderChosen(usize),
     /// Streaming download progress (units resolved / total).
     ArtifactProgress {
         /// Units resolved so far.
@@ -1045,11 +1075,18 @@ pub enum Message {
         /// Total units.
         total: u64,
     },
+    /// The transfer entered its verify/materialize phase (#624): zblob emits
+    /// `Progress::Verifying` after a tree download's last chunk, before
+    /// `reconstruct_tree` — which can take a while on a large snapshot.
+    ArtifactVerifying,
     /// The artifact finished downloading (a temp file for a blob, the chosen
     /// folder for a tree), or failed.
     ArtifactDownloaded(Result<std::path::PathBuf, String>),
     /// Outcome of the "Save as…" dialog for a downloaded blob artifact.
     ArtifactSaved(Result<Option<String>, String>),
+    /// Outcome of tagging a downloaded snapshot in the local chunk cache
+    /// (keeps its chunks warm for re-download dedup; log-only either way).
+    BlobCacheTagged(Result<(), String>),
     /// Pause the in-flight artifact download (keeps the partial; resumable).
     PauseArtifact,
     /// Resume a paused artifact download.

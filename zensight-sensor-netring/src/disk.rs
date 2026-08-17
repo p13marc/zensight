@@ -49,8 +49,10 @@ pub const DISK_CHANNEL_CAP: usize = 8192;
 /// Max entries the served capture index keeps (newest first).
 pub const CAPTURE_INDEX_CAP: usize = 64;
 
-/// Chunk size for triggered-capture blob manifests, bytes.
-const BLOB_CHUNK_SIZE: u32 = 512 * 1024;
+/// Chunk size for triggered-capture blob manifests, bytes. zblob's default is
+/// measured (bao-slice overhead vs the fragment-loss model — see zblob's
+/// `tests/chunk_size.rs` table); no local reason to diverge from it.
+const BLOB_CHUNK_SIZE: u32 = zblob::DEFAULT_CHUNK_SIZE;
 
 /// One frame lifted off the wire by the continuous capture-to-disk
 /// subscription. `data` is already snap-truncated at copy time (the handler
@@ -687,7 +689,7 @@ async fn finalize_recording(
                 expires_ms = Some(now_ms() + (cfg.artifact_ttl_secs as i64) * 1000);
                 expires =
                     Some(tokio::time::Instant::now() + Duration::from_secs(cfg.artifact_ttl_secs));
-                artifact_id = Some(manifest.id.clone());
+                artifact_id = Some(manifest.id.to_string());
                 artifact_prefix = Some(blob.prefix.clone());
                 artifact_root = Some(
                     zenkey::ContentHash::parse(&manifest.root.to_string())
