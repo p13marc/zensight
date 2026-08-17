@@ -52,6 +52,10 @@
       // per-dir `incremental: true` then reuses unchanged files' chunks across
       // builds (append-mostly dirs only — see the config docs).
       // state_dir: "/var/lib/zensight-sysinfo/artifacts",
+      // Replicate registered snapshots into router-side Zenoh storage (#623)
+      // so they outlive this sensor — needs a storage subscribed to
+      // @blob/{store,tree}/** (see configs/router-blob-storage.json5).
+      // replicate: true,
     },
   },
 

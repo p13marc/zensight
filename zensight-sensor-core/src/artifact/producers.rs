@@ -120,6 +120,9 @@ impl ArtifactProducer for SnapshotProducer {
     fn store_state_dir(&self) -> Option<std::path::PathBuf> {
         self.limits.state_dir.as_ref().map(std::path::PathBuf::from)
     }
+    fn replicate_snapshots(&self) -> bool {
+        self.limits.replicate
+    }
     async fn produce(&self, kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
         let ArtifactKind::Snapshot { dir } = kind else {
             anyhow::bail!("snapshot producer given a non-snapshot request");

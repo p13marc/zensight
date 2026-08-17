@@ -684,6 +684,15 @@ pub struct ArtifactSnapshotLimits {
     /// survive restarts, and repeated builds dedup against warm chunks.
     #[serde(default)]
     pub state_dir: Option<String>,
+    /// Replicate each registered snapshot into router-side Zenoh storage
+    /// (#623): after `TreeServer::register`, PUT the snapshot's chunks +
+    /// index so a `configs/router-blob-storage.json5`-style storage retains
+    /// them and the snapshot outlives this sensor (and its host).
+    /// **Off by default** — it costs one PUT per chunk (DataLow priority)
+    /// and is useless without such a storage subscribed. Best-effort: a
+    /// failed replication is logged, the artifact still goes `Ready`.
+    #[serde(default)]
+    pub replicate: bool,
 }
 
 impl Default for ArtifactSnapshotLimits {
@@ -697,6 +706,7 @@ impl Default for ArtifactSnapshotLimits {
             ttl_secs: default_report_ttl(),
             chunk_size: default_snapshot_chunk_size(),
             state_dir: None,
+            replicate: false,
         }
     }
 }

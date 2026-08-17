@@ -30,7 +30,8 @@ use tokio::sync::{Mutex, watch};
 use ulid::Ulid;
 use zblob::{
     BlobServer, BlobSpec, CancelToken, CdcParams, ContentStore, DirStore, Hash, MemoryBlobSource,
-    MemoryStore, TreeIndex, TreeServer, build_tree_from, gc,
+    MemoryStore, Publisher, SettleCoverage, SnapshotPublisher, TreeIndex, TreeServer,
+    build_tree_from, gc,
 };
 use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
@@ -153,6 +154,14 @@ pub trait ArtifactProducer: Send + Sync + 'static {
         None
     }
 
+    /// For a `Tree` producer, whether registered snapshots are also
+    /// replicated into router-side Zenoh storage
+    /// (`artifacts.snapshot.replicate`, #623). The channel builds one
+    /// `SnapshotPublisher` when any enabled Tree producer opts in.
+    fn replicate_snapshots(&self) -> bool {
+        false
+    }
+
     /// Produce the artifact. Long-running producers must honor `ctx.cancel` and
     /// stream `ctx.progress`.
     async fn produce(&self, kind: ArtifactKind, ctx: ProduceCtx) -> anyhow::Result<Produced>;
@@ -221,6 +230,10 @@ pub struct ArtifactChannel {
     /// full TTL after the produce call returns.
     workdir: Arc<tempfile::TempDir>,
     tree_server: Option<TreeServer>,
+    /// Replicates each registered snapshot into router-side storage
+    /// (`artifacts.snapshot.replicate`, #623). `None` unless a Tree producer
+    /// opted in.
+    snapshot_publisher: Option<SnapshotPublisher>,
     state: Arc<Mutex<HashMap<&'static str, KindRuntime>>>,
 }
 
@@ -258,6 +271,20 @@ impl ArtifactChannel {
             zblob::ServePrefix::new(prefix).expect("own-origin prefix is concrete")
         };
         let blob = wants_blob.then(|| BlobServer::new(&session, serve(artifact_blob_prefix())));
+        // Snapshot replication into router storage (#623), opt-in via
+        // `artifacts.snapshot.replicate`. `SettleCoverage::All` probes every
+        // chunk after publishing — but note the probes are answered by this
+        // channel's own `TreeServer` on the same prefixes, so settle here is
+        // a liveness smoke test, not proof a storage retained anything
+        // (zblob documents exactly this). The honest end-to-end check is the
+        // router-storage conformance test (`just router-verify`), which
+        // publishes from a session with no TreeServer.
+        let replicate = wants_tree && enabled.iter().any(|p| p.replicate_snapshots());
+        let snapshot_publisher = replicate.then(|| {
+            Publisher::new(&session, serve(artifact_store_prefix()))
+                .snapshots(serve(artifact_tree_prefix()))
+                .coverage(SettleCoverage::All)
+        });
         let (store, tags, tags_dir, tree_server) = if wants_tree {
             // A durable store when a Tree producer names a state dir; memory
             // otherwise (the pre-durable behavior). A configured dir that
@@ -340,6 +367,7 @@ impl ArtifactChannel {
             _tags_dir: tags_dir,
             workdir,
             tree_server,
+            snapshot_publisher,
             state: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -865,6 +893,29 @@ impl ArtifactChannel {
                     .await
                     .map_err(|e| anyhow::anyhow!("registering the snapshot index: {e}"))?;
 
+                // Replicate into router storage (#623), best-effort and off
+                // the produce path: the PUTs ride DataLow priority, and a
+                // slow or absent storage must not delay `Ready` — the sensor
+                // itself serves the snapshot either way.
+                if let (Some(publisher), Some(store)) = (&self.snapshot_publisher, &self.store) {
+                    let publisher = publisher.clone();
+                    let pub_index = index.clone();
+                    let pub_store = store.clone();
+                    let root_str = root.to_string();
+                    tokio::spawn(async move {
+                        match publisher.publish(&pub_index, &pub_store).await {
+                            Ok(()) => tracing::info!(
+                                root = %root_str,
+                                "snapshot replicated to router storage"
+                            ),
+                            Err(e) => tracing::warn!(
+                                root = %root_str, error = %e,
+                                "snapshot replication failed (best-effort; the                                  sensor still serves it)"
+                            ),
+                        }
+                    });
+                }
+
                 // Lineage bookkeeping: replacing the tag atomically drops
                 // liveness of the previous snapshot's *unshared* chunks (the
                 // next sweep reclaims them) while keeping this one warm for
@@ -1064,6 +1115,7 @@ impl ArtifactChannel {
             _tags_dir: self._tags_dir.clone(),
             workdir: self.workdir.clone(),
             tree_server: self.tree_server.clone(),
+            snapshot_publisher: self.snapshot_publisher.clone(),
             state: self.state.clone(),
         }
     }
