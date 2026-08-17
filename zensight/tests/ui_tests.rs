@@ -2417,6 +2417,177 @@ fn test_sensors_view() {
     assert!(ui.find("Downloading 1/4 (25%)").is_ok());
 }
 
+/// Several hosts produced an artifact under the shared request id: the card
+/// offers one button per origin (plus Cancel), and clicking one dispatches
+/// the holder choice. Single-holder requests never enter this state (pinned
+/// at the reducer level in artifact_fetch's unit tests).
+#[test]
+fn test_artifact_holder_pick() {
+    use std::collections::{HashMap, VecDeque};
+    use zensight::message::Message;
+    use zensight::view::artifact_fetch::{ArtifactFetch, ArtifactHolder};
+    use zensight::view::sensors::sensors_view;
+    use zensight_common::{
+        ArtifactState, Delivery, ErrorReport, HealthSnapshot, HealthStatus, KindStatus, TreeSummary,
+    };
+
+    let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
+    let no_forms: HashMap<String, zensight::view::artifact_fetch::CaptureForm> = HashMap::new();
+    let mut health = HashMap::new();
+    health.insert(
+        "sysinfo".to_string(),
+        HealthSnapshot {
+            sensor: "sysinfo".into(),
+            status: HealthStatus::Healthy,
+            uptime_secs: 60,
+            devices_total: 1,
+            devices_responding: 1,
+            devices_failed: 0,
+            last_poll_duration_ms: 5,
+            errors_last_hour: 0,
+            metrics_published: 10,
+            host_id: None,
+            source: None,
+        },
+    );
+    let kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
+
+    let holder = |origin: &str| ArtifactHolder {
+        origin: origin.to_string(),
+        state: ArtifactState::Ready {
+            id: ulid::Ulid::from_parts(1, 1),
+            kind: "snapshot".into(),
+            delivery: Delivery::Tree {
+                root: zblob::Hash::of(origin.as_bytes()),
+                store_prefix: format!("v1/{origin}/@blob/store"),
+                tree_prefix: format!("v1/{origin}/@blob/tree"),
+                summary: TreeSummary {
+                    file_count: 3,
+                    total_bytes: 2048,
+                },
+            },
+            expires_ms: 0,
+        },
+    };
+    let picking = ArtifactFetch::PickingHolder {
+        holders: vec![holder("h-3fa9c2d41b7e"), holder("h-0123456789ab")],
+    };
+    let mut ui = simulator(sensors_view(
+        &health,
+        &no_errors,
+        &picking,
+        Some("sysinfo"),
+        Some("snapshot"),
+        &kinds,
+        &no_forms,
+    ));
+    assert!(
+        ui.find("2 hosts produced this artifact — choose one")
+            .is_ok()
+    );
+    assert!(ui.find("Cancel").is_ok());
+    let first = ui.find("h-3fa9c2d41b7e · 2.0 KB");
+    assert!(first.is_ok(), "holder button shows origin + size");
+    assert!(ui.find("h-0123456789ab · 2.0 KB").is_ok());
+    let _ = ui.click("h-3fa9c2d41b7e · 2.0 KB");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::ArtifactHolderChosen(0))),
+        "clicking a holder dispatches its index"
+    );
+}
+
+/// The verified pre-download confirm for a tree artifact: the card shows the
+/// root-verified file count/size, who still serves the snapshot (live
+/// producer vs router replica), the largest entries, and the confirm button
+/// dispatches the folder-picker step.
+#[test]
+fn test_artifact_tree_confirm_card() {
+    use std::collections::{HashMap, VecDeque};
+    use zensight::message::Message;
+    use zensight::view::artifact_fetch::{ArtifactFetch, TreeSource, TreeVerify};
+    use zensight::view::sensors::sensors_view;
+    use zensight_common::{ErrorReport, HealthSnapshot, HealthStatus, KindStatus};
+
+    let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
+    let no_forms: HashMap<String, zensight::view::artifact_fetch::CaptureForm> = HashMap::new();
+    let kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
+    let mut health = HashMap::new();
+    health.insert(
+        "sysinfo".to_string(),
+        HealthSnapshot {
+            sensor: "sysinfo".into(),
+            status: HealthStatus::Healthy,
+            uptime_secs: 60,
+            devices_total: 1,
+            devices_responding: 1,
+            devices_failed: 0,
+            last_poll_duration_ms: 5,
+            errors_last_hour: 0,
+            metrics_published: 10,
+            host_id: None,
+            source: None,
+        },
+    );
+
+    let verify = |source: TreeSource| ArtifactFetch::ConfirmingTree {
+        verify: TreeVerify {
+            file_count: 1204,
+            total_bytes: 327_155_712,
+            distinct_chunks: 4981,
+            largest: vec![("var/log/big.pcap".into(), 200_000_000)],
+            source,
+        },
+    };
+
+    // Live producer serving all chunks.
+    let confirming = verify(TreeSource::Producer {
+        origin: "v1/h-3fa9c2d41b7e/@blob/store".into(),
+        present: 4981,
+        total: 4981,
+    });
+    let mut ui = simulator(sensors_view(
+        &health,
+        &no_errors,
+        &confirming,
+        Some("sysinfo"),
+        Some("snapshot"),
+        &kinds,
+        &no_forms,
+    ));
+    assert!(ui.find("Verified snapshot: 1204 files, 312.0 MB").is_ok());
+    assert!(
+        ui.find("served by v1/h-3fa9c2d41b7e/@blob/store (all 4981 chunks present)")
+            .is_ok()
+    );
+    assert!(ui.find("Choose folder & download").is_ok());
+    assert!(ui.find("Cancel").is_ok());
+    let _ = ui.click("Choose folder & download");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::ArtifactTreeConfirmed)),
+        "confirming dispatches the folder-picker step"
+    );
+
+    // Producer offline, router replica holds it.
+    let replica = verify(TreeSource::RouterReplica);
+    let mut ui = simulator(sensors_view(
+        &health,
+        &no_errors,
+        &replica,
+        Some("sysinfo"),
+        Some("snapshot"),
+        &kinds,
+        &no_forms,
+    ));
+    assert!(
+        ui.find("producer not answering — a router replica holds the snapshot")
+            .is_ok()
+    );
+}
+
 /// The Sensors view surfaces Tier-2 directory-snapshot download controls (#199):
 /// a button per advertised directory, and progress + Cancel while a job runs.
 #[test]

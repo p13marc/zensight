@@ -122,6 +122,22 @@ pub fn artifact_tree_prefix(producer: &str) -> String {
         .into()
 }
 
+/// The `*`-origin Tier-1 artifact **probe** prefix (RFC 07 §2.5), as the
+/// typed query prefix a probing [`zblob::BlobClient`] takes.
+///
+/// This lives here — next to the tier builders — and not in `keyexpr.rs`,
+/// whose guard posture rightly refuses any stringly `@blob` + `*` spelling:
+/// a probe prefix and a fetch prefix are interchangeable as strings, which is
+/// exactly how a probe becomes §3's wildcard-origin bulk fetch. The value
+/// stays behind `zenkey::BlobProbePrefix` (not convertible to a `Key`) until
+/// the final conversion into zblob's own probe-capable type.
+pub fn fleet_artifact_probe_prefix() -> zblob::QueryPrefix {
+    zblob::QueryPrefix::new(
+        zenkey::BlobProbePrefix::new(zenkey::grammar::BlobTier::Artifact).as_str(),
+    )
+    .expect("the generated probe prefix is a valid query prefix")
+}
+
 /// Optional envelope carrying a correlation id alongside a command body.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Command<T> {

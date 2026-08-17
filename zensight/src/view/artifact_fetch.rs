@@ -57,6 +57,21 @@ pub enum ArtifactFetch {
         /// Total units.
         total: u64,
     },
+    /// Several hosts produced their own artifact under the shared request id
+    /// — the operator picks which host's to download. Cancel is offered; the
+    /// unpicked hosts' artifacts simply age out by TTL.
+    PickingHolder {
+        /// One entry per producing origin.
+        holders: Vec<ArtifactHolder>,
+    },
+    /// A tree artifact was verified pre-download (root-fetched index + holder
+    /// probe): show what it actually contains and who still serves it, then
+    /// let the operator pick a folder — before committing to a potentially
+    /// multi-gigabyte fetch, not after.
+    ConfirmingTree {
+        /// The verified summary.
+        verify: TreeVerify,
+    },
     /// Verifying / reconstructing (done inside `zenoh-blob`) before save.
     Verifying,
     /// Saved to `path`.
@@ -73,6 +88,8 @@ impl ArtifactFetch {
             self,
             ArtifactFetch::Requesting
                 | ArtifactFetch::Generating { .. }
+                | ArtifactFetch::PickingHolder { .. }
+                | ArtifactFetch::ConfirmingTree { .. }
                 | ArtifactFetch::Downloading { .. }
                 | ArtifactFetch::Verifying
         )
@@ -134,6 +151,17 @@ impl ArtifactFetch {
                 }
             }
             ArtifactFetch::Paused { got, total } => format!("Paused {got}/{total}"),
+            ArtifactFetch::PickingHolder { holders } => {
+                format!(
+                    "{} hosts produced this artifact — choose one",
+                    holders.len()
+                )
+            }
+            ArtifactFetch::ConfirmingTree { verify } => format!(
+                "Verified snapshot: {} files, {}",
+                verify.file_count,
+                crate::view::formatting::format_bytes(verify.total_bytes as f64)
+            ),
             ArtifactFetch::Verifying => match kind {
                 "snapshot" => "Reconstructing…".into(),
                 _ => "Verifying…".into(),
@@ -420,27 +448,27 @@ pub fn request_and_stream_ready(
             &producer,
             "artifact/status",
         );
-        // Poll every 500ms for a scaled window (2 iters/sec).
+        // Poll every 500ms for a scaled window (2 iters/sec). The request
+        // fanned out under one shared ULID, so EVERY host running the
+        // producer may be building its own artifact for it — a round's
+        // outcome is decided over all of their states (`poll_round_outcome`),
+        // not whichever host answered first.
         let iters = (60 + extra_secs) * 2;
         for _ in 0..iters {
-            if let Some(state) = poll_status(&session, &status_key, &slug, id).await {
-                match state {
-                    ArtifactState::Ready { .. } => {
-                        yield Message::ArtifactRequested(Ok(state));
-                        return;
-                    }
-                    ArtifactState::Failed { reason, .. } => {
-                        yield Message::ArtifactRequested(Err(reason));
-                        return;
-                    }
-                    ArtifactState::Expired { .. } => {
-                        yield Message::ArtifactRequested(Err("artifact expired".into()));
-                        return;
-                    }
-                    ArtifactState::Generating { detail, progress, .. } => {
-                        yield Message::ArtifactGenerating { detail, progress };
-                    }
+            let states = poll_status_all(&session, &status_key, &slug, id).await;
+            match poll_round_outcome(states) {
+                RoundOutcome::Ready(ready) => {
+                    yield Message::ArtifactRequested(Ok(ready));
+                    return;
                 }
+                RoundOutcome::Generating { detail, progress } => {
+                    yield Message::ArtifactGenerating { detail, progress };
+                }
+                RoundOutcome::Failed(reason) => {
+                    yield Message::ArtifactRequested(Err(reason));
+                    return;
+                }
+                RoundOutcome::Pending => {}
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -448,22 +476,223 @@ pub fn request_and_stream_ready(
     }
 }
 
-/// GET the status queryable and return the current state iff it is for this
+/// The decision a status-poll round yields over every host's state.
+enum RoundOutcome {
+    /// At least one host is Ready and none is still Generating — done.
+    Ready(Vec<ArtifactState>),
+    /// Someone is still producing (the first one's progress is surfaced);
+    /// keep polling — a slower host is not dropped because a fast one
+    /// finished.
+    Generating {
+        /// Producer-reported progress line.
+        detail: Option<String>,
+        /// Producer-reported fraction.
+        progress: Option<f32>,
+    },
+    /// Every host that answered failed or expired — done, with the first
+    /// host's reason.
+    Failed(String),
+    /// No host has answered for this id yet.
+    Pending,
+}
+
+/// Decide a poll round: Ready-and-quiet completes with every Ready state;
+/// any Generating keeps waiting; a Failed/Expired counts only when no host
+/// is Ready or producing (one host's refusal must not mask another's
+/// artifact).
+fn poll_round_outcome(states: Vec<ArtifactState>) -> RoundOutcome {
+    if let Some(g) = states.iter().find_map(|s| match s {
+        ArtifactState::Generating {
+            detail, progress, ..
+        } => Some((detail.clone(), *progress)),
+        _ => None,
+    }) {
+        return RoundOutcome::Generating {
+            detail: g.0,
+            progress: g.1,
+        };
+    }
+    let ready: Vec<ArtifactState> = states
+        .iter()
+        .filter(|s| matches!(s, ArtifactState::Ready { .. }))
+        .cloned()
+        .collect();
+    if !ready.is_empty() {
+        return RoundOutcome::Ready(ready);
+    }
+    for s in states {
+        match s {
+            ArtifactState::Failed { reason, .. } => return RoundOutcome::Failed(reason),
+            ArtifactState::Expired { .. } => {
+                return RoundOutcome::Failed("artifact expired".into());
+            }
+            _ => {}
+        }
+    }
+    RoundOutcome::Pending
+}
+
+/// The verified pre-download summary of a tree artifact — built from the
+/// root-fetched index, never from the sensor's self-reported `TreeSummary`
+/// (which is display-only by its own contract).
+#[derive(Debug, Clone)]
+pub struct TreeVerify {
+    /// Files in the snapshot (from the verified index).
+    pub file_count: u64,
+    /// Total uncompressed bytes.
+    pub total_bytes: u64,
+    /// Distinct content-addressed chunks — the download's true unit count,
+    /// the same unit `Progress::Chunk` reports in.
+    pub distinct_chunks: u64,
+    /// The largest few entries (path, bytes), for the confirm card.
+    pub largest: Vec<(String, u64)>,
+    /// Who still serves the snapshot.
+    pub source: TreeSource,
+}
+
+/// Who answered for a verified snapshot.
+#[derive(Debug, Clone)]
+pub enum TreeSource {
+    /// The producing sensor is live (it answered the `have` probe).
+    Producer {
+        /// The answering origin's probe prefix.
+        origin: String,
+        /// Distinct chunks it holds.
+        present: u32,
+        /// Distinct chunks the snapshot references.
+        total: u32,
+    },
+    /// No live server answered the probe, but the index was still fetchable —
+    /// a router storage (or another replica) holds the snapshot. Storages
+    /// never answer `have` (they serve only stored PUT keys), so this verdict
+    /// is detected by the index fetch succeeding where the probe was silent.
+    RouterReplica,
+}
+
+/// Verify a tree artifact before committing to the fetch: probe who serves it
+/// (`<root>/have` — four numbers whatever the snapshot's size) and fetch the
+/// root-verified index (no chunk store needed). Both go to the delivery's own
+/// concrete prefixes; the index is pinned by construction, so the summary is
+/// trustworthy whoever answered.
+pub async fn verify_tree(
+    session: Arc<Session>,
+    root: zblob::Hash,
+    store_prefix: String,
+    tree_prefix: String,
+) -> Result<TreeVerify, String> {
+    let concrete = |prefix: String| -> Result<zblob::QueryPrefix, String> {
+        let p = zblob::QueryPrefix::new(prefix).map_err(|e| e.to_string())?;
+        if !p.is_concrete() {
+            return Err("refusing a wildcard-origin fetch prefix (RFC 07 §3)".into());
+        }
+        Ok(p)
+    };
+    let client = TreeClient::new(&session, concrete(store_prefix)?, concrete(tree_prefix)?);
+
+    let probes = client
+        .probe_snapshot(&root.to_string())
+        .await
+        .unwrap_or_default();
+    let index = match client.fetch_index_by_root(&root).await {
+        Ok(index) => index,
+        Err(e) if probes.is_empty() => {
+            return Err(format!(
+                "snapshot unreachable — producer offline and no replica answered ({e})"
+            ));
+        }
+        Err(e) => return Err(format!("snapshot index fetch failed: {e}")),
+    };
+
+    let mut largest: Vec<(String, u64)> = index
+        .files()
+        .map(|(path, size, _)| (path.to_string(), size))
+        .collect();
+    largest.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+    largest.truncate(5);
+
+    let source = probes
+        .iter()
+        .find(|(_, p)| p.have_index)
+        .or_else(|| probes.first())
+        .map(|(origin, p)| TreeSource::Producer {
+            origin: origin.as_str().to_string(),
+            present: p.chunks_present,
+            total: p.chunks_total,
+        })
+        .unwrap_or(TreeSource::RouterReplica);
+
+    Ok(TreeVerify {
+        file_count: index.file_count() as u64,
+        total_bytes: index.total_size(),
+        distinct_chunks: index.needed_chunks().len() as u64,
+        largest,
+        source,
+    })
+}
+
+/// One host's Ready artifact for the shared request id — the pick-a-holder
+/// unit when several hosts produced under the same ULID.
+#[derive(Debug, Clone)]
+pub struct ArtifactHolder {
+    /// The producing host's origin chunk (`h-…`), read off the delivery's
+    /// concrete blob/tree prefix.
+    pub origin: String,
+    /// That host's full Ready state (delivery, expiry).
+    pub state: ArtifactState,
+}
+
+/// Reduce a Ready set to one holder per origin. The origin comes from the
+/// delivery's own concrete prefix — for trees every host has a *different
+/// root* (each built its own snapshot), so holders are alternatives to pick
+/// between, never stripes of one transfer. A malformed prefix is skipped: a
+/// holder the download path would refuse anyway is not worth offering.
+pub fn holders_from_states(states: Vec<ArtifactState>) -> Vec<ArtifactHolder> {
+    let mut out: Vec<ArtifactHolder> = Vec::new();
+    for state in states {
+        let ArtifactState::Ready { delivery, .. } = &state else {
+            continue;
+        };
+        let prefix = match delivery {
+            Delivery::Blob { blob_prefix, .. } => blob_prefix,
+            Delivery::Tree { tree_prefix, .. } => tree_prefix,
+        };
+        let Some(origin) = prefix
+            .split('/')
+            .nth(1)
+            .filter(|c| zenkey::origin::RemoteOrigin::parse(c).is_ok())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if out.iter().any(|h| h.origin == origin) {
+            continue;
+        }
+        out.push(ArtifactHolder { origin, state });
+    }
+    out
+}
+
+/// GET the status queryable and collect EVERY host's current state for this
 /// `slug` + `id` (a sensor lists one entry per kind it produces).
-async fn poll_status(
+///
+/// Fleet fan-in (RFC 05 §2.1): every host serving the producer replies, and
+/// every host may have accepted the shared request id — so all matching
+/// states come back, not the first. First-reply-wins silently dropped every
+/// other host's artifact.
+async fn poll_status_all(
     session: &Session,
     status_key: &str,
     slug: &str,
     id: Ulid,
-) -> Option<ArtifactState> {
-    // Fleet fan-in (RFC 05 §2.1): every host serving the producer replies,
-    // but only the one that accepted `id` carries its state — scan them all
-    // instead of trusting whichever host answered first.
-    let replies = session
+) -> Vec<ArtifactState> {
+    let mut out = Vec::new();
+    let Ok(replies) = session
         .get(status_key)
         .target(zenoh::query::QueryTarget::All)
         .await
-        .ok()?;
+    else {
+        return out;
+    };
     while let Ok(reply) = replies.recv_async().await {
         let Ok(sample) = reply.result() else { continue };
         let Ok(status) = serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
@@ -477,10 +706,10 @@ async fn poll_status(
             .and_then(|k| k.current)
             .filter(|s| s.id() == id)
         {
-            return Some(state);
+            out.push(state);
         }
     }
-    None
+    out
 }
 
 /// Drive the right `zblob` client for `delivery` into `dest`, yielding
@@ -806,6 +1035,76 @@ pub fn artifact_section<'a>(
     // progress while generating, chunk counts while downloading/paused).
     if is_this && fetch.is_busy() {
         let kind = active_kind.unwrap_or("report");
+        // The holder pick: one button per producing host (origin + size),
+        // plus Cancel. Rendered before the generic controls — this state has
+        // no progress to bar and no pause to offer.
+        if let ArtifactFetch::PickingHolder { holders } = fetch {
+            let col = column![text(fetch.label(kind)).size(font::CAPTION)].spacing(space::XS);
+            let mut btns = Row::new().spacing(space::SM).align_y(Alignment::Center);
+            for (i, h) in holders.iter().enumerate() {
+                let size = match &h.state {
+                    ArtifactState::Ready {
+                        delivery: Delivery::Blob { manifest, .. },
+                        ..
+                    } => crate::view::formatting::format_bytes(manifest.total_len as f64),
+                    ArtifactState::Ready {
+                        delivery: Delivery::Tree { summary, .. },
+                        ..
+                    } => crate::view::formatting::format_bytes(summary.total_bytes as f64),
+                    _ => String::new(),
+                };
+                btns = btns.push(
+                    button(text(format!("{} · {size}", h.origin)).size(font::CAPTION))
+                        .on_press(Message::ArtifactHolderChosen(i)),
+                );
+            }
+            btns = btns
+                .push(button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact));
+            return col.push(btns).into();
+        }
+        // The verified pre-download confirm: what the snapshot actually
+        // contains (root-verified, not self-reported) and who still serves
+        // it, then the folder pick — before the multi-gigabyte fetch.
+        if let ArtifactFetch::ConfirmingTree { verify } = fetch {
+            let source_line = match &verify.source {
+                TreeSource::Producer {
+                    origin,
+                    present,
+                    total,
+                } => {
+                    if present >= total {
+                        format!("served by {origin} (all {total} chunks present)")
+                    } else {
+                        format!("served by {origin} ({present}/{total} chunks present)")
+                    }
+                }
+                TreeSource::RouterReplica => {
+                    "producer not answering — a router replica holds the snapshot".to_string()
+                }
+            };
+            let mut col = column![
+                text(fetch.label(kind)).size(font::CAPTION),
+                text(source_line).size(font::CAPTION),
+            ]
+            .spacing(space::XS);
+            for (path, size) in &verify.largest {
+                col = col.push(
+                    text(format!(
+                        "  {path} · {}",
+                        crate::view::formatting::format_bytes(*size as f64)
+                    ))
+                    .size(font::CAPTION),
+                );
+            }
+            let controls = row![
+                button(text("Choose folder & download").size(font::CAPTION))
+                    .on_press(Message::ArtifactTreeConfirmed),
+                button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact),
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center);
+            return col.push(controls).into();
+        }
         let mut controls = row![text(fetch.label(kind)).size(font::CAPTION)]
             .spacing(space::MD)
             .align_y(Alignment::Center);
@@ -1139,5 +1438,83 @@ mod tests {
                 .label("report")
                 .contains("boom")
         );
+    }
+
+    fn ready(origin: &str, kind: &str) -> ArtifactState {
+        ArtifactState::Ready {
+            id: Ulid::from_parts(1, 1),
+            kind: kind.into(),
+            delivery: Delivery::Tree {
+                root: zblob::Hash::of(origin.as_bytes()),
+                store_prefix: format!("v1/{origin}/@blob/store"),
+                tree_prefix: format!("v1/{origin}/@blob/tree"),
+                summary: zensight_common::TreeSummary {
+                    file_count: 1,
+                    total_bytes: 1,
+                },
+            },
+            expires_ms: 0,
+        }
+    }
+
+    /// The fan-in round rule: any Generating keeps waiting (a slow host is
+    /// not dropped because a fast one finished), Ready-and-quiet completes
+    /// with EVERY Ready state, and a failure counts only when nobody is
+    /// Ready or producing.
+    #[test]
+    fn poll_round_outcome_rules() {
+        let producing = ArtifactState::Generating {
+            id: Ulid::from_parts(1, 1),
+            kind: "snapshot".into(),
+            detail: None,
+            progress: Some(0.5),
+        };
+        let failed = ArtifactState::Failed {
+            id: Ulid::from_parts(1, 1),
+            kind: "snapshot".into(),
+            reason: "disk full".into(),
+        };
+
+        // Ready + Generating → keep polling.
+        assert!(matches!(
+            poll_round_outcome(vec![ready("h-3fa9c2d41b7e", "snapshot"), producing.clone()]),
+            RoundOutcome::Generating { .. }
+        ));
+        // Ready + Failed → the failure must not mask the artifact.
+        match poll_round_outcome(vec![failed.clone(), ready("h-3fa9c2d41b7e", "snapshot")]) {
+            RoundOutcome::Ready(states) => assert_eq!(states.len(), 1),
+            _ => panic!("a failure must not mask a Ready artifact"),
+        }
+        // Two Ready hosts → both come back.
+        match poll_round_outcome(vec![
+            ready("h-3fa9c2d41b7e", "snapshot"),
+            ready("h-0123456789ab", "snapshot"),
+        ]) {
+            RoundOutcome::Ready(states) => assert_eq!(states.len(), 2),
+            _ => panic!("both hosts' artifacts must come back"),
+        }
+        // Only failures → failed, with the reason.
+        assert!(matches!(
+            poll_round_outcome(vec![failed]),
+            RoundOutcome::Failed(r) if r == "disk full"
+        ));
+        // Nothing yet → pending.
+        assert!(matches!(poll_round_outcome(vec![]), RoundOutcome::Pending));
+    }
+
+    /// Holder reduction: one holder per origin, origin read off the concrete
+    /// delivery prefix, malformed prefixes skipped.
+    #[test]
+    fn holders_reduce_by_origin() {
+        let states = vec![
+            ready("h-3fa9c2d41b7e", "snapshot"),
+            ready("h-3fa9c2d41b7e", "snapshot"), // duplicate origin
+            ready("h-0123456789ab", "snapshot"),
+            ready("*", "snapshot"), // wildcard origin: not a fetchable holder
+        ];
+        let holders = holders_from_states(states);
+        assert_eq!(holders.len(), 2);
+        assert_eq!(holders[0].origin, "h-3fa9c2d41b7e");
+        assert_eq!(holders[1].origin, "h-0123456789ab");
     }
 }
