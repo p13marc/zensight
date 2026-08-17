@@ -4549,6 +4549,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "json5"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
+dependencies = [
+ "serde",
+ "ucd-trie",
+]
+
+[[package]]
 name = "jsonwebtoken"
 version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11309,7 +11319,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "869a93e8a7286e339e1128630051d82babbcd75d585975af07b9f3327220e60e"
 dependencies = [
- "json5",
+ "json5 0.4.1",
  "serde",
  "serde_json",
  "validated_struct_macros",
@@ -13113,7 +13123,7 @@ dependencies = [
  "futures",
  "git-version",
  "itertools",
- "json5",
+ "json5 0.4.1",
  "lazy_static",
  "nonempty-collections",
  "once_cell",
@@ -13184,7 +13194,7 @@ version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8672f4eaf88fd486f0503c59d19edfc25e7dd689bccd90d3cb731a5f627e0df"
 dependencies = [
- "json5",
+ "json5 0.4.1",
  "nonempty-collections",
  "num_cpus",
  "secrecy",
@@ -13641,7 +13651,7 @@ dependencies = [
  "iced_anim",
  "iced_test",
  "image",
- "json5",
+ "json5 1.3.1",
  "notify-rust",
  "parallax-pipeline",
  "rand 0.9.5",
@@ -13669,7 +13679,7 @@ version = "0.10.1"
 dependencies = [
  "ciborium",
  "glob",
- "json5",
+ "json5 1.3.1",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -13693,7 +13703,7 @@ dependencies = [
  "ciborium",
  "clap",
  "flume",
- "json5",
+ "json5 1.3.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13714,7 +13724,7 @@ dependencies = [
  "anyhow",
  "ciborium",
  "clap",
- "json5",
+ "json5 1.3.1",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -13739,7 +13749,7 @@ dependencies = [
  "ciborium",
  "clap",
  "glob",
- "json5",
+ "json5 1.3.1",
  "parking_lot",
  "prometheus-client",
  "prost 0.14.4",
@@ -13764,7 +13774,7 @@ version = "0.10.1"
 dependencies = [
  "anyhow",
  "clap",
- "json5",
+ "json5 1.3.1",
  "re_log_encoding",
  "re_log_types",
  "rerun",
@@ -13791,7 +13801,7 @@ dependencies = [
  "dirs 6.0.0",
  "hostname",
  "if-addrs",
- "json5",
+ "json5 1.3.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13820,7 +13830,7 @@ dependencies = [
  "ciborium",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rustls-pemfile",
@@ -13850,7 +13860,7 @@ dependencies = [
  "clap",
  "glob",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "libc",
  "once_cell",
  "rcgen",
@@ -13886,7 +13896,7 @@ dependencies = [
  "chrono",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -13907,7 +13917,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "netflow_parser",
  "serde",
  "serde_json",
@@ -13930,7 +13940,7 @@ dependencies = [
  "aya-log",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "libc",
  "nlink",
  "serde",
@@ -13972,7 +13982,7 @@ dependencies = [
  "clap",
  "flowscope",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "netring",
  "nlink",
  "pcap-file",
@@ -13997,7 +14007,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "parallax-pipeline",
  "serde",
  "serde_json",
@@ -14020,7 +14030,7 @@ dependencies = [
  "bytes",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "mib-rs",
  "rand 0.9.5",
  "serde",
@@ -14045,7 +14055,7 @@ dependencies = [
  "chrono",
  "clap",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "libc",
  "procfs",
  "rustix 1.1.4",
@@ -14086,7 +14096,7 @@ dependencies = [
  "futures-util",
  "glob",
  "hostname",
- "json5",
+ "json5 1.3.1",
  "rustix 0.38.44",
  "serde",
  "serde_json",
