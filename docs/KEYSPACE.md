@@ -197,8 +197,10 @@ bus). It observes the base-less wire by default; set
 sensors at it with `ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17471
 ZENSIGHT_ZENOH_SCOUTING=false` (the `zenoh.scouting` config knob / env
 override disables multicast discovery so a session can never join a mesh
-beyond its explicit endpoints; gossip stays on — it only propagates within
-the connected graph).
+beyond its explicit endpoints; gossip has its own `zenoh.gossip` /
+`ZENSIGHT_ZENOH_GOSSIP` switch — it only propagates within the connected
+graph. Unset, both default mode-aware: off for a client with explicit
+`connect` endpoints, on otherwise — #626).
 
 Session config, storage recipes (latest/catalog/timeseries/pdns), ACL, and
 constrained-link profiles: RFC [09](https://github.com/p13marc/zenkey/blob/main/rfcs/09-operations.md).

@@ -19,15 +19,27 @@ pub struct ZenohConfig {
     #[serde(default)]
     pub listen: Vec<String>,
 
-    /// Zenoh multicast scouting. Default true. Set false — or export
-    /// `ZENSIGHT_ZENOH_SCOUTING=false` — for ISOLATED runs pinned to
+    /// Zenoh multicast scouting. Unset means mode-aware (issue #626): **off**
+    /// for a client with explicit `connect` endpoints — a client dials its
+    /// router and never needs to discover peers, and every scouted-but-mTLS
+    /// peer is a permanent WARN in the journal — and **on** otherwise
+    /// (Zenoh's own default). Set false — or export
+    /// `ZENSIGHT_ZENOH_SCOUTING=false` — for ISOLATED peer runs pinned to
     /// explicit endpoints: with multicast scouting on, a default-config
     /// session joins any reachable mesh (the "sensors contaminate the live
-    /// hub" hazard). Gossip stays on either way — it only propagates within
-    /// the explicitly-connected graph (and is what lets spokes of a hub
-    /// find each other, the `just run` topology).
-    #[serde(default = "default_scouting")]
-    pub scouting: bool,
+    /// hub" hazard). An explicit value always wins over the mode default.
+    #[serde(default)]
+    pub scouting: Option<bool>,
+
+    /// Zenoh gossip scouting. Unset means mode-aware (issue #626): **off**
+    /// for a client with explicit `connect` endpoints — the router would
+    /// relay peer locators the client then tries (and, on an mTLS-only mesh,
+    /// forever fails) to dial — and **on** otherwise: gossip only propagates
+    /// within the already-connected graph and is what lets spokes of a hub
+    /// find each other (RFC 09 §0.1, the `just run` topology). Set
+    /// explicitly — or export `ZENSIGHT_ZENOH_GOSSIP=false` — to override.
+    #[serde(default)]
+    pub gossip: Option<bool>,
 
     /// The deployment base (RFC 03 §1.1), set as the Zenoh session
     /// **`namespace`** (RFC 09 §0, issue #466).
@@ -82,10 +94,6 @@ pub struct ZenohTlsConfig {
     pub enable_mtls: bool,
 }
 
-fn default_scouting() -> bool {
-    true
-}
-
 fn default_mode() -> String {
     "peer".to_string()
 }
@@ -96,7 +104,8 @@ impl Default for ZenohConfig {
             mode: default_mode(),
             connect: Vec::new(),
             listen: Vec::new(),
-            scouting: true,
+            scouting: None,
+            gossip: None,
             // Deliberately empty: the base is per-deployment configuration
             // with no software default — empty means no session namespace
             // (keys at the bus root), which is Zenoh's own default.
@@ -107,8 +116,24 @@ impl Default for ZenohConfig {
 }
 
 impl ZenohConfig {
-    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING,NAMESPACE}` and
-    /// `ZENSIGHT_ZENOH_TLS_{CA,CERT,KEY,MTLS}` environment overrides.
+    /// The effective `(multicast, gossip)` scouting switches (issue #626).
+    ///
+    /// Explicit config/env values win; unset fields resolve mode-aware — both
+    /// **off** for a client with explicit `connect` endpoints (it dials its
+    /// router; anything scouted is an unreachable-peer WARN every few
+    /// seconds on an mTLS-only mesh), both **on** otherwise (Zenoh's own
+    /// default; a connect-less client still needs multicast to *find* a
+    /// router, and peers rely on gossip for spoke-to-spoke discovery).
+    pub fn effective_scouting(&self) -> (bool, bool) {
+        let default_on = !(self.mode == "client" && !self.connect.is_empty());
+        (
+            self.scouting.unwrap_or(default_on),
+            self.gossip.unwrap_or(default_on),
+        )
+    }
+
+    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING,GOSSIP,NAMESPACE}`
+    /// and `ZENSIGHT_ZENOH_TLS_{CA,CERT,KEY,MTLS}` environment overrides.
     ///
     /// `CONNECT`/`LISTEN` are comma-separated endpoint lists. Unset variables
     /// leave the field untouched. This lets a launcher (e.g. `just run`) pin
@@ -140,7 +165,10 @@ impl ZenohConfig {
             self.listen = parse(l);
         }
         if let Some(s) = get("ZENSIGHT_ZENOH_SCOUTING") {
-            self.scouting = !matches!(s.trim(), "false" | "0" | "off" | "no");
+            self.scouting = Some(!matches!(s.trim(), "false" | "0" | "off" | "no"));
+        }
+        if let Some(g) = get("ZENSIGHT_ZENOH_GOSSIP") {
+            self.gossip = Some(!matches!(g.trim(), "false" | "0" | "off" | "no"));
         }
         if let Some(ns) = get("ZENSIGHT_ZENOH_NAMESPACE") {
             self.namespace = ns.trim().to_string();
@@ -189,11 +217,79 @@ mod zenoh_env_tests {
             mode: "peer".into(),
             connect: vec!["tcp/a:1".into()],
             listen: vec![],
-            scouting: true,
+            scouting: Some(true),
+            gossip: Some(false),
             namespace: "zensight".into(),
             tls: None,
         };
         assert_eq!(over(base.clone(), &[]), base);
+    }
+
+    /// The scouting variables use the negative form (the fields default on
+    /// outside client mode) and always produce an *explicit* value — an env
+    /// override must beat the mode-aware default, both ways.
+    #[test]
+    fn scouting_and_gossip_vars_set_explicit_values() {
+        for off in ["false", "0", "off", "no"] {
+            let out = over(
+                ZenohConfig::default(),
+                &[
+                    ("ZENSIGHT_ZENOH_SCOUTING", off),
+                    ("ZENSIGHT_ZENOH_GOSSIP", off),
+                ],
+            );
+            assert_eq!(out.scouting, Some(false), "for {off:?}");
+            assert_eq!(out.gossip, Some(false), "for {off:?}");
+        }
+        let out = over(
+            ZenohConfig::default(),
+            &[
+                ("ZENSIGHT_ZENOH_SCOUTING", "true"),
+                ("ZENSIGHT_ZENOH_GOSSIP", "true"),
+            ],
+        );
+        assert_eq!(out.scouting, Some(true));
+        assert_eq!(out.gossip, Some(true));
+        // Unset leaves the mode-aware default in place.
+        let out = over(ZenohConfig::default(), &[]);
+        assert_eq!(out.scouting, None);
+        assert_eq!(out.gossip, None);
+    }
+
+    /// The mode-aware resolution itself (#626): a client with explicit
+    /// connect endpoints scouts nothing by default; everyone else keeps
+    /// Zenoh's on-defaults; explicit values always win.
+    #[test]
+    fn effective_scouting_is_mode_aware() {
+        let client = ZenohConfig {
+            mode: "client".into(),
+            connect: vec!["tls/10.0.0.1:7447".into()],
+            ..Default::default()
+        };
+        assert_eq!(client.effective_scouting(), (false, false));
+        // A connect-less client needs multicast to find a router at all.
+        let lost_client = ZenohConfig {
+            mode: "client".into(),
+            ..Default::default()
+        };
+        assert_eq!(lost_client.effective_scouting(), (true, true));
+        let peer = ZenohConfig {
+            connect: vec!["tcp/hub:7447".into()],
+            ..Default::default()
+        };
+        assert_eq!(peer.effective_scouting(), (true, true));
+        // Explicit config wins over the mode default, both directions.
+        let opted_in = ZenohConfig {
+            gossip: Some(true),
+            ..client.clone()
+        };
+        assert_eq!(opted_in.effective_scouting(), (false, true));
+        let opted_out = ZenohConfig {
+            scouting: Some(false),
+            gossip: Some(false),
+            ..peer.clone()
+        };
+        assert_eq!(opted_out.effective_scouting(), (false, false));
     }
 
     /// #466: the deployment base is config, and a launcher must be able to

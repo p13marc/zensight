@@ -46,7 +46,7 @@ impl DemoContext {
             mode: "peer".to_string(),
             connect: vec![endpoint.to_string()],
             listen: vec![],
-            scouting: false,
+            scouting: Some(false),
             ..Default::default()
         }
         // The base has no default: `ZENSIGHT_ZENOH_NAMESPACE` must name the

@@ -120,7 +120,9 @@ Netring detector features are documented in `zensight-sensor-netring/docs/detect
 ## Configuration
 
 JSON5 in [`configs/`](configs/), one per crate. Shared Zenoh block, overridable via
-`ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING,NAMESPACE}`:
+`ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING,GOSSIP,NAMESPACE}` (scouting and
+gossip default mode-aware: both off for a client with explicit `connect`
+endpoints, on otherwise — #626):
 
 ```json5
 { zenoh: { mode: "peer", connect: ["tcp/localhost:7447"], listen: [] },

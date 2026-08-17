@@ -284,7 +284,10 @@ impl ZenSight {
             mode: persistent.zenoh_mode.clone(),
             connect: persistent.zenoh_connect.clone(),
             listen: persistent.zenoh_listen.clone(),
-            scouting: true,
+            // Unset = mode-aware (#626): scouting off for a client with
+            // explicit connect endpoints, on otherwise.
+            scouting: None,
+            gossip: None,
             // The deployment base (#466) is not a GUI setting: it names the
             // deployment and comes ONLY from `ZENSIGHT_ZENOH_NAMESPACE` — not
             // from a text box. Empty (the default) means no session namespace:
@@ -7575,7 +7578,9 @@ impl ZenSight {
                 mode: self.settings.zenoh_mode.as_str().to_string(),
                 connect: self.settings.connect_endpoints(),
                 listen: self.settings.listen_endpoints(),
-                scouting: true,
+                // Unset = mode-aware (#626), as in boot().
+                scouting: None,
+                gossip: None,
                 // The base comes from `ZENSIGHT_ZENOH_NAMESPACE` inside
                 // `session::connect`; empty = base-less deployment (see boot()).
                 namespace: String::new(),

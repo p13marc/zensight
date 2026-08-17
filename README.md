@@ -104,7 +104,10 @@ docker, …). Since the endpoints are pinned, `just run` also sets `ZENSIGHT_ZEN
 to turn multicast off; that silences the loopback `CONNECTION_TO_SELF` / "transport to itself"
 warnings Zenoh otherwise logs (gossip stays on, so the correlator still finds the sensors). To
 target specific endpoints, set `ZENSIGHT_ZENOH_CONNECT`, `ZENSIGHT_ZENOH_LISTEN`, or
-`ZENSIGHT_ZENOH_MODE` (comma-separated), which override the config.
+`ZENSIGHT_ZENOH_MODE` (comma-separated), which override the config. A **client-mode** process
+with explicit `connect` endpoints turns both multicast and gossip scouting off by default —
+it dials its router and never needs discovery (#626); `zenoh.scouting`/`zenoh.gossip` (or
+`ZENSIGHT_ZENOH_SCOUTING`/`ZENSIGHT_ZENOH_GOSSIP`) override explicitly.
 
 > **Seeing no data in the GUI?** It's almost always discovery — the GUI and sensors didn't
 > form a Zenoh session. `just run` fixes this; if you launch pieces by hand, give them matching
