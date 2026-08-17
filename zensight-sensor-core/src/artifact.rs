@@ -29,8 +29,8 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 use ulid::Ulid;
 use zblob::{
-    BlobServer, BlobSpec, CancelToken, CdcParams, ContentStore, Hash, MemoryStore, TreeIndex,
-    TreeServer, build_tree,
+    BlobServer, BlobSpec, CancelToken, CdcParams, ContentStore, Hash, MemoryBlobSource,
+    MemoryStore, TreeIndex, TreeServer, build_tree,
 };
 use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
@@ -69,6 +69,17 @@ pub enum Produced {
     Dir {
         /// Absolute path of the directory to snapshot.
         path: PathBuf,
+    },
+    /// An in-memory payload → [`Delivery::Blob`], served straight from memory
+    /// (`BlobServer::register_source` over a `MemoryBlobSource`) — nothing
+    /// lands on disk, so cleanup is unregister-only. For artifacts that are
+    /// already fully built in memory (the debug report, the log bundle);
+    /// anything genuinely file-backed stays [`Produced::File`].
+    Bytes {
+        /// The artifact payload.
+        data: Vec<u8>,
+        /// Suggested download filename.
+        filename: String,
     },
 }
 
@@ -138,6 +149,9 @@ struct Active {
 enum Cleanup {
     /// Unregister the blob (by artifact id) and remove the temp file.
     TempFile { id: Ulid, path: PathBuf },
+    /// Unregister the blob (by artifact id); nothing on disk to remove
+    /// (an in-memory [`Produced::Bytes`] artifact).
+    Blob { id: Ulid },
     /// Unregister the tree index and clear the chunk store.
     Tree(String),
 }
@@ -602,6 +616,43 @@ impl ArtifactChannel {
                     },
                 ))
             }
+            Produced::Bytes { data, filename } => {
+                let blob = self
+                    .blob
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no blob server for a Bytes artifact"))?;
+                // Same manifest-is-the-result contract as the File arm; the
+                // bao outboard is computed over the in-memory source, which is
+                // right-sized here — Bytes artifacts are bounded by their
+                // producer's max_bytes long before this point.
+                let manifest = blob
+                    .register_source(
+                        BlobSpec::new(id.to_string())
+                            .filename(filename)
+                            .chunk_size(chunk_size)
+                            .created_ms(created_ms),
+                        Arc::new(MemoryBlobSource::new(data)),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("register blob: {e}"))?;
+                let state = ArtifactState::Ready {
+                    id,
+                    kind: slug.to_string(),
+                    delivery: Delivery::Blob {
+                        manifest,
+                        blob_prefix: artifact_blob_prefix(&self.producer),
+                    },
+                    expires_ms,
+                };
+                Ok((
+                    state,
+                    Active {
+                        id,
+                        cleanup: Cleanup::Blob { id },
+                        expires,
+                    },
+                ))
+            }
             Produced::Dir { path } => {
                 let store = self
                     .store
@@ -771,6 +822,11 @@ impl ArtifactChannel {
                     blob.unregister(&id.to_string()).await;
                 }
                 let _ = tokio::fs::remove_file(&path).await;
+            }
+            Cleanup::Blob { id } => {
+                if let Some(blob) = &self.blob {
+                    blob.unregister(&id.to_string()).await;
+                }
             }
             Cleanup::Tree(tree_id) => {
                 if let Some(store) = &self.store {
