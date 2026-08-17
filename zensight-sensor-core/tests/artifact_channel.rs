@@ -764,3 +764,74 @@ async fn tree_probe_and_index_fetch_verify_a_snapshot() {
     );
     assert!(tclient.fetch_index_by_root(&bogus).await.is_err());
 }
+
+/// Replication (#623): with `artifacts.snapshot.replicate` on, registering a
+/// snapshot also PUTs its chunks + index onto the serve prefixes — the
+/// publications a router-side storage would retain. Publications are the
+/// observable (a subscriber sees them); the settle read-back is deliberately
+/// NOT asserted as proof of storage here, because this channel's own
+/// TreeServer answers the probes (see docs/artifacts.md).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicate_publishes_snapshot_chunks_and_index() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "arttest-replicate";
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("a.txt"), b"replicated alpha").unwrap();
+
+    let store_sub = session
+        .declare_subscriber(format!("{}/**", zensight_common::artifact_store_prefix()))
+        .await
+        .unwrap();
+    let tree_sub = session
+        .declare_subscriber(format!("{}/**", zensight_common::artifact_tree_prefix()))
+        .await
+        .unwrap();
+
+    let snap_limits = ArtifactSnapshotLimits {
+        enabled: true,
+        cooldown_secs: 0,
+        replicate: true,
+        dirs: vec![SnapshotDir {
+            name: "snap".into(),
+            path: src.path().to_string_lossy().to_string(),
+            incremental: false,
+        }],
+        ..Default::default()
+    };
+    let channel = ArtifactChannel::new(
+        session.clone(),
+        prefix,
+        "host1",
+        vec![Arc::new(SnapshotProducer::new(&snap_limits))],
+    )
+    .expect("snapshot producer enabled");
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let id = Ulid::from_parts(80, 80);
+    request_snapshot(&session, prefix, id).await;
+    let root = wait_tree_root(&session, &artifact_status_key(prefix), id).await;
+
+    // At least one chunk PUT and the index PUT (keyed by the content root)
+    // must arrive; the spawned publisher runs off the produce path, so give
+    // it a moment.
+    let chunk_put = tokio::time::timeout(Duration::from_secs(10), store_sub.recv_async())
+        .await
+        .expect("no chunk publication — replicate did not publish")
+        .unwrap();
+    assert!(
+        chunk_put.key_expr().as_str().contains("/blake3/"),
+        "chunk publications ride the content-addressed store keys: {}",
+        chunk_put.key_expr()
+    );
+    let index_put = tokio::time::timeout(Duration::from_secs(10), tree_sub.recv_async())
+        .await
+        .expect("no index publication — replicate did not publish the tree")
+        .unwrap();
+    assert!(
+        index_put.key_expr().as_str().ends_with(&root.to_string()),
+        "the index is published under its content root (RFC 07 §2.3): {}",
+        index_put.key_expr()
+    );
+}

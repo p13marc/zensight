@@ -18,10 +18,15 @@
 //! multicast-off. The *storages* — the thing under test — are used exactly as
 //! shipped.
 //!
-//! These tests are sessions on the **wire**, so they speak full keys
-//! (`zensight/v1/…`) and set no namespace, like `zenctl` and a router do. That is
-//! deliberate: a test that cannot see outside the namespace cannot prove what
-//! landed in the storage.
+//! These tests are sessions on the **wire**, so they speak full keys and set
+//! no namespace, like `zenctl` and a router do. That is deliberate: a test
+//! that cannot see outside the namespace cannot prove what landed in the
+//! storage. Full keys start at `v1/…` (#466: zenkey builders are
+//! base-relative; the optional deployment base is session config, and the
+//! shipped router configs assume the default base-less deployment) — this
+//! suite once hand-spelled the conventional `zensight/` base onto every key,
+//! which matched NO shipped storage key_expr: every storage test failed
+//! against the exact configs it exists to verify.
 
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -155,7 +160,7 @@ macro_rules! router_or_skip {
 #[ignore = "needs a real zenohd; run via `just router-verify`"]
 async fn a_state_doc_outlives_its_publisher() {
     let _router = router_or_skip!("router-evidence-storage.json5");
-    let key = "zensight/v1/h-aaaabbbbcccc/state/sysinfo/health";
+    let key = "v1/h-aaaabbbbcccc/state/sysinfo/health";
 
     {
         let sensor = client().await;
@@ -170,7 +175,7 @@ async fn a_state_doc_outlives_its_publisher() {
     tokio::time::sleep(SETTLE).await;
 
     let gui = client().await;
-    let replies = get_all(&gui, "zensight/v1/*/state/**").await;
+    let replies = get_all(&gui, "v1/*/state/**").await;
     assert!(
         replies
             .iter()
@@ -187,7 +192,7 @@ async fn a_state_doc_outlives_its_publisher() {
 #[ignore = "needs a real zenohd; run via `just router-verify`"]
 async fn a_delete_tombstone_retires_the_doc() {
     let _router = router_or_skip!("router-evidence-storage.json5");
-    let key = "zensight/v1/h-ddddeeeeffff/state/netlink/health";
+    let key = "v1/h-ddddeeeeffff/state/netlink/health";
 
     let sensor = client().await;
     sensor.put(key, b"alive".to_vec()).await.expect("put");
@@ -220,7 +225,7 @@ async fn a_delete_tombstone_retires_the_doc() {
 #[ignore = "needs a real zenohd; run via `just router-verify`"]
 async fn the_catalog_needs_its_own_storage_because_star_cannot_match_it() {
     let _router = router_or_skip!("router-evidence-storage.json5");
-    let entity = "zensight/v1/@catalog/state/entity/h-aaaabbbbcccc";
+    let entity = "v1/@catalog/state/entity/h-aaaabbbbcccc";
 
     {
         let catalog = client().await;
@@ -236,7 +241,7 @@ async fn the_catalog_needs_its_own_storage_because_star_cannot_match_it() {
     let gui = client().await;
 
     // Half one: the `zensight-catalog` storage stored it (publisher is gone).
-    let direct = get_all(&gui, "zensight/v1/@catalog/state/entity/*").await;
+    let direct = get_all(&gui, "v1/@catalog/state/entity/*").await;
     assert!(
         direct.iter().any(|(k, _)| k == entity),
         "the @catalog storage must serve entity docs after the correlator left; got {direct:?}"
@@ -244,7 +249,7 @@ async fn the_catalog_needs_its_own_storage_because_star_cannot_match_it() {
 
     // Half two: the fleet selector cannot see it. If this ever starts matching,
     // the two storages overlap and one of them is silently redundant.
-    let via_star = get_all(&gui, "zensight/v1/*/state/**").await;
+    let via_star = get_all(&gui, "v1/*/state/**").await;
     assert!(
         !via_star.iter().any(|(k, _)| k == entity),
         "`*` must not match the verbatim `@catalog` chunk (D4) — if it does, the \
@@ -262,36 +267,79 @@ async fn the_catalog_needs_its_own_storage_because_star_cannot_match_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a real zenohd; run via `just router-verify`"]
 async fn blob_chunks_outlive_the_sensor_that_stored_them() {
+    use std::sync::Arc;
+    use zblob::{
+        CdcParams, ContentStore, DownloadRequest, MemoryStore, Publisher, QueryPrefix, ServePrefix,
+        SettleCoverage, TreeClient, build_tree,
+    };
+
     let _router = router_or_skip!("router-blob-storage.json5");
-    // Keys spell the RFC 07 shapes: `blake3` (the only algo zblob writes
-    // — pre-0.11 `sha256/` chunks are inert, not part of this claim)
-    // and a hex content root, never a name (`tree/report-1` is illegal now).
-    let chunk = "zensight/v1/h-aaaabbbbcccc/@blob/store/blake3/deadbeefcafe";
-    let tree = &format!("zensight/v1/h-aaaabbbbcccc/@blob/tree/{}", "ab".repeat(32));
-    let bytes = b"chunk-bytes".to_vec();
+    // Since #623 this drives the REAL replication path — `zblob::Publisher`,
+    // the same API `artifacts.snapshot.replicate` uses — instead of
+    // hand-PUTting raw keys, so it also proves the wire framing (packed
+    // chunks, encoded index), not just the router config's key routing.
+    // Crucially the publishing session declares **no TreeServer**, so the
+    // settle read-back can only be answered by the router storage: settle
+    // success here is proof of retention (the vacuous-settle trap zblob
+    // documents cannot occur).
+    let store_prefix = "v1/h-aaaabbbbcccc/@blob/store";
+    let tree_prefix = "v1/h-aaaabbbbcccc/@blob/tree";
+    let payload = b"router-retained bytes".to_vec();
+
+    // A real (tiny) snapshot: one file, chunked into a memory store.
+    let src = tempfile::tempdir().expect("source dir");
+    std::fs::write(src.path().join("data.txt"), &payload).expect("write source");
+    let store: Arc<dyn ContentStore> = Arc::new(MemoryStore::new());
+    let index = {
+        let store = store.clone();
+        let path = src.path().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            build_tree(&path, "conformance", &CdcParams::default(), store.as_ref())
+        })
+        .await
+        .expect("join build_tree")
+        .expect("build tree")
+    }
+    // RFC 07 §2.3: served trees are keyed by their content root, never a name.
+    .keyed_by_root();
+    let root = index.root_hash;
 
     {
         let sensor = client().await;
-        sensor.put(chunk, bytes.clone()).await.expect("put chunk");
-        sensor
-            .put(tree, b"tree-index".to_vec())
-            .await
-            .expect("put tree");
-        tokio::time::sleep(SETTLE).await;
+        Publisher::new(
+            &sensor,
+            ServePrefix::new(store_prefix).expect("store prefix"),
+        )
+        .snapshots(ServePrefix::new(tree_prefix).expect("tree prefix"))
+        .coverage(SettleCoverage::All)
+        .publish(&index, &store)
+        .await
+        .expect("publish must settle against the router storage");
         sensor.close().await.expect("close");
     }
     tokio::time::sleep(SETTLE).await;
 
+    // A fresh consumer, fresh store: reconstruct the whole tree from the
+    // router alone. This is the header's claim end-to-end — the producer is
+    // gone, the bytes live on the router.
     let gui = client().await;
-    let got = get_all(&gui, chunk).await;
-    assert_eq!(
-        got.first().map(|(_, v)| v.as_slice()),
-        Some(bytes.as_slice()),
-        "a Tier-2 chunk must be re-fetchable from the router after its producer exits"
+    let dest = tempfile::tempdir().expect("dest dir");
+    let fresh: Arc<dyn ContentStore> = Arc::new(MemoryStore::new());
+    let tclient = TreeClient::new(
+        &gui,
+        QueryPrefix::new(store_prefix).expect("store query prefix"),
+        QueryPrefix::new(tree_prefix).expect("tree query prefix"),
     );
-    assert!(
-        !get_all(&gui, tree).await.is_empty(),
-        "the tree index must be re-fetchable too — a chunk store with no index is unreachable"
+    tclient
+        .download_tree(&DownloadRequest::by_root(root), dest.path(), &fresh)
+        .await
+        .expect(
+            "a Tier-2 snapshot must be reconstructible from the router after its producer exits",
+        );
+    assert_eq!(
+        std::fs::read(dest.path().join("data.txt")).expect("read reconstructed file"),
+        payload,
+        "reconstructed content must round-trip through the router storage"
     );
 }
 
@@ -312,7 +360,7 @@ async fn a_fleet_rpc_get_still_fans_in_through_the_storage_router() {
     let mut sensors = Vec::new();
     for origin in origins {
         let session = client().await;
-        let key = format!("zensight/v1/{origin}/@rpc/sysinfo/processes");
+        let key = format!("v1/{origin}/@rpc/sysinfo/processes");
         let queryable = session
             .declare_queryable(&key)
             .await
@@ -330,7 +378,7 @@ async fn a_fleet_rpc_get_still_fans_in_through_the_storage_router() {
     tokio::time::sleep(SETTLE).await;
 
     let gui = client().await;
-    let replies = get_all(&gui, "zensight/v1/*/@rpc/sysinfo/processes").await;
+    let replies = get_all(&gui, "v1/*/@rpc/sysinfo/processes").await;
     assert_eq!(
         replies.len(),
         2,

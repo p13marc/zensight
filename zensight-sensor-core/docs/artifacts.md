@@ -153,6 +153,26 @@ producer is defined by the netring sensor (it needs the live tap), but its reque
 params live in the shared `ArtifactKind::Capture` so both ends stay typed. An
 unknown kind degrades cleanly to `ArtifactKind::Unsupported` / a `Failed` state.
 
+## Router replication (#623)
+
+`artifacts.snapshot.replicate: true` makes the channel PUT each registered
+snapshot's chunks + index onto the same `@blob/{store,tree}` keys it serves,
+so a router-side Zenoh storage (`configs/router-blob-storage.json5`) retains
+them and the snapshot **outlives the sensor** — this is what makes the GUI's
+"router replica holds the snapshot" verdict reachable. Off by default: it
+costs one PUT per chunk (`DataLow` priority, spawned off the produce path)
+and is useless without such a storage. Replication is **best-effort** — a
+failure is logged and the artifact still goes `Ready`, since the sensor
+serves it itself either way.
+
+Honesty note on the publish settle: zblob's post-publish read-back probes
+are answered by this channel's own `TreeServer` on the same prefixes, so a
+"settled" result here does **not** prove a storage retained anything (zblob
+documents exactly this trap). The end-to-end proof is the router-storage
+conformance test — `just router-verify` — which publishes through the same
+`Publisher` API from a session with *no* TreeServer, closes it, and fetches
+back from the storage alone.
+
 ## Wire types
 
 `ArtifactRequest`, `ArtifactKind`, `ArtifactStatus` / `KindStatus`, `Delivery`,
