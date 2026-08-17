@@ -133,10 +133,11 @@ pub trait ArtifactProducer: Send + Sync + 'static {
 `Produced::Bytes { data, filename }` (→ `Delivery::Blob`; `Bytes` is served
 straight from memory, nothing lands on disk) or `Produced::Dir { path }`
 (→ `Delivery::Tree`); the variant must match the declared `delivery_kind`.
-`ProduceCtx` supplies a `workdir` (currently the shared system temp dir — it
-is **not** per-request and the channel cleans up only the final artifact, not
-intermediate files a producer leaves there), a `CancelToken` a long-running
-producer must poll, and a `progress` sender.
+`ProduceCtx` supplies a `workdir` (#624: a channel-owned private temp dir —
+0700, unpredictable path, deleted when the channel drops; it is **not**
+per-request, and during the channel's lifetime only the final artifact is
+cleaned up, not intermediate files a producer leaves there), a `CancelToken`
+a long-running producer must poll, and a `progress` sender.
 
 ## Built-in producers
 

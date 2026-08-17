@@ -103,6 +103,11 @@ pub struct ProgressUpdate {
 /// Context handed to [`ArtifactProducer::produce`].
 pub struct ProduceCtx {
     /// A private working directory for temp files (cleaned by the channel).
+    ///
+    /// Since #624 this really is private: a channel-owned `tempfile::TempDir`
+    /// (0700, unpredictable path), not the shared system temp dir it used to
+    /// be — a producer writing a predictably-named file into `/tmp` (netring's
+    /// pcap captures) was symlink-attackable and world-readable.
     pub workdir: PathBuf,
     /// Fires when the request is cancelled — a long-running producer must poll
     /// this and stop promptly.
@@ -210,6 +215,11 @@ pub struct ArtifactChannel {
     last_index: Arc<Mutex<HashMap<String, TreeIndex>>>,
     /// Keeps the volatile-mode tags directory alive (deleted on drop).
     _tags_dir: Option<Arc<tempfile::TempDir>>,
+    /// The private producer workdir ([`ProduceCtx::workdir`], #624). Owned by
+    /// the channel — not per-produce — because a `Produced::File` artifact
+    /// stays inside it until its `Cleanup::TempFile` release, which can be a
+    /// full TTL after the produce call returns.
+    workdir: Arc<tempfile::TempDir>,
     tree_server: Option<TreeServer>,
     state: Arc<Mutex<HashMap<&'static str, KindRuntime>>>,
 }
@@ -279,7 +289,7 @@ impl ArtifactChannel {
                     // Volatile mode runs the same tag/sweep machinery against
                     // a private temp dir that dies with the channel. A host
                     // whose temp dir is unwritable cannot produce artifacts
-                    // at all (the workdir is the same temp dir), so this
+                    // at all (the producers' workdir lives under it too), so this
                     // expect cannot newly fail anything that worked before.
                     let dir = Arc::new(
                         tempfile::tempdir().expect("a writable temp dir for snapshot tags"),
@@ -306,6 +316,17 @@ impl ArtifactChannel {
             map.insert(p.kind(), p);
         }
 
+        // The producers' private workdir (#624). Same justification as the
+        // volatile tags dir above: a host whose temp dir is unwritable cannot
+        // produce artifacts at all, so this expect cannot newly fail anything
+        // that worked before.
+        let workdir = Arc::new(
+            tempfile::Builder::new()
+                .prefix("zensight-artifacts-")
+                .tempdir()
+                .expect("a writable temp dir for artifact production"),
+        );
+
         Some(ArtifactChannel {
             session,
             producer,
@@ -317,6 +338,7 @@ impl ArtifactChannel {
             temps: Arc::new(gc::TempTags::new()),
             last_index: Arc::new(Mutex::new(HashMap::new())),
             _tags_dir: tags_dir,
+            workdir,
             tree_server,
             state: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -581,9 +603,8 @@ impl ArtifactChannel {
             })
         };
 
-        let workdir = std::env::temp_dir();
         let ctx = ProduceCtx {
-            workdir,
+            workdir: self.workdir.path().to_path_buf(),
             cancel: cancel.clone(),
             progress: progress_tx,
         };
@@ -1041,6 +1062,7 @@ impl ArtifactChannel {
             temps: self.temps.clone(),
             last_index: self.last_index.clone(),
             _tags_dir: self._tags_dir.clone(),
+            workdir: self.workdir.clone(),
             tree_server: self.tree_server.clone(),
             state: self.state.clone(),
         }

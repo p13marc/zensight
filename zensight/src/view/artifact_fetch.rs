@@ -803,8 +803,21 @@ pub fn download_stream(
             }
         });
         while let Some(p) = rx.recv().await {
-            if let Progress::Chunk { received, total, .. } = p {
-                yield Message::ArtifactProgress { got: received as u64, total: total as u64 };
+            match p {
+                Progress::Chunk { received, total, .. }
+                // A resume seeds the bar at the recovered count (#624) —
+                // without this a warm restart renders like a cold start until
+                // the first fresh chunk (and never moves if zero chunks
+                // remain).
+                | Progress::Resumed { received, total } => {
+                    yield Message::ArtifactProgress { got: received as u64, total: total as u64 };
+                }
+                // Tree downloads verify + materialize after the last chunk
+                // (zblob emits this before `reconstruct_tree`); blob
+                // downloads verify as they write and never emit it.
+                Progress::Verifying => yield Message::ArtifactVerifying,
+                // `Progress` is #[non_exhaustive].
+                _ => {}
             }
         }
         match dl.await {
@@ -881,16 +894,31 @@ pub fn download_blob_direct(
             };
             // `Staged.suggested` is deliberately discarded: this path's
             // Save-as name comes off the CaptureRecord that listed the blob.
+            //
+            // `Overwrite::Replace` (#624): this path stages under the
+            // *sensor's* artifact id, so a crash between download-complete
+            // and Save-as leaves a completed staged file that would trip
+            // `DestinationExists` on every re-download of that capture,
+            // permanently. Replacing a stale staged copy of the same
+            // content-addressed blob is always right.
             let staged = client
                 .download_staged(&req, &dir)
+                .overwrite(zblob::Overwrite::Replace)
                 .progress(&sink)
                 .cancel(&cancel)
                 .await?;
             Ok(staged.path)
         });
         while let Some(p) = rx.recv().await {
-            if let Progress::Chunk { received, total, .. } = p {
-                yield Message::ArtifactProgress { got: received as u64, total: total as u64 };
+            match p {
+                Progress::Chunk { received, total, .. }
+                // Seed the bar on resume (#624) — see `download_stream`.
+                | Progress::Resumed { received, total } => {
+                    yield Message::ArtifactProgress { got: received as u64, total: total as u64 };
+                }
+                // Blob downloads never emit `Verifying`; `Progress` is
+                // #[non_exhaustive].
+                _ => {}
             }
         }
         match dl.await {
