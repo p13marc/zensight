@@ -115,7 +115,7 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `evidence.enabled` | bool | Publish observed-device identity claims (#537, default true). |
 | `evidence.refresh_cycles` | u32 | Claim refresh cadence in poll cycles (default 10). |
 | `mib.load_builtin` | bool | Load bundled MIB definitions. |
-| `mib.files` | string[] | **Deprecated** (#532): legacy JSON pseudo-MIBs, honored one more release. Use `mib.dirs`. |
+| `mib.files` | string[] | **Removed** (#580, deprecated in #532): legacy JSON pseudo-MIBs. Setting it fails startup with a pointer to `mib.dirs`. |
 | `mib.dirs` | string[] | Directories of **standard SMI** `.mib`/`.txt` files (vendor MIBs drop in unmodified); parsed with a real SMI parser, malformed modules fail startup. |
 
 ### `devices[]`

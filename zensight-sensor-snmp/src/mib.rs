@@ -1,26 +1,25 @@
-//! MIB (Management Information Base) loading and OID resolution.
+//! OID→name resolution: built-in tables for the common MIBs plus the
+//! config/profile mapping layers.
 //!
-//! This module provides functionality to load pre-compiled OID-to-name mappings
-//! from JSON files. These mappings are derived from standard MIB definitions
-//! (IF-MIB, SNMPv2-MIB, HOST-RESOURCES-MIB, etc.) and allow the sensor to
-//! publish human-readable metric names instead of numeric OIDs.
+//! Built-in mappings cover SNMPv2-MIB, IF-MIB, HOST-RESOURCES-MIB and IP-MIB
+//! with profile-convention names (#559); `oid_names` config entries and
+//! device profiles (#531) layer on top, and real SMI files loaded via
+//! `mib.dirs` (#532) fill everything else. The legacy JSON pseudo-MIB format
+//! (`mib.files`) was deprecated in #532 and removed in #580.
 //!
 //! # Example
 //!
 //! ```ignore
 //! let mut resolver = MibResolver::new();
 //! resolver.load_builtin_mibs()?;
-//! resolver.load_file("custom-mibs.json")?;
 //!
 //! // Resolve OID to name
 //! let name = resolver.resolve("1.3.6.1.2.1.1.3.0");
 //! assert_eq!(name, "system/uptime");
 //! ```
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
 use std::collections::HashMap;
-use std::path::Path;
 
 /// A MIB resolver that converts numeric OIDs to human-readable names.
 #[derive(Debug, Clone, Default)]
@@ -34,32 +33,26 @@ pub struct MibResolver {
 }
 
 /// An entry in the OID mapping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OidEntry {
-    /// Human-readable name (e.g., "sysUpTime", "if/{index}/in_octets").
+    /// Human-readable name (e.g., "system/uptime", "if/{index}/in_octets").
     pub name: String,
     /// MIB module this OID belongs to (e.g., "SNMPv2-MIB", "IF-MIB").
-    #[serde(default)]
     pub module: Option<String>,
     /// Description of the OID.
-    #[serde(default)]
     pub description: Option<String>,
     /// SYNTAX type (e.g., "Counter32", "INTEGER", "DisplayString").
-    #[serde(default)]
     pub syntax: Option<String>,
     /// Whether this is a table entry (has index suffix).
-    #[serde(default)]
     pub is_table_entry: bool,
 }
 
-/// A MIB definition file format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MibDefinition {
+/// One built-in MIB module's OID table. Formerly also the JSON pseudo-MIB
+/// wire format — that loading path was removed in #580 (use `mib.dirs`).
+#[derive(Debug, Clone)]
+pub(crate) struct MibDefinition {
     /// Module name (e.g., "IF-MIB").
     pub module: String,
-    /// Module description.
-    #[serde(default)]
-    pub description: Option<String>,
     /// OID mappings: OID string -> entry.
     pub oids: HashMap<String, OidEntry>,
 }
@@ -84,30 +77,8 @@ impl MibResolver {
         Ok(())
     }
 
-    /// Load MIB definitions from a JSON file.
-    pub fn load_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read MIB file: {}", path.display()))?;
-
-        self.load_json(&content)
-            .with_context(|| format!("Failed to parse MIB file: {}", path.display()))?;
-
-        Ok(())
-    }
-
-    /// Load MIB definitions from a JSON string.
-    pub fn load_json(&mut self, json: &str) -> Result<()> {
-        let def: MibDefinition = serde_json::from_str(json)
-            .or_else(|_| json5::from_str(json))
-            .context("Failed to parse MIB JSON")?;
-
-        self.load_definition(def);
-        Ok(())
-    }
-
     /// Load a MIB definition into the resolver.
-    pub fn load_definition(&mut self, def: MibDefinition) {
+    pub(crate) fn load_definition(&mut self, def: MibDefinition) {
         self.loaded_modules.push(def.module.clone());
 
         for (oid, mut entry) in def.oids {
@@ -266,7 +237,6 @@ impl MibResolver {
     fn load_snmpv2_mib(&mut self) {
         let def = MibDefinition {
             module: "SNMPv2-MIB".to_string(),
-            description: Some("SNMPv2 Management Information Base".to_string()),
             oids: HashMap::from([
                 // system group (1.3.6.1.2.1.1)
                 (
@@ -368,7 +338,6 @@ impl MibResolver {
     fn load_if_mib(&mut self) {
         let def = MibDefinition {
             module: "IF-MIB".to_string(),
-            description: Some("Interface MIB".to_string()),
             oids: HashMap::from([
                 // interfaces group (1.3.6.1.2.1.2)
                 (
@@ -611,7 +580,6 @@ impl MibResolver {
     fn load_host_resources_mib(&mut self) {
         let def = MibDefinition {
             module: "HOST-RESOURCES-MIB".to_string(),
-            description: Some("Host Resources MIB".to_string()),
             oids: HashMap::from([
                 // hrSystem group
                 (
@@ -734,7 +702,6 @@ impl MibResolver {
     fn load_ip_mib(&mut self) {
         let def = MibDefinition {
             module: "IP-MIB".to_string(),
-            description: Some("IP MIB".to_string()),
             oids: HashMap::from([
                 // ip group scalars
                 (
@@ -871,7 +838,6 @@ mod tests {
         let mut resolver = MibResolver::new();
         resolver.load_definition(MibDefinition {
             module: "TEST-MIB".to_string(),
-            description: None,
             oids: HashMap::from([(
                 "1.3.6.1.2.1.2.2.1.1".to_string(),
                 OidEntry {
@@ -895,34 +861,6 @@ mod tests {
             "1.3.6.1.2.1.2.2.1.10.3"
         );
         assert_eq!(resolver.syntax("1.3.6.1.2.1.2.2.1.10.3"), None);
-    }
-
-    #[test]
-    fn test_load_json() {
-        let mut resolver = MibResolver::new();
-
-        let json = r#"{
-            "module": "TEST-MIB",
-            "description": "Test MIB",
-            "oids": {
-                "1.3.6.1.4.1.12345.1.0": {
-                    "name": "testScalar.0",
-                    "syntax": "INTEGER"
-                },
-                "1.3.6.1.4.1.12345.2.1.1": {
-                    "name": "testTableEntry",
-                    "is_table_entry": true
-                }
-            }
-        }"#;
-
-        resolver.load_json(json).unwrap();
-
-        assert_eq!(resolver.resolve("1.3.6.1.4.1.12345.1.0"), "testScalar.0");
-        assert_eq!(
-            resolver.resolve("1.3.6.1.4.1.12345.2.1.1.5"),
-            "testTableEntry.5"
-        );
     }
 
     #[test]

@@ -161,11 +161,10 @@ pub struct MibConfig {
     #[serde(default = "default_true")]
     pub load_builtin: bool,
 
-    /// Additional MIB files to load (legacy JSON pseudo-MIB format).
-    ///
-    /// Deprecated (#532): put standard SMI `.mib`/`.txt` files in `dirs`
-    /// instead. Still honored for one release; a startup warning points
-    /// here.
+    /// **Removed** (#580, deprecated in #532): the legacy JSON pseudo-MIB
+    /// format is gone. The field is still parsed so a config that sets it
+    /// fails startup with a pointer to `dirs` instead of being silently
+    /// ignored; it goes away entirely next release.
     #[serde(default)]
     pub files: Vec<String>,
 
