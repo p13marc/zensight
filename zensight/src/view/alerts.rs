@@ -1575,6 +1575,7 @@ fn render_external_alert_row<'a>(alert: &'a SensorAlert, acked: bool) -> Element
                         unit,
                         pattern,
                         severity_min: None,
+                        at_ms: Some(alert.timestamp),
                     })
                     .padding([space::XS, space::SM])
                     .style(iced::widget::button::text),

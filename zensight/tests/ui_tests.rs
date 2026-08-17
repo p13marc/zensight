@@ -3726,7 +3726,7 @@ fn test_logs_view_renders_lines() {
     let messages = vec![syslog_message_from_point(&point, &point.source)];
     let filter = SyslogFilterState::default();
 
-    let mut ui = simulator(logs_view(&messages, &filter, None));
+    let mut ui = simulator(logs_view(&messages, &filter, None, None));
     assert!(ui.find("Logs").is_ok());
     assert!(ui.find("INTRUDER ALERT from 10.0.0.9").is_ok());
     assert!(ui.find("host01").is_ok());
@@ -3757,7 +3757,7 @@ fn test_logs_unit_filter_and_source_badge() {
     let mut filter = SyslogFilterState::default();
     filter.panel_open = true;
 
-    let mut ui = simulator(logs_view(&messages, &filter, None));
+    let mut ui = simulator(logs_view(&messages, &filter, None, None));
     // Provenance badge + the unit chip render.
     assert!(ui.find("journald").is_ok());
     assert!(ui.find("nginx.service").is_ok());
@@ -3790,7 +3790,7 @@ fn test_logs_filtered_export_button_carries_filter() {
         max_lines: 0,
         busy: false,
     });
-    let mut ui = simulator(logs_view(&[], &filter, export));
+    let mut ui = simulator(logs_view(&[], &filter, export, None));
 
     assert!(
         ui.find("Export filtered logs").is_ok(),
@@ -3826,6 +3826,31 @@ fn test_logs_filtered_export_button_carries_filter() {
     }
 }
 
+/// #603: a failed sensor-history fetch is visible on the feed. Without it an
+/// unreachable logs sensor looks exactly like "there are no logs".
+#[test]
+fn test_logs_fetch_error_banner() {
+    use zensight::view::specialized::{SyslogFilterState, logs_view};
+
+    let filter = SyslogFilterState::default();
+    let mut ui = simulator(logs_view(&[], &filter, None, None));
+    assert!(
+        ui.find("Sensor history unavailable").is_err(),
+        "no banner when the fetch is fine"
+    );
+
+    let mut ui = simulator(logs_view(
+        &[],
+        &filter,
+        None,
+        Some("Not connected to Zenoh"),
+    ));
+    assert!(
+        ui.find("Sensor history unavailable (Not connected to Zenoh) — showing this viewer's cached logs only")
+            .is_ok()
+    );
+}
+
 /// #602: the export format is a visible choice next to the Export button,
 /// and the chosen format rides the request.
 #[test]
@@ -3841,7 +3866,7 @@ fn test_logs_export_format_choice() {
     });
 
     // Default is JSONL, and the toggle advertises what it will produce.
-    let mut ui = simulator(logs_view(&[], &filter, export));
+    let mut ui = simulator(logs_view(&[], &filter, export, None));
     assert!(ui.find("as JSONL").is_ok());
     ui.click("as JSONL").expect("format toggle");
     let msgs: Vec<Message> = ui.into_messages().collect();
@@ -3852,7 +3877,7 @@ fn test_logs_export_format_choice() {
 
     // Flipped to text, the request carries it.
     filter.export_format = LogBundleFormat::Text;
-    let mut ui = simulator(logs_view(&[], &filter, export));
+    let mut ui = simulator(logs_view(&[], &filter, export, None));
     assert!(ui.find("as text").is_ok());
     ui.click("Export filtered logs").expect("click export");
     let msgs: Vec<Message> = ui.into_messages().collect();
@@ -3899,7 +3924,7 @@ fn test_logs_time_range_picker_renders() {
 
     let mut filter = SyslogFilterState::default();
     filter.panel_open = true;
-    let mut ui = simulator(logs_view(&[], &filter, None));
+    let mut ui = simulator(logs_view(&[], &filter, None, None));
     assert!(
         ui.find("Time range:").is_ok(),
         "the time-range picker row should render in the filter panel"
@@ -3913,7 +3938,7 @@ fn test_logs_no_export_button_when_unavailable() {
 
     let mut filter = SyslogFilterState::default();
     filter.panel_open = true;
-    let mut ui = simulator(logs_view(&[], &filter, None));
+    let mut ui = simulator(logs_view(&[], &filter, None, None));
     assert!(
         ui.find("Export filtered logs").is_err(),
         "no export button without a logbundle advert"
@@ -4024,7 +4049,7 @@ fn test_logs_view_empty_state() {
     use zensight::view::specialized::logs_view;
 
     let filter = SyslogFilterState::default();
-    let mut ui = simulator(logs_view(&[], &filter, None));
+    let mut ui = simulator(logs_view(&[], &filter, None, None));
     assert!(ui.find("No log messages received yet...").is_ok());
 }
 

@@ -685,6 +685,11 @@ pub enum Message {
         unit: Option<String>,
         pattern: Option<String>,
         severity_min: Option<u8>,
+        /// When the alert fired (epoch ms), so the pivot can scope the log
+        /// history around it (#603). Without a window the pivot asks only the
+        /// sensors' hot rings, so an alert from an hour ago opened an empty
+        /// feed.
+        at_ms: Option<i64>,
     },
     /// Clear the "filtered from alert <rule>" breadcrumb on the Logs view (#558).
     ClearLogsAlertPivot,
