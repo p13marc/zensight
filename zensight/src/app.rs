@@ -70,6 +70,11 @@ struct LogQuery {
     since: Option<i64>,
     from: Option<i64>,
     to: Option<i64>,
+    /// Cursor for deeper history (#601): the sensor returns records strictly
+    /// **older** than this uid, newest-first, so paging passes the previous
+    /// page's oldest uid. Present on its own it also routes to the durable
+    /// store.
+    after_uid: Option<String>,
 }
 
 const LOG_FETCH_MAX: usize = 500;
@@ -1070,8 +1075,15 @@ impl ZenSight {
             Message::SetLogTimeRange(range) => {
                 self.syslog_filter.set_time_range(range, now_ms());
                 // Re-query so the feed's history depth reflects the new lower
-                // bound (the sensor filters `from=` server-side, #544/#553).
-                return ControlFlow::Break(self.query_log_events(None));
+                // bound — from the durable store, since a widened range is
+                // exactly a request for history the ring no longer holds
+                // (#603). Take the inflight gate so this cannot stack with a
+                // tick refresh (it previously did not, #601).
+                if !self.log_fetch_inflight {
+                    self.log_fetch_inflight = true;
+                    self.last_log_fetch_ms = Some(now_ms());
+                    return ControlFlow::Break(self.query_log_history());
+                }
             }
 
             Message::ToggleSyslogFacility(facility) => {
@@ -1831,6 +1843,67 @@ impl ZenSight {
             }
             Message::SetSnmpEventSearch(search) => {
                 self.dashboard.snmp_event_filter.search = search;
+            }
+            Message::ShowMoreLogs => {
+                self.syslog_filter.extra_rows += crate::view::specialized::syslog::LOG_PAGE_STEP;
+            }
+            Message::LoadOlderLogs => {
+                // The cursor is the oldest line the buffer holds: the sensor
+                // returns records strictly older than it, so pages abut
+                // without overlapping.
+                let Some(cursor) = self
+                    .recent_logs
+                    .iter()
+                    .map(|m| m.uid())
+                    .filter(|uid| !uid.is_empty())
+                    .min()
+                    .map(str::to_string)
+                else {
+                    // Nothing buffered (or nothing with a uid — pre-#556
+                    // lines): a plain history fetch is the right fallback.
+                    self.syslog_filter.loading_older = true;
+                    return ControlFlow::Break(self.query_log_history());
+                };
+                // Never stack page fetches: a second click while one is in
+                // flight would race two merges into the same buffer.
+                if !self.syslog_filter.loading_older {
+                    self.syslog_filter.loading_older = true;
+                    return ControlFlow::Break(self.query_older_logs(cursor));
+                }
+            }
+            Message::LogOlderPageLoaded(result) => {
+                self.syslog_filter.loading_older = false;
+                match result {
+                    Ok(records) => {
+                        // A short page means the store had nothing more under
+                        // this filter — the only signal available, since the
+                        // reply carries no next-cursor.
+                        self.syslog_filter.exhausted = records.len() < LOG_FETCH_MAX;
+                        // Deliberately NOT advancing `last_log_event_ms`: an
+                        // older page must never make the live tail skip
+                        // forward past lines it has not seen.
+                        let mut msgs = Vec::with_capacity(records.len());
+                        for rec in &records {
+                            let point = rec.to_point();
+                            if let Some(log) = crate::store::StoredLog::from_point(&point) {
+                                self.store.record_log(log);
+                            }
+                            msgs.push(crate::view::specialized::syslog_message_from_point(
+                                &point,
+                                &point.source,
+                            ));
+                        }
+                        // Reveal what was just fetched rather than making the
+                        // operator click "Show more" for rows they asked for.
+                        self.syslog_filter.extra_rows += msgs.len();
+                        self.merge_log_messages(msgs);
+                        self.log_fetch_error = None;
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "older log page fetch failed");
+                        self.log_fetch_error = Some(e);
+                    }
+                }
             }
             Message::ToggleLogExportFormat => {
                 let fmt = &mut self.syslog_filter.export_format;
@@ -7416,6 +7489,9 @@ impl ZenSight {
         if let Some(to) = q.to {
             selector.push_str(&format!(";to={to}"));
         }
+        if let Some(cursor) = &q.after_uid {
+            selector.push_str(&format!(";after_uid={cursor}"));
+        }
         selector
     }
 
@@ -7426,6 +7502,7 @@ impl ZenSight {
             since,
             from: self.syslog_filter.range_from,
             to: self.syslog_filter.frozen_at,
+            after_uid: None,
         })
     }
 
@@ -7449,14 +7526,37 @@ impl ZenSight {
             since: None,
             from: Some(from),
             to: self.syslog_filter.frozen_at,
+            after_uid: None,
         })
     }
 
+    /// Fetch the page strictly older than `cursor` (#601). Cursor-paginated
+    /// against the sensors' durable stores: the reply is newest-first and
+    /// excludes the cursor, so pages never overlap and memory stays bounded
+    /// by what the operator actually asked to see.
+    fn query_older_logs(&self, cursor: String) -> Task<Message> {
+        self.run_log_query_as(
+            LogQuery {
+                since: None,
+                from: self.syslog_filter.range_from,
+                to: self.syslog_filter.frozen_at,
+                after_uid: Some(cursor),
+            },
+            Message::LogOlderPageLoaded,
+        )
+    }
+
     fn run_log_query(&self, q: LogQuery) -> Task<Message> {
+        self.run_log_query_as(q, Message::LogEventsLoaded)
+    }
+
+    fn run_log_query_as(
+        &self,
+        q: LogQuery,
+        wrap: fn(Result<Vec<zensight_common::LogRecord>, String>) -> Message,
+    ) -> Task<Message> {
         let Some(session) = self.session.clone() else {
-            return Task::done(Message::LogEventsLoaded(Err(
-                "Not connected to Zenoh".to_string()
-            )));
+            return Task::done(wrap(Err("Not connected to Zenoh".to_string())));
         };
         // Fleet fan-in: every logs sensor answers, so target All (RFC 05 §2.1).
         let selector = self.log_events_selector(&q);
@@ -7479,9 +7579,9 @@ impl ZenSight {
                             records.append(&mut batch);
                         }
                     }
-                    Message::LogEventsLoaded(Ok(records))
+                    wrap(Ok(records))
                 }
-                Err(e) => Message::LogEventsLoaded(Err(e.to_string())),
+                Err(e) => wrap(Err(e.to_string())),
             }
         })
     }
@@ -8437,6 +8537,69 @@ mod log_fetch_tests {
 
         // Every fetch is capped.
         assert!(live.contains(&format!("max={LOG_FETCH_MAX}")));
+    }
+
+    /// #601: the cursor page is what reaches deep history — assert the
+    /// selector carries it, and that a short page ends the walk.
+    #[test]
+    fn older_page_cursor_and_exhaustion() {
+        let mut a = app();
+
+        let paged = a.log_events_selector(&LogQuery {
+            after_uid: Some("1700000000000000000000001".to_string()),
+            ..Default::default()
+        });
+        assert!(paged.contains("after_uid=1700000000000000000000001"));
+        // A cursor alone routes to the durable store — no `since` tail read.
+        assert!(!paged.contains("since="));
+
+        // A full page means there may be more; a short one means there is not.
+        let full: Vec<_> = (0..LOG_FETCH_MAX)
+            .map(|i| rec(&format!("{:025}", i), 1_000 + i as i64, "boom"))
+            .collect();
+        let _ = a.update(Message::LogOlderPageLoaded(Ok(full)));
+        assert!(!a.syslog_filter.exhausted, "a full page may have more");
+        assert!(!a.syslog_filter.loading_older);
+
+        let _ = a.update(Message::LogOlderPageLoaded(Ok(vec![rec(
+            "0000000000000000000000999",
+            900,
+            "old",
+        )])));
+        assert!(a.syslog_filter.exhausted, "a short page ends the walk");
+
+        // A changed filter re-opens the walk: a new filter can match older
+        // records the previous one exhausted.
+        a.syslog_filter.set_message_filter("other".to_string());
+        assert!(!a.syslog_filter.exhausted);
+        assert_eq!(a.syslog_filter.extra_rows, 0, "paging resets with filters");
+    }
+
+    /// #601: an older page must not advance the live-tail watermark, or the
+    /// tail would skip forward past lines it never saw.
+    #[test]
+    fn older_page_does_not_move_the_tail_watermark() {
+        let mut a = app();
+        let _ = a.update(Message::LogEventsLoaded(Ok(vec![rec(
+            "1700000000000000000000005",
+            5_000,
+            "recent",
+        )])));
+        let watermark = a.last_log_event_ms;
+        assert_eq!(watermark, Some(5_000));
+
+        let _ = a.update(Message::LogOlderPageLoaded(Ok(vec![rec(
+            "1600000000000000000000001",
+            1_000,
+            "older",
+        )])));
+        assert_eq!(
+            a.last_log_event_ms, watermark,
+            "an older page leaves the tail watermark alone"
+        );
+        // ...but the line is in the buffer, and revealed.
+        assert!(a.recent_logs.iter().any(|m| m.message() == "older"));
+        assert!(a.syslog_filter.extra_rows >= 1);
     }
 
     /// #558: pivoting from a log alert pre-filters the feed (unit + pattern +

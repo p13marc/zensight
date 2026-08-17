@@ -73,6 +73,15 @@ sources dedup on `uid`, so the overlap is free.
 The 5 s live-tail refresh deliberately sends **no** `from=`, so the steady-state
 poll stays a cheap ring read.
 
+Scrolling back further is **cursor-paginated** (#601): "Load older" sends
+`after_uid=` with the oldest buffered uid, and the sensor replies with records
+strictly older than it, newest-first — so pages abut without overlapping and
+memory stays bounded by what the operator actually asked to see. A short page
+(fewer than the reply cap) is the only "no more records" signal the reply
+carries, so it is what ends the walk. An older page deliberately does **not**
+advance the live-tail watermark: the tail must not skip forward past lines it
+has never seen.
+
 ## Event records
 
 Durable `events`-class records (SNMP traps today, #578) get their own redb

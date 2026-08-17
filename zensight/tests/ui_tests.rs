@@ -3826,6 +3826,96 @@ fn test_logs_filtered_export_button_carries_filter() {
     }
 }
 
+/// Build a buffered log line at `ts` for the pagination tests (#601).
+fn log_line(ts: i64, message: &str) -> zensight::view::specialized::SyslogMessage {
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+    let mut labels = HashMap::new();
+    // A uid is what the cursor pages on, so give every line one.
+    labels.insert(
+        "log.record.uid".to_string(),
+        format!("{ts:013}{:012}", ts % 1000),
+    );
+    let point = TelemetryPoint {
+        timestamp: ts,
+        source: "web01".to_string(),
+        protocol: Protocol::Logs,
+        metric: "daemon/info".to_string(),
+        value: TelemetryValue::Text(message.to_string()),
+        labels,
+        unit: None,
+    };
+    zensight::view::specialized::syslog_message_from_point(&point, &point.source)
+}
+
+/// #601: the feed states how much of the match is on screen and offers both
+/// the rest of the buffer and a deeper page — the old silent `truncate(100)`
+/// gave an operator no way to know rows were withheld, let alone reach them.
+#[test]
+fn test_logs_pagination_affordances() {
+    use zensight::view::specialized::{SyslogFilterState, logs_view};
+
+    // 150 lines: one page rendered, the remainder offered.
+    let messages: Vec<_> = (0..150)
+        .map(|i| log_line(i as i64 * 1000 + 1000, &format!("line {i}")))
+        .collect();
+    let mut filter = SyslogFilterState::default();
+
+    let mut ui = simulator(logs_view(&messages, &filter, None, None));
+    assert!(ui.find("Showing 100 of 150 matching lines").is_ok());
+    ui.click("Show 100 more").expect("reveal button");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::ShowMoreLogs)));
+
+    // Revealed: the count stops qualifying and the button goes away.
+    filter.extra_rows = 100;
+    {
+        let mut ui = simulator(logs_view(&messages, &filter, None, None));
+        assert!(ui.find("150 matching lines").is_ok());
+        assert!(ui.find("Show 100 more").is_err());
+
+        // Deeper history is a separate, round-trip-costing affordance.
+        ui.click("Load older").expect("load-older button");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(m, Message::LoadOlderLogs)));
+    }
+
+    // In flight, and once exhausted, it stops offering.
+    filter.loading_older = true;
+    {
+        let mut ui = simulator(logs_view(&messages, &filter, None, None));
+        assert!(ui.find("Loading older…").is_ok());
+        assert!(ui.find("Load older").is_err());
+    }
+
+    filter.loading_older = false;
+    filter.exhausted = true;
+    let mut ui = simulator(logs_view(&messages, &filter, None, None));
+    assert!(ui.find("No older records").is_ok());
+    assert!(ui.find("Load older").is_err());
+}
+
+/// #601: the time-range picker scopes what is on screen, not just the query.
+/// Older buffered lines used to keep rendering under "Last 15 min".
+#[test]
+fn test_logs_time_range_filters_the_buffer() {
+    use zensight::view::specialized::{SyslogFilterState, logs_view};
+
+    let messages = vec![log_line(1_000, "ancient"), log_line(900_000, "recent")];
+    let mut filter = SyslogFilterState::default();
+    {
+        let mut ui = simulator(logs_view(&messages, &filter, None, None));
+        assert!(ui.find("ancient").is_ok());
+    }
+
+    filter.range_from = Some(500_000);
+    let mut ui = simulator(logs_view(&messages, &filter, None, None));
+    assert!(ui.find("recent").is_ok());
+    assert!(
+        ui.find("ancient").is_err(),
+        "lines older than the picked range are off screen"
+    );
+}
+
 /// #603: a failed sensor-history fetch is visible on the feed. Without it an
 /// unreachable logs sensor looks exactly like "there are no logs".
 #[test]

@@ -203,7 +203,23 @@ pub struct SyslogFilterState {
     /// Bundle format the Export button requests (#602). JSONL keeps the
     /// records machine-readable; text is what you paste into a ticket.
     pub export_format: LogBundleFormat,
+    /// Extra rows revealed beyond the first page (#601), grown by "Show
+    /// more". Additive rather than absolute so the struct's derived `Default`
+    /// still means "one page" — reset when the filter changes, so a narrowed
+    /// feed starts at the top.
+    pub extra_rows: usize,
+    /// A deeper page is being fetched from the sensors' durable stores (#601).
+    pub loading_older: bool,
+    /// The last cursor page came back short, so there is nothing older to
+    /// fetch under the current filter (#601).
+    pub exhausted: bool,
 }
+
+/// Rows rendered before "Show more" (#601).
+pub const LOG_PAGE_ROWS: usize = 100;
+
+/// How many more rows each "Show more" reveals (#601).
+pub const LOG_PAGE_STEP: usize = 100;
 
 impl SyslogFilterState {
     /// Check if any filters are active.
@@ -223,7 +239,7 @@ impl SyslogFilterState {
     pub fn set_time_range(&mut self, range: TimeRange, now_ms: i64) {
         self.time_range = range;
         self.range_from = range.window_ms().map(|w| now_ms - w);
-        self.modified = true;
+        self.touch();
     }
 
     /// Toggle a systemd unit in the unit filter (#64).
@@ -233,7 +249,7 @@ impl SyslogFilterState {
         } else {
             self.selected_units.insert(unit);
         }
-        self.modified = true;
+        self.touch();
     }
 
     /// Toggle a journald boot in the boot filter (#93).
@@ -243,7 +259,7 @@ impl SyslogFilterState {
         } else {
             self.selected_boots.insert(boot);
         }
-        self.modified = true;
+        self.touch();
     }
 
     /// Toggle live-tail follow/pause (#93). Pausing freezes the stream at `now`;
@@ -275,7 +291,7 @@ impl SyslogFilterState {
     /// Set minimum severity.
     pub fn set_min_severity(&mut self, severity: Option<u8>) {
         self.min_severity = severity;
-        self.modified = true;
+        self.touch();
     }
 
     /// Toggle a facility.
@@ -285,19 +301,19 @@ impl SyslogFilterState {
         } else {
             self.selected_facilities.insert(facility);
         }
-        self.modified = true;
+        self.touch();
     }
 
     /// Set app filter.
     pub fn set_app_filter(&mut self, filter: String) {
         self.app_filter = filter;
-        self.modified = true;
+        self.touch();
     }
 
     /// Set message filter.
     pub fn set_message_filter(&mut self, filter: String) {
         self.message_filter = filter;
-        self.modified = true;
+        self.touch();
     }
 
     /// Clear all filters.
@@ -312,12 +328,22 @@ impl SyslogFilterState {
         self.alert_pivot = None;
         self.time_range = TimeRange::All;
         self.range_from = None;
-        self.modified = true;
+        self.touch();
     }
 
     /// Mark as applied (not modified).
     pub fn mark_applied(&mut self) {
         self.modified = false;
+    }
+
+    /// A filter changed: flag it, and reset paging (#601). A narrowed feed
+    /// must start at the first page — carrying a grown window or a stale
+    /// "nothing older" verdict across a filter change is how a feed lies
+    /// about what it holds.
+    fn touch(&mut self) {
+        self.modified = true;
+        self.extra_rows = 0;
+        self.exhausted = false;
     }
 }
 
@@ -1236,10 +1262,14 @@ fn render_log_stream<'a>(
         .into();
     }
 
-    // Sort by timestamp descending (newest first) and limit to 100.
+    // Newest first, then render a bounded window of it. The cap used to be a
+    // silent `truncate(100)`: an operator scrolling a busy feed had no way to
+    // know rows were being withheld, let alone reach them (#601).
     let mut sorted_messages = filtered_messages;
     sorted_messages.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
-    sorted_messages.truncate(100);
+    let matched = sorted_messages.len();
+    let shown = (LOG_PAGE_ROWS + filter_state.extra_rows).min(matched);
+    sorted_messages.truncate(shown);
 
     // Column header row, aligned to the per-row widths.
     let head = |label: &'static str, w: f32| -> Element<'static, Message> {
@@ -1310,7 +1340,52 @@ fn render_log_stream<'a>(
 
     let scroll = scrollable(list).width(Length::Fill).height(Length::Fill);
 
-    column![header_bar, header_row, scroll]
+    // Honest footer (#601): say how much of the match is on screen, offer the
+    // rest of the buffer, then offer to page deeper into the sensors' durable
+    // stores. Silence here is what made the old `truncate(100)` a trap.
+    let mut footer = row![
+        text(if shown < matched {
+            format!("Showing {shown} of {matched} matching lines")
+        } else {
+            format!("{matched} matching lines")
+        })
+        .size(11)
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
+        }),
+    ]
+    .spacing(space::SM)
+    .align_y(Alignment::Center);
+    if shown < matched {
+        footer = footer.push(
+            button(text(format!("Show {LOG_PAGE_STEP} more")).size(11))
+                .on_press(Message::ShowMoreLogs)
+                .padding([3, 9])
+                .style(iced::widget::button::secondary),
+        );
+    }
+    // Deeper history comes from the sensors, not the buffer — a separate
+    // affordance, because it costs a round trip.
+    if filter_state.loading_older {
+        footer = footer.push(text("Loading older…").size(11));
+    } else if filter_state.exhausted {
+        footer = footer.push(
+            text("No older records")
+                .size(11)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+        );
+    } else {
+        footer = footer.push(
+            button(text("Load older").size(11))
+                .on_press(Message::LoadOlderLogs)
+                .padding([3, 9])
+                .style(iced::widget::button::secondary),
+        );
+    }
+
+    column![header_bar, header_row, scroll, footer]
         .spacing(8)
         .height(Length::Fill)
         .into()
@@ -1581,6 +1656,15 @@ fn apply_local_filters(
             // Live-tail pause (#93): hide lines newer than the freeze instant.
             if let Some(ceiling) = filter_state.frozen_at
                 && msg.timestamp > ceiling
+            {
+                return false;
+            }
+
+            // Time-range floor (#601). The picker scoped the *query* since
+            // #554, but older lines already in the buffer kept rendering — so
+            // "Last 15 min" could show hours. Apply the same bound on screen.
+            if let Some(floor) = filter_state.range_from
+                && msg.timestamp < floor
             {
                 return false;
             }
