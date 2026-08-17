@@ -253,6 +253,9 @@ pub struct ZenSight {
     /// Firing external-alert counts keyed by source, for the dashboard host-card
     /// alert rollup (#306). Rebuilt at 1 Hz in `handle_tick`.
     firing_by_source: std::collections::HashMap<String, usize>,
+    /// Firing external-alert counts keyed by protocol, for the protocol
+    /// overviews' headline tile (#582). Rebuilt alongside `firing_by_source`.
+    firing_by_protocol: std::collections::HashMap<zensight_common::Protocol, usize>,
 }
 
 /// Decode an `@rpc` reply-error payload into its `(error, message)` pair
@@ -469,6 +472,7 @@ impl ZenSight {
             favorites: persistent.favorite_metrics.iter().cloned().collect(),
             dashboard_sparks: crate::view::trend::DeviceSparks::new(),
             firing_by_source: std::collections::HashMap::new(),
+            firing_by_protocol: std::collections::HashMap::new(),
         };
 
         (app, Task::none())
@@ -2741,6 +2745,14 @@ impl ZenSight {
             }
             Message::SetAlertSourceFilter(source) => {
                 self.alerts.external_source_filter = source;
+            }
+            Message::SetAlertProtocolFilter(protocol) => {
+                self.alerts.external_protocol_filter = protocol;
+            }
+            Message::OpenAlertsForProtocol(protocol) => {
+                // Overview tile click-through (#582): protocol-scoped Alerts.
+                self.alerts.external_protocol_filter = Some(protocol);
+                self.set_view(CurrentView::Alerts);
             }
             Message::SaveAlertFilterPreset => {
                 if self.alerts.save_current_filter_preset() {
@@ -6926,6 +6938,7 @@ impl ZenSight {
                         sparks,
                         &self.entities,
                         &self.firing_by_source,
+                        &self.firing_by_protocol,
                         self.settings.group_by_host,
                     )
                 }
@@ -6940,6 +6953,7 @@ impl ZenSight {
                 sparks,
                 &self.entities,
                 &self.firing_by_source,
+                &self.firing_by_protocol,
                 self.settings.group_by_host,
             ),
         };
@@ -7742,13 +7756,16 @@ impl ZenSight {
         // Expire alert silences whose window has passed (#26).
         self.alerts.prune_silences(now);
 
-        // Rebuild the per-source firing-alert rollup for host cards (#306).
+        // Rebuild the per-source firing-alert rollup for host cards (#306)
+        // and the per-protocol rollup for the overview tiles (#582).
         self.firing_by_source.clear();
+        self.firing_by_protocol.clear();
         for alert in self.alerts.active_external() {
             *self
                 .firing_by_source
                 .entry(alert.source.clone())
                 .or_insert(0) += 1;
+            *self.firing_by_protocol.entry(alert.protocol).or_insert(0) += 1;
         }
 
         // Apply debounced search filter

@@ -56,6 +56,7 @@ fn test_dashboard_empty() {
     let sensor_health = HashMap::new();
     let entities = zensight::entity::EntityStore::default();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -66,6 +67,7 @@ fn test_dashboard_empty() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 
@@ -92,6 +94,7 @@ fn test_dashboard_with_devices() {
     let sensor_health = HashMap::new();
     let entities = zensight::entity::EntityStore::default();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -102,6 +105,7 @@ fn test_dashboard_with_devices() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 
@@ -132,6 +136,7 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
     let sensor_health = HashMap::new();
     let entities = zensight::entity::EntityStore::default();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -142,6 +147,7 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 
@@ -195,6 +201,7 @@ fn test_dashboard_card_shows_trend_badge() {
     let sensor_health = HashMap::new();
     let entities = zensight::entity::EntityStore::default();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -205,6 +212,7 @@ fn test_dashboard_card_shows_trend_badge() {
         sparks,
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 
@@ -576,6 +584,7 @@ fn test_host_card_disambiguates_same_protocol_facets() {
 
     // Duplicated protocol → both chips carry their source suffix.
     let (state, entities) = dashboard(&["host-a", "toolbx"]);
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -586,6 +595,7 @@ fn test_host_card_disambiguates_same_protocol_facets() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
     assert!(ui.find("· toolbx").is_ok());
@@ -593,6 +603,7 @@ fn test_host_card_disambiguates_same_protocol_facets() {
 
     // Single facet for the protocol → no suffix.
     let (state, entities) = dashboard(&["toolbx"]);
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -603,6 +614,7 @@ fn test_host_card_disambiguates_same_protocol_facets() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
     assert!(ui.find("· toolbx").is_err());
@@ -1212,6 +1224,59 @@ fn test_gnmi_specialized_view() {
 // Overview Section Tests
 // ============================================================================
 
+/// Firing-alert headline tile on the protocol overviews (#582): count from
+/// the per-protocol rollup, click-through emits the protocol-scoped Alerts
+/// pivot; zero renders the quiet state.
+#[test]
+fn test_overview_firing_alert_tile() {
+    use zensight::view::overview::overview_section;
+
+    let mut state = DashboardState::default();
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
+    state
+        .devices
+        .insert(device_id.clone(), DeviceState::new(device_id));
+
+    let mut overview = OverviewState::default();
+    overview.expanded = true;
+    overview.select_protocol(Protocol::Sysinfo);
+
+    let mut firing_proto: HashMap<Protocol, usize> = HashMap::new();
+    firing_proto.insert(Protocol::Sysinfo, 2);
+
+    let discovery = HashMap::new();
+    let mut ui = simulator(overview_section(
+        &overview,
+        &state.devices,
+        &state.snmp_interfaces,
+        &state.snmp_events,
+        &discovery,
+        false,
+        &firing_proto,
+    ));
+    assert!(ui.find("2 firing alerts →").is_ok());
+    ui.click("2 firing alerts →").expect("tile clickable");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::OpenAlertsForProtocol(Protocol::Sysinfo)))
+    );
+
+    // No firing alerts → quiet state, no button.
+    let none: HashMap<Protocol, usize> = HashMap::new();
+    let mut ui = simulator(overview_section(
+        &overview,
+        &state.devices,
+        &state.snmp_interfaces,
+        &state.snmp_events,
+        &discovery,
+        false,
+        &none,
+    ));
+    assert!(ui.find("No firing alerts").is_ok());
+}
+
 /// Test that overview section shows when devices are present.
 #[test]
 fn test_overview_section_renders() {
@@ -1243,6 +1308,7 @@ fn test_overview_section_renders() {
     let sensor_health = HashMap::new();
     let entities = zensight::entity::EntityStore::default();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -1253,6 +1319,7 @@ fn test_overview_section_renders() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 
@@ -1292,6 +1359,7 @@ fn test_overview_protocol_tab_click() {
     let sensor_health = HashMap::new();
     let entities = zensight::entity::EntityStore::default();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -1302,6 +1370,7 @@ fn test_overview_protocol_tab_click() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 
@@ -1345,6 +1414,7 @@ fn test_overview_collapse_toggle() {
     let sensor_health = HashMap::new();
     let entities = zensight::entity::EntityStore::default();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -1355,6 +1425,7 @@ fn test_overview_collapse_toggle() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 
@@ -4408,6 +4479,7 @@ fn test_host_card_renders_entity_members() {
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -4418,6 +4490,7 @@ fn test_host_card_renders_entity_members() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 
@@ -4445,6 +4518,7 @@ fn test_dashboard_empty_entity_store_degraded_parity() {
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
     let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let firing_proto: HashMap<Protocol, usize> = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -4455,6 +4529,7 @@ fn test_dashboard_empty_entity_store_degraded_parity() {
         zensight::view::trend::DeviceSparks::new(),
         &entities,
         &firing,
+        &firing_proto,
         true,
     ));
 

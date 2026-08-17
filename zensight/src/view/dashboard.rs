@@ -486,6 +486,7 @@ pub fn dashboard_view<'a>(
     mut sparks: crate::view::trend::DeviceSparks,
     entities: &'a EntityStore,
     firing_by_source: &'a HashMap<String, usize>,
+    firing_by_protocol: &'a HashMap<zensight_common::Protocol, usize>,
     group_by_host: bool,
 ) -> Element<'a, Message> {
     // Compute filtered devices once and pass through to avoid redundant work
@@ -511,6 +512,7 @@ pub fn dashboard_view<'a>(
         &state.snmp_events,
         &state.snmp_discovery,
         state.snmp_discovery_open,
+        firing_by_protocol,
     );
     let devices = render_device_grid(
         state,
