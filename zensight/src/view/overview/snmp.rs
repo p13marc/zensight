@@ -83,8 +83,10 @@ pub fn snmp_overview<'a>(
     devices: &HashMap<&DeviceId, &DeviceState>,
     interfaces: &'a HashMap<String, InterfaceTable>,
     events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
+    discovery: &'a HashMap<String, zensight_common::DiscoveryReport>,
+    discovery_open: bool,
 ) -> Element<'a, Message> {
-    if devices.is_empty() && interfaces.is_empty() {
+    if devices.is_empty() && interfaces.is_empty() && discovery.is_empty() {
         return empty_state("No SNMP devices available", None);
     }
 
@@ -120,16 +122,88 @@ pub fn snmp_overview<'a>(
     let error_hotspots = render_error_hotspots(&fleet);
     let trap_feed = render_trap_feed(events);
 
-    column![
-        summary_row,
-        top_talkers,
-        down_hotlist,
-        error_hotspots,
-        trap_feed
-    ]
-    .spacing(space::MD)
-    .width(Length::Fill)
-    .into()
+    let mut content = column![summary_row].spacing(space::MD).width(Length::Fill);
+    if let Some(card) = render_discovery(discovery, discovery_open) {
+        content = content.push(card);
+    }
+    content
+        .push(top_talkers)
+        .push(down_hotlist)
+        .push(error_hotspots)
+        .push(trap_feed)
+        .into()
+}
+
+/// Discovery proposals (#579): unmonitored responders the sensor's opt-in
+/// sweep found (#541). A one-line banner, expandable to the per-device list
+/// with a copy button for the proposed `devices[]` snippet. Nothing
+/// auto-adds — the operator pastes the snippet into the config.
+fn render_discovery<'a>(
+    discovery: &'a HashMap<String, zensight_common::DiscoveryReport>,
+    open: bool,
+) -> Option<Element<'a, Message>> {
+    // Union across publishing sensors, deduped by address (two pollers can
+    // sweep overlapping subnets), newest report first so its metadata wins.
+    let mut reports: Vec<_> = discovery.values().collect();
+    reports.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+    let mut seen = std::collections::HashSet::new();
+    let proposals: Vec<&zensight_common::DiscoveredDevice> = reports
+        .iter()
+        .flat_map(|r| r.discovered.iter())
+        .filter(|d| seen.insert(d.address.as_str()))
+        .collect();
+    if proposals.is_empty() {
+        return None;
+    }
+
+    let toggle = iced::widget::button(
+        text(format!(
+            "{} unmonitored SNMP device{} found {}",
+            proposals.len(),
+            if proposals.len() == 1 { "" } else { "s" },
+            if open { "▾" } else { "▸" },
+        ))
+        .size(font::CAPTION),
+    )
+    .on_press(Message::ToggleSnmpDiscovery)
+    .style(iced::widget::button::text);
+
+    let mut card = column![toggle].spacing(space::SM);
+    if open {
+        let rows: Vec<Element<'a, Message>> = proposals
+            .iter()
+            .map(|d| {
+                let identity = d.sys_name.as_deref().unwrap_or("(no sysName)");
+                let profiles = if d.matched_profiles.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", d.matched_profiles.join(", "))
+                };
+                let creds = d
+                    .credentials
+                    .as_deref()
+                    .map(|c| format!(" [creds: {c}]"))
+                    .unwrap_or_default();
+                row![
+                    text(d.address.clone()).size(font::CAPTION),
+                    text(format!("{identity}{profiles}{creds}"))
+                        .size(font::CAPTION)
+                        .style(|t: &Theme| text::Style {
+                            color: Some(theme::colors(t).text_muted()),
+                        })
+                        .width(Length::Fill),
+                    iced::widget::button(text("Copy snippet").size(font::CAPTION))
+                        .on_press(Message::CopyText(d.suggested.clone()))
+                        .style(iced::widget::button::text),
+                ]
+                .spacing(space::SM)
+                .align_y(Alignment::Center)
+                .into()
+            })
+            .collect();
+        card = card.push(Column::with_children(rows).spacing(2));
+    }
+    Some(card.into())
 }
 
 /// Fleet trap feed (#536): recent translated records + the loudest senders.

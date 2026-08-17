@@ -728,6 +728,16 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                 Message::SnmpInterfaceTable { device, table }
             })
         }
+        // Subnet-discovery proposals (#579): the sensor's LWW report of
+        // unconfigured responders. Shown, never auto-added (#541).
+        ZensightState::SnmpDiscovery => {
+            decode!(zensight_common::DiscoveryReport, |report| {
+                Message::SnmpDiscoveryReport {
+                    source: origin,
+                    report,
+                }
+            })
+        }
         ZensightState::Common(CommonState::CatalogEntity { .. }) => {
             decode!(HostEntity, Message::EntityReceived)
         }

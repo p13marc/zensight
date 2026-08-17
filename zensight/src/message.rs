@@ -584,6 +584,18 @@ pub enum Message {
     },
     /// A durable SNMP trap/inform record off the events plane (#536).
     SnmpEventReceived(zensight_common::EventRecord),
+    /// Subnet-discovery report (#579) off `state/snmp/discovery` — LWW per
+    /// publishing sensor origin; proposals only, nothing auto-adds (#541).
+    SnmpDiscoveryReport {
+        source: String,
+        report: zensight_common::DiscoveryReport,
+    },
+    /// Toggle the SNMP overview's discovery card between the one-line count
+    /// and the expanded proposal list (#579).
+    ToggleSnmpDiscovery,
+    /// Copy a text snippet (e.g. a proposed `devices[]` entry) to the
+    /// clipboard (#579).
+    CopyText(String),
     /// SNMP device view: interface-table sort/filter/paging (#530).
     SnmpTableSort(usize),
     SnmpTableFilter(String),
