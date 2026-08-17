@@ -33,6 +33,7 @@ pub mod rpc;
 pub mod schema;
 pub mod semconv;
 pub mod serialization;
+pub mod served;
 pub mod session;
 pub mod state;
 pub mod stream;

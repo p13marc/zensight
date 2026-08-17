@@ -171,7 +171,7 @@ impl History {
 /// exists to eliminate.
 async fn serve_capability(session: Arc<zenoh::Session>, producer: String, cap: ActionCapability) {
     let key = capability_key(&producer, ACTION_TOPIC);
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "action: declare capability failed");
@@ -226,21 +226,21 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsCon
     let cmd_key = command_key(&producer, ACTION_TOPIC);
     let stat_key = status_key(&producer, ACTION_TOPIC);
     let ring_key = query_key(&producer, ACTIONS_TOPIC);
-    let set_q = match session.declare_queryable(&cmd_key).await {
+    let set_q = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "action: subscribe failed");
             return;
         }
     };
-    let status_q = match session.declare_queryable(&stat_key).await {
+    let status_q = match zensight_common::served::serve_queryable(&session, &stat_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %stat_key, "action: declare status failed");
             return;
         }
     };
-    let ring_q = match session.declare_queryable(&ring_key).await {
+    let ring_q = match zensight_common::served::serve_queryable(&session, &ring_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %ring_key, "action: declare history failed");

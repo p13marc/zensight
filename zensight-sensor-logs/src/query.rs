@@ -94,7 +94,7 @@ pub async fn run_events(
     store: Option<Arc<LogStore>>,
 ) {
     let key = zensight_common::command::query_key(&producer, "events");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare events failed");

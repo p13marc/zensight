@@ -34,8 +34,7 @@ pub async fn serve_entities(
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key = entities_query_key();
-    let queryable = session
-        .declare_queryable(&key)
+    let queryable = zensight_common::served::serve_queryable(&session, &key)
         .await
         .map_err(|e| anyhow::anyhow!("declare entities queryable: {e}"))?;
     info!(key = %key, "entities seed queryable ready");
@@ -74,8 +73,7 @@ pub async fn serve_names(
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key = names_query_key();
-    let queryable = session
-        .declare_queryable(&key)
+    let queryable = zensight_common::served::serve_queryable(&session, &key)
         .await
         .map_err(|e| anyhow::anyhow!("declare names queryable: {e}"))?;
     info!(key = %key, "names queryable ready");
@@ -134,12 +132,10 @@ pub async fn serve_assertions(
 ) -> anyhow::Result<()> {
     let link_key = catalog_rpc_key("link");
     let unlink_key = catalog_rpc_key("unlink");
-    let link_q = session
-        .declare_queryable(&link_key)
+    let link_q = zensight_common::served::serve_queryable(&session, &link_key)
         .await
         .map_err(|e| anyhow::anyhow!("declare link queryable: {e}"))?;
-    let unlink_q = session
-        .declare_queryable(&unlink_key)
+    let unlink_q = zensight_common::served::serve_queryable(&session, &unlink_key)
         .await
         .map_err(|e| anyhow::anyhow!("declare unlink queryable: {e}"))?;
     info!(
@@ -298,8 +294,7 @@ pub async fn serve_introspect(
     let key = catalog_rpc_key("introspect");
     let slice = zensight_common::registry::registry_toml("catalog")
         .ok_or_else(|| anyhow::anyhow!("catalog registry slice missing from the build"))?;
-    let queryable = session
-        .declare_queryable(&key)
+    let queryable = zensight_common::served::serve_queryable(&session, &key)
         .await
         .map_err(|e| anyhow::anyhow!("declare introspect queryable: {e}"))?;
     info!(key = %key, "introspect queryable ready");
@@ -328,8 +323,7 @@ pub async fn serve_describe(
 ) -> anyhow::Result<()> {
     let key = catalog_rpc_key("describe");
     let json = zensight_common::schema::DESCRIBE_JSON.as_str();
-    let queryable = session
-        .declare_queryable(&key)
+    let queryable = zensight_common::served::serve_queryable(&session, &key)
         .await
         .map_err(|e| anyhow::anyhow!("declare describe queryable: {e}"))?;
     info!(key = %key, "describe queryable ready");

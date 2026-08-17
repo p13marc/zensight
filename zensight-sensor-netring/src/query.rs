@@ -31,7 +31,7 @@ fn top_n(query: &zenoh::query::Query) -> usize {
 /// recent ended-flow records (most-recent first) as JSON `Vec<FlowRecord>`.
 pub async fn run(session: Arc<zenoh::Session>, producer: String, flows: FlowRing) {
     let key = zensight_common::command::query_key(&producer, "flows");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare flows failed");
@@ -64,7 +64,7 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, flows: FlowRing
 /// `Vec<TlsRecord>`.
 pub async fn run_tls(session: Arc<zenoh::Session>, producer: String, inventory: TlsInventory) {
     let key = zensight_common::command::query_key(&producer, "tls");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare tls failed");
@@ -95,7 +95,7 @@ pub async fn run_tls(session: Arc<zenoh::Session>, producer: String, inventory: 
 /// `Vec<QuicRecord>` (issue #72).
 pub async fn run_quic(session: Arc<zenoh::Session>, producer: String, inventory: QuicInventory) {
     let key = zensight_common::command::query_key(&producer, "quic");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare quic failed");
@@ -119,7 +119,7 @@ pub async fn run_quic(session: Arc<zenoh::Session>, producer: String, inventory:
 /// `Vec<SshRecord>` (issue #72).
 pub async fn run_ssh(session: Arc<zenoh::Session>, producer: String, inventory: SshInventory) {
     let key = zensight_common::command::query_key(&producer, "ssh");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare ssh failed");
@@ -147,7 +147,7 @@ pub async fn run_encrypted_dns(
     state: Arc<crate::monitor::EncDnsState>,
 ) {
     let key = zensight_common::command::query_key(&producer, "encrypted_dns");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare encrypted_dns failed");
@@ -171,7 +171,7 @@ pub async fn run_encrypted_dns(
 /// `Vec<AssetRecord>` (issue #70).
 pub async fn run_assets(session: Arc<zenoh::Session>, producer: String, inventory: AssetInventory) {
     let key = zensight_common::command::query_key(&producer, "assets");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare assets failed");
@@ -204,7 +204,7 @@ pub async fn run_talkers(
     name_map: Option<crate::monitor::SharedNameMap>,
 ) {
     let key = zensight_common::command::query_key(&producer, "talkers");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare talkers failed");
@@ -247,7 +247,7 @@ pub async fn run_matrix(
     name_map: Option<crate::monitor::SharedNameMap>,
 ) {
     let key = zensight_common::command::query_key(&producer, "matrix");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare matrix failed");
@@ -280,7 +280,7 @@ pub async fn run_matrix(
 /// replies with the recent largest flows (biggest first) as `Vec<ElephantRecord>`.
 pub async fn run_elephants(session: Arc<zenoh::Session>, producer: String, ring: ElephantRing) {
     let key = zensight_common::command::query_key(&producer, "elephant_flows");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare elephant_flows failed");
@@ -303,7 +303,7 @@ pub async fn run_elephants(session: Arc<zenoh::Session>, producer: String, ring:
 /// replies with the top-N SLDs by query count as JSON `Vec<DnsRecord>`.
 pub async fn run_dns(session: Arc<zenoh::Session>, producer: String, inventory: DnsInventory) {
     let key = zensight_common::command::query_key(&producer, "dns");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare dns failed");
@@ -326,7 +326,7 @@ pub async fn run_dns(session: Arc<zenoh::Session>, producer: String, inventory: 
 /// replies with the top-N hosts by request count as JSON `Vec<HttpHostRecord>`.
 pub async fn run_http(session: Arc<zenoh::Session>, producer: String, inventory: HttpInventory) {
     let key = zensight_common::command::query_key(&producer, "http");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare http failed");
@@ -351,7 +351,7 @@ pub async fn run_http(session: Arc<zenoh::Session>, producer: String, inventory:
 /// `--features ja4plus` and `collect.http_fp` is set.
 pub async fn run_ja4h(session: Arc<zenoh::Session>, producer: String, inventory: Ja4hInventory) {
     let key = zensight_common::command::query_key(&producer, "ja4h");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare ja4h failed");
@@ -383,7 +383,7 @@ pub async fn run_ipfix(
     records: crate::monitor::IpfixRing,
 ) {
     let key = zensight_common::command::query_key(&producer, "ipfix");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare ipfix failed");
@@ -412,7 +412,7 @@ pub async fn run_captures(
     index: crate::disk::CaptureIndex,
 ) {
     let key = zensight_common::command::query_key(&producer, "captures");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare captures failed");

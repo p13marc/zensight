@@ -348,6 +348,13 @@ impl<C: SensorConfig> SensorRunner<C> {
             } else {
                 tracing::debug!(producer = %producer_name, "no registry slice; introspect not served");
             }
+            // registry ⊆ served (RFC 08 §6.1, #484). Checked *here* because
+            // this is the moment the claim is made: `introspect` is about to
+            // hand the fleet this producer's registry slice as truth, and
+            // `alive` is about to say it is callable. Anything the slice
+            // advertises that this build never declared is a lie from now on.
+            // Debug panics (a sensor's own tests fail); release warns.
+            zensight_common::served::check_registry_coverage(&producer_name);
         }
 
         // Presence is not optional: declare the sensor-level liveliness token

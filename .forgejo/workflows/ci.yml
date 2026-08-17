@@ -79,6 +79,21 @@ jobs:
             exit 1
           fi
 
+      # #484: every queryable goes through zensight_common::served, so the
+      # registry-vs-served check knows what this build actually serves.
+      - name: queryables are declared through served::serve_queryable (#484)
+        run: |
+          hits=$(grep -rn '\.declare_queryable(' \
+            zensight-common/src zensight-correlator/src \
+            zensight-sensor-core/src zensight-sensor-*/src \
+            --include='*.rs' \
+            | grep -vE 'served\.rs|/tests/|_test\.rs|mod tests' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Raw declare_queryable — serve through zensight_common::served::serve_queryable so registry coverage (RFC 08 §6.1, #484) can see it:"
+            echo "$hits"
+            exit 1
+          fi
+
       # #466: keys are base-relative; the deployment base is never spelled.
       - name: application code never spells the deployment base (#466)
         run: |

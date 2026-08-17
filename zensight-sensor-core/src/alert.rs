@@ -323,7 +323,7 @@ impl AlertReporter {
 pub async fn serve_alerts_query(reporter: std::sync::Arc<AlertReporter>) {
     let session = reporter.publisher().session().clone();
     let selector = format!("{}/*", reporter.publisher().v1().state_key(&["alert"]));
-    let queryable = match session.declare_queryable(&selector).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &selector).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %selector, "failed to declare alert seed queryable");
