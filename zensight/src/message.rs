@@ -600,6 +600,15 @@ pub enum Message {
     ClearSnmpEventFilters,
     /// Flip the log-bundle export format between JSONL and text (#602).
     ToggleLogExportFormat,
+    /// Reveal more of the already-buffered matching lines (#601).
+    ShowMoreLogs,
+    /// Fetch the next older page from the sensors' durable stores (#601),
+    /// using the oldest buffered uid as the cursor.
+    LoadOlderLogs,
+    /// An older-page fetch finished (#601). Kept separate from
+    /// `LogEventsLoaded` so a page merge never advances the live-tail
+    /// watermark — an older page must not make the tail skip forward.
+    LogOlderPageLoaded(Result<Vec<zensight_common::LogRecord>, String>),
     /// Open the Alerts view scoped to one device (#578): the trap-feed row's
     /// pivot. Events carry no alert key, so the honest link is by source.
     OpenAlertsForSource(String),
