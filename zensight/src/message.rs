@@ -1041,16 +1041,16 @@ pub enum Message {
         /// `None` fans out to every host running this protocol.
         target_source: Option<String>,
     },
-    /// The destination-folder picker resolved for a tree artifact (`None` = the
-    /// user cancelled). Only tree kinds (snapshots) pick a folder first; blobs go
+    /// A Ready tree artifact was verified pre-download (root-fetched index +
+    /// holder probe) — or the verification failed, before any folder picker
+    /// opened or any chunk moved.
+    ArtifactTreeVerified(Result<crate::view::artifact_fetch::TreeVerify, String>),
+    /// The operator confirmed the verified tree — open the folder picker.
+    ArtifactTreeConfirmed,
+    /// The destination-folder picker resolved for a confirmed tree artifact
+    /// (`None` = the user cancelled). Blobs never pick a folder — they stage
     /// to a temp dir then a Save-as dialog.
-    ArtifactDestChosen {
-        /// Producer name.
-        producer: String,
-        /// What to produce.
-        kind: zensight_common::ArtifactKind,
-        /// Target one sensor instance, threaded from `StartArtifact`.
-        target_source: Option<String>,
+    ArtifactTreeDestChosen {
         /// Chosen destination folder, or `None` if cancelled.
         dest: Option<std::path::PathBuf>,
     },
@@ -1064,7 +1064,10 @@ pub enum Message {
         progress: Option<f32>,
     },
     /// The artifact request resolved: a `Ready` state to download, or an error.
-    ArtifactRequested(Result<zensight_common::ArtifactState, String>),
+    ArtifactRequested(Result<Vec<zensight_common::ArtifactState>, String>),
+    /// The operator picked which host's artifact to download (index into the
+    /// `PickingHolder` state's holder list).
+    ArtifactHolderChosen(usize),
     /// Streaming download progress (units resolved / total).
     ArtifactProgress {
         /// Units resolved so far.
@@ -1077,6 +1080,9 @@ pub enum Message {
     ArtifactDownloaded(Result<std::path::PathBuf, String>),
     /// Outcome of the "Save as…" dialog for a downloaded blob artifact.
     ArtifactSaved(Result<Option<String>, String>),
+    /// Outcome of tagging a downloaded snapshot in the local chunk cache
+    /// (keeps its chunks warm for re-download dedup; log-only either way).
+    BlobCacheTagged(Result<(), String>),
     /// Pause the in-flight artifact download (keeps the partial; resumable).
     PauseArtifact,
     /// Resume a paused artifact download.

@@ -14,8 +14,8 @@ use zensight_common::artifact::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert,
 };
 use zensight_common::{
-    ArtifactReportLimits, ArtifactSnapshotLimits, SnapshotDir, artifact_request_key,
-    artifact_status_key,
+    ArtifactReportLimits, ArtifactSnapshotLimits, SnapshotDir, artifact_cancel_key,
+    artifact_request_key, artifact_status_key,
 };
 use zensight_sensor_core::artifact::{ProduceCtx, Produced};
 use zensight_sensor_core::{
@@ -90,6 +90,7 @@ async fn report_and_snapshot_on_one_channel() {
         dirs: vec![SnapshotDir {
             name: "snap".into(),
             path: src.path().to_string_lossy().to_string(),
+            incremental: false,
         }],
         ..Default::default()
     };
@@ -199,6 +200,28 @@ async fn report_and_snapshot_on_one_channel() {
         names.push(e.unwrap().path().unwrap().to_string_lossy().to_string());
     }
     assert!(names.iter().any(|n| n == "config.json"));
+
+    // Cancelling a Ready report releases it: the in-memory blob is
+    // unregistered (Cleanup::Blob is unregister-only — there is no temp file
+    // to remove since the report is served from memory), so a fresh pinned
+    // download must now fail rather than resolve.
+    let replies = session
+        .get(format!("{}?id={report_id}", artifact_cancel_key(prefix)))
+        .await
+        .unwrap();
+    let reply = replies.recv_async().await.expect("cancel reply");
+    assert!(reply.result().is_ok(), "cancel refused: {reply:?}");
+    let after = dest.path().join("after-cancel.tar.zst");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            client.download_to(&req, &after).cancel(&cancel),
+        )
+        .await
+        .expect("post-cancel download timed out")
+        .is_err(),
+        "a released report must no longer be served"
+    );
 
     // --- Tier-2: request a snapshot, download the tree. ---
     let snap_id = Ulid::from_parts(2, 2);
@@ -393,4 +416,351 @@ async fn cancel_aborts_in_flight_production() {
     .await
     .expect("cancelled production should report Failed");
     assert!(reason.contains("cancel"), "reason was: {reason}");
+}
+
+/// Count regular files under a directory, recursively (the DirStore layout).
+fn file_count(root: &std::path::Path) -> usize {
+    let mut n = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+async fn request_snapshot(session: &zenoh::Session, prefix: &str, id: Ulid) {
+    // Fleet shape (RFC 05 §2.1): target All so EVERY channel serving the
+    // producer receives the request — BestMatching would short-circuit to one.
+    let replies = session
+        .get(artifact_request_key(prefix))
+        .target(zenoh::query::QueryTarget::All)
+        .payload(
+            serde_json::to_vec(&ArtifactRequest {
+                id,
+                kind: ArtifactKind::Snapshot { dir: "snap".into() },
+                opts: Default::default(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reply = replies.recv_async().await.expect("request reply");
+    assert!(reply.result().is_ok(), "request refused: {reply:?}");
+}
+
+async fn wait_tree_root(session: &zenoh::Session, status_key: &str, id: Ulid) -> zblob::Hash {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(s) = poll_status(session, status_key).await
+                && let Some(ArtifactState::Ready {
+                    id: got,
+                    delivery: Delivery::Tree { root, .. },
+                    ..
+                }) = kind_current(&s, "snapshot")
+                && got == id
+            {
+                return root;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("snapshot never became Ready")
+}
+
+/// Durable-store lineage: with `state_dir` + `incremental`, a released
+/// snapshot's chunks stay warm (the lineage tag marks them live through the
+/// sweep), and a later build of a grown directory adds chunks on top instead
+/// of starting from an empty store. This is the observable half of
+/// `build_tree_from` parent reuse — the store is inspected on disk, where the
+/// DirStore actually lives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_snapshot_lineage_survives_release() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "arttest3";
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("a.bin"), vec![7u8; 200_000]).unwrap();
+    std::fs::write(src.path().join("b.bin"), vec![9u8; 150_000]).unwrap();
+
+    let state = tempfile::tempdir().unwrap();
+    let snap_limits = ArtifactSnapshotLimits {
+        enabled: true,
+        cooldown_secs: 0,
+        state_dir: Some(state.path().to_string_lossy().to_string()),
+        dirs: vec![SnapshotDir {
+            name: "snap".into(),
+            path: src.path().to_string_lossy().to_string(),
+            incremental: true,
+        }],
+        ..Default::default()
+    };
+    let channel = ArtifactChannel::new(
+        session.clone(),
+        prefix,
+        "host1",
+        vec![Arc::new(SnapshotProducer::new(&snap_limits))],
+    )
+    .expect("snapshot producer enabled");
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let status_key = artifact_status_key(prefix);
+    let chunks_dir = state.path().join("chunks");
+
+    // Build #1.
+    let id1 = Ulid::from_parts(10, 10);
+    request_snapshot(&session, prefix, id1).await;
+    let root1 = wait_tree_root(&session, &status_key, id1).await;
+    let after_first = file_count(&chunks_dir);
+    assert!(after_first > 0, "durable store must hold chunks on disk");
+
+    // Cancel (release + sweep): the lineage tag keeps the chunks warm.
+    let replies = session
+        .get(format!("{}?id={id1}", artifact_cancel_key(prefix)))
+        .await
+        .unwrap();
+    assert!(replies.recv_async().await.unwrap().result().is_ok());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        file_count(&chunks_dir),
+        after_first,
+        "a released lineage snapshot's chunks must survive the sweep"
+    );
+
+    // Grow the directory; build #2 dedups against the warm chunks.
+    std::fs::write(src.path().join("c.bin"), vec![3u8; 120_000]).unwrap();
+    let id2 = Ulid::from_parts(20, 20);
+    request_snapshot(&session, prefix, id2).await;
+    let root2 = wait_tree_root(&session, &status_key, id2).await;
+    assert_ne!(root1, root2, "a grown tree must have a new root");
+    assert!(
+        file_count(&chunks_dir) > after_first,
+        "the grown tree adds chunks on top of the warm store"
+    );
+}
+
+/// One-shot (non-incremental) snapshots are fully reclaimed on release: no
+/// tag marks them, so cancel → unregister → sweep empties the store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_shot_snapshot_is_swept_on_release() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "arttest4";
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("a.bin"), vec![5u8; 200_000]).unwrap();
+
+    let state = tempfile::tempdir().unwrap();
+    let snap_limits = ArtifactSnapshotLimits {
+        enabled: true,
+        cooldown_secs: 0,
+        state_dir: Some(state.path().to_string_lossy().to_string()),
+        dirs: vec![SnapshotDir {
+            name: "snap".into(),
+            path: src.path().to_string_lossy().to_string(),
+            incremental: false,
+        }],
+        ..Default::default()
+    };
+    let channel = ArtifactChannel::new(
+        session.clone(),
+        prefix,
+        "host1",
+        vec![Arc::new(SnapshotProducer::new(&snap_limits))],
+    )
+    .expect("snapshot producer enabled");
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let status_key = artifact_status_key(prefix);
+    let id = Ulid::from_parts(30, 30);
+    request_snapshot(&session, prefix, id).await;
+    let _root = wait_tree_root(&session, &status_key, id).await;
+    assert!(file_count(&state.path().join("chunks")) > 0);
+
+    let replies = session
+        .get(format!("{}?id={id}", artifact_cancel_key(prefix)))
+        .await
+        .unwrap();
+    assert!(replies.recv_async().await.unwrap().result().is_ok());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        file_count(&state.path().join("chunks")),
+        0,
+        "an untagged snapshot's chunks must be swept once released"
+    );
+}
+
+/// Fleet fan-out under one shared request id: every channel serving the
+/// producer accepts the ULID (no `target_source` narrows it), so a status
+/// sweep sees BOTH artifacts — each with its own content root. This is the
+/// wire-side half of the GUI's holders_from_states/pick step, and the reason
+/// first-reply-wins was wrong: either reply alone silently hides the other
+/// host's artifact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_request_id_yields_one_artifact_per_channel() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "arttest5";
+
+    let mk = |content: &[u8]| {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("data.bin"), content).unwrap();
+        let limits = ArtifactSnapshotLimits {
+            enabled: true,
+            cooldown_secs: 0,
+            dirs: vec![SnapshotDir {
+                name: "snap".into(),
+                path: src.path().to_string_lossy().to_string(),
+                incremental: false,
+            }],
+            ..Default::default()
+        };
+        (src, limits)
+    };
+    let (_src_a, limits_a) = mk(&[1u8; 50_000]);
+    let (_src_b, limits_b) = mk(&[2u8; 50_000]);
+
+    // Two channels for the same producer name (in-process stand-ins for two
+    // hosts; both share this process's origin, so what distinguishes their
+    // artifacts on the wire is the content root, exactly as in a real fleet).
+    for limits in [&limits_a, &limits_b] {
+        let channel = ArtifactChannel::new(
+            session.clone(),
+            prefix,
+            "host1",
+            vec![Arc::new(SnapshotProducer::new(limits))],
+        )
+        .expect("snapshot producer enabled");
+        tokio::spawn(channel.run());
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let id = Ulid::from_parts(50, 50);
+    request_snapshot(&session, prefix, id).await;
+
+    // Sweep the status queryables (target All) until BOTH channels report
+    // Ready for the shared id, then assert their roots differ.
+    let status_key = artifact_status_key(prefix);
+    let roots = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut roots: Vec<String> = Vec::new();
+            // ConsolidationMode::None: in this in-process stand-in both
+            // channels reply on the SAME key (one shared origin), which
+            // default consolidation would collapse to one reply. A real
+            // fleet's hosts reply on their own origin-distinct keys.
+            if let Ok(replies) = session
+                .get(&status_key)
+                .target(zenoh::query::QueryTarget::All)
+                .consolidation(zenoh::query::ConsolidationMode::None)
+                .await
+            {
+                while let Ok(reply) = replies.recv_async().await {
+                    let Ok(sample) = reply.result() else { continue };
+                    let Ok(status) =
+                        serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
+                    else {
+                        continue;
+                    };
+                    if let Some(ArtifactState::Ready {
+                        id: got,
+                        delivery: Delivery::Tree { root, .. },
+                        ..
+                    }) = kind_current(&status, "snapshot")
+                        && got == id
+                    {
+                        roots.push(root.to_string());
+                    }
+                }
+            }
+            roots.sort();
+            roots.dedup();
+            if roots.len() >= 2 {
+                return roots;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("both channels must go Ready for the shared id");
+    assert_eq!(roots.len(), 2, "each channel built its own snapshot");
+}
+
+/// The pre-download verify pair the GUI runs before a tree fetch: the
+/// `<root>/have` probe names a live holder with all chunks present, and
+/// `fetch_index_by_root` returns the root-verified index with no chunk store
+/// involved. An unserved root probes empty and fetches nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tree_probe_and_index_fetch_verify_a_snapshot() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "arttest6";
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("a.bin"), vec![9u8; 80_000]).unwrap();
+    std::fs::write(src.path().join("b.txt"), b"hello").unwrap();
+    let snap_limits = ArtifactSnapshotLimits {
+        enabled: true,
+        cooldown_secs: 0,
+        dirs: vec![SnapshotDir {
+            name: "snap".into(),
+            path: src.path().to_string_lossy().to_string(),
+            incremental: false,
+        }],
+        ..Default::default()
+    };
+    let channel = ArtifactChannel::new(
+        session.clone(),
+        prefix,
+        "host1",
+        vec![Arc::new(SnapshotProducer::new(&snap_limits))],
+    )
+    .expect("snapshot producer enabled");
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let id = Ulid::from_parts(60, 60);
+    request_snapshot(&session, prefix, id).await;
+    let root = wait_tree_root(&session, &artifact_status_key(prefix), id).await;
+
+    let tclient = TreeClient::new(
+        &session,
+        zblob::QueryPrefix::new(zensight_common::artifact_store_prefix()).unwrap(),
+        zblob::QueryPrefix::new(zensight_common::artifact_tree_prefix()).unwrap(),
+    );
+
+    // The probe is four numbers whatever the snapshot's size, and the serving
+    // channel holds every chunk it just built.
+    let probes = tclient.probe_snapshot(&root.to_string()).await.unwrap();
+    assert!(!probes.is_empty(), "the live server must answer the probe");
+    let (_, probe) = &probes[0];
+    assert!(probe.have_index);
+    assert!(probe.chunks_total > 0);
+    assert_eq!(probe.chunks_present, probe.chunks_total);
+
+    // The index is fetchable and root-verified with no ContentStore at all.
+    let index = tclient.fetch_index_by_root(&root).await.unwrap();
+    assert_eq!(index.file_count(), 2);
+    assert_eq!(index.total_size(), 80_000 + 5);
+    assert_eq!(index.needed_chunks().len() as u32, probe.chunks_total);
+
+    // An unserved root: silent probe, failed fetch — the GUI's honest
+    // "unreachable" outcome, decided before any folder picker opens.
+    let bogus = zblob::Hash::of(b"no such snapshot");
+    assert!(
+        tclient
+            .probe_snapshot(&bogus.to_string())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(tclient.fetch_index_by_root(&bogus).await.is_err());
 }

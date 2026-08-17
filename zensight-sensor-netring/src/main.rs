@@ -151,14 +151,16 @@ async fn main() -> Result<()> {
             runner.session(),
             zblob::ServePrefix::new(blob_prefix.clone()).expect("an own-origin prefix is concrete"),
         );
-        {
-            let blob = blob.clone();
-            runner.spawn(async move {
-                if let Err(e) = blob.run().await {
-                    tracing::error!(error = %e, "netring: capture blob server exited");
-                }
-            });
-        }
+        // `spawn()` declares the queryable *before* it returns, so a capture
+        // record cannot race ahead of the server that must serve its bytes —
+        // the same fix sensor-core's artifact channel applied (`run()` declared
+        // inside the spawned task, leaving that window open). Dropping the
+        // handle is deliberate: the server lives as long as the session.
+        let _ = blob
+            .clone()
+            .spawn()
+            .await
+            .map_err(|e| anyhow::anyhow!("netring: spawn capture blob server: {e}"))?;
         runner.spawn(disk::run_engine(
             to_disk.clone(),
             source.clone(),

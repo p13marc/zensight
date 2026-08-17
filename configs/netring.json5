@@ -16,7 +16,7 @@
       max_bytes: 67108864,   // 64 MiB cap on the (uncompressed) bundle
       cooldown_secs: 30,     // min gap between generations
       ttl_secs: 600,         // how long a generated bundle stays downloadable
-      chunk_size: 524288,    // 512 KiB transfer chunk (clamped 256 KiB–1 MiB)
+      chunk_size: 524288,    // 512 KiB transfer chunk (zblob validates: 64 KiB–4 MiB, 16 KiB-aligned)
     },
     snapshot: {
       enabled: false,        // set true to allow directory downloads from this sensor
@@ -28,6 +28,11 @@
       cooldown_secs: 30,     // min gap between builds
       ttl_secs: 600,         // how long a built snapshot stays downloadable
       chunk_size: 262144,    // 256 KiB average (FastCDC content-defined chunking)
+      // Durable chunk store (unset = in-memory, lost on restart). With the
+      // systemd unit's StateDirectory this is /var/lib/zensight-netring/artifacts;
+      // per-dir `incremental: true` then reuses unchanged files' chunks across
+      // builds (append-mostly dirs only — see the config docs).
+      // state_dir: "/var/lib/zensight-netring/artifacts",
     },
   },
 

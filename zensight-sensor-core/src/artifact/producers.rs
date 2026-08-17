@@ -52,7 +52,7 @@ impl ArtifactProducer for ReportProducer {
             _ => Err("report producer given a non-report request".into()),
         }
     }
-    async fn produce(&self, _kind: ArtifactKind, ctx: ProduceCtx) -> anyhow::Result<Produced> {
+    async fn produce(&self, _kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
         let inputs = BundleInputs {
             sensor_name: self.source.sensor_name(),
             source_id: self.source.source_id(),
@@ -63,12 +63,11 @@ impl ArtifactProducer for ReportProducer {
         };
         let max_bytes = self.common.max_bytes;
         let redact_extra = self.redact_extra.clone();
-        let dir = ctx.workdir.clone();
-        let (path, filename) = tokio::task::spawn_blocking(move || {
-            build_debug_bundle(inputs, max_bytes, &redact_extra, &dir)
+        let (data, filename) = tokio::task::spawn_blocking(move || {
+            build_debug_bundle(inputs, max_bytes, &redact_extra)
         })
         .await??;
-        Ok(Produced::File { path, filename })
+        Ok(Produced::Bytes { data, filename })
     }
 }
 
@@ -118,6 +117,9 @@ impl ArtifactProducer for SnapshotProducer {
     fn tree_max_files(&self) -> Option<u64> {
         Some(self.limits.max_files)
     }
+    fn store_state_dir(&self) -> Option<std::path::PathBuf> {
+        self.limits.state_dir.as_ref().map(std::path::PathBuf::from)
+    }
     async fn produce(&self, kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
         let ArtifactKind::Snapshot { dir } = kind else {
             anyhow::bail!("snapshot producer given a non-snapshot request");
@@ -126,8 +128,20 @@ impl ArtifactProducer for SnapshotProducer {
             .limits
             .resolve(&dir)
             .ok_or_else(|| anyhow::anyhow!("unknown directory: {dir}"))?;
+        // Per-dir opt-in (config `incremental`): the lineage tag keys the
+        // channel's parent-index map and the durable tag file. The name is a
+        // zblob tag name (validated on `tags.set`); dir names are operator
+        // config, so an exotic one degrades to a warned, un-warm build.
+        let lineage = self
+            .limits
+            .dirs
+            .iter()
+            .find(|d| d.name == dir)
+            .filter(|d| d.incremental)
+            .map(|d| format!("snapshot-{}", d.name));
         Ok(Produced::Dir {
             path: PathBuf::from(path),
+            lineage,
         })
     }
 }
