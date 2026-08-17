@@ -23,7 +23,6 @@ pub struct SnmpPoller {
     /// Declared-publisher registry for the telemetry path (declare-on-first-use +
     /// cache per key, drop QoS) — never a one-shot `session.put`.
     registry: Arc<zensight_common::PublisherRegistry>,
-    telemetry_prefix: String,
     mib_resolver: Arc<MibResolver>,
     format: Format,
     oids: Vec<String>,
@@ -101,17 +100,12 @@ impl SnmpPoller {
         oid_groups: &HashMap<String, OidGroup>,
         format: Format,
     ) -> Self {
-        let telemetry_prefix =
-            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
-                .telemetry_prefix();
-
         let oids = device.all_oids(oid_groups);
         let walks = device.all_walks(oid_groups);
 
         Self {
             device,
             registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh)),
-            telemetry_prefix: telemetry_prefix.into(),
             mib_resolver,
             format,
             oids,
@@ -699,6 +693,11 @@ impl SnmpPoller {
         {
             metric_name = name;
         }
+        // #559: names ride the telemetry key, so every chunk must satisfy the
+        // chunk grammar. Shipped tables are already valid (passthrough); a
+        // mixed-case user `oid_names` entry gets zenkey's lossless escaping
+        // instead of tripping the metric guard.
+        let metric_name = slug_metric(&metric_name);
         let syntax = self
             .mib_resolver
             .syntax(oid_str)
@@ -789,16 +788,22 @@ impl SnmpPoller {
             point = point.with_label("enum", label);
         }
 
-        let key = format!(
-            "{}/{}/{}",
-            self.telemetry_prefix, self.device.name, metric_name
+        // #559: through the generated builder (slugs the device chunk too —
+        // the state key already slugs it, so the trees stay aligned).
+        let key = zensight_common::registry::snmp::key(
+            &zensight_common::PROFILE.local_origin(),
+            &zensight_common::registry::snmp::Subject::device_metric(
+                &self.device.name,
+                metric_name.split('/'),
+            ),
         );
+        let key = key.as_str();
 
         match encode(&point, self.format) {
             Ok(payload) => {
                 if let Err(e) = self
                     .registry
-                    .put(&key, payload, zensight_common::QosClass::Telemetry)
+                    .put(key, payload, zensight_common::QosClass::Telemetry)
                     .await
                 {
                     tracing::error!(key = %key, error = %e, "Failed to publish to Zenoh");
@@ -811,6 +816,24 @@ impl SnmpPoller {
             }
         }
     }
+}
+
+/// #559: slug each `/`-separated chunk of a resolved metric name into
+/// chunk-grammar-valid form. Shipped name tables (builtins, profiles, SMI
+/// snake_case, dotted-OID fallback) are already valid and pass through
+/// byte-identical; anything else (a mixed-case user `oid_names` entry) gets
+/// zenkey's lossless `_xNN_` escaping instead of tripping the metric guard.
+fn slug_metric(name: &str) -> String {
+    if name
+        .split('/')
+        .all(zenkey::grammar::is_valid_plain_chunk)
+    {
+        return name.to_string();
+    }
+    name.split('/')
+        .map(|c| zenkey::Chunk::slug(c).as_str().to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Unit for a derived rate metric: octet counters are bytes/second,

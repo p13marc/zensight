@@ -14,7 +14,7 @@
 //!
 //! // Resolve OID to name
 //! let name = resolver.resolve("1.3.6.1.2.1.1.3.0");
-//! assert_eq!(name, "sysUpTime.0");
+//! assert_eq!(name, "system/uptime");
 //! ```
 
 use anyhow::{Context, Result};
@@ -36,7 +36,7 @@ pub struct MibResolver {
 /// An entry in the OID mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidEntry {
-    /// Human-readable name (e.g., "sysUpTime", "ifInOctets").
+    /// Human-readable name (e.g., "sysUpTime", "if/{index}/in_octets").
     pub name: String,
     /// MIB module this OID belongs to (e.g., "SNMPv2-MIB", "IF-MIB").
     #[serde(default)]
@@ -272,7 +272,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.1.1.0".to_string(),
                     OidEntry {
-                        name: "sysDescr.0".to_string(),
+                        name: "system/descr".to_string(),
                         module: None,
                         description: Some("System description".to_string()),
                         syntax: Some("DisplayString".to_string()),
@@ -282,7 +282,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.1.2.0".to_string(),
                     OidEntry {
-                        name: "sysObjectID.0".to_string(),
+                        name: "system/object_id".to_string(),
                         module: None,
                         description: Some("System object identifier".to_string()),
                         syntax: Some("OBJECT IDENTIFIER".to_string()),
@@ -292,7 +292,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.1.3.0".to_string(),
                     OidEntry {
-                        name: "sysUpTime.0".to_string(),
+                        name: "system/uptime".to_string(),
                         module: None,
                         description: Some("Time since system started".to_string()),
                         syntax: Some("TimeTicks".to_string()),
@@ -302,7 +302,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.1.4.0".to_string(),
                     OidEntry {
-                        name: "sysContact.0".to_string(),
+                        name: "system/contact".to_string(),
                         module: None,
                         description: Some("Contact person for system".to_string()),
                         syntax: Some("DisplayString".to_string()),
@@ -312,7 +312,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.1.5.0".to_string(),
                     OidEntry {
-                        name: "sysName.0".to_string(),
+                        name: "system/name".to_string(),
                         module: None,
                         description: Some("System name".to_string()),
                         syntax: Some("DisplayString".to_string()),
@@ -322,7 +322,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.1.6.0".to_string(),
                     OidEntry {
-                        name: "sysLocation.0".to_string(),
+                        name: "system/location".to_string(),
                         module: None,
                         description: Some("Physical location of system".to_string()),
                         syntax: Some("DisplayString".to_string()),
@@ -332,7 +332,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.1.7.0".to_string(),
                     OidEntry {
-                        name: "sysServices.0".to_string(),
+                        name: "system/services".to_string(),
                         module: None,
                         description: Some("Services offered by system".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -343,7 +343,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.11.1.0".to_string(),
                     OidEntry {
-                        name: "snmpInPkts.0".to_string(),
+                        name: "snmp/in_pkts".to_string(),
                         module: None,
                         description: Some("Total SNMP messages received".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -353,7 +353,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.11.2.0".to_string(),
                     OidEntry {
-                        name: "snmpOutPkts.0".to_string(),
+                        name: "snmp/out_pkts".to_string(),
                         module: None,
                         description: Some("Total SNMP messages sent".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -374,7 +374,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.1.0".to_string(),
                     OidEntry {
-                        name: "ifNumber.0".to_string(),
+                        name: "if_number".to_string(),
                         module: None,
                         description: Some("Number of network interfaces".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -385,7 +385,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.1".to_string(),
                     OidEntry {
-                        name: "ifIndex".to_string(),
+                        name: "if/{index}/index".to_string(),
                         module: None,
                         description: Some("Interface index".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -395,7 +395,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.2".to_string(),
                     OidEntry {
-                        name: "ifDescr".to_string(),
+                        name: "if/{index}/descr".to_string(),
                         module: None,
                         description: Some("Interface description".to_string()),
                         syntax: Some("DisplayString".to_string()),
@@ -405,7 +405,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.3".to_string(),
                     OidEntry {
-                        name: "ifType".to_string(),
+                        name: "if/{index}/type".to_string(),
                         module: None,
                         description: Some("Interface type".to_string()),
                         syntax: Some("IANAifType".to_string()),
@@ -415,7 +415,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.4".to_string(),
                     OidEntry {
-                        name: "ifMtu".to_string(),
+                        name: "if/{index}/mtu".to_string(),
                         module: None,
                         description: Some("Interface MTU".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -425,7 +425,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.5".to_string(),
                     OidEntry {
-                        name: "ifSpeed".to_string(),
+                        name: "if/{index}/speed".to_string(),
                         module: None,
                         description: Some("Interface speed (bps)".to_string()),
                         syntax: Some("Gauge32".to_string()),
@@ -435,7 +435,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.6".to_string(),
                     OidEntry {
-                        name: "ifPhysAddress".to_string(),
+                        name: "if/{index}/phys_address".to_string(),
                         module: None,
                         description: Some("Interface MAC address".to_string()),
                         syntax: Some("PhysAddress".to_string()),
@@ -445,7 +445,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.7".to_string(),
                     OidEntry {
-                        name: "ifAdminStatus".to_string(),
+                        name: "if/{index}/admin_status".to_string(),
                         module: None,
                         description: Some("Desired interface state".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -455,7 +455,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.8".to_string(),
                     OidEntry {
-                        name: "ifOperStatus".to_string(),
+                        name: "if/{index}/oper_status".to_string(),
                         module: None,
                         description: Some("Current interface state".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -465,7 +465,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.9".to_string(),
                     OidEntry {
-                        name: "ifLastChange".to_string(),
+                        name: "if/{index}/last_change".to_string(),
                         module: None,
                         description: Some("Last status change time".to_string()),
                         syntax: Some("TimeTicks".to_string()),
@@ -475,7 +475,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.10".to_string(),
                     OidEntry {
-                        name: "ifInOctets".to_string(),
+                        name: "if/{index}/in_octets".to_string(),
                         module: None,
                         description: Some("Bytes received".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -485,7 +485,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.11".to_string(),
                     OidEntry {
-                        name: "ifInUcastPkts".to_string(),
+                        name: "if/{index}/in_ucast_pkts".to_string(),
                         module: None,
                         description: Some("Unicast packets received".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -495,7 +495,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.13".to_string(),
                     OidEntry {
-                        name: "ifInDiscards".to_string(),
+                        name: "if/{index}/in_discards".to_string(),
                         module: None,
                         description: Some("Inbound discards".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -505,7 +505,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.14".to_string(),
                     OidEntry {
-                        name: "ifInErrors".to_string(),
+                        name: "if/{index}/in_errors".to_string(),
                         module: None,
                         description: Some("Inbound errors".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -515,7 +515,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.16".to_string(),
                     OidEntry {
-                        name: "ifOutOctets".to_string(),
+                        name: "if/{index}/out_octets".to_string(),
                         module: None,
                         description: Some("Bytes sent".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -525,7 +525,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.17".to_string(),
                     OidEntry {
-                        name: "ifOutUcastPkts".to_string(),
+                        name: "if/{index}/out_ucast_pkts".to_string(),
                         module: None,
                         description: Some("Unicast packets sent".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -535,7 +535,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.19".to_string(),
                     OidEntry {
-                        name: "ifOutDiscards".to_string(),
+                        name: "if/{index}/out_discards".to_string(),
                         module: None,
                         description: Some("Outbound discards".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -545,7 +545,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.2.2.1.20".to_string(),
                     OidEntry {
-                        name: "ifOutErrors".to_string(),
+                        name: "if/{index}/out_errors".to_string(),
                         module: None,
                         description: Some("Outbound errors".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -556,7 +556,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.31.1.1.1.1".to_string(),
                     OidEntry {
-                        name: "ifName".to_string(),
+                        name: "ifx/{index}/name".to_string(),
                         module: None,
                         description: Some("Interface name".to_string()),
                         syntax: Some("DisplayString".to_string()),
@@ -566,7 +566,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.31.1.1.1.6".to_string(),
                     OidEntry {
-                        name: "ifHCInOctets".to_string(),
+                        name: "ifx/{index}/hc_in_octets".to_string(),
                         module: None,
                         description: Some("Bytes received (64-bit)".to_string()),
                         syntax: Some("Counter64".to_string()),
@@ -576,7 +576,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.31.1.1.1.10".to_string(),
                     OidEntry {
-                        name: "ifHCOutOctets".to_string(),
+                        name: "ifx/{index}/hc_out_octets".to_string(),
                         module: None,
                         description: Some("Bytes sent (64-bit)".to_string()),
                         syntax: Some("Counter64".to_string()),
@@ -586,7 +586,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.31.1.1.1.15".to_string(),
                     OidEntry {
-                        name: "ifHighSpeed".to_string(),
+                        name: "ifx/{index}/high_speed".to_string(),
                         module: None,
                         description: Some("Interface speed (Mbps)".to_string()),
                         syntax: Some("Gauge32".to_string()),
@@ -596,7 +596,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.31.1.1.1.18".to_string(),
                     OidEntry {
-                        name: "ifAlias".to_string(),
+                        name: "ifx/{index}/alias".to_string(),
                         module: None,
                         description: Some("Interface alias/description".to_string()),
                         syntax: Some("DisplayString".to_string()),
@@ -617,7 +617,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.1.1.0".to_string(),
                     OidEntry {
-                        name: "hrSystemUptime.0".to_string(),
+                        name: "host/uptime".to_string(),
                         module: None,
                         description: Some("Host uptime".to_string()),
                         syntax: Some("TimeTicks".to_string()),
@@ -627,7 +627,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.1.2.0".to_string(),
                     OidEntry {
-                        name: "hrSystemDate.0".to_string(),
+                        name: "host/date".to_string(),
                         module: None,
                         description: Some("Current date and time".to_string()),
                         syntax: Some("DateAndTime".to_string()),
@@ -637,7 +637,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.1.5.0".to_string(),
                     OidEntry {
-                        name: "hrSystemNumUsers.0".to_string(),
+                        name: "host/users".to_string(),
                         module: None,
                         description: Some("Number of logged in users".to_string()),
                         syntax: Some("Gauge32".to_string()),
@@ -647,7 +647,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.1.6.0".to_string(),
                     OidEntry {
-                        name: "hrSystemProcesses.0".to_string(),
+                        name: "host/processes".to_string(),
                         module: None,
                         description: Some("Number of processes".to_string()),
                         syntax: Some("Gauge32".to_string()),
@@ -658,7 +658,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.2.3.1.1".to_string(),
                     OidEntry {
-                        name: "hrStorageIndex".to_string(),
+                        name: "storage/{index}/index".to_string(),
                         module: None,
                         description: Some("Storage index".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -668,7 +668,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.2.3.1.2".to_string(),
                     OidEntry {
-                        name: "hrStorageType".to_string(),
+                        name: "storage/{index}/type".to_string(),
                         module: None,
                         description: Some("Storage type".to_string()),
                         syntax: Some("OBJECT IDENTIFIER".to_string()),
@@ -678,7 +678,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.2.3.1.3".to_string(),
                     OidEntry {
-                        name: "hrStorageDescr".to_string(),
+                        name: "storage/{index}/descr".to_string(),
                         module: None,
                         description: Some("Storage description".to_string()),
                         syntax: Some("DisplayString".to_string()),
@@ -688,7 +688,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.2.3.1.4".to_string(),
                     OidEntry {
-                        name: "hrStorageAllocationUnits".to_string(),
+                        name: "storage/{index}/allocation_units".to_string(),
                         module: None,
                         description: Some("Allocation unit size".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -698,7 +698,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.2.3.1.5".to_string(),
                     OidEntry {
-                        name: "hrStorageSize".to_string(),
+                        name: "storage/{index}/size".to_string(),
                         module: None,
                         description: Some("Total storage units".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -708,7 +708,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.2.3.1.6".to_string(),
                     OidEntry {
-                        name: "hrStorageUsed".to_string(),
+                        name: "storage/{index}/used".to_string(),
                         module: None,
                         description: Some("Used storage units".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -719,7 +719,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.25.3.3.1.2".to_string(),
                     OidEntry {
-                        name: "hrProcessorLoad".to_string(),
+                        name: "cpu/{index}/load".to_string(),
                         module: None,
                         description: Some("CPU load (1 min avg)".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -740,7 +740,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.4.1.0".to_string(),
                     OidEntry {
-                        name: "ipForwarding.0".to_string(),
+                        name: "ip/forwarding".to_string(),
                         module: None,
                         description: Some("IP forwarding enabled".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -750,7 +750,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.4.2.0".to_string(),
                     OidEntry {
-                        name: "ipDefaultTTL.0".to_string(),
+                        name: "ip/default_ttl".to_string(),
                         module: None,
                         description: Some("Default TTL".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -760,7 +760,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.4.3.0".to_string(),
                     OidEntry {
-                        name: "ipInReceives.0".to_string(),
+                        name: "ip/in_receives".to_string(),
                         module: None,
                         description: Some("IP datagrams received".to_string()),
                         syntax: Some("Counter32".to_string()),
@@ -771,7 +771,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.4.20.1.1".to_string(),
                     OidEntry {
-                        name: "ipAdEntAddr".to_string(),
+                        name: "ip/{index}/addr".to_string(),
                         module: None,
                         description: Some("IP address".to_string()),
                         syntax: Some("IpAddress".to_string()),
@@ -781,7 +781,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.4.20.1.2".to_string(),
                     OidEntry {
-                        name: "ipAdEntIfIndex".to_string(),
+                        name: "ip/{index}/if_index".to_string(),
                         module: None,
                         description: Some("Interface index".to_string()),
                         syntax: Some("INTEGER".to_string()),
@@ -791,7 +791,7 @@ impl MibResolver {
                 (
                     "1.3.6.1.2.1.4.20.1.3".to_string(),
                     OidEntry {
-                        name: "ipAdEntNetMask".to_string(),
+                        name: "ip/{index}/netmask".to_string(),
                         module: None,
                         description: Some("Subnet mask".to_string()),
                         syntax: Some("IpAddress".to_string()),
@@ -814,28 +814,51 @@ mod tests {
         resolver.load_builtin_mibs().unwrap();
 
         // Check SNMPv2-MIB
-        assert_eq!(resolver.resolve("1.3.6.1.2.1.1.3.0"), "sysUpTime.0");
-        assert_eq!(resolver.resolve("1.3.6.1.2.1.1.5.0"), "sysName.0");
+        assert_eq!(resolver.resolve("1.3.6.1.2.1.1.3.0"), "system/uptime");
+        assert_eq!(resolver.resolve("1.3.6.1.2.1.1.5.0"), "system/name");
 
         // Check IF-MIB scalars
-        assert_eq!(resolver.resolve("1.3.6.1.2.1.2.1.0"), "ifNumber.0");
+        assert_eq!(resolver.resolve("1.3.6.1.2.1.2.1.0"), "if_number");
 
         // Check IF-MIB table entries
-        assert_eq!(resolver.resolve("1.3.6.1.2.1.2.2.1.10.1"), "ifInOctets.1");
-        assert_eq!(resolver.resolve("1.3.6.1.2.1.2.2.1.16.5"), "ifOutOctets.5");
+        assert_eq!(resolver.resolve("1.3.6.1.2.1.2.2.1.10.1"), "if/1/in_octets");
+        assert_eq!(
+            resolver.resolve("1.3.6.1.2.1.2.2.1.16.5"),
+            "if/5/out_octets"
+        );
 
         // Check HOST-RESOURCES-MIB
-        assert_eq!(resolver.resolve("1.3.6.1.2.1.25.1.1.0"), "hrSystemUptime.0");
-        assert_eq!(
-            resolver.resolve("1.3.6.1.2.1.25.3.3.1.2.1"),
-            "hrProcessorLoad.1"
-        );
+        assert_eq!(resolver.resolve("1.3.6.1.2.1.25.1.1.0"), "host/uptime");
+        assert_eq!(resolver.resolve("1.3.6.1.2.1.25.3.3.1.2.1"), "cpu/1/load");
 
         // Unknown OID returns as-is
         assert_eq!(
             resolver.resolve("1.3.6.1.4.1.9.9.999.0"),
             "1.3.6.1.4.1.9.9.999.0"
         );
+    }
+
+    /// #559: every built-in MIB name is chunk-grammar-valid (profile
+    /// convention, lowercase snake), so a debug-build poll cycle publishing
+    /// them never trips the metric guard.
+    #[test]
+    fn builtin_names_are_chunk_grammar_valid() {
+        let mut resolver = MibResolver::new();
+        resolver.load_builtin_mibs().unwrap();
+        let names = resolver
+            .exact_mappings
+            .values()
+            .chain(resolver.prefix_mappings.iter().map(|(_, e)| e))
+            .map(|e| e.name.as_str());
+        for name in names {
+            for chunk in name.split('/') {
+                let plain = chunk.replace("{index}", "1");
+                assert!(
+                    zenkey::grammar::is_valid_plain_chunk(&plain),
+                    "built-in MIB name {name:?} violates the chunk grammar (#559)"
+                );
+            }
+        }
     }
 
     /// #581: prefix matching must respect OID chunk boundaries. With only

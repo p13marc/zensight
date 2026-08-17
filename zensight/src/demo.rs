@@ -970,35 +970,35 @@ impl DemoSimulator {
         points.push(self.make_point(
             Protocol::Snmp,
             router,
-            "system/sysUpTime",
+            "system/uptime",
             TelemetryValue::Gauge(uptime as f64),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             router,
-            "system/sysName",
+            "system/name",
             TelemetryValue::Text(router.to_string()),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             router,
-            "system/sysDescr",
+            "system/descr",
             TelemetryValue::Text("Cisco IOS XE Software, ASR1002-X, Version 17.3.4a".to_string()),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             router,
-            "system/sysContact",
+            "system/contact",
             TelemetryValue::Text("netops@example.com".to_string()),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             router,
-            "system/sysLocation",
+            "system/location",
             TelemetryValue::Text("DC1 Rack 42".to_string()),
             timestamp,
         ));
@@ -1008,7 +1008,7 @@ impl DemoSimulator {
         points.push(self.make_point(
             Protocol::Snmp,
             router,
-            "host/hrProcessorLoad",
+            "cpu/1/load",
             TelemetryValue::Gauge(router_cpu.clamp(0.0, 100.0)),
             timestamp,
         ));
@@ -1019,14 +1019,14 @@ impl DemoSimulator {
         points.push(self.make_point(
             Protocol::Snmp,
             router,
-            "host/hrStorageSize",
+            "storage/1/size",
             TelemetryValue::Counter(mem_total),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             router,
-            "host/hrStorageUsed",
+            "storage/1/used",
             TelemetryValue::Counter(mem_used),
             timestamp,
         ));
@@ -1083,7 +1083,7 @@ impl DemoSimulator {
             points.push(self.make_point(
                 Protocol::Snmp,
                 router,
-                &format!("if/{}/ifName", iface),
+                &format!("if/{}/name", iface),
                 TelemetryValue::Text(iface_name.to_string()),
                 timestamp,
             ));
@@ -1098,28 +1098,28 @@ impl DemoSimulator {
             points.push(self.make_point(
                 Protocol::Snmp,
                 router,
-                &format!("if/{}/ifOperStatus", iface),
+                &format!("if/{}/oper_status", iface),
                 TelemetryValue::Gauge(status),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Snmp,
                 router,
-                &format!("if/{}/ifAdminStatus", iface),
+                &format!("if/{}/admin_status", iface),
                 TelemetryValue::Gauge(1.0), // Admin up
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Snmp,
                 router,
-                &format!("if/{}/ifInOctets", iface),
+                &format!("if/{}/in_octets", iface),
                 TelemetryValue::Counter(in_octets),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Snmp,
                 router,
-                &format!("if/{}/ifOutOctets", iface),
+                &format!("if/{}/out_octets", iface),
                 TelemetryValue::Counter(out_octets),
                 timestamp,
             ));
@@ -1144,35 +1144,35 @@ impl DemoSimulator {
         points.push(self.make_point(
             Protocol::Snmp,
             switch,
-            "system/sysUpTime",
+            "system/uptime",
             TelemetryValue::Gauge((uptime + 500) as f64),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             switch,
-            "system/sysName",
+            "system/name",
             TelemetryValue::Text(switch.to_string()),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             switch,
-            "system/sysDescr",
+            "system/descr",
             TelemetryValue::Text("Cisco Catalyst 9300-48P, Version 17.6.3".to_string()),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             switch,
-            "system/sysContact",
+            "system/contact",
             TelemetryValue::Text("netops@example.com".to_string()),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             switch,
-            "system/sysLocation",
+            "system/location",
             TelemetryValue::Text("DC1 Rack 43".to_string()),
             timestamp,
         ));
@@ -1182,7 +1182,7 @@ impl DemoSimulator {
         points.push(self.make_point(
             Protocol::Snmp,
             switch,
-            "host/hrProcessorLoad",
+            "cpu/1/load",
             TelemetryValue::Gauge(switch_cpu.clamp(0.0, 100.0)),
             timestamp,
         ));
@@ -1194,14 +1194,14 @@ impl DemoSimulator {
         points.push(self.make_point(
             Protocol::Snmp,
             switch,
-            "host/hrStorageSize",
+            "storage/1/size",
             TelemetryValue::Counter(switch_mem_total),
             timestamp,
         ));
         points.push(self.make_point(
             Protocol::Snmp,
             switch,
-            "host/hrStorageUsed",
+            "storage/1/used",
             TelemetryValue::Counter(switch_mem_used),
             timestamp,
         ));
@@ -1233,7 +1233,7 @@ impl DemoSimulator {
             points.push(self.make_point(
                 Protocol::Snmp,
                 switch,
-                &format!("if/{}/ifName", port),
+                &format!("if/{}/name", port),
                 TelemetryValue::Text(format!("Gi1/0/{}", port)),
                 timestamp,
             ));
@@ -1248,28 +1248,28 @@ impl DemoSimulator {
             points.push(self.make_point(
                 Protocol::Snmp,
                 switch,
-                &format!("if/{}/ifOperStatus", port),
+                &format!("if/{}/oper_status", port),
                 TelemetryValue::Gauge(status),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Snmp,
                 switch,
-                &format!("if/{}/ifAdminStatus", port),
+                &format!("if/{}/admin_status", port),
                 TelemetryValue::Gauge(1.0),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Snmp,
                 switch,
-                &format!("if/{}/ifInOctets", port),
+                &format!("if/{}/in_octets", port),
                 TelemetryValue::Counter(in_octets),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Snmp,
                 switch,
-                &format!("if/{}/ifOutOctets", port),
+                &format!("if/{}/out_octets", port),
                 TelemetryValue::Counter(out_octets),
                 timestamp,
             ));
@@ -2577,7 +2577,7 @@ pub fn demo_alert_rules() -> Vec<crate::view::alerts::AlertRule> {
         },
         // Network interface down (Critical severity)
         {
-            let mut rule = AlertRule::new(4, "Interface Down", "ifOperStatus");
+            let mut rule = AlertRule::new(4, "Interface Down", "oper_status");
             rule.operator = ComparisonOp::GreaterThan;
             rule.threshold = 1.5; // 2 = down
             rule.severity = Severity::Critical;

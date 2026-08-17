@@ -40,7 +40,6 @@ pub struct TrapReceiver {
     /// Declared-publisher registry for the telemetry counters (drop QoS) —
     /// never a one-shot `session.put`.
     registry: Arc<zensight_common::PublisherRegistry>,
-    telemetry_prefix: String,
     events: EventPublisher,
     mib_resolver: Arc<MibResolver>,
     smi: Option<Arc<SmiResolver>>,
@@ -63,12 +62,6 @@ impl TrapReceiver {
         Self {
             config,
             registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh.clone())),
-            telemetry_prefix: zensight_sensor_core::v1::V1Context::for_producer(
-                &zensight_common::PROFILE,
-                "snmp",
-            )
-            .telemetry_prefix()
-            .into(),
             events: EventPublisher::new(Publisher::new(zenoh, "snmp", format)),
             mib_resolver,
             smi: None,
@@ -304,12 +297,18 @@ impl TrapReceiver {
             &metric,
             TelemetryValue::Counter(count),
         );
-        let key = format!("{}/{}/{}", self.telemetry_prefix, device, metric);
+        // #559: through the generated builder — slugs device and trap-id
+        // chunks so a resolved trap name can never trip the metric guard.
+        let key = zensight_common::registry::snmp::key(
+            &zensight_common::PROFILE.local_origin(),
+            &zensight_common::registry::snmp::Subject::device_metric(device, metric.split('/')),
+        );
+        let key = key.as_str();
         match encode(&point, self.format) {
             Ok(payload) => {
                 if let Err(e) = self
                     .registry
-                    .put(&key, payload, zensight_common::QosClass::Telemetry)
+                    .put(key, payload, zensight_common::QosClass::Telemetry)
                     .await
                 {
                     tracing::warn!(key = %key, error = %e, "trap counter publish failed");

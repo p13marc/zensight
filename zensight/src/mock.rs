@@ -140,43 +140,43 @@ pub mod snmp {
             telemetry_point(
                 Protocol::Snmp,
                 name,
-                "system/sysUpTime",
+                "system/uptime",
                 TelemetryValue::Gauge(86_400.0), // 1 day, seconds (#527)
             ),
             telemetry_point(
                 Protocol::Snmp,
                 name,
-                "system/sysName",
+                "system/name",
                 TelemetryValue::Text(name.to_string()),
             ),
             telemetry_point(
                 Protocol::Snmp,
                 name,
-                "if/1/ifInOctets",
+                "if/1/in_octets",
                 TelemetryValue::Counter(1_234_567_890),
             ),
             telemetry_point(
                 Protocol::Snmp,
                 name,
-                "if/1/ifOutOctets",
+                "if/1/out_octets",
                 TelemetryValue::Counter(987_654_321),
             ),
             telemetry_point(
                 Protocol::Snmp,
                 name,
-                "if/1/ifOperStatus",
+                "if/1/oper_status",
                 TelemetryValue::Gauge(1.0), // up
             ),
             telemetry_point(
                 Protocol::Snmp,
                 name,
-                "if/2/ifInOctets",
+                "if/2/in_octets",
                 TelemetryValue::Counter(555_666_777),
             ),
             telemetry_point(
                 Protocol::Snmp,
                 name,
-                "if/2/ifOutOctets",
+                "if/2/out_octets",
                 TelemetryValue::Counter(111_222_333),
             ),
         ]
@@ -187,7 +187,7 @@ pub mod snmp {
         let mut points = vec![telemetry_point(
             Protocol::Snmp,
             name,
-            "system/sysUpTime",
+            "system/uptime",
             TelemetryValue::Gauge(172_800.0), // 2 days, seconds (#527)
         )];
 
@@ -195,13 +195,13 @@ pub mod snmp {
             points.push(telemetry_point(
                 Protocol::Snmp,
                 name,
-                &format!("if/{}/ifInOctets", port),
+                &format!("if/{}/in_octets", port),
                 TelemetryValue::Counter((port as u64) * 1_000_000),
             ));
             points.push(telemetry_point(
                 Protocol::Snmp,
                 name,
-                &format!("if/{}/ifOutOctets", port),
+                &format!("if/{}/out_octets", port),
                 TelemetryValue::Counter((port as u64) * 500_000),
             ));
         }

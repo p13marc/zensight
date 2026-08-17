@@ -389,10 +389,9 @@ pub struct TestRig {
 /// Lowercase OID→name mappings for everything [`SimMib`] serves, in the same
 /// per-config `oid_names` style as `configs/snmp.json5`.
 ///
-/// Chunk-valid names are deliberate: the built-in MIB names (`sysUpTime.0`)
-/// violate the key grammar's lowercase chunk rule and trip the registry
-/// metric guard in debug builds — tracked as issue #559. Unmapped OIDs fall
-/// back to their dotted form, which is a valid chunk already.
+/// Since #559 the built-in MIB table emits the same profile-style names, so
+/// this table is no longer a guard workaround — it just keeps the harness's
+/// expected names explicit and independent of the builtins.
 pub fn test_oid_names() -> HashMap<String, String> {
     let mut names = HashMap::new();
     let mut add = |oid: String, name: &str| {
@@ -476,6 +475,17 @@ pub async fn rig(device: DeviceConfig) -> TestRig {
         sub,
         poller,
     }
+}
+
+/// [`rig`] with the production resolver: built-in MIB tables only (#559).
+/// A debug-build poll cycle through this rig proves the builtin names never
+/// trip the registry metric guard.
+pub async fn rig_with_builtins(device: DeviceConfig) -> TestRig {
+    let mut rig = rig(device).await;
+    let mut resolver = MibResolver::new();
+    resolver.load_builtin_mibs().expect("builtin mibs");
+    rig.poller.set_resolver(Arc::new(resolver));
+    rig
 }
 
 /// [`rig`] plus device profiles (#531): shipped base profiles are loaded,
