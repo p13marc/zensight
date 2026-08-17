@@ -17,19 +17,16 @@ use zensight_common::config::ZenohConfig;
 /// Rebuilding a `zenoh::Config` from scratch here would mean a rerun adapter
 /// that quietly subscribes to a keyspace nothing publishes to.
 pub fn build_isolated_zenoh_config(config: &ZenohConfig) -> anyhow::Result<zenoh::Config> {
-    let mut zenoh_config = zensight_common::session::build_config(&ZenohConfig {
-        // multicast off, via the shared knob
-        scouting: false,
+    // The isolate delta, via the shared knobs. RFC 09 §0.1: multicast and
+    // gossip are independent switches — an isolated *recording* wants both
+    // explicitly off (there is no hub to traverse), which is stricter than
+    // the isolated *deployment* posture.
+    let zenoh_config = zensight_common::session::build_config(&ZenohConfig {
+        scouting: Some(false),
+        gossip: Some(false),
         ..config.clone()
     })
     .map_err(|e| anyhow::anyhow!("failed to build Zenoh config: {e}"))?;
-
-    // The isolate delta. RFC 09 §0.1: multicast and gossip are independent
-    // switches — an isolated *recording* wants both off (there is no hub to
-    // traverse), which is stricter than the isolated *deployment* posture.
-    zenoh_config
-        .insert_json5("scouting/gossip/enabled", "false")
-        .map_err(|e| anyhow::anyhow!("failed to disable gossip scouting: {e}"))?;
 
     Ok(zenoh_config)
 }
@@ -73,7 +70,7 @@ mod tests {
             mode: "gateway".into(),
             connect: vec![],
             listen: vec![],
-            scouting: true,
+            scouting: Some(true),
             ..Default::default()
         };
         assert!(build_isolated_zenoh_config(&config).is_err());

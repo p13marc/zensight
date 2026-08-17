@@ -204,7 +204,15 @@ overrides applied on top of the file/settings config:
 | `ZENSIGHT_ZENOH_MODE` | override `mode` |
 | `ZENSIGHT_ZENOH_CONNECT` | override `connect` endpoints (comma-separated) |
 | `ZENSIGHT_ZENOH_LISTEN` | override `listen` endpoints (comma-separated) |
-| `ZENSIGHT_ZENOH_SCOUTING` | `false` disables multicast scouting (gossip unaffected) |
+| `ZENSIGHT_ZENOH_SCOUTING` | `false`/`true` sets multicast scouting explicitly |
+| `ZENSIGHT_ZENOH_GOSSIP` | `false`/`true` sets gossip scouting explicitly |
+
+When neither knob is set, the defaults are **mode-aware** (#626): a `client`
+with explicit `connect` endpoints gets both switches **off** — it dials its
+router and never needs discovery, and on an mTLS-only mesh every scouted or
+gossiped peer locator is an unreachable-peer WARN every few seconds — while
+peers (and connect-less clients, which need multicast to find a router at
+all) keep Zenoh's on-defaults.
 
 Implemented by `ZenohConfig::with_env_overrides()` (zensight-common), applied in
 both the sensor session (`session::connect`) and the GUI.
