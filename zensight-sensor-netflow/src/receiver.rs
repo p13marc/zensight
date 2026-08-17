@@ -4,7 +4,7 @@ use crate::config::{ListenerConfig, NetFlowConfig};
 use anyhow::{Context, Result};
 use netflow_parser::static_versions::v5::FlowSet as V5FlowSet;
 use netflow_parser::static_versions::v7::FlowSet as V7FlowSet;
-use netflow_parser::variable_versions::data_number::FieldValue;
+use netflow_parser::variable_versions::field_value::FieldValue;
 use netflow_parser::variable_versions::ipfix::{FlowSetBody as IpFixFlowSetBody, IPFixFieldPair};
 use netflow_parser::variable_versions::v9::{FlowSetBody as V9FlowSetBody, V9FieldPair};
 use netflow_parser::{NetflowPacket, NetflowParser};
@@ -108,9 +108,15 @@ async fn process_packet(
 
     // Parse the packet
     let mut parser_guard = parser.lock().await;
-    let packets = parser_guard.parse_bytes(data);
+    // 1.0: `parse_bytes` returns a `ParseResult` — the packets parsed before
+    // any error, plus the error that stopped parsing (the pre-1.0
+    // `NetflowPacket::Error` variant is gone).
+    let result = parser_guard.parse_bytes(data);
+    if let Some(e) = &result.error {
+        tracing::debug!("NetFlow parse error: {:?}", e);
+    }
 
-    for packet in packets {
+    for packet in result.packets {
         match packet {
             NetflowPacket::V5(v5) => {
                 for flow in &v5.flowsets {
@@ -158,8 +164,9 @@ async fn process_packet(
                     }
                 }
             }
-            NetflowPacket::Error(e) => {
-                tracing::debug!("NetFlow parse error: {:?}", e);
+            // `NetflowPacket` is #[non_exhaustive] since 1.0.
+            other => {
+                tracing::debug!("unhandled NetFlow packet variant: {:?}", other);
             }
         }
     }
@@ -388,8 +395,13 @@ fn parse_field_value(field_value: &FieldValue) -> FlowFieldValue {
     match field_value {
         FieldValue::Ip4Addr(addr) => FlowFieldValue::IpAddr(addr.to_string()),
         FieldValue::Ip6Addr(addr) => FlowFieldValue::IpAddr(addr.to_string()),
-        FieldValue::MacAddr(mac) => FlowFieldValue::MacAddr(mac.clone()),
-        FieldValue::String(s) => FlowFieldValue::String(s.clone()),
+        // 1.0: the wire bytes, formatted the way the crate itself does.
+        FieldValue::MacAddr(mac) => FlowFieldValue::MacAddr(format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        )),
+        // 1.0: `StringValue` carries the cleaned display string + raw bytes.
+        FieldValue::String(s) => FlowFieldValue::String(s.value.clone()),
         FieldValue::Vec(bytes) => {
             if bytes.len() <= 8 {
                 let mut value: u64 = 0;
@@ -401,12 +413,12 @@ fn parse_field_value(field_value: &FieldValue) -> FlowFieldValue {
                 FlowFieldValue::Bytes(bytes.clone())
             }
         }
-        FieldValue::Duration(dur) => FlowFieldValue::Uint(dur.as_millis() as u64),
-        FieldValue::ProtocolType(proto) => FlowFieldValue::Uint(*proto as u64),
+        FieldValue::Duration(dur) => FlowFieldValue::Uint(dur.as_duration().as_millis() as u64),
+        FieldValue::ProtocolType(proto) => FlowFieldValue::Uint(u8::from(*proto) as u64),
         FieldValue::Float64(f) => FlowFieldValue::Float(*f),
         FieldValue::DataNumber(dn) => {
             // DataNumber can be various integer types
-            use netflow_parser::variable_versions::data_number::DataNumber;
+            use netflow_parser::variable_versions::field_value::DataNumber;
             match dn {
                 DataNumber::U8(v) => FlowFieldValue::Uint(*v as u64),
                 DataNumber::I8(v) => FlowFieldValue::Int(*v as i64),
@@ -420,13 +432,19 @@ fn parse_field_value(field_value: &FieldValue) -> FlowFieldValue {
                 DataNumber::I64(v) => FlowFieldValue::Int(*v),
                 DataNumber::U128(v) => FlowFieldValue::Uint(*v as u64),
                 DataNumber::I128(v) => FlowFieldValue::Int(*v as i64),
+                // 1.0: an over-8-byte numeric field lands as raw bytes.
+                DataNumber::Vec(bytes) => FlowFieldValue::Bytes(bytes.clone()),
             }
         }
         FieldValue::ApplicationId(app_id) => FlowFieldValue::String(format!(
             "{}:{:?}",
             app_id.classification_engine_id, app_id.selector_id
         )),
-        FieldValue::Unknown(bytes) => FlowFieldValue::Bytes(bytes.clone()),
+        // 1.0 replaced `Unknown(bytes)` with a family of typed variants
+        // (TcpControlBits, FlowEndReason, NatEvent, …). None of them map to a
+        // numeric FlowFieldValue; keep them as their debug rendering so the
+        // information survives into labels instead of being dropped.
+        other => FlowFieldValue::String(format!("{other:?}")),
     }
 }
 
@@ -517,7 +535,8 @@ mod tests {
         assert_eq!(pkt.len(), 72);
 
         let mut parser = NetflowParser::default();
-        let packets = parser.parse_bytes(&pkt);
+        let result = parser.parse_bytes(&pkt);
+        assert!(result.is_ok(), "parse error: {:?}", result.error);
 
         let uint = |f: &FlowFieldValue| match f {
             FlowFieldValue::Uint(v) => *v,
@@ -529,7 +548,7 @@ mod tests {
         };
 
         let mut saw_flow = false;
-        for packet in packets {
+        for packet in result.packets {
             if let NetflowPacket::V5(v5) = packet {
                 for flow in &v5.flowsets {
                     let r = parse_v5_flow("1.2.3.4", "exp", flow, 7);
