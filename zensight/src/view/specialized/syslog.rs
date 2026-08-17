@@ -621,6 +621,7 @@ pub fn logs_view<'a>(
     messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
     export: Option<LogExport>,
+    fetch_error: Option<&str>,
 ) -> Element<'a, Message> {
     // Header: title + count + filter toggle (no per-device back button).
     let has_filters = filter_state.has_active_filters();
@@ -687,6 +688,20 @@ pub fn logs_view<'a>(
             ]
             .spacing(space::SM)
             .align_y(Alignment::Center),
+        ));
+    }
+    // History-fetch failure (#603): the local cache still backfills, so this
+    // is a caveat — but an unreachable sensor must not be indistinguishable
+    // from "there are no logs".
+    if let Some(err) = fetch_error {
+        content = content.push(card(
+            text(format!(
+                "Sensor history unavailable ({err}) — showing this viewer's cached logs only"
+            ))
+            .size(12)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).status_warning()),
+            }),
         ));
     }
     if filter_state.panel_open {

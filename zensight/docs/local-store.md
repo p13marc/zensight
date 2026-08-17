@@ -55,9 +55,23 @@ without limit.
 
 ### Logs view seeding
 
-The Logs view seeds from the cold store when it opens: on view open the frontend
-queries the `logs` table and delivers the results via `Message::LogHistoryLoaded`,
-so historical lines are available immediately without waiting for live traffic.
+The Logs view seeds from **two** sources when it opens, in parallel:
+
+1. the **sensors' durable stores** (#603) — the authoritative, unsampled
+   history. The frontend sends `@rpc/logs/events` with a `from=` bound (24 h,
+   or the picked time range), which is what routes the sensor to its redb
+   store rather than its 500-line hot ring.
+2. this **local cache** — the frontend queries the `logs` table and delivers
+   the rows via `Message::LogHistoryLoaded`.
+
+The local store is per-GUI-instance and template-sampled, so it is the offline
+path, not the source of truth: when no sensor answers, the feed degrades to
+cached history and says so (a banner names the fetch error — an unreachable
+sensor must not be indistinguishable from "there are no logs"). Rows from both
+sources dedup on `uid`, so the overlap is free.
+
+The 5 s live-tail refresh deliberately sends **no** `from=`, so the steady-state
+poll stays a cheap ring read.
 
 ## Event records
 

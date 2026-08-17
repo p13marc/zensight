@@ -54,6 +54,24 @@ const LOG_REFRESH_SECS: i64 = 5;
 const LOG_FETCH_OVERLAP_MS: i64 = 10_000;
 
 /// Reply cap requested per `@rpc/logs/events` fetch (#358).
+/// How far back the Logs view asks the sensors for history on open (#603).
+/// Matches the local cache's seed window so the authoritative and cached
+/// sources cover the same span and dedup cleanly.
+const LOG_BACKFILL_WINDOW_MS: i64 = 24 * 3_600_000;
+
+/// How far before an alert's timestamp the alert→Logs pivot looks (#603) —
+/// enough context to see what led up to it.
+const ALERT_PIVOT_LOOKBACK_MS: i64 = 3_600_000;
+
+/// What scopes one `@rpc/logs/events` fetch (#603). `from`/`to` are what
+/// route the sensor to its durable store; `since` alone reads the hot ring.
+#[derive(Debug, Default, Clone)]
+struct LogQuery {
+    since: Option<i64>,
+    from: Option<i64>,
+    to: Option<i64>,
+}
+
 const LOG_FETCH_MAX: usize = 500;
 
 /// Text input ID for dashboard search.
@@ -159,6 +177,10 @@ pub struct ZenSight {
     last_log_fetch_ms: Option<i64>,
     /// An `@rpc/logs/events` fetch is in flight (#358) — never stack fetches.
     log_fetch_inflight: bool,
+    /// Why the last log fetch failed (#603), surfaced on the Logs view.
+    /// Without this an unreachable logs sensor is indistinguishable from
+    /// "there are no logs" — the fetch error used to be a debug log only.
+    log_fetch_error: Option<String>,
     /// Whether the host identity details (facts + resolution group) are
     /// expanded in the merged host nav bar (#350). Persisted.
     identity_expanded: bool,
@@ -412,6 +434,7 @@ impl ZenSight {
             last_log_event_ms: None,
             last_log_fetch_ms: None,
             log_fetch_inflight: false,
+            log_fetch_error: None,
             identity_expanded: persistent.identity_expanded,
             current_view,
             stale_threshold_ms,
@@ -1320,6 +1343,7 @@ impl ZenSight {
                 unit,
                 pattern,
                 severity_min,
+                at_ms,
             } => {
                 // Alert → Logs pivot (#558): pre-filter the feed to the alert's
                 // context and open Logs (cold-store search-back included). A
@@ -1333,6 +1357,14 @@ impl ZenSight {
                     .set_message_filter(pattern.unwrap_or_default());
                 self.syslog_filter.min_severity = severity_min;
                 self.syslog_filter.alert_pivot = Some(rule);
+                // Scope history around when the alert fired (#603). The pivot
+                // used to leave the range at All, which sends no `from=` — so
+                // the sensors answered from their hot rings and an alert older
+                // than the last 500 lines opened an empty feed.
+                if let Some(at) = at_ms {
+                    self.syslog_filter.range_from =
+                        Some(at.saturating_sub(ALERT_PIVOT_LOOKBACK_MS));
+                }
                 return ControlFlow::Break(Task::done(Message::OpenLogs));
             }
             Message::ClearLogsAlertPivot => {
@@ -2488,13 +2520,17 @@ impl ZenSight {
                         Message::LogHistoryLoaded(logs)
                     }));
                 }
-                // On-demand seed (#358): per-line events no longer stream, so
-                // pull the sensors' current rings immediately on open. The
-                // periodic tick refresh keeps the view live afterwards.
+                // On-demand seed (#358/#603): per-line events no longer
+                // stream, so pull history on open — from the sensors'
+                // **durable** stores, not just their hot rings, so opening
+                // Logs shows real history instead of the last 500 lines that
+                // happened to still be buffered. The periodic tick refresh
+                // (ring-only, cheap) keeps the view live afterwards.
                 if !self.demo_mode && self.session.is_some() && !self.log_fetch_inflight {
                     self.log_fetch_inflight = true;
                     self.last_log_fetch_ms = Some(now_ms());
-                    tasks.push(self.query_log_events(None));
+                    self.log_fetch_error = None;
+                    tasks.push(self.query_log_history());
                 }
                 if !tasks.is_empty() {
                     return Task::batch(tasks);
@@ -2527,8 +2563,17 @@ impl ZenSight {
                             ));
                         }
                         self.merge_log_messages(msgs);
+                        self.log_fetch_error = None;
                     }
-                    Err(e) => tracing::debug!(error = %e, "log-events fetch failed"),
+                    Err(e) => {
+                        // #603: a failed history fetch used to be invisible —
+                        // the feed just looked empty, with no way to tell
+                        // "no logs" from "the sensor never answered". The
+                        // local cache still backfills, so this is a caveat on
+                        // the view, not a fatal state.
+                        tracing::debug!(error = %e, "log-events fetch failed");
+                        self.log_fetch_error = Some(e);
+                    }
                 }
             }
 
@@ -6904,7 +6949,12 @@ impl ZenSight {
                         max_lines,
                         busy: self.artifact_fetch.is_busy(),
                     });
-                crate::view::specialized::logs_view(&logs, &self.syslog_filter, export)
+                crate::view::specialized::logs_view(
+                    &logs,
+                    &self.syslog_filter,
+                    export,
+                    self.log_fetch_error.as_deref(),
+                )
             }
             CurrentView::Inventory => {
                 crate::view::inventory::inventory_view(&self.inventory, &self.entities, now_ms())
@@ -7334,20 +7384,21 @@ impl ZenSight {
     /// One `@rpc/logs/events` GET (#358): fans out to every logs sensor's
     /// queryable, drains ALL replies (one per sensor — never first-reply-wins),
     /// and concatenates the decoded records.
-    fn query_log_events(&self, since: Option<i64>) -> Task<Message> {
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::LogEventsLoaded(Err(
-                "Not connected to Zenoh".to_string()
-            )));
-        };
+    /// Build the `@rpc/logs/events` selector for one fetch.
+    ///
+    /// Pure and separated from the task so the selector is assertable — the
+    /// routing rule it encodes is not obvious: the sensor answers from its
+    /// **hot ring** unless `from`/`to`/`after_uid` is present, in which case
+    /// it reads the durable store (#544). So "give me history" means sending
+    /// a `from`, not merely a bigger `max`.
+    fn log_events_selector(&self, q: &LogQuery) -> String {
         // NB: zenoh selector parameters are `;`-separated (`Parameters`), not
         // `&` — the server reads them via `query.parameters().get(..)`.
-        // Fleet fan-in: every logs sensor answers, so target All (RFC 05 §2.1).
         let mut selector = format!(
             "{}?max={LOG_FETCH_MAX}",
             zensight_common::fleet_rpc_key("logs", "events")
         );
-        if let Some(since) = since {
+        if let Some(since) = q.since {
             selector.push_str(&format!(";since={since}"));
         }
         // Push the active message filter to the sensor (#554/#553): it filters
@@ -7359,14 +7410,56 @@ impl ZenSight {
         if !pattern.is_empty() && !pattern.contains([';', '?']) {
             selector.push_str(&format!(";pattern={pattern}"));
         }
-        // Push the active time-range bounds (#554) so the sensor scopes history
-        // server-side (#544 store `from=`/`to=`), not just the client buffer.
-        if let Some(from) = self.syslog_filter.range_from {
+        if let Some(from) = q.from {
             selector.push_str(&format!(";from={from}"));
         }
-        if let Some(to) = self.syslog_filter.frozen_at {
+        if let Some(to) = q.to {
             selector.push_str(&format!(";to={to}"));
         }
+        selector
+    }
+
+    /// Fetch the live tail: no `from`, so the sensor answers from its hot
+    /// ring. Cheap, and what the 5 s refresh runs.
+    fn query_log_events(&self, since: Option<i64>) -> Task<Message> {
+        self.run_log_query(LogQuery {
+            since,
+            from: self.syslog_filter.range_from,
+            to: self.syslog_filter.frozen_at,
+        })
+    }
+
+    /// Fetch history from the sensors' **durable** stores (#603).
+    ///
+    /// The local redb store is a per-GUI, template-sampled cache; the sensor's
+    /// store is the authoritative unsampled one. Opening Logs asks the sensors
+    /// for the window directly instead of relying on whatever this GUI
+    /// instance happened to see and keep. The local cache stays as the
+    /// offline path: it is seeded in parallel and deduped by uid, so an
+    /// unreachable sensor degrades to cached history rather than a blank feed.
+    fn query_log_history(&self) -> Task<Message> {
+        let now = now_ms();
+        // An explicit picker choice wins; otherwise the same 24 h the local
+        // cache seeds, so the two sources cover the same span.
+        let from = self
+            .syslog_filter
+            .range_from
+            .unwrap_or(now - LOG_BACKFILL_WINDOW_MS);
+        self.run_log_query(LogQuery {
+            since: None,
+            from: Some(from),
+            to: self.syslog_filter.frozen_at,
+        })
+    }
+
+    fn run_log_query(&self, q: LogQuery) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::LogEventsLoaded(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        // Fleet fan-in: every logs sensor answers, so target All (RFC 05 §2.1).
+        let selector = self.log_events_selector(&q);
         Task::future(async move {
             match session
                 .get(&selector)
@@ -8300,6 +8393,52 @@ mod log_fetch_tests {
         assert!(a.recent_logs.is_empty());
     }
 
+    /// #603: the selector is what decides whether the sensor answers from its
+    /// hot ring or its durable store — `from`/`to` route to the store, a bare
+    /// `since` does not. These assert the routing, since it is invisible in
+    /// the reply.
+    #[test]
+    fn selector_routes_history_to_the_durable_store() {
+        let mut a = app();
+
+        // Live tail: no time bounds, so the sensor reads its ring.
+        let live = a.log_events_selector(&LogQuery {
+            since: Some(1_000),
+            ..Default::default()
+        });
+        assert!(live.contains("since=1000"));
+        assert!(
+            !live.contains("from="),
+            "a tail must not hit the store: {live}"
+        );
+
+        // History: a `from` is present, which is what reaches the store.
+        let hist = a.log_events_selector(&LogQuery {
+            from: Some(500),
+            to: Some(900),
+            ..Default::default()
+        });
+        assert!(hist.contains("from=500"));
+        assert!(hist.contains("to=900"));
+        assert!(!hist.contains("since="));
+
+        // The active message filter is pushed server-side so the reply cap
+        // buys matching lines rather than arbitrary ones...
+        a.syslog_filter.set_message_filter("timeout".to_string());
+        let filtered = a.log_events_selector(&LogQuery::default());
+        assert!(filtered.contains("pattern=timeout"));
+
+        // ...unless it carries `;`/`?`, which would break the Parameters
+        // grammar — then it filters locally only.
+        a.syslog_filter
+            .set_message_filter("5\\d\\d?;drop".to_string());
+        let unsafe_pattern = a.log_events_selector(&LogQuery::default());
+        assert!(!unsafe_pattern.contains("pattern="), "{unsafe_pattern}");
+
+        // Every fetch is capped.
+        assert!(live.contains(&format!("max={LOG_FETCH_MAX}")));
+    }
+
     /// #558: pivoting from a log alert pre-filters the feed (unit + pattern +
     /// breadcrumb) and routes to the Logs view; clearing the pivot drops the
     /// breadcrumb.
@@ -8311,10 +8450,18 @@ mod log_fetch_tests {
             unit: Some("nginx.service".to_string()),
             pattern: Some("upstream timed out".to_string()),
             severity_min: Some(4),
+            at_ms: Some(1_700_000_000_000),
         });
         assert!(a.syslog_filter.selected_units.contains("nginx.service"));
         assert_eq!(a.syslog_filter.message_filter, "upstream timed out");
         assert_eq!(a.syslog_filter.min_severity, Some(4));
+        // #603: the pivot scopes history around the alert, so the query
+        // reaches the sensors' durable stores instead of their hot rings.
+        assert_eq!(
+            a.syslog_filter.range_from,
+            Some(1_700_000_000_000 - ALERT_PIVOT_LOOKBACK_MS),
+            "pivot sets a lookback window"
+        );
         assert_eq!(
             a.syslog_filter.alert_pivot.as_deref(),
             Some("log-error-budget")
