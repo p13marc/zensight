@@ -32,8 +32,8 @@ use crate::view::components::Sparkline;
 use crate::view::device::DeviceDetailState;
 
 pub use syslog::{
-    LogExport, LogTimeRange, SyslogFilterState, SyslogMessage, log_bundle_kind_from_filter,
-    logs_view, syslog_event_view, syslog_message_from_point,
+    LogExport, SyslogFilterState, SyslogMessage, log_bundle_kind_from_filter, logs_view,
+    syslog_event_view, syslog_message_from_point,
 };
 
 /// The active tab of a tabbed specialized view (#243, epic #257). Currently

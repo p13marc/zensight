@@ -19,6 +19,7 @@ use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::time_range::TimeRange;
 use crate::view::tokens::space;
 
 /// Syslog severity — the one canonical model (#557), re-exported under the name
@@ -195,7 +196,7 @@ pub struct SyslogFilterState {
     pub alert_pivot: Option<String>,
     /// Selected relative time window (#554). Displayed by the picker; resolved to
     /// [`Self::range_from`] against `now` when applied.
-    pub time_range: LogTimeRange,
+    pub time_range: TimeRange,
     /// Absolute lower time bound (epoch ms) resolved from [`Self::time_range`],
     /// pushed to the events query (`from=`) and the filtered export. `None` = all.
     pub range_from: Option<i64>,
@@ -211,12 +212,12 @@ impl SyslogFilterState {
             || self.invocation_id.is_some()
             || !self.app_filter.is_empty()
             || !self.message_filter.is_empty()
-            || self.time_range != LogTimeRange::All
+            || self.time_range != TimeRange::All
     }
 
     /// Select a relative time window and resolve its absolute lower bound against
-    /// `now_ms` (epoch ms). `LogTimeRange::All` clears the bound.
-    pub fn set_time_range(&mut self, range: LogTimeRange, now_ms: i64) {
+    /// `now_ms` (epoch ms). `TimeRange::All` clears the bound.
+    pub fn set_time_range(&mut self, range: TimeRange, now_ms: i64) {
         self.time_range = range;
         self.range_from = range.window_ms().map(|w| now_ms - w);
         self.modified = true;
@@ -306,7 +307,7 @@ impl SyslogFilterState {
         self.app_filter.clear();
         self.message_filter.clear();
         self.alert_pivot = None;
-        self.time_range = LogTimeRange::All;
+        self.time_range = TimeRange::All;
         self.range_from = None;
         self.modified = true;
     }
@@ -327,70 +328,6 @@ pub struct SeverityOption {
 impl std::fmt::Display for SeverityOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.label)
-    }
-}
-
-/// A relative time window for the Logs feed (#554). The picker stores the
-/// selection; the update handler resolves it to an absolute lower bound (epoch
-/// ms) against `now` when applied, so the pure view never needs the clock. The
-/// bound feeds both the events query (`from=`) and the filtered export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LogTimeRange {
-    /// No lower bound — everything the sensor/ring holds.
-    #[default]
-    All,
-    /// The last 15 minutes.
-    Last15m,
-    /// The last hour.
-    LastHour,
-    /// The last 6 hours.
-    Last6h,
-    /// The last 24 hours.
-    Last24h,
-    /// The last 7 days.
-    Last7d,
-}
-
-impl LogTimeRange {
-    /// The pick-list options, in display order.
-    pub const ALL: [LogTimeRange; 6] = [
-        LogTimeRange::All,
-        LogTimeRange::Last15m,
-        LogTimeRange::LastHour,
-        LogTimeRange::Last6h,
-        LogTimeRange::Last24h,
-        LogTimeRange::Last7d,
-    ];
-
-    /// Window length in milliseconds, or `None` for "all time" (no lower bound).
-    pub fn window_ms(self) -> Option<i64> {
-        let mins = match self {
-            LogTimeRange::All => return None,
-            LogTimeRange::Last15m => 15,
-            LogTimeRange::LastHour => 60,
-            LogTimeRange::Last6h => 6 * 60,
-            LogTimeRange::Last24h => 24 * 60,
-            LogTimeRange::Last7d => 7 * 24 * 60,
-        };
-        Some(mins * 60_000)
-    }
-
-    /// The label shown in the picker.
-    pub fn label(self) -> &'static str {
-        match self {
-            LogTimeRange::All => "All time",
-            LogTimeRange::Last15m => "Last 15 min",
-            LogTimeRange::LastHour => "Last hour",
-            LogTimeRange::Last6h => "Last 6 hours",
-            LogTimeRange::Last24h => "Last 24 hours",
-            LogTimeRange::Last7d => "Last 7 days",
-        }
-    }
-}
-
-impl std::fmt::Display for LogTimeRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.label())
     }
 }
 
@@ -838,7 +775,7 @@ fn render_filter_panel<'a>(
     let time_range_picker = row![
         text("Time range:").size(13),
         pick_list(
-            LogTimeRange::ALL.as_slice(),
+            TimeRange::ALL.as_slice(),
             Some(filter_state.time_range),
             Message::SetLogTimeRange,
         )
@@ -1729,7 +1666,7 @@ mod tests {
         assert_eq!(f.range_from, None);
         assert!(!f.has_active_filters());
 
-        f.set_time_range(LogTimeRange::LastHour, now);
+        f.set_time_range(TimeRange::LastHour, now);
         assert_eq!(f.range_from, Some(now - 3_600_000));
         assert!(f.has_active_filters());
         match log_bundle_kind_from_filter(&f) {
@@ -1737,7 +1674,7 @@ mod tests {
             other => panic!("expected LogBundle, got {other:?}"),
         }
 
-        f.set_time_range(LogTimeRange::All, now);
+        f.set_time_range(TimeRange::All, now);
         assert_eq!(f.range_from, None);
     }
 

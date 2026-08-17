@@ -475,7 +475,23 @@ impl ZenSight {
             firing_by_protocol: std::collections::HashMap::new(),
         };
 
-        (app, Task::none())
+        // Event-feed backfill (#578): the trap feed is on the dashboard, which
+        // is the boot view, so seed it from the cold store here rather than
+        // behind a view-open message the operator may never send.
+        let startup = match app.store.persistent() {
+            Some(store) => Task::future(async move {
+                let events = tokio::task::spawn_blocking(move || {
+                    store
+                        .query_events(crate::view::dashboard::SNMP_EVENT_RING)
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                Message::SnmpEventHistoryLoaded(events)
+            }),
+            None => Task::none(),
+        };
+        (app, startup)
     }
 
     /// Get the window title.
@@ -1757,7 +1773,46 @@ impl ZenSight {
                         events.truncate(crate::view::specialized::snmp::DEVICE_EVENT_RING);
                     }
                 }
+                // Persist (#578): the feed survives a GUI restart without
+                // requiring a bus-side storage on `**/events/**`.
+                self.store.record_event(record.clone());
                 self.dashboard.push_snmp_event(record);
+            }
+            Message::ToggleSnmpEventFilters => {
+                let filter = &mut self.dashboard.snmp_event_filter;
+                filter.open = !filter.open;
+            }
+            Message::SetSnmpEventDevice(device) => {
+                self.dashboard.snmp_event_filter.device = device;
+            }
+            Message::SetSnmpEventSeverity(severity) => {
+                self.dashboard.snmp_event_filter.severity = severity;
+            }
+            Message::SetSnmpEventKind(kind) => {
+                self.dashboard.snmp_event_filter.kind = kind;
+            }
+            Message::SetSnmpEventTimeRange(range) => {
+                // Resolved against the clock here so the view stays pure.
+                self.dashboard
+                    .snmp_event_filter
+                    .set_time_range(range, now_ms());
+            }
+            Message::SetSnmpEventSearch(search) => {
+                self.dashboard.snmp_event_filter.search = search;
+            }
+            Message::ClearSnmpEventFilters => {
+                self.dashboard.snmp_event_filter.clear();
+            }
+            Message::OpenAlertsForSource(source) => {
+                self.alerts.external_source_filter = Some(source);
+                self.set_view(CurrentView::Alerts);
+            }
+            Message::SnmpEventHistoryLoaded(events) => {
+                // Cold-store backfill on open; push_snmp_event dedups by ULID
+                // against whatever the live subscriber already delivered.
+                for record in events {
+                    self.dashboard.push_snmp_event(record);
+                }
             }
             Message::SnmpDiscoveryReport { source, report } => {
                 // LWW per publishing sensor origin (#579).
@@ -2284,8 +2339,9 @@ impl ZenSight {
                     self.ticks_since_flush = 0;
                     let metric_batch = self.store.take_flush_batch();
                     let log_batch = self.store.take_log_flush_batch();
+                    let event_batch = self.store.take_event_flush_batch();
                     // Only schedule the off-thread write if there's something to do.
-                    if metric_batch.is_some() || log_batch.is_some() {
+                    if metric_batch.is_some() || log_batch.is_some() || event_batch.is_some() {
                         // Prune aged-out buckets/log rows every Nth flush (#131,
                         // #107) so the redb file doesn't grow unbounded — bundled
                         // into the same off-thread task as the write.
@@ -2294,14 +2350,16 @@ impl ZenSight {
                         if prune {
                             self.flushes_since_prune = 0;
                         }
-                        // Either batch carries a clone of the same redb handle.
+                        // Any batch carries a clone of the same redb handle.
                         let store = metric_batch
                             .as_ref()
                             .map(|(s, _)| s.clone())
                             .or_else(|| log_batch.as_ref().map(|(s, _)| s.clone()))
+                            .or_else(|| event_batch.as_ref().map(|(s, _)| s.clone()))
                             .expect("at least one batch is Some");
                         let batch = metric_batch.map(|(_, b)| b).unwrap_or_default();
                         let logs = log_batch.map(|(_, l)| l).unwrap_or_default();
+                        let events = event_batch.map(|(_, e)| e).unwrap_or_default();
                         let now_ms = zensight_common::current_timestamp_millis();
                         // The chunk cache rides the same prune cadence
                         // (samples and logs have retention; without this the
@@ -2320,6 +2378,7 @@ impl ZenSight {
                             let res = tokio::task::spawn_blocking(move || {
                                 let n = store.write_batch(&batch).map_err(|e| e.to_string())?;
                                 store.write_logs(&logs).map_err(|e| e.to_string())?;
+                                store.write_events(&events).map_err(|e| e.to_string())?;
                                 if let Some(tags) = &sweep_tags {
                                     let chunks = crate::store::RedbContentStore::new(store.clone());
                                     match zblob::gc::sweep(&chunks, tags, &sweep_temps, []) {
@@ -2339,10 +2398,14 @@ impl ZenSight {
                                     let log_evicted = store
                                         .prune_logs(crate::store::LOG_STORE_MAX_ROWS)
                                         .map_err(|e| e.to_string())?;
-                                    if evicted > 0 || log_evicted > 0 {
+                                    let event_evicted = store
+                                        .prune_events(crate::store::EVENT_STORE_MAX_ROWS)
+                                        .map_err(|e| e.to_string())?;
+                                    if evicted > 0 || log_evicted > 0 || event_evicted > 0 {
                                         tracing::debug!(
                                             evicted,
                                             log_evicted,
+                                            event_evicted,
                                             "Pruned aged-out store rows"
                                         );
                                     }
@@ -7474,6 +7537,20 @@ impl ZenSight {
         // the Focus control is armed the moment a device can be selected at all.
         detail_state.focused = self.link.focus.as_deref() == Some(device_id.origin.as_str());
         detail_state.origin = Some(device_id.origin.clone());
+        // Seed the device's Events card from the fleet ring (#578). Without
+        // this a freshly-opened SNMP device shows "no records yet" even when
+        // the fleet feed is holding its traps — the per-device ring only ever
+        // filled from records that arrived *while* it was selected.
+        if device_id.protocol == Protocol::Snmp {
+            detail_state.snmp_detail.events = self
+                .dashboard
+                .snmp_events
+                .iter()
+                .filter(|e| e.source == device_id.source)
+                .take(crate::view::specialized::snmp::DEVICE_EVENT_RING)
+                .cloned()
+                .collect();
+        }
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
         // Project firing anomalies for this source into the netring view (#253).

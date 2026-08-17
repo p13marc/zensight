@@ -3,7 +3,7 @@
 The frontend persists telemetry to a bounded local store (`src/store.rs`) so
 history survives restart without growing unbounded on disk. It is a
 Netdata-style tiered time-series store backed by [redb](https://docs.rs/redb),
-with a separate keyed store for log events.
+with separate keyed stores for log events and event records.
 
 Metric history used to live only in an in-memory `VecDeque` (capped per metric)
 and was lost on restart. The store replaces that with a hot in-memory ring plus
@@ -59,6 +59,32 @@ The Logs view seeds from the cold store when it opens: on view open the frontend
 queries the `logs` table and delivers the results via `Message::LogHistoryLoaded`,
 so historical lines are available immediately without waiting for live traffic.
 
+## Event records
+
+Durable `events`-class records (SNMP traps today, #578) get their own redb
+`events` table keyed by the record's **ULID**. ULIDs sort chronologically, so
+the table is time-ordered by construction and "the most recent N events" is a
+bounded reverse range walk — the same shape as the logs table.
+
+There is deliberately **no sampler**: an event is already a rare, deliberate
+record, and dropping a trap would defeat the point of persisting them. The
+ULID key also makes writes idempotent, so a record delivered twice (the live
+subscriber overlapping a storage backfill) updates in place instead of
+duplicating.
+
+`EVENT_STORE_MAX_ROWS = 20_000` bounds the table — two orders below the log
+cap, because traps are rare and a trap storm should not evict a week of
+history. `prune_events` drops the oldest rows beyond it on the shared prune
+cadence.
+
+The fleet trap feed seeds from this table at **boot** (not on view open): the
+feed lives on the dashboard, which is the boot view, so the frontend queries
+`events` during `boot()` and delivers the rows via
+`Message::SnmpEventHistoryLoaded`. Records dedup by ULID against whatever the
+live subscriber has already delivered. The net effect is the one #578 asked
+for: the feed survives a GUI restart *without* requiring a bus-side Zenoh
+storage aligned on `**/events/**`.
+
 ## Async discipline
 
 The in-memory ring append is O(1) and runs inline on the Iced update thread.
@@ -67,9 +93,10 @@ Every redb read/write, by contrast, runs **off** the UI thread via
 cloned behind an `Arc`. The UI thread never blocks on disk I/O.
 
 The batching seam is explicit in the API: the in-memory side accumulates writes
-(`record`, `record_log`) and hands off `take_flush_batch` / `take_log_flush_batch`
-tuples of `(PersistentStore, rows)` to be flushed on a blocking task, keeping the
-redb transaction off the render path.
+(`record`, `record_log`, `record_event`) and hands off `take_flush_batch` /
+`take_log_flush_batch` / `take_event_flush_batch` tuples of
+`(PersistentStore, rows)` to be flushed on a blocking task, keeping the redb
+transaction off the render path.
 
 ## Other tables
 

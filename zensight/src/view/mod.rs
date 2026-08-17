@@ -29,6 +29,7 @@ pub mod shell;
 pub mod specialized;
 pub mod subject;
 pub mod theme;
+pub mod time_range;
 pub mod toast;
 pub mod tokens;
 pub mod topology;

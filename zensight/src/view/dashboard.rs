@@ -186,6 +186,8 @@ pub struct DashboardState {
     pub snmp_discovery: HashMap<String, zensight_common::DiscoveryReport>,
     /// Whether the discovery card shows the expanded proposal list (#579).
     pub snmp_discovery_open: bool,
+    /// Filter/search state for the fleet trap/event feed (#578).
+    pub snmp_event_filter: crate::view::overview::snmp::EventFilterState,
 }
 
 impl Default for DashboardState {
@@ -207,6 +209,7 @@ impl Default for DashboardState {
             snmp_events: std::collections::VecDeque::new(),
             snmp_discovery: HashMap::new(),
             snmp_discovery_open: false,
+            snmp_event_filter: Default::default(),
         }
     }
 }
@@ -508,10 +511,13 @@ pub fn dashboard_view<'a>(
     let overview_panel = overview_section(
         overview,
         &state.devices,
-        &state.snmp_interfaces,
-        &state.snmp_events,
-        &state.snmp_discovery,
-        state.snmp_discovery_open,
+        crate::view::overview::snmp::SnmpOverviewData {
+            interfaces: &state.snmp_interfaces,
+            events: &state.snmp_events,
+            event_filter: &state.snmp_event_filter,
+            discovery: &state.snmp_discovery,
+            discovery_open: state.snmp_discovery_open,
+        },
         firing_by_protocol,
     );
     let devices = render_device_grid(
