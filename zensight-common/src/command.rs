@@ -11,7 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 use zenkey::V1Context;
-use zenkey::grammar::BlobTier;
 
 /// The write procedure for a control topic: `…/@rpc/<producer>/<topic>/set`.
 ///
@@ -101,24 +100,28 @@ pub fn artifact_cancel_key(producer: &str) -> String {
 
 /// Tier-1 blob prefix: `<base>/v1/<origin>/@blob/artifact` — a produced
 /// artifact's manifest + chunks live under `…/artifact/<id>/**` (RFC 07 §2).
-pub fn artifact_blob_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .blob_prefix(BlobTier::Artifact)
+///
+/// Blob keys carry no producer chunk, so unlike the `@rpc` builders above
+/// these take no producer — the tier + the local origin is the whole address
+/// (`registry::blob::Tier`, generated from the `[[blob]]` declarations).
+pub fn artifact_blob_prefix() -> String {
+    crate::registry::blob::Tier::Artifact
+        .prefix_at(&crate::PROFILE.local_origin())
         .into()
 }
 
 /// Tier-2 content-store prefix: `<base>/v1/<origin>/@blob/store` — chunks
 /// at `…/store/<algo>/<hash>`, immutable ⇒ cacheable fleet-wide.
-pub fn artifact_store_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .blob_prefix(BlobTier::Store)
+pub fn artifact_store_prefix() -> String {
+    crate::registry::blob::Tier::Store
+        .prefix_at(&crate::PROFILE.local_origin())
         .into()
 }
 
 /// Tier-2 tree-index prefix: `<base>/v1/<origin>/@blob/tree`.
-pub fn artifact_tree_prefix(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .blob_prefix(BlobTier::Tree)
+pub fn artifact_tree_prefix() -> String {
+    crate::registry::blob::Tier::Tree
+        .prefix_at(&crate::PROFILE.local_origin())
         .into()
 }
 
@@ -180,11 +183,11 @@ mod tests {
         assert!(artifact_request_key(p).ends_with("/@rpc/netlink/artifact/request"));
         assert!(artifact_status_key(p).ends_with("/@rpc/netlink/artifact/status"));
         assert!(artifact_cancel_key(p).ends_with("/@rpc/netlink/artifact/cancel"));
-        assert!(artifact_blob_prefix(p).ends_with("/@blob/artifact"));
-        assert!(artifact_store_prefix(p).ends_with("/@blob/store"));
-        assert!(artifact_tree_prefix(p).ends_with("/@blob/tree"));
+        assert!(artifact_blob_prefix().ends_with("/@blob/artifact"));
+        assert!(artifact_store_prefix().ends_with("/@blob/store"));
+        assert!(artifact_tree_prefix().ends_with("/@blob/tree"));
         // Control procedures and blob delivery live on different planes.
-        assert!(!artifact_request_key(p).starts_with(&artifact_blob_prefix(p)));
+        assert!(!artifact_request_key(p).starts_with(&artifact_blob_prefix()));
     }
 
     #[test]

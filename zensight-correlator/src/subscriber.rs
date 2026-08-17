@@ -15,7 +15,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::{info, trace, warn};
-use zenkey::grammar::{Class, ClassOrPlane};
 use zenoh::Session;
 use zenoh::sample::{Sample, SampleKind};
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
@@ -124,25 +123,18 @@ fn is_put(sample: &Sample) -> bool {
 /// `v1/<origin>/state/<sensor>/evidence/device/<device>` — base-relative,
 /// because the session namespace already stripped the base on ingress (#466).
 ///
-/// This was a hand-rolled `split('/')` walk that also had to assert the base
-/// chunk by hand. Going through the grammar deletes both problems at once: the
-/// base is not the parser's business, and the chunk positions come from the
-/// grammar rather than from counting (RFC 08 §1, issue #475).
+/// Refined through the registry's parse direction rather than by positional
+/// chunk matching: `refine_key` resolves the producer and the registered
+/// subject, and `common_state()` names the RFC 06 evidence family — so the
+/// chunk positions come from the registry, not from counting (RFC 08 §1),
+/// and an unregistered subject "does not exist" here either.
 ///
 /// A `…/evidence/self` tombstone carries only the origin — the store keys
 /// claims by the payload's source, so it just ages out by TTL instead.
 fn parse_host_evidence_key(key: &str) -> Option<(String, String)> {
-    let parsed = zensight_common::keyexpr::parse_key(key)?;
-    if !matches!(parsed.class, ClassOrPlane::Class(Class::State)) {
-        return None;
-    }
-    let sensor = parsed.producer.as_ref()?.name().to_string();
-    match parsed.subject.as_slice() {
-        [evidence, device_kw, device]
-            if *evidence == "evidence" && *device_kw == "device" && !device.is_empty() =>
-        {
-            Some((sensor, device.to_string()))
-        }
+    let (_, sensor, subject) = zensight_common::keyexpr::refine_key(key)?;
+    match subject.common_state()? {
+        zenkey::CommonState::EvidenceDevice { device } => Some((sensor, device.to_string())),
         _ => None,
     }
 }

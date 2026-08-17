@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
         // The concrete prefix is captured once and travels with the server, so
         // every capture record can name the literal origin serving its bytes
         // (RFC 07 §3) instead of leaving the consumer to wildcard for it.
-        let blob_prefix = zensight_common::artifact_blob_prefix(&producer);
+        let blob_prefix = zensight_common::artifact_blob_prefix();
         let blob = zblob::BlobServer::new(
             runner.session(),
             zblob::ServePrefix::new(blob_prefix.clone()).expect("an own-origin prefix is concrete"),

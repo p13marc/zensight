@@ -247,8 +247,7 @@ impl ArtifactChannel {
         let serve = |prefix: String| {
             zblob::ServePrefix::new(prefix).expect("own-origin prefix is concrete")
         };
-        let blob =
-            wants_blob.then(|| BlobServer::new(&session, serve(artifact_blob_prefix(&producer))));
+        let blob = wants_blob.then(|| BlobServer::new(&session, serve(artifact_blob_prefix())));
         let (store, tags, tags_dir, tree_server) = if wants_tree {
             // A durable store when a Tree producer names a state dir; memory
             // otherwise (the pre-durable behavior). A configured dir that
@@ -293,8 +292,8 @@ impl ArtifactChannel {
             };
             let tree_server = TreeServer::new(
                 &session,
-                serve(artifact_store_prefix(&producer)),
-                serve(artifact_tree_prefix(&producer)),
+                serve(artifact_store_prefix()),
+                serve(artifact_tree_prefix()),
                 store.clone(),
             );
             (Some(store), Some(tags), tags_dir, Some(tree_server))
@@ -689,7 +688,7 @@ impl ArtifactChannel {
                     kind: slug.to_string(),
                     delivery: Delivery::Blob {
                         manifest,
-                        blob_prefix: artifact_blob_prefix(&self.producer),
+                        blob_prefix: artifact_blob_prefix(),
                     },
                     expires_ms,
                 };
@@ -726,7 +725,7 @@ impl ArtifactChannel {
                     kind: slug.to_string(),
                     delivery: Delivery::Blob {
                         manifest,
-                        blob_prefix: artifact_blob_prefix(&self.producer),
+                        blob_prefix: artifact_blob_prefix(),
                     },
                     expires_ms,
                 };
@@ -882,8 +881,8 @@ impl ArtifactChannel {
                     kind: slug.to_string(),
                     delivery: Delivery::Tree {
                         root,
-                        store_prefix: artifact_store_prefix(&self.producer),
-                        tree_prefix: artifact_tree_prefix(&self.producer),
+                        store_prefix: artifact_store_prefix(),
+                        tree_prefix: artifact_tree_prefix(),
                         summary,
                     },
                     expires_ms,

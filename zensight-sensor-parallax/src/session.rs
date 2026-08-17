@@ -697,13 +697,17 @@ impl SessionManager {
             }
         };
 
-        // Declare the media publisher on the profile's concrete key.
-        let key = {
-            let ctx = self.publisher.v1();
-            match profile {
-                Profile::Video(idx) => ctx.media_video_key(stream, "h264", self.tier_name(idx)),
-                Profile::Preview => ctx.media_key(&[stream, "preview", "jpeg"]),
-            }
+        // Declare the media publisher on the profile's concrete key — built
+        // with the generated registry `Media` builders, so what this sensor
+        // publishes and what the viewer subscribes to agree with the
+        // `[[media]]` declarations in parallax.toml by construction.
+        let key: String = {
+            use zensight_common::registry::parallax::{Media, media_key};
+            let m = match profile {
+                Profile::Video(idx) => Media::video(stream, "h264", self.tier_name(idx)),
+                Profile::Preview => Media::preview_jpeg(stream),
+            };
+            media_key(&zensight_common::PROFILE.local_origin(), &m).into()
         };
         let media = match self.publisher.raw_media_publisher(key.clone()).await {
             Ok(p) => Arc::new(p),

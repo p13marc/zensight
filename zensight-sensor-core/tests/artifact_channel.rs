@@ -733,8 +733,8 @@ async fn tree_probe_and_index_fetch_verify_a_snapshot() {
 
     let tclient = TreeClient::new(
         &session,
-        zblob::QueryPrefix::new(zensight_common::artifact_store_prefix(prefix)).unwrap(),
-        zblob::QueryPrefix::new(zensight_common::artifact_tree_prefix(prefix)).unwrap(),
+        zblob::QueryPrefix::new(zensight_common::artifact_store_prefix()).unwrap(),
+        zblob::QueryPrefix::new(zensight_common::artifact_tree_prefix()).unwrap(),
     );
 
     // The probe is four numbers whatever the snapshot's size, and the serving

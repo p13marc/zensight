@@ -14,9 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use zensight_common::{
-    AssetRecord, HostEvidence, NameObservation, host_evidence_key, name_observation_key,
-};
+use zensight_common::registry::netring as netring_registry;
+use zensight_common::{AssetRecord, HostEvidence, NameObservation, PROFILE};
 use zensight_sensor_core::AdvancedPublisherRegistry;
 
 use crate::config::EvidenceConfig;
@@ -205,7 +204,11 @@ pub async fn run_asset_evidence(
             ) {
                 continue;
             }
-            let key = host_evidence_key("netring", &ev.source);
+            let key: String = netring_registry::key(
+                &PROFILE.local_origin(),
+                &netring_registry::Subject::evidence_device(&ev.source),
+            )
+            .into();
             if let Err(e) = registry.publish_serializable(&key, &ev).await {
                 tracing::warn!(error = %e, mac = %mac, "netring: asset-evidence publish failed");
                 continue;
@@ -254,7 +257,11 @@ pub async fn run_name_evidence(
             items.truncate(NAME_MAX_PER_BATCH);
         }
         for obs in items {
-            let key = name_observation_key("netring", &ip_slug(&obs.ip));
+            let key: String = netring_registry::key(
+                &PROFILE.local_origin(),
+                &netring_registry::Subject::evidence_names(ip_slug(&obs.ip)),
+            )
+            .into();
             if let Err(e) = registry.publish_serializable(&key, &obs).await {
                 tracing::warn!(error = %e, ip = %obs.ip, "netring: name-evidence publish failed");
             }
