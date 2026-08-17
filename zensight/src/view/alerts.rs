@@ -294,6 +294,9 @@ pub struct AlertsState {
     /// Source filter for the external-alerts feed (#27). `None` = all sources;
     /// otherwise only alerts from this source are shown.
     pub external_source_filter: Option<String>,
+    /// Protocol filter for the external-alerts feed (#582). `None` = all;
+    /// set by the pill row or an overview tile's click-through.
+    pub external_protocol_filter: Option<zensight_common::Protocol>,
     /// Saved filter presets (#27): named severity+source combinations the user
     /// can re-apply in one click. Persisted in `PersistentSettings`.
     pub alert_filter_presets: Vec<AlertFilterPreset>,
@@ -363,6 +366,7 @@ impl AlertsState {
             timelines: HashMap::new(),
             external_severity_filter: None,
             external_source_filter: None,
+            external_protocol_filter: None,
             alert_filter_presets: Vec::new(),
         }
     }
@@ -585,6 +589,11 @@ impl AlertsState {
         }
         if let Some(src) = &self.external_source_filter
             && &alert.source != src
+        {
+            return false;
+        }
+        if let Some(proto) = self.external_protocol_filter
+            && alert.protocol != proto
         {
             return false;
         }
@@ -1268,6 +1277,39 @@ fn render_alert_filter_pills<'a>(
     }
 
     let mut col = Column::new().spacing(space::XS).push(sev_row);
+
+    // Protocol row (#582): shown when more than one protocol is firing, or a
+    // protocol filter is active (an overview tile's click-through must stay
+    // visible and clearable even when only its own protocol fires).
+    let mut protocols: Vec<zensight_common::Protocol> =
+        state.external.values().map(|a| a.protocol).collect();
+    protocols.sort_by_key(std::string::ToString::to_string);
+    protocols.dedup();
+    let active_proto = state.external_protocol_filter;
+    if protocols.len() > 1 || active_proto.is_some() {
+        let mut proto_row = row![
+            text("Protocol").size(font::CAPTION).style(|theme: &Theme| {
+                text::Style {
+                    color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                }
+            }),
+            pill(
+                "All".into(),
+                active_proto.is_none(),
+                Message::SetAlertProtocolFilter(None)
+            ),
+        ]
+        .spacing(space::XS)
+        .align_y(Alignment::Center);
+        for p in protocols {
+            proto_row = proto_row.push(pill(
+                p.to_string(),
+                active_proto == Some(p),
+                Message::SetAlertProtocolFilter(Some(p)),
+            ));
+        }
+        col = col.push(proto_row.wrap());
+    }
 
     // Source row only when more than one source is firing (a single source needs
     // no filter). Always offers "All" to reset.

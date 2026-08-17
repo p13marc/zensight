@@ -991,6 +991,11 @@ pub enum Message {
     SetAlertSeverityFilter(Option<zensight_common::AlertSeverity>),
     /// Filter the external-alerts feed by source (`None` = all) (#27).
     SetAlertSourceFilter(Option<String>),
+    /// Filter the external-alerts feed to one protocol (#582). `None` = all.
+    SetAlertProtocolFilter(Option<zensight_common::Protocol>),
+    /// Open the Alerts view pre-filtered to a protocol — the overview tiles'
+    /// click-through (#582).
+    OpenAlertsForProtocol(zensight_common::Protocol),
     /// Save the current external-alert filter combination as a preset (#27).
     SaveAlertFilterPreset,
     /// Apply a saved external-alert filter preset by index (#27).

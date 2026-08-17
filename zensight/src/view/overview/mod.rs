@@ -69,6 +69,7 @@ pub fn overview_section<'a>(
     snmp_events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
     snmp_discovery: &'a HashMap<String, zensight_common::DiscoveryReport>,
     snmp_discovery_open: bool,
+    firing_by_protocol: &'a HashMap<Protocol, usize>,
 ) -> Element<'a, Message> {
     // Count devices by protocol
     let protocol_counts = count_devices_by_protocol(devices);
@@ -113,7 +114,34 @@ pub fn overview_section<'a>(
             .filter(|(id, _)| id.protocol == protocol)
             .collect();
 
-        match protocol {
+        // Firing-alert headline tile (#582), same for every protocol tab:
+        // count of this protocol's firing external alerts, clicking through
+        // to the Alerts view pre-filtered to it.
+        let firing = firing_by_protocol.get(&protocol).copied().unwrap_or(0);
+        let alert_tile: Element<'a, Message> = if firing > 0 {
+            button(
+                text(format!(
+                    "{firing} firing alert{} →",
+                    if firing == 1 { "" } else { "s" }
+                ))
+                .size(12)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).status_error()),
+                }),
+            )
+            .on_press(Message::OpenAlertsForProtocol(protocol))
+            .style(iced::widget::button::text)
+            .into()
+        } else {
+            text("No firing alerts")
+                .size(12)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                })
+                .into()
+        };
+
+        let body = match protocol {
             Protocol::Snmp => snmp::snmp_overview(
                 &protocol_devices,
                 snmp_interfaces,
@@ -131,7 +159,8 @@ pub fn overview_section<'a>(
             Protocol::Opcua => generic_overview(&protocol_devices, "OPC-UA nodes"),
             Protocol::Systemd => generic_overview(&protocol_devices, "systemd units"),
             Protocol::Parallax => generic_overview(&protocol_devices, "video streams"),
-        }
+        };
+        column![alert_tile, body].spacing(8).into()
     } else {
         text("Select a protocol tab to view aggregated metrics")
             .size(12)
