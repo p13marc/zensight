@@ -195,14 +195,14 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Detecto
     let cmd_key = command_key(&producer, DETECTORS_TOPIC);
     let stat_key = status_key(&producer, DETECTORS_TOPIC);
 
-    let subscriber = match session.declare_queryable(&cmd_key).await {
+    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to detector commands");
             return;
         }
     };
-    let queryable = match session.declare_queryable(&stat_key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &stat_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %stat_key, "netring: failed to declare detector status queryable");
@@ -276,14 +276,14 @@ pub async fn run_capture_filter(
     let cmd_key = command_key(&producer, CAPTURE_FILTER_TOPIC);
     let stat_key = status_key(&producer, CAPTURE_FILTER_TOPIC);
 
-    let subscriber = match session.declare_queryable(&cmd_key).await {
+    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to capture-filter commands");
             return;
         }
     };
-    let queryable = match session.declare_queryable(&stat_key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &stat_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %stat_key, "netring: failed to declare capture-filter status queryable");
@@ -428,14 +428,14 @@ pub async fn run_threat_intel(
     let cmd_key = command_key(&producer, THREAT_INTEL_TOPIC);
     let stat_key = status_key(&producer, THREAT_INTEL_TOPIC);
 
-    let subscriber = match session.declare_queryable(&cmd_key).await {
+    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to threat-intel commands");
             return;
         }
     };
-    let queryable = match session.declare_queryable(&stat_key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &stat_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %stat_key, "netring: failed to declare threat-intel status queryable");
@@ -616,14 +616,14 @@ pub async fn run_capture_disk(
     let cmd_key = command_key(&producer, CAPTURE_DISK_TOPIC);
     let stat_key = status_key(&producer, CAPTURE_DISK_TOPIC);
 
-    let subscriber = match session.declare_queryable(&cmd_key).await {
+    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to capture-disk commands");
             return;
         }
     };
-    let queryable = match session.declare_queryable(&stat_key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &stat_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %stat_key, "netring: failed to declare capture-disk status queryable");

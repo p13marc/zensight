@@ -130,7 +130,7 @@ fn filter_ring(
 /// Serve the `flows` read procedure (`?exporter=…;max=…`) until the session
 /// closes. Replies newest-first JSON `Vec<FlowRecord>` on the concrete key.
 pub async fn serve_flows(session: Arc<zenoh::Session>, key: String, ring: FlowRing) {
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "flows: declare queryable failed");

@@ -400,21 +400,15 @@ impl ArtifactChannel {
 
     async fn run_inner(self: &ArtifactChannel) -> anyhow::Result<()> {
         let request_key = artifact_request_key(&self.producer);
-        let req_q = self
-            .session
-            .declare_queryable(request_key.as_str())
+        let req_q = zensight_common::served::serve_queryable(&self.session, request_key.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("declare artifact request queryable: {e}"))?;
         let status_key = artifact_status_key(&self.producer);
-        let status_q = self
-            .session
-            .declare_queryable(status_key.as_str())
+        let status_q = zensight_common::served::serve_queryable(&self.session, status_key.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("declare artifact status queryable: {e}"))?;
         let cancel_key = artifact_cancel_key(&self.producer);
-        let cancel_q = self
-            .session
-            .declare_queryable(cancel_key.as_str())
+        let cancel_q = zensight_common::served::serve_queryable(&self.session, cancel_key.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("declare artifact cancel queryable: {e}"))?;
 

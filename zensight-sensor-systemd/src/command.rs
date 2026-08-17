@@ -33,14 +33,14 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Sentine
     let cmd_key = command_key(&producer, EXPECTATIONS_TOPIC);
     let stat_key = status_key(&producer, EXPECTATIONS_TOPIC);
 
-    let subscriber = match session.declare_queryable(&cmd_key).await {
+    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "sentinel: subscribe to commands failed");
             return;
         }
     };
-    let queryable = match session.declare_queryable(&stat_key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &stat_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %stat_key, "sentinel: declare status queryable failed");

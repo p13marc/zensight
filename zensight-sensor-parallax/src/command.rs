@@ -23,7 +23,7 @@ pub const STREAMS_TOPIC: &str = "streams";
 pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: SessionHandle) {
     let cmd_key = command_key(&producer, STREAM_TOPIC);
 
-    let subscriber = match session.declare_queryable(&cmd_key).await {
+    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "stream: failed to declare command queryable");

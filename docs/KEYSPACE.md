@@ -85,6 +85,16 @@ zensight/v1/@catalog/…                                   the identity catalog
   catch-all makes the lint vacuously true (issue #468). `snmp`/`modbus`/`gnmi`/
   `netflow` keep a rest-var by design: their metric tree belongs to the polled
   device, not to us.
+- **The registry must not lie** (RFC 08 §6.1, #484). The check above runs one
+  direction — *published ⊆ registered*. The reverse — *registered ⊆ served* —
+  is a distinct MUST, and the first does not imply it: a registry may be a
+  strict superset of what the code does and every published key still builds.
+  That superset is precisely what `introspect` hands the fleet as truth, and
+  the #453 audit found **seven** such surfaces. So every queryable is declared
+  through `zensight_common::served::serve_queryable` (CI bans raw
+  `declare_queryable`), and each producer checks its registry slice against
+  what it actually declared at the moment it starts serving `introspect` —
+  debug panic, release warn, the same posture as the metric guard.
 - **Type table + self-description** (RFC 08 §5/§7):
   [`zensight-common/registry/types.toml`](../zensight-common/registry/types.toml)
   is the RFC 08 §5 type table — a registry `type`/`request`/`reply` name with no

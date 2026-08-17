@@ -110,7 +110,7 @@ async fn dump_sockets(conn: &Connection<SockDiag>) -> Vec<SocketRow> {
 /// snapshot, trimmed to `?top=N` (default 100).
 pub async fn run_query(session: Arc<zenoh::Session>, producer: String, shared: OwnerBandwidth) {
     let key = zensight_common::command::query_key(&producer, "bandwidth");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "query: declare bandwidth failed");

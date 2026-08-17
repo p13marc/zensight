@@ -120,17 +120,16 @@ async fn main() -> Result<()> {
         tracing::info!("Dynamic filters enabled, listening on {}", command_key);
 
         // Serve filter writes as an @rpc procedure (RFC 05; epic #453).
-        let subscriber = session
-            .declare_queryable(&command_key)
+        let subscriber = zensight_common::served::serve_queryable(&session, &command_key)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to declare filter/set queryable: {}", e))?;
 
         // Declare queryable for filter status
         let filter_manager_for_status = filter_manager_for_commands.clone();
-        let queryable = session_for_commands
-            .declare_queryable(&status_key)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to declare status queryable: {}", e))?;
+        let queryable =
+            zensight_common::served::serve_queryable(&session_for_commands, &status_key)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to declare status queryable: {}", e))?;
 
         // Spawn command handler task
         let filter_manager_cmd = filter_manager_for_commands.clone();

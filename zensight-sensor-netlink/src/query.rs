@@ -101,70 +101,78 @@ pub async fn run(
     let nft_key = zensight_common::command::query_key(&producer, "nft");
     let bandwidth_key = zensight_common::command::query_key(&producer, "bandwidth");
 
-    let routes_q = match session.declare_queryable(&routes_key).await {
+    let routes_q = match zensight_common::served::serve_queryable(&session, &routes_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %routes_key, "query: declare routes failed");
             return;
         }
     };
-    let neighbors_q = match session.declare_queryable(&neighbors_key).await {
+    let neighbors_q = match zensight_common::served::serve_queryable(&session, &neighbors_key).await
+    {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %neighbors_key, "query: declare neighbors failed");
             return;
         }
     };
-    let sockets_q = match session.declare_queryable(&sockets_key).await {
+    let sockets_q = match zensight_common::served::serve_queryable(&session, &sockets_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %sockets_key, "query: declare sockets failed");
             return;
         }
     };
-    let addresses_q = match session.declare_queryable(&addresses_key).await {
+    let addresses_q = match zensight_common::served::serve_queryable(&session, &addresses_key).await
+    {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %addresses_key, "query: declare addresses failed");
             return;
         }
     };
-    let events_q = match session.declare_queryable(&events_key).await {
+    let events_q = match zensight_common::served::serve_queryable(&session, &events_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %events_key, "query: declare events failed");
             return;
         }
     };
-    let route_changes_q = match session.declare_queryable(&route_changes_key).await {
+    let route_changes_q = match zensight_common::served::serve_queryable(
+        &session,
+        &route_changes_key,
+    )
+    .await
+    {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %route_changes_key, "query: declare route_changes failed");
             return;
         }
     };
-    let tc_q = match session.declare_queryable(&tc_key).await {
+    let tc_q = match zensight_common::served::serve_queryable(&session, &tc_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %tc_key, "query: declare tc failed");
             return;
         }
     };
-    let xfrm_q = match session.declare_queryable(&xfrm_key).await {
+    let xfrm_q = match zensight_common::served::serve_queryable(&session, &xfrm_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %xfrm_key, "query: declare xfrm failed");
             return;
         }
     };
-    let nft_q = match session.declare_queryable(&nft_key).await {
+    let nft_q = match zensight_common::served::serve_queryable(&session, &nft_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %nft_key, "query: declare nft failed");
             return;
         }
     };
-    let bandwidth_q = match session.declare_queryable(&bandwidth_key).await {
+    let bandwidth_q = match zensight_common::served::serve_queryable(&session, &bandwidth_key).await
+    {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %bandwidth_key, "query: declare bandwidth failed");
@@ -312,14 +320,18 @@ pub async fn run_ebpf_queries(
 ) {
     let retransmits_key = zensight_common::command::query_key(&producer, "retransmits");
     let connections_key = zensight_common::command::query_key(&producer, "connections");
-    let retransmits_q = match session.declare_queryable(&retransmits_key).await {
+    let retransmits_q = match zensight_common::served::serve_queryable(&session, &retransmits_key)
+        .await
+    {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %retransmits_key, "query: declare retransmits failed");
             return;
         }
     };
-    let connections_q = match session.declare_queryable(&connections_key).await {
+    let connections_q = match zensight_common::served::serve_queryable(&session, &connections_key)
+        .await
+    {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %connections_key, "query: declare connections failed");

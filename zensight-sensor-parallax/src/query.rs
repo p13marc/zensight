@@ -27,7 +27,7 @@ pub async fn run(
     handle: SessionHandle,
 ) {
     let key = query_key(&producer, "streams");
-    let queryable = match session.declare_queryable(&key).await {
+    let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %key, "streams: failed to declare catalogue queryable");

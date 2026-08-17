@@ -163,42 +163,42 @@ pub async fn run(
     let cgroups_key = zensight_common::command::query_key(&producer, "cgroups");
     let unit_file_key = zensight_common::command::nested_query_key(&producer, "unit", "file");
 
-    let units_q = match session.declare_queryable(&units_key).await {
+    let units_q = match zensight_common::served::serve_queryable(&session, &units_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %units_key, "query: declare units failed");
             return;
         }
     };
-    let failed_q = match session.declare_queryable(&failed_key).await {
+    let failed_q = match zensight_common::served::serve_queryable(&session, &failed_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %failed_key, "query: declare failed failed");
             return;
         }
     };
-    let unit_q = match session.declare_queryable(&unit_key).await {
+    let unit_q = match zensight_common::served::serve_queryable(&session, &unit_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %unit_key, "query: declare unit failed");
             return;
         }
     };
-    let events_q = match session.declare_queryable(&events_key).await {
+    let events_q = match zensight_common::served::serve_queryable(&session, &events_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %events_key, "query: declare events failed");
             return;
         }
     };
-    let timers_q = match session.declare_queryable(&timers_key).await {
+    let timers_q = match zensight_common::served::serve_queryable(&session, &timers_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %timers_key, "query: declare timers failed");
             return;
         }
     };
-    let cgroups_q = match session.declare_queryable(&cgroups_key).await {
+    let cgroups_q = match zensight_common::served::serve_queryable(&session, &cgroups_key).await {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %cgroups_key, "query: declare cgroups failed");
@@ -208,7 +208,7 @@ pub async fn run(
     // Opt-in: unit files routinely carry credentials, so a host does not serve
     // them unless asked to. When off the queryable is not declared at all.
     let unit_file_q = if expose_unit_files {
-        match session.declare_queryable(&unit_file_key).await {
+        match zensight_common::served::serve_queryable(&session, &unit_file_key).await {
             Ok(q) => Some(q),
             Err(e) => {
                 tracing::error!(error = %e, key = %unit_file_key, "query: declare unit/file failed");
