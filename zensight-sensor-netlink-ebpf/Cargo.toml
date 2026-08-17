@@ -22,8 +22,8 @@ zensight-sensor-netlink-ebpf-common = { path = "../zensight-sensor-netlink-ebpf-
 # aya-ebpf only compiles for the bpf target. Target-gating it keeps a host build
 # of this member a trivial empty binary. VERIFY-LATEST on crates.io.
 [target.'cfg(target_arch = "bpf")'.dependencies]
-aya-ebpf = "0.1"
-aya-log-ebpf = "0.1"
+aya-ebpf = "0.2"
+aya-log-ebpf = "0.2"
 
 [[bin]]
 # NOTE: must differ from the package name — aya-build 0.1 uses

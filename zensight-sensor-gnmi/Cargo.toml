@@ -15,9 +15,9 @@ hostname = { workspace = true }
 tokio = { workspace = true, features = ["full", "sync", "time"] }
 
 # gRPC
-tonic = { version = "0.13", features = ["transport", "tls-ring", "tls-native-roots"] }
-prost = "0.13"
-prost-types = "0.13"
+tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-native-roots"] }
+prost = "0.14"
+prost-types = "0.14"
 tokio-stream = "0.1"
 
 # CBOR serialization
@@ -50,7 +50,7 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 
 [build-dependencies]
-tonic-build = "0.13"
+tonic-build = "0.14"
 
 [[bin]]
 name = "zensight-sensor-gnmi"
