@@ -19,6 +19,7 @@ use zensight::view::device::{
 };
 use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
+use zensight::view::overview::snmp::{EventFilterState, SnmpOverviewData};
 use zensight::view::settings::{SettingsState, settings_view};
 use zensight::view::specialized::{SyslogFilterState, specialized_view};
 use zensight::view::topology::{TopologyState, topology_view};
@@ -1245,13 +1246,17 @@ fn test_overview_firing_alert_tile() {
     firing_proto.insert(Protocol::Sysinfo, 2);
 
     let discovery = HashMap::new();
+    let evt_filter = EventFilterState::default();
     let mut ui = simulator(overview_section(
         &overview,
         &state.devices,
-        &state.snmp_interfaces,
-        &state.snmp_events,
-        &discovery,
-        false,
+        SnmpOverviewData {
+            interfaces: &state.snmp_interfaces,
+            events: &state.snmp_events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
         &firing_proto,
     ));
     assert!(ui.find("2 firing alerts →").is_ok());
@@ -1268,10 +1273,13 @@ fn test_overview_firing_alert_tile() {
     let mut ui = simulator(overview_section(
         &overview,
         &state.devices,
-        &state.snmp_interfaces,
-        &state.snmp_events,
-        &discovery,
-        false,
+        SnmpOverviewData {
+            interfaces: &state.snmp_interfaces,
+            events: &state.snmp_events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
         &none,
     ));
     assert!(ui.find("No firing alerts").is_ok());
@@ -5938,7 +5946,17 @@ fn test_snmp_overview_rate_based() {
     let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
     let events = std::collections::VecDeque::new();
     let discovery = HashMap::new();
-    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, false));
+    let evt_filter = EventFilterState::default();
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
 
     // Top talker is router01's busiest interface (rates, humanized).
     assert!(ui.find("1.").is_ok());
@@ -5961,7 +5979,17 @@ fn test_snmp_overview_empty() {
     let docs = HashMap::new();
     let events = std::collections::VecDeque::new();
     let discovery = HashMap::new();
-    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, false));
+    let evt_filter = EventFilterState::default();
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
     assert!(ui.find("No SNMP devices available").is_ok());
 }
 
@@ -6010,9 +6038,21 @@ fn test_snmp_overview_trap_feed() {
     events.push_back(mock::snmp::trap_event("sw02", "trap/cold_start", "01aae"));
 
     let discovery = HashMap::new();
-    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, false));
+    let evt_filter = EventFilterState::default();
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
+    // The heading gained a collapse marker when it became the filter toggle
+    // (#578); the count + top-emitter summary is unchanged.
     assert!(
-        ui.find("Recent Traps (3) — top: router01 (2), sw02 (1)")
+        ui.find("Recent Traps (3) — top: router01 (2), sw02 (1) ▸")
             .is_ok()
     );
     assert!(ui.find("trap/cold_start").is_ok());
@@ -6056,14 +6096,33 @@ fn test_snmp_overview_discovery_card() {
         mock::snmp::interface_table("router01", 1),
     );
     let events = std::collections::VecDeque::new();
+    let evt_filter = EventFilterState::default();
 
     // Collapsed: just the banner.
-    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, false));
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
     assert!(ui.find("2 unmonitored SNMP devices found ▸").is_ok());
     assert!(ui.find("edge-sw3").is_err(), "list hidden while collapsed");
 
     // Expanded: rows + copy button emitting the snippet.
-    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, true));
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: true,
+        },
+    ));
     assert!(ui.find("192.168.1.50:161").is_ok());
     assert!(
         ui.find("edge-sw3 — network-interfaces [creds: lab-v2c]")
@@ -6076,6 +6135,135 @@ fn test_snmp_overview_discovery_card() {
         m,
         Message::CopyText(s) if s.contains("192.168.1.50:161")
     )));
+}
+
+/// Trap-feed filters and cross-links (#578): the heading toggles the panel,
+/// facets and free text narrow the list, and a row links to the device view
+/// and to that device's alerts.
+#[test]
+fn test_snmp_event_feed_filters_and_links() {
+    use std::collections::HashMap;
+    use zensight::view::overview::snmp::snmp_overview;
+
+    // The device must be in the fleet for the row's name to be a link (the
+    // event carries a name; a drill-down needs the origin-bearing handle).
+    let router_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
+    let router = DeviceState::new(router_id.clone());
+    let mut devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
+    devices.insert(&router_id, &router);
+
+    let mut docs = HashMap::new();
+    docs.insert(
+        "router01".to_string(),
+        mock::snmp::interface_table("router01", 1),
+    );
+    let mut events = std::collections::VecDeque::new();
+    events.push_back(mock::snmp::trap_event(
+        "router01",
+        "trap/link_down",
+        "01aac",
+    ));
+    events.push_back(mock::snmp::trap_event("router01", "trap/link_up", "01aad"));
+    events.push_back(mock::snmp::trap_event("sw02", "trap/cold_start", "01aae"));
+    let discovery = HashMap::new();
+
+    // Collapsed: the heading is a toggle.
+    let evt_filter = EventFilterState::default();
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
+    assert!(
+        ui.find("Recent Traps (3) — top: router01 (2), sw02 (1) ▸")
+            .is_ok()
+    );
+    ui.click("Recent Traps (3) — top: router01 (2), sw02 (1) ▸")
+        .expect("heading toggles");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ToggleSnmpEventFilters))
+    );
+
+    // Open + free-text search: only the matching record survives, and the
+    // heading reports the narrowing rather than hiding it.
+    let mut evt_filter = EventFilterState {
+        open: true,
+        ..Default::default()
+    };
+    evt_filter.search = "cold".to_string();
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
+    assert!(
+        ui.find("Recent Traps (1 of 3) — top: router01 (2), sw02 (1) ▾")
+            .is_ok()
+    );
+    assert!(ui.find("trap/cold_start").is_ok());
+    assert!(ui.find("trap/link_down").is_err(), "filtered out");
+
+    // A facet that matches nothing says so instead of rendering an empty box.
+    let evt_filter = EventFilterState {
+        open: true,
+        kind: Some("trap/nope".to_string()),
+        ..Default::default()
+    };
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
+    assert!(ui.find("No records match the filter").is_ok());
+
+    // Cross-links: the known device's name selects it; the row pivots to the
+    // device's alerts. sw02 is not in the fleet, so it is text, not a link.
+    let evt_filter = EventFilterState {
+        open: true,
+        device: Some("router01".to_string()),
+        ..Default::default()
+    };
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
+    ui.click("router01").expect("device name links");
+    ui.click("alerts →").expect("alert pivot");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SelectDevice(id) if id.source == "router01"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::OpenAlertsForSource(s) if s == "router01"))
+    );
 }
 
 /// The fleet event ring dedups by ULID and keeps newest-first order (#536).

@@ -46,6 +46,14 @@ const SAMPLES_TABLE: TableDefinition<u128, f64> = TableDefinition::new("samples"
 /// store with template-aware sampling rather than the downsampled tiers.
 const LOGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("logs");
 
+/// redb table: event ULID -> serialized [`zensight_common::EventRecord`]
+/// (#578). Events are the `events` class's durable records (SNMP traps
+/// today); ULIDs sort chronologically, so the table is time-ordered by
+/// construction and a "recent events" read is a bounded reverse range walk —
+/// the same shape as [`LOGS_TABLE`], without the template sampling (an event
+/// is already a rare, deliberate record).
+const EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("events");
+
 /// redb table: content-addressed chunk store (#199, Tier-2). Key is `<algo>/<hex>`
 /// (the chunk's content hash); value is the raw chunk bytes. Immutable + idempotent
 /// — a chunk is written once and read by hash, so this doubles as the directory-sync
@@ -62,6 +70,10 @@ pub const LOG_SAMPLE_EVERY: u64 = 10;
 /// Cap on persisted log rows; the oldest beyond this are pruned so the redb file
 /// stops growing (the log analogue of [`Tier::retention_secs`]).
 pub const LOG_STORE_MAX_ROWS: usize = 200_000;
+
+/// Cap on persisted event rows (#578). Two orders below the log cap: traps are
+/// rare by nature, and a trap storm should not evict a week of history.
+pub const EVENT_STORE_MAX_ROWS: usize = 20_000;
 
 /// A single downsampled bucket queued for persistence: `(metric, tier, bucket_ts, value)`.
 pub type FlushRow = (MetricId, Tier, i64, f64);
@@ -340,6 +352,8 @@ impl PersistentStore {
             let _ = txn.open_table(SAMPLES_TABLE)?;
             // Ensure the logs table (#107, C9) exists too.
             let _ = txn.open_table(LOGS_TABLE)?;
+            // Ensure the events table (#578) exists too.
+            let _ = txn.open_table(EVENTS_TABLE)?;
             // Ensure the Tier-2 chunk store (#199) exists too.
             let _ = txn.open_table(CHUNKS_TABLE)?;
         }
@@ -509,6 +523,86 @@ impl PersistentStore {
             if total > keep_max {
                 let to_remove = total - keep_max;
                 // The oldest rows are at the front of the key order.
+                let oldest: Vec<String> = table
+                    .range::<&str>(..)?
+                    .take(to_remove)
+                    .filter_map(|e| e.ok().map(|(k, _)| k.value().to_string()))
+                    .collect();
+                for key in oldest {
+                    table.remove(key.as_str())?;
+                    removed += 1;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(removed)
+    }
+
+    // ---- Event records (#578) ----------------------------------------------
+
+    /// Persist a batch of event records keyed by ULID. Idempotent — a record
+    /// that arrives twice (live subscriber overlapping the storage backfill)
+    /// overwrites itself. Records with an empty id are skipped. Blocking I/O.
+    pub fn write_events(
+        &self,
+        events: &[zensight_common::EventRecord],
+    ) -> Result<usize, redb::Error> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        let txn = self.db.begin_write()?;
+        let mut written = 0usize;
+        {
+            let mut table = txn.open_table(EVENTS_TABLE)?;
+            for event in events {
+                if event.id.is_empty() {
+                    continue;
+                }
+                let Ok(bytes) = serde_json::to_vec(event) else {
+                    continue;
+                };
+                table.insert(event.id.as_str(), bytes.as_slice())?;
+                written += 1;
+            }
+        }
+        txn.commit()?;
+        Ok(written)
+    }
+
+    /// Read the `limit` most recent persisted events, newest-first. ULID keys
+    /// sort chronologically, so this is a bounded reverse range walk.
+    /// Blocking I/O.
+    pub fn query_events(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<zensight_common::EventRecord>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(EVENTS_TABLE)?;
+        let mut out = Vec::new();
+        for entry in table.range::<&str>(..)?.rev() {
+            let (_key, value) = entry?;
+            let Ok(event) = serde_json::from_slice::<zensight_common::EventRecord>(value.value())
+            else {
+                continue;
+            };
+            out.push(event);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Evict the oldest event rows beyond `keep_max`. Returns the number
+    /// removed. Blocking I/O.
+    pub fn prune_events(&self, keep_max: usize) -> Result<usize, redb::Error> {
+        let txn = self.db.begin_write()?;
+        let mut removed = 0usize;
+        {
+            let mut table = txn.open_table(EVENTS_TABLE)?;
+            let total = table.len()? as usize;
+            if total > keep_max {
+                let to_remove = total - keep_max;
                 let oldest: Vec<String> = table
                     .range::<&str>(..)?
                     .take(to_remove)
@@ -810,6 +904,8 @@ pub struct MetricStore {
     log_pending: Vec<StoredLog>,
     /// Template-aware sampler gating what enters `log_pending`.
     log_retention: LogRetention,
+    /// Event records buffered for the next flush to the cold store (#578).
+    event_pending: Vec<zensight_common::EventRecord>,
 }
 
 impl MetricStore {
@@ -823,6 +919,7 @@ impl MetricStore {
             persistent,
             log_pending: Vec::new(),
             log_retention: LogRetention::new(LOG_SAMPLE_EVERY),
+            event_pending: Vec::new(),
         }
     }
 
@@ -951,6 +1048,28 @@ impl MetricStore {
             return None;
         }
         Some((store, std::mem::take(&mut self.log_pending)))
+    }
+
+    /// Offer an event record to the cold store (#578). Unlike logs there is no
+    /// sampler: an event is already a rare, deliberate record, and dropping a
+    /// trap would defeat the point of persisting them. No-op without a DB.
+    pub fn record_event(&mut self, event: zensight_common::EventRecord) {
+        if self.persistent.is_none() {
+            return;
+        }
+        self.event_pending.push(event);
+    }
+
+    /// Drain buffered event records into a persist batch (#578). Same shape as
+    /// [`take_log_flush_batch`](Self::take_log_flush_batch).
+    pub fn take_event_flush_batch(
+        &mut self,
+    ) -> Option<(PersistentStore, Vec<zensight_common::EventRecord>)> {
+        let store = self.persistent.clone()?;
+        if self.event_pending.is_empty() {
+            return None;
+        }
+        Some((store, std::mem::take(&mut self.event_pending)))
     }
 
     /// Hot (in-memory) samples for a metric path, oldest-first.
@@ -1374,6 +1493,88 @@ mod tests {
         // Idempotent under the cap.
         assert_eq!(store.prune_logs(2).unwrap(), 0);
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn event(id: &str, ts: i64, source: &str, kind: &str) -> zensight_common::EventRecord {
+        zensight_common::EventRecord {
+            id: id.to_string(),
+            timestamp: ts,
+            source: source.to_string(),
+            protocol: zensight_common::Protocol::Snmp,
+            kind: kind.to_string(),
+            severity: zensight_common::AlertSeverity::Warning,
+            summary: format!("{kind} on {source}"),
+            fields: Default::default(),
+        }
+    }
+
+    /// #578: events round-trip through redb newest-first, and a re-delivered
+    /// record (live subscriber overlapping the backfill) overwrites rather
+    /// than duplicating — the ULID is the key.
+    #[test]
+    fn events_round_trip_newest_first_and_dedup() {
+        let path = temp_db_path("events-rt");
+        let store = PersistentStore::open(&path).expect("open");
+        let events = vec![
+            event("01aaa", 100, "router01", "trap/link_down"),
+            event("01aab", 200, "router01", "trap/link_up"),
+            event("01aac", 300, "sw02", "trap/cold_start"),
+        ];
+        assert_eq!(store.write_events(&events).unwrap(), 3);
+        // Same ULID again: an update, not a second row.
+        store
+            .write_events(&[event("01aac", 300, "sw02", "trap/cold_start")])
+            .unwrap();
+
+        let got = store.query_events(10).unwrap();
+        assert_eq!(
+            got.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["01aac", "01aab", "01aaa"],
+            "newest-first, deduped by ULID"
+        );
+        // Limit bounds the walk.
+        assert_eq!(store.query_events(2).unwrap().len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prune_events_evicts_oldest_beyond_cap() {
+        let path = temp_db_path("events-prune");
+        let store = PersistentStore::open(&path).expect("open");
+        let events: Vec<_> = (1..=5)
+            .map(|i| event(&format!("01aa{i}"), i * 100, "r1", "trap/x"))
+            .collect();
+        store.write_events(&events).unwrap();
+        assert_eq!(store.prune_events(2).unwrap(), 3);
+        let got = store.query_events(10).unwrap();
+        assert_eq!(
+            got.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["01aa5", "01aa4"]
+        );
+        assert_eq!(store.prune_events(2).unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Events are buffered without sampling (unlike logs) and drained once.
+    #[test]
+    fn record_event_buffers_into_flush_batch() {
+        let path = temp_db_path("events-flush");
+        let store = PersistentStore::open(&path).expect("open");
+        let mut ms = MetricStore::new(10, Some(store));
+        ms.record_event(event("01aaa", 100, "r1", "trap/a"));
+        ms.record_event(event("01aab", 200, "r1", "trap/b"));
+        let (handle, batch) = ms.take_event_flush_batch().expect("a batch");
+        assert_eq!(batch.len(), 2, "no sampler drops events");
+        assert_eq!(handle.write_events(&batch).unwrap(), 2);
+        assert!(ms.take_event_flush_batch().is_none(), "drained");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_event_noop_without_persistence() {
+        let mut ms = MetricStore::new(10, None);
+        ms.record_event(event("01aaa", 100, "r1", "trap/a"));
+        assert!(ms.take_event_flush_batch().is_none());
     }
 
     #[test]

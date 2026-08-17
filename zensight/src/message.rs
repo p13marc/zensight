@@ -584,6 +584,23 @@ pub enum Message {
     },
     /// A durable SNMP trap/inform record off the events plane (#536).
     SnmpEventReceived(zensight_common::EventRecord),
+    /// Event records read back from the local redb store on open (#578) —
+    /// the feed's restart survival when no bus-side storage is aligned.
+    SnmpEventHistoryLoaded(Vec<zensight_common::EventRecord>),
+    /// Expand/collapse the trap feed's filter row and full listing (#578).
+    ToggleSnmpEventFilters,
+    /// Trap-feed facets (#578). `None` clears that facet.
+    SetSnmpEventDevice(Option<String>),
+    SetSnmpEventSeverity(Option<zensight_common::AlertSeverity>),
+    SetSnmpEventKind(Option<String>),
+    SetSnmpEventTimeRange(crate::view::time_range::TimeRange),
+    /// Free-text search over the trap feed (kind/summary/source/fields).
+    SetSnmpEventSearch(String),
+    /// Reset every trap-feed facet (#578).
+    ClearSnmpEventFilters,
+    /// Open the Alerts view scoped to one device (#578): the trap-feed row's
+    /// pivot. Events carry no alert key, so the honest link is by source.
+    OpenAlertsForSource(String),
     /// Subnet-discovery report (#579) off `state/snmp/discovery` — LWW per
     /// publishing sensor origin; proposals only, nothing auto-adds (#541).
     SnmpDiscoveryReport {
@@ -1250,7 +1267,7 @@ pub enum Message {
 
     /// Set the Logs-feed relative time window (#554); resolved to a `from=` bound
     /// against `now` and re-queries the sensor with the new depth.
-    SetLogTimeRange(crate::view::specialized::LogTimeRange),
+    SetLogTimeRange(crate::view::time_range::TimeRange),
 
     /// Toggle inclusion of a facility in the filter.
     ToggleSyslogFacility(String),
