@@ -150,7 +150,7 @@ impl NetlinkDetailTopic {
     /// The queryable key for this topic (matches the sensor's `query.rs`).
     /// `Some(origin)` targets the drilled-in host's concrete key; `None`
     /// selects the fleet.
-    pub fn key(&self, origin: Option<&str>) -> String {
+    pub fn key(&self, origin: Option<&zenkey::RemoteOrigin>) -> String {
         let topic = match self {
             NetlinkDetailTopic::Sockets => "sockets",
             NetlinkDetailTopic::Routes => "routes",

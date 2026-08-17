@@ -44,7 +44,7 @@ impl SystemdDetailTopic {
     /// The queryable key for this topic (matches the sensor's `query.rs`).
     /// `Some(origin)` targets the drilled-in host's concrete key; `None`
     /// selects the fleet.
-    pub fn key(&self, origin: Option<&str>) -> String {
+    pub fn key(&self, origin: Option<&zenkey::RemoteOrigin>) -> String {
         let topic = match self {
             SystemdDetailTopic::Units => "units",
             SystemdDetailTopic::Timers => "timers",
@@ -303,29 +303,29 @@ impl SystemdDetailState {
 /// never widen into a fleet broadcast. A caller without an origin must refuse.
 /// (Contrast `parallax_stream_set_key`, which does fall back to the fleet — a
 /// media control is recoverable, `stop nginx.service` on every host is not.)
-pub fn action_set_key(origin: &str) -> String {
+pub fn action_set_key(origin: &zenkey::RemoteOrigin) -> String {
     zensight_common::origin_rpc_key(origin, "systemd", "action/set")
 }
 
 /// The last-action-outcome read key for one host, origin-scoped for the same
 /// reason as [`action_set_key`]: a fleet read returns whichever host replied
 /// first, which is not necessarily the one we acted on.
-pub fn action_read_key(origin: &str) -> String {
+pub fn action_read_key(origin: &zenkey::RemoteOrigin) -> String {
     zensight_common::origin_rpc_key(origin, "systemd", "action")
 }
 
 /// The service-control probe key. Answered by every 1.4+ sensor, enabled or not.
-pub fn action_capability_key(origin: &str) -> String {
+pub fn action_capability_key(origin: &zenkey::RemoteOrigin) -> String {
     zensight_common::origin_rpc_key(origin, "systemd", "action/capability")
 }
 
 /// The audit-timeline key: a bounded ring of recent action outcomes.
-pub fn actions_history_key(origin: &str) -> String {
+pub fn actions_history_key(origin: &zenkey::RemoteOrigin) -> String {
     zensight_common::origin_rpc_key(origin, "systemd", "actions")
 }
 
 /// The unit-file read key, matching the sensor's `unit/file?name=` queryable.
-pub fn unit_file_key(origin: Option<&str>, unit: &str) -> String {
+pub fn unit_file_key(origin: Option<&zenkey::RemoteOrigin>, unit: &str) -> String {
     let key = match origin {
         Some(o) => zensight_common::origin_rpc_key(o, "systemd", "unit/file"),
         None => zensight_common::fleet_rpc_key("systemd", "unit/file"),
@@ -354,7 +354,7 @@ pub enum ActionFailure {
 
 /// The single-unit detail key (#313), matching the sensor's
 /// `@rpc/systemd/unit?name=<u>` queryable.
-pub fn unit_detail_key(origin: Option<&str>, unit: &str) -> String {
+pub fn unit_detail_key(origin: Option<&zenkey::RemoteOrigin>, unit: &str) -> String {
     let key = match origin {
         Some(o) => zensight_common::origin_rpc_key(o, "systemd", "unit"),
         None => zensight_common::fleet_rpc_key("systemd", "unit"),
@@ -365,10 +365,10 @@ pub fn unit_detail_key(origin: Option<&str>, unit: &str) -> String {
 /// Fetch + decode one unit's detail for the drill-down panel (#313).
 pub async fn fetch_unit_detail(
     session: Arc<zenoh::Session>,
-    origin: Option<String>,
+    origin: Option<zenkey::RemoteOrigin>,
     unit: String,
 ) -> Option<UnitDetail> {
-    fetch_one(session, unit_detail_key(origin.as_deref(), &unit)).await
+    fetch_one(session, unit_detail_key(origin.as_ref(), &unit)).await
 }
 
 /// Extract the systemd unit name from a cgroup path (#313) — the
@@ -401,6 +401,11 @@ mod tests {
 
     use super::*;
 
+    /// A parsed origin for the drill-down key tests (#485).
+    fn test_origin() -> zenkey::RemoteOrigin {
+        zenkey::RemoteOrigin::parse("h-3fa9c2d41b7e").expect("valid test origin")
+    }
+
     #[test]
     fn topic_keys_and_labels() {
         assert_eq!(
@@ -425,24 +430,24 @@ mod tests {
     #[test]
     fn action_keys_are_origin_scoped() {
         assert_eq!(
-            action_set_key("h-3fa9c2d41b7e"),
+            action_set_key(&test_origin()),
             "v1/h-3fa9c2d41b7e/@rpc/systemd/action/set"
         );
         assert_eq!(
-            action_read_key("h-3fa9c2d41b7e"),
+            action_read_key(&test_origin()),
             "v1/h-3fa9c2d41b7e/@rpc/systemd/action"
         );
         assert_eq!(
-            action_capability_key("h-3fa9c2d41b7e"),
+            action_capability_key(&test_origin()),
             "v1/h-3fa9c2d41b7e/@rpc/systemd/action/capability"
         );
         assert_eq!(
-            actions_history_key("h-3fa9c2d41b7e"),
+            actions_history_key(&test_origin()),
             "v1/h-3fa9c2d41b7e/@rpc/systemd/actions"
         );
         for k in [
-            action_set_key("h-3fa9c2d41b7e"),
-            action_read_key("h-3fa9c2d41b7e"),
+            action_set_key(&test_origin()),
+            action_read_key(&test_origin()),
         ] {
             assert!(!k.contains('*'), "{k} must not be a fleet selector");
         }

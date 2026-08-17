@@ -1388,9 +1388,25 @@ pub struct DeviceId {
 }
 
 /// The placeholder origin worn by every [`DeviceId::fixture`].
-pub const FIXTURE_ORIGIN: &str = "h-fixture0000";
+///
+/// Must be a **real** origin (`h-` + 12 hex): since #485 the drill-down key
+/// builders take a parsed [`RemoteOrigin`], so a fixture that cannot parse
+/// would make every fixture-built call key silently unroutable — which is
+/// exactly what the old spelling (`h-fixture0000`, not hex) did, hidden by a
+/// fallback that produced a matches-nothing key.
+pub const FIXTURE_ORIGIN: &str = "h-facade000000";
 
 impl DeviceId {
+    /// This device's origin as the typed address a caller needs (#485).
+    ///
+    /// The parse happens here, once, at the boundary where an origin enters
+    /// the GUI from a wire key — so the `@rpc` builders can take a type that
+    /// cannot be confused with this process's own origin, and a malformed
+    /// origin surfaces as `None` instead of a key that matches nothing.
+    pub fn remote_origin(&self) -> Option<zenkey::RemoteOrigin> {
+        zenkey::RemoteOrigin::parse(&self.origin).ok()
+    }
+
     pub fn new(protocol: Protocol, origin: impl Into<String>, source: impl Into<String>) -> Self {
         Self {
             protocol,
@@ -1430,5 +1446,34 @@ impl std::fmt::Display for DeviceId {
     /// the label. The origin is an *address*, not a name (RFC 06 §1).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.protocol, self.source)
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    /// #485: every fixture must carry an origin a caller can actually
+    /// address. The old placeholder (`h-fixture0000`) was not hex, so it
+    /// never parsed — and the pre-#485 builder quietly hand-spelled a key
+    /// that matched nothing, which is why no test ever noticed that every
+    /// fixture-built drill-down was aimed at nobody.
+    #[test]
+    fn fixture_origin_is_addressable() {
+        assert!(
+            zenkey::RemoteOrigin::parse(FIXTURE_ORIGIN).is_ok(),
+            "{FIXTURE_ORIGIN} must parse as a real origin"
+        );
+        let id = DeviceId::fixture(Protocol::Sysinfo, "web01".to_string());
+        assert!(id.remote_origin().is_some());
+    }
+
+    /// A device whose origin is junk yields no callee address — the caller
+    /// then falls back to the fleet selector instead of building a key aimed
+    /// at nobody.
+    #[test]
+    fn junk_origin_is_not_addressable() {
+        let id = DeviceId::new(Protocol::Sysinfo, "not-an-origin", "web01");
+        assert!(id.remote_origin().is_none());
     }
 }

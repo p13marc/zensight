@@ -44,7 +44,20 @@ Commands do not exist in v1: writes are GETs on `<topic>/set`, reads on
 |--------|--------|
 | `fleet_rpc_key(producer, procedure)` | `zensight/v1/*/@rpc/<producer>/<procedure>` (use query target `All`) |
 | `fleet_command_key(producer, topic)` | `zensight/v1/*/@rpc/<producer>/<topic>/set` |
-| `origin_rpc_key(origin, producer, procedure)` | `zensight/v1/<origin>/@rpc/<producer>/<procedure>` (single host) |
+| `origin_rpc_key(&RemoteOrigin, producer, procedure)` | `zensight/v1/<origin>/@rpc/<producer>/<procedure>` (single host) |
+
+**The origin's kind is a type** (#485, RFC 08 §1.1 amendment B). `origin_rpc_key`
+takes a parsed [`zenkey::RemoteOrigin`], not a `&str`, because the distinction
+between *an origin I own* and *an origin I address* shipped as a bug three
+times: the local-host builders below are exactly right for a sensor serving its
+own queryable and exactly wrong for the GUI calling someone else's, and the
+failure mode — a timeout, at runtime, in one view — is the worst possible way
+to find out. Origins parse once where they enter the GUI
+(`DeviceId::remote_origin`); a malformed one is `None`, so the caller falls back
+to the fleet selector instead of building a key aimed at nobody. (That fallback
+used to be silent: the builder hand-spelled a matches-nothing key, which is how
+every fixture-built drill-down in the test suite was aimed at nobody without a
+single test noticing.)
 
 Topic keys for the **local** host (`command.rs`). Every helper takes the bare
 **producer name** (`"netlink"`, `"logs"`, …) — the legacy `zensight/<protocol>` prefix

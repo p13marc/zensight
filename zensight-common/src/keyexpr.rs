@@ -174,13 +174,21 @@ pub fn fleet_command_key(producer: &str, topic: &str) -> String {
 /// `<base>/v1/<origin>/@rpc/<producer>/<procedure...>` reaches exactly one
 /// host's producer — use when the origin is already known (e.g. a drill-down
 /// view), [`fleet_rpc_key`] otherwise.
-pub fn origin_rpc_key(origin: &str, producer: &str, procedure: &str) -> String {
-    match RemoteOrigin::parse(origin) {
-        Ok(o) => selector::rpc_at(&o, producer, &proc_chunks(procedure)).into(),
-        // A malformed origin never parsed before either — the legacy spelling
-        // simply matched nothing, which is exactly the behavior to keep.
-        Err(_) => format!("v1/{origin}/@rpc/{producer}/{procedure}"),
-    }
+///
+/// Takes a [`RemoteOrigin`], not a `&str` (#485). The distinction this encodes
+/// is the one that shipped as a bug three times: the own-origin builders in
+/// [`crate::command`] are right for a sensor *serving* its own queryable and
+/// exactly wrong for the GUI *calling* someone else's. Splitting the API by
+/// name fixed the instances; the type is what stops the next one, because
+/// the failure mode — a timeout, at runtime, in one view — is the worst
+/// possible way to find out.
+///
+/// Requiring the parsed type also deletes a quieter bug: this used to accept
+/// any string and fall back to a hand-spelled key when it did not parse,
+/// which produced a *matches-nothing* key rather than an error. Origins now
+/// parse once where they enter the GUI, so a malformed one cannot reach here.
+pub fn origin_rpc_key(origin: &RemoteOrigin, producer: &str, procedure: &str) -> String {
+    selector::rpc_at(origin, producer, &proc_chunks(procedure)).into()
 }
 
 /// Build a wildcard key expression for the whole fleet state plane.
@@ -842,7 +850,11 @@ mod tests {
                 "v1/*/@rpc/netring/stream/set"
             );
             assert_eq!(
-                origin_rpc_key(ORIGIN, "netring", "artifact/status"),
+                origin_rpc_key(
+                    &RemoteOrigin::parse(ORIGIN).expect("valid origin"),
+                    "netring",
+                    "artifact/status"
+                ),
                 "v1/h-3fa9c2d41b7e/@rpc/netring/artifact/status"
             );
             assert_eq!(catalog_rpc_key("names"), "v1/@catalog/@rpc/names");

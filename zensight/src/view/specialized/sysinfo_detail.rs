@@ -46,7 +46,7 @@ impl ProcessSort {
 /// targets the drilled-in host's concrete key (the GUI's device `source` IS
 /// the origin chunk); `None` selects the fleet. Single-host deployments
 /// the single-instance netlink/netring sensors.
-pub fn processes_key(origin: Option<&str>, sort: ProcessSort) -> String {
+pub fn processes_key(origin: Option<&zenkey::RemoteOrigin>, sort: ProcessSort) -> String {
     let key = match origin {
         Some(o) => zensight_common::origin_rpc_key(o, "sysinfo", "processes"),
         None => zensight_common::fleet_rpc_key("sysinfo", "processes"),
@@ -91,7 +91,7 @@ pub fn pid_filter_verdict(procs: &[ProcessRecord], filter: &PidFilter) -> PidVer
 /// with the whole report, and it always declares the queryable — even when the
 /// histograms are `available: false` — so the GUI can tell "not built with
 /// eBPF" from "no answer at all".
-pub fn latency_key(origin: Option<&str>) -> String {
+pub fn latency_key(origin: Option<&zenkey::RemoteOrigin>) -> String {
     match origin {
         Some(o) => zensight_common::origin_rpc_key(o, "sysinfo", "latency"),
         None => zensight_common::fleet_rpc_key("sysinfo", "latency"),
@@ -142,9 +142,9 @@ impl SysinfoDetailState {
 /// record fan-in helpers — it takes the first reply from the drilled-in host.
 pub async fn fetch_latency(
     session: Arc<zenoh::Session>,
-    origin: Option<String>,
+    origin: Option<zenkey::RemoteOrigin>,
 ) -> Option<LatencyReport> {
-    let key = latency_key(origin.as_deref());
+    let key = latency_key(origin.as_ref());
     let replies = session
         .get(&key)
         .target(zenoh::query::QueryTarget::All)
@@ -166,21 +166,28 @@ pub async fn fetch_latency(
 /// the host's origin is known, else the fleet selector (first reply).
 pub async fn fetch_processes(
     session: Arc<zenoh::Session>,
-    origin: Option<String>,
+    origin: Option<zenkey::RemoteOrigin>,
     sort: ProcessSort,
 ) -> Option<Vec<ProcessRecord>> {
-    super::netlink_detail::fetch_records(session, processes_key(origin.as_deref(), sort)).await
+    super::netlink_detail::fetch_records(session, processes_key(origin.as_ref(), sort)).await
 }
 
 #[cfg(test)]
 mod tests {
+    /// A parsed origin for the drill-down key tests (#485): the builders take
+    /// a `RemoteOrigin` now, so a test cannot hand them a string that would
+    /// never have routed.
+    fn test_origin() -> zenkey::RemoteOrigin {
+        zenkey::RemoteOrigin::parse("h-3fa9c2d41b7e").expect("valid test origin")
+    }
+
     use super::*;
 
     #[test]
     fn key_is_host_scoped_with_sort_and_top() {
         // Mapped origin → the drilled-in host's concrete procedure key.
         assert_eq!(
-            processes_key(Some("h-3fa9c2d41b7e"), ProcessSort::Cpu),
+            processes_key(Some(&test_origin()), ProcessSort::Cpu),
             "v1/h-3fa9c2d41b7e/@rpc/sysinfo/processes?sort=cpu&top=50"
         );
         // No mapping yet → the fleet selector fallback.
