@@ -374,7 +374,7 @@ impl ParallaxDetailState {
 /// right on a single-host mesh, and the origin map fills within ~5 s).
 pub async fn fetch_streams(
     session: Arc<Session>,
-    origin: Option<String>,
+    origin: Option<zenkey::RemoteOrigin>,
 ) -> Option<Vec<StreamDescriptor>> {
     let key = match origin {
         Some(o) => origin_rpc_key(&o, "parallax", "streams"),
@@ -448,6 +448,13 @@ pub fn preview_tile_stream(
 
 #[cfg(test)]
 mod tests {
+    /// A parsed origin for the drill-down key tests (#485): the builders take
+    /// a `RemoteOrigin` now, so a test cannot hand them a string that would
+    /// never have routed.
+    fn test_origin() -> zenkey::RemoteOrigin {
+        zenkey::RemoteOrigin::parse("h-3fa9c2d41b7e").expect("valid test origin")
+    }
+
     use super::*;
 
     fn dummy_handle() -> image::Handle {
@@ -463,7 +470,7 @@ mod tests {
             "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         );
         assert_eq!(
-            origin_rpc_key("h-3fa9c2d41b7e", "parallax", "streams"),
+            origin_rpc_key(&test_origin(), "parallax", "streams"),
             "v1/h-3fa9c2d41b7e/@rpc/parallax/streams"
         );
     }

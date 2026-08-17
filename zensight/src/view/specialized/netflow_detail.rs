@@ -19,7 +19,7 @@ const FLOWS_MAX: usize = 200;
 
 /// The recent-flow ring key (`?max=N`). `Some(origin)` targets the drilled-in
 /// exporter's host; `None` selects the fleet.
-pub fn flows_key(origin: Option<&str>) -> String {
+pub fn flows_key(origin: Option<&zenkey::RemoteOrigin>) -> String {
     let key = match origin {
         Some(o) => zensight_common::origin_rpc_key(o, "netflow", "flows"),
         None => zensight_common::fleet_rpc_key("netflow", "flows"),
@@ -47,7 +47,7 @@ impl NetflowDetailState {
 /// Fetch + decode the recent-flow ring.
 pub async fn fetch_flows(
     session: Arc<zenoh::Session>,
-    origin: Option<String>,
+    origin: Option<zenkey::RemoteOrigin>,
 ) -> Option<Vec<NetflowRecord>> {
     match origin {
         Some(o) => super::netlink_detail::fetch_records(session, flows_key(Some(&o))).await,
@@ -57,12 +57,19 @@ pub async fn fetch_flows(
 
 #[cfg(test)]
 mod tests {
+    /// A parsed origin for the drill-down key tests (#485): the builders take
+    /// a `RemoteOrigin` now, so a test cannot hand them a string that would
+    /// never have routed.
+    fn test_origin() -> zenkey::RemoteOrigin {
+        zenkey::RemoteOrigin::parse("h-3fa9c2d41b7e").expect("valid test origin")
+    }
+
     use super::*;
 
     #[test]
     fn flows_key_is_origin_scoped_or_fleet() {
         assert_eq!(
-            flows_key(Some("h-3fa9c2d41b7e")),
+            flows_key(Some(&test_origin())),
             "v1/h-3fa9c2d41b7e/@rpc/netflow/flows?max=200"
         );
         assert_eq!(flows_key(None), "v1/*/@rpc/netflow/flows?max=200");

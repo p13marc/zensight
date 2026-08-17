@@ -4865,7 +4865,7 @@ impl ZenSight {
         };
         let key = unit_file_key(
             self.selected_origin_for(zensight_common::Protocol::Systemd)
-                .as_deref(),
+                .as_ref(),
             &unit,
         );
         Task::future(async move {
@@ -5084,7 +5084,7 @@ impl ZenSight {
         };
         let key = topic.key(
             self.selected_origin_for(zensight_common::Protocol::Systemd)
-                .as_deref(),
+                .as_ref(),
         );
         Task::future(async move {
             let data = match topic {
@@ -5207,7 +5207,7 @@ impl ZenSight {
         };
         let key = topic.key(
             self.selected_origin_for(zensight_common::Protocol::Netlink)
-                .as_deref(),
+                .as_ref(),
         );
         Task::future(async move {
             let data = match topic {
@@ -5267,10 +5267,17 @@ impl ZenSight {
     /// after connect — and every drill-down in that window silently fell back to
     /// a fleet-wide selector. There is no such window now: a device we have
     /// heard from has an origin, and one we have not cannot be queried anyway.
-    fn origin_for(&self, protocol: zensight_common::Protocol, source: &str) -> Option<String> {
+    /// The typed callee address for `source`'s device (#485). `None` when the
+    /// fleet map does not know it, or its origin does not parse — either way
+    /// there is no single host to address.
+    fn origin_for(
+        &self,
+        protocol: zensight_common::Protocol,
+        source: &str,
+    ) -> Option<zenkey::RemoteOrigin> {
         self.dashboard
             .resolve_device(protocol, source)
-            .map(|id| id.origin)
+            .and_then(|id| id.remote_origin())
     }
 
     /// A display name for an origin: the `source` of a device it publishes,
@@ -5321,11 +5328,20 @@ impl ZenSight {
     /// `proto` — detail-tab fetches target that host's concrete @rpc key;
     /// `None` (no selection, or origin not yet learned) falls back to the
     /// fleet selector.
-    fn selected_origin_for(&self, proto: zensight_common::Protocol) -> Option<String> {
+    /// The drilled-in device's origin as a typed callee address (#485).
+    ///
+    /// `None` means "no such device selected" *or* "its origin does not
+    /// parse" — either way there is no single host to address, and the caller
+    /// falls back to the fleet selector rather than building a key aimed at
+    /// nobody (or, worse, at this process's own origin).
+    fn selected_origin_for(
+        &self,
+        proto: zensight_common::Protocol,
+    ) -> Option<zenkey::RemoteOrigin> {
         self.selected_device
             .as_ref()
             .filter(|d| d.device_id.protocol == proto)
-            .map(|d| d.device_id.origin.clone())
+            .and_then(|d| d.device_id.remote_origin())
     }
 
     fn query_channel<T, Fut>(
@@ -6302,7 +6318,11 @@ impl ZenSight {
         let (frames, handle) = Task::stream(
             crate::view::specialized::parallax_detail::preview_tile_stream(
                 session,
-                media_origin,
+                // The `@media` plane keeps its string origin for now: unlike
+                // `@rpc` it has a legitimate non-registry spelling for
+                // protocols with no generated media builder (#485 is scoped
+                // to the plane that shipped the own-vs-other bug).
+                zenkey::ConcreteOrigin::chunk(&media_origin).to_string(),
                 stream.clone(),
                 generation,
             ),
@@ -8930,8 +8950,9 @@ mod origin_tests {
             "flows/total",
         )));
         assert_eq!(
-            a.origin_for(Protocol::Netring, "hostA").as_deref(),
-            Some("h-3fa9c2d41b7e"),
+            a.origin_for(Protocol::Netring, "hostA")
+                .map(|o| zenkey::ConcreteOrigin::chunk(&o).to_string()),
+            Some("h-3fa9c2d41b7e".to_string()),
         );
     }
 
@@ -8969,8 +8990,9 @@ mod origin_tests {
         let id = DeviceId::new(Protocol::Netring, "h-3fa9c2d41b7e", "hostA");
         a.selected_device = Some(DeviceDetailState::new(id));
         assert_eq!(
-            a.selected_origin_for(Protocol::Netring).as_deref(),
-            Some("h-3fa9c2d41b7e")
+            a.selected_origin_for(Protocol::Netring)
+                .map(|o| zenkey::ConcreteOrigin::chunk(&o).to_string()),
+            Some("h-3fa9c2d41b7e".to_string())
         );
         // Wrong protocol → no origin (fleet fallback).
         assert_eq!(a.selected_origin_for(Protocol::Sysinfo), None);
