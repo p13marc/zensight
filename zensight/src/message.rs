@@ -1075,6 +1075,10 @@ pub enum Message {
         /// Total units.
         total: u64,
     },
+    /// The transfer entered its verify/materialize phase (#624): zblob emits
+    /// `Progress::Verifying` after a tree download's last chunk, before
+    /// `reconstruct_tree` — which can take a while on a large snapshot.
+    ArtifactVerifying,
     /// The artifact finished downloading (a temp file for a blob, the chosen
     /// folder for a tree), or failed.
     ArtifactDownloaded(Result<std::path::PathBuf, String>),

@@ -2960,6 +2960,20 @@ impl ZenSight {
                 }
             }
 
+            Message::ArtifactVerifying => {
+                // Only while actively downloading (a stale event from a
+                // cancelled job must not resurrect the busy state). The
+                // post-resolve assignment in `on_artifact_downloaded` keeps
+                // covering the blob Save-as phase; this arrives earlier, when
+                // a tree download starts verify/materialize (#624).
+                if matches!(
+                    self.artifact_fetch,
+                    crate::view::artifact_fetch::ArtifactFetch::Downloading { .. }
+                ) {
+                    self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Verifying;
+                }
+            }
+
             Message::ArtifactDownloaded(result) => {
                 if let Some(task) = self.on_artifact_downloaded(result) {
                     return task;
