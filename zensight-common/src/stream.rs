@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// This is the tier *definition* — the sensor owns the numbers; the wire and
 /// the key carry the *name*. It appears in [`StreamDescriptor::tiers`] (the
-/// catalogue) and in the `tiers/set` admin command.
+/// catalogue); the ladder itself is configured in `configs/parallax.json5`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TierSpec {
     /// Tier name — the `<tier>` key chunk (`low` / `medium` / `high`).
@@ -48,8 +48,8 @@ pub struct TierSpec {
 ///
 /// Note per-viewer quality is expressed by *which `<tier>` key you subscribe
 /// to*, not by a command (#494). These commands manage a stream's lifecycle and
-/// keyframes; redefining what a tier *means* is a separate `tiers/set` admin
-/// command ([`TierSpec`]), the only global knob.
+/// keyframes; redefining what a tier *means* ([`TierSpec`]) is config-only
+/// (`configs/parallax.json5`), not a bus command (#513).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamControl {
