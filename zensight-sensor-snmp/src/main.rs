@@ -103,6 +103,22 @@ async fn main() -> Result<()> {
 
     // Add custom OID mappings from config
     if !snmp_config.oid_names.is_empty() {
+        // #559: names ride the telemetry key chunk-for-chunk. A violating
+        // name still publishes (slugged losslessly at the boundary), but the
+        // published key then won't look like the configured name — say so.
+        for name in snmp_config.oid_names.values() {
+            let ok = name
+                .split('/')
+                .map(|c| c.replace("{index}", "1"))
+                .all(|c| zenkey::grammar::is_valid_plain_chunk(&c));
+            if !ok {
+                tracing::warn!(
+                    name = %name,
+                    "oid_names entry violates the key chunk grammar (lowercase alnum + `._-`); \
+                     it will be escaped on the wire — prefer a lowercase name (#559)"
+                );
+            }
+        }
         mib_resolver.add_custom_mappings(&snmp_config.oid_names);
         tracing::info!(
             count = snmp_config.oid_names.len(),

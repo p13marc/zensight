@@ -8056,7 +8056,7 @@ mod prefetch_tests {
         let snmp_text = TelemetryPoint::new(
             "router01",
             Protocol::Snmp,
-            "system/sysDescr",
+            "system/descr",
             TelemetryValue::Text("Cisco IOS".to_string()),
         );
         assert!(!point_is_log_line(&snmp_text));

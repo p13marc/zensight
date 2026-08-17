@@ -153,29 +153,31 @@
 
     // OID to human-readable name mapping
     // Use {index} placeholder for table indices
+    // Names must be chunk-grammar-valid: lowercase alnum + `._-` per `/`
+    // chunk (#559). These match the shipped profiles' convention.
     oid_names: {
-      "1.3.6.1.2.1.1.1.0": "system/sysDescr",
-      "1.3.6.1.2.1.1.3.0": "system/sysUpTime",
-      "1.3.6.1.2.1.1.4.0": "system/sysContact",
-      "1.3.6.1.2.1.1.5.0": "system/sysName",
-      "1.3.6.1.2.1.1.6.0": "system/sysLocation",
-      "1.3.6.1.2.1.1.7.0": "system/sysServices",
+      "1.3.6.1.2.1.1.1.0": "system/descr",
+      "1.3.6.1.2.1.1.3.0": "system/uptime",
+      "1.3.6.1.2.1.1.4.0": "system/contact",
+      "1.3.6.1.2.1.1.5.0": "system/name",
+      "1.3.6.1.2.1.1.6.0": "system/location",
+      "1.3.6.1.2.1.1.7.0": "system/services",
 
       // Interface table columns
-      "1.3.6.1.2.1.2.2.1.1": "if/{index}/ifIndex",
-      "1.3.6.1.2.1.2.2.1.2": "if/{index}/ifDescr",
-      "1.3.6.1.2.1.2.2.1.3": "if/{index}/ifType",
-      "1.3.6.1.2.1.2.2.1.5": "if/{index}/ifSpeed",
-      "1.3.6.1.2.1.2.2.1.7": "if/{index}/ifAdminStatus",
-      "1.3.6.1.2.1.2.2.1.8": "if/{index}/ifOperStatus",
-      "1.3.6.1.2.1.2.2.1.10": "if/{index}/ifInOctets",
-      "1.3.6.1.2.1.2.2.1.11": "if/{index}/ifInUcastPkts",
-      "1.3.6.1.2.1.2.2.1.13": "if/{index}/ifInDiscards",
-      "1.3.6.1.2.1.2.2.1.14": "if/{index}/ifInErrors",
-      "1.3.6.1.2.1.2.2.1.16": "if/{index}/ifOutOctets",
-      "1.3.6.1.2.1.2.2.1.17": "if/{index}/ifOutUcastPkts",
-      "1.3.6.1.2.1.2.2.1.19": "if/{index}/ifOutDiscards",
-      "1.3.6.1.2.1.2.2.1.20": "if/{index}/ifOutErrors",
+      "1.3.6.1.2.1.2.2.1.1": "if/{index}/index",
+      "1.3.6.1.2.1.2.2.1.2": "if/{index}/descr",
+      "1.3.6.1.2.1.2.2.1.3": "if/{index}/type",
+      "1.3.6.1.2.1.2.2.1.5": "if/{index}/speed",
+      "1.3.6.1.2.1.2.2.1.7": "if/{index}/admin_status",
+      "1.3.6.1.2.1.2.2.1.8": "if/{index}/oper_status",
+      "1.3.6.1.2.1.2.2.1.10": "if/{index}/in_octets",
+      "1.3.6.1.2.1.2.2.1.11": "if/{index}/in_ucast_pkts",
+      "1.3.6.1.2.1.2.2.1.13": "if/{index}/in_discards",
+      "1.3.6.1.2.1.2.2.1.14": "if/{index}/in_errors",
+      "1.3.6.1.2.1.2.2.1.16": "if/{index}/out_octets",
+      "1.3.6.1.2.1.2.2.1.17": "if/{index}/out_ucast_pkts",
+      "1.3.6.1.2.1.2.2.1.19": "if/{index}/out_discards",
+      "1.3.6.1.2.1.2.2.1.20": "if/{index}/out_errors",
     },
   },
 

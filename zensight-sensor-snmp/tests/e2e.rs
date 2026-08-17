@@ -74,6 +74,43 @@ async fn v2c_walk_stays_in_subtree() {
     assert!(!points.keys().any(|m| m.starts_with("ifx/")));
 }
 
+/// #559 acceptance: a debug-build poll cycle with the production resolver
+/// (built-in MIB tables, no harness name overrides) publishes without
+/// tripping the registry metric guard, and every published key refines into
+/// the registry's `{device}/{metric...}` subject.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn builtin_mib_names_survive_the_metric_guard() {
+    let agent = SimAgent::start(base_mib()).await;
+    let mut device = v2c_device("router01", agent.addr());
+    device.oids = vec![
+        format!("{SYSTEM}.3.0"), // sysUpTime
+        format!("{SYSTEM}.5.0"), // sysName
+    ];
+    device.walks = vec!["1.3.6.1.2.1.2.2".to_string()]; // ifTable
+
+    let rig = harness::rig_with_builtins(device).await;
+    // In a debug build this cycle panics inside the metric guard if any
+    // builtin name violates the chunk grammar.
+    rig.poller.poll_once().await.expect("poll");
+
+    let mut seen = std::collections::HashMap::new();
+    while let Ok(Ok(sample)) = tokio::time::timeout(IDLE, rig.sub.recv_async()).await {
+        let key = sample.key_expr().to_string();
+        let refined = zensight_common::registry::refine_key(&key);
+        assert!(
+            refined.is_some(),
+            "published key {key:?} does not refine into a registry subject (#559)"
+        );
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode point");
+        seen.insert(point.metric.clone(), key);
+    }
+    // Builtin names, not the harness table, named these.
+    assert!(seen.contains_key("system/uptime"), "seen: {seen:?}");
+    assert!(seen.contains_key("system/name"), "seen: {seen:?}");
+    assert!(seen.contains_key("if/1/in_octets"), "seen: {seen:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v1_get_and_walk() {
     let agent = SimAgent::start(base_mib()).await;

@@ -26,8 +26,11 @@ fn warned() -> &'static Mutex<HashSet<String>> {
 /// Non-telemetry keys, unparseable keys and unknown producers pass silently:
 /// this guards the telemetry tree, which is the one #468 refined. Producers
 /// whose metric tree is defined by the polled device (`snmp`, `modbus`,
-/// `gnmi`, `netflow`) keep a rest-var subject by design, so everything they
-/// publish is registered and this is a no-op for them.
+/// `gnmi`, `netflow`) keep a rest-var subject by design, so every
+/// *grammar-valid* name they publish is registered. The rest-var does NOT
+/// excuse a chunk-grammar violation: a mixed-case metric name fails
+/// `parse_subject` chunk-by-chunk and trips the guard like any unregistered
+/// subject (#559) — which is why those producers slug at the publish boundary.
 pub fn check_telemetry_key(key: &str) {
     // The publish path is base-relative (#466): the session namespace adds the
     // base. A full key here would still *parse* if we searched for "v1/" —
@@ -85,6 +88,19 @@ mod tests {
     fn rest_var_producers_pass() {
         // snmp's tree is whatever the device exposes — a rest-var by design.
         check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/if/1/in_octets");
+        // `.rate` siblings (#527), trap counters, and the dotted-OID fallback
+        // are all grammar-valid chunks and ride the same rest-var.
+        check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/if/1/in_octets.rate");
+        check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/trap/link_down");
+        check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/1.3.6.1.4.1.9.9.999.0");
+    }
+
+    /// #559: a rest-var subject does not excuse the chunk grammar — the
+    /// mixed-case names the builtin MIB table used to emit trip the guard.
+    #[test]
+    #[should_panic(expected = "unregistered telemetry subject")]
+    fn rest_var_grammar_violation_panics_in_debug() {
+        check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/sysUpTime.0");
     }
 
     #[test]
