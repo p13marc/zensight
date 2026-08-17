@@ -824,10 +824,7 @@ impl SnmpPoller {
 /// byte-identical; anything else (a mixed-case user `oid_names` entry) gets
 /// zenkey's lossless `_xNN_` escaping instead of tripping the metric guard.
 fn slug_metric(name: &str) -> String {
-    if name
-        .split('/')
-        .all(zenkey::grammar::is_valid_plain_chunk)
-    {
+    if name.split('/').all(zenkey::grammar::is_valid_plain_chunk) {
         return name.to_string();
     }
     name.split('/')

@@ -76,19 +76,14 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Load additional MIB files (legacy JSON pseudo-MIBs; deprecated #532)
+    // Legacy JSON pseudo-MIBs: deprecated #532, removed #580. One release of
+    // hard error beats silently ignoring the setting.
     if !snmp_config.mib.files.is_empty() {
-        tracing::warn!(
-            "snmp.mib.files (JSON pseudo-MIBs) is deprecated — move standard SMI \
-             .mib files into snmp.mib.dirs; JSON support goes away next release"
+        anyhow::bail!(
+            "snmp.mib.files (JSON pseudo-MIBs) was removed (#580) — convert the \
+             definitions to standard SMI .mib files and list their directory in \
+             snmp.mib.dirs"
         );
-    }
-    for mib_file in &snmp_config.mib.files {
-        if let Err(e) = mib_resolver.load_file(mib_file) {
-            tracing::warn!(file = %mib_file, error = %e, "Failed to load MIB file");
-        } else {
-            tracing::info!(file = %mib_file, "Loaded MIB file");
-        }
     }
 
     // Real SMI MIBs (#532): vendor files drop into mib.dirs unmodified.
