@@ -504,6 +504,7 @@ pub fn download_stream(
     delivery: Delivery,
     dest: PathBuf,
     store: Arc<dyn ContentStore>,
+    temps: Arc<zblob::gc::TempTags>,
     cancel: CancelToken,
 ) -> impl Stream<Item = Message> {
     async_stream::stream! {
@@ -550,11 +551,18 @@ pub fn download_stream(
                     tree_prefix,
                     ..
                 } => {
-                    let client = TreeClient::new(
+                    // `temp_tags` is the sweep contract's other half: the
+                    // client registers fetched-but-unmaterialized chunks so a
+                    // concurrent chunk-cache sweep cannot collect them
+                    // mid-transfer (they look exactly like garbage until the
+                    // tree materializes).
+                    let client = TreeClient::builder(
                         &session,
                         concrete(store_prefix)?,
                         concrete(tree_prefix)?,
-                    );
+                    )
+                    .temp_tags(temps)
+                    .build();
                     let req = DownloadRequest::by_root(root);
                     client
                         .download_tree(&req, &dest, &store)

@@ -117,6 +117,9 @@ impl ArtifactProducer for SnapshotProducer {
     fn tree_max_files(&self) -> Option<u64> {
         Some(self.limits.max_files)
     }
+    fn store_state_dir(&self) -> Option<std::path::PathBuf> {
+        self.limits.state_dir.as_ref().map(std::path::PathBuf::from)
+    }
     async fn produce(&self, kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
         let ArtifactKind::Snapshot { dir } = kind else {
             anyhow::bail!("snapshot producer given a non-snapshot request");
@@ -125,8 +128,20 @@ impl ArtifactProducer for SnapshotProducer {
             .limits
             .resolve(&dir)
             .ok_or_else(|| anyhow::anyhow!("unknown directory: {dir}"))?;
+        // Per-dir opt-in (config `incremental`): the lineage tag keys the
+        // channel's parent-index map and the durable tag file. The name is a
+        // zblob tag name (validated on `tags.set`); dir names are operator
+        // config, so an exotic one degrades to a warned, un-warm build.
+        let lineage = self
+            .limits
+            .dirs
+            .iter()
+            .find(|d| d.name == dir)
+            .filter(|d| d.incremental)
+            .map(|d| format!("snapshot-{}", d.name));
         Ok(Produced::Dir {
             path: PathBuf::from(path),
+            lineage,
         })
     }
 }

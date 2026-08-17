@@ -47,6 +47,11 @@
       cooldown_secs: 30,     // min gap between builds
       ttl_secs: 600,         // how long a built snapshot stays downloadable
       chunk_size: 262144,    // 256 KiB average (FastCDC content-defined chunking)
+      // Durable chunk store (unset = in-memory, lost on restart). With the
+      // systemd unit's StateDirectory this is /var/lib/zensight-sysinfo/artifacts;
+      // per-dir `incremental: true` then reuses unchanged files' chunks across
+      // builds (append-mostly dirs only — see the config docs).
+      // state_dir: "/var/lib/zensight-sysinfo/artifacts",
     },
   },
 
