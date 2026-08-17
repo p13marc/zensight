@@ -1755,6 +1755,16 @@ impl ZenSight {
                 }
                 self.dashboard.push_snmp_event(record);
             }
+            Message::SnmpDiscoveryReport { source, report } => {
+                // LWW per publishing sensor origin (#579).
+                self.dashboard.snmp_discovery.insert(source, report);
+            }
+            Message::ToggleSnmpDiscovery => {
+                self.dashboard.snmp_discovery_open = !self.dashboard.snmp_discovery_open;
+            }
+            Message::CopyText(text) => {
+                return ControlFlow::Break(iced::clipboard::write(text));
+            }
             Message::SnmpTableSort(col) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.snmp_detail.table.toggle_sort(col);

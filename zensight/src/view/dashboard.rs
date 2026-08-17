@@ -181,6 +181,11 @@ pub struct DashboardState {
     /// Recent SNMP trap/event records off the events plane (#536), newest
     /// first, deduped by ULID, capped.
     pub snmp_events: std::collections::VecDeque<zensight_common::EventRecord>,
+    /// Subnet-discovery reports (#579), keyed by publishing sensor origin —
+    /// LWW off `state/snmp/discovery`.
+    pub snmp_discovery: HashMap<String, zensight_common::DiscoveryReport>,
+    /// Whether the discovery card shows the expanded proposal list (#579).
+    pub snmp_discovery_open: bool,
 }
 
 impl Default for DashboardState {
@@ -200,6 +205,8 @@ impl Default for DashboardState {
             status_filter: None,
             snmp_interfaces: HashMap::new(),
             snmp_events: std::collections::VecDeque::new(),
+            snmp_discovery: HashMap::new(),
+            snmp_discovery_open: false,
         }
     }
 }
@@ -502,6 +509,8 @@ pub fn dashboard_view<'a>(
         &state.devices,
         &state.snmp_interfaces,
         &state.snmp_events,
+        &state.snmp_discovery,
+        state.snmp_discovery_open,
     );
     let devices = render_device_grid(
         state,

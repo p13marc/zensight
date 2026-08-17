@@ -5862,7 +5862,8 @@ fn test_snmp_overview_rate_based() {
 
     let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
     let events = std::collections::VecDeque::new();
-    let mut ui = simulator(snmp_overview(&devices, &docs, &events));
+    let discovery = HashMap::new();
+    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, false));
 
     // Top talker is router01's busiest interface (rates, humanized).
     assert!(ui.find("1.").is_ok());
@@ -5884,7 +5885,8 @@ fn test_snmp_overview_empty() {
     let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
     let docs = HashMap::new();
     let events = std::collections::VecDeque::new();
-    let mut ui = simulator(snmp_overview(&devices, &docs, &events));
+    let discovery = HashMap::new();
+    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, false));
     assert!(ui.find("No SNMP devices available").is_ok());
 }
 
@@ -5932,12 +5934,73 @@ fn test_snmp_overview_trap_feed() {
     events.push_back(mock::snmp::trap_event("router01", "trap/link_up", "01aad"));
     events.push_back(mock::snmp::trap_event("sw02", "trap/cold_start", "01aae"));
 
-    let mut ui = simulator(snmp_overview(&devices, &docs, &events));
+    let discovery = HashMap::new();
+    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, false));
     assert!(
         ui.find("Recent Traps (3) — top: router01 (2), sw02 (1)")
             .is_ok()
     );
     assert!(ui.find("trap/cold_start").is_ok());
+}
+
+/// Discovery proposals surface on the fleet overview (#579): banner count,
+/// expanded list with identity + profiles, and a copy-snippet button that
+/// emits the snippet.
+#[test]
+fn test_snmp_overview_discovery_card() {
+    use std::collections::HashMap;
+    use zensight::view::overview::snmp::snmp_overview;
+
+    let report = zensight_common::DiscoveryReport {
+        timestamp: 1_700_000_000_000,
+        scanned: 254,
+        discovered: vec![
+            zensight_common::DiscoveredDevice {
+                address: "192.168.1.50:161".into(),
+                credentials: Some("lab-v2c".into()),
+                sys_object_id: Some("1.3.6.1.4.1.9.1.1".into()),
+                sys_name: Some("edge-sw3".into()),
+                sys_descr: None,
+                matched_profiles: vec!["network-interfaces".into()],
+                suggested: "{ name: \"edge-sw3\", address: \"192.168.1.50:161\" }".into(),
+            },
+            zensight_common::DiscoveredDevice {
+                address: "192.168.1.51:161".into(),
+                suggested: "{ address: \"192.168.1.51:161\" }".into(),
+                ..Default::default()
+            },
+        ],
+    };
+    let mut discovery = HashMap::new();
+    discovery.insert("h-aaaaaaaaaaaa".to_string(), report);
+
+    let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
+    let mut docs = HashMap::new();
+    docs.insert(
+        "router01".to_string(),
+        mock::snmp::interface_table("router01", 1),
+    );
+    let events = std::collections::VecDeque::new();
+
+    // Collapsed: just the banner.
+    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, false));
+    assert!(ui.find("2 unmonitored SNMP devices found ▸").is_ok());
+    assert!(ui.find("edge-sw3").is_err(), "list hidden while collapsed");
+
+    // Expanded: rows + copy button emitting the snippet.
+    let mut ui = simulator(snmp_overview(&devices, &docs, &events, &discovery, true));
+    assert!(ui.find("192.168.1.50:161").is_ok());
+    assert!(
+        ui.find("edge-sw3 — network-interfaces [creds: lab-v2c]")
+            .is_ok()
+    );
+    assert!(ui.find("(no sysName)").is_ok());
+    ui.click("Copy snippet").expect("copy button");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        Message::CopyText(s) if s.contains("192.168.1.50:161")
+    )));
 }
 
 /// The fleet event ring dedups by ULID and keeps newest-first order (#536).
