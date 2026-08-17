@@ -424,6 +424,12 @@ pub struct LogStoreConfig {
     /// 100 000.
     #[serde(default = "default_store_queue_capacity")]
     pub queue_capacity: usize,
+
+    /// redb page-cache budget in bytes. redb's own default is 1 GiB (#625) —
+    /// on the small hosts this sensor targets that reads as a slow multi-day
+    /// RSS climb toward OOM as the database grows. Default 64 MiB.
+    #[serde(default = "default_store_cache_bytes")]
+    pub cache_bytes: usize,
 }
 
 impl Default for LogStoreConfig {
@@ -437,8 +443,13 @@ impl Default for LogStoreConfig {
             flush_interval_secs: default_store_flush_secs(),
             prune_interval_secs: default_store_prune_secs(),
             queue_capacity: default_store_queue_capacity(),
+            cache_bytes: default_store_cache_bytes(),
         }
     }
+}
+
+fn default_store_cache_bytes() -> usize {
+    64 * 1024 * 1024
 }
 
 fn default_store_max_age_days() -> u64 {
@@ -791,6 +802,23 @@ pub struct JournaldConfig {
     #[serde(default)]
     pub min_priority: Option<u8>,
 
+    /// Drop the bundle's own journal output (#625): entries whose
+    /// `_SYSTEMD_UNIT` or `SYSLOG_IDENTIFIER` starts with `zensight-sensor`
+    /// are discarded in the reader, before rate limiting and decode. On by
+    /// default — a logs sensor tailing a journal that contains its own
+    /// stdout is a feedback loop (every line it logs becomes traffic it
+    /// publishes, which produces more lines). libsystemd matches are
+    /// include-only, so this cannot be expressed server-side.
+    #[serde(default = "default_true")]
+    pub exclude_self: bool,
+
+    /// Client-side exclusion of additional exact `_SYSTEMD_UNIT` names —
+    /// the negative match libsystemd doesn't have. Checked in the reader
+    /// before rate limiting; dropped entries are counted
+    /// (`journald/self_excluded_total`). Empty by default.
+    #[serde(default)]
+    pub exclude_units: Vec<String>,
+
     /// Server-side filter: only these transports (`_TRANSPORT`, e.g. `kernel`,
     /// `journal`, `stdout`, `syslog`), OR'd. Empty = all.
     #[serde(default)]
@@ -891,6 +919,8 @@ impl Default for JournaldConfig {
             on_missing_cursor: MissingCursor::default(),
             units: Vec::new(),
             min_priority: None,
+            exclude_self: true,
+            exclude_units: Vec::new(),
             transports: Vec::new(),
             match_fields: std::collections::HashMap::new(),
             extra_fields: Vec::new(),

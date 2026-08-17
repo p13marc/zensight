@@ -286,7 +286,8 @@ mod tests {
         use zensight_sensor_core::{ProduceCtx, ProgressUpdate};
 
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(LogStore::open(dir.path().join("logs.redb")).unwrap());
+        let store =
+            Arc::new(LogStore::open(dir.path().join("logs.redb"), 8 * 1024 * 1024).unwrap());
         // 5 lines; 4 contain "boom" (matcher target).
         let recs: Vec<LogRecord> = (0..5)
             .map(|i| LogRecord {

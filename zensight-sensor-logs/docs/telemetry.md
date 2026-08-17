@@ -70,7 +70,7 @@ names below, each starting with the `logs/` chunk):
 | `errors_total`, `warnings_total` | Counter | error / warning totals |
 | `by_unit/<unit>/messages_total`, `.../errors_total` | Counter | top-N per-unit rollups (capped to `top_units` + an `other` bucket) |
 | `units_in_failure` | Gauge | units currently in a failure/error state (windowed) |
-| `journald/{read,published,dropped,sampled_out}_total` | Counter | journald throughput accounting |
+| `journald/{read,published,dropped,sampled_out,self_excluded}_total` | Counter | journald throughput accounting (#625: `self_excluded` = self/deny-list drops) |
 
 ### Ingest accounting (`ingest/*`, #106)
 
