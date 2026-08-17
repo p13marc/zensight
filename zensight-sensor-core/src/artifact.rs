@@ -620,10 +620,13 @@ impl ArtifactChannel {
 
                 let build_store = store.clone() as Arc<dyn ContentStore>;
                 let build_id = id.to_string();
-                let cdc = CdcParams {
-                    avg: chunk_size,
-                    ..CdcParams::default()
-                };
+                let cdc = snapshot_cdc_params(chunk_size);
+                cdc.validate().map_err(|e| {
+                    anyhow::anyhow!(
+                        "artifacts.snapshot.chunk_size = {chunk_size} yields invalid CDC \
+                         parameters: {e}"
+                    )
+                })?;
                 let index: TreeIndex = tokio::task::spawn_blocking(move || {
                     build_tree(&path, build_id, &cdc, build_store.as_ref())
                 })
@@ -792,5 +795,52 @@ impl ArtifactChannel {
             tree_server: self.tree_server.clone(),
             state: self.state.clone(),
         }
+    }
+}
+
+/// CDC parameters for a snapshot build, derived from the configured average
+/// chunk size.
+///
+/// `min`/`max` scale with the average, keeping zblob's default 1:4:16 geometry
+/// (16 KiB / 64 KiB / 256 KiB). Setting only `avg` and inheriting the default
+/// `max` — what this code did before — made `avg == max` at the shipped
+/// 256 KiB default, so FastCDC cut at `max` on nearly every chunk: fixed-size
+/// chunking in disguise, with none of the shift resistance content-defined
+/// chunking exists for. It also rejected any configured `chunk_size` above
+/// 256 KiB outright (`CdcParams::validate` requires `avg <= max`).
+fn snapshot_cdc_params(chunk_size: u32) -> CdcParams {
+    CdcParams {
+        min: (chunk_size / 4).max(64),
+        avg: chunk_size.max(256),
+        max: chunk_size.saturating_mul(4).min(16 * 1024 * 1024),
+        ..CdcParams::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_cdc_params;
+
+    #[test]
+    fn snapshot_cdc_params_validate_across_the_knob_range() {
+        // Shipped default, the old report default, and a small-average edge.
+        for chunk_size in [262_144, 524_288, 65_536, 256, 4 * 1024 * 1024] {
+            let cdc = snapshot_cdc_params(chunk_size);
+            cdc.validate()
+                .unwrap_or_else(|e| panic!("chunk_size {chunk_size}: {e}"));
+            assert!(
+                cdc.avg < cdc.max,
+                "chunk_size {chunk_size}: avg == max degenerates FastCDC into \
+                 fixed-size chunking"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_cdc_params_keep_the_default_geometry() {
+        // The shipped 256 KiB average maps onto 64 KiB / 256 KiB / 1 MiB —
+        // zblob's default 1:4:16 ratio shifted up by the config knob.
+        let cdc = snapshot_cdc_params(262_144);
+        assert_eq!((cdc.min, cdc.avg, cdc.max), (65_536, 262_144, 1_048_576));
     }
 }

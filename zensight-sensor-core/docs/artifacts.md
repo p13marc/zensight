@@ -91,9 +91,11 @@ sequenceDiagram
         Producer-->>Channel: Produced::File or Produced::Dir
         Channel->>Channel: finalize()
         alt Produced::File (Tier-1)
-            Channel->>Blob: BlobServer.register(manifest)
+            Channel->>Blob: BlobServer.register_file(spec, path)
+            Blob-->>Channel: Manifest (registration output, not input)
             Channel->>Channel: current = Ready{Delivery::Blob, expires_ms}
         else Produced::Dir (Tier-2)
+            Channel->>Channel: build_tree → index, keyed by its root
             Channel->>Blob: TreeServer.register(index)
             Channel->>Channel: current = Ready{Delivery::Tree, expires_ms}
         end
@@ -125,7 +127,9 @@ pub trait ArtifactProducer: Send + Sync + 'static {
 
 `produce` returns a `Produced::File { path, filename }` (→ `Delivery::Blob`) or
 `Produced::Dir { path }` (→ `Delivery::Tree`); the variant must match the declared
-`delivery_kind`. `ProduceCtx` supplies a private `workdir`, a `CancelToken` a
+`delivery_kind`. `ProduceCtx` supplies a `workdir` (currently the shared system
+temp dir — it is **not** per-request and the channel cleans up only the final
+artifact, not intermediate files a producer leaves there), a `CancelToken` a
 long-running producer must poll, and a `progress` sender.
 
 ## Built-in producers

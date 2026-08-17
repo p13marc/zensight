@@ -483,7 +483,8 @@ pub struct CommonArtifactLimits {
     pub cooldown_secs: u64,
     /// How long a produced artifact stays available before the reaper drops it.
     pub ttl_secs: u64,
-    /// Chunk size for the transfer (clamped by `zenoh-blob` to 256 KiB–1 MiB).
+    /// Chunk size for the transfer, bytes. zblob *validates* it — 64 KiB to
+    /// 4 MiB, 16 KiB-aligned — and an invalid value fails blob registration.
     pub chunk_size: u32,
 }
 
@@ -504,7 +505,9 @@ pub struct ArtifactReportLimits {
     /// How long a generated bundle stays available.
     #[serde(default = "default_report_ttl")]
     pub ttl_secs: u64,
-    /// Chunk size used by the blob transfer (clamped to 256 KiB–1 MiB).
+    /// Chunk size used by the blob transfer, bytes. zblob *validates* it —
+    /// 64 KiB to 4 MiB, 16 KiB-aligned — and an invalid value fails blob
+    /// registration.
     #[serde(default = "default_report_chunk_size")]
     pub chunk_size: u32,
     /// Extra config field-name patterns to redact (case-insensitive substring).
@@ -564,6 +567,8 @@ pub struct ArtifactSnapshotLimits {
     #[serde(default = "default_report_ttl")]
     pub ttl_secs: u64,
     /// Average chunk size for the content-defined (FastCDC) chunker, bytes.
+    /// The min/max cutoffs are derived from it (avg/4 and avg×4, zblob's
+    /// default 1:4:16 geometry).
     #[serde(default = "default_snapshot_chunk_size")]
     pub chunk_size: u32,
 }

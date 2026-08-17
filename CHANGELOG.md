@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — BREAKING
 
+- **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire
+  tag is re-spelled and the wire version moves to 3, so a mixed deployment
+  fails closed rather than half-decoding — **sensors and frontend upgrade
+  together** (again). Unlike the sha256→blake3 cut below, **chunk addresses
+  do not change**: the GUI's redb chunk store and any router-hosted storages
+  stay warm across the upgrade. Also picked up from 0.3: typed
+  serve/query prefixes replace string hygiene (a wildcard fetch prefix is
+  now unrepresentable, not just guarded), tier-2 materialization hardening
+  (a hostile snapshot index can no longer delete pre-existing directories,
+  apply setuid/setgid bits, or escape via a symlink chain), batched tier-2
+  chunk fetches, and snapshot chunking derives its CDC min/max from the
+  configured average (previously `avg == max` degenerated FastCDC into
+  fixed-size chunking, and a `chunk_size` above 256 KiB failed validation).
 - **zblob 0.2 (wire v2).** Artifact transfer moves to BLAKE3 + bao verified
   streaming, postcard control messages and chunk-range resume. v1 and v2
   peers deliberately do not interoperate — v2 renamed the reply keys so a
