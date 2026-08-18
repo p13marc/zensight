@@ -230,6 +230,7 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `trap_listener.users` | object[] | SNMPv3 notification users (same schema as device `security`; `engine_id` ignored — the receiver is authoritative). |
 | `trap_listener.alerts` | object[] | Trap → alert rules: `{ rule, fire: <OID>, resolve?: <OID>, severity }`. |
 | `trap_listener.builtin_rules` | bool | Include the built-in linkDown/linkUp mapping (default true). |
+| `trap_listener.engine_state_path` | path? | Where the v3 authoritative engine identity + boots counter persist (#650). Unset = `STATE_DIRECTORY` / XDG state default. See *SNMPv3 receiving identity* below. |
 | `devices[]` | array | Devices to poll (see below). |
 | `oid_groups` | map | Named, reusable `{ oids, walks }` sets referenced by `device.oid_group`. |
 | `oid_names` | map | OID→metric-name map; `{index}` is substituted with the table index. |
@@ -460,6 +461,39 @@ harness lives in `tests/harness/mod.rs`:
 
 The harness maps OIDs through lowercase `oid_names` (grammar-valid chunks);
 built-in MIB names currently violate the chunk grammar — see issue #559.
+
+## SNMPv3 receiving identity (#650)
+
+When `trap_listener.users` is set, this sensor is an **authoritative SNMP
+engine** — not because it sends anything, but because informs are authenticated
+against *its* `snmpEngineID` and `(boots, time)` window, and it signs the
+automatic acknowledgement with them. RFC 3414 §2.2 therefore requires a stable
+engine ID and a `snmpEngineBoots` counter that increments and persists across
+restarts; the ±150 s time window is the only replay defence authenticated
+messages have.
+
+Through 0.11 the receiver minted a fresh identity every start. That is worse
+than it sounds: a sender that has already discovered this engine does not merely
+re-handshake, it has its informs **dropped outright** (localized to an engine ID
+the receiver no longer has) until it rediscovers. The identity is now persisted.
+
+| Situation | Behaviour |
+|---|---|
+| A durable location resolves | `(engine_id, boots)` persist; each start increments boots and reuses the ID |
+| No location resolves at all | Per-start ephemeral identity, with one warning. This deployment never asked for durability, and refusing would turn an upgrade into an outage |
+| The location resolves but cannot be written | **v3 receiving is refused**; v1/v2c listening continues. You asked for durability and did not get it, so you hear about it now rather than from a sender later |
+| The stored file is missing or corrupt | A fresh identity is installed — the old value is unusable, so there is nothing to preserve |
+| `boots` has latched at 2147483647 | A **new** engine ID is minted. Restarting into a latched engine rejects all authenticated inbound (RFC 3414 §2.2), i.e. a silently dead receiver |
+
+Resolution order for the location: `trap_listener.engine_state_path`, then the
+systemd `STATE_DIRECTORY`, then `$XDG_STATE_HOME/zensight`, then
+`~/.local/state/zensight`. The shipped unit sets
+`StateDirectory=zensight-snmp`; under `ProtectSystem=strict` that is the only
+writable path, so **a unit without it lands in the "refused" row**.
+
+Writes are atomic (temp file, fsync, rename), which fails in the safe
+direction: a crash after the rename leaves boots at or above the value actually
+used, never below — below is what would re-open a replay window.
 
 ## Build / run notes & caveats
 

@@ -471,13 +471,21 @@ fn render_event_row<'a>(
                 })
                 .width(Length::Fill),
         );
-        // A trap that raised an alert (#535) does not carry the alert key, so
-        // the honest pivot is device-scoped: this device's alerts.
-        row = row.push(
-            iced::widget::button(text("alerts →").size(10))
+        // A record that named the alert it raised or cleared links straight to
+        // it (#651). Records that drove no alert transition — and every record
+        // written before that field existed — keep the device-scoped pivot,
+        // which is the honest link when there is no key to follow.
+        row = row.push(match &record.alert_key {
+            Some(key) => iced::widget::button(text("alert →").size(10))
+                .on_press(Message::OpenAlertForKey {
+                    source: record.source.clone(),
+                    alert_key: key.clone(),
+                })
+                .style(iced::widget::button::text),
+            None => iced::widget::button(text("alerts →").size(10))
                 .on_press(Message::OpenAlertsForSource(record.source.clone()))
                 .style(iced::widget::button::text),
-        );
+        });
     }
     row.into()
 }

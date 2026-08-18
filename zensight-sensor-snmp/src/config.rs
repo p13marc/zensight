@@ -281,6 +281,20 @@ pub struct TrapListenerConfig {
     /// Include the built-in linkDown/linkUp mapping (default true).
     #[serde(default = "default_true")]
     pub builtin_rules: bool,
+
+    /// Where the v3 authoritative engine identity (`snmpEngineID`) and its
+    /// `snmpEngineBoots` counter are persisted (#650, RFC 3414 §2.2).
+    ///
+    /// `None` (the default) resolves the systemd `STATE_DIRECTORY` / XDG state
+    /// location, the same scheme the logs sensor uses for its cursor and
+    /// offsets. If **no** location resolves at all, the receiver keeps a
+    /// per-start ephemeral identity and says so once — see
+    /// `docs/reference.md`. A location that resolves but cannot be written is
+    /// a different matter: v3 receiving is refused rather than silently
+    /// downgraded, because an operator who asked for durability and did not
+    /// get it should not find out from an inform sender.
+    #[serde(default)]
+    pub engine_state_path: Option<std::path::PathBuf>,
 }
 
 fn default_trap_bind() -> String {
@@ -296,6 +310,7 @@ impl Default for TrapListenerConfig {
             users: Vec::new(),
             alerts: Vec::new(),
             builtin_rules: true,
+            engine_state_path: None,
         }
     }
 }

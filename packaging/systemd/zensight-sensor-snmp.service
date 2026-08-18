@@ -15,6 +15,12 @@ KillSignal=SIGTERM
 TimeoutStopSec=20s
 # Run unprivileged under a transient system user, with a minimal sandbox.
 DynamicUser=yes
+# SNMPv3 authoritative engine identity + boots counter (#650, RFC 3414 §2.2):
+# /var/lib/zensight-snmp — the only writable path under ProtectSystem=strict.
+# Without this the sensor cannot persist its engine id, so it refuses v3
+# receiving (v1/v2c keeps working) rather than silently re-minting an identity
+# every restart and breaking each inform sender until it rediscovers.
+StateDirectory=zensight-snmp
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

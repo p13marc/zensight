@@ -206,17 +206,18 @@ pub async fn run(
         }
     };
     // Opt-in: unit files routinely carry credentials, so a host does not serve
-    // them unless asked to. When off the queryable is not declared at all.
-    let unit_file_q = if expose_unit_files {
-        match zensight_common::served::serve_queryable(&session, &unit_file_key).await {
-            Ok(q) => Some(q),
-            Err(e) => {
-                tracing::error!(error = %e, key = %unit_file_key, "query: declare unit/file failed");
-                None
-            }
+    // their *contents* unless asked to. The procedure is declared either way —
+    // it is registered unconditionally, and not declaring it made `introspect`
+    // advertise a surface this build never served (RFC 08 §6.1, #648). When off
+    // it answers `error/gated`, which tells an operator to flip the knob rather
+    // than leaving them to guess whether any systemd sensor is even running.
+    let unit_file_q = match zensight_common::served::serve_queryable(&session, &unit_file_key).await
+    {
+        Ok(q) => Some(q),
+        Err(e) => {
+            tracing::error!(error = %e, key = %unit_file_key, "query: declare unit/file failed");
+            None
         }
-    } else {
-        None
     };
     tracing::info!(units = %units_key, failed = %failed_key, unit = %unit_key, events = %events_key,
         timers = %timers_key, cgroups = %cgroups_key, unit_files = expose_unit_files,
@@ -262,8 +263,8 @@ pub async fn run(
                 let tree = build_cgroup_tree(&cgroup, query.parameters().as_str());
                 reply_json(&query, &cgroups_key, &tree).await;
             }
-            // `Option::None` makes this arm never ready, so an opted-out sensor
-            // simply parks here forever rather than needing a second loop.
+            // `Option::None` only happens if the declaration itself failed, in
+            // which case this arm parks forever rather than needing a second loop.
             q = async {
                 match &unit_file_q {
                     Some(q) => q.recv_async().await,
@@ -271,6 +272,20 @@ pub async fn run(
                 }
             } => {
                 let Ok(query) = q else { return };
+                if !expose_unit_files {
+                    // Declared but switched off (#648): say which, so a caller can
+                    // tell "not allowed here" from "no systemd sensor answered".
+                    let err = zensight_common::rpc::RpcError::gated(
+                        "`unit/file` needs `actions.expose_unit_files: true` on this host; \
+                         unit files routinely carry credentials, so serving their contents \
+                         is opt-in",
+                    );
+                    let body = serde_json::to_vec(&err).unwrap_or_default();
+                    if let Err(e) = query.reply_err(body).await {
+                        tracing::warn!(error = %e, "query: unit/file gated reply failed");
+                    }
+                    continue;
+                }
                 let name = param(query.parameters().as_str(), "name");
                 let file = match name.as_deref() {
                     Some(n) => unit_file(&conn, &manager, n).await,

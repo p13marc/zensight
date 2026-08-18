@@ -1290,7 +1290,23 @@ struct TrapRig {
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
     reporter: std::sync::Arc<zensight_sensor_core::AlertReporter>,
     addr: std::net::SocketAddr,
-    _task: tokio::task::JoinHandle<()>,
+    /// Engine facts captured at bind, so a restart test can compare them after
+    /// the receiver has been moved into its run loop (#650).
+    engine_id: Vec<u8>,
+    engine_boots: u32,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TrapRig {
+    /// Stop the receiver and release its socket. Aborting drops the
+    /// `BoundTrapReceiver`, which closes the UDP socket, so the same port can
+    /// be re-bound by a restarted rig (#650).
+    async fn stop(self) {
+        self.task.abort();
+        let _ = self.task.await;
+        drop(self.session);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// A running trap receiver on 127.0.0.1:0 over an isolated peer, with an
@@ -1328,6 +1344,8 @@ async fn trap_rig(config: TrapListenerConfig) -> TrapRig {
     receiver.with_alerts(reporter.clone());
     let bound = receiver.bind().await.expect("bind trap listener");
     let addr = bound.local_addr();
+    let engine_id = bound.engine_id();
+    let engine_boots = bound.engine_boots();
     let task = tokio::spawn(async move {
         let _ = bound.run().await;
     });
@@ -1337,7 +1355,9 @@ async fn trap_rig(config: TrapListenerConfig) -> TrapRig {
         event_sub,
         reporter,
         addr,
-        _task: task,
+        engine_id,
+        engine_boots,
+        task,
     }
 }
 
@@ -1405,6 +1425,15 @@ async fn trap_v2c_event_alert_lifecycle() {
     assert_eq!(alert.labels["device"], "127-0-0-1");
     assert_eq!(alert.labels["if_index"], "1");
 
+    // #651: the record names the alert it raised, and names it exactly — the
+    // key the reporter published under, not the rule name, which would be
+    // ambiguous the moment a second interface goes down on the same device.
+    assert_eq!(
+        event.alert_key.as_deref(),
+        Some(alert.alert_key().as_str()),
+        "the trap record must carry the alert key the reporter used"
+    );
+
     // linkUp resolves exactly that alert.
     agent
         .agent()
@@ -1413,6 +1442,12 @@ async fn trap_v2c_event_alert_lifecycle() {
         .expect("send linkUp");
     let (_, up_event) = next_event(&rig).await;
     assert_eq!(up_event.kind, "trap/1.3.6.1.6.3.1.1.5.4");
+    // #651: the clearing trap links to the SAME alert it cleared, so an
+    // operator following the link lands on the incident rather than nowhere.
+    assert_eq!(
+        up_event.alert_key, event.alert_key,
+        "linkUp must name the alert linkDown raised"
+    );
 
     let mut resolved = false;
     while let Ok(Ok(sample)) =
@@ -1508,6 +1543,112 @@ async fn trap_v3_authpriv_end_to_end() {
         .expect("send v3 trap");
 
     let (_, event) = next_event(&rig).await;
+    assert_eq!(event.fields["trap_oid"], LINK_DOWN);
+    assert_eq!(event.fields["snmp_version"], "V3");
+}
+
+/// #650: the receiving engine identity survives a restart, and a sender that
+/// already discovered it keeps working.
+///
+/// The order matters and is the whole test. The sender informs **first**, so
+/// its inform client caches this receiver's authoritative engine id; only then
+/// does the receiver restart. On the pre-#650 ephemeral identity the second
+/// inform is localized to an engine the receiver no longer has, so it is
+/// dropped with no acknowledgement — the sender does not merely re-handshake,
+/// it is broken until it rediscovers. Send only *after* the restart and the
+/// test passes either way, which is why it does not.
+///
+/// What is deliberately NOT asserted is "zero round trips". boots goes 1 → 2,
+/// so the sender's cached `(boots, time)` fails RFC 3414 Step 7a and the
+/// receiver owes it one authenticated time-sync Report. Asserting that away
+/// would be asserting a spec violation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trap_v3_engine_identity_survives_a_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("engine.json");
+    let user = zensight_sensor_snmp::config::SnmpV3Security {
+        username: "trapuser".to_string(),
+        auth_protocol: AuthProtocol::Sha256,
+        auth_password: Some("authpass123".to_string()),
+        priv_protocol: PrivProtocol::Aes128,
+        priv_password: Some("privpass123".to_string()),
+        engine_id: None,
+    };
+    let cfg = |bind: String| TrapListenerConfig {
+        enabled: true,
+        bind,
+        users: vec![user.clone()],
+        engine_state_path: Some(state.clone()),
+        ..Default::default()
+    };
+
+    let first = trap_rig(cfg("127.0.0.1:0".to_string())).await;
+    let addr = first.addr;
+    let id1 = first.engine_id.clone();
+    assert_eq!(first.engine_boots, 1, "a first start installs boots=1");
+    assert!(
+        !id1.is_empty(),
+        "a v3 receiver has an authoritative engine id"
+    );
+
+    let sink_auth: async_snmp::Auth = async_snmp::Auth::usm("trapuser")
+        .auth_priv(
+            AgentAuth::Sha256,
+            "authpass123",
+            AgentPriv::Aes128,
+            "privpass123",
+        )
+        .into();
+    let agent = SimAgent::start_with(SimMib::new(), |b| {
+        b.community(b"public")
+            .authoritative_engine(test_engine(b"\x80\x00\x00\x00\x01informer".to_vec()))
+            .trap_sink(addr.to_string(), sink_auth)
+            .inform_timeout(Duration::from_secs(3))
+    })
+    .await;
+
+    // First inform: the sender discovers and caches this receiver's engine.
+    // `send_inform` swallows per-sink failures and returns Ok regardless, so
+    // the detailed form is the only one that asserts anything.
+    let outcome = agent
+        .agent()
+        .send_inform_detailed(&harness::oid(LINK_DOWN), 11, Vec::new())
+        .await;
+    let failures: Vec<_> = outcome.failures().collect();
+    assert!(
+        failures.is_empty(),
+        "first inform was not acknowledged: {failures:?}"
+    );
+    let (_, event) = next_event(&first).await;
+    assert_eq!(event.fields["snmp_version"], "V3");
+
+    // Free the socket, then come back on the same port with the same state.
+    first.stop().await;
+    let second = trap_rig(cfg(addr.to_string())).await;
+
+    assert_eq!(
+        second.engine_id, id1,
+        "the engine id must survive a restart — the sender above cached it"
+    );
+    assert_eq!(
+        second.engine_boots, 2,
+        "boots must increment across restarts (RFC 3414 §2.2); a stable id with a \
+         non-increasing boots is the replay condition senders are required to reject, \
+         and would be worse than the ephemeral identity this replaced"
+    );
+
+    // Second inform from the SAME sender, still holding the cached engine id.
+    let outcome = agent
+        .agent()
+        .send_inform_detailed(&harness::oid(LINK_DOWN), 12, Vec::new())
+        .await;
+    let failures: Vec<_> = outcome.failures().collect();
+    assert!(
+        failures.is_empty(),
+        "the sender's cached engine id was invalidated by the restart — this is exactly \
+         the #650 regression: {failures:?}"
+    );
+    let (_, event) = next_event(&second).await;
     assert_eq!(event.fields["trap_oid"], LINK_DOWN);
     assert_eq!(event.fields["snmp_version"], "V3");
 }

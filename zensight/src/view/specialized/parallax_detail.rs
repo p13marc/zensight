@@ -20,7 +20,7 @@ use iced::widget::image;
 use zenoh::Session;
 use zensight_common::keyexpr::{media_preview_key, origin_rpc_key};
 use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus, TierSpec};
-use zensight_common::{Format, Protocol, decode};
+use zensight_common::{Format, decode};
 
 use super::fetch::Fetch;
 use super::parallax::preview_handle_from_jpeg;
@@ -392,15 +392,19 @@ pub async fn fetch_streams(
 /// yielded message carries the tile `generation` this task was opened with.
 pub fn preview_tile_stream(
     session: Arc<Session>,
-    origin: String,
+    origin: zenkey::RemoteOrigin,
     stream: String,
     generation: u64,
 ) -> impl Stream<Item = Message> {
     async_stream::stream! {
-        // The preview key for one stream on one host. `origin` is the mapped
-        // v1 origin — or `*` before the map fills, which still matches only
-        // this stream's concrete key on whichever host serves it.
-        let key = media_preview_key(Protocol::Parallax, &origin, &stream);
+        // The preview key for one stream on one host, exact on every chunk.
+        // The origin is a parsed type rather than a string (#649): a `*` here
+        // would fan the JPEG stream in from every host running a camera of
+        // this name, which RFC 07 §3 forbids on the bulk planes. The caller
+        // resolves the origin and toasts if it cannot (`app.rs`), so the
+        // "before the map fills" window this used to cover no longer exists
+        // (#474).
+        let key = media_preview_key(&origin, &stream);
         let subscriber = match session.declare_subscriber(&key).await {
             Ok(s) => s,
             Err(e) => {
@@ -466,7 +470,7 @@ mod tests {
         // Pin the exact key the tile stream subscribes to — the sensor
         // publishes on this literal key (cross-crate contract, RFC 07 §1).
         assert_eq!(
-            media_preview_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0"),
+            media_preview_key(&test_origin(), "cam0"),
             "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         );
         assert_eq!(
