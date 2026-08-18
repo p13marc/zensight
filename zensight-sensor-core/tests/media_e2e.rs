@@ -19,9 +19,8 @@ use std::time::Duration;
 
 use zenoh::bytes::{Encoding, ZBytes};
 use zensight_common::command::{Command, command_key, query_key};
-use zensight_common::keyexpr::media_preview_key;
 use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor};
-use zensight_common::{Format, Protocol, decode_auto, encode};
+use zensight_common::{Format, decode_auto, encode};
 use zensight_sensor_core::Publisher;
 
 /// One-pixel-ish canned JPEG stand-in (opaque bytes; the test only cares that
@@ -186,7 +185,12 @@ async fn media_plane_e2e_stream_control_and_keyframe() {
         "sensor must receive the OpenStream command"
     );
 
-    let preview_key = media_preview_key(Protocol::Netring, &source, "cam0");
+    // Spelled inline rather than through `media_preview_key`, which is
+    // parallax-only since #649. That is not a workaround: this test exercises
+    // the *generic* `raw_media_publisher`, which takes any key string by
+    // design, and netring declares no `[[media]]` in the registry — so there
+    // is no builder for this key and there should not be one.
+    let preview_key = format!("v1/{source}/@media/netring/cam0/preview/jpeg");
     let media = publisher
         .raw_media_publisher(preview_key.clone())
         .await
