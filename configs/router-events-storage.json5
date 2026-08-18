@@ -1,0 +1,104 @@
+// zenohd (router) configuration that makes the ZenSight v1 EVENTS plane durable
+// (#583, RFC 09 §2). Events are durable in *transit* (reliable + block QoS) but
+// the bus stores nothing, so without a storage there is no history for a late
+// joiner: the GUI's startup backfill GET (#536) returns nothing after a restart,
+// and a trap that fired while nobody was looking is simply gone.
+//
+//   zenohd -c configs/router-events-storage.json5
+//
+// Requires the storage-manager + filesystem-backend plugins (shipped with a
+// standard zenohd build): zenoh-plugin-storage-manager, zenoh-backend-fs.
+// `just router-plugins` builds a matching pair.
+//
+// KEYS HERE ARE **FULL**, AND THAT IS CORRECT (#466, RFC 09 §0).
+// A *router* has no namespace, so what reaches these storages is the full
+// wire key. This example assumes the default base-less deployment (no session
+// namespace set — RFC 03 §1.1 amended), where the full key starts at `v1/…`.
+// If your deployment sets a base (`zenoh.namespace`, e.g. `zensight`), prefix
+// every `key_expr`/`strip_prefix` below with it (`zensight/v1/…`).
+//
+// ---------------------------------------------------------------------------
+// WHY `fs` AND NOT InfluxDB — read this before "fixing" it
+//
+// RFC 09 §2's sketch puts events in InfluxDB, and its volume table (§2.1)
+// reserves `influxdb` for "anything whose value is the *sequence*", marking
+// `fs`/`rocksdb` as durable-but-`latest`. That caveat does **not** bind here.
+//
+// It is a statement about *per-key* history: a `latest` backend loses data only
+// when many samples share one key. Every event record owns a unique key — the
+// grammar is `v1/<origin>/events/<producer>/<subject...>/<ULID>`, one ULID per
+// record, and nothing ever overwrites (RFC 04 §1.3). So "latest per key" and
+// "the whole log" are the same set, and `fs` retains everything. RFC 09 chose
+// InfluxDB there for uniformity with the `timeseries` storage, not necessity.
+//
+// What InfluxDB would still buy you is DB-side retention policy — see below.
+// ---------------------------------------------------------------------------
+// RETENTION IS YOURS
+//
+// Zenoh storages have no TTL. With `fs`, retention is a disk-space concern:
+// prune the volume directory on your own schedule, or size it against your trap
+// rate. The registry declares SNMP traps at `burst(1000/h)` with a cardinality
+// bound of 100000 per device, which is the number to size against. If you want
+// policy-based expiry instead, copy the shape of
+// `configs/router-pdns-influxdb-storage.json5` and point this key_expr at an
+// InfluxDB volume with a retention policy.
+// ---------------------------------------------------------------------------
+// NOT `complete`
+//
+// This storage must never declare `complete`: a complete storage
+// short-circuits `BestMatching` and silently collapses a fleet-wide `@rpc` GET
+// to a single reply — two sensors answer, the operator sees one, nothing
+// errors (RFC 05 §2.1, RFC 09 §2.2). Enforced statically by
+// `no_storage_claims_completeness` in `zensight-common/tests/router_storage.rs`,
+// which scans every `configs/router-*.json5`.
+// ---------------------------------------------------------------------------
+// WHAT THE GUI DOES WITH THIS
+//
+// `zensight/src/subscription.rs` already GETs `v1/*/events/**` on startup and
+// then streams live records through a subscriber; with this storage running,
+// that GET is answered by the router. The GUI *also* keeps a local redb cold
+// store of its own observations. The two are **additive, not alternative**, and
+// need no precedence rule: records are immutable and ULID-identified, and
+// `DashboardState::push_snmp_event` rejects a duplicate id and inserts in ULID
+// order, so the union is correct however the two arrive.
+{
+  mode: "router",
+
+  // Listen for sensors + GUIs. Adjust to your network.
+  listen: {
+    endpoints: ["tcp/0.0.0.0:7447"],
+  },
+
+  // NO `timestamping` block, deliberately — unlike
+  // `router-evidence-storage.json5`, which needs it because state docs are
+  // last-writer-wins mutable keys. An event key is written once and never
+  // updated, so "which sample wins" is not a question that has a wrong answer.
+  // (A router timestamps by default anyway, so storage replication still works
+  // if you later add one.)
+
+  plugins_loading: { enabled: true },
+
+  plugins: {
+    storage_manager: {
+      volumes: {
+        // Persist to disk so the log survives a router restart. Point `dir` at
+        // a durable, roomy path; ZENOH_BACKEND_FS_ROOT (env) sets the base the
+        // relative `dir` below hangs under.
+        fs: {},
+      },
+      storages: {
+        // Every producer's events, every origin. `*` in the origin position
+        // never matches a verbatim service origin (D4) — there is no
+        // `@catalog` events subject today, so no companion storage is needed;
+        // add one explicitly if that ever changes.
+        "zensight-events": {
+          key_expr: "v1/*/events/**",
+          strip_prefix: "v1",
+          volume: { id: "fs", dir: "zensight-events" },
+          // No `garbage_collection`: nothing ever DELETEs an event record, so
+          // there are no tombstones to reap.
+        },
+      },
+    },
+  },
+}

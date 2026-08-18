@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A shipped Zenoh storage config for the events plane** (#583):
+  `configs/router-events-storage.json5`. Events are durable in *transit* but the
+  bus stores nothing, so the GUI's startup backfill GET (#536) returned nothing
+  after a restart and a trap that fired while nobody was looking was gone. With
+  this running, that GET is answered by the router.
+  - It uses a plain `fs` volume, which contradicts RFC 09 §2's InfluxDB sketch
+    on purpose: that guidance is about *per-key* history, and every event record
+    owns a unique ULID key, so "latest per key" and "the whole log" are the same
+    set. The config says so, and `router-verify` now proves it — two records
+    under one subject must both survive.
+  - The GUI's local redb cold store is **additive**, not superseded: records are
+    immutable and ULID-identified, so the union needs no precedence rule.
+  - The startup backfill drain is now bounded (`EVENT_BACKFILL_MAX`). Unbounded
+    was harmless while nothing answered that GET; with a storage aligned it is
+    answered by the entire stored log, and no narrower selector exists (ULIDs
+    sort by time, but RFC 02 P6 forbids the sub-chunk wildcard that would let a
+    consumer ask for a prefix).
+
 ### Changed — BREAKING
 
 - **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire

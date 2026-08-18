@@ -312,8 +312,10 @@ clean-run:
 # ── Router storage verification (#471) ───────────────────────────────────────
 
 # Verify configs/router-*.json5 against a REAL zenohd: state docs outlive their
-# publisher, DELETE tombstones retire, blob chunks persist, `*` cannot match
-# @catalog, and a fleet @rpc GET still fans in (no `complete` storage).
+# publisher, DELETE tombstones retire, blob chunks persist, every event record
+# survives because each owns its ULID key (#583 — the claim behind that config
+# choosing an `fs` volume over InfluxDB), `*` cannot match @catalog, and a fleet
+# @rpc GET still fans in (no `complete` storage).
 #
 # Needs zenohd AND its plugins, all at the workspace's zenoh version (1.9).
 # The plugins are cdylibs, not binaries — `cargo install` refuses them, and the
