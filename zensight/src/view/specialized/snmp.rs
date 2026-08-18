@@ -484,7 +484,7 @@ fn render_events(state: &DeviceDetailState) -> Element<'_, Message> {
                 .collect();
             fields.sort();
             let detail = fields.join("  ");
-            row![
+            let mut row = row![
                 text(when).size(font::CAPTION).style(|t: &Theme| {
                     text::Style {
                         color: Some(theme::colors(t).text_muted()),
@@ -502,8 +502,20 @@ fn render_events(state: &DeviceDetailState) -> Element<'_, Message> {
                 }),
             ]
             .spacing(space::MD)
-            .align_y(Alignment::Center)
-            .into()
+            .align_y(Alignment::Center);
+            // Only the exact link here (#651): a device-scoped pivot is
+            // redundant inside that device's own view.
+            if let Some(key) = &record.alert_key {
+                row = row.push(
+                    iced::widget::button(text("alert →").size(10))
+                        .on_press(Message::OpenAlertForKey {
+                            source: record.source.clone(),
+                            alert_key: key.clone(),
+                        })
+                        .style(iced::widget::button::text),
+                );
+            }
+            row.into()
         })
         .collect();
 

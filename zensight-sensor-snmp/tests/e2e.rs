@@ -1425,6 +1425,15 @@ async fn trap_v2c_event_alert_lifecycle() {
     assert_eq!(alert.labels["device"], "127-0-0-1");
     assert_eq!(alert.labels["if_index"], "1");
 
+    // #651: the record names the alert it raised, and names it exactly — the
+    // key the reporter published under, not the rule name, which would be
+    // ambiguous the moment a second interface goes down on the same device.
+    assert_eq!(
+        event.alert_key.as_deref(),
+        Some(alert.alert_key().as_str()),
+        "the trap record must carry the alert key the reporter used"
+    );
+
     // linkUp resolves exactly that alert.
     agent
         .agent()
@@ -1433,6 +1442,12 @@ async fn trap_v2c_event_alert_lifecycle() {
         .expect("send linkUp");
     let (_, up_event) = next_event(&rig).await;
     assert_eq!(up_event.kind, "trap/1.3.6.1.6.3.1.1.5.4");
+    // #651: the clearing trap links to the SAME alert it cleared, so an
+    // operator following the link lands on the incident rather than nowhere.
+    assert_eq!(
+        up_event.alert_key, event.alert_key,
+        "linkUp must name the alert linkDown raised"
+    );
 
     let mut resolved = false;
     while let Ok(Ok(sample)) =

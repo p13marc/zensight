@@ -120,7 +120,7 @@ pub mod snmp {
         }
     }
 
-    /// A translated trap record (#536).
+    /// A translated trap record (#536) that drove no alert transition.
     pub fn trap_event(device: &str, kind: &str, ulid: &str) -> zensight_common::EventRecord {
         zensight_common::EventRecord {
             id: ulid.to_string(),
@@ -130,7 +130,22 @@ pub mod snmp {
             kind: kind.to_string(),
             severity: zensight_common::AlertSeverity::Warning,
             summary: format!("{device}: {kind}"),
+            alert_key: None,
             fields: [("if_index".to_string(), "3".to_string())].into(),
+        }
+    }
+
+    /// A trap record that raised `alert_key` (#651) — the shape whose feed row
+    /// links to one alert rather than pivoting to the device's alert list.
+    pub fn trap_event_with_alert(
+        device: &str,
+        kind: &str,
+        ulid: &str,
+        alert_key: &str,
+    ) -> zensight_common::EventRecord {
+        zensight_common::EventRecord {
+            alert_key: Some(alert_key.to_string()),
+            ..trap_event(device, kind, ulid)
         }
     }
 

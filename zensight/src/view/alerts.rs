@@ -297,6 +297,12 @@ pub struct AlertsState {
     /// Protocol filter for the external-alerts feed (#582). `None` = all;
     /// set by the pill row or an overview tile's click-through.
     pub external_protocol_filter: Option<zensight_common::Protocol>,
+    /// The `<source>/<alert_key>` an operator pivoted to from an event record
+    /// (#651). Highlights that row, and deliberately survives the alert
+    /// resolving so the view can say "no longer firing" instead of showing
+    /// nothing — a link that silently lands on an empty list is worse than the
+    /// device-scoped pivot it replaced.
+    pub focused_external: Option<String>,
     /// Saved filter presets (#27): named severity+source combinations the user
     /// can re-apply in one click. Persisted in `PersistentSettings`.
     pub alert_filter_presets: Vec<AlertFilterPreset>,
@@ -367,6 +373,7 @@ impl AlertsState {
             external_severity_filter: None,
             external_source_filter: None,
             external_protocol_filter: None,
+            focused_external: None,
             alert_filter_presets: Vec::new(),
         }
     }
@@ -1204,6 +1211,37 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
 
     let pills = render_alert_filter_pills(state, &sources);
 
+    // The alert an event record linked to has since resolved (#651). Say so,
+    // with its firing→resolved strip, instead of dropping the operator on an
+    // empty list — a link that silently lands nowhere is worse than the
+    // device-scoped pivot it replaced. `clear_external` removes the alert from
+    // `external` but keeps its timeline, which is what makes this possible.
+    let resolved_focus: Option<Element<'_, Message>> = state
+        .focused_external
+        .as_ref()
+        .filter(|k| !state.external.contains_key(*k))
+        .map(|key| {
+            let mut col = Column::new().spacing(space::XS).push(
+                row![
+                    text("The linked alert is no longer firing.").size(font::CAPTION),
+                    container(text("")).width(Length::Fill),
+                    button(text("Clear").size(font::CAPTION))
+                        .on_press(Message::ClearAlertFocus)
+                        .padding([space::XS, space::SM])
+                        .style(iced::widget::button::text),
+                ]
+                .align_y(Alignment::Center),
+            );
+            let tl = state.timeline(key);
+            if tl.len() > 1 {
+                col = col.push(render_timeline(&tl));
+            }
+            container(col)
+                .padding(space::SM)
+                .style(container::rounded_box)
+                .into()
+        });
+
     let body: Element<'_, Message> = if groups.is_empty() {
         // A filter is active and hides everything — keep the pills visible so it
         // can be cleared.
@@ -1216,9 +1254,14 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
         list.into()
     };
 
-    column![section_title, pills, body]
+    let mut out = Column::new()
         .spacing(space::SM)
-        .into()
+        .push(section_title)
+        .push(pills);
+    if let Some(banner) = resolved_focus {
+        out = out.push(banner);
+    }
+    out.push(body).into()
 }
 
 /// Severity + source filter pills for the external-alerts feed (#27). Each row is
@@ -1464,8 +1507,10 @@ fn render_incident<'a>(
 
     let mut col = Column::new().spacing(2).push(header);
     for alert in &incident.alerts {
-        let acked = state.is_external_acked(&AlertsState::external_key(alert));
-        col = col.push(render_external_alert_row(alert, acked));
+        let key = AlertsState::external_key(alert);
+        let acked = state.is_external_acked(&key);
+        let focused = state.focused_external.as_deref() == Some(key.as_str());
+        col = col.push(render_external_alert_row(alert, acked, focused));
         // Incident timeline strip: firing→resolved transitions (#26).
         let tl = state.timeline(&AlertsState::external_key(alert));
         if tl.len() > 1 {
@@ -1496,7 +1541,11 @@ fn render_timeline<'a>(events: &[TransitionEvent]) -> Element<'a, Message> {
 }
 
 /// Render a single sensor-pushed alert row (dimmed when acknowledged).
-fn render_external_alert_row<'a>(alert: &'a SensorAlert, acked: bool) -> Element<'a, Message> {
+fn render_external_alert_row<'a>(
+    alert: &'a SensorAlert,
+    acked: bool,
+    focused: bool,
+) -> Element<'a, Message> {
     let severity: Severity = alert.severity.into();
     let icon: Element<'a, Message> = match severity {
         Severity::Critical => icons::status_error(IconSize::Small),
@@ -1506,6 +1555,11 @@ fn render_external_alert_row<'a>(alert: &'a SensorAlert, acked: bool) -> Element
 
     // Severity as a color+label badge (#28 L5): never color alone.
     let severity_badge = badge(severity.color(), severity.name());
+
+    // The row an event record linked to (#651), marked so the operator can see
+    // which of a device's alerts they were sent to.
+    let link_badge: Option<Element<'a, Message>> =
+        focused.then(|| badge(crate::view::theme::SEVERITY_INFO, "linked from event"));
 
     let kind = text(if acked { "ack'd" } else { alert.kind.as_str() })
         .size(10)
@@ -1554,7 +1608,11 @@ fn render_external_alert_row<'a>(alert: &'a SensorAlert, acked: bool) -> Element
     // burn ratio, template, coredump details, …) instead of hiding them. Generic
     // — renders whatever known label groups are present, so it degrades cleanly
     // for any protocol's alerts.
-    let mut col = Column::new().spacing(4).push(top);
+    let mut col = Column::new().spacing(4);
+    if let Some(b) = link_badge {
+        col = col.push(b);
+    }
+    col = col.push(top);
     if let Some(detail) = alert_detail_line(&alert.labels) {
         col = col.push(detail);
     }

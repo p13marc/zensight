@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A trap record names the alert it raised or cleared** (#651). `EventRecord`
+  gains `alert_key: Option<String>` (serde-default and skipped when absent, so
+  old records decode and records that drove no alert transition are unchanged on
+  the wire). The SNMP trap path stamps the key the reporter actually published
+  under — computed from the same `Alert`, so the two cannot drift — and a
+  clearing trap names the alert it cleared rather than nothing.
+  The SNMP event feed links straight to that alert instead of pivoting to the
+  device's alert list, which is the difference between landing on an incident
+  and landing in a list when several alerts fire on one device. Records without
+  the field keep the source-scoped pivot. The Alerts view marks the linked row
+  and, if that alert has since resolved, says so with its firing→resolved
+  timeline rather than showing an empty list.
+  - Alert transitions now publish **before** the event record that references
+    them, so a consumer never sees a record pointing at an alert it has not
+    ingested.
 - **A shipped Zenoh storage config for the events plane** (#583):
   `configs/router-events-storage.json5`. Events are durable in *transit* but the
   bus stores nothing, so the GUI's startup backfill GET (#536) returned nothing
@@ -26,33 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     answered by the entire stored log, and no narrower selector exists (ULIDs
     sort by time, but RFC 02 P6 forbids the sub-chunk wildcard that would let a
     consumer ask for a prefix).
-
-### Fixed
-
-- **The SNMPv3 trap receiver minted a fresh engine identity on every start**
-  (#650). When `trap_listener.users` is configured this sensor is an
-  authoritative SNMP engine — informs are authenticated against *its*
-  `snmpEngineID` and `(boots, time)` window, and it signs the automatic
-  acknowledgement with them — so RFC 3414 §2.2 requires a stable id and a
-  monotonic, persisted `snmpEngineBoots`. It had neither.
-  The cost was worse than the re-handshake the code comment claimed: a sender
-  that had already discovered this engine had its informs **dropped outright**
-  (localized to an authoritative engine the receiver no longer had), with no
-  acknowledgement, until it rediscovered. `(engine_id, boots)` now persist to
-  `trap_listener.engine_state_path` — defaulting to the systemd
-  `STATE_DIRECTORY` / XDG state location — written atomically, and boots
-  increments on each start.
-  - **The shipped systemd unit gains `StateDirectory=zensight-snmp`.** Under
-    `ProtectSystem=strict` that is the only writable path, so a unit without it
-    could not persist anything.
-  - A location that resolves but **cannot be written refuses v3 receiving**
-    (v1/v2c listening continues) rather than silently downgrading: an operator
-    who asked for durability and did not get it should hear it from the log, not
-    from a sender. A host that resolves *no* durable location at all keeps the
-    old ephemeral identity with a warning — it never asked for durability, and
-    refusing would turn an upgrade into an outage.
-  - A stored `boots` latched at the RFC maximum mints a **new** engine id;
-    restarting into a latched engine rejects all authenticated inbound.
 
 ### Changed — BREAKING
 
@@ -86,6 +74,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
 
 ### Fixed
+
+- **Trap alerts were never published when `snmp.alerts.for_secs > 0`.** The
+  trap path used the reporter's default debounce, which only publishes once a
+  *second* observation arrives after the window — but a trap is a single
+  observation, so the alert was entered as active and never sent. It now passes
+  an explicit zero debounce: a one-shot event has no "sustained for" semantics.
+  Default `for_secs` is 0, so stock deployments were unaffected; anyone who set
+  it lost trap alerting entirely, silently.
+
+- **The SNMPv3 trap receiver minted a fresh engine identity on every start**
+  (#650). When `trap_listener.users` is configured this sensor is an
+  authoritative SNMP engine — informs are authenticated against *its*
+  `snmpEngineID` and `(boots, time)` window, and it signs the automatic
+  acknowledgement with them — so RFC 3414 §2.2 requires a stable id and a
+  monotonic, persisted `snmpEngineBoots`. It had neither.
+  The cost was worse than the re-handshake the code comment claimed: a sender
+  that had already discovered this engine had its informs **dropped outright**
+  (localized to an authoritative engine the receiver no longer had), with no
+  acknowledgement, until it rediscovered. `(engine_id, boots)` now persist to
+  `trap_listener.engine_state_path` — defaulting to the systemd
+  `STATE_DIRECTORY` / XDG state location — written atomically, and boots
+  increments on each start.
+  - **The shipped systemd unit gains `StateDirectory=zensight-snmp`.** Under
+    `ProtectSystem=strict` that is the only writable path, so a unit without it
+    could not persist anything.
+  - A location that resolves but **cannot be written refuses v3 receiving**
+    (v1/v2c listening continues) rather than silently downgrading: an operator
+    who asked for durability and did not get it should hear it from the log, not
+    from a sender. A host that resolves *no* durable location at all keeps the
+    old ephemeral identity with a warning — it never asked for durability, and
+    refusing would turn an upgrade into an outage.
+  - A stored `boots` latched at the RFC maximum mints a **new** engine id;
+    restarting into a latched engine rejects all authenticated inbound.
+
 
 - **Tier-2 artifact fetches were trust-on-first-use** (RFC 07 §2.1/§2.3).
   `Delivery::Tree` named the snapshot by a caller-minted ULID, and the root

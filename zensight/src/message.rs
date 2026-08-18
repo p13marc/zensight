@@ -610,8 +610,19 @@ pub enum Message {
     /// watermark — an older page must not make the tail skip forward.
     LogOlderPageLoaded(Result<Vec<zensight_common::LogRecord>, String>),
     /// Open the Alerts view scoped to one device (#578): the trap-feed row's
-    /// pivot. Events carry no alert key, so the honest link is by source.
+    /// pivot, and still the honest link for a record that drove no alert
+    /// transition, or one written before #651.
     OpenAlertsForSource(String),
+    /// Open the Alerts view focused on the one alert a trap raised or cleared
+    /// (#651). `source` + `alert_key` are the in-GUI external identity
+    /// `<source>/<alert_key>`; scoping the view by source alone would land the
+    /// operator in a list when several alerts fire on one device.
+    OpenAlertForKey {
+        source: String,
+        alert_key: String,
+    },
+    /// Drop the focused-alert highlight (#651).
+    ClearAlertFocus,
     /// Subnet-discovery report (#579) off `state/snmp/discovery` — LWW per
     /// publishing sensor origin; proposals only, nothing auto-adds (#541).
     SnmpDiscoveryReport {
