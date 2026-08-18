@@ -73,6 +73,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rather than wrong — the store refills on the next fetch. It also gained
     the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
 
+
+- **The SNMP event feed persists, filters and cross-links** (#578). Trap records
+  land in a new redb `events` table keyed by their ULID — chronologically
+  sorted, so "most recent N" is a bounded reverse walk and re-delivery is
+  idempotent. No sampler, unlike logs: an event is already a rare, deliberate
+  record. Facets + free-text search, and rows link to the device.
+- **Logs history is backfilled from the sensors' durable stores** (#603).
+  Opening Logs seeded only from the local redb cache and whatever the sensors'
+  500-line hot rings still held — the authoritative unsampled store from #544
+  was never asked, because a sensor reads it only when the query carries
+  `from=`/`to=`/`after_uid=` and the GUI sent none on open.
+- **Deep log-history pagination** (#601). The feed did a silent
+  `truncate(100)`: an operator on a busy feed could not tell rows were withheld,
+  nor reach them. The cap is now a window with a footer that says so, and a
+  "load older" cursor walk against the history the sensor has served since #544.
+- **Log export gains a format choice, and artifacts can carry a producer
+  caveat** (#602). The export request hardcoded JSONL; the format is now picked
+  next to the button. `ArtifactState::Ready` gained an optional `note` a
+  producer sets via `ctx.note()`, so a bundle that had to truncate or skip
+  something can say so instead of arriving silently incomplete.
+- **A firing-alert headline tile on every protocol overview** (#582), plus a
+  `firing_by_protocol` rollup beside `firing_by_source` and a protocol filter on
+  the Alerts view.
+- **SNMP subnet-discovery proposals on the fleet overview** (#579). The opt-in
+  sweep from #541 published its report to `state/snmp/discovery` where only
+  `zenctl` could see it. Proposals only — nothing auto-adds.
+
+### Changed
+
+- **`introspect` can no longer ship lies** (#484). RFC 08 §6.1's MUST — every
+  registered procedure is served by the build advertising it — is now checked at
+  run time, immediately before the `alive` token. Debug builds panic; release
+  builds warn. Every `declare_queryable` goes through
+  `zensight_common::served::serve_queryable`, and a CI guard bans the raw call
+  so the check cannot be bypassed by accident.
+- **An origin you address is a type, not a string** (#485). `origin_rpc_key`
+  takes a parsed `zenkey::RemoteOrigin`, so building an `@rpc` key aimed at your
+  own host is a compile error rather than a timeout in one view. That bug
+  shipped three times and was fixed by splitting the API by name — but both
+  halves still took `&str`, so nothing stopped a fourth.
+- **async-snmp 0.17** (#577). Upstream fixed the v3 engine wedge, so the
+  client-rebuild workaround is gone in favour of `rediscover_engine()`.
+- **`stream.rs` no longer documents a `tiers/set` command that never existed**
+  (#513). The tier ladder is config-only; no build ever served that procedure
+  and the registry declares none, so the type was documenting a bus nobody
+  built.
+
+### Changed — BREAKING
+
+- **Every exported Prometheus/OTel series for the SNMP sensor is renamed**
+  (#559, #647). The built-in MIB tables published raw MIB object names straight
+  onto the telemetry key (`sysUpTime.0`, `ifInOctets`) — names the key chunk
+  grammar forbids, so every debug poll cycle panicked in the metric guard and
+  `refine_key` could not classify SNMP telemetry at all. All 49 built-in names
+  now follow the lowercase, profile-style convention the shipped profiles
+  already used.
+
+  | | before | after |
+  |---|---|---|
+  | Prometheus | `zensight_snmp_sysUpTime_0` | `zensight_snmp_system_uptime` |
+  | Prometheus | `zensight_snmp_ifInOctets_3` | `zensight_snmp_if_3_in_octets` |
+  | OTel | `zensight.snmp.sysUpTime.0` | `zensight.snmp.system.uptime` |
+  | OTel | `zensight.snmp.ifInOctets.3` | `zensight.snmp.if.3.in_octets` |
+
+  **This hits stock deployments, not just exotic ones.** Profiles have been on
+  by default since #531 and already used lowercase names — but before #559
+  built-ins *won* over profiles (`add_profile_mappings` inserted with
+  `.entry().or_insert()`), so for any OID both tables covered, the mixed-case
+  built-in name is what got published.
+
+  **Dashboards, recording rules and alerting rules built on the old names will
+  stop matching** — silently, not with an error. The full 49-row table is in
+  [`zensight-sensor-snmp/docs/reference.md`](zensight-sensor-snmp/docs/reference.md).
+  Table columns also move the index into its own key chunk (`ifInOctets.3` →
+  `if/3/in_octets`), so a per-interface series that was one flat name is now
+  structured.
+
+  **No compatibility aliases are published, deliberately.** SNMP is the
+  highest-cardinality producer in the fleet (per-column × per-interface ×
+  per-device); emitting both spellings would double that on the wire and in
+  every scrape, permanently, to save a one-time dashboard edit. The GUI keeps
+  *read-side* aliases so a fleet part-way through the upgrade still renders —
+  those cost nothing on the wire and go away once no pre-0.11 sensor remains.
+
+  **Unlike the logs rename in 0.10.0, `introspect` cannot tell you the old names
+  are gone.** That one moved registry *subject paths*, leaving `deprecated.lock`
+  entries a consumer can query. The SNMP registry subject is the rest-var
+  `{device}/{metric...}` and the rename happened *inside* it, so no subject was
+  retired and there is nothing in the ledger to find. This entry and the crate
+  reference are the only record.
+
+  The *keyspace* change is not breaking: consumers subscribe by class wildcard
+  (`v1/*/telemetry/**`), so no subscription changes.
+
+  Custom `oid_names` violating the grammar are no longer a panic — they are
+  escaped losslessly at the publish boundary and warned about at startup — so a
+  stale config now yields a **third** spelling matching neither scheme
+  (`system/sysUpTime` publishes as `system/sys_x55_p_x54_ime`).
+  `docker/configs/snmp.json5` was shipping exactly that, and is fixed here.
+
+- **The deprecated JSON pseudo-MIB support is removed** (#580). `snmp.mib.files`
+  is now a hard startup error pointing at `snmp.mib.dirs`, rather than a
+  warning. Deprecated in #532 and warned through 0.10.x.
+
+- **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire
+  tag is re-spelled and the wire version moves to 3, so a mixed deployment
+  fails closed rather than half-decoding — **sensors and frontend upgrade
+  together** (again). Unlike the sha256→blake3 cut below, **chunk addresses
+  do not change**: the GUI's redb chunk store and any router-hosted storages
+  stay warm across the upgrade. Also picked up from 0.3: typed
+  serve/query prefixes replace string hygiene (a wildcard fetch prefix is
+  now unrepresentable, not just guarded), tier-2 materialization hardening
+  (a hostile snapshot index can no longer delete pre-existing directories,
+  apply setuid/setgid bits, or escape via a symlink chain), batched tier-2
+  chunk fetches, and snapshot chunking derives its CDC min/max from the
+  configured average (previously `avg == max` degenerated FastCDC into
+  fixed-size chunking, and a `chunk_size` above 256 KiB failed validation).
+- **zblob 0.2 (wire v2).** Artifact transfer moves to BLAKE3 + bao verified
+  streaming, postcard control messages and chunk-range resume. v1 and v2
+  peers deliberately do not interoperate — v2 renamed the reply keys so a
+  mixed fleet fails closed instead of corrupting — so **sensors and frontend
+  upgrade together**. Every reply is verified against the blob's content root
+  *before* it touches disk, so a wrong or tampered slice is discarded rather
+  than assembled and detected at the end.
+  - `Delivery::Blob`'s manifest changes shape: `filename` is optional and
+    advisory, and `chunk_count`/`hash_algo`/`hash` give way to `root` (the
+    BLAKE3 bao root). The caller now names the destination *file*; the crate
+    never joins a remote-supplied filename to a path.
+  - The GUI's redb chunk store re-keys from `sha256/<hex>` to
+    `blake3/<hex>`. Dedup is per-algorithm, so pre-0.11 chunks are inert
+    rather than wrong — the store refills on the next fetch. It also gained
+    the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
+
 ### Fixed
 
 - **Trap alerts were never published when `snmp.alerts.for_secs > 0`.** The

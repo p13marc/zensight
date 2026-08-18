@@ -39,6 +39,130 @@ Standard sensor metadata is published by the shared runner:
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
 
+## Metric names changed in 0.11 (#559) — read before upgrading
+
+The built-in MIB tables published raw MIB object names straight onto the
+telemetry key (`sysUpTime.0`, `ifInOctets`). Those violate the key chunk
+grammar, which is lowercase alphanumeric plus `._-` per chunk (RFC 03 §2), so
+every debug poll cycle panicked in the metric guard and `refine_key` could not
+classify SNMP telemetry at all. All 49 built-in names now follow the same
+lowercase, profile-style convention the shipped profiles already used.
+
+### Why a stock deployment is affected
+
+It is tempting to assume only exotic configs were, since profiles have been on
+by default since #531 and already used lowercase names. But before #559
+**built-ins won over profiles**: `MibResolver::add_profile_mappings` inserted
+with `.entry().or_insert()`, so for any OID both tables covered, the mixed-case
+built-in name is what got published. A stock `load_builtin: true` deployment was
+publishing the old names.
+
+### What this does to your dashboards
+
+Both exporters derive the exported series name from the metric path — there is
+no SNMP entry in `semconv.rs`, deliberately (the tree is device-defined, so
+there is no fixed vocabulary to map). So the rename moves every series:
+
+| | before | after |
+|---|---|---|
+| Prometheus | `zensight_snmp_sysUpTime_0` | `zensight_snmp_system_uptime` |
+| Prometheus | `zensight_snmp_ifInOctets_3` | `zensight_snmp_if_3_in_octets` |
+| OTel | `zensight.snmp.sysUpTime.0` | `zensight.snmp.system.uptime` |
+| OTel | `zensight.snmp.ifInOctets.3` | `zensight.snmp.if.3.in_octets` |
+
+**Dashboards, recording rules and alerting rules built on the old names stop
+matching.** They do not error — they go silent, which is the bad kind. Note the
+table columns also move the index into its own key chunk (`ifInOctets.3` →
+`if/3/in_octets`), so a per-interface series that was one flat name is now
+structured.
+
+### No compatibility aliases, deliberately
+
+The exporters do **not** emit both spellings, and should not. SNMP is the
+highest-cardinality producer in the fleet — per-column × per-interface ×
+per-device — so dual-publishing doubles that on the wire and in every scrape,
+permanently, to spare a one-time dashboard edit. That is a bad trade, and
+stating it here is the point: the decision should be findable, not folklore.
+
+The GUI's aliases are a different thing and not a precedent. They are
+**read-side** tolerance so a fleet part-way through the upgrade still renders
+(`zensight/src/view/specialized/snmp.rs` accepts `system/uptime` *or*
+`system/sysUpTime`, `cpu/*/load` or `hrProcessorLoad`, and so on). They cost
+nothing on the wire and can be deleted once no pre-0.11 sensor remains.
+
+### `introspect` cannot tell you the old names are gone
+
+Unlike the logs-sensor rename in 0.10.0, which moved registry *subject paths*
+and therefore left `deprecated.lock` entries a consumer can query, the SNMP
+registry subject is the rest-var `{device}/{metric...}`. The rename happened
+*inside* it, so no registry subject was retired and there is nothing in
+`deprecated.lock` to find. **This document and the changelog are the only
+record.**
+
+### Custom `oid_names`
+
+A name violating the chunk grammar is no longer a panic: since #559 it is
+escaped losslessly at the publish boundary and warned about once at startup. So
+a stale config keeps working but publishes a *third* spelling matching neither
+scheme — `system/sysUpTime` becomes `system/sys_x55_p_x54_ime`, and your
+Prometheus series becomes `zensight_snmp_system_sys_x55_p_x54_ime`. Check your
+`oid_names` against the table below. (`docker/configs/snmp.json5` was shipping
+exactly this and is fixed in #647.)
+
+### The full table
+
+| before | after |
+|---|---|
+| `sysDescr.0` | `system/descr` |
+| `sysObjectID.0` | `system/object_id` |
+| `sysUpTime.0` | `system/uptime` |
+| `sysContact.0` | `system/contact` |
+| `sysName.0` | `system/name` |
+| `sysLocation.0` | `system/location` |
+| `sysServices.0` | `system/services` |
+| `snmpInPkts.0` | `snmp/in_pkts` |
+| `snmpOutPkts.0` | `snmp/out_pkts` |
+| `ifNumber.0` | `if_number` |
+| `ifIndex` | `if/{index}/index` |
+| `ifDescr` | `if/{index}/descr` |
+| `ifType` | `if/{index}/type` |
+| `ifMtu` | `if/{index}/mtu` |
+| `ifSpeed` | `if/{index}/speed` |
+| `ifPhysAddress` | `if/{index}/phys_address` |
+| `ifAdminStatus` | `if/{index}/admin_status` |
+| `ifOperStatus` | `if/{index}/oper_status` |
+| `ifLastChange` | `if/{index}/last_change` |
+| `ifInOctets` | `if/{index}/in_octets` |
+| `ifInUcastPkts` | `if/{index}/in_ucast_pkts` |
+| `ifInDiscards` | `if/{index}/in_discards` |
+| `ifInErrors` | `if/{index}/in_errors` |
+| `ifOutOctets` | `if/{index}/out_octets` |
+| `ifOutUcastPkts` | `if/{index}/out_ucast_pkts` |
+| `ifOutDiscards` | `if/{index}/out_discards` |
+| `ifOutErrors` | `if/{index}/out_errors` |
+| `ifName` | `ifx/{index}/name` |
+| `ifHCInOctets` | `ifx/{index}/hc_in_octets` |
+| `ifHCOutOctets` | `ifx/{index}/hc_out_octets` |
+| `ifHighSpeed` | `ifx/{index}/high_speed` |
+| `ifAlias` | `ifx/{index}/alias` |
+| `hrSystemUptime.0` | `host/uptime` |
+| `hrSystemDate.0` | `host/date` |
+| `hrSystemNumUsers.0` | `host/users` |
+| `hrSystemProcesses.0` | `host/processes` |
+| `hrStorageIndex` | `storage/{index}/index` |
+| `hrStorageType` | `storage/{index}/type` |
+| `hrStorageDescr` | `storage/{index}/descr` |
+| `hrStorageAllocationUnits` | `storage/{index}/allocation_units` |
+| `hrStorageSize` | `storage/{index}/size` |
+| `hrStorageUsed` | `storage/{index}/used` |
+| `hrProcessorLoad` | `cpu/{index}/load` |
+| `ipForwarding.0` | `ip/forwarding` |
+| `ipDefaultTTL.0` | `ip/default_ttl` |
+| `ipInReceives.0` | `ip/in_receives` |
+| `ipAdEntAddr` | `ip/{index}/addr` |
+| `ipAdEntIfIndex` | `ip/{index}/if_index` |
+| `ipAdEntNetMask` | `ip/{index}/netmask` |
+
 ## Counter semantics (#527)
 
 - **Typing**: Counter32/Counter64 publish as `Counter`; Gauge32/Unsigned32 as
