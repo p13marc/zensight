@@ -294,6 +294,9 @@ mod tests {
     fn only_sysinfo_and_systemd_are_mapped() {
         assert!(metric_semconv(Protocol::Sysinfo, "memory/used").is_some());
         assert!(metric_semconv(Protocol::Systemd, "unit/sshd.service/active").is_some());
+        // SNMP is intentionally unmapped (#647): its metric tree is
+        // device-defined, so the metric path *is* the exported series name and
+        // there is no fixed vocabulary to map onto semconv. Do not "fix" this.
         assert!(metric_semconv(Protocol::Snmp, "memory/used").is_none());
         assert!(metric_semconv(Protocol::Netlink, "cpu/usage").is_none());
     }

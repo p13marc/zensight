@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — BREAKING
 
+- **Every exported Prometheus/OTel series for the SNMP sensor is renamed**
+  (#559, #647). The built-in MIB tables published raw MIB object names straight
+  onto the telemetry key (`sysUpTime.0`, `ifInOctets`) — names the key chunk
+  grammar forbids, so every debug poll cycle panicked in the metric guard and
+  `refine_key` could not classify SNMP telemetry at all. All 49 built-in names
+  now follow the lowercase, profile-style convention the shipped profiles
+  already used.
+
+  | | before | after |
+  |---|---|---|
+  | Prometheus | `zensight_snmp_sysUpTime_0` | `zensight_snmp_system_uptime` |
+  | Prometheus | `zensight_snmp_ifInOctets_3` | `zensight_snmp_if_3_in_octets` |
+  | OTel | `zensight.snmp.sysUpTime.0` | `zensight.snmp.system.uptime` |
+  | OTel | `zensight.snmp.ifInOctets.3` | `zensight.snmp.if.3.in_octets` |
+
+  **This hits stock deployments, not just exotic ones.** Profiles have been on
+  by default since #531 and already used lowercase names — but before #559
+  built-ins *won* over profiles (`add_profile_mappings` inserted with
+  `.entry().or_insert()`), so for any OID both tables covered, the mixed-case
+  built-in name is what got published.
+
+  **Dashboards, recording rules and alerting rules built on the old names will
+  stop matching** — silently, not with an error. The full 49-row table is in
+  [`zensight-sensor-snmp/docs/reference.md`](zensight-sensor-snmp/docs/reference.md).
+  Table columns also move the index into its own key chunk (`ifInOctets.3` →
+  `if/3/in_octets`), so a per-interface series that was one flat name is now
+  structured.
+
+  **No compatibility aliases are published, deliberately.** SNMP is the
+  highest-cardinality producer in the fleet (per-column × per-interface ×
+  per-device); emitting both spellings would double that on the wire and in
+  every scrape, permanently, to save a one-time dashboard edit. The GUI keeps
+  *read-side* aliases so a fleet part-way through the upgrade still renders —
+  those cost nothing on the wire and go away once no pre-0.11 sensor remains.
+
+  **Unlike the logs rename in 0.10.0, `introspect` cannot tell you the old names
+  are gone.** That one moved registry *subject paths*, leaving `deprecated.lock`
+  entries a consumer can query. The SNMP registry subject is the rest-var
+  `{device}/{metric...}` and the rename happened *inside* it, so no subject was
+  retired and there is nothing in the ledger to find. This entry and the crate
+  reference are the only record.
+
+  The *keyspace* change is not breaking: consumers subscribe by class wildcard
+  (`v1/*/telemetry/**`), so no subscription changes.
+
+  Custom `oid_names` violating the grammar are no longer a panic — they are
+  escaped losslessly at the publish boundary and warned about at startup — so a
+  stale config now yields a **third** spelling matching neither scheme
+  (`system/sysUpTime` publishes as `system/sys_x55_p_x54_ime`).
+  `docker/configs/snmp.json5` was shipping exactly that, and is fixed here.
+
+- **The deprecated JSON pseudo-MIB support is removed** (#580). `snmp.mib.files`
+  is now a hard startup error pointing at `snmp.mib.dirs`, rather than a
+  warning. Deprecated in #532 and warned through 0.10.x.
+
 - **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire
   tag is re-spelled and the wire version moves to 3, so a mixed deployment
   fails closed rather than half-decoding — **sensors and frontend upgrade

@@ -52,16 +52,23 @@
       },
     },
 
+    // Metric names must be chunk-grammar-valid: each `/`-separated chunk is
+    // lowercase alphanumeric plus `._-` (RFC 03 §2). Since #559 a violating
+    // name is escaped losslessly at the publish boundary rather than rejected,
+    // so a stale mixed-case name does not fail — it publishes as
+    // `system/sys_x55_p_x54_ime`, a third spelling matching neither the old
+    // names nor the built-ins, and warns once per name at startup. These match
+    // the built-in tables and the shipped profiles.
     oid_names: {
-      "1.3.6.1.2.1.1.1.0": "system/sysDescr",
-      "1.3.6.1.2.1.1.3.0": "system/sysUpTime",
-      "1.3.6.1.2.1.1.5.0": "system/sysName",
-      "1.3.6.1.2.1.1.6.0": "system/sysLocation",
-      "1.3.6.1.2.1.2.2.1.1": "if/{index}/ifIndex",
-      "1.3.6.1.2.1.2.2.1.2": "if/{index}/ifDescr",
-      "1.3.6.1.2.1.2.2.1.8": "if/{index}/ifOperStatus",
-      "1.3.6.1.2.1.2.2.1.10": "if/{index}/ifInOctets",
-      "1.3.6.1.2.1.2.2.1.16": "if/{index}/ifOutOctets",
+      "1.3.6.1.2.1.1.1.0": "system/descr",
+      "1.3.6.1.2.1.1.3.0": "system/uptime",
+      "1.3.6.1.2.1.1.5.0": "system/name",
+      "1.3.6.1.2.1.1.6.0": "system/location",
+      "1.3.6.1.2.1.2.2.1.1": "if/{index}/index",
+      "1.3.6.1.2.1.2.2.1.2": "if/{index}/descr",
+      "1.3.6.1.2.1.2.2.1.8": "if/{index}/oper_status",
+      "1.3.6.1.2.1.2.2.1.10": "if/{index}/in_octets",
+      "1.3.6.1.2.1.2.2.1.16": "if/{index}/out_octets",
     },
   },
 
