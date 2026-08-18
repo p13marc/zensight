@@ -230,58 +230,89 @@ fn edac_and_mdstat_metrics_are_registered() {
 /// them honest. A live sensor is covered by the publish-path guard
 /// (`zensight_common::metric_guard`), which panics in debug on an unregistered
 /// key.
+/// One representative metric per family built inline in `collector.rs`.
+///
+/// Hoisted to a const so both directions consume the same list: the forward
+/// check below, and the reverse family-coverage check (#648), which would
+/// otherwise report every collector-built family as unemitted.
+const COLLECTOR_INLINE_METRICS: &[&str] = &[
+    // system/*
+    "system/uptime",
+    "system/load",
+    "system/boot_time",
+    "system/processes_total",
+    "system/processes_zombie",
+    "system/saturation_score",
+    "system/health_state",
+    // cpu/* — the host aggregate, the per-core family, and host times
+    "cpu/usage",
+    "cpu/0/usage",
+    "cpu/0/frequency",
+    "cpu/times/user",
+    "cpu/times/steal",
+    // The per-CPU rows of /proc/stat, whose *first* chunk is the variable
+    // (`{cpu}/times/{component}`) — a different family from the host
+    // aggregate above, and emitted by the same loop (collector.rs:1119).
+    "cpu0/times/user",
+    // memory/*
+    "memory/total",
+    "memory/used",
+    "memory/available",
+    "memory/usage_percent",
+    "memory/swap_total",
+    "memory/swap_used",
+    "memory/swap_percent",
+    "memory/cached",
+    "memory/buffers",
+    "memory/slab",
+    "memory/dirty",
+    "memory/writeback",
+    // disk/* — the three shapes that share the `disk` head
+    "disk/root/total",
+    "disk/root/usage_percent",
+    "disk/root/used",
+    "disk/root/available",
+    // Each io/* column is its own registered family, so one representative
+    // per column — not one for the whole `disk/{device}/io/` subtree.
+    "disk/sda/io/read_bytes",
+    "disk/sda/io/write_bytes",
+    "disk/sda/io/read_ops",
+    "disk/sda/io/write_ops",
+    "disk/sda/io/read_iops",
+    "disk/sda/io/write_iops",
+    "disk/sda/io/read_rate",
+    "disk/sda/io/write_rate",
+    "disk/sda/io/time_ms",
+    "disk/sda/io/queue_depth",
+    "disk/nvme0n1/io/util_percent",
+    // network/{iface}/*
+    "network/eth0/rx_bytes",
+    "network/eth0/tx_bytes",
+    "network/eth0/rx_packets",
+    "network/eth0/tx_packets",
+    "network/eth0/rx_errors",
+    "network/eth0/tx_errors",
+    "network/eth0/rx_rate",
+    "network/eth0/tx_rate",
+    // tcp/* — the socket-state histogram
+    "tcp/established",
+    "tcp/total",
+    // sensors/*
+    "sensors/coretemp/core_0/temp",
+    "sensors/coretemp/core_0/critical",
+    "sensors/coretemp/core_0/max",
+    "sensors/dell_ddv/cpu_fan/rpm",
+    // process/{rank}/* — the `collect.processes` top-N stream. Absent from
+    // this list until 2026-07-16, which is how it shipped unregistered: the
+    // flag defaults off, so nothing exercised it and only the runtime
+    // metric_guard ever complained (loudly, once the demo turned it on).
+    "process/1/cpu",
+    "process/1/memory",
+];
+
 #[test]
 fn collector_inline_families_are_registered() {
-    for metric in [
-        // system/*
-        "system/uptime",
-        "system/load",
-        "system/boot_time",
-        "system/processes_total",
-        "system/processes_zombie",
-        "system/saturation_score",
-        "system/health_state",
-        // cpu/* — the host aggregate, the per-core family, and host times
-        "cpu/usage",
-        "cpu/0/usage",
-        "cpu/0/frequency",
-        "cpu/times/user",
-        "cpu/times/steal",
-        // memory/*
-        "memory/total",
-        "memory/used",
-        "memory/available",
-        "memory/usage_percent",
-        "memory/swap_total",
-        "memory/swap_used",
-        "memory/swap_percent",
-        "memory/cached",
-        "memory/buffers",
-        "memory/slab",
-        "memory/dirty",
-        "memory/writeback",
-        // disk/* — the three shapes that share the `disk` head
-        "disk/root/total",
-        "disk/root/usage_percent",
-        "disk/sda/io/read_bytes",
-        "disk/nvme0n1/io/util_percent",
-        // network/{iface}/*
-        "network/eth0/rx_bytes",
-        "network/eth0/tx_rate",
-        // tcp/* — the socket-state histogram
-        "tcp/established",
-        "tcp/total",
-        // sensors/*
-        "sensors/coretemp/core_0/temp",
-        "sensors/coretemp/core_0/critical",
-        "sensors/dell_ddv/cpu_fan/rpm",
-        // process/{rank}/* — the `collect.processes` top-N stream. Absent from
-        // this list until 2026-07-16, which is how it shipped unregistered: the
-        // flag defaults off, so nothing exercised it and only the runtime
-        // metric_guard ever complained (loudly, once the demo turned it on).
-        "process/1/cpu",
-        "process/1/memory",
-    ] {
+    for metric in COLLECTOR_INLINE_METRICS {
         assert!(
             is_registered_telemetry("sysinfo", metric),
             "collector metric {metric:?} is not a registered sysinfo subject"
@@ -365,4 +396,149 @@ fn overlapping_families_resolve_to_the_right_entry() {
     // returns None now, instead of matching `{metric...}`.
     assert_eq!(Subject::parse_metric("not/a/real/metric"), None);
     assert_eq!(Subject::parse_metric("memory/usedd"), None); // a typo is now caught
+}
+
+/// Registered sysinfo telemetry families this build can never emit, and why.
+///
+/// A standing, reviewed admission that `introspect` advertises something
+/// conditional. The registry TOML has no `feature`/`when` field to say so in
+/// the slice itself (that needs a zenkey schema change — see RFC 08 §6.1), so
+/// the ledger lives here, next to the check that enforces it. Entries are
+/// verified in both directions: one the build *does* emit fails, and one the
+/// registry no longer declares fails. See `zensight_common::registry_audit`.
+const CONDITIONAL_FAMILIES: &[(&str, &str)] = &[];
+
+/// The other direction from every test above (#648, RFC 08 §6.1).
+///
+/// Those ask "is everything we emit registered?". This asks "is everything we
+/// registered emittable?" — the half `zensight_common::served` deliberately
+/// cannot do at run time, because publishers are declared lazily on first put
+/// and a correct build legitimately publishes nothing in a family for the life
+/// of a host. A family here with no emitter and no ledger entry is a surface
+/// `introspect` promises the fleet and no build can deliver.
+#[test]
+fn every_registered_family_has_an_emitter() {
+    use zensight_common::registry::sysinfo::Subject;
+    use zensight_common::registry_audit;
+
+    let mut emitted: Vec<String> = COLLECTOR_INLINE_METRICS
+        .iter()
+        .map(|m| (*m).to_string())
+        .collect();
+
+    let mut push = |ms: Vec<Metric>| emitted.extend(ms.into_iter().map(|m| m.metric));
+
+    push(map_pressure(&PsiSample {
+        cpu_some: Some(pressure()),
+        memory_some: Some(pressure()),
+        memory_full: Some(pressure()),
+        io_some: Some(pressure()),
+        io_full: Some(pressure()),
+    }));
+    push(map_vmstat(&VmStat {
+        oom_kill: Some(1),
+        pgmajfault: Some(2),
+        pgfault: Some(3),
+        pswpin: Some(4),
+        pswpout: Some(5),
+        pgpgin: Some(6),
+        pgpgout: Some(7),
+    }));
+    push(map_kernel_derivatives(&KernelDerivatives {
+        context_switches: 100,
+        forks: 20,
+        procs_running: Some(3),
+        procs_blocked: Some(1),
+    }));
+    push(map_fd(&FdStat { used: 1, max: 2 }));
+    push(map_inodes(&[InodeStat {
+        mount: "/var/log".into(),
+        fs_type: "ext4".into(),
+        total: 100,
+        free: 40,
+        used: 60,
+    }]));
+    push(map_net_dev(&[NetDevStat {
+        iface: "eth0".into(),
+        rx_dropped: 1,
+        rx_fifo: 2,
+        rx_frame: 3,
+        multicast: 4,
+        tx_dropped: 5,
+        tx_fifo: 6,
+        tx_colls: 7,
+        tx_carrier: 8,
+    }]));
+    push(map_cgroup(&CgroupSample {
+        path: "/system.slice/foo.service".into(),
+        cpu_nr_throttled: Some(1),
+        cpu_throttled_usec: Some(2),
+        memory_current: Some(3),
+        memory_max: Some(4),
+        memory_oom_kills: Some(5),
+        memory_oom: Some(6),
+        cpu_pressure_some: Some(pressure()),
+        memory_pressure_some: Some(pressure()),
+        memory_pressure_full: Some(pressure()),
+        io_pressure_some: Some(pressure()),
+        io_pressure_full: Some(pressure()),
+    }));
+    push(map_power(&PowerSample {
+        rapl_watts: vec![("intel-rapl:0".into(), "package-0".into(), 12.5)],
+        fans: vec![FanReading {
+            chip: "nct6798".into(),
+            label: "fan1".into(),
+            rpm: 900.0,
+        }],
+        batteries: vec![BatteryReading {
+            name: "BAT0".into(),
+            capacity: Some(80.0),
+            status: Some("Discharging".into()),
+        }],
+        entropy_avail: Some(256),
+    }));
+    push(map_netstat(&NetstatSample {
+        tcp_retrans_segs: Some(1),
+        listen_overflows: Some(2),
+        listen_drops: Some(3),
+    }));
+    push(map_sockstat(&SockstatSample {
+        sockets_used: Some(1),
+        tcp_inuse: Some(2),
+        tcp_mem_pages: Some(3),
+        udp_inuse: Some(4),
+    }));
+    push(map_softnet(&SoftnetSample {
+        processed: 1,
+        dropped: 2,
+        squeezed: 3,
+    }));
+    push(map_conntrack(&ConntrackSample {
+        count: 10,
+        max: Some(100),
+    }));
+    push(map_schedstat(&SchedstatSample {
+        per_cpu: vec![(0, 111), (1, 222)],
+        total_run_delay_ns: 333,
+    }));
+    push(map_edac(&[EdacSample {
+        controller: "mc0".into(),
+        ce: 1,
+        ue: 0,
+    }]));
+    push(map_mdstat(&[MdArray {
+        name: "md0".into(),
+        active: true,
+        total_disks: Some(2),
+        active_disks: Some(1),
+        failed_disks: 1,
+        degraded: true,
+    }]));
+
+    registry_audit::assert_families_covered(
+        "sysinfo",
+        &emitted,
+        |m| Subject::parse_metric(m).map(|s| s.pattern()),
+        CONDITIONAL_FAMILIES,
+    );
 }
