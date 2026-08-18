@@ -29,6 +29,7 @@ pub mod publisher_registry;
 pub mod qos;
 pub mod query_detail;
 pub mod registry;
+pub mod registry_audit;
 pub mod rpc;
 pub mod schema;
 pub mod semconv;
