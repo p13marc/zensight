@@ -93,6 +93,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rather than wrong — the store refills on the next fetch. It also gained
     the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
 
+### Added
+
+- **The SNMP event feed persists, filters and cross-links** (#578). Trap records
+  land in a new redb `events` table keyed by their ULID — chronologically
+  sorted, so "most recent N" is a bounded reverse walk and re-delivery is
+  idempotent. No sampler, unlike logs: an event is already a rare, deliberate
+  record. Facets + free-text search, and rows link to the device.
+- **Logs history is backfilled from the sensors' durable stores** (#603).
+  Opening Logs seeded only from the local redb cache and whatever the sensors'
+  500-line hot rings still held — the authoritative unsampled store from #544
+  was never asked, because a sensor reads it only when the query carries
+  `from=`/`to=`/`after_uid=` and the GUI sent none on open.
+- **Deep log-history pagination** (#601). The feed did a silent
+  `truncate(100)`: an operator on a busy feed could not tell rows were withheld,
+  nor reach them. The cap is now a window with a footer that says so, and a
+  "load older" cursor walk against the history the sensor has served since #544.
+- **Log export gains a format choice, and artifacts can carry a producer
+  caveat** (#602). The export request hardcoded JSONL; the format is now picked
+  next to the button. `ArtifactState::Ready` gained an optional `note` a
+  producer sets via `ctx.note()`, so a bundle that had to truncate or skip
+  something can say so instead of arriving silently incomplete.
+- **A firing-alert headline tile on every protocol overview** (#582), plus a
+  `firing_by_protocol` rollup beside `firing_by_source` and a protocol filter on
+  the Alerts view.
+- **SNMP subnet-discovery proposals on the fleet overview** (#579). The opt-in
+  sweep from #541 published its report to `state/snmp/discovery` where only
+  `zenctl` could see it. Proposals only — nothing auto-adds.
+
+### Changed
+
+- **`introspect` can no longer ship lies** (#484). RFC 08 §6.1's MUST — every
+  registered procedure is served by the build advertising it — is now checked at
+  run time, immediately before the `alive` token. Debug builds panic; release
+  builds warn. Every `declare_queryable` goes through
+  `zensight_common::served::serve_queryable`, and a CI guard bans the raw call
+  so the check cannot be bypassed by accident.
+- **An origin you address is a type, not a string** (#485). `origin_rpc_key`
+  takes a parsed `zenkey::RemoteOrigin`, so building an `@rpc` key aimed at your
+  own host is a compile error rather than a timeout in one view. That bug
+  shipped three times and was fixed by splitting the API by name — but both
+  halves still took `&str`, so nothing stopped a fourth.
+- **async-snmp 0.17** (#577). Upstream fixed the v3 engine wedge, so the
+  client-rebuild workaround is gone in favour of `rediscover_engine()`.
+- **`stream.rs` no longer documents a `tiers/set` command that never existed**
+  (#513). The tier ladder is config-only; no build ever served that procedure
+  and the registry declares none, so the type was documenting a bus nobody
+  built.
+
 ### Fixed
 
 - **Tier-2 artifact fetches were trust-on-first-use** (RFC 07 §2.1/§2.3).
