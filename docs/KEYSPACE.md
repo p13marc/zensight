@@ -47,7 +47,7 @@ zensight/v1/@catalog/…                                   the identity catalog
   `v1/<origin>/events/<producer>/<subject...>/<id>` where `<id>` is the
   record's lowercase ULID — one key per record, nothing overwrites. The
   shared envelope is `zensight_common::EventRecord` (id, timestamp, source,
-  protocol, kind, severity, summary, fields), published through
+  protocol, kind, severity, summary, optional `alert_key`, fields), published through
   `zensight_sensor_core::EventPublisher` with `QosClass::Event`
   (reliable + block: a dropped event is unrecoverable). Registry entries use
   `class = "events"` with the RFC 08 §5 `rate = rare|low|burst(n/h)`

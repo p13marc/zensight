@@ -1504,6 +1504,7 @@ mod tests {
             kind: kind.to_string(),
             severity: zensight_common::AlertSeverity::Warning,
             summary: format!("{kind} on {source}"),
+            alert_key: None,
             fields: Default::default(),
         }
     }
