@@ -27,6 +27,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     sort by time, but RFC 02 P6 forbids the sub-chunk wildcard that would let a
     consumer ask for a prefix).
 
+### Fixed
+
+- **The SNMPv3 trap receiver minted a fresh engine identity on every start**
+  (#650). When `trap_listener.users` is configured this sensor is an
+  authoritative SNMP engine — informs are authenticated against *its*
+  `snmpEngineID` and `(boots, time)` window, and it signs the automatic
+  acknowledgement with them — so RFC 3414 §2.2 requires a stable id and a
+  monotonic, persisted `snmpEngineBoots`. It had neither.
+  The cost was worse than the re-handshake the code comment claimed: a sender
+  that had already discovered this engine had its informs **dropped outright**
+  (localized to an authoritative engine the receiver no longer had), with no
+  acknowledgement, until it rediscovered. `(engine_id, boots)` now persist to
+  `trap_listener.engine_state_path` — defaulting to the systemd
+  `STATE_DIRECTORY` / XDG state location — written atomically, and boots
+  increments on each start.
+  - **The shipped systemd unit gains `StateDirectory=zensight-snmp`.** Under
+    `ProtectSystem=strict` that is the only writable path, so a unit without it
+    could not persist anything.
+  - A location that resolves but **cannot be written refuses v3 receiving**
+    (v1/v2c listening continues) rather than silently downgrading: an operator
+    who asked for durability and did not get it should hear it from the log, not
+    from a sender. A host that resolves *no* durable location at all keeps the
+    old ephemeral identity with a warning — it never asked for durability, and
+    refusing would turn an upgrade into an outage.
+  - A stored `boots` latched at the RFC maximum mints a **new** engine id;
+    restarting into a latched engine rejects all authenticated inbound.
+
 ### Changed — BREAKING
 
 - **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire

@@ -256,6 +256,36 @@ pub struct ArtifactChannel {
     state: Arc<Mutex<HashMap<&'static str, KindRuntime>>>,
 }
 
+/// Declare the three `artifact/*` procedures and answer `error/gated` on all
+/// of them, for a build whose `artifacts.*` config enables no producer (#648).
+///
+/// Every artifact-capable producer's registry slice lists `artifact/request`,
+/// `artifact/status` and `artifact/cancel` unconditionally, and `introspect`
+/// hands that slice to the fleet as truth. Skipping the channel entirely — the
+/// old behaviour, and the default one, since artifacts ship disabled — left
+/// three advertised procedures unserved, which `check_registry_coverage`
+/// debug-panics on (RFC 08 §6.1).
+///
+/// `error/gated` is the honest answer: the sensor is present and the surface
+/// exists, it is switched off in this deployment's config. A caller can tell
+/// that apart from "no sensor replied", which is what silence would have said.
+pub async fn serve_disabled(session: Arc<zenoh::Session>, producer: String) {
+    zensight_common::served::serve_unavailable(
+        session,
+        vec![
+            artifact_request_key(&producer),
+            artifact_status_key(&producer),
+            artifact_cancel_key(&producer),
+        ],
+        zensight_common::rpc::RpcError::gated(format!(
+            "`{producer}` serves no artifact kind: every entry under `artifacts.*` in this \
+             sensor's config is disabled. Enable one (e.g. `artifacts.report.enabled: true`) \
+             to make artifact/request answer."
+        )),
+    )
+    .await;
+}
+
 impl ArtifactChannel {
     /// Build a channel for `producer` (e.g. `"netlink"`) serving the
     /// given producers. `source_id` is this host's id (for `target_source`

@@ -267,6 +267,29 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Detecto
 /// (our single capture-focus subscription). Validation happens in
 /// `set_packet_filter` (parse-before-swap), so a bad expression becomes a status
 /// error and the previous filter keeps running — never a panic or dropped capture.
+/// Declare a control topic's read+write pair and answer `error/gated` on both,
+/// for a run in which the topic's machinery is not armed (#648).
+///
+/// Control topics are registered in pairs (`<topic>` and `<topic>/set`) and the
+/// registry lists them unconditionally, so a run that skipped the channel left
+/// two advertised procedures unserved and tripped `check_registry_coverage`
+/// (RFC 08 §6.1). netring hit this whenever the packet monitor could not start
+/// — a sensor without CAP_NET_RAW panicked on a registry complaint instead of
+/// on the privilege problem that actually stopped it.
+pub async fn serve_topic_unavailable(
+    session: Arc<zenoh::Session>,
+    producer: String,
+    topic: &'static str,
+    err: zensight_common::rpc::RpcError,
+) {
+    zensight_common::served::serve_unavailable(
+        session,
+        vec![status_key(&producer, topic), command_key(&producer, topic)],
+        err,
+    )
+    .await;
+}
+
 pub async fn run_capture_filter(
     session: Arc<zenoh::Session>,
     producer: String,

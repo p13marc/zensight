@@ -6318,11 +6318,7 @@ impl ZenSight {
         let (frames, handle) = Task::stream(
             crate::view::specialized::parallax_detail::preview_tile_stream(
                 session,
-                // The `@media` plane keeps its string origin for now: unlike
-                // `@rpc` it has a legitimate non-registry spelling for
-                // protocols with no generated media builder (#485 is scoped
-                // to the plane that shipped the own-vs-other bug).
-                zenkey::ConcreteOrigin::chunk(&media_origin).to_string(),
+                media_origin,
                 stream.clone(),
                 generation,
             ),

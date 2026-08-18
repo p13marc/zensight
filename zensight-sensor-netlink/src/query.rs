@@ -307,15 +307,31 @@ async fn sample_socket_bytes(conn: &Connection<SockDiag>) -> Vec<(u64, u64, u64)
     }
 }
 
-/// Serve the opt-in eBPF detail queryables (#114) until the session closes:
-/// `@rpc/netlink/retransmits` (top-K retransmit peers) and `@rpc/netlink/connections`
-/// (recent tcplife records). Spawned only when the `ebpf` feature is built and
-/// the module loaded; reads the shared [`EbpfState`](crate::ebpf::EbpfState).
-#[cfg(feature = "ebpf")]
+/// Serve the eBPF detail queryables (#114) until the session closes:
+/// `@rpc/netlink/retransmits` (top-K retransmit peers) and
+/// `@rpc/netlink/connections` (recent tcplife records).
+///
+/// **Declared unconditionally — whatever the build, whatever the config.**
+/// `registry/netlink.toml` advertises both procedures to the whole fleet, so a
+/// build that does not declare them makes `introspect` lie (RFC 08 §6.1) and
+/// trips `check_registry_coverage`, which debug-panics — which is exactly what
+/// a stock `cargo run -p zensight-sensor-netlink` used to do (#648).
+///
+/// With no eBPF module behind them the reply is `error/unsupported`, not an
+/// empty list. That distinction is the whole point: `[]` would conflate "this
+/// build has no eBPF" with "eBPF is running and saw no retransmits", and a
+/// caller that cannot tell those apart is being lied to more quietly than by
+/// the missing declaration. Three outcomes stay distinguishable — no reply at
+/// all (no netlink sensor on the bus), `error/unsupported` (sensor present,
+/// capability absent), `[]` (capability live, nothing observed).
+// Both data parameters are unused without the feature, and that is deliberate:
+// the signature is identical in both builds so `main` has one call site, the
+// same reason `QueryEbpf` exists.
+#[cfg_attr(not(feature = "ebpf"), allow(unused_variables))]
 pub async fn run_ebpf_queries(
     session: Arc<zenoh::Session>,
     producer: String,
-    ebpf: crate::ebpf::EbpfState,
+    ebpf: QueryEbpf,
     top_k: usize,
 ) {
     let retransmits_key = zensight_common::command::query_key(&producer, "retransmits");
@@ -346,13 +362,44 @@ pub async fn run_ebpf_queries(
         tokio::select! {
             q = retransmits_q.recv_async() => {
                 let Ok(query) = q else { return };
-                reply_json(&query, &retransmits_key, &ebpf.top_retransmits(top_k)).await;
+                #[cfg(feature = "ebpf")]
+                if let Some(state) = ebpf.as_ref() {
+                    reply_json(&query, &retransmits_key, &state.top_retransmits(top_k)).await;
+                    continue;
+                }
+                reply_no_ebpf(&query, "retransmits").await;
             }
             q = connections_q.recv_async() => {
                 let Ok(query) = q else { return };
-                reply_json(&query, &connections_key, &ebpf.recent_connections()).await;
+                #[cfg(feature = "ebpf")]
+                if let Some(state) = ebpf.as_ref() {
+                    reply_json(&query, &connections_key, &state.recent_connections()).await;
+                    continue;
+                }
+                reply_no_ebpf(&query, "connections").await;
             }
         }
+    }
+}
+
+/// Reply `error/unsupported` (RFC 05 §3) on an eBPF procedure this build or
+/// this run cannot answer. The procedure stays *declared* either way — the
+/// registry advertises it, so the build must serve it (RFC 08 §6.1, #648).
+async fn reply_no_ebpf(query: &zenoh::query::Query, procedure: &str) {
+    let err = zensight_common::rpc::RpcError::unsupported(format!(
+        "`{procedure}` needs the netlink sensor built with `--features ebpf`, run with \
+         `collect.ebpf: true`, and granted CAP_BPF + CAP_PERFMON; this build has no \
+         eBPF module loaded"
+    ));
+    let payload = match serde_json::to_vec(&err) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "query: serialize rpc error failed");
+            return;
+        }
+    };
+    if let Err(e) = query.reply_err(payload).await {
+        tracing::warn!(procedure = %procedure, error = %e, "query: reply_err failed");
     }
 }
 

@@ -14,6 +14,15 @@ use crate::error::{Result, SensorError};
 use crate::liveliness::LivelinessManager;
 use crate::publisher::Publisher;
 
+/// How long [`SensorRunner::run`] waits for this producer's spawned tasks to
+/// declare their queryables before reporting a registry-coverage gap (#648).
+///
+/// This is also the deadline the `alive` token implies: RFC 04 §5 says a
+/// producer is callable once alive, so a queryable declared later than this is
+/// late whatever the check does. Two seconds is far beyond any local
+/// `declare_queryable` and short enough not to delay liveliness noticeably.
+const DECLARATION_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Sensor runner that manages the lifecycle of a protocol sensor.
 ///
 /// Handles:
@@ -182,11 +191,20 @@ impl<C: SensorConfig> SensorRunner<C> {
     ///
     /// Registers the given producers (e.g. [`ReportProducer`](crate::ReportProducer)
     /// for debug bundles, [`SnapshotProducer`](crate::SnapshotProducer) for
-    /// directory snapshots, or a sensor-specific capture producer). A no-op unless
-    /// at least one producer is enabled in the sensor's `artifacts.*` config; when
-    /// enabled, spawns one [`ArtifactChannel`](crate::ArtifactChannel) as a tracked
-    /// worker. The runner's `source` is this host's id (for a request's
-    /// `target_source` filter).
+    /// directory snapshots, or a sensor-specific capture producer). When at
+    /// least one is enabled in the sensor's `artifacts.*` config this spawns a
+    /// full [`ArtifactChannel`](crate::ArtifactChannel) as a tracked worker.
+    /// The runner's `source` is this host's id (for a request's `target_source`
+    /// filter).
+    ///
+    /// When none is enabled the three `artifact/*` procedures are **still
+    /// declared**, answering `error/gated`. They are registered
+    /// unconditionally by every artifact-capable producer's registry slice, so
+    /// a build that skipped them entirely made `introspect` advertise three
+    /// surfaces it did not serve — which is a lie to the fleet (RFC 08 §6.1)
+    /// and, since #484, a `debug_assert!` that killed the sensor at startup.
+    /// Artifacts are disabled by default, so that was every stock debug sensor
+    /// on a stock config (#648).
     pub fn with_artifacts(
         mut self,
         producers: Vec<Arc<dyn crate::artifact::ArtifactProducer>>,
@@ -199,6 +217,12 @@ impl<C: SensorConfig> SensorRunner<C> {
         ) {
             self.spawn(channel.run());
             tracing::info!("artifact channel enabled");
+        } else {
+            let session = self.session.clone();
+            let producer = self.config.producer().to_string();
+            self.spawn(async move {
+                crate::artifact::serve_disabled(session, producer).await;
+            });
         }
         self
     }
@@ -354,7 +378,12 @@ impl<C: SensorConfig> SensorRunner<C> {
             // `alive` is about to say it is callable. Anything the slice
             // advertises that this build never declared is a lie from now on.
             // Debug panics (a sensor's own tests fail); release warns.
-            zensight_common::served::check_registry_coverage(&producer_name);
+            //
+            // A bounded *wait*, not a snapshot: every sensor declares its
+            // queryables inside `Self::spawn` tasks, so reading the served set
+            // once here races them (#648).
+            zensight_common::served::await_registry_coverage(&producer_name, DECLARATION_GRACE)
+                .await;
         }
 
         // Presence is not optional: declare the sensor-level liveliness token

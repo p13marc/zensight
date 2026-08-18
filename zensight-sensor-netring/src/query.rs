@@ -432,6 +432,47 @@ pub async fn run_captures(
 
 /// Serialize `records` to JSON and reply on the queryable's **concrete**
 /// key (RFC 05 §2.1); logs (does not panic) on failure.
+/// Declare a registered procedure this run cannot answer, and reply `err` to
+/// every caller until the session closes (#648).
+///
+/// The registry advertises every procedure below unconditionally, so the binary
+/// must declare them unconditionally too — `introspect` hands the fleet the
+/// registry slice as truth, and `check_registry_coverage` debug-panics on a
+/// gap (RFC 08 §6.1). Before this, a stock netring build declared none of the
+/// ten `collect.*`-gated channels and panicked at startup.
+///
+/// Replying `error/gated` (configuration) or `error/unsupported` (build) rather
+/// than an empty list is what keeps the three cases distinguishable: no reply
+/// at all means no netring sensor on the bus, an error reply means the sensor
+/// is there but this surface is off and *why*, and `[]` means the collector is
+/// running and saw nothing. An empty list for all three is the same silence the
+/// missing declaration was.
+pub async fn serve_unavailable(
+    session: Arc<zenoh::Session>,
+    producer: String,
+    procedure: &'static str,
+    err: zensight_common::rpc::RpcError,
+) {
+    let key = zensight_common::command::query_key(&producer, procedure);
+    zensight_common::served::serve_unavailable(session, vec![key], err).await;
+}
+
+/// `error/gated`: built in, switched off in this deployment's config.
+pub fn gated(procedure: &str, knob: &str) -> zensight_common::rpc::RpcError {
+    zensight_common::rpc::RpcError::gated(format!(
+        "`{procedure}` needs `{knob}: true` in the netring config; this sensor is \
+         running with it off"
+    ))
+}
+
+/// `error/unsupported`: absent from this binary, needs a rebuild.
+pub fn unsupported(procedure: &str, feature: &str) -> zensight_common::rpc::RpcError {
+    zensight_common::rpc::RpcError::unsupported(format!(
+        "`{procedure}` needs the netring sensor built with `--features {feature}`; this \
+         binary was not"
+    ))
+}
+
 async fn reply<T: serde::Serialize>(
     query: &zenoh::query::Query,
     key: &str,
