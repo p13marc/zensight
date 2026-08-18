@@ -413,6 +413,107 @@ fn sanitize_unit(unit: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Registered logs telemetry families this build can never emit, and why.
+    /// Empty — and the audit helper keeps it that way, failing on an entry the
+    /// build does emit and on one the registry no longer declares.
+    const CONDITIONAL_FAMILIES: &[(&str, &str)] = &[];
+
+    /// Families built inline outside a mapper: `main.rs`'s windowed
+    /// `ingest/dropped_ratio` gauge and the three `store/*` gauges it publishes
+    /// beside the durable store. One representative each, pinned by name.
+    const INLINE_FAMILIES: &[&str] = &[
+        "ingest/dropped_ratio",
+        "store/records",
+        "store/oldest_age_secs",
+        "store/write_drops_total",
+    ];
+
+    /// The other direction from every test above (#654, RFC 08 §6.1): not "is
+    /// what we emit registered" but "is what we registered emittable".
+    ///
+    /// A family here with no emitter is a surface `introspect` advertises to the
+    /// fleet and no build can deliver. The forward direction is enforced at run
+    /// time by `telemetry_guard::checked_point`; this is the half that needs no
+    /// Zenoh session and no live journal.
+    #[test]
+    fn every_registered_family_has_an_emitter() {
+        use zensight_common::registry::logs::Subject;
+        use zensight_common::registry_audit;
+
+        let mut emitted: Vec<String> = INLINE_FAMILIES.iter().map(|m| (*m).to_string()).collect();
+
+        // Drive the real mappers, with fixtures populated enough that every
+        // conditional branch fires — an under-populated fixture would report a
+        // live family as unemitted and send the next reader hunting a
+        // non-existent bug.
+        let counters = LogAggregator::new(8).with_budget(BudgetParams {
+            enabled: true,
+            target_ratio: 0.01,
+            burn_rate: 2.0,
+            burn_windows: 1,
+            min_messages: 1,
+        });
+        // One error and one non-error per unit: `by_unit/*/errors_total` is
+        // emitted only when the window saw an error, and `units_in_failure`
+        // counts distinct units that did.
+        for _ in 0..2 {
+            counters.observe(&msg(Severity::Error, Some("nginx.service")));
+            counters.observe(&msg(Severity::Informational, Some("nginx.service")));
+            counters.observe(&msg(Severity::Warning, Some("sshd.service")));
+        }
+        emitted.extend(
+            counters
+                .emit(
+                    "h",
+                    Some(crate::receiver::JournaldStatsSnapshot {
+                        read: 10,
+                        published: 9,
+                        dropped: 1,
+                        sampled_out: 1,
+                        self_excluded: 1,
+                        ..Default::default()
+                    }),
+                )
+                .into_iter()
+                .map(|p| p.metric),
+        );
+        emitted.extend(
+            counters
+                .tick_budgets("h")
+                .points
+                .into_iter()
+                .map(|p| p.metric),
+        );
+
+        // Template rollups live in their own counter type.
+        let templates =
+            crate::template::TemplateAggregator::new(crate::template::DrainParams::default(), 8);
+        templates.observe("connection from 10.0.0.1 failed", true);
+        templates.observe("connection from 10.0.0.2 failed", true);
+        templates.observe("started unit foo", false);
+        emitted.extend(templates.emit("h").into_iter().map(|p| p.metric));
+
+        // And the ingest counters.
+        emitted.extend(
+            crate::ingest::IngestStatsSnapshot {
+                received: 4,
+                parsed: 3,
+                parse_failed: 1,
+                dropped: 1,
+            }
+            .to_points("h")
+            .into_iter()
+            .map(|p| p.metric),
+        );
+
+        registry_audit::assert_families_covered(
+            "logs",
+            &emitted,
+            |m| Subject::parse_metric(m).map(|s| s.pattern()),
+            CONDITIONAL_FAMILIES,
+        );
+    }
+
     fn msg(sev: Severity, unit: Option<&str>) -> SyslogMessage {
         let mut m = crate::parser::parse("<14>hello").unwrap();
         m.severity = sev;
