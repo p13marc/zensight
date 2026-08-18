@@ -113,7 +113,104 @@ Runtime control is not published at all: sensors declare **queryables** on the
 registry slice). A topic's read is `…/@rpc/<producer>/<topic>`, its write is
 `…/@rpc/<producer>/<topic>/set`; failures reply `reply_err` with namespaced
 `error/...` names (`RpcError`). RPC queryables are declared before the liveliness
-token — alive ⇒ callable.
+token — alive ⇒ callable. How many queries a producer handles at once, and the
+bounds that keep that safe, are below: *Serving `@rpc` — one query at a time*.
+
+## Serving `@rpc` — one query at a time
+
+Every `@rpc` queryable in this workspace handles **one query at a time**. That
+is a decision, not an oversight, and it is written down here because from the
+outside it is indistinguishable from an accident — which means it could be
+"fixed" wrongly, or relied on without anyone knowing it is load-bearing.
+
+### Two shapes, and the second is the sharper one
+
+```rust
+// 1. One task per queryable. Serializes queries within one procedure.
+while let Ok(query) = queryable.recv_async().await {
+    let records = tokio::task::spawn_blocking(move || collect(sel)).await?;
+    reply_json(&query, &key, &records).await;
+}
+
+// 2. N queryables multiplexed on ONE task. Serializes across *procedures*.
+loop {
+    tokio::select! {
+        q = routes_q.recv_async()  => { … }
+        q = sockets_q.recv_async() => { … }
+        // …eight more arms
+    }
+}
+```
+
+Shape 2 is the one to keep in mind: `zensight-sensor-netlink/src/query.rs` has
+**ten** arms on one task, `zensight-sensor-systemd/src/query.rs` seven, plus
+netring's command channels, the correlator and the artifact channel. So on
+netlink a socket drill-down does not merely delay the next socket drill-down —
+it delays `routes`, `neighbors`, `addresses`, `events`, `route_changes`, `tc`,
+`xfrm` and `nft` too.
+
+### Why serial is the right default
+
+A sensor is a guest on a host it is supposed to be *measuring*, not perturbing.
+Unbounded concurrency turns a cheap RPC into an amplification vector: N
+simultaneous `/proc` walks cost the monitored host more than the telemetry is
+worth, and a client storm should not be able to buy that. Serial handling is
+natural backpressure with no configuration and no failure mode of its own.
+
+Nothing needs more, either. The GUI issues one drill-down per procedure at a
+time, and fleet fan-in is parallel across *hosts* — one query each — which
+per-host serial handlers do not impede at all.
+
+### What a caller actually observes
+
+Queries **queue, they do not drop**. `zensight_common::served::serve_queryable`
+returns a queryable over Zenoh's default FIFO channel with no bound set, so a
+slow handler costs head-of-line *latency*, not lost calls, with the caller's
+query timeout as the backstop.
+
+### Rules for handler authors
+
+1. **Bound the cost of one query.** This is the lever that exists, and the
+   precedents to copy are `MAX_SEARCH_SCAN` (logs: at most 500 000 redb rows
+   scanned per search), `socket_process_max_procs` (netlink: skip attribution
+   on a host with too many processes) and logs' early `reply_err` on a bad
+   regex — reject cheaply, before the expensive path.
+2. **`spawn_blocking` anything blocking.** It protects the runtime's worker
+   threads. It does **not** make the loop concurrent — the handler still awaits
+   the join before the next query is dequeued, which is the thing most likely
+   to be misread here.
+3. **Reject bad input before doing the work**, not after.
+
+### The three handlers where this is visible
+
+Most handlers snapshot a lock and copy, so serial costs microseconds. Three do
+real work, and their numbers are recorded here so the head-of-line delay is
+documented rather than discovered:
+
+| Handler | Cost of one query |
+|---|---|
+| `sensor-sysinfo/src/query.rs` `processes` | two full `/proc` walks *plus* a `std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL)` — a floor of ~200 ms, by construction |
+| `sensor-logs/src/query.rs` `events` (durable path) | a redb range walk, up to `MAX_SEARCH_SCAN` = 500 000 rows |
+| `sensor-netlink/src/query.rs` `sockets`/`bandwidth` | a `/proc` fd + cgroupfs walk, which also blocks the nine sibling arms |
+
+> **Deferred: bounded concurrency (#652).** Making handlers concurrent means a
+> `tokio::spawn` per query behind a `tokio::sync::Semaphore`, applied first to
+> the three handlers above. It is deferred until a real workload complains —
+> concretely: an operator drill-down that times out because an *unrelated*
+> drill-down on the same host was in flight.
+>
+> It is not a drop-in, which is the other half of the reason. A `Semaphore`
+> only bounds concurrency that already exists; the thing that creates it is the
+> spawn, and for the `select!` shape that means every handler's captured state
+> (`&conn`, `&route`, `Arc<Manager>`, the eBPF handle) must become
+> `Clone + 'static`, reply ordering stops being arrival ordering, and task
+> lifetime unbinds from the loop. Nor could the policy be *enforced* where it
+> belongs: `serve_queryable` hands back the concrete
+> `Queryable<FifoChannelHandler<Query>>`, so callers own their loops, and making
+> it policy-carrying would touch all 67 call sites.
+>
+> Until then the contract above is the contract: **bound the cost of one query,
+> not the number in flight.**
 
 ## Host identity
 
