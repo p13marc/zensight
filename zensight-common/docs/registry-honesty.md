@@ -83,14 +83,49 @@ declares fails — so it cannot decay into a permanent excuse.
 
 ## Coverage today
 
-| Producer | Subject check | Note |
+Every producer with a finite telemetry tree is now covered (#654).
+
+| Producer | Families | Ledger |
 |---|---|---|
-| `sysinfo` | ✅ `tests/registry_conformance.rs` | 121 families, ledger empty |
-| `snmp`, `modbus`, `gnmi`, `netflow` | **exempt** | rest-var telemetry (`{device}/{metric...}`); the check is vacuous and `assert_families_covered` refuses to run rather than pass them for free |
-| `netlink`, `netring`, `systemd`, `logs`, `parallax`, `catalog` | ❌ not yet | finite families, no coverage test — the honest gap. `netlink`'s `sockets/tcp/connlat_us_p50`/`p95` are the known conditional pair awaiting a ledger |
+| `sysinfo` | 121 | empty |
+| `netlink` | 106 | **2** — `sockets/tcp/connlat_us_{p50,p95}` |
+| `netring` | 70 | empty |
+| `systemd` | 37 | empty |
+| `logs` | 23 | empty |
+| `parallax` | 6 | empty |
+| `snmp`, `modbus`, `gnmi`, `netflow` | **exempt** | rest-var telemetry (`{device}/{metric...}`); the check is vacuous, and `assert_families_covered` refuses to run rather than pass them for free |
+| `catalog` | 0 telemetry subjects | n/a |
 
 The procedure half covers **every** producer, and is verified by starting each
 sensor binary on its stock config: see the sweep in #648.
+
+### Writing one of these tests
+
+Two shapes, and which you get is decided by the producer, not by preference:
+
+- **Drive the real mappers** where metric names come from pure functions
+  (netlink, netring, systemd, logs). Strongest, because the test cannot drift
+  from the code.
+- **List one representative per family** where names are built inline with
+  `format!` (parallax, and sysinfo's collector-built families). Pair it with a
+  forward assertion that each representative *is* registered — without that, the
+  reverse test can pass on a list of typos.
+
+**Fixture completeness is the whole difficulty**, and it fails in two directions
+that both look like a registry bug:
+
+- *Empty is not neutral.* `IfaceSample::default()` has an empty interface name
+  and produces `iface//rx_bytes`, which trips the grammar guard before coverage
+  is even evaluated.
+- *Zero is not neutral either.* Many families are gated on a value being `> 0`
+  or an `Option` being `Some` — netlink's socket percentiles, systemd's
+  accounting fields, netring's `Some(pcts)` arguments. A zeroed fixture reports
+  live families as unemitted and sends the next reader hunting a bug that is not
+  there.
+
+Also watch for mappers that pick a *name* from an argument: netring's
+`shed_points` chooses `sampled_total` or `new_flows_total` by policy, so one
+call covers one family. Call it once per branch.
 
 ## See also
 
