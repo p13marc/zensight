@@ -42,6 +42,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     sort by time, but RFC 02 P6 forbids the sub-chunk wildcard that would let a
     consumer ask for a prefix).
 
+### Changed
+
+- **`introspect` can no longer ship lies** (#484). RFC 08 §6.1's MUST — every
+  registered procedure is served by the build advertising it — is now checked at
+  run time, immediately before the `alive` token. Debug builds panic; release
+  builds warn. Every `declare_queryable` goes through
+  `zensight_common::served::serve_queryable`, and a CI guard bans the raw call
+  so the check cannot be bypassed by accident.
+- **An origin you address is a type, not a string** (#485). `origin_rpc_key`
+  takes a parsed `zenkey::RemoteOrigin`, so building an `@rpc` key aimed at your
+  own host is a compile error rather than a timeout in one view. That bug
+  shipped three times and was fixed by splitting the API by name — but both
+  halves still took `&str`, so nothing stopped a fourth.
+- **async-snmp 0.17** (#577). Upstream fixed the v3 engine wedge, so the
+  client-rebuild workaround is gone in favour of `rediscover_engine()`.
+- **`stream.rs` no longer documents a `tiers/set` command that never existed**
+  (#513). The tier ladder is config-only; no build ever served that procedure
+  and the registry declares none, so the type was documenting a bus nobody
+  built.
+
 ### Changed — BREAKING
 
 - **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire
@@ -100,27 +120,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sweep from #541 published its report to `state/snmp/discovery` where only
   `zenctl` could see it. Proposals only — nothing auto-adds.
 
-### Changed
-
-- **`introspect` can no longer ship lies** (#484). RFC 08 §6.1's MUST — every
-  registered procedure is served by the build advertising it — is now checked at
-  run time, immediately before the `alive` token. Debug builds panic; release
-  builds warn. Every `declare_queryable` goes through
-  `zensight_common::served::serve_queryable`, and a CI guard bans the raw call
-  so the check cannot be bypassed by accident.
-- **An origin you address is a type, not a string** (#485). `origin_rpc_key`
-  takes a parsed `zenkey::RemoteOrigin`, so building an `@rpc` key aimed at your
-  own host is a compile error rather than a timeout in one view. That bug
-  shipped three times and was fixed by splitting the API by name — but both
-  halves still took `&str`, so nothing stopped a fourth.
-- **async-snmp 0.17** (#577). Upstream fixed the v3 engine wedge, so the
-  client-rebuild workaround is gone in favour of `rediscover_engine()`.
-- **`stream.rs` no longer documents a `tiers/set` command that never existed**
-  (#513). The tier ladder is config-only; no build ever served that procedure
-  and the registry declares none, so the type was documenting a bus nobody
-  built.
-
-### Changed — BREAKING
 
 - **Every exported Prometheus/OTel series for the SNMP sensor is renamed**
   (#559, #647). The built-in MIB tables published raw MIB object names straight
