@@ -275,6 +275,22 @@ sequenceDiagram
     Bus->>Sensor: queryable replies (value or reply_err)
 ```
 
+### Serving `@rpc` — serial by design
+
+A producer handles **one query at a time**: a single task drains each
+queryable's FIFO channel and awaits the handler before dequeuing the next. The
+`select!` multiplexers (netlink has ten queryables on one task, systemd seven)
+serialize across *different procedures* as well.
+
+This is deliberate. A sensor is a guest on the host it measures, and unbounded
+concurrency would let a client storm fan out into simultaneous `/proc` walks —
+a worse failure for a monitoring agent than a queued query. Queries queue rather
+than drop, so the cost is head-of-line latency bounded by the caller's timeout.
+Sensors therefore bound the *cost of one query*, never the number in flight.
+
+Details, the three handlers where it is measurable, and why bounded concurrency
+is deferred: [`zensight-sensor-core/docs/framework.md`](../zensight-sensor-core/docs/framework.md).
+
 ## Frontend Architecture
 
 ```mermaid

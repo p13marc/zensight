@@ -13,6 +13,15 @@
 //! - Queryables MUST be declared **before** the producer's `alive`
 //!   liveliness token ("alive ⇒ callable", RFC 04 §5) — serve procedures
 //!   before `SensorRunner::run()` and the ordering holds.
+//! - **Handler loops are serial, by design.** One task drains a queryable's
+//!   FIFO channel and awaits each handler before taking the next query, so a
+//!   slow query delays every query behind it — and the `select!` multiplexers
+//!   (netlink, systemd, netring, correlator, the artifact channel) serialize
+//!   across *different* procedures on one task. Sensors bound the **cost of
+//!   one query**, never the number in flight, and `spawn_blocking` keeps a
+//!   blocking handler off the runtime without making the loop concurrent.
+//!   Rationale and the bounds that exist: `zensight-sensor-core/docs/framework.md`,
+//!   "Serving `@rpc` — one query at a time" (#652).
 
 use std::future::Future;
 use std::sync::Arc;
