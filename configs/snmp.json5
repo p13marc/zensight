@@ -58,6 +58,11 @@
     trap_listener: {
       enabled: false,
       bind: "0.0.0.0:162",
+      // Where the SNMPv3 authoritative engine identity + boots counter live
+      // (#650). Unset = the systemd StateDirectory / XDG state default. With
+      // no durable location at all the receiver falls back to a per-start
+      // identity, and every v3 inform sender re-handshakes after a restart.
+      // engine_state_path: "/var/lib/zensight-snmp/snmp-trap-engine.json",
     },
 
     // Devices to poll

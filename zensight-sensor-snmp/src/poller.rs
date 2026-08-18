@@ -1006,7 +1006,7 @@ fn seeded_engine_cache(device: &DeviceConfig) -> Option<Arc<EngineCache>> {
 }
 
 /// Decode a hex string, tolerating an `0x` prefix and `:` separators.
-fn parse_hex(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn parse_hex(s: &str) -> Option<Vec<u8>> {
     let s = s.strip_prefix("0x").unwrap_or(s).replace(':', "");
     if s.is_empty() || !s.len().is_multiple_of(2) {
         return None;
