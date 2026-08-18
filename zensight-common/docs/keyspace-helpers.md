@@ -128,12 +128,34 @@ match it — catalog state needs its own subscriber/storage.
 
 | Helper | Result |
 |--------|--------|
-| `media_video_key(proto, origin, stream, codec, profile)` | `zensight/v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>` |
-| `media_preview_key(proto, origin, stream)` | `zensight/v1/<origin>/@media/<producer>/<stream>/preview/jpeg` |
+| `media_video_key(&origin, stream, codec, tier)` | `zensight/v1/<origin>/@media/parallax/<stream>/video/<codec>/<tier>` |
+| `media_preview_key(&origin, stream)` | `zensight/v1/<origin>/@media/parallax/<stream>/preview/jpeg` |
 
 Media samples are opaque encoded access units (no `TelemetryPoint`/`Format`
 envelope); stream *control* rides the `@rpc` plane with the `stream` /
 `stream/set` / `streams` procedures.
+
+**The origin is a type, and there is no wildcard (#649.)** Both take a parsed
+`zenkey::RemoteOrigin`, like `origin_rpc_key` above — but here the reason is
+not only the own-vs-other confusion the `@rpc` fix was about. On a bulk plane a
+`*` origin is a *cost* bug: RFC 07 §3 says a consumer that cannot name an
+origin still MUST NOT fan out across origins on `@media` or `@blob`, because
+every matching holder ships the full payload and Zenoh cannot cancel remote
+replies in flight. One camera named `cam0` per host meant N× the video on one
+viewer's wire. `zenkey-build` emits no wildcard selector for this plane at all,
+for the same reason, and the string spelling these helpers used to accept is
+gone rather than typed.
+
+**They are parallax-only, and that is in the signature.** `parallax.toml` is
+the registry's only `[[media]]` declarer, so `protocol` had exactly one legal
+production value and is gone too. A producer that publishes media without a
+registry entry uses `Publisher::raw_media_publisher`, which takes any key
+string by design — there is no builder for such a key, and there should not be
+one until the producer declares its `[[media]]`.
+
+The third parameter of `media_video_key` is a **tier** — a bandwidth rung of
+the ladder, subscribed to exactly (keyspace v1.3). It is not an H.264 coding
+profile, which is what this table used to call it.
 
 ## See also
 

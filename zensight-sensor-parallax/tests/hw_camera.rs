@@ -18,7 +18,7 @@ use std::time::Duration;
 use zensight_common::command::{Command, command_key, query_key};
 use zensight_common::keyexpr::media_preview_key;
 use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor};
-use zensight_common::{Format, Protocol, decode};
+use zensight_common::{Format, decode};
 use zensight_sensor_core::Publisher;
 use zensight_sensor_parallax::catalog::Catalog;
 use zensight_sensor_parallax::config::ParallaxConfig;
@@ -142,7 +142,8 @@ async fn v4l2_camera_preview_delivers_real_frames() {
         .clone();
 
     // Subscribe first, then open — keyframe-on-subscribe covers the rest.
-    let preview_key = media_preview_key(Protocol::Parallax, source, &camera);
+    let origin = zenkey::RemoteOrigin::parse(source).expect("the sensor's own origin parses");
+    let preview_key = media_preview_key(&origin, &camera);
     let sub = viewer
         .declare_subscriber(&preview_key)
         .await
