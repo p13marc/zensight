@@ -80,7 +80,7 @@ Metrics are named as `{prefix}_{protocol}_{metric_path}`:
 
 | ZenSight Metric | Prometheus Metric |
 |-----------------|-------------------|
-| `snmp/router01/sysUpTime` | `zensight_snmp_sysUpTime{source="router01"}` |
+| `snmp/router01/system/uptime` | `zensight_snmp_system_uptime{source="router01"}` |
 | `sysinfo/server01/cpu/usage` | `zensight_sysinfo_cpu_usage{source="server01"}` |
 
 ## Type Mapping

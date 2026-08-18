@@ -45,8 +45,10 @@ state/direction/device become labels.
 
 - **Metric names** are forced to match `[a-zA-Z_:][a-zA-Z0-9_:]*`: invalid chars
   → `_`, consecutive underscores collapsed, trailing underscores trimmed, a
-  leading digit prefixed with `_`, empty → `unnamed`. So `system/sysUpTime` →
-  `system_sysUpTime`, `disk[sda]` → `disk_sda`.
+  leading digit prefixed with `_`, empty → `unnamed`. So `if/3/in_octets` →
+  `if_3_in_octets`, `disk[sda]` → `disk_sda`. (The old example here was
+  `system/sysUpTime` → `system_sysUpTime`, demonstrating case preservation —
+  true of the sanitizer, but no shipped metric name exercises it since #559.)
 - **Label names** match `[a-zA-Z_][a-zA-Z0-9_]*`; a name starting with the
   reserved `__` is prefixed with `z`; empty → `label`.
 
