@@ -153,8 +153,9 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
 
             // Events plane (#536): append-only records (SNMP traps today).
             // A startup GET on the same selector backfills history when a
-            // Zenoh storage is aligned on the events tree; live records then
-            // stream through the subscriber.
+            // Zenoh storage is aligned on the events tree (#583,
+            // `configs/router-events-storage.json5`); live records then stream
+            // through the subscriber.
             let events_sub = session
                 .declare_subscriber(&events_selector(&config))
                 .with(flume::unbounded())
@@ -178,6 +179,27 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                             {
                                 msgs.push(msg);
                             }
+                        }
+                        // Stop draining once we have more than the ring can
+                        // hold (#583). Unbounded here was harmless while
+                        // nothing answered this GET; with an events storage
+                        // aligned it is answered by the whole log, and the
+                        // registry bounds SNMP traps at 100k records *per
+                        // device*. There is no narrower selector available —
+                        // ULIDs are time-ordered but RFC 02 P6 forbids the
+                        // sub-chunk wildcard that would let us ask for a
+                        // prefix — so a decode cap is the only lever.
+                        //
+                        // Dropping `replies` here does not cancel the remote
+                        // side, which keeps sending; what it bounds is our
+                        // decode and allocation, which is what actually hurts.
+                        if msgs.len() >= EVENT_BACKFILL_MAX {
+                            tracing::debug!(
+                                cap = EVENT_BACKFILL_MAX,
+                                "events backfill hit its cap; older history stays \
+                                 in the storage"
+                            );
+                            break;
                         }
                     }
                     msgs
@@ -523,6 +545,16 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
         }
     })
 }
+
+/// Cap on how many event records the startup backfill GET decodes (#583).
+///
+/// Comfortably above `dashboard::SNMP_EVENT_RING` (500), so a full ring can
+/// still be filled from history, but bounded: with an events storage aligned on
+/// the tree the GET is answered by the entire stored log, and the registry
+/// bounds SNMP trap records at 100k *per device*. Nothing narrower is
+/// available — ULIDs sort by time, but RFC 02 P6 forbids the sub-chunk wildcard
+/// that would let a consumer ask for a time prefix.
+const EVENT_BACKFILL_MAX: usize = 2_000;
 
 /// Cap on how many already-queued telemetry samples are folded into one
 /// [`Message::TelemetryBatch`] per stream iteration. Bounds per-update latency

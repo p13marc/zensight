@@ -421,3 +421,68 @@ fn no_storage_claims_completeness() {
         );
     }
 }
+
+/// **The claim** (`router-events-storage.json5`): an `fs` volume keeps the
+/// *whole* event log, not just a latest-per-key view.
+///
+/// This is the assertion the config's "why `fs`, not InfluxDB" rationale rests
+/// on, so it is worth pinning rather than reasoning about. RFC 09 §2.1 marks
+/// `fs` as durable·**latest** and reserves `influxdb` for values whose meaning
+/// is the sequence — but that is a *per-key* statement, and every event record
+/// owns a unique ULID key. Two records under the same subject is the case that
+/// distinguishes the two readings: if only one survives, the volume really did
+/// collapse them and the config's rationale is wrong.
+///
+/// Publishers are closed before the GET, so any reply can only be the storage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a real zenohd; run via `just router-verify`"]
+async fn every_event_record_survives_because_each_owns_its_key() {
+    let _router = router_or_skip!("router-events-storage.json5");
+
+    // Two records under the SAME subject, differing only in ULID — plus one
+    // from a second origin, so the `*` origin position is exercised too.
+    let same_subject_a = "v1/h-aaaabbbbcccc/events/snmp/router01/trap/01k0000000000000000000000a";
+    let same_subject_b = "v1/h-aaaabbbbcccc/events/snmp/router01/trap/01k0000000000000000000000b";
+    let other_origin = "v1/h-ccccddddeeee/events/snmp/switch02/trap/01k0000000000000000000000c";
+
+    {
+        let sensor = client().await;
+        for (key, body) in [
+            (same_subject_a, b"first".to_vec()),
+            (same_subject_b, b"second".to_vec()),
+            (other_origin, b"elsewhere".to_vec()),
+        ] {
+            sensor.put(key, body).await.expect("put event");
+        }
+        tokio::time::sleep(SETTLE).await;
+        sensor.close().await.expect("close");
+    }
+    // The producer is now off the bus. Nothing but the storage can answer.
+    tokio::time::sleep(SETTLE).await;
+
+    let gui = client().await;
+    let replies = get_all(&gui, "v1/*/events/**").await;
+
+    for (key, expected) in [
+        (same_subject_a, &b"first"[..]),
+        (same_subject_b, &b"second"[..]),
+        (other_origin, &b"elsewhere"[..]),
+    ] {
+        assert!(
+            replies.iter().any(|(k, v)| k == key && v == expected),
+            "the router must serve {key} after its publisher left — this is the \
+             backfill `zensight/src/subscription.rs` promises (#536/#583); got {replies:?}"
+        );
+    }
+
+    let same_subject = replies
+        .iter()
+        .filter(|(k, _)| k == same_subject_a || k == same_subject_b)
+        .count();
+    assert_eq!(
+        same_subject, 2,
+        "both records under one subject must survive. If only one did, the `fs` \
+         volume collapsed two ULID keys into one and the config's \
+         'why fs, not InfluxDB' rationale is wrong — fix the config, not this test."
+    );
+}

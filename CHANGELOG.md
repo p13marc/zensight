@@ -24,6 +24,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Alert transitions now publish **before** the event record that references
     them, so a consumer never sees a record pointing at an alert it has not
     ingested.
+- **A shipped Zenoh storage config for the events plane** (#583):
+  `configs/router-events-storage.json5`. Events are durable in *transit* but the
+  bus stores nothing, so the GUI's startup backfill GET (#536) returned nothing
+  after a restart and a trap that fired while nobody was looking was gone. With
+  this running, that GET is answered by the router.
+  - It uses a plain `fs` volume, which contradicts RFC 09 §2's InfluxDB sketch
+    on purpose: that guidance is about *per-key* history, and every event record
+    owns a unique ULID key, so "latest per key" and "the whole log" are the same
+    set. The config says so, and `router-verify` now proves it — two records
+    under one subject must both survive.
+  - The GUI's local redb cold store is **additive**, not superseded: records are
+    immutable and ULID-identified, so the union needs no precedence rule.
+  - The startup backfill drain is now bounded (`EVENT_BACKFILL_MAX`). Unbounded
+    was harmless while nothing answered that GET; with a storage aligned it is
+    answered by the entire stored log, and no narrower selector exists (ULIDs
+    sort by time, but RFC 02 P6 forbids the sub-chunk wildcard that would let a
+    consumer ask for a prefix).
+
+### Changed
+
+- **`introspect` can no longer ship lies** (#484). RFC 08 §6.1's MUST — every
+  registered procedure is served by the build advertising it — is now checked at
+  run time, immediately before the `alive` token. Debug builds panic; release
+  builds warn. Every `declare_queryable` goes through
+  `zensight_common::served::serve_queryable`, and a CI guard bans the raw call
+  so the check cannot be bypassed by accident.
+- **An origin you address is a type, not a string** (#485). `origin_rpc_key`
+  takes a parsed `zenkey::RemoteOrigin`, so building an `@rpc` key aimed at your
+  own host is a compile error rather than a timeout in one view. That bug
+  shipped three times and was fixed by splitting the API by name — but both
+  halves still took `&str`, so nothing stopped a fourth.
+- **async-snmp 0.17** (#577). Upstream fixed the v3 engine wedge, so the
+  client-rebuild workaround is gone in favour of `rediscover_engine()`.
+- **`stream.rs` no longer documents a `tiers/set` command that never existed**
+  (#513). The tier ladder is config-only; no build ever served that procedure
+  and the registry declares none, so the type was documenting a bus nobody
+  built.
+
+### Changed — BREAKING
+
+- **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire
+  tag is re-spelled and the wire version moves to 3, so a mixed deployment
+  fails closed rather than half-decoding — **sensors and frontend upgrade
+  together** (again). Unlike the sha256→blake3 cut below, **chunk addresses
+  do not change**: the GUI's redb chunk store and any router-hosted storages
+  stay warm across the upgrade. Also picked up from 0.3: typed
+  serve/query prefixes replace string hygiene (a wildcard fetch prefix is
+  now unrepresentable, not just guarded), tier-2 materialization hardening
+  (a hostile snapshot index can no longer delete pre-existing directories,
+  apply setuid/setgid bits, or escape via a symlink chain), batched tier-2
+  chunk fetches, and snapshot chunking derives its CDC min/max from the
+  configured average (previously `avg == max` degenerated FastCDC into
+  fixed-size chunking, and a `chunk_size` above 256 KiB failed validation).
+- **zblob 0.2 (wire v2).** Artifact transfer moves to BLAKE3 + bao verified
+  streaming, postcard control messages and chunk-range resume. v1 and v2
+  peers deliberately do not interoperate — v2 renamed the reply keys so a
+  mixed fleet fails closed instead of corrupting — so **sensors and frontend
+  upgrade together**. Every reply is verified against the blob's content root
+  *before* it touches disk, so a wrong or tampered slice is discarded rather
+  than assembled and detected at the end.
+  - `Delivery::Blob`'s manifest changes shape: `filename` is optional and
+    advisory, and `chunk_count`/`hash_algo`/`hash` give way to `root` (the
+    BLAKE3 bao root). The caller now names the destination *file*; the crate
+    never joins a remote-supplied filename to a path.
+  - The GUI's redb chunk store re-keys from `sha256/<hex>` to
+    `blake3/<hex>`. Dedup is per-algorithm, so pre-0.11 chunks are inert
+    rather than wrong — the store refills on the next fetch. It also gained
+    the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
 
 
 - **The SNMP event feed persists, filters and cross-links** (#578). Trap records
@@ -52,27 +120,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sweep from #541 published its report to `state/snmp/discovery` where only
   `zenctl` could see it. Proposals only — nothing auto-adds.
 
-### Changed
-
-- **`introspect` can no longer ship lies** (#484). RFC 08 §6.1's MUST — every
-  registered procedure is served by the build advertising it — is now checked at
-  run time, immediately before the `alive` token. Debug builds panic; release
-  builds warn. Every `declare_queryable` goes through
-  `zensight_common::served::serve_queryable`, and a CI guard bans the raw call
-  so the check cannot be bypassed by accident.
-- **An origin you address is a type, not a string** (#485). `origin_rpc_key`
-  takes a parsed `zenkey::RemoteOrigin`, so building an `@rpc` key aimed at your
-  own host is a compile error rather than a timeout in one view. That bug
-  shipped three times and was fixed by splitting the API by name — but both
-  halves still took `&str`, so nothing stopped a fourth.
-- **async-snmp 0.17** (#577). Upstream fixed the v3 engine wedge, so the
-  client-rebuild workaround is gone in favour of `rediscover_engine()`.
-- **`stream.rs` no longer documents a `tiers/set` command that never existed**
-  (#513). The tier ladder is config-only; no build ever served that procedure
-  and the registry declares none, so the type was documenting a bus nobody
-  built.
-
-### Changed — BREAKING
 
 - **Every exported Prometheus/OTel series for the SNMP sensor is renamed**
   (#559, #647). The built-in MIB tables published raw MIB object names straight

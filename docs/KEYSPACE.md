@@ -52,9 +52,15 @@ zensight/v1/@catalog/…                                   the identity catalog
   (reliable + block: a dropped event is unrecoverable). Registry entries use
   `class = "events"` with the RFC 08 §5 `rate = rare|low|burst(n/h)`
   annotation; the first real subjects are the SNMP trap records (#535).
-  Retention is the deployment's choice: point a Zenoh storage at
-  `**/events/**` to keep the log (events are durable in transit, not stored
-  by the bus itself).
+  Retention is the deployment's choice: events are durable in *transit*
+  (reliable + block QoS) but the bus stores nothing, so without a storage there
+  is no history for a late joiner and the GUI's startup backfill GET (#536)
+  returns nothing after a restart. Point a Zenoh storage at `v1/*/events/**` —
+  [`configs/router-events-storage.json5`](../configs/router-events-storage.json5)
+  is the worked example (#583). Because every record owns a unique ULID key, a
+  plain `fs` volume keeps the whole log rather than a latest-per-key view, and
+  the GUI's own redb cold store is *additive* to it: records are immutable and
+  ULID-identified, so the union needs no precedence rule.
 - Telemetry payloads (`TelemetryPoint`) carry an optional UCUM-style `unit`
   field (serde-defaulted, absent when unknown). Proxy pollers with counter
   metrics (today: `snmp`, #527) publish a derived per-second sibling under
@@ -216,5 +222,6 @@ Session config, storage recipes (latest/catalog/timeseries/pdns), ACL, and
 constrained-link profiles: RFC [09](https://github.com/p13marc/zenkey/blob/main/rfcs/09-operations.md).
 Shipped router configs: [`configs/router-evidence-storage.json5`](../configs/router-evidence-storage.json5)
 (state seed store), [`configs/router-blob-storage.json5`](../configs/router-blob-storage.json5)
-(@blob tiers), [`configs/router-pdns-influxdb-storage.json5`](../configs/router-pdns-influxdb-storage.json5)
+(@blob tiers), [`configs/router-events-storage.json5`](../configs/router-events-storage.json5)
+(events log), [`configs/router-pdns-influxdb-storage.json5`](../configs/router-pdns-influxdb-storage.json5)
 (pdns history).
