@@ -33,6 +33,15 @@ jobs:
           cache-targets: false
       - run: cargo test --workspace --locked
 
+      # The `h264` feature is off by default because it pulls openh264, a C++
+      # build from source — so nothing above compiles the opt-in live-view path,
+      # and #485 shipped it broken for a week (`app.rs` passed a `RemoteOrigin`
+      # to a `String` parameter; nobody found out until someone built it). A
+      # check, not a test: the cost is the openh264 build, and the bug class it
+      # catches is "this feature no longer compiles" (#649).
+      - name: opt-in features still compile
+        run: cargo check -p zensight --features h264 --locked
+
   lint:
     runs-on: ubuntu-24.04
     steps:

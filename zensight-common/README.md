@@ -60,6 +60,8 @@ cargo test -p zensight-common
 - [Data model](docs/data-model.md) — telemetry, alerts, RPC, serialization, QoS.
 - [Identity, evidence & entities](docs/identity-evidence.md) — the evidence → entity pipeline.
 - [Keyspace helpers](docs/keyspace-helpers.md) — index of the `keyexpr.rs` / `command.rs` builders.
+- [Registry honesty](docs/registry-honesty.md) — the four checks that keep `introspect` truthful,
+  and what none of them covers.
 - [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) — the deployed keyspace profile
   (normative spec: [`../docs/rfcs/keyspace-v2/`](../docs/rfcs/keyspace-v2/00-index.md)).
 

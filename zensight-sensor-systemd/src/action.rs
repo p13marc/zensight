@@ -196,6 +196,28 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsCon
 
     if !cfg.enabled {
         tracing::info!("systemd service control disabled (actions.enabled = false)");
+        // The three action procedures are registered unconditionally, so a
+        // read-only host still declares them and answers `error/gated` — the
+        // same reason `capability` is declared above, applied to the rest of
+        // the surface. Returning here without declaring left `introspect`
+        // advertising three procedures no read-only build served (RFC 08 §6.1),
+        // which is what made a stock systemd sensor debug-panic at startup
+        // (#648). `capability` is the machine-readable form of this answer;
+        // these replies are what a caller that skipped the probe gets.
+        // Spawned, not awaited, so `run` keeps its contract of returning as
+        // soon as a disabled sensor's surface is up.
+        tokio::spawn(zensight_common::served::serve_unavailable(
+            session,
+            vec![
+                command_key(&producer, ACTION_TOPIC),
+                status_key(&producer, ACTION_TOPIC),
+                query_key(&producer, ACTIONS_TOPIC),
+            ],
+            zensight_common::rpc::RpcError::gated(
+                "systemd service control is disabled on this host \
+                 (`actions.enabled: false`); ask `action/capability` for the details",
+            ),
+        ));
         return;
     }
     if cfg.allow_units.is_empty() {
@@ -630,7 +652,7 @@ mod tests {
     /// Without the second assertion, the probe could quietly have become a
     /// reason to declare the writable procedures.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_disabled_sensor_answers_the_probe_and_serves_no_write_surface() {
+    async fn a_disabled_sensor_answers_the_probe_and_refuses_the_write_surface() {
         // Unique prefix so parallel test runs don't cross-talk.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -665,15 +687,38 @@ mod tests {
         assert!(cap.verbs.is_empty());
         assert!(cap.allow_units.is_empty());
 
-        // …and the writable procedure is not declared, so nobody answers it.
+        // …and the writable procedure IS declared, answering `error/gated`.
+        //
+        // This inverts what this test asserted before #648. Leaving it
+        // undeclared was the more obvious posture, but `registry/systemd.toml`
+        // advertises `action/set` unconditionally, so not declaring it made
+        // `introspect` lie to the fleet (RFC 08 §6.1) — and, once #484 started
+        // checking, killed the sensor at startup.
+        //
+        // Nothing is exposed by declaring it: the queryable executes nothing
+        // and only reports that control is off, which `action/capability`
+        // above already broadcasts. What the caller gains is the difference
+        // between "no systemd sensor answered" and "this host will not do
+        // that" — which is the whole point of an error reply over silence.
         let replies = session
             .get(&command_key(&producer, ACTION_TOPIC))
-            .timeout(std::time::Duration::from_secs(1))
+            .timeout(std::time::Duration::from_secs(5))
             .await
             .expect("get action/set");
-        assert!(
-            replies.recv_async().await.is_err(),
-            "a disabled sensor must expose no write surface"
+        let reply = replies
+            .recv_async()
+            .await
+            .expect("a disabled sensor still answers its declared write procedure");
+        let err = reply
+            .result()
+            .expect_err("a disabled sensor must refuse, not accept");
+        let decoded: zensight_common::rpc::RpcError =
+            serde_json::from_slice(&err.payload().to_bytes()).expect("decode RpcError");
+        assert_eq!(
+            decoded.error,
+            zensight_common::rpc::ERR_GATED,
+            "the refusal must say `gated` (built in, switched off) rather than \
+             `unsupported` (absent from the build) — they call for different fixes"
         );
     }
 

@@ -43,7 +43,7 @@ mod real {
     use zenoh::Session;
     use zensight_common::keyexpr::media_video_key;
     use zensight_common::stream::FrameMeta;
-    use zensight_common::{Format, Protocol, decode};
+    use zensight_common::{Format, decode};
 
     use crate::message::Message;
 
@@ -127,7 +127,7 @@ mod real {
     /// Every yielded message carries the tile `generation` it was opened with.
     pub fn h264_tile_stream(
         session: Arc<Session>,
-        origin: String,
+        origin: zenkey::RemoteOrigin,
         stream: String,
         tier: String,
         generation: u64,
@@ -141,7 +141,7 @@ mod real {
             // matching is exact, so the sensor's per-tier matching listener
             // counts this subscriber against that tier alone (pinned in the
             // sensor e2e: two viewers on distinct tiers stream independently).
-            let key = media_video_key(Protocol::Parallax, &origin, &stream, "h264", &tier);
+            let key = media_video_key(&origin, &stream, "h264", &tier);
             let subscriber = match session.declare_subscriber(&key).await {
                 Ok(s) => s,
                 Err(e) => {

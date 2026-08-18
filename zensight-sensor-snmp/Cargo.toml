@@ -37,6 +37,7 @@ zenkey.workspace = true
 
 [dev-dependencies]
 async-snmp = { version = "=0.17.0", features = ["agent"] }
+tempfile.workspace = true
 
 # =============================================================================
 # Package metadata for cargo-deb

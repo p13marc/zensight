@@ -1,5 +1,3 @@
-use crate::telemetry::Protocol;
-
 use crate::registry::{self, AnySubject};
 use zenkey::grammar::{self, Class, ClassOrPlane, Origin, StructuralKey};
 use zenkey::origin::{RemoteOrigin, ServiceOrigin};
@@ -524,46 +522,47 @@ pub fn all_device_liveliness_wildcard() -> String {
 /// Stream *control* rides the `@rpc` plane — the `stream`/`stream/set` and
 /// `streams` procedures (see [`crate::command`] and [`crate::stream`]).
 ///
+/// # The origin is a type, and there is no fallback (#649)
+///
+/// Like [`origin_rpc_key`], this takes a parsed [`RemoteOrigin`]. Unlike it,
+/// the `format!` this replaced was not only a parse-failure fallback — it also
+/// spelled a `*` origin and the non-parallax protocols. Both are gone, and
+/// deleting them is the point rather than a side effect:
+///
+/// - **A `*` origin was an RFC 07 §3 violation**, not merely an untyped
+///   spelling. *"A consumer legitimately unable to name an origin still MUST
+///   NOT fan out across origins on `@media` or `@blob`, because every matching
+///   holder ships the full payload and Zenoh cannot cancel remote replies in
+///   flight."* One camera named `cam0` on each of N hosts meant N× the video on
+///   this viewer's wire. It is the same rule that deleted `fleet_blob_prefix()`
+///   above, and the reason `zenkey-build` emits no wildcard selector for the
+///   media plane at all. The window it existed for — a viewer subscribing
+///   before the origin map filled — has not existed since #474.
+/// - **Non-parallax protocols have no media producer.** `parallax.toml` is the
+///   registry's only `[[media]]` declarer, and the only non-parallax media key
+///   in the tree is a sensor-core test exercising the generic
+///   `raw_media_publisher` machinery, which takes any key string by design.
+///   So `protocol` had exactly one legal production value and is gone too.
+///
 /// # Example
 /// ```
+/// use zenkey::RemoteOrigin;
 /// use zensight_common::keyexpr::media_video_key;
-/// use zensight_common::telemetry::Protocol;
 ///
+/// let origin = RemoteOrigin::parse("h-3fa9c2d41b7e").unwrap();
 /// assert_eq!(
-///     media_video_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0", "h264", "high"),
+///     media_video_key(&origin, "cam0", "h264", "high"),
 ///     "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high"
 /// );
 /// ```
-pub fn media_video_key(
-    protocol: Protocol,
-    origin: &str,
-    stream: &str,
-    codec: &str,
-    tier: &str,
-) -> String {
-    // Parallax is the registry's only `[[media]]` declarer, so a concrete
-    // origin rides the generated builder — the same one the sensor publishes
-    // with, which is what makes the two sides agree by construction. The
-    // fallback arm keeps two deliberate behaviors: a `*` origin (a viewer
-    // subscribing before the origin map fills — exact on every other chunk)
-    // and non-parallax protocols (sensor-core's generic media machinery).
-    if matches!(protocol, Protocol::Parallax)
-        && let Ok(o) = RemoteOrigin::parse(origin)
-    {
-        return registry::parallax::media_key_at(
-            &o,
-            &registry::parallax::Media::video(stream, codec, tier),
-        )
-        .into();
-    }
-    format!(
-        "v1/{}/@media/{}/{}/video/{}/{}",
+pub fn media_video_key(origin: &RemoteOrigin, stream: &str, codec: &str, tier: &str) -> String {
+    // The generated builder is the same one the sensor publishes with, which is
+    // what makes the two sides agree by construction rather than by review.
+    registry::parallax::media_key_at(
         origin,
-        protocol.as_str(),
-        stream,
-        codec,
-        tier
+        &registry::parallax::Media::video(stream, codec, tier),
     )
+    .into()
 }
 
 /// Build the v1 media-plane key for one stream's JPEG preview (RFC 07 §1):
@@ -572,33 +571,24 @@ pub fn media_video_key(
 /// Same opaque, `@`-verbatim plane as [`media_video_key`] (no serialization
 /// envelope, `QosClass::LiveVideo`); control rides the `@rpc` plane.
 ///
+/// Takes a parsed [`RemoteOrigin`] and is parallax-only, for the reasons set
+/// out on [`media_video_key`] — the `*` origin it used to accept was the
+/// RFC 07 §3 fan-out this plane forbids.
+///
 /// # Example
 /// ```
+/// use zenkey::RemoteOrigin;
 /// use zensight_common::keyexpr::media_preview_key;
-/// use zensight_common::telemetry::Protocol;
 ///
+/// let origin = RemoteOrigin::parse("h-3fa9c2d41b7e").unwrap();
 /// assert_eq!(
-///     media_preview_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0"),
+///     media_preview_key(&origin, "cam0"),
 ///     "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
 /// );
 /// ```
-pub fn media_preview_key(protocol: Protocol, origin: &str, stream: &str) -> String {
-    // Same delegation split as [`media_video_key`].
-    if matches!(protocol, Protocol::Parallax)
-        && let Ok(o) = RemoteOrigin::parse(origin)
-    {
-        return registry::parallax::media_key_at(
-            &o,
-            &registry::parallax::Media::preview_jpeg(stream),
-        )
-        .into();
-    }
-    format!(
-        "v1/{}/@media/{}/{}/preview/jpeg",
-        origin,
-        protocol.as_str(),
-        stream
-    )
+pub fn media_preview_key(origin: &RemoteOrigin, stream: &str) -> String {
+    registry::parallax::media_key_at(origin, &registry::parallax::Media::preview_jpeg(stream))
+        .into()
 }
 
 /// Slugify an IP address into a single key chunk: `.` and `:` (IPv4 / IPv6
@@ -700,9 +690,10 @@ mod tests {
         use zenoh::key_expr::KeyExpr;
         let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
         let state = KeyExpr::try_from(all_state_wildcard()).unwrap();
+        let origin = RemoteOrigin::parse("h-3fa9c2d41b7e").unwrap();
         for media_key in [
-            media_video_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0", "h264", "main"),
-            media_preview_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0"),
+            media_video_key(&origin, "cam0", "h264", "main"),
+            media_preview_key(&origin, "cam0"),
         ] {
             let media = KeyExpr::try_from(media_key.clone()).unwrap();
             assert!(
@@ -715,18 +706,8 @@ mod tests {
             );
         }
         // A subscriber declared on the exact concrete key does receive it.
-        let exact = KeyExpr::try_from(media_preview_key(
-            Protocol::Parallax,
-            "h-3fa9c2d41b7e",
-            "cam0",
-        ))
-        .unwrap();
-        let same = KeyExpr::try_from(media_preview_key(
-            Protocol::Parallax,
-            "h-3fa9c2d41b7e",
-            "cam0",
-        ))
-        .unwrap();
+        let exact = KeyExpr::try_from(media_preview_key(&origin, "cam0")).unwrap();
+        let same = KeyExpr::try_from(media_preview_key(&origin, "cam0")).unwrap();
         assert!(exact.intersects(&same));
     }
 
@@ -904,12 +885,13 @@ mod tests {
 
         #[test]
         fn media_keys() {
+            let origin = RemoteOrigin::parse(ORIGIN).unwrap();
             assert_eq!(
-                media_video_key(Protocol::Parallax, ORIGIN, "cam0", "h264", "high"),
+                media_video_key(&origin, "cam0", "h264", "high"),
                 "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high"
             );
             assert_eq!(
-                media_preview_key(Protocol::Parallax, ORIGIN, "cam0"),
+                media_preview_key(&origin, "cam0"),
                 "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
             );
         }

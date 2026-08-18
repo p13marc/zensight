@@ -25,7 +25,7 @@ reference pages are under `<crate>/docs/`.
 | Crate | Docs |
 |-------|------|
 | [zensight](../zensight/) (frontend) | views · testing · design-system · local-store |
-| [zensight-common](../zensight-common/) | data-model · identity-evidence · keyspace-helpers |
+| [zensight-common](../zensight-common/) | data-model · identity-evidence · keyspace-helpers · registry-honesty |
 | [zensight-sensor-core](../zensight-sensor-core/) | framework · artifacts |
 | [zensight-sensor-snmp](../zensight-sensor-snmp/) | reference |
 | [zensight-sensor-logs](../zensight-sensor-logs/) | telemetry · filtering · configuration |
