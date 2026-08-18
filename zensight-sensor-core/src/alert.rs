@@ -196,7 +196,16 @@ impl AlertReporter {
     /// of `labels` — the event-driven counterpart to the sweep-style
     /// [`reconcile`](Self::reconcile): a linkUp trap resolves exactly the
     /// linkDown alert(s) for that device+interface, nothing else.
-    pub async fn resolve_matching(&self, rule: &str, labels: &[(&str, &str)]) -> Result<()> {
+    /// Returns the `alert_key`s actually resolved (empty when nothing
+    /// matched), so a caller can name the alert it cleared (#651). Reporting
+    /// what was resolved beats re-deriving it: a clear with no prior fire then
+    /// links to nothing, rather than to a key that never existed.
+    pub async fn resolve_matching(
+        &self,
+        rule: &str,
+        labels: &[(&str, &str)],
+    ) -> Result<Vec<String>> {
+        let mut resolved = Vec::new();
         let action = {
             let mut active = self.active.lock().unwrap();
             let to_resolve: Vec<String> = active
@@ -214,6 +223,7 @@ impl AlertReporter {
             for k in to_resolve {
                 if let Some(a) = active.remove(&k) {
                     payloads.push(a.last.resolved());
+                    resolved.push(k);
                 }
             }
             if payloads.is_empty() {
@@ -222,7 +232,8 @@ impl AlertReporter {
                 Action::Resolve(payloads)
             }
         };
-        self.apply("", action).await
+        self.apply("", action).await?;
+        Ok(resolved)
     }
 
     /// Resolve and tombstone every active alert (graceful shutdown).

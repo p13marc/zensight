@@ -1921,7 +1921,21 @@ impl ZenSight {
             }
             Message::OpenAlertsForSource(source) => {
                 self.alerts.external_source_filter = Some(source);
+                self.alerts.focused_external = None;
                 self.set_view(CurrentView::Alerts);
+            }
+            Message::OpenAlertForKey { source, alert_key } => {
+                // Scope to the source and clear the other facets first: an
+                // active severity or protocol filter would otherwise hide the
+                // very alert this link was asked to show (#651).
+                self.alerts.focused_external = Some(format!("{source}/{alert_key}"));
+                self.alerts.external_source_filter = Some(source);
+                self.alerts.external_severity_filter = None;
+                self.alerts.external_protocol_filter = None;
+                self.set_view(CurrentView::Alerts);
+            }
+            Message::ClearAlertFocus => {
+                self.alerts.focused_external = None;
             }
             Message::SnmpEventHistoryLoaded(events) => {
                 // Cold-store backfill on open; push_snmp_event dedups by ULID
@@ -2934,16 +2948,20 @@ impl ZenSight {
 
             Message::SetAlertSeverityFilter(sev) => {
                 self.alerts.external_severity_filter = sev;
+                self.alerts.focused_external = None;
             }
             Message::SetAlertSourceFilter(source) => {
                 self.alerts.external_source_filter = source;
+                self.alerts.focused_external = None;
             }
             Message::SetAlertProtocolFilter(protocol) => {
                 self.alerts.external_protocol_filter = protocol;
+                self.alerts.focused_external = None;
             }
             Message::OpenAlertsForProtocol(protocol) => {
                 // Overview tile click-through (#582): protocol-scoped Alerts.
                 self.alerts.external_protocol_filter = Some(protocol);
+                self.alerts.focused_external = None;
                 self.set_view(CurrentView::Alerts);
             }
             Message::SaveAlertFilterPreset => {
@@ -2953,6 +2971,7 @@ impl ZenSight {
             }
             Message::ApplyAlertFilterPreset(index) => {
                 self.alerts.apply_filter_preset(index);
+                self.alerts.focused_external = None;
             }
             Message::DeleteAlertFilterPreset(index) => {
                 self.alerts.delete_filter_preset(index);

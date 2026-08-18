@@ -6446,6 +6446,63 @@ fn test_snmp_event_feed_filters_and_links() {
     );
 }
 
+/// #651: a record that names the alert it raised links straight to that alert,
+/// not to a device-scoped list.
+///
+/// The distinction matters exactly when it is hardest to live without: a device
+/// with several alerts firing, where the source pivot lands the operator in a
+/// list and leaves them to guess which row their trap caused.
+#[test]
+fn test_snmp_event_row_links_to_the_alert_it_raised() {
+    use std::collections::HashMap;
+    use zensight::view::overview::snmp::snmp_overview;
+
+    let router_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
+    let router = DeviceState::new(router_id.clone());
+    let mut devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
+    devices.insert(&router_id, &router);
+
+    let docs = HashMap::new();
+    let discovery = HashMap::new();
+    let mut events = std::collections::VecDeque::new();
+    events.push_back(mock::snmp::trap_event_with_alert(
+        "router01",
+        "trap/link_down",
+        "01aac",
+        "00ff00ff00ff00ff",
+    ));
+    let evt_filter = EventFilterState {
+        open: true,
+        ..Default::default()
+    };
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+        },
+    ));
+    ui.click("alert →").expect("exact alert link");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::OpenAlertForKey { source, alert_key }
+                if source == "router01" && alert_key == "00ff00ff00ff00ff"
+        )),
+        "expected an exact alert link, got {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::OpenAlertsForSource(_))),
+        "a record carrying a key must not fall back to the source pivot"
+    );
+}
+
 /// The fleet event ring dedups by ULID and keeps newest-first order (#536).
 #[test]
 fn test_snmp_event_ring_dedup_and_order() {

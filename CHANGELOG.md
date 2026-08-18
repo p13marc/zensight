@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A trap record names the alert it raised or cleared** (#651). `EventRecord`
+  gains `alert_key: Option<String>` (serde-default and skipped when absent, so
+  old records decode and records that drove no alert transition are unchanged on
+  the wire). The SNMP trap path stamps the key the reporter actually published
+  under — computed from the same `Alert`, so the two cannot drift — and a
+  clearing trap names the alert it cleared rather than nothing.
+  The SNMP event feed links straight to that alert instead of pivoting to the
+  device's alert list, which is the difference between landing on an incident
+  and landing in a list when several alerts fire on one device. Records without
+  the field keep the source-scoped pivot. The Alerts view marks the linked row
+  and, if that alert has since resolved, says so with its firing→resolved
+  timeline rather than showing an empty list.
+  - Alert transitions now publish **before** the event record that references
+    them, so a consumer never sees a record pointing at an alert it has not
+    ingested.
+
 ### Fixed
+
+- **Trap alerts were never published when `snmp.alerts.for_secs > 0`.** The
+  trap path used the reporter's default debounce, which only publishes once a
+  *second* observation arrives after the window — but a trap is a single
+  observation, so the alert was entered as active and never sent. It now passes
+  an explicit zero debounce: a one-shot event has no "sustained for" semantics.
+  Default `for_secs` is 0, so stock deployments were unaffected; anyone who set
+  it lost trap alerting entirely, silently.
 
 - **The SNMPv3 trap receiver minted a fresh engine identity on every start**
   (#650). When `trap_listener.users` is configured this sensor is an

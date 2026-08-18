@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_snmp::notification::{Notification, NotificationReceiver};
@@ -291,17 +292,21 @@ impl TrapReceiver {
             "SNMP notification received"
         );
 
-        // 1. Durable event record.
+        // 1. Alert mapping FIRST (#651): the record must be able to name the
+        //    alert it caused, and the bus ordering that falls out is the one we
+        //    want — a consumer never sees a record pointing at an alert it has
+        //    not ingested yet.
+        event.alert_key = self
+            .apply_alert_rules(&device, &trap_oid, if_index.as_deref())
+            .await;
+
+        // 2. Durable event record.
         if let Err(e) = self.events.publish(&[&device, "trap"], &event).await {
             tracing::warn!(error = %e, device = %device, "trap event publish failed");
         }
 
-        // 2. Lightweight per-type telemetry counter.
+        // 3. Lightweight per-type telemetry counter.
         self.publish_counter(&device, &trap_id).await;
-
-        // 3. Alert mapping.
-        self.apply_alert_rules(&device, &trap_oid, if_index.as_deref())
-            .await;
     }
 
     /// Trap OID → key-safe name: explicit tables → SMI notifications →
@@ -386,10 +391,16 @@ impl TrapReceiver {
         self.rules.iter().find(|r| r.fire == trap_oid)
     }
 
-    async fn apply_alert_rules(&self, device: &str, trap_oid: &str, if_index: Option<&str>) {
-        let Some(reporter) = &self.alerts else {
-            return;
-        };
+    /// Returns the `alert_key` of the alert this trap raised or cleared, for
+    /// the event record to carry (#651). `None` when no rule matched, no
+    /// reporter is attached, or a clear matched no firing alert.
+    async fn apply_alert_rules(
+        &self,
+        device: &str,
+        trap_oid: &str,
+        if_index: Option<&str>,
+    ) -> Option<String> {
+        let reporter = self.alerts.as_ref()?;
 
         if let Some(rule) = self.rule_for_fire(trap_oid) {
             let mut alert = Alert::new(
@@ -404,10 +415,20 @@ impl TrapReceiver {
             if let Some(idx) = if_index {
                 alert = alert.with_label("if_index", idx);
             }
-            if let Err(e) = reporter.observe(alert, None).await {
+            // Computed before `observe` takes the alert. Safe because `observe`
+            // stamps only `host.id`, and `alert_key()` excludes every `host.`
+            // label — so this is byte-identical to the key it publishes under.
+            // Pinned by `fire_key_matches_the_reporters_key`.
+            let key = alert.alert_key();
+            // `Some(ZERO)`, not the reporter's default debounce: a trap is a
+            // single observation, and `observe` only publishes once a *second*
+            // one arrives after the window. With `alerts.for_secs > 0` the
+            // alert was entered and never published — so the link this record
+            // now carries would point at an alert nobody could see.
+            if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
                 tracing::warn!(error = %e, rule = %rule.rule, "trap alert publish failed");
             }
-            return;
+            return Some(key);
         }
 
         if let Some(rule) = self
@@ -419,10 +440,18 @@ impl TrapReceiver {
             if let Some(idx) = if_index {
                 labels.push(("if_index", idx));
             }
-            if let Err(e) = reporter.resolve_matching(&rule.rule, &labels).await {
-                tracing::warn!(error = %e, rule = %rule.rule, "trap alert resolve failed");
+            match reporter.resolve_matching(&rule.rule, &labels).await {
+                // Exactly one is the normal case (device + if_index identify
+                // one alert). Zero means the clear arrived with nothing firing;
+                // several would be ambiguous, so neither gets a link.
+                Ok(keys) if keys.len() == 1 => return keys.into_iter().next(),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, rule = %rule.rule, "trap alert resolve failed");
+                }
             }
         }
+        None
     }
 }
 
@@ -585,6 +614,45 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #651's load-bearing invariant: the key computed *before* `observe` is
+    /// the key the reporter publishes under.
+    ///
+    /// It holds because `observe` stamps only `host.id`, and `alert_key()`
+    /// excludes every `host.`-prefixed label from the hash. If either side of
+    /// that ever changes, the link a trap record carries silently points at an
+    /// alert that does not exist — a failure mode nothing else would catch, so
+    /// it is pinned here rather than assumed.
+    #[test]
+    fn fire_key_matches_the_reporters_key() {
+        let build = || {
+            Alert::new(
+                "router01",
+                Protocol::Snmp,
+                AlertKind::Expectation,
+                "link-down",
+                AlertSeverity::Warning,
+                "router01: link-down fired",
+            )
+            .with_label("device", "router01")
+            .with_label("if_index", "3")
+        };
+
+        let before = build().alert_key();
+
+        // What `AlertReporter::observe` does to the alert before keying it.
+        let mut stamped = build();
+        stamped
+            .labels
+            .insert("host.id".to_string(), "h-3fa9c2d41b7e".to_string());
+
+        assert_eq!(
+            before,
+            stamped.alert_key(),
+            "the identity stamp must not move the alert key — the record's link \
+             would point at an alert nobody published"
+        );
+    }
 
     /// #650: the identity survives a restart and boots increments.
     ///
