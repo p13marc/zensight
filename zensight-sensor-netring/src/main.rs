@@ -116,6 +116,13 @@ async fn main() -> Result<()> {
             mon.reload_handle(),
             cfg.capture_focus.base_expr.clone(),
         ));
+    } else {
+        runner.spawn(zensight_sensor_netring::command::serve_topic_unavailable(
+            runner.session().clone(),
+            producer.clone(),
+            "capture_filter",
+            zensight_sensor_netring::query::gated("capture_filter", "capture_focus.enabled"),
+        ));
     }
 
     // Runtime threat-intel channel (#328): hot-swap the live IOC set / YARA rules
@@ -127,6 +134,13 @@ async fn main() -> Result<()> {
             producer.clone(),
             mon.reload_handle(),
             cfg.threat.ioc.clone(),
+        ));
+    } else {
+        runner.spawn(zensight_sensor_netring::command::serve_topic_unavailable(
+            runner.session().clone(),
+            producer.clone(),
+            "threat_intel",
+            zensight_sensor_netring::query::gated("threat_intel", "threat.reload"),
         ));
     }
 
@@ -220,6 +234,22 @@ async fn main() -> Result<()> {
             });
         }
         capture_disk_trigger = Some((handle, to_disk));
+    } else {
+        // `captures` and the `capture_disk` control pair are registered
+        // unconditionally; declare them even when the capture-to-disk engine is
+        // not armed, or `introspect` lies (#648).
+        runner.spawn(zensight_sensor_netring::query::serve_unavailable(
+            runner.session().clone(),
+            producer.clone(),
+            "captures",
+            zensight_sensor_netring::query::gated("captures", "capture.to_disk.mode"),
+        ));
+        runner.spawn(zensight_sensor_netring::command::serve_topic_unavailable(
+            runner.session().clone(),
+            producer.clone(),
+            "capture_disk",
+            zensight_sensor_netring::query::gated("capture_disk", "capture.to_disk.mode"),
+        ));
     }
 
     // On-demand query channels (P2): recent-flow ring, TLS asset inventory,
@@ -256,12 +286,29 @@ async fn main() -> Result<()> {
                 channels.aggregate.clone(),
                 channels.name_map.clone(),
             ));
+        } else {
+            // Registered unconditionally, so declared unconditionally (#648).
+            for p in ["talkers", "elephant_flows", "matrix"] {
+                runner.spawn(query::serve_unavailable(
+                    s.clone(),
+                    producer.clone(),
+                    p,
+                    query::gated(p, "collect.talkers"),
+                ));
+            }
         }
         if cfg.collect.dns {
             runner.spawn(query::run_dns(
                 s.clone(),
                 producer.clone(),
                 channels.dns.inventory.clone(),
+            ));
+        } else {
+            runner.spawn(query::serve_unavailable(
+                s.clone(),
+                producer.clone(),
+                "dns",
+                query::gated("dns", "collect.dns"),
             ));
         }
         if cfg.collect.http {
@@ -270,12 +317,26 @@ async fn main() -> Result<()> {
                 producer.clone(),
                 channels.http.inventory.clone(),
             ));
+        } else {
+            runner.spawn(query::serve_unavailable(
+                s.clone(),
+                producer.clone(),
+                "http",
+                query::gated("http", "collect.http"),
+            ));
         }
         if cfg.collect.quic {
             runner.spawn(query::run_quic(
                 s.clone(),
                 producer.clone(),
                 channels.quic.clone(),
+            ));
+        } else {
+            runner.spawn(query::serve_unavailable(
+                s.clone(),
+                producer.clone(),
+                "quic",
+                query::gated("quic", "collect.quic"),
             ));
         }
         if cfg.collect.ssh {
@@ -284,6 +345,13 @@ async fn main() -> Result<()> {
                 producer.clone(),
                 channels.ssh.clone(),
             ));
+        } else {
+            runner.spawn(query::serve_unavailable(
+                s.clone(),
+                producer.clone(),
+                "ssh",
+                query::gated("ssh", "collect.ssh"),
+            ));
         }
         if cfg.collect.encrypted_dns {
             runner.spawn(query::run_encrypted_dns(
@@ -291,7 +359,17 @@ async fn main() -> Result<()> {
                 producer.clone(),
                 channels.enc_dns.clone(),
             ));
+        } else {
+            runner.spawn(query::serve_unavailable(
+                s.clone(),
+                producer.clone(),
+                "encrypted_dns",
+                query::gated("encrypted_dns", "collect.encrypted_dns"),
+            ));
         }
+        // `ja4h` is registered unconditionally, so it is declared on every
+        // build: with the feature and the collector on it answers for real,
+        // otherwise it says which of the two is missing (#648).
         #[cfg(feature = "ja4plus")]
         if cfg.collect.http_fp {
             runner.spawn(query::run_ja4h(
@@ -299,12 +377,33 @@ async fn main() -> Result<()> {
                 producer.clone(),
                 channels.ja4h_fp.clone(),
             ));
+        } else {
+            runner.spawn(query::serve_unavailable(
+                s.clone(),
+                producer.clone(),
+                "ja4h",
+                query::gated("ja4h", "collect.http_fp"),
+            ));
         }
+        #[cfg(not(feature = "ja4plus"))]
+        runner.spawn(query::serve_unavailable(
+            s.clone(),
+            producer.clone(),
+            "ja4h",
+            query::unsupported("ja4h", "ja4plus"),
+        ));
         if cfg.collect.assets {
             runner.spawn(query::run_assets(
                 s.clone(),
                 producer.clone(),
                 channels.assets.clone(),
+            ));
+        } else {
+            runner.spawn(query::serve_unavailable(
+                s.clone(),
+                producer.clone(),
+                "assets",
+                query::gated("assets", "collect.assets"),
             ));
         }
         #[cfg(feature = "ipfix")]
@@ -314,7 +413,21 @@ async fn main() -> Result<()> {
                 producer.clone(),
                 channels.ipfix_records.clone(),
             ));
+        } else {
+            runner.spawn(query::serve_unavailable(
+                s.clone(),
+                producer.clone(),
+                "ipfix",
+                query::gated("ipfix", "collect.ipfix"),
+            ));
         }
+        #[cfg(not(feature = "ipfix"))]
+        runner.spawn(query::serve_unavailable(
+            s.clone(),
+            producer.clone(),
+            "ipfix",
+            query::unsupported("ipfix", "ipfix"),
+        ));
     }
 
     // Wire-level bandwidth-by-process attribution (#318, opt-in). When armed, the
@@ -330,6 +443,14 @@ async fn main() -> Result<()> {
             runner.session().clone(),
             producer.clone(),
             owner_bw,
+        ));
+    } else {
+        // Likewise `bandwidth` (#648).
+        runner.spawn(zensight_sensor_netring::query::serve_unavailable(
+            runner.session().clone(),
+            producer.clone(),
+            "bandwidth",
+            zensight_sensor_netring::query::gated("bandwidth", "bandwidth_attribution"),
         ));
     }
 

@@ -196,6 +196,27 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsCon
 
     if !cfg.enabled {
         tracing::info!("systemd service control disabled (actions.enabled = false)");
+        // The three action procedures are registered unconditionally, so a
+        // read-only host still declares them and answers `error/gated` — the
+        // same reason `capability` is declared above, applied to the rest of
+        // the surface. Returning here without declaring left `introspect`
+        // advertising three procedures no read-only build served (RFC 08 §6.1),
+        // which is what made a stock systemd sensor debug-panic at startup
+        // (#648). `capability` is the machine-readable form of this answer;
+        // these replies are what a caller that skipped the probe gets.
+        zensight_common::served::serve_unavailable(
+            session,
+            vec![
+                command_key(&producer, ACTION_TOPIC),
+                status_key(&producer, ACTION_TOPIC),
+                query_key(&producer, ACTIONS_TOPIC),
+            ],
+            zensight_common::rpc::RpcError::gated(
+                "systemd service control is disabled on this host \
+                 (`actions.enabled: false`); ask `action/capability` for the details",
+            ),
+        )
+        .await;
         return;
     }
     if cfg.allow_units.is_empty() {

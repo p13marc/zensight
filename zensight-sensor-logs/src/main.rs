@@ -173,6 +173,23 @@ async fn main() -> Result<()> {
                 }
             }
         });
+    } else {
+        // `filter` and `filter/set` are registered unconditionally, so declare
+        // them even with dynamic filters off — otherwise `introspect` advertises
+        // two procedures this build never serves (RFC 08 §6.1, #648) and
+        // `check_registry_coverage` debug-panics at startup.
+        let s = session.clone();
+        runner.spawn(async move {
+            zensight_common::served::serve_unavailable(
+                s,
+                vec![commands::command_key("logs"), commands::status_key("logs")],
+                zensight_common::rpc::RpcError::gated(
+                    "`filter` needs `enable_dynamic_filters: true` in the logs sensor config; \
+                     this sensor is running with a fixed compiled filter",
+                ),
+            )
+            .await;
+        });
     }
 
     // Shared alert reporter for all sensor-emitted alerts: journald known-events

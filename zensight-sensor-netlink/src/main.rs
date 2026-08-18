@@ -72,16 +72,6 @@ async fn main() -> Result<()> {
                 runner.spawn(async move {
                     zensight_sensor_netlink::ebpf::drain_ring(ring, drain_state).await;
                 });
-                let q_session = runner.session().clone();
-                let q_producer = "netlink".to_string();
-                let q_state = state.clone();
-                let top_k = netlink_config.ebpf.retransmit_top_k;
-                runner.spawn(async move {
-                    zensight_sensor_netlink::query::run_ebpf_queries(
-                        q_session, q_producer, q_state, top_k,
-                    )
-                    .await;
-                });
                 std::mem::forget(bpf);
                 ebpf_state = Some(state);
             }
@@ -182,6 +172,31 @@ async fn main() -> Result<()> {
                 query_routes,
                 query_collect,
                 query_ebpf,
+            )
+            .await;
+        });
+    }
+
+    // The eBPF detail queryables (`retransmits`, `connections`). Spawned on
+    // EVERY build and every config, because `registry/netlink.toml` advertises
+    // both procedures unconditionally — a binary that declares them only under
+    // `--features ebpf` + `collect.ebpf` makes `introspect` lie to the fleet
+    // and trips `check_registry_coverage`, which debug-panics at startup
+    // (RFC 08 §6.1, #648). Without a loaded module they answer
+    // `error/unsupported` rather than an indistinguishable empty list.
+    {
+        let q_session = runner.session().clone();
+        #[cfg(feature = "ebpf")]
+        let q_ebpf = ebpf_state.clone();
+        #[cfg(not(feature = "ebpf"))]
+        let q_ebpf = None;
+        let top_k = netlink_config.ebpf.retransmit_top_k;
+        runner.spawn(async move {
+            zensight_sensor_netlink::query::run_ebpf_queries(
+                q_session,
+                "netlink".to_string(),
+                q_ebpf,
+                top_k,
             )
             .await;
         });

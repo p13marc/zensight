@@ -157,8 +157,19 @@ async fn main() -> Result<()> {
                 });
                 tracing::info!("systemd sentinel enabled");
             }
-            Err(e) => tracing::error!(error = %e, "systemd sentinel: system bus connect failed"),
+            Err(e) => {
+                tracing::error!(error = %e, "systemd sentinel: system bus connect failed");
+                declare_sentinel_unavailable(
+                    &mut runner,
+                    "the systemd sentinel could not reach the system bus on this host",
+                );
+            }
         }
+    } else {
+        declare_sentinel_unavailable(
+            &mut runner,
+            "no `expectations` are configured for this systemd sensor, or alerting is off",
+        );
     }
 
     // Gated service control (#283) — default OFF; only declared when explicitly
@@ -179,4 +190,29 @@ async fn main() -> Result<()> {
         .run_with_metadata(Some(metadata))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Declare `expectations` + `expectations/set` for a run with no sentinel (#648).
+///
+/// Both are registered unconditionally in `registry/systemd.toml`, so a build
+/// that skipped them made `introspect` advertise two procedures it never served
+/// (RFC 08 §6.1) and tripped `check_registry_coverage` at startup. Answering
+/// `error/gated` also tells an operator *which* precondition is missing, which
+/// declaring nothing could not.
+fn declare_sentinel_unavailable<C: zensight_sensor_core::SensorConfig>(
+    runner: &mut zensight_sensor_core::SensorRunner<C>,
+    why: &'static str,
+) {
+    let session = runner.session().clone();
+    runner.spawn(async move {
+        zensight_common::served::serve_unavailable(
+            session,
+            vec![
+                zensight_common::command::command_key("systemd", "expectations"),
+                zensight_common::command::status_key("systemd", "expectations"),
+            ],
+            zensight_common::rpc::RpcError::gated(why),
+        )
+        .await;
+    });
 }
