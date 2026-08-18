@@ -140,7 +140,10 @@ async fn main() -> Result<()> {
             runner.session().clone(),
             producer.clone(),
             "threat_intel",
-            zensight_sensor_netring::query::gated("threat_intel", "threat.reload"),
+            zensight_common::rpc::RpcError::gated(
+                "`threat_intel` needs live matchers armed: set `threat.reload: true`, or \
+                 configure startup `threat.ioc` indicators or a `threat.yara.file`",
+            ),
         ));
     }
 
@@ -242,13 +245,19 @@ async fn main() -> Result<()> {
             runner.session().clone(),
             producer.clone(),
             "captures",
-            zensight_sensor_netring::query::gated("captures", "capture.to_disk.mode"),
+            zensight_common::rpc::RpcError::gated(
+                "`captures` needs the capture-to-disk engine armed \
+                 (`capture.to_disk.mode` other than `off`)",
+            ),
         ));
         runner.spawn(zensight_sensor_netring::command::serve_topic_unavailable(
             runner.session().clone(),
             producer.clone(),
             "capture_disk",
-            zensight_sensor_netring::query::gated("capture_disk", "capture.to_disk.mode"),
+            zensight_common::rpc::RpcError::gated(
+                "`capture_disk` needs the capture-to-disk engine armed \
+                 (`capture.to_disk.mode` other than `off`)",
+            ),
         ));
     }
 
@@ -450,7 +459,9 @@ async fn main() -> Result<()> {
             runner.session().clone(),
             producer.clone(),
             "bandwidth",
-            zensight_sensor_netring::query::gated("bandwidth", "bandwidth_attribution"),
+            zensight_common::rpc::RpcError::gated(
+                "`bandwidth` needs `bandwidth_attribution: true` in the netring config",
+            ),
         ));
     }
 
