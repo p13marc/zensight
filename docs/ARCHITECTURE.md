@@ -103,7 +103,7 @@ flowchart BT
 flowchart LR
     subgraph Collection["1. Collection"]
         SNMPAgent["SNMP Agent"] -- "poll (GET)" --> SnmpSensor["zensight-sensor-snmp"]
-        SnmpSensor -- publish --> SnmpKey["zensight/v1/&lt;origin&gt;/telemetry/snmp/router01/system/sysUpTime"]
+        SnmpSensor -- publish --> SnmpKey["zensight/v1/&lt;origin&gt;/telemetry/snmp/router01/system/uptime"]
 
         SyslogSource["Syslog Source"] -- "UDP/TCP 514" --> LogsSensor["zensight-sensor-logs"]
         LogsSensor -- publish --> LogsKey["zensight/v1/&lt;origin&gt;/telemetry/logs/..."]
@@ -137,7 +137,7 @@ TelemetryPoint {
     timestamp: 1704412800000,        // Unix epoch ms
     source: "router01",              // Device identifier
     protocol: Protocol::Snmp,        // Origin protocol
-    metric: "system/sysUpTime",      // Metric path
+    metric: "system/uptime",         // Metric path
     value: TelemetryValue::Counter(123456),
     labels: {"location": "dc1", "vendor": "cisco"},
 }
@@ -154,7 +154,7 @@ origin.
 zensight/v1/
 ├── <origin>/                            # h-<12hex> — one subtree per host
 │   ├── telemetry/<producer>/<metric...> # TelemetryPoint samples
-│   │       Example: zensight/v1/h-3fa9c2d41b7e/telemetry/snmp/router01/interfaces/eth0/ifInOctets
+│   │       Example: zensight/v1/h-3fa9c2d41b7e/telemetry/snmp/router01/if/3/in_octets
 │   ├── state/<producer>/                # LWW documents (its own late-joiner seed)
 │   │   ├── health · errors · sensor · alive
 │   │   ├── device/<device>/{liveness,alive}
