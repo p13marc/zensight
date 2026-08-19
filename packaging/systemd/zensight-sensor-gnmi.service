@@ -19,6 +19,8 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
+# Needs no capabilities: a gNMI client — outbound gRPC only.
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

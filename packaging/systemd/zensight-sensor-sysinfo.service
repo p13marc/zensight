@@ -35,6 +35,13 @@ ReadOnlyPaths=/etc/zensight
 # AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
 # CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
 # ProtectKernelTunables=no
+#
+# The default build needs no capabilities at all, so drop the whole set. This
+# line and the commented one above are alternatives: an eBPF build replaces
+# this with that, it does not add to it (#670). While it was commented out the
+# bounding set stayed at the kernel default — the full set — which is what put
+# this unit at 8.1 EXPOSED while its siblings sat at 5.6-5.9.
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target
