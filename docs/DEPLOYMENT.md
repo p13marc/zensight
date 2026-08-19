@@ -6,9 +6,11 @@ you want to monitor runs one **sensors container** — the five host sensors
 same demo-max defaults, bundled into a single image. The only thing you
 configure is the Zenoh endpoint the sensors connect to.
 
-> The parallax live-video sensor is **not** in the image (it is source-only as of
-> 0.8.0 — it compiles openh264 from C++ source). `just run` adds it locally when
-> its binary has been built; the container never has it.
+> The parallax live-video sensor is **not** in the image (it is source-only — it
+> compiles openh264 from C++ source; #512). `just run` adds it locally when its
+> binary has been built; the container never has it. A self-built binary can be
+> installed as a system service: its unit ships in the release tarball
+> (`packaging/systemd/zensight-sensor-parallax.service`, #411).
 
 ```
 ┌─ GUI machine ──────────────────┐        ┌─ monitored machine (×N) ────────┐

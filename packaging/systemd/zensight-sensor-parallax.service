@@ -1,0 +1,43 @@
+[Unit]
+Description=ZenSight parallax — live video (V4L2 / RTSP / test pattern) on the @media plane
+Documentation=https://github.com/p13marc/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-sensor-parallax --config /etc/zensight/parallax.json5
+Restart=on-failure
+RestartSec=5s
+# Graceful stop (#161): SIGTERM lets the process publish its offline status and
+# tombstone any firing alerts before exit.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+# Run unprivileged under a transient system user, with a minimal sandbox.
+DynamicUser=yes
+# Durable artifact chunk store (artifacts.snapshot.state_dir):
+# /var/lib/zensight-parallax — the only writable path under ProtectSystem=strict.
+StateDirectory=zensight-parallax
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/zensight
+# ── The two divergences from the sibling sensors' sandbox (#411) ─────────────
+# Video device nodes are root:video 0660, so a DynamicUser needs the group to
+# open them at all. `enumerate_v4l2` probes /dev/video0..63 by opening each.
+SupplementaryGroups=video
+# Naming any DeviceAllow switches DevicePolicy to `closed`, so this both grants
+# the video nodes and takes away every other device the siblings still have —
+# a net tightening, not a loosening. `char-video4linux` covers /dev/video*,
+# /dev/media* and the rest of the subsystem's character devices.
+DeviceAllow=char-video4linux rw
+# V4L2 capture and RTSP are unprivileged, so this sensor needs no capabilities
+# at all — an empty bounding set drops the lot. netring and logs each keep the
+# one they need; parallax keeps none, which is why it scores better than either
+# on `systemd-analyze security` (see packaging/systemd/README.md).
+CapabilityBoundingSet=
+# Egress to RTSP cameras is why there is no PrivateNetwork here, as for every
+# other sensor.
+
+[Install]
+WantedBy=multi-user.target
