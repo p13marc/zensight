@@ -70,6 +70,65 @@ fn parse_top(params: &str) -> Option<usize> {
 /// runtime `collection` command channel) so the socket→process attribution
 /// (#304) honors the same hot-swappable `socket_processes` toggle. `ebpf` is
 /// the tier-2a recent-close attribution handle (see [`QueryEbpf`]).
+/// The ten procedures this channel owns, in registry order.
+///
+/// Named once so the failure path declares exactly what the success path
+/// declares — a key present in one and missing from the other is precisely the
+/// bug this constant exists to make impossible (#666). The eBPF procedures
+/// (`retransmits`, `connections`) are not here: they are declared by their own
+/// task and do not depend on this route socket.
+const PROCEDURES: [&str; 10] = [
+    "routes",
+    "neighbors",
+    "sockets",
+    "addresses",
+    "events",
+    "route_changes",
+    "tc",
+    "xfrm",
+    "nft",
+    "bandwidth",
+];
+
+/// Declare all ten procedures with an error reply, and serve it until the
+/// session closes.
+///
+/// Without the RTNETLINK socket this channel can answer nothing, but the
+/// registry advertises these procedures unconditionally and `introspect` hands
+/// that slice to the fleet as truth (RFC 08 §6.1). Returning without declaring
+/// makes `introspect` lie and — in a debug build — trips
+/// `check_registry_coverage` at startup, so the answer is an error rather than
+/// silence (#648, #666).
+///
+/// Opening an RTNETLINK socket is unprivileged, so this path is not reachable
+/// on an ordinary host; a sandbox that restricts `AF_NETLINK` reaches it, which
+/// is exactly what a hardened unit or a seccomp profile does.
+///
+/// `error/netlink/no-route-socket`, not `error/gated` or `error/unsupported`:
+/// the build has the capability and nothing is switched off in config — the
+/// host refused the socket, which is a third thing, and saying which one it is
+/// is the whole point of answering at all.
+///
+/// `pub` for the regression test: unlike systemd's bus, a refused RTNETLINK
+/// socket cannot be arranged from inside a test process, so the test drives
+/// this directly and the one-line wiring above is by inspection.
+pub async fn serve_without_route(session: Arc<zenoh::Session>, producer: &str, why: String) {
+    let keys: Vec<String> = PROCEDURES
+        .iter()
+        .map(|p| zensight_common::command::query_key(producer, p))
+        .collect();
+    zensight_common::served::serve_unavailable(
+        session,
+        keys,
+        zensight_common::rpc::RpcError::producer(
+            producer,
+            "no-route-socket",
+            format!("the netlink sensor could not open an RTNETLINK socket: {why}"),
+        ),
+    )
+    .await;
+}
+
 pub async fn run(
     session: Arc<zenoh::Session>,
     producer: String,
@@ -83,6 +142,7 @@ pub async fn run(
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "query: failed to open netlink route connection");
+            serve_without_route(session, &producer, e.to_string()).await;
             return;
         }
     };
