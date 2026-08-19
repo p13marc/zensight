@@ -161,9 +161,21 @@ pub struct StreamDescriptor {
     pub description: Option<String>,
 }
 
-/// The **applied** parameters of one running tier — actual, not requested (a
-/// hardware encoder may silently ignore a knob, and the scaler even-aligns
-/// dimensions). This is what the GUI should render as the tile's real state.
+/// The parameters of one running tier, as reported by the sensor.
+///
+/// **Two of these four are measured and two are not** (#504). `width`/`height`
+/// come from the built pipeline — the scaler even-aligns dimensions and never
+/// upscales, so they are genuinely what the encoder produces and can differ
+/// from what the tier asked for. `fps` and `bitrate_kbps` are the tier's
+/// configured *targets* read back out of its [`TierSpec`]; nothing measures
+/// them here, and a hardware encoder that silently ignores a knob would not
+/// show up in either.
+///
+/// For what a tier actually costs on the wire, read the stream's
+/// `stats/kbps` telemetry (per stream, summed over open tiers) or measure at
+/// the subscriber — `zensight-sensor-parallax/tests/e2e.rs` does the latter
+/// per tier. `stats/rc_drops` says whether the bitrate cap is currently
+/// biting (#510).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TierApplied {
     /// Encoded width in pixels (post-scale, even-aligned).

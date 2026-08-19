@@ -206,11 +206,13 @@ impl<E: Element> Element for TimedElement<E> {
 /// the knobs rather than anywhere more obvious (#510).
 ///
 /// Every controllable knob a running video pipeline exposes is cloned here at
-/// construction. Note what the session actor actually *drives*: only
-/// [`Self::keyframe`]. The rest are cloned against a live-retune path that no
-/// command reaches — quality is chosen by which `<tier>` a viewer subscribes to
-/// (#494) and redefining a tier is config-only (#513). RTSP passthrough has no
-/// encoder in its graph, so its handles are all `None`.
+/// construction — it has to be done then or not at all. Note what the session
+/// actor actually *drives*: only [`Self::keyframe`]. The rest are cloned
+/// against a live-retune path that no command reaches, because there is no such
+/// command: quality is chosen by which `<tier>` a viewer subscribes to (#494)
+/// and redefining a tier is config-only (#513). See `docs/streams.md`, "Why
+/// there is no live re-tune command". RTSP passthrough has no encoder in its
+/// graph, so its handles are all `None`.
 #[derive(Default, Clone)]
 pub struct PipelineControls {
     /// Live H.264 bitrate / GOP / QP / rate-control. `None` for passthrough.
