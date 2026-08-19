@@ -18,7 +18,7 @@ use parallax::buffer::Buffer;
 use parallax::control::{Controllable, EncoderControl, EncoderStatsHandle, RateControlMode};
 use parallax::converters::PixelFormat as ConvFormat;
 use parallax::element::{Element, ProduceContext, ProduceResult, Source};
-use parallax::elements::codec::KeyframeHandle;
+use parallax::elements::codec::{Complexity, KeyframeHandle, Profile, UsageType};
 use parallax::elements::transform::VideoConvertElement;
 use parallax::elements::{
     AppSink, AppSinkHandle, AppSrc, AppSrcHandle, ColorType, H264Decoder, H264Encoder,
@@ -28,7 +28,7 @@ use parallax::elements::{
 use parallax::pipeline::{Executor, Pipeline, UnifiedExecutorConfig};
 
 use crate::catalog::SourceKind;
-use crate::config::PreviewConfig;
+use crate::config::{EncoderComplexity, EncoderTuning, EncoderUsage, H264Profile, PreviewConfig};
 use crate::stats::StreamStats;
 
 /// How many encoded frames an AppSink may queue before dropping the oldest.
@@ -279,13 +279,56 @@ const FEED_QUEUE: usize = 8;
 /// quality at a low cap), and the encoder skips *further* only when even that
 /// rate exceeds the byte budget on a complex scene — exactly the graceful
 /// degradation a cheap tier wants.
+///
+/// Everything past those five is *tier shaping* (#509), resolved from
+/// `video.encoder` and the tier's own `encoder` block. Each is applied only
+/// when the operator set it, so an unset knob is OpenH264's default **by
+/// construction** rather than by our copy of it — which is why this reads as a
+/// chain of `if let` rather than a table of defaults.
+///
+/// `threads` and `sps_pps_strategy` stay unset deliberately: parallax
+/// auto-detects a thread count and a per-tier thread budget needs a host-wide
+/// story, while OpenH264 writes the parameter sets into every IDR under every
+/// strategy (the strategy only renumbers ids) and the egress's
+/// self-contained-keyframe guarantee is derived from the bytes regardless.
 fn video_encoder_config(params: &VideoParams) -> H264EncoderConfig {
-    H264EncoderConfig::new()
+    let t = &params.tuning;
+    let mut cfg = H264EncoderConfig::new()
         .bitrate(params.bitrate_kbps.saturating_mul(1000))
         .frame_rate(params.fps as f32)
         .keyframe_interval(params.gop_frames)
         .rate_control(RateControlMode::Bitrate)
-        .skip_frames(true)
+        .skip_frames(true);
+
+    if let Some(profile) = t.profile {
+        cfg = cfg.profile(match profile {
+            H264Profile::Baseline => Profile::Baseline,
+            H264Profile::Main => Profile::Main,
+            H264Profile::High => Profile::High,
+        });
+    }
+    if let Some(complexity) = t.complexity {
+        cfg = cfg.complexity(match complexity {
+            EncoderComplexity::Low => Complexity::Low,
+            EncoderComplexity::Medium => Complexity::Medium,
+            EncoderComplexity::High => Complexity::High,
+        });
+    }
+    if let Some(usage) = t.usage_type {
+        cfg = cfg.usage_type(match usage {
+            EncoderUsage::CameraRealtime => UsageType::CameraRealtime,
+            EncoderUsage::ScreenRealtime => UsageType::ScreenRealtime,
+            EncoderUsage::CameraNonRealtime => UsageType::CameraNonRealtime,
+            EncoderUsage::ScreenNonRealtime => UsageType::ScreenNonRealtime,
+        });
+    }
+    if let Some(bytes) = t.max_slice_len {
+        cfg = cfg.max_slice_len(bytes);
+    }
+    if let Some(qp) = t.qp {
+        cfg = cfg.qp(qp);
+    }
+    cfg
 }
 
 /// The resolved encoder parameters for one video tier — a config `TierSpec`
@@ -301,6 +344,9 @@ pub struct VideoParams {
     pub fps: u32,
     /// Aspect-preserving height cap; `None` = native.
     pub max_height: Option<u32>,
+    /// Resolved encoder shaping — the tier's `encoder` block over the shared
+    /// `video.encoder` defaults (#509). Sensor-local; never on the wire.
+    pub tuning: EncoderTuning,
 }
 
 /// A `VideoScale` element plus its live `ScaleControl`, seeded with the initial
@@ -829,6 +875,7 @@ mod tests {
             gop_frames: 60,
             fps,
             max_height,
+            tuning: EncoderTuning::default(),
         }
     }
 
@@ -957,6 +1004,7 @@ mod tests {
             gop_frames: 60,
             fps: 15,
             max_height: None,
+            tuning: EncoderTuning::default(),
         };
         let mut built = build_video(&kind, &params, &Arc::default()).expect("build video");
         let handle = built.controls.encoder_stats.clone().expect("encoder stats");
@@ -986,6 +1034,70 @@ mod tests {
             shed > 0,
             "a 1 kbit/s cap on noise must make the rate controller shed frames \
              ({encoded} encoded, {shed} shed)"
+        );
+    }
+
+    /// `encoder.max_slice_len` must actually reach OpenH264 (#509). On an
+    /// incompressible source a keyframe far larger than the cap comes back as
+    /// SEVERAL coded-slice NALs; the same graph with the knob unset produces
+    /// exactly one slice per access unit.
+    ///
+    /// The assertion is **structural** — slice *count*, not slice size. OpenH264
+    /// treats `uiSliceSizeConstraint` as a target it may overshoot on a
+    /// macroblock boundary, not as a limiter, so `every NAL <= 1200` would be a
+    /// flake with a plausible-sounding story. The generous per-slice bound below
+    /// only catches the knob being ignored outright.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mtu_slicing_splits_a_keyframe_into_packet_sized_nals() {
+        const CAP: u32 = 1200;
+        let kind = SourceKind::Test {
+            pattern: "snow".into(),
+            width: 640,
+            height: 360,
+            fps: 10,
+        };
+
+        async fn biggest_au(kind: &SourceKind, params: &VideoParams) -> Vec<u8> {
+            let built = build_video(kind, params, &Arc::default()).expect("build video");
+            pull_full_aus(built, 4)
+                .await
+                .into_iter()
+                .max_by_key(|au| au.len())
+                .expect("the encoder produced no access units")
+        }
+
+        let mut sliced = vparams(10, None);
+        sliced.tuning.max_slice_len = Some(CAP);
+        let au = biggest_au(&kind, &sliced).await;
+        let slices: Vec<usize> = crate::annexb::nal_units(&au)
+            .into_iter()
+            .filter(|(t, _)| *t == 1 || *t == 5)
+            .map(|(_, len)| len)
+            .collect();
+        eprintln!("sliced: {}-byte AU -> slices {slices:?}", au.len());
+        assert!(
+            au.len() as u32 > CAP * 2,
+            "640x360 noise must produce an AU well over the cap to slice at all \
+             (got {} bytes)",
+            au.len()
+        );
+        assert!(
+            slices.len() > 1,
+            "a {}-byte access unit under a {CAP}-byte cap must be sliced: {slices:?}",
+            au.len()
+        );
+        assert!(
+            slices.iter().all(|l| *l as u32 <= CAP * 2),
+            "a slice ran to {:?} against a {CAP}-byte cap — the knob looks ignored",
+            slices.iter().max()
+        );
+
+        // Control: the same graph with the knob unset is one slice per frame.
+        let au = biggest_au(&kind, &vparams(10, None)).await;
+        assert_eq!(
+            crate::annexb::coded_slice_count(&au),
+            1,
+            "without a cap OpenH264 emits one coded slice per access unit"
         );
     }
 
@@ -1132,6 +1244,55 @@ mod tests {
     /// size actually encoded. A non-mod-16 aspect-derived width (1280×720 →
     /// 854×480) is the awkward case; a floor/ceil disagreement here used to make
     /// the readout claim 852 while the pixels were 854.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn every_profile_the_ladder_can_name_decodes_like_the_gui() {
+        use parallax::converters::{PixelFormat, VideoConvert};
+
+        // The frontend decodes with OpenH264 too (`zensight`'s `h264` feature),
+        // so an encoder profile its decoder cannot read would be a
+        // self-inflicted outage. Nothing ships a profile today (#509 leaves
+        // every knob unset); this is the gate that has to pass before one does.
+        for profile in [
+            None,
+            Some(H264Profile::Baseline),
+            Some(H264Profile::Main),
+            Some(H264Profile::High),
+        ] {
+            let label = profile.map_or("unset".to_string(), |p| format!("{p:?}"));
+            let kind = SourceKind::Test {
+                pattern: "smpte".into(),
+                width: 640,
+                height: 360,
+                fps: 15,
+            };
+            let mut params = vparams(15, Some(240));
+            params.tuning.profile = profile;
+            let built = build_video(&kind, &params, &Arc::default()).expect("build video");
+            let aus = pull_full_aus(built, 6).await;
+            assert!(!aus.is_empty(), "{label}: no access units produced");
+
+            let mut decoder = H264Decoder::new().expect("decoder");
+            let mut decoded = false;
+            for au in &aus {
+                if let Some(frame) = decoder.decode(au).expect("decode must not error") {
+                    let (w, h) = (frame.width() as u32, frame.height() as u32);
+                    let yuv = frame.to_yuv420_planar();
+                    let conv = VideoConvert::new(PixelFormat::I420, PixelFormat::Rgba, w, h)
+                        .unwrap_or_else(|e| panic!("{label}: VideoConvert::new failed: {e}"));
+                    let mut rgba = vec![0u8; (w * h * 4) as usize];
+                    conv.convert(&yuv, &mut rgba)
+                        .unwrap_or_else(|e| panic!("{label}: convert failed: {e}"));
+                    decoded = true;
+                    break;
+                }
+            }
+            assert!(
+                decoded,
+                "{label}: the GUI's decoder produced no frame from this profile"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn scaled_tier_decodes_like_the_gui() {
         use parallax::converters::{PixelFormat, VideoConvert};

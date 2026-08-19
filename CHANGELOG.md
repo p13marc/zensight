@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The tier ladder shapes its encoder, not just its numbers** (#509).
+  parallax-pipeline exposes thirteen `H264EncoderConfig` knobs and the sensor set
+  five, so a tier could say what it delivers but nothing about how the encoder
+  got there. `video.encoder` now sets `profile` / `complexity` / `usage_type` /
+  `qp` / `max_slice_len` and a per-tier `gop_frames` override for every rung, and
+  any tier's own `encoder` block overrides it field by field.
+  - The knobs are **sensor-local by design**. `TierSpec` rides the catalogue and
+    is a derived entry in the fleet-wide `describe` schema every producer serves
+    (RFC 08 §7); putting encoder internals there would make an implementation
+    detail a bus contract, and a viewer picks a tier by resolution, framerate and
+    bitrate — never by entropy coder.
+  - **Every knob ships unset**, and each is applied only when set, so an unset
+    knob is OpenH264's own default by construction rather than by a copy of it
+    that can drift. A default build is byte-for-byte what it was.
+  - Two defaults were asked for and not shipped, with the reasons written into
+    the docs. `complexity` is documented as the answer to a firing
+    `encoder_overrun` — cheaper than dropping resolution, invisible to the
+    receiver — rather than given a value nobody measured. And `max_slice_len` is
+    documented as **not paying off yet**: MTU-sized NALs limit fragmentation
+    loss to one slice, but this sensor publishes a whole access unit as one
+    best-effort Zenoh sample, so a lost sample costs the whole AU however it was
+    sliced. It is wired and tested so it is ready for a downstream RTP/WebRTC
+    payloader; it is off until there is one.
+  - All three H.264 profiles are verified to decode through the GUI's own
+    OpenH264 path, so an operator can set any of them without discovering that
+    the project's own viewer cannot read the result.
+
 - **The encoder says when the bitrate cap is biting** (#510). parallax-pipeline
   0.6 hands out an `EncoderStatsHandle` — cloned before `Executor::start()` like
   every other live handle — and with it the one number this sensor could never

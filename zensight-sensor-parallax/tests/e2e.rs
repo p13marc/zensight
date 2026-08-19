@@ -121,7 +121,7 @@ async fn spawn_sensor_with_config(
     StatsRegistry,
 ) {
     let catalog = Arc::new(Catalog::build(&config));
-    let tiers = config.video.tiers.clone();
+    let tiers = config.video.ladder();
     let publisher = Publisher::new(session.clone(), "parallax", Format::Json);
     // v1: control/query surfaces key off the producer name (the origin
     // chunk scopes per host; the source label is payload-only).

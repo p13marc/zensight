@@ -21,10 +21,12 @@ matching listener forces a keyframe the instant a subscriber appears.
   `close_stream {codec, tier}` / `request_keyframe {tier}`). The video plane is
   a *ladder* of tiers (`low`/`medium`/`high`), each an **independent** encoder
   published concurrently on its own `<tier>` key with its own
-  resolution/fps/bitrate. A viewer subscribes to exactly the one tier its link
-  can take, so two viewers on different links never fight over one encoder. Each
-  (stream, tier) and the preview is refcounted per requester and reaped after
-  `idle_timeout_secs` without viewers. Live re-tuning (bitrate seamless; GOP /
+  resolution/fps/bitrate — plus optional per-tier **encoder shaping**
+  (profile / complexity / usage type / QP / GOP / MTU slicing, #509), which is
+  sensor-local config and never on the wire. A viewer subscribes to exactly the
+  one tier its link can take, so two viewers on different links never fight over
+  one encoder. Each (stream, tier) and the preview is refcounted per requester
+  and reaped after `idle_timeout_secs` without viewers. Live re-tuning (bitrate seamless; GOP /
   resolution rebuild + IDR) runs on the pipeline's control handles — no teardown.
 - **Media egress** — `zensight/v1/<origin>/@media/parallax/<stream>/video/h264/<tier>`
   (encoding `video/h264`) and `…/@media/parallax/<stream>/preview/jpeg`

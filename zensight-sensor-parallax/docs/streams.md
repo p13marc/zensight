@@ -77,6 +77,49 @@ Notes:
   at whatever size the camera produces. The scaler sits before the RGB
   convert (still YUYV/I420), so convert + JPEG run on the capped size.
 
+## Encoder shaping per tier (#509)
+
+The ladder's `max_height` / `fps` / `bitrate_kbps` say what a tier *delivers* —
+they are on the wire, because a viewer picks a tier by them. How the encoder
+reaches those numbers is a separate, **sensor-local** set of knobs:
+`video.encoder` for the defaults, a per-tier `encoder` block to override any
+field. See [`configuration.md`](configuration.md) for the table.
+
+They are deliberately not on the wire. `TierSpec` rides the catalogue inside
+`StreamDescriptor`, which is a derived entry in the fleet-wide `SchemaSet` every
+producer serves on `@rpc/<producer>/describe` (RFC 08 §7) — so an encoder
+implementation detail would become a bus contract, and `zensight-common` would
+need serde mirrors of the codec crate's enums to carry it. Nobody subscribes by
+entropy coder. The sensor owns the numbers; the wire carries the name.
+
+**Everything ships unset**, and each knob is applied only when set, so an unset
+knob is OpenH264's own default *by construction* rather than by a copy of it
+that can drift. Two of them are worth reading before you reach for them:
+
+- **`profile`.** The frontend decodes with OpenH264 too, so a profile its
+  decoder cannot read would be a self-inflicted outage. All three profiles are
+  pinned by a test that runs the encoder output through the GUI's exact decode
+  path (`every_profile_the_ladder_can_name_decodes_like_the_gui`); keep that
+  gate green before shipping a default.
+- **`max_slice_len`** caps each NAL near the path MTU. The usual reason to want
+  that is fragmentation: a large keyframe NAL split across IP fragments loses
+  the whole IDR when one fragment drops, whereas MTU-sized slices lose one
+  slice. **That reasoning does not apply to this egress.** The media plane
+  publishes one *whole access unit* per Zenoh sample at `QosClass::LiveVideo`
+  (best-effort, drop-on-congestion), so a lost sample costs the entire AU
+  whether it was one slice or twenty — there is no RTP payloader in the path.
+  What slicing does cost today is a slice header per ~1200 bytes on whichever
+  tier has the tightest budget, plus OpenH264's `SM_SIZELIMITED_SLICE`
+  threading constraint. It is wired and tested so it is *ready*; turn it on when
+  something downstream packetises (an RTP/WebRTC gateway), or when a decoder
+  doing slice-level concealment is on the other end.
+
+`threads` and `sps_pps_strategy` are deliberately not exposed: parallax
+auto-detects a thread count and a per-tier thread budget needs a host-wide
+story, while OpenH264 writes the parameter sets into every IDR under every
+strategy (the strategy only renumbers ids) and the egress's
+self-contained-keyframe guarantee is derived from the bytes regardless.
+
 ## Live control (no teardown) — #496
 
 Each tier's pipeline exposes control handles (`PipelineControls`), cloned from

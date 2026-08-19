@@ -158,6 +158,105 @@ impl Default for PreviewConfig {
     }
 }
 
+/// H.264 profile. Mirrors `parallax::elements::codec::Profile`, which carries no
+/// serde derives — so the config vocabulary is ours, not the codec crate's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum H264Profile {
+    Baseline,
+    Main,
+    High,
+}
+
+/// Encoder CPU/quality trade. Mirrors `parallax::elements::codec::Complexity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncoderComplexity {
+    Low,
+    Medium,
+    High,
+}
+
+/// What the encoder is being asked to encode. Mirrors
+/// `parallax::elements::codec::UsageType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncoderUsage {
+    CameraRealtime,
+    ScreenRealtime,
+    CameraNonRealtime,
+    ScreenNonRealtime,
+}
+
+/// Encoder knobs that shape *how* a tier reaches its advertised numbers (#509).
+///
+/// Deliberately **sensor-local**: unlike the resolution/framerate/bitrate in
+/// [`TierSpec`], none of this is on the wire. `TierSpec` rides the catalogue
+/// inside `StreamDescriptor`, which is a derived entry in the fleet-wide
+/// `SchemaSet` every producer serves on `@rpc/<producer>/describe` (RFC 08 §7),
+/// and a viewer picks a tier by the three numbers it can act on — never by
+/// entropy coder. The sensor owns the numbers; the wire carries the name.
+///
+/// Every field is `None` = inherit `video.encoder`; an unset `video.encoder`
+/// field means the corresponding parallax builder is **never called**, so an
+/// unset knob is OpenH264's own default by construction rather than by our copy
+/// of it. Everything ships unset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncoderTuning {
+    /// H.264 profile. Unset lets OpenH264 choose — see `docs/streams.md` for
+    /// why pinning one needs a decode test first (the GUI decodes with
+    /// OpenH264 too).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<H264Profile>,
+    /// CPU spent per frame. `low` is the answer to a firing `encoder_overrun`:
+    /// cheaper than dropping resolution, and invisible to the receiver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complexity: Option<EncoderComplexity>,
+    /// Camera vs screen, realtime vs not. A property of the *source* rather
+    /// than the tier — set it on `video.encoder`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_type: Option<EncoderUsage>,
+    /// Cap on each emitted NAL unit, in bytes (`None` = one slice per frame).
+    /// See `docs/streams.md`: this buys nothing on today's whole-access-unit
+    /// egress, and is here for a downstream RTP/WebRTC payloader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_slice_len: Option<u32>,
+    /// Target quantiser (0..=51). Under `RateControlMode::Bitrate` with frame
+    /// skipping on, the rate controller works in a ±4 band around it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qp: Option<u8>,
+    /// Per-tier keyframe interval; `None` = `video.gop_frames`. A lossy low
+    /// tier wants a short GOP (fast recovery, fast late-join); a high tier
+    /// wants a long one (efficiency).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gop_frames: Option<u32>,
+}
+
+impl EncoderTuning {
+    /// Resolve one tier's tuning against the shared defaults: `self` wins,
+    /// `base` fills the gaps, field by field.
+    pub fn over(self, base: Self) -> Self {
+        Self {
+            profile: self.profile.or(base.profile),
+            complexity: self.complexity.or(base.complexity),
+            usage_type: self.usage_type.or(base.usage_type),
+            max_slice_len: self.max_slice_len.or(base.max_slice_len),
+            qp: self.qp.or(base.qp),
+            gop_frames: self.gop_frames.or(base.gop_frames),
+        }
+    }
+}
+
+/// One rung of the ladder: the wire [`TierSpec`] a viewer picks by, flattened
+/// alongside the sensor-local encoder shaping that never leaves this host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TierConfig {
+    #[serde(flatten)]
+    pub spec: TierSpec,
+    #[serde(default)]
+    pub encoder: EncoderTuning,
+}
+
 /// H.264 video settings: a shared GOP plus the **tier ladder** — the sensor owns
 /// the numbers, the wire and the `<tier>` key carry the name (#498). Each tier is
 /// published concurrently on its own `@media/<stream>/video/h264/<tier>` key, so
@@ -166,20 +265,39 @@ impl Default for PreviewConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoConfig {
     /// Keyframe (GOP) interval in frames, shared across tiers (default: 60).
+    /// A tier's `encoder.gop_frames` overrides it.
     #[serde(default = "default_gop_frames")]
     pub gop_frames: u32,
+    /// Encoder shaping shared by every tier; each tier's own `encoder` block
+    /// overrides it field by field (#509). Ships entirely unset.
+    #[serde(default)]
+    pub encoder: EncoderTuning,
     /// The bandwidth tiers this sensor offers (default: low/medium/high).
     #[serde(default = "default_tiers")]
-    pub tiers: Vec<TierSpec>,
+    pub tiers: Vec<TierConfig>,
     /// Which tier an `OpenStream` with no explicit tier resolves to.
     #[serde(default = "default_default_tier")]
     pub default_tier: String,
+}
+
+impl VideoConfig {
+    /// The wire view of the ladder — what the catalogue advertises in
+    /// `StreamDescriptor::tiers`. The encoder shaping stays behind.
+    pub fn ladder(&self) -> Vec<TierSpec> {
+        self.tiers.iter().map(|t| t.spec.clone()).collect()
+    }
+
+    /// One tier's tuning, resolved against the shared `video.encoder` block.
+    pub fn tuning_for(&self, tier: &TierConfig) -> EncoderTuning {
+        tier.encoder.over(self.encoder)
+    }
 }
 
 impl Default for VideoConfig {
     fn default() -> Self {
         Self {
             gop_frames: default_gop_frames(),
+            encoder: EncoderTuning::default(),
             tiers: default_tiers(),
             default_tier: default_default_tier(),
         }
@@ -229,26 +347,26 @@ fn default_preview_max_height() -> Option<u32> {
 /// The default bandwidth ladder (#498). Bandwidth is ~linear in pixel count at
 /// constant quality, so each rung down is a large, deliberate saving for a
 /// constrained link.
-fn default_tiers() -> Vec<TierSpec> {
+///
+/// Every rung ships with its encoder shaping **unset** (#509): the knobs exist
+/// so an operator can reach for them, not so this file can guess. See
+/// `docs/streams.md` for what each is for and when it pays.
+fn default_tiers() -> Vec<TierConfig> {
+    fn rung(name: &str, max_height: Option<u32>, fps: u32, bitrate_kbps: u32) -> TierConfig {
+        TierConfig {
+            spec: TierSpec {
+                name: name.into(),
+                max_height,
+                fps,
+                bitrate_kbps,
+            },
+            encoder: EncoderTuning::default(),
+        }
+    }
     vec![
-        TierSpec {
-            name: "low".into(),
-            max_height: Some(240),
-            fps: 10,
-            bitrate_kbps: 400,
-        },
-        TierSpec {
-            name: "medium".into(),
-            max_height: Some(480),
-            fps: 20,
-            bitrate_kbps: 1200,
-        },
-        TierSpec {
-            name: "high".into(),
-            max_height: None,
-            fps: 30,
-            bitrate_kbps: 4000,
-        },
+        rung("low", Some(240), 10, 400),
+        rung("medium", Some(480), 20, 1200),
+        rung("high", None, 30, 4000),
     ]
 }
 
@@ -262,6 +380,33 @@ fn default_idle_timeout() -> u64 {
 
 fn default_stats_interval() -> u64 {
     5
+}
+
+/// Numeric bounds on encoder shaping (#509). parallax clamps `qp` silently at
+/// `.min(51)`; rejecting at load beats accepting a value that means something
+/// other than what it says.
+fn validate_tuning(what: &str, t: EncoderTuning) -> Result<(), ConfigError> {
+    if let Some(n) = t.max_slice_len
+        && !(200..=65_535).contains(&n)
+    {
+        return Err(ConfigError::Validation(format!(
+            "{what}: encoder.max_slice_len must be 200..=65535 bytes \
+             (below ~200 the slice header dominates the slice)"
+        )));
+    }
+    if let Some(q) = t.qp
+        && q > 51
+    {
+        return Err(ConfigError::Validation(format!(
+            "{what}: encoder.qp must be 0..=51"
+        )));
+    }
+    if t.gop_frames == Some(0) {
+        return Err(ConfigError::Validation(format!(
+            "{what}: encoder.gop_frames must be > 0"
+        )));
+    }
+    Ok(())
 }
 
 impl ParallaxSensorConfig {
@@ -348,40 +493,46 @@ impl ParallaxSensorConfig {
         }
         let mut tier_names = std::collections::HashSet::new();
         for t in &p.video.tiers {
-            if t.name.is_empty() || t.name.contains('/') || t.name.contains('*') {
+            let name = &t.spec.name;
+            if name.is_empty() || name.contains('/') || name.contains('*') {
                 return Err(ConfigError::Validation(format!(
-                    "tier name {:?} must be a single key chunk (no '/' or '*')",
-                    t.name
+                    "tier name {name:?} must be a single key chunk (no '/' or '*')"
                 )));
             }
-            if !tier_names.insert(&t.name) {
+            if !tier_names.insert(name) {
                 return Err(ConfigError::Validation(format!(
-                    "duplicate tier name {:?}",
-                    t.name
+                    "duplicate tier name {name:?}"
                 )));
             }
-            if t.fps == 0 {
+            if t.spec.fps == 0 {
                 return Err(ConfigError::Validation(format!(
-                    "tier {:?}: fps must be > 0",
-                    t.name
+                    "tier {name:?}: fps must be > 0"
                 )));
             }
-            if t.bitrate_kbps == 0 {
+            if t.spec.bitrate_kbps == 0 {
                 return Err(ConfigError::Validation(format!(
-                    "tier {:?}: bitrate_kbps must be > 0",
-                    t.name
+                    "tier {name:?}: bitrate_kbps must be > 0"
                 )));
             }
-            if let Some(mh) = t.max_height
+            if let Some(mh) = t.spec.max_height
                 && mh < 2
             {
                 return Err(ConfigError::Validation(format!(
-                    "tier {:?}: max_height must be >= 2",
-                    t.name
+                    "tier {name:?}: max_height must be >= 2"
                 )));
             }
+            // Encoder shaping (#509), validated on the *resolved* tuning so a
+            // bad shared default is caught even when no tier overrides it. Bad
+            // enum spellings are already a parse error naming the field.
+            validate_tuning(&format!("tier {name:?}"), p.video.tuning_for(t))?;
         }
-        if !p.video.tiers.iter().any(|t| t.name == p.video.default_tier) {
+        validate_tuning("video.encoder", p.video.encoder)?;
+        if !p
+            .video
+            .tiers
+            .iter()
+            .any(|t| t.spec.name == p.video.default_tier)
+        {
             return Err(ConfigError::Validation(format!(
                 "video.default_tier {:?} names no tier in the ladder",
                 p.video.default_tier
@@ -462,7 +613,7 @@ mod tests {
             .video
             .tiers
             .iter()
-            .map(|t| t.name.as_str())
+            .map(|t| t.spec.name.as_str())
             .collect();
         assert_eq!(tier_names, vec!["low", "medium", "high"]);
         assert_eq!(config.parallax.video.default_tier, "medium");
@@ -511,7 +662,7 @@ mod tests {
         assert_eq!(config.parallax.video.gop_frames, 30);
         assert_eq!(config.parallax.video.default_tier, "low");
         assert_eq!(config.parallax.video.tiers.len(), 2);
-        assert_eq!(config.parallax.video.tiers[1].bitrate_kbps, 4000);
+        assert_eq!(config.parallax.video.tiers[1].spec.bitrate_kbps, 4000);
     }
 
     #[test]
@@ -525,6 +676,128 @@ mod tests {
         }"#;
         let config: ParallaxSensorConfig = json5::from_str(json).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    /// The precedence rule the whole tuning design rests on: a tier's own
+    /// `encoder` block wins field by field, `video.encoder` fills the gaps, and
+    /// a field neither sets stays `None` — which is what makes "unset means
+    /// OpenH264's default" true by construction rather than by our copy of it.
+    #[test]
+    fn tier_encoder_overrides_the_shared_defaults() {
+        let config: ParallaxSensorConfig = json5::from_str(
+            r#"{
+                zenoh: { mode: "peer" },
+                parallax: {
+                    video: {
+                        encoder: { complexity: "medium", qp: 26, profile: "main" },
+                        default_tier: "low",
+                        tiers: [
+                            { name: "low", fps: 10, bitrate_kbps: 400,
+                              encoder: { complexity: "low", max_slice_len: 1200 } },
+                            { name: "high", fps: 30, bitrate_kbps: 4000 },
+                        ],
+                    },
+                },
+            }"#,
+        )
+        .expect("parse");
+        config.validate().expect("valid");
+
+        let video = &config.parallax.video;
+        let low = video.tuning_for(&video.tiers[0]);
+        assert_eq!(low.complexity, Some(EncoderComplexity::Low), "tier wins");
+        assert_eq!(low.profile, Some(H264Profile::Main), "shared fills the gap");
+        assert_eq!(low.qp, Some(26), "shared fills the gap");
+        assert_eq!(low.max_slice_len, Some(1200), "tier-only field");
+        assert_eq!(low.usage_type, None, "neither set it — parallax decides");
+
+        let high = video.tuning_for(&video.tiers[1]);
+        assert_eq!(high.complexity, Some(EncoderComplexity::Medium));
+        assert_eq!(
+            high.max_slice_len, None,
+            "not inherited from a sibling tier"
+        );
+
+        // The wire ladder carries the three numbers a viewer picks by, and
+        // none of the shaping (#509).
+        let ladder = video.ladder();
+        assert_eq!(ladder.len(), 2);
+        assert_eq!(ladder[0].name, "low");
+        assert_eq!(ladder[0].bitrate_kbps, 400);
+    }
+
+    /// The shipped example must load — it is the file `just parallax` and every
+    /// deployment start from, and nothing else in CI opens it. (Precedent:
+    /// `zensight-sensor-logs` guards `configs/logs.json5` the same way.)
+    #[test]
+    fn shipped_config_loads_and_validates() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/parallax.json5");
+        let config = ParallaxSensorConfig::load_from_file(path).expect("configs/parallax.json5");
+        let video = &config.parallax.video;
+        assert_eq!(
+            video.ladder().len(),
+            3,
+            "the shipped ladder is low / medium / high"
+        );
+        // #509's shaping knobs ship commented out; if one is ever uncommented
+        // here, that is a deliberate default and this assertion should move.
+        assert_eq!(
+            video.encoder,
+            EncoderTuning::default(),
+            "configs/parallax.json5 must ship with no encoder shaping set"
+        );
+    }
+
+    /// Everything ships unset, so a default build's encoder config is exactly
+    /// what it was before #509.
+    #[test]
+    fn shipped_tiers_set_no_encoder_shaping() {
+        let video = VideoConfig::default();
+        assert_eq!(video.encoder, EncoderTuning::default());
+        for tier in &video.tiers {
+            assert_eq!(
+                video.tuning_for(tier),
+                EncoderTuning::default(),
+                "tier {:?} must ship with no shaping",
+                tier.spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_encoder_shaping() {
+        for bad in [
+            // qp is clamped silently by parallax; reject rather than accept a
+            // value that means something other than what it says.
+            r#"{ zenoh: { mode: "peer" }, parallax: { video: { tiers: [
+                 { name: "low", fps: 10, bitrate_kbps: 400, encoder: { qp: 52 } } ],
+                 default_tier: "low" } } }"#,
+            r#"{ zenoh: { mode: "peer" }, parallax: { video: { tiers: [
+                 { name: "low", fps: 10, bitrate_kbps: 400, encoder: { max_slice_len: 64 } } ],
+                 default_tier: "low" } } }"#,
+            r#"{ zenoh: { mode: "peer" }, parallax: { video: { tiers: [
+                 { name: "low", fps: 10, bitrate_kbps: 400, encoder: { gop_frames: 0 } } ],
+                 default_tier: "low" } } }"#,
+            // A bad shared default is caught even when no tier overrides it.
+            r#"{ zenoh: { mode: "peer" }, parallax: { video: {
+                 encoder: { max_slice_len: 99999 } } } }"#,
+        ] {
+            let config: ParallaxSensorConfig = json5::from_str(bad).expect("parses");
+            assert!(
+                config.validate().is_err(),
+                "should have been rejected: {bad}"
+            );
+        }
+
+        // An unrecognised enum spelling fails at parse, naming the field.
+        assert!(
+            json5::from_str::<ParallaxSensorConfig>(
+                r#"{ zenoh: { mode: "peer" }, parallax: { video: {
+                     encoder: { profile: "ultra" } } } }"#
+            )
+            .is_err(),
+            "profile must be one of baseline/main/high"
+        );
     }
 
     #[test]
