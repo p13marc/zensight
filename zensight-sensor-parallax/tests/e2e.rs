@@ -790,6 +790,181 @@ async fn stats_ticker_publishes_fps_telemetry() {
     sensor.close().await.unwrap();
 }
 
+/// A starved single-tier ladder on per-pixel noise: `RateControlMode::Bitrate`
+/// with `skip_frames(true)` leaves OpenH264 no way to hold 1 kbit/s except by
+/// swallowing frames, so `rc_drops` has something real to report.
+fn starved_parallax_config() -> ParallaxConfig {
+    json5::from_str(
+        r#"{
+            enumerate_v4l2: false,
+            test_sources: [
+                { name: "test0", pattern: "snow", width: 160, height: 120, fps: 8 },
+            ],
+            preview: { fps: 2, quality: 70 },
+            video: {
+                default_tier: "low",
+                tiers: [ { name: "low", fps: 8, bitrate_kbps: 1 } ],
+            },
+            idle_timeout_secs: 5,
+        }"#,
+    )
+    .unwrap()
+}
+
+/// The whole #510 path in one assertion: the encoder's `EncoderStatsHandle`,
+/// cloned before the executor started, through `PipelineControls` and the
+/// session actor's 1 Hz fold into `StreamStats`, out through the ticker and the
+/// registry guard, onto the wire as a `Counter`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stats_ticker_publishes_rc_drops_for_a_video_tier() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-rc-drops";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor_with_config(sensor.clone(), source, starved_parallax_config())
+        .await
+        .0;
+
+    let stats_sub = viewer
+        .declare_subscriber(format!("{}/test0/stats/**", v1ctx().telemetry_prefix()))
+        .await
+        .expect("declare stats subscriber");
+    // Hold a media viewer so the idle reaper never tears the tier down.
+    let video_key = v1ctx().media_video_key("test0", "h264", "low");
+    let media_sub = viewer
+        .declare_subscriber(video_key.as_keyexpr())
+        .await
+        .expect("declare video subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: Some("low".into()),
+        },
+    )
+    .await;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut seen: Option<u64> = None;
+    while Instant::now() < deadline {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(5), stats_sub.recv_async()).await
+        else {
+            break;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode stats point");
+        if point.metric != "test0/stats/rc_drops" {
+            continue;
+        }
+        let zensight_common::TelemetryValue::Counter(n) = point.value else {
+            panic!("rc_drops must be a Counter, got {:?}", point.value);
+        };
+        // Monotonic: the actor folds deltas precisely so a tier switch cannot
+        // walk a published counter backwards.
+        if let Some(prev) = seen {
+            assert!(n >= prev, "rc_drops went backwards: {prev} -> {n}");
+            if n > 0 {
+                seen = Some(n);
+                break;
+            }
+        }
+        seen = Some(n);
+    }
+    let observed = seen.expect("no rc_drops point within the deadline");
+    eprintln!("rc_drops observed: {observed}");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: Some("low".into()),
+        },
+    )
+    .await;
+    drop(media_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// The negative, and fully deterministic: a JPEG preview has no rate control,
+/// so the stream must report *nothing* rather than a zero that would read as
+/// "the cap is not biting". This pins the `rc_tracked` gate, which is the part
+/// of #510 most likely to be "simplified" away later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preview_only_stream_publishes_no_rc_drops() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-no-rc";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor(sensor.clone(), source).await;
+
+    let stats_sub = viewer
+        .declare_subscriber(format!("{}/test0/stats/**", v1ctx().telemetry_prefix()))
+        .await
+        .expect("declare stats subscriber");
+    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
+    let media_sub = viewer
+        .declare_subscriber(preview_key.as_keyexpr())
+        .await
+        .expect("declare preview subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+
+    // Three ticker intervals (1 s each in the test harness) is ample for the
+    // stream's other five metrics to arrive several times over.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut saw_fps = false;
+    while Instant::now() < deadline {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(2), stats_sub.recv_async()).await
+        else {
+            continue;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode stats point");
+        assert_ne!(
+            point.metric, "test0/stats/rc_drops",
+            "a preview-only stream has no rate control to report on"
+        );
+        saw_fps |= point.metric == "test0/stats/fps";
+    }
+    assert!(
+        saw_fps,
+        "the ticker published nothing at all — vacuous test"
+    );
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+    drop(media_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
 /// Poll the actor until no stream is open (bounded).
 async fn wait_until_closed(handle: &zensight_sensor_parallax::session::SessionHandle) {
     let deadline = Instant::now() + Duration::from_secs(10);

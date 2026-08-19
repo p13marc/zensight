@@ -187,12 +187,39 @@ Per-stream stats ride ordinary telemetry under
 | `fps` | gauge | frames published per second (all open tiers + preview combined) |
 | `kbps` | gauge | total media bandwidth published for the stream |
 | `drops` | counter | frames lost between encoder and egress (video-tier sequence gaps; intentional preview throttling is never counted) |
+| `rc_drops` | counter | frames the encoder's rate control swallowed to hold the tier's `bitrate_kbps` (omitted for streams with no rate-controlled encoder) |
 | `viewers` | gauge | open profiles with matching subscribers (0 .. tiers + 1) |
 | `encode_ms` | gauge | average wall time per encoder `process()` call (omitted when no encoder ran) |
 
-For per-tier **applied** resolution/bitrate/viewers, read the `StreamStatus`
-doc's `tiers[]` (each `TierStatus` carries the params the encoder was actually
-built with) — that is what the GUI's per-tile bandwidth readout shows.
+Three things about that table are easy to get wrong, so they are written down
+here (#510):
+
+- **`drops` and `rc_drops` cannot overlap.** The H.264 element numbers its
+  output from its own *emitted*-frame count, and a frame the rate controller
+  swallows produces no buffer at all — so it leaves no sequence gap for the
+  egress task to notice. `drops` is therefore always the `AppSink` shedding
+  under a slow consumer; `rc_drops` is always the bitrate cap biting. A tier
+  whose `rc_drops` climbs is being held to its `bitrate_kbps`, which is the
+  ladder working, not a fault — but it is also the number to read before
+  concluding a tier "looks soft".
+- **`rc_drops` is omitted, not zeroed**, when a stream has no rate-controlled
+  encoder — an RTSP passthrough (no encoder at all) or a preview-only stream
+  (JPEG has no rate control). A `0` there would read as "the cap is not
+  biting" when the truth is "there is no cap".
+- **`fps` and `kbps` stay egress-sourced on purpose.** They count what actually
+  crossed Zenoh — the SPS/PPS the egress injects into a bare keyframe included,
+  and frames the sink shed excluded — which is the bandwidth an operator is
+  paying for. The encoder's own `bytes_encoded` over-reports on both counts, and
+  an RTSP passthrough has no encoder to ask. For the same reason `encode_ms`
+  remains a mean over whole `process()` calls rather than the encoder handle's
+  `last_encode_ns`, which is a single sample of the inner encode: the
+  `encoder_overrun` rule compares a mean to a per-frame budget.
+
+For per-tier **applied** resolution/viewers, read the `StreamStatus` doc's
+`tiers[]` — that is what the GUI's per-tile bandwidth readout shows. Note that
+`TierApplied`'s `fps` and `bitrate_kbps` are the tier's configured *targets*
+read back, not measurements; only `width`/`height` come from the built
+pipeline.
 
 `streams/advertised` (catalogue size) is published every tick regardless of
 open streams, so a parallax host appears on the dashboard before anything is

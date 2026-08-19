@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The encoder says when the bitrate cap is biting** (#510). parallax-pipeline
+  0.6 hands out an `EncoderStatsHandle` — cloned before `Executor::start()` like
+  every other live handle — and with it the one number this sensor could never
+  compute for itself: `frames_dropped_by_rc`, the frames OpenH264 swallowed
+  rather than overshoot a tier's bitrate. `skip_frames(true)` has been set since
+  the rate-control mode was chosen precisely so that could happen, and nothing
+  counted it. It now rides `{stream}/stats/rc_drops` as a counter, folded from
+  each open tier's handle by the session actor on its existing 1 Hz tick and
+  summed per stream like every other stat there. The fold is a *delta*, not an
+  absolute: a tier switch hands the stream a fresh handle that restarts at zero,
+  and a published counter must not walk backwards.
+  - It is **disjoint from `drops` by construction**: the encoder numbers its
+    output from its own emitted-frame count, so a swallowed frame leaves no
+    sequence gap for egress to see. `drops` remains the sink shedding under a
+    slow consumer; `rc_drops` is the cap. The point is **omitted, not zeroed**,
+    for RTSP passthrough and preview-only streams, which have no rate control —
+    a `0` there would read as "the cap is not biting" when the truth is "there
+    is no cap".
+  - `fps` and `kbps` deliberately keep their published-plane meaning rather than
+    moving to the encoder's `bytes_encoded`: they count what actually crossed
+    Zenoh, injected parameter sets included and sink-shed frames excluded, and a
+    passthrough camera has no encoder to ask. `encode_ms` likewise keeps its
+    `TimedElement` mean — the handle's `last_encode_ns` is one sample of the
+    inner encode call, and the `encoder_overrun` rule needs an interval mean of
+    the whole `process()`. The two are now pinned to agree on the denominator.
+  - The GUI's live tile appends `· capped` when the counter is *growing*
+    between ticks — the absolute value only says the cap bit at some point.
+
 - **Every systemd unit now restricts its capability bounding set** (#670). Nine
   of the thirteen left `CapabilityBoundingSet` unset — which is not "none", it
   is the kernel default, the *full* set — and scored 8.1 EXPOSED on

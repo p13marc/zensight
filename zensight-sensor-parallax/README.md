@@ -43,7 +43,7 @@ matching listener forces a keyframe the instant a subscriber appears.
   `state/parallax/stream/<stream>` (declared publisher; failed opens publish
   a definitive `open: false`; tombstoned on removal from config, not on
   close), and per-stream telemetry under
-  `<stream>/stats/{fps,kbps,drops,viewers,encode_ms}` so existing charts
+  `<stream>/stats/{fps,kbps,drops,rc_drops,viewers,encode_ms}` so existing charts
   light up for free.
 - **Liveliness + health + alerts** — one `state/parallax/device/<stream>/alive`
   token per catalogue entry; per-stream health tracking; alert rules for

@@ -375,6 +375,7 @@ subject	parallax	{stream}/stats/drops	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/encode_ms	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/fps	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/kbps	telemetry	TelemetryPoint
+subject	parallax	{stream}/stats/rc_drops	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/viewers	telemetry	TelemetryPoint
 subject	snmp	alert/{alert_key}	state	Alert
 subject	snmp	artifact/{kind}	state	ArtifactStatus

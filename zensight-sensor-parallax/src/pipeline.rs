@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use parallax::buffer::Buffer;
-use parallax::control::{Controllable, EncoderControl, RateControlMode};
+use parallax::control::{Controllable, EncoderControl, EncoderStatsHandle, RateControlMode};
 use parallax::converters::PixelFormat as ConvFormat;
 use parallax::element::{Element, ProduceContext, ProduceResult, Source};
 use parallax::elements::codec::KeyframeHandle;
@@ -135,6 +135,20 @@ impl<S: Source> Source for StoppableSource<S> {
 
 /// Wraps an encoder [`Element`] to time each `process()` call into the
 /// stream's stats (`encode_ms` telemetry + the encoder-overrun rule).
+///
+/// This survives parallax 0.6's [`EncoderStatsHandle`] (#510) on purpose, and
+/// the reason is easy to lose: the handle's `last_encode_ns` is a *store*, one
+/// sample of the most recent call, where `encode_ms` is a mean over every call
+/// in the tick interval. At the default 5 s interval on a 30 fps tier that is
+/// one sample in 150, and `encoder_overrun` compares that mean to a per-frame
+/// budget — a spot sample would turn a threshold rule into a coin flip. The
+/// handle also times only the inner `encode()`, while this wrapper covers the
+/// whole `process()` (pending-control application, the geometry lookup, the
+/// arena copy, the IDR scan), which is the work the budget is actually about.
+/// It is also the only encode timing the three JPEG preview paths have.
+///
+/// What the two *do* agree on is the denominator, and `pipeline.rs`'s tests
+/// pin it: `encoded_frames == frames_encoded() + frames_dropped_by_rc()`.
 struct TimedElement<E: Element> {
     inner: E,
     stats: Arc<StreamStats>,
@@ -183,14 +197,20 @@ impl<E: Element> Element for TimedElement<E> {
     }
 }
 
-/// Live control handles for a running pipeline (parallax 0.6).
+/// Live control **and observation** handles for a running pipeline (parallax 0.6).
 ///
 /// The unified executor **moves** every element into its task at
 /// `Executor::start()`, so a live element is unreachable except through a
-/// handle cloned **before** start. Every controllable knob a running video
-/// pipeline exposes is cloned here at construction; the session actor writes
-/// to them to reconfigure a stream without a teardown (#496). RTSP passthrough
-/// has no encoder in its graph, so its handles are all `None`.
+/// handle cloned **before** start. That pre-start rule is the invariant this
+/// struct encodes, and it is why the encoder's own counters live here next to
+/// the knobs rather than anywhere more obvious (#510).
+///
+/// Every controllable knob a running video pipeline exposes is cloned here at
+/// construction. Note what the session actor actually *drives*: only
+/// [`Self::keyframe`]. The rest are cloned against a live-retune path that no
+/// command reaches — quality is chosen by which `<tier>` a viewer subscribes to
+/// (#494) and redefining a tier is config-only (#513). RTSP passthrough has no
+/// encoder in its graph, so its handles are all `None`.
 #[derive(Default, Clone)]
 pub struct PipelineControls {
     /// Live H.264 bitrate / GOP / QP / rate-control. `None` for passthrough.
@@ -211,6 +231,12 @@ pub struct PipelineControls {
     /// graphs that re-encode; the MJPG passthrough has no scaler (the camera's
     /// JPEG bytes are forwarded verbatim).
     pub preview_scale: Option<ScaleControl>,
+    /// The H.264 encoder's own counters — `frames_dropped_by_rc`, the one
+    /// number this crate cannot compute for itself (#510). Cloned before start
+    /// like every other handle here. `None` for previews (JPEG has no rate
+    /// control, and parallax documents the counter as permanently zero there)
+    /// and for RTSP passthrough (no encoder in the graph at all).
+    pub encoder_stats: Option<EncoderStatsHandle>,
 }
 
 /// A constructed (not yet started) profile pipeline.
@@ -331,6 +357,7 @@ pub fn build_video(
             // Clone every control handle BEFORE the elements move into the pipeline.
             let enc_ctl = encoder.control();
             let keyframe = encoder.keyframe_handle();
+            let enc_stats = encoder.stats();
 
             stats.tighten_budget(1_000_000_000 / params.fps.max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
@@ -368,6 +395,7 @@ pub fn build_video(
                     keyframe: Some(keyframe),
                     scale: Some(scale_ctl),
                     rate: Some(rate_ctl),
+                    encoder_stats: Some(enc_stats),
                     ..Default::default()
                 },
                 stop,
@@ -390,6 +418,7 @@ pub fn build_video(
                 H264Encoder::new(video_encoder_config(params)).context("create H.264 encoder")?;
             let enc_ctl = encoder.control();
             let keyframe = encoder.keyframe_handle();
+            let enc_stats = encoder.stats();
 
             stats.tighten_budget(1_000_000_000 / params.fps.max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
@@ -460,6 +489,7 @@ pub fn build_video(
                     keyframe: Some(keyframe),
                     scale: Some(scale_ctl),
                     rate: Some(rate_ctl),
+                    encoder_stats: Some(enc_stats),
                     ..Default::default()
                 },
                 stop,
@@ -848,6 +878,115 @@ mod tests {
             .expect("pipeline must shut down cleanly after StopHandle::stop()")
             .expect("pipeline tasks must end without error");
         frames
+    }
+
+    /// Only an encoder-backed video graph can report rate-control drops. A
+    /// preview re-encodes with JPEG (parallax documents `frames_dropped_by_rc`
+    /// as permanently zero there) and an RTSP tier is passthrough with no
+    /// encoder at all — both must hand back `None`, which is what stops the
+    /// stats ticker publishing a misleading zero (#510).
+    #[test]
+    fn only_video_graphs_expose_encoder_stats() {
+        let video =
+            build_video(&test_kind(15), &vparams(10, None), &Arc::default()).expect("build video");
+        assert!(
+            video.controls.encoder_stats.is_some(),
+            "an H.264 tier carries the encoder's own counters"
+        );
+
+        let preview = build_preview(
+            &test_kind(15),
+            &PreviewConfig {
+                fps: 5,
+                quality: 75,
+                max_height: None,
+            },
+            &Arc::default(),
+        )
+        .expect("build preview");
+        assert!(
+            preview.controls.encoder_stats.is_none(),
+            "JPEG has no rate control"
+        );
+    }
+
+    /// `TimedElement` survives `EncoderStatsHandle` because the handle cannot
+    /// produce an interval *mean* (see its doc comment). What the two do agree
+    /// on is the denominator — every `process()` call is either an emitted
+    /// frame or one the rate controller swallowed — so pin that, and the
+    /// "keep the wrapper" decision stays reviewable instead of asserted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn encoder_stats_agree_with_the_timed_element() {
+        let stats = Arc::new(StreamStats::default());
+        let built = build_video(&test_kind(15), &vparams(10, None), &stats).expect("build video");
+        // Clone the handle BEFORE the pull consumes `built` — the whole reason
+        // it is cloned before `Executor::start()` in the first place.
+        let handle = built
+            .controls
+            .encoder_stats
+            .clone()
+            .expect("video graph exposes encoder stats");
+
+        let frames = pull_frames(built, 6).await;
+        assert!(!frames.is_empty(), "the test source must produce frames");
+
+        let encoded = handle.frames_encoded();
+        let shed = handle.frames_dropped_by_rc();
+        assert!(encoded > 0, "the encoder emitted nothing");
+        assert!(handle.bytes_encoded() > 0, "the encoder produced no bytes");
+        assert_eq!(
+            stats.encoded_frames.load(Ordering::Relaxed),
+            encoded + shed,
+            "every timed `process()` call is either an emitted frame or an RC drop"
+        );
+    }
+
+    /// One kbit/s against per-pixel noise: `RateControlMode::Bitrate` with
+    /// `skip_frames(true)` leaves OpenH264 no way to hold that target except by
+    /// swallowing frames. This is the counter actually counting something.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rate_control_drops_frames_at_a_starved_bitrate() {
+        let kind = SourceKind::Test {
+            pattern: "snow".into(),
+            width: 320,
+            height: 240,
+            fps: 15,
+        };
+        let params = VideoParams {
+            bitrate_kbps: 1,
+            gop_frames: 60,
+            fps: 15,
+            max_height: None,
+        };
+        let mut built = build_video(&kind, &params, &Arc::default()).expect("build video");
+        let handle = built.controls.encoder_stats.clone().expect("encoder stats");
+        let sink = built.sink.clone();
+        let pipeline = executor()
+            .start(&mut built.pipeline)
+            .expect("start pipeline");
+
+        // Bounded by wall clock, not by a frame count: a starved encoder emits
+        // almost nothing, so waiting for N *published* frames would wait for
+        // the thing the test is asserting does not happen. Stop as soon as the
+        // counter moves.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && handle.frames_dropped_by_rc() == 0 {
+            let _ = sink.pull_buffer_timeout(Duration::from_millis(100)).await;
+        }
+        let (encoded, shed) = (handle.frames_encoded(), handle.frames_dropped_by_rc());
+
+        built.stop.stop();
+        tokio::time::timeout(Duration::from_secs(10), pipeline.wait())
+            .await
+            .expect("pipeline must shut down cleanly")
+            .expect("pipeline tasks must end without error");
+
+        eprintln!("starved encoder: {encoded} encoded, {shed} shed by RC");
+        assert!(
+            shed > 0,
+            "a 1 kbit/s cap on noise must make the rate controller shed frames \
+             ({encoded} encoded, {shed} shed)"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
