@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A one-shot `@rpc` reader, so a queryable can be read without a GUI** (#168).
+  `zenctl` lives in the external zenkey repo and the desktop app needs a display,
+  so a query channel had no reader at all on a headless host — which is part of
+  why the eBPF frontier went a month without on-host validation.
+  `cargo run -p zensight-common --example rpc_get -- 'v1/*/@rpc/sysinfo/latency'`
+  issues one GET and pretty-prints every reply, exiting non-zero when nobody
+  answered. It *connects* where `v1_probe` listens, because a validation run
+  starts the sensor first and dialling an already-listening peer skips the
+  connect-retry backoff.
+
 - **Every systemd unit now restricts its capability bounding set** (#670). Nine
   of the thirteen left `CapabilityBoundingSet` unset — which is not "none", it
   is the kernel default, the *full* set — and scored 8.1 EXPOSED on
@@ -264,6 +274,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on master. The 04:17 UTC cron is untouched: it had not been failing nightly,
   it had not yet run at all (Forgejo schedules only from the default branch, and
   the workflow arrived there the same day the issue was written).
+
+- **An eBPF load failure now says why** (#168). Both loaders logged
+  `tracing::warn!(error = %e, …)`, and `Display` on an `anyhow::Error` prints
+  only the outermost context — `"load eBPF bytecode"` — discarding the aya error
+  underneath it, including the verifier log. A rejected program was
+  indistinguishable from an `EPERM`, which is the worst possible property for a
+  subsystem whose entire remaining work item is on-host validation. Both now log
+  the full chain, and it paid for itself immediately: the first unprivileged run
+  named its own cause (`attach sched/sched_wakeup: perf_event_open_trace_point
+  failed: Permission denied`) instead of shrugging.
 
 - **The SNMP e2e harness had a 500 ms cliff under load** (#668).
   `collect_points` waited for *silence*, not for the points it wanted: a cycle
