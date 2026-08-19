@@ -207,6 +207,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`inform_v2c_is_acknowledged` asserted nothing about acknowledgement**
+  (#663). `send_inform` swallows per-sink failures and returns `Ok(())`
+  unconditionally, so the test's `.expect("inform must be acknowledged")` could
+  not fail — an inform that timed out and retransmitted itself to death logged
+  a warning and passed. The test now uses `send_inform_detailed` and asserts
+  `outcome.failures()` is empty, the form #650's restart e2e already used. Test
+  only; no shipped behaviour changes.
+
 - **Trap alerts were never published when `snmp.alerts.for_secs > 0`.** The
   trap path used the reporter's default debounce, which only publishes once a
   *second* observation arrives after the window — but a trap is a single
