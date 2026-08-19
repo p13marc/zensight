@@ -19,6 +19,8 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
+# Needs no capabilities: a Modbus TCP client — outbound to port 502 only.
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

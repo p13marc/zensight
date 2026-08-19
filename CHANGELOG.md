@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every systemd unit now restricts its capability bounding set** (#670). Nine
+  of the thirteen left `CapabilityBoundingSet` unset — which is not "none", it
+  is the kernel default, the *full* set — and scored 8.1 EXPOSED on
+  `systemd-analyze security` against 5.7–5.9 for the four that restricted it.
+  Nothing could use those capabilities (`DynamicUser` with no
+  `AmbientCapabilities` means an empty effective set), but the bounding set is
+  what a compromised process could regain and what `NoNewPrivileges=yes` alone
+  does not close. Each now carries an explicit empty set with its reason, and no
+  unit is above 6.0. Two carried something worth writing down: the SNMP unit's
+  shipped trap-listener bind is the privileged port **162** (default-off, and
+  never bindable under this unit — enabling it needs an ambient capability as
+  well), and sysinfo's bounding-set line was commented out for the eBPF build,
+  which is what left it unrestricted for the default one.
+
 - **A systemd unit for the parallax sensor** (#411).
   `packaging/systemd/zensight-sensor-parallax.service` follows the hardened
   sensor template and diverges only where live video requires it:

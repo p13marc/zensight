@@ -28,6 +28,41 @@ Some units need extra capabilities, granted as *ambient* caps (still no root):
 | `zensight-sensor-logs` | `CAP_NET_BIND_SERVICE` | bind the privileged syslog port 514 |
 | `zensight-sensor-netlink` | `CAP_NET_ADMIN` (+`CAP_BPF CAP_PERFMON`) | *optional* collectors only — nftables/conntrack + the XFRM monitor (`CAP_NET_ADMIN`) and the eBPF module (`CAP_BPF`/`CAP_PERFMON`, also needs a `--features ebpf` build) |
 
+**Every other unit holds none, and now says so.** Until #670 they simply left
+`CapabilityBoundingSet` unset, which is not "none" — it is the kernel default,
+the *full* set. Nothing could use those capabilities (`DynamicUser` with no
+`AmbientCapabilities` means an empty effective set), but the bounding set is
+what a compromised process could regain, and what `NoNewPrivileges=yes` alone
+does not close. Each of those units now carries an explicit empty
+`CapabilityBoundingSet=` with the reason next to it, and no unit is above 6.0:
+
+```
+$ for f in packaging/systemd/*.service; do
+    systemd-analyze security --offline=true "$f" | tail -1
+  done | sort -k1
+
+5.6   correlator, both exporters, gnmi, modbus, netflow, snmp, sysinfo, systemd
+5.7   parallax        (empty set, plus DeviceAllow — see below)
+5.8   logs            CAP_NET_BIND_SERVICE
+5.8   netring         CAP_NET_RAW + CAP_IPC_LOCK
+5.9   netlink         CAP_NET_ADMIN (+ CAP_BPF CAP_PERFMON)
+```
+
+Two of them carry a caveat in the unit rather than just a reason:
+
+- **`zensight-sensor-snmp`** — the shipped `configs/snmp.json5` binds its trap
+  listener to `0.0.0.0:`**`162`**, a privileged port. It is `enabled: false` by
+  default, so nothing breaks as shipped; enabling it needs **both**
+  `AmbientCapabilities=CAP_NET_BIND_SERVICE` and the matching
+  `CapabilityBoundingSet=`, exactly as the logs unit does for syslog on 514 — or
+  a port above 1024. The unit could not bind 162 before this change either; it
+  granted no ambient capability then and does not now.
+- **`zensight-sensor-sysinfo`** — its eBPF `CapabilityBoundingSet` line is
+  commented out for the default build. The empty line and that one are
+  *alternatives*: an eBPF build replaces one with the other. Leaving the
+  commented line as the only mention is what kept this unit at 8.1 while its
+  siblings sat lower.
+
 `zensight-sensor-netlink`'s **baseline** reads (interfaces/routes/neighbors/
 addresses/sockets/ethtool/tc/diagnostics/RTNETLINK events/XFRM SA dump) are
 **unprivileged**. Its shipped unit grants the caps above so a "just run" demo

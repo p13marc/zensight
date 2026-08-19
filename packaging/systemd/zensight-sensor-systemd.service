@@ -20,6 +20,10 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
+# Needs no capabilities: a system D-Bus client. Unit *control* (`actions`)
+# is a separate, config-gated concern and goes through systemd's own
+# authorisation, not through a capability held here.
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target
