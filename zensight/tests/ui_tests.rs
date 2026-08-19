@@ -3232,7 +3232,7 @@ fn test_netlink_sockets_ebpf_section() {
     use zensight::view::specialized::SpecializedTab;
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight::view::specialized::netlink_detail::{
-        ConnRecord, NetlinkDetailData, NetlinkDetailTopic, RetransRecord,
+        ConnectionRecord, NetlinkDetailData, NetlinkDetailTopic, RetransmitRecord,
     };
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
@@ -3262,7 +3262,7 @@ fn test_netlink_sockets_ebpf_section() {
     }
     state.netlink_detail.apply(
         NetlinkDetailTopic::Retransmits,
-        Ok(NetlinkDetailData::Retransmits(vec![RetransRecord {
+        Ok(NetlinkDetailData::Retransmits(vec![RetransmitRecord {
             peer: "203.0.113.9".into(),
             family: 2,
             count: 42,
@@ -3270,7 +3270,7 @@ fn test_netlink_sockets_ebpf_section() {
     );
     state.netlink_detail.apply(
         NetlinkDetailTopic::Connections,
-        Ok(NetlinkDetailData::Connections(vec![ConnRecord {
+        Ok(NetlinkDetailData::Connections(vec![ConnectionRecord {
             pid: 1234,
             comm: "curl".into(),
             family: 2,

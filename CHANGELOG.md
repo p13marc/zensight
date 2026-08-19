@@ -265,6 +265,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it had not yet run at all (Forgejo schedules only from the default branch, and
   the workflow arrived there the same day the issue was written).
 
+- **netlink's registry described two reply types that did not exist** (#114).
+  `@rpc/netlink/retransmits` and `.../connections` were declared as
+  `Vec<RetransmitRecord>` and `Vec<ConnectionRecord>`; **neither Rust type
+  existed** — the sensor served `Vec<RetransRecord>` and `Vec<ConnView>` — and
+  `describe` (RFC 08 §7) further reported the tcplife payload as "conntrack
+  records", a different subsystem entirely. Same class as #513's phantom command
+  and #479's phantom payload type.
+  - Fixed by moving the two types into `zensight-common::query_detail` under the
+    names the registry already used, with real derived schemas replacing the
+    summary stubs. That is this repo's own rule — *"when adding a procedure, put
+    its reply type in `zensight-common`"*, the precedent `LatencyReport` set
+    under #469 — and it is also the only direction available: `zenkey-build`
+    treats a changed `reply` on an existing path as an incompatible edit, and the
+    `[[deprecated]]` escape is gated to subjects, so renaming the registry would
+    have meant shipping `retransmits2`.
+  - `registry.lock`, `types.toml` and the wire JSON are all **unchanged** —
+    verified by `cargo build -p zensight-common`, whose build script enforces the
+    compat lock. The GUI's two hand-written mirror structs are deleted in favour
+    of the shared types, which is the drift this was always going to cause.
+
 - **The SNMP e2e harness had a 500 ms cliff under load** (#668).
   `collect_points` waited for *silence*, not for the points it wanted: a cycle
   whose first sample took longer than the 500 ms idle gap returned an empty map,

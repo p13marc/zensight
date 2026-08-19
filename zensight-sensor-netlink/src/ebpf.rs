@@ -28,7 +28,9 @@ use zensight_sensor_netlink_ebpf_common::{
     CONN_EVENT_ESTABLISHED, CONNLAT_BUCKETS, ConnRecord, RetransKey,
 };
 
-use crate::map::{ConnView, RetransRecord, connlat_percentiles, top_k_retransmits};
+use crate::map::{
+    ConnectionRecord, RetransmitRecord, conn_record_view, connlat_percentiles, top_k_retransmits,
+};
 
 /// TCP 4-tuple key for the recent-close map (#304): (local ip, local port,
 /// remote ip, remote port). Addresses are the `Ipv4Addr`/`Ipv6Addr` `Display`
@@ -78,7 +80,7 @@ impl OwnerMap {
 
     /// Record who owned a just-closed connection, sweeping expired entries and
     /// keeping the map bounded.
-    fn note(&self, v: &ConnView) {
+    fn note(&self, v: &ConnectionRecord) {
         let Ok(mut map) = self.map.lock() else {
             return;
         };
@@ -101,7 +103,7 @@ impl OwnerMap {
     }
 
     /// Forget a connection (its close event arrived — tier 2b live map).
-    fn remove(&self, v: &ConnView) {
+    fn remove(&self, v: &ConnectionRecord) {
         if let Ok(mut map) = self.map.lock() {
             map.remove(&(v.local.clone(), v.lport, v.remote.clone(), v.rport));
         }
@@ -135,7 +137,7 @@ pub struct EbpfState {
 }
 
 struct Inner {
-    conns: Mutex<VecDeque<ConnView>>,
+    conns: Mutex<VecDeque<ConnectionRecord>>,
     conn_cap: usize,
     retrans: Mutex<AyaHashMap<MapData, RetransKey, u64>>,
     connlat: Mutex<PerCpuArray<MapData, u64>>,
@@ -152,7 +154,7 @@ impl EbpfState {
     /// live map (tier 2b); close events retire the live entry, feed the
     /// recent-close map (tier 2a) and land in the tcplife ring.
     fn ingest(&self, rec: &ConnRecord) {
-        let v = ConnView::from_record(rec);
+        let v = conn_record_view(rec);
         if rec.event == CONN_EVENT_ESTABLISHED {
             self.inner.live.note(&v);
         } else {
@@ -163,7 +165,7 @@ impl EbpfState {
 
     /// Push a completed-connection record, dropping the oldest past capacity,
     /// and remember its owner in the recent-close map (#304).
-    fn push_conn(&self, v: ConnView) {
+    fn push_conn(&self, v: ConnectionRecord) {
         self.inner.closed.note(&v);
         if let Ok(mut q) = self.inner.conns.lock() {
             if q.len() == self.inner.conn_cap {
@@ -198,7 +200,7 @@ impl EbpfState {
     }
 
     /// Recent completed-connection records (oldest first), for `@rpc/netlink/connections`.
-    pub fn recent_connections(&self) -> Vec<ConnView> {
+    pub fn recent_connections(&self) -> Vec<ConnectionRecord> {
         self.inner
             .conns
             .lock()
@@ -207,7 +209,7 @@ impl EbpfState {
     }
 
     /// Top-K retransmit peers, for `@rpc/netlink/retransmits`.
-    pub fn top_retransmits(&self, k: usize) -> Vec<RetransRecord> {
+    pub fn top_retransmits(&self, k: usize) -> Vec<RetransmitRecord> {
         let snapshot: Vec<(RetransKey, u64)> = match self.inner.retrans.lock() {
             Ok(map) => map.iter().filter_map(|r| r.ok()).collect(),
             Err(_) => Vec::new(),
@@ -364,8 +366,8 @@ fn bump_memlock() {
 mod tests {
     use super::*;
 
-    fn conn(local: &str, lport: u16, pid: u32, comm: &str) -> ConnView {
-        ConnView {
+    fn conn(local: &str, lport: u16, pid: u32, comm: &str) -> ConnectionRecord {
+        ConnectionRecord {
             pid,
             comm: comm.into(),
             family: 4,
