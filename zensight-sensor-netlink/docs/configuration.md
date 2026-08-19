@@ -51,7 +51,7 @@ each block; defaults are as parsed by `src/config.rs`.
 | `xfrm` | `true`* | none | IPsec/XFRM SA + policy health + monitor events |
 | `nftables` | `false` | `CAP_NET_ADMIN` | nftables table/chain/rule + hit-rate counters |
 | `conntrack` | `false` | `CAP_NET_ADMIN` | conntrack table summary |
-| `ebpf` | `false` | `CAP_BPF`+`CAP_NET_ADMIN` | connect-latency + retransmit/tcplife (needs `--features ebpf` build) |
+| `ebpf` | `false` | `CAP_BPF`+`CAP_PERFMON`+`CAP_DAC_READ_SEARCH` | connect-latency + retransmit/tcplife (needs `--features ebpf` build) |
 | `socket_processes` | `true` | none | socket→process attribution on `@rpc/netlink/sockets` (#304) |
 | `socket_process_max_procs` | `4096` | — | skip the `/proc` fd-walk above this many processes |
 | `bandwidth` | `true` | none | per-process TCP goodput on `@rpc/netlink/bandwidth` (#317) |
@@ -143,7 +143,8 @@ build it:
 
 ```bash
 cargo build -p zensight-sensor-netlink --release --features ebpf
-# needs nightly + rust-src + bpf-linker to compile; CAP_BPF + CAP_NET_ADMIN to run
+# needs nightly + rust-src + bpf-linker to compile; CAP_BPF + CAP_PERFMON +
+# CAP_DAC_READ_SEARCH to run
 ```
 
 Off / missing caps / unsupported kernel → one warning and the unprivileged

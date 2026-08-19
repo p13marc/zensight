@@ -265,6 +265,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it had not yet run at all (Forgejo schedules only from the default branch, and
   the workflow arrived there the same day the issue was written).
 
+- **netlink's eBPF tier needs `CAP_PERFMON`, not `CAP_NET_ADMIN`** (#114). Six
+  places — README, both docs, the module doc comment, the feature comment in
+  `Cargo.toml` — said `CAP_BPF + CAP_NET_ADMIN`, while the code, the shipped
+  config and the systemd unit said `CAP_BPF + CAP_PERFMON`. The code was right:
+  these are kprobe and tracepoint *tracing* programs, and `CAP_NET_ADMIN` gates
+  networking program types (XDP, tc, cgroup/skb) that this never loads. netlink
+  genuinely does need `CAP_NET_ADMIN` — for nftables, conntrack and WireGuard
+  peer data — and the two collectors had been conflated.
+  - `CAP_DAC_READ_SEARCH` was missing from netlink's story entirely, including
+    from its systemd unit. aya resolves a tracepoint by reading
+    `<tracefs>/events/<cat>/<name>/id` and `/sys/kernel/tracing` is `0700`, so
+    without it netlink's two tracepoints fail to attach **while its kprobes
+    succeed** — a half-attached module, which is a nastier failure than a clean
+    refusal. The unit now documents it as an opt-in line, commented, with the
+    same "reads any file on the host" warning `zensight-sensor-sysinfo.service`
+    carries.
+  - `docs/telemetry.md` presented the whole tier as working. It now carries the
+    host-validation result: which facets are trustworthy, which one is not, and
+    the `perf_event_paranoid=3` trap (#683).
+
 - **netlink's registry described two reply types that did not exist** (#114).
   `@rpc/netlink/retransmits` and `.../connections` were declared as
   `Vec<RetransmitRecord>` and `Vec<ConnectionRecord>`; **neither Rust type

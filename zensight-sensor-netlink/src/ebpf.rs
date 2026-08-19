@@ -6,7 +6,7 @@
 //! gauges) and the `@rpc/netlink/{retransmits,connections}` channels.
 //!
 //! Gated on `feature = "ebpf"` — the rest of the crate stays aya-free. Any
-//! load/attach failure (no `CAP_BPF`/`CAP_NET_ADMIN`, unsupported kernel) is
+//! load/attach failure (no `CAP_BPF`/`CAP_PERFMON`, unsupported kernel) is
 //! returned as an `Err`; the caller logs one warning and the unprivileged
 //! baseline is untouched.
 

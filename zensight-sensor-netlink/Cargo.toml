@@ -16,7 +16,7 @@ path = "src/lib.rs"
 [features]
 # Opt-in eBPF module (connlat + retransmit attribution + tcplife), issue #114.
 # OFF by default. Requires nightly + rust-src + bpf-linker to BUILD, and
-# CAP_BPF/CAP_NET_ADMIN to RUN. Keeps the unprivileged baseline intact and out
+# CAP_BPF/CAP_PERFMON to RUN. Keeps the unprivileged baseline intact and out
 # of `cargo build --workspace` on stable CI. (The `/user` feature adds the
 # aya::Pod impls on the shared records for ring-buffer/map reads.)
 ebpf = [
