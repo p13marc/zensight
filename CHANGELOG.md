@@ -170,7 +170,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   escaped losslessly at the publish boundary and warned about at startup — so a
   stale config now yields a **third** spelling matching neither scheme
   (`system/sysUpTime` publishes as `system/sys_x55_p_x54_ime`).
-  `docker/configs/snmp.json5` was shipping exactly that, and is fixed here.
+  `docker/configs/snmp.json5` was shipping exactly that, and is fixed here —
+  though see the Removed entry below: that file turned out to ship nowhere.
 
 - **The deprecated JSON pseudo-MIB support is removed** (#580). `snmp.mib.files`
   is now a hard startup error pointing at `snmp.mib.dirs`, rather than a
@@ -204,6 +205,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `blake3/<hex>`. Dedup is per-algorithm, so pre-0.11 chunks are inert
     rather than wrong — the store refills on the next fetch. It also gained
     the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
+
+### Removed
+
+- **`docker/configs/` — three config files that shipped nowhere** (#472). They
+  were referenced by no Dockerfile, no compose file and no script: the sensors
+  image copies the root `configs/*.json5`, and the per-component images expect a
+  mounted `/etc/zensight`. Their only live consumer was a "shipped configs load
+  strict" test in the logs crate, which now covers the two that really ship.
+  They were not harmless: the SNMP one still carried pre-#559 `oid_names`, so
+  #647 was written — and its changelog entry and crate reference worded — as a
+  fix to a *shipped* config. `configs/snmp.json5`, the one the image actually
+  carries, was already correct. Both references are corrected here.
 
 ### Fixed
 

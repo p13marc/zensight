@@ -107,7 +107,9 @@ a stale config keeps working but publishes a *third* spelling matching neither
 scheme — `system/sysUpTime` becomes `system/sys_x55_p_x54_ime`, and your
 Prometheus series becomes `zensight_snmp_system_sys_x55_p_x54_ime`. Check your
 `oid_names` against the table below. (`docker/configs/snmp.json5` was shipping
-exactly this and is fixed in #647.)
+exactly this. It was corrected in #647 and then deleted in #472 — it turned out
+to be referenced by no Dockerfile and no compose file. The config the SNMP
+image actually uses is `configs/snmp.json5`, which was already correct.)
 
 ### The full table
 

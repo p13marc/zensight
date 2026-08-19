@@ -1416,11 +1416,7 @@ mod tests {
     /// future edit adding a key the schema doesn't know.
     #[test]
     fn shipped_configs_load_strict() {
-        for rel in [
-            "/../configs/logs.json5",
-            "/../configs/syslog.json5",
-            "/../docker/configs/syslog.json5",
-        ] {
+        for rel in ["/../configs/logs.json5", "/../configs/syslog.json5"] {
             let path = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
             SyslogSensorConfig::load_from_file(&path)
                 .unwrap_or_else(|e| panic!("{path} must load strict: {e}"));
