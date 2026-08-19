@@ -247,6 +247,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The SNMP e2e harness had a 500 ms cliff under load** (#668).
+  `collect_points` waited for *silence*, not for the points it wanted: a cycle
+  whose first sample took longer than the 500 ms idle gap returned an empty map,
+  and the caller indexed it, so the failure read `no entry found for key` with
+  nothing pointing at a timeout. It now waits up to 5 s for the first sample and
+  keeps the short idle gap between samples — the two are different quantities,
+  and only the first moves under load. The callers that assert a cycle published
+  *nothing* use a new `collect_quiet`, which keeps the old semantics, because
+  waiting longer for a point that must never come is only slower.
+
 - **A host without the resource made `introspect` lie again** (#666, #648
   follow-up). `zensight-sensor-systemd`'s `@rpc` channel connected to the system
   D-Bus *before* declaring anything and returned on failure, so a host with no

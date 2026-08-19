@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use async_snmp::{AuthProtocol as AgentAuth, PrivProtocol as AgentPriv, Value};
 use harness::{
-    FlakyProxy, IF_TABLE, IF_X_TABLE, SYSTEM, SimAgent, SimMib, collect_points, rig, v2c_device,
+    FlakyProxy, IF_TABLE, IF_X_TABLE, SYSTEM, SimAgent, SimMib, collect_points, collect_quiet, rig,
+    v2c_device,
 };
 use zensight_common::TelemetryValue;
 use zensight_sensor_snmp::config::{AuthProtocol, PrivProtocol, SnmpV3Security, SnmpVersion};
@@ -304,7 +305,7 @@ async fn unreachable_device_then_recovery() {
         .poll_once()
         .await
         .expect("poll cycle must survive");
-    let points = collect_points(&rig, IDLE).await;
+    let points = collect_quiet(&rig, IDLE).await;
     assert!(
         points.is_empty(),
         "blackholed poll published: {:?}",
@@ -361,7 +362,7 @@ async fn exhausted_retries_recover_by_next_cycle() {
         .poll_once()
         .await
         .expect("poll cycle must survive");
-    let points = collect_points(&rig, IDLE).await;
+    let points = collect_quiet(&rig, IDLE).await;
     assert!(
         points.is_empty(),
         "cycle with exhausted retries published: {:?}",
@@ -646,7 +647,7 @@ async fn v3_engine_rediscovery_after_agent_restart() {
     let mut recovered = false;
     for _ in 0..3 {
         let _ = rig.poller.poll_once().await;
-        if !collect_points(&rig, IDLE).await.is_empty() {
+        if !collect_quiet(&rig, IDLE).await.is_empty() {
             recovered = true;
             break;
         }
@@ -1127,7 +1128,7 @@ async fn profile_selection_defers_until_device_answers() {
 
     proxy.set_blackhole(true);
     rig.poller.poll_once().await.expect("poll");
-    let points = collect_points(&rig, IDLE).await;
+    let points = collect_quiet(&rig, IDLE).await;
     assert!(points.is_empty());
 
     proxy.set_blackhole(false);
@@ -1827,7 +1828,7 @@ async fn breaker_opens_probes_and_recovers() {
     assert_eq!(rig.poller.backoff_multiplier(), 1, "breaker closed");
 
     // ...and the next cycle polls fully again, publishing telemetry.
-    let _ = collect_points(&rig, Duration::from_millis(100)).await; // drain
+    let _ = collect_quiet(&rig, Duration::from_millis(100)).await; // drain
     assert!(matches!(rig.poller.cycle().await, CycleKind::Full(_)));
     let points = collect_points(&rig, IDLE).await;
     assert!(points.contains_key("system/name"), "{:?}", points.keys());
