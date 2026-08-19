@@ -590,15 +590,62 @@ pub async fn collect_alerts(
     out
 }
 
-/// Collect telemetry points until `deadline` elapses with no new sample.
-/// Returns `metric name → point` (the metric name is the last key chunks after
+/// How long [`collect_points`] waits for the *first* sample of a cycle.
+///
+/// The gap between a poll and its first published point is a different quantity
+/// from the gap between two points of the same cycle, and it is the one that
+/// moves under load: a Zenoh publish/subscribe round trip on a machine running
+/// a dozen test binaries can take far longer than the `idle` gap that separates
+/// samples once they start flowing. Waiting `idle` for both is the 500 ms cliff
+/// of #668 — the map came back empty, the caller indexed it, and the failure
+/// read `no entry found for key` with nothing pointing at a timeout.
+const FIRST_POINT_GRACE: Duration = Duration::from_secs(5);
+
+/// Collect the telemetry a cycle published: wait up to [`FIRST_POINT_GRACE`]
+/// for the first sample, then keep collecting until `idle` elapses with no new
+/// one. Returns `metric name → point` (the metric name is the key chunks after
 /// the device name).
+///
+/// Panics if nothing arrives at all, because every caller of this expects at
+/// least one point — and a panic that says so beats an index panic three lines
+/// later that does not. Use [`collect_quiet`] where publishing nothing is the
+/// property under test.
 pub async fn collect_points(rig: &TestRig, idle: Duration) -> HashMap<String, TelemetryPoint> {
+    let first = tokio::time::timeout(FIRST_POINT_GRACE, rig.sub.recv_async())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "no telemetry within {FIRST_POINT_GRACE:?} of the poll — the cycle published \
+                 nothing, or delivery was slower than the grace (#668)"
+            )
+        })
+        .expect("telemetry subscriber closed");
+
     let mut points = HashMap::new();
+    let point: TelemetryPoint =
+        decode_auto(&first.payload().to_bytes()).expect("decode telemetry point");
+    points.insert(point.metric.clone(), point);
+    collect_into(&mut points, rig, idle).await;
+    points
+}
+
+/// Collect telemetry points until `idle` elapses with no new sample, starting
+/// immediately — so an empty result is a real answer rather than a timeout.
+///
+/// This is the shape [`collect_points`] used to have, kept for the callers that
+/// assert a cycle published *nothing*, and for drains. Those cannot be given a
+/// grace period: waiting longer for a point that must never come is only slower,
+/// never more correct.
+pub async fn collect_quiet(rig: &TestRig, idle: Duration) -> HashMap<String, TelemetryPoint> {
+    let mut points = HashMap::new();
+    collect_into(&mut points, rig, idle).await;
+    points
+}
+
+async fn collect_into(points: &mut HashMap<String, TelemetryPoint>, rig: &TestRig, idle: Duration) {
     while let Ok(Ok(sample)) = tokio::time::timeout(idle, rig.sub.recv_async()).await {
         let point: TelemetryPoint =
             decode_auto(&sample.payload().to_bytes()).expect("decode telemetry point");
         points.insert(point.metric.clone(), point);
     }
-    points
 }
