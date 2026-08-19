@@ -218,6 +218,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A host without the resource made `introspect` lie again** (#666, #648
+  follow-up). `zensight-sensor-systemd`'s `@rpc` channel connected to the system
+  D-Bus *before* declaring anything and returned on failure, so a host with no
+  reachable bus — a container started without the
+  `/run/dbus/system_bus_socket` mount is the everyday case — advertised
+  `units`, `failed`, `unit`, `unit/file`, `timers`, `events` and `cgroups` and
+  answered none of them. #648 closed the build-feature, config-flag and
+  capability doors; this is the same class through a fourth, resource
+  acquisition order. `zensight-sensor-netlink` had the identical shape ahead of
+  ten procedures, reachable from a sandbox that restricts `AF_NETLINK`. Both now
+  declare first and answer `error/systemd/no-system-bus` /
+  `error/netlink/no-route-socket` — neither `gated` (nothing is switched off)
+  nor `unsupported` (the build has the capability), because a caller that
+  cannot tell those apart is back to the silence the check exists to prevent.
+
 - **`inform_v2c_is_acknowledged` asserted nothing about acknowledgement**
   (#663). `send_inform` swallows per-sink failures and returns `Ok(())`
   unconditionally, so the test's `.expect("inform must be acknowledged")` could
