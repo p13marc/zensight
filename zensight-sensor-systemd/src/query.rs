@@ -132,6 +132,47 @@ fn accounting(v: u64) -> Option<u64> {
 /// How many event-ring lines a `@rpc/systemd/unit?name=` reply carries (#274).
 const RECENT_CHANGES_MAX: usize = 20;
 
+/// The six flat procedures this channel owns, in registry order. The seventh,
+/// `unit/file`, is nested and is built with `nested_query_key` alongside them.
+///
+/// Named once so the failure path declares exactly what the success path
+/// declares — a key present in one and missing from the other is precisely the
+/// bug this constant exists to make impossible (#666).
+const PROCEDURES: [&str; 6] = ["units", "failed", "unit", "events", "timers", "cgroups"];
+
+/// Declare all seven procedures with an error reply, and serve it until the
+/// session closes.
+///
+/// `run` cannot do its job without the system bus, but the registry advertises
+/// these procedures unconditionally and `introspect` hands that slice to the
+/// fleet as truth (RFC 08 §6.1). Returning without declaring makes `introspect`
+/// lie and — in a debug build — trips `check_registry_coverage` at startup, so
+/// the answer is an error, not silence (#648, #666).
+///
+/// `error/systemd/no-system-bus`, not `error/gated` or `error/unsupported`:
+/// this build has the capability and nothing is switched off in config. The
+/// host does not provide the resource, which is a third thing, and telling an
+/// operator which one it is is the whole point of answering at all.
+async fn serve_without_bus(session: Arc<zenoh::Session>, producer: &str, why: String) {
+    let mut keys: Vec<String> = PROCEDURES
+        .iter()
+        .map(|p| zensight_common::command::query_key(producer, p))
+        .collect();
+    keys.push(zensight_common::command::nested_query_key(
+        producer, "unit", "file",
+    ));
+    zensight_common::served::serve_unavailable(
+        session,
+        keys,
+        zensight_common::rpc::RpcError::producer(
+            producer,
+            "no-system-bus",
+            format!("the systemd sensor could not reach the system D-Bus: {why}"),
+        ),
+    )
+    .await;
+}
+
 /// Run the on-demand unit inventory query channel until the session closes.
 pub async fn run(
     session: Arc<zenoh::Session>,
@@ -144,6 +185,7 @@ pub async fn run(
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "query: system bus connect failed");
+            serve_without_bus(session, &producer, e.to_string()).await;
             return;
         }
     };
@@ -151,6 +193,7 @@ pub async fn run(
         Ok(m) => m,
         Err(e) => {
             tracing::error!(error = %e, "query: Manager proxy failed");
+            serve_without_bus(session, &producer, e.to_string()).await;
             return;
         }
     };

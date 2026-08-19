@@ -33,14 +33,64 @@ jobs:
           cache-targets: false
       - run: cargo test --workspace --locked
 
-      # The `h264` feature is off by default because it pulls openh264, a C++
-      # build from source — so nothing above compiles the opt-in live-view path,
-      # and #485 shipped it broken for a week (`app.rs` passed a `RemoteOrigin`
-      # to a `String` parameter; nobody found out until someone built it). A
-      # check, not a test: the cost is the openh264 build, and the bug class it
-      # catches is "this feature no longer compiles" (#649).
-      - name: opt-in features still compile
+  # Optional features gate real code that a default build never type-checks:
+  # `#[cfg(feature = ...)]` blocks in `main.rs`/`query.rs` and, in netring's
+  # case, whole detector modules. #485 shipped `h264` broken for a week under
+  # exactly this blind spot — `app.rs` passed a `RemoteOrigin` into a `String`
+  # parameter and nobody found out until someone built it (#649). This job is
+  # the general form of that fix (#662).
+  #
+  # One job, one step per feature, not a matrix: the steps share a target dir,
+  # so netring's six detectors cost one build plus five deltas instead of six
+  # cold ones. A named step per feature means the CI log says *which* feature
+  # stopped compiling, which `--all-features` cannot. (netring's sets are in
+  # fact additive — `--all-features` builds — but a per-feature check also
+  # catches "feature A alone no longer compiles because it leans on something
+  # only B pulls in", which is the more likely regression.)
+  #
+  # NOT covered here: `zensight-sensor-{netlink,sysinfo}` `--features ebpf`.
+  # Their build scripts invoke `aya-build` through `rustup run nightly`, so the
+  # leg needs a nightly toolchain, `rust-src`, and a `bpf-linker` install (an
+  # LLVM build) on top of everything above — too much for every push. Both were
+  # verified to compile by hand at the commit that added this job; see #662 for
+  # the standing plan to cover them out-of-band.
+  features:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: features
+          cache-targets: false
+
+      # zensight: the F12 UI recorder.
+      - name: zensight --features tester
+        run: cargo check -p zensight --features tester --locked
+      # zensight: the opt-in H.264 live view. The expensive one — it pulls
+      # openh264, a C++ build from source. This is the #649 step, moved here.
+      - name: zensight --features h264
         run: cargo check -p zensight --features h264 --locked
+
+      # netring detectors, each off by default and each pulling its own
+      # upstream parser through the netring facade.
+      - name: netring --features sigma
+        run: cargo check -p zensight-sensor-netring --features sigma --locked
+      - name: netring --features yara
+        run: cargo check -p zensight-sensor-netring --features yara --locked
+      - name: netring --features snmp
+        run: cargo check -p zensight-sensor-netring --features snmp --locked
+      - name: netring --features lateral
+        run: cargo check -p zensight-sensor-netring --features lateral --locked
+      - name: netring --features ipfix
+        run: cargo check -p zensight-sensor-netring --features ipfix --locked
+      # ja4plus carries the FoxIO License 1.1, which is NOT OSI. Compiling it in
+      # its own opt-in step keeps it type-checked without putting it anywhere
+      # near the default path — the default build stays OSI-clean.
+      - name: netring --features ja4plus
+        run: cargo check -p zensight-sensor-netring --features ja4plus --locked
 
   lint:
     runs-on: ubuntu-24.04
