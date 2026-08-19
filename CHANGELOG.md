@@ -247,6 +247,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The eBPF features job had never once got past installing its linker**
+  (#674). `cargo install bpf-linker --locked` builds an LLVM frontend against a
+  *system* LLVM, and the runner image ships none: the only run this workflow has
+  ever had spent 70 seconds compiling before dying on "could not find
+  llvm-config in directories specified by environment variable `PATH`".
+  Upstream's own build script says as much before it fails — a source build "is
+  NOT recommended for regular users" — and publishes a statically linked release
+  binary for the purpose, which is what the job now fetches: pinned to v0.11.0,
+  27 MB over the wire, and installed to `/usr/local/bin` rather than
+  `$CARGO_HOME/bin` so a 104 MB executable stays out of the Rust cache, whose
+  key knows nothing about the linker's version and would have restored a stale
+  copy on every bump. The workflow also gains a path-filtered `pull_request`
+  trigger, because the deeper problem was that nothing but a manual dispatch
+  could ever run this file — which is how a job that had never completed landed
+  on master. The 04:17 UTC cron is untouched: it had not been failing nightly,
+  it had not yet run at all (Forgejo schedules only from the default branch, and
+  the workflow arrived there the same day the issue was written).
+
 - **The SNMP e2e harness had a 500 ms cliff under load** (#668).
   `collect_points` waited for *silence*, not for the points it wanted: a cycle
   whose first sample took longer than the 500 ms idle gap returned an empty map,

@@ -55,8 +55,10 @@ jobs:
   #
   # NOT covered here: `zensight-sensor-{netlink,sysinfo}` `--features ebpf`.
   # Their build scripts invoke `aya-build` through `rustup run nightly`, so the
-  # leg needs a nightly toolchain, `rust-src`, and a `bpf-linker` install (an
-  # LLVM build) on top of everything above — too much for every push. Both were
+  # leg needs a nightly toolchain, `rust-src`, and a `bpf-linker` install (a
+  # 100 MB prebuilt binary with LLVM baked in — building it from source needs a
+  # matching system LLVM the runner image has not got, #674) on top of
+  # everything above — too much for every push. Both were
   # verified to compile by hand at the commit that added this job; see #662 for
   # the standing plan to cover them out-of-band.
   features:
