@@ -1,0 +1,52 @@
+# The expensive tail of #662.
+#
+# `zensight-sensor-{netlink,sysinfo}` both carry an opt-in `ebpf` feature whose
+# build script drives `aya-build` through `rustup run nightly`. Checking them
+# therefore needs a nightly toolchain, `rust-src`, and a `bpf-linker` install on
+# top of everything the normal CI job installs — far too much for every push,
+# which is why ci.yml's `features` job deliberately stops at the eight features
+# a stable toolchain can check.
+#
+# So they run here instead, nightly and on demand. The signal is slower than a
+# per-push gate, and that is the accepted trade (#662 names it as the third and
+# cheapest option). What matters is that a feature which stops compiling fails
+# CI at all, rather than being discovered by the next person who happens to
+# build it — which is exactly how `h264` was found broken a week late (#649).
+name: eBPF features
+on:
+  schedule:
+    # 04:17 UTC daily, well clear of the working day.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: /srv/cache/bin/sccache
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  ebpf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
+      # The workspace toolchain builds the userspace half...
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      # ...and nightly + rust-src builds the BPF object (bpfel-unknown-none is a
+      # build-std target, hence rust-src). `aya-build` invokes it by name via
+      # `rustup run nightly`, so it must be installed, not merely selected.
+      - uses: https://github.com/dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: ebpf
+          cache-targets: false
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked
+
+      - name: netlink --features ebpf
+        run: cargo check -p zensight-sensor-netlink --features ebpf --locked
+      - name: sysinfo --features ebpf
+        run: cargo check -p zensight-sensor-sysinfo --features ebpf --locked

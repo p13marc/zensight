@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CI compiles every optional feature, not one of ten** (#662). Ten features
+  across four crates gate `#[cfg(feature = ...)]` code that a default build
+  never type-checks; CI built exactly one of them, which is how `h264` stayed
+  broken for a week (#485 → #649). A new `features` job checks the eight a
+  stable toolchain can reach — `zensight` `tester`/`h264` and netring's
+  `sigma`/`yara`/`snmp`/`lateral`/`ipfix`/`ja4plus` — one named step each, so
+  the log says which feature broke. `ja4plus` (FoxIO License 1.1, not OSI)
+  stays in its own opt-in step and off the default path. The two `ebpf`
+  features need nightly + `rust-src` + `bpf-linker`, so they run nightly in a
+  separate `eBPF features` workflow rather than on every push.
+
 - **A trap record names the alert it raised or cleared** (#651). `EventRecord`
   gains `alert_key: Option<String>` (serde-default and skipped when absent, so
   old records decode and records that drove no alert transition are unchanged on
