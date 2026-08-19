@@ -72,6 +72,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#513). The tier ladder is config-only; no build ever served that procedure
   and the registry declares none, so the type was documenting a bus nobody
   built.
+- **The release pipeline starts the sensors image instead of asking it for
+  help** (#472). The smoke test was `zensight-sensor-sysinfo --help`, which
+  exits before a config is read: it proves the binary loads — worth having, and
+  the reason it was written — and nothing else. Every way the image can be
+  broken that is not a linker problem passed it, which is how the 0.10.1 image
+  shipped five sensors whose `introspect` advertised artifact procedures they
+  did not serve (#648): a release build warns rather than dying, so the check
+  was green for three weeks. It now runs the real entrypoint — interface
+  detection, config generation, all five binaries, the shared spawner under
+  `FAIL_FAST=1` — for 25 s, and fails if the spawner returns on its own, if
+  anything panics, or if any producer reports the RFC 08 §6.1 coverage warning.
+  The correlator image keeps the `--help` check; it has no entrypoint to drive.
 
 ### Changed — BREAKING
 
@@ -216,21 +228,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `blake3/<hex>`. Dedup is per-algorithm, so pre-0.11 chunks are inert
     rather than wrong — the store refills on the next fetch. It also gained
     the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
-
-### Changed
-
-- **The release pipeline starts the sensors image instead of asking it for
-  help** (#472). The smoke test was `zensight-sensor-sysinfo --help`, which
-  exits before a config is read: it proves the binary loads — worth having, and
-  the reason it was written — and nothing else. Every way the image can be
-  broken that is not a linker problem passed it, which is how the 0.10.1 image
-  shipped five sensors whose `introspect` advertised artifact procedures they
-  did not serve (#648): a release build warns rather than dying, so the check
-  was green for three weeks. It now runs the real entrypoint — interface
-  detection, config generation, all five binaries, the shared spawner under
-  `FAIL_FAST=1` — for 25 s, and fails if the spawner returns on its own, if
-  anything panics, or if any producer reports the RFC 08 §6.1 coverage warning.
-  The correlator image keeps the `--help` check; it has no entrypoint to drive.
 
 ### Removed
 
