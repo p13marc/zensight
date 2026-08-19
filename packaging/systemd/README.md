@@ -35,6 +35,42 @@ lights up every collector; drop the `AmbientCapabilities`/`CapabilityBoundingSet
 lines (and re-disable `collect.nftables`/`conntrack`) to return to the pure
 unprivileged baseline.
 
+## `zensight-sensor-parallax`: devices, not capabilities
+
+parallax is the one unit that diverges from the template in a direction other
+than capabilities — it needs **device access**, and no capabilities at all
+(#411). Each is in the unit next to the reason for it:
+
+| Directive | Why |
+|---|---|
+| `SupplementaryGroups=video` | `/dev/video*` nodes are `root:video 0660`. A `DynamicUser` cannot open one without the group, and `enumerate_v4l2` (on by default) probes `/dev/video0`…`63` by opening each. |
+| `DeviceAllow=char-video4linux rw` | Grants the video4linux character devices. Naming *any* `DeviceAllow` switches `DevicePolicy` to `closed`, so this also takes away every other device node the sibling units still reach — a net tightening. |
+| `CapabilityBoundingSet=` (empty) | V4L2 capture and RTSP are unprivileged, so parallax needs none. |
+
+The empty bounding set is why it scores *better* than its siblings rather than
+worse, which is not the outcome "this one needs the camera" suggests:
+
+```
+$ systemd-analyze security --offline=true packaging/systemd/zensight-sensor-parallax.service
+parallax  5.7 MEDIUM      # no capabilities at all
+netring   5.8 MEDIUM      # CAP_NET_RAW + CAP_IPC_LOCK
+logs      5.8 MEDIUM      # CAP_NET_BIND_SERVICE
+```
+
+Device access costs nothing in that score; an unrestricted capability bounding
+set costs 2.3. Eight of the other units still leave theirs unrestricted.
+
+**Screen capture is not supported by this unit, and cannot be.** A screen source
+would go through the XDG desktop portal, which needs an interactive session
+bus and a user consent prompt — neither exists under a system unit with
+`DynamicUser`. It would have to be a per-user (`systemd --user`) deployment
+variant. Note this is forward-looking: `zensight-sensor-parallax` has no screen
+source today (`auto` / `v4l2` / `rtsp` / `test` are the only kinds), so nothing
+is being taken away here.
+
+**RTSP** needs ordinary network egress, which is why there is no
+`PrivateNetwork=` — the same as every other sensor.
+
 ## Graceful stop
 
 All units stop with `SIGTERM` (`TimeoutStopSec=20s`), which lets a sensor publish
