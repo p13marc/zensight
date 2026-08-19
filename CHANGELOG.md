@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A systemd unit for the parallax sensor** (#411).
+  `packaging/systemd/zensight-sensor-parallax.service` follows the hardened
+  sensor template and diverges only where live video requires it:
+  `SupplementaryGroups=video` (device nodes are `root:video 0660`, and
+  `enumerate_v4l2` opens `/dev/video0`…`63` to probe them) and
+  `DeviceAllow=char-video4linux rw` — which, by naming any device at all,
+  switches `DevicePolicy` to `closed` and so takes away every other device node
+  the sibling units still reach. It also carries an empty
+  `CapabilityBoundingSet=`, because V4L2 capture and RTSP need no capabilities:
+  the unit that wants the camera ends up with the *lowest*
+  `systemd-analyze security` exposure of any sensor (5.7, against netring's and
+  logs' 5.8, which each need one capability). Screen capture is documented as
+  not supported by a system unit and not possible under one — it would need the
+  XDG portal and an interactive session.
+
 - **CI compiles every optional feature, not one of ten** (#662). Ten features
   across four crates gate `#[cfg(feature = ...)]` code that a default build
   never type-checks; CI built exactly one of them, which is how `h264` stayed
