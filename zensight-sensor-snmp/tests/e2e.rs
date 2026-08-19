@@ -1472,9 +1472,13 @@ async fn trap_v2c_event_alert_lifecycle() {
     assert_eq!(rig.reporter.firing_alerts().len(), 0);
 }
 
-/// An inform round-trip: `send_inform` only returns Ok once the receiver's
-/// automatic acknowledgement arrives (no retransmit), and the record notes
-/// it was confirmed.
+/// An inform round-trip, both halves: the receiver's automatic acknowledgement
+/// gets back to the *sender* (no retransmit timeout), and the record the
+/// receiver published notes it was confirmed.
+///
+/// The two are independent. A receiver that publishes `confirmed = true` but
+/// never manages to send the response PDU back satisfies the second and fails
+/// the first, and the first is the half that stops retransmission.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inform_v2c_is_acknowledged() {
     let rig = trap_rig(TrapListenerConfig {
@@ -1491,11 +1495,18 @@ async fn inform_v2c_is_acknowledged() {
     })
     .await;
 
-    agent
+    // `send_inform` swallows per-sink failures and returns Ok regardless
+    // (async-snmp `agent/notification.rs`), so the detailed form is the only
+    // one that asserts the acknowledgement came back — #663.
+    let outcome = agent
         .agent()
-        .send_inform(&harness::oid(LINK_DOWN), 100, Vec::new())
-        .await
-        .expect("inform must be acknowledged (no retransmit timeout)");
+        .send_inform_detailed(&harness::oid(LINK_DOWN), 100, Vec::new())
+        .await;
+    let failures: Vec<_> = outcome.failures().collect();
+    assert!(
+        failures.is_empty(),
+        "inform was not acknowledged (retransmit timeout): {failures:?}"
+    );
 
     let (_, event) = next_event(&rig).await;
     assert_eq!(event.fields["confirmed"], "true");
