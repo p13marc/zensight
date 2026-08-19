@@ -126,13 +126,63 @@ jobs:
           image="$REGISTRY/marcpardo/zensight-sensors"
           buildah --storage-driver vfs build $labels --build-arg TARGETARCH=amd64 \
             -t "$image:${VERSION}" -t "$image:latest" -f docker/Dockerfile.sensors-runtime .
-          # smoke: run one binary inside each runtime base — catches glibc or
-          # shared-library skew at build time instead of on the fleet
-          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-sensors:${VERSION}")
-          buildah --storage-driver vfs run "$ctr" -- /usr/local/bin/zensight-sensor-sysinfo --help >/dev/null
-          buildah --storage-driver vfs rm "$ctr"
+          # smoke, part 1: run one binary inside a runtime base — catches glibc
+          # or shared-library skew at build time instead of on the fleet. The
+          # correlator image has no entrypoint script to drive, so this is all
+          # it gets.
           ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-correlator:${VERSION}")
           buildah --storage-driver vfs run "$ctr" -- /usr/local/bin/zensight-correlator --help >/dev/null
+          buildah --storage-driver vfs rm "$ctr"
+
+          # smoke, part 2: START the sensors image, do not just ask it for help
+          # (#472).
+          #
+          # `--help` exits before a config is read. It proves the binary loads,
+          # which is worth having, and nothing else: every way an image can be
+          # broken that is not a linker problem passes it. The image published
+          # at 0.10.1 shipped five sensors whose registry advertised artifact
+          # procedures they did not serve (#648) — a release build warns and
+          # keeps going rather than dying, so `--help` was green while
+          # `introspect` lied to the fleet for three weeks.
+          #
+          # So: run the real entrypoint — interface detection, config
+          # generation, all five binaries, the shared spawner under
+          # FAIL_FAST=1 — for 25s against an endpoint with nothing behind it.
+          # Sensors are Zenoh peers and retry an unreachable endpoint in the
+          # background, so no router is needed here (verified).
+          #
+          # Healthy means `timeout` had to kill it (124). Any other exit means
+          # the spawner returned on its own, which under FAIL_FAST=1 means a
+          # sensor died. Missing privileges and missing host services are NOT
+          # failures and must not be: netring without CAP_NET_RAW reports the
+          # privilege and keeps running, and the systemd sensor without a
+          # system bus answers `error/systemd/no-system-bus` — both are #648's
+          # rule working, and both are the normal state inside this step.
+          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-sensors:${VERSION}")
+          buildah --storage-driver vfs run "$ctr" -- bash -c '
+            ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17447 \
+              timeout -s TERM 25 /usr/local/bin/entrypoint-sensors.sh >/tmp/smoke.log 2>&1
+            rc=$?
+            if [ "$rc" != 124 ]; then
+              echo "::error::sensors image: the spawner exited on its own (rc=$rc) — a sensor died at startup"
+              tail -n 80 /tmp/smoke.log
+              exit 1
+            fi
+            if grep -q "panicked at" /tmp/smoke.log; then
+              echo "::error::sensors image: a sensor panicked at startup"
+              grep -n -B2 -A10 "panicked at" /tmp/smoke.log
+              exit 1
+            fi
+            # The release-build form of the #484 registry check. In a debug
+            # build this is a panic; here it is a warning, and a warning nobody
+            # greps for is how #648 shipped.
+            if grep -q "does not serve" /tmp/smoke.log; then
+              echo "::error::sensors image: a producer advertises procedures it does not serve — introspect would ship that to the fleet as truth (RFC 08 6.1, #648)"
+              grep -n "does not serve" /tmp/smoke.log
+              exit 1
+            fi
+            echo "sensors image: five sensors alive after 25s, no panics, registry honest"
+          '
           buildah --storage-driver vfs rm "$ctr"
       - name: Push images
         if: startsWith(github.ref, 'refs/tags/')
