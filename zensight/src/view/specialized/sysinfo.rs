@@ -1447,6 +1447,12 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
             }),
     );
 
+    // A histogram with no samples renders nothing, which is right — but if
+    // BOTH are empty the panel used to be a title and a Refresh button with a
+    // blank gap between them, indistinguishable from a broken view. That state
+    // is reachable on any idle host, so it needs to say so (#685).
+    let mut rendered_any = false;
+
     for (label, hist) in [
         ("Run-queue delay (runqlat)", &report.runqlat),
         ("Block I/O (biolatency)", &report.biolatency),
@@ -1454,6 +1460,7 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
         if hist.total == 0 {
             continue;
         }
+        rendered_any = true;
         col = col.push(text(label).size(14)).push(
             row![
                 latency_stat("p50", hist.p50_us),
@@ -1469,6 +1476,15 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
             .spacing(space::MD)
             .align_y(Alignment::Center),
         );
+    }
+
+    if !rendered_any {
+        col = col.push(empty_state(
+            "No samples in this window. The collector is attached and measuring — \
+             the host was simply idle enough that nothing was scheduled off-CPU or \
+             waiting on disk long enough to record.",
+            None,
+        ));
     }
 
     col.push(
