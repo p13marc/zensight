@@ -21,7 +21,7 @@ use aya::{
     // The userspace handle for a kernel LRU_HASH map is `HashMap` (aya has no
     // separate userspace `LruHashMap`); its TryFrom accepts the LRU variant.
     maps::{HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf},
-    programs::{KProbe, TracePoint},
+    programs::TracePoint,
 };
 use tokio::io::unix::AsyncFd;
 use zensight_sensor_netlink_ebpf_common::{
@@ -255,13 +255,11 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
         tracing::debug!(error = %e, "eBPF: aya-log init skipped");
     }
 
-    // connlat: entry kprobes + matching return kprobes (the macro marks the
-    // `_ret` programs as kretprobes; both attach to the same kernel function).
-    attach_kprobe(&mut bpf, "tcp_v4_connect", "tcp_v4_connect")?;
-    attach_kprobe(&mut bpf, "tcp_v6_connect", "tcp_v6_connect")?;
-    attach_kprobe(&mut bpf, "tcp_v4_connect_ret", "tcp_v4_connect")?;
-    attach_kprobe(&mut bpf, "tcp_v6_connect_ret", "tcp_v6_connect")?;
-    // retransmit + tcplife tracepoints.
+    // Two tracepoints, and that is the whole attach surface: connlat used to
+    // need four kprobes on tcp_v[46]_connect, and now rides the state machine
+    // inet_sock_set_state already reports (#114). One fewer failure mode too —
+    // a kernel with IPv6 unbuilt has no tcp_v6_connect symbol, which used to
+    // abort the entire load.
     attach_tp(&mut bpf, "tcp_retransmit_skb", "tcp", "tcp_retransmit_skb")?;
     attach_tp(
         &mut bpf,
@@ -323,18 +321,6 @@ pub async fn drain_ring(ring: RingBuf<MapData>, state: EbpfState) {
         }
         guard.clear_ready();
     }
-}
-
-fn attach_kprobe(bpf: &mut Ebpf, prog: &str, fn_name: &str) -> Result<()> {
-    let p: &mut KProbe = bpf
-        .program_mut(prog)
-        .with_context(|| format!("program {prog} missing"))?
-        .try_into()
-        .with_context(|| format!("program {prog} is not a kprobe"))?;
-    p.load().with_context(|| format!("load {prog}"))?;
-    p.attach(fn_name, 0)
-        .with_context(|| format!("attach kprobe {fn_name}"))?;
-    Ok(())
 }
 
 fn attach_tp(bpf: &mut Ebpf, prog: &str, category: &str, name: &str) -> Result<()> {

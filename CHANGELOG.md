@@ -275,6 +275,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it had not yet run at all (Forgejo schedules only from the default branch, and
   the workflow arrived there the same day the issue was written).
 
+- **netlink's connect latency measures the handshake, not the SYN it sent**
+  (#114). The probe sat on a kretprobe on `tcp_v4_connect()`, which builds and
+  sends the SYN and returns — the handshake wait happens afterwards in
+  `inet_stream_connect()`, and for a non-blocking socket there is no wait at
+  all. Loaded on a real host against a 200 ms netem RTT, it reported **16–64 µs**:
+  a ~6000x understatement, and one that never looks empty — it looks like a
+  suspiciously fast network. It now stamps at `CLOSE → SYN_SENT` and measures at
+  `→ ESTABLISHED`, both edges of the `inet_sock_set_state` tracepoint that was
+  already attached for tcplife, so it costs no new offsets and **deletes four
+  kprobes** (and with them the failure mode where a kernel without a
+  `tcp_v6_connect` symbol aborted the whole load). Verified at two independent
+  delays: 100 ms RTT → bucket 18 (131–262 ms), 5 ms RTT → bucket 14 (8–16 ms).
+  - Refused connects no longer enter the histogram. They go `SYN_SENT → CLOSE`
+    and never reach the measurement point, so they are excluded by construction
+    rather than by checking a return value the kretprobe never looked at — 20
+    refused connects moved the total by 0.
+  - **Connection ownership is now the process that opened the socket.**
+    `pid`/`comm` were read at ESTABLISHED and CLOSE, which are frequently
+    softirq context: a 60-connection `curl` loop was attributed to `curl` in
+    only 59 of 91 records, the rest going to `bash`, `python3`, `claude` and
+    twice to `ksoftirqd/1`. The identity is captured at `CLOSE → SYN_SENT` —
+    inside `connect(2)`, in the caller's own context — and replayed at both
+    later edges. 110/110 after the fix.
+  - The tracepoint is shared with DCCP and SCTP, so a protocol guard now drops
+    non-TCP transitions before their state numbers can be read as TCP ones.
+
 - **An eBPF load failure now says why** (#168). Both loaders logged
   `tracing::warn!(error = %e, …)`, and `Display` on an `anyhow::Error` prints
   only the outermost context — `"load eBPF bytecode"` — discarding the aya error
