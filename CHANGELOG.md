@@ -265,6 +265,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it had not yet run at all (Forgejo schedules only from the default branch, and
   the workflow arrived there the same day the issue was written).
 
+- **netlink's eBPF tier needs `CAP_PERFMON`, not `CAP_NET_ADMIN`** (#114). Six
+  places — README, both docs, the module doc comment, the feature comment in
+  `Cargo.toml` — said `CAP_BPF + CAP_NET_ADMIN`, while the code, the shipped
+  config and the systemd unit said `CAP_BPF + CAP_PERFMON`. The code was right:
+  these are kprobe and tracepoint *tracing* programs, and `CAP_NET_ADMIN` gates
+  networking program types (XDP, tc, cgroup/skb) that this never loads. netlink
+  genuinely does need `CAP_NET_ADMIN` — for nftables, conntrack and WireGuard
+  peer data — and the two collectors had been conflated.
+  - `CAP_DAC_READ_SEARCH` was missing from netlink's story entirely, including
+    from its systemd unit. aya resolves a tracepoint by reading
+    `<tracefs>/events/<cat>/<name>/id` and `/sys/kernel/tracing` is `0700`, so
+    without it netlink's two tracepoints fail to attach **while its kprobes
+    succeed** — a half-attached module, which is a nastier failure than a clean
+    refusal. The unit now documents it as an opt-in line, commented, with the
+    same "reads any file on the host" warning `zensight-sensor-sysinfo.service`
+    carries.
+  - `docs/telemetry.md` presented the whole tier as working. It now carries the
+    host-validation result: which facets are trustworthy, which one is not, and
+    the `perf_event_paranoid=3` trap (#683).
+
+- **netlink's registry described two reply types that did not exist** (#114).
+  `@rpc/netlink/retransmits` and `.../connections` were declared as
+  `Vec<RetransmitRecord>` and `Vec<ConnectionRecord>`; **neither Rust type
+  existed** — the sensor served `Vec<RetransRecord>` and `Vec<ConnView>` — and
+  `describe` (RFC 08 §7) further reported the tcplife payload as "conntrack
+  records", a different subsystem entirely. Same class as #513's phantom command
+  and #479's phantom payload type.
+  - Fixed by moving the two types into `zensight-common::query_detail` under the
+    names the registry already used, with real derived schemas replacing the
+    summary stubs. That is this repo's own rule — *"when adding a procedure, put
+    its reply type in `zensight-common`"*, the precedent `LatencyReport` set
+    under #469 — and it is also the only direction available: `zenkey-build`
+    treats a changed `reply` on an existing path as an incompatible edit, and the
+    `[[deprecated]]` escape is gated to subjects, so renaming the registry would
+    have meant shipping `retransmits2`.
+  - `registry.lock`, `types.toml` and the wire JSON are all **unchanged** —
+    verified by `cargo build -p zensight-common`, whose build script enforces the
+    compat lock. The GUI's two hand-written mirror structs are deleted in favour
+    of the shared types, which is the drift this was always going to cause.
+
 - **The SNMP e2e harness had a 500 ms cliff under load** (#668).
   `collect_points` waited for *silence*, not for the points it wanted: a cycle
   whose first sample took longer than the 500 ms idle gap returned an empty map,

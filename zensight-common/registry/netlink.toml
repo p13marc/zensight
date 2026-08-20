@@ -1035,7 +1035,7 @@ kind = "read"
 reply = "Vec<RetransmitRecord>"
 idempotent = true
 since = "1.0"
-description = "eBPF retransmit ring (feature ebpf)"
+description = "top-K per-peer TCP retransmit counts, cumulative since load (feature ebpf)"
 
 [[procedure]]
 path = "connections"
@@ -1043,7 +1043,7 @@ kind = "read"
 reply = "Vec<ConnectionRecord>"
 idempotent = true
 since = "1.0"
-description = "eBPF connection lifecycle (feature ebpf)"
+description = "tcplife connection-lifecycle records: pid/comm/peer/duration (feature ebpf) — NOT conntrack"
 
 # The `@blob` plane (RFC 07 §2, RFC 08 §2 v1.8): every artifact-capable
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2

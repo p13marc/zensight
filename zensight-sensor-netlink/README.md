@@ -45,7 +45,7 @@ everything under `collect.*` defaults on except `nftables`/`conntrack`/`ebpf`
 |---|---|
 | none (unprivileged) | interfaces, addresses, routes, neighbors, sockets, tcp_info, ethtool, TC, xfrm, socket→process, per-process TCP bandwidth |
 | `CAP_NET_ADMIN` | `collect.nftables`, `collect.conntrack`, full WireGuard peer data |
-| `CAP_BPF` + `CAP_NET_ADMIN` | `collect.ebpf` (also needs a `--features ebpf` build) |
+| `CAP_BPF` + `CAP_PERFMON` + `CAP_DAC_READ_SEARCH` | `collect.ebpf` (also needs a `--features ebpf` build, and `perf_event_paranoid` ≤ 2 — see #683) |
 
 ## License
 

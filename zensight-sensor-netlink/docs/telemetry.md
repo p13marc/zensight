@@ -112,7 +112,32 @@ What `sock_diag` snapshots cannot see — connection *lifecycle* and *attributio
 Streams connect-latency gauges `sockets/tcp/connlat_us_{p50,p95}` (through the
 normal publish path, so sentinel `metric-threshold` expectations can watch them).
 Also serves `@rpc/netlink/retransmits` and `@rpc/netlink/connections` (see below).
-No-op unless built with `--features ebpf` **and** holding `CAP_BPF` + `CAP_NET_ADMIN`.
+No-op unless built with `--features ebpf` **and** holding `CAP_BPF` +
+`CAP_PERFMON` + `CAP_DAC_READ_SEARCH`. Note the capability set is **not**
+`CAP_NET_ADMIN`: these are kprobe/tracepoint *tracing* programs, and
+`CAP_NET_ADMIN` gates networking program types (XDP, tc, cgroup/skb) that this
+never loads. netlink does need `CAP_NET_ADMIN` — for nftables, conntrack and
+WireGuard peer data — but that is a different collector, and the two were
+conflated here for a long time. `CAP_DAC_READ_SEARCH` is needed because aya
+resolves a tracepoint by reading `<tracefs>/events/<cat>/<name>/id` and
+`/sys/kernel/tracing` is mode `0700`; without it the two tracepoints fail to
+attach while the kprobes (which take the world-readable `perf_event_open` path)
+succeed, leaving a half-attached module rather than a clean refusal.
+
+### Status: host-validated, one gap remains (#168)
+
+Loaded and measured on 6.12.101+deb13-cloud-amd64 (2026-08-19) — the first time
+these programs had run anywhere. What holds and what does not:
+
+| | |
+|---|---|
+| `connlat_us_{p50,p95}` | **correct** since #114 — verified against `netem` at 100 ms and 5 ms RTT. It previously measured SYN-construction time and understated a 200 ms handshake by ~6000×. |
+| `@rpc/netlink/retransmits` | **correct** — agrees with `nstat TcpRetransSegs` (per *skb*, so it reads lower than the segment count by whatever TSO coalesced). Per-peer, and cumulative since load rather than windowed. |
+| `@rpc/netlink/connections` | lifecycle and `pid`/`comm` **correct** since #114 (attribution was landing on softirq threads in a third of records). **Byte and segment counters are always zero** — they need `tcp_sock` offsets this build cannot resolve (#681). A zero there means "not measured", not "idle". |
+
+On Debian/Ubuntu, `perf_event_paranoid` defaults to 3 — a level above upstream's
+maximum — and every attach fails `EACCES` even with the capabilities above. See
+#683.
 
 ## On-demand detail — `@rpc/netlink/<topic>`
 
