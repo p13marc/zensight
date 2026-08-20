@@ -149,3 +149,14 @@ cargo build -p zensight-sensor-netlink --release --features ebpf
 
 Off / missing caps / unsupported kernel → one warning and the unprivileged
 baseline is unchanged.
+
+The capabilities are necessary and **not sufficient** on Debian and Ubuntu,
+which ship `kernel.perf_event_paranoid = 3` — a patched level above upstream's
+maximum of 2 that restricts `perf_event_open` beyond what `CAP_PERFMON` relaxes.
+The programs load and every *attach* then fails `EACCES`, so the failure shows
+up in the half of the process nobody is looking at and reads as a capability
+problem it is not. Root is unaffected only because `CAP_SYS_ADMIN` bypasses the
+check. Needs `kernel.perf_event_paranoid <= 2`; `just caps` reports the running
+value. See #683 and
+[sysinfo's configuration notes](../../zensight-sensor-sysinfo/docs/configuration.md#ebpf-feature-99),
+which carry the measurement.

@@ -160,6 +160,26 @@ caps: build
             echo "  demo is unaffected. Run from a host terminal for the eBPF panel."
             echo
         fi
+        # The caps above are necessary and not sufficient (#683). Debian and
+        # Ubuntu ship perf_event_paranoid=3 — above upstream's maximum of 2 —
+        # which denies perf_event_open beyond what CAP_PERFMON relaxes. The
+        # programs LOAD and every attach then fails EACCES, which reads as a
+        # capability problem and is not one. Report it here, where the caps are
+        # granted, rather than let it surface as one line in the sensor log.
+        paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "?")
+        if [[ "$paranoid" =~ ^[0-9]+$ ]] && (( paranoid > 2 )); then
+            echo
+            echo "  WARNING: kernel.perf_event_paranoid=$paranoid (Debian/Ubuntu default is 3,"
+            echo "  above upstream's maximum of 2). The programs will load and every attach"
+            echo "  will fail with 'Permission denied', whatever the caps above say."
+            echo "    this session: sudo sysctl kernel.perf_event_paranoid=2"
+            echo "    persistent:   echo 'kernel.perf_event_paranoid = 2' | sudo tee /etc/sysctl.d/60-zensight-ebpf.conf"
+            echo "  It relaxes perf_event_open for every unprivileged process on the host, so"
+            echo "  it is your call to make, not something 'just caps' should do for you."
+            echo
+        else
+            echo "kernel.perf_event_paranoid=$paranoid — permits the attach (needs <= 2)."
+        fi
         echo "logs + parallax need no capabilities."
     else
         echo "sysinfo + logs + parallax need no capabilities."

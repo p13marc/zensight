@@ -439,6 +439,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     compat lock. The GUI's two hand-written mirror structs are deleted in favour
     of the shared types, which is the drift this was always going to cause.
 
+- **The documented eBPF capability set is not sufficient on Debian/Ubuntu**
+  (#683). `CAP_BPF` + `CAP_PERFMON` + `CAP_DAC_READ_SEARCH` are necessary and
+  not sufficient there: both distributions ship `kernel.perf_event_paranoid=3`,
+  a patched level above upstream's maximum of 2, which restricts
+  `perf_event_open` beyond what `CAP_PERFMON` relaxes. The programs **load**;
+  every attach then fails `EACCES` — so the failure appears in the half of the
+  process nobody is looking at, and reads as a capability problem it is not.
+  Confirmed by changing nothing but the sysctl: at 3 the attach is denied, at 2
+  the histograms come up, same binary and same caps. Root was never affected
+  because `CAP_SYS_ADMIN` bypasses the check, which is why it survived the
+  original bring-up. `just caps` now reads the sysctl and says so where the
+  capabilities are granted, printing the confirmed-good value when it is fine;
+  the requirement is in the sysinfo requirements table with the load-vs-attach
+  distinction spelled out, and in the systemd unit's commented capability block.
+  It is documented rather than applied automatically: lowering it relaxes
+  `perf_event_open` for every unprivileged process on the host.
+
 - **The SNMP e2e harness had a 500 ms cliff under load** (#668).
   `collect_points` waited for *silence*, not for the points it wanted: a cycle
   whose first sample took longer than the 500 ms idle gap returned an empty map,
