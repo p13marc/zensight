@@ -11,3 +11,10 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+# Test-only: checks the offsets above against the running kernel's BTF.
+# A dev-dependency on purpose — cargo never builds a dependency's
+# dev-dependencies, so nothing from it can reach the bpfel-unknown-none object
+# this crate also feeds (#682).
+[dev-dependencies]
+zensight-btf = { path = "../zensight-btf" }

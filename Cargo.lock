@@ -14082,6 +14082,9 @@ dependencies = [
 [[package]]
 name = "zensight-sensor-sysinfo-ebpf-common"
 version = "0.10.1"
+dependencies = [
+ "zensight-btf",
+]
 
 [[package]]
 name = "zensight-sensor-systemd"
