@@ -569,6 +569,7 @@ fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>
                 cell("comm", 120),
                 cell("local", 170),
                 cell("remote", 170),
+                cell("closed", 80),
                 cell("dur_ms", 80),
                 cell("tx", 80),
                 cell("rx", 80),
@@ -582,6 +583,8 @@ fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>
                     cell(&c.comm, 120),
                     cell(&format!("{}:{}", c.local, c.lport), 170),
                     cell(&format!("{}:{}", c.remote, c.rport), 170),
+                    // 0 means a producer older than #685, not 1970.
+                    cell(&conn_age(c.ts_unix_ms), 80),
                     cell(&c.duration_ms.to_string(), 80),
                     cell(&c.tx_bytes.to_string(), 80),
                     cell(&c.rx_bytes.to_string(), 80),
@@ -600,6 +603,18 @@ fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>
     }
 
     Some(card(col))
+}
+
+/// When a tcplife record closed, relative to now.
+///
+/// `ts_unix_ms == 0` is a producer that predates the field (#685), not the
+/// epoch — rendering "56y ago" there would be worse than saying nothing.
+fn conn_age(ts_unix_ms: i64) -> String {
+    if ts_unix_ms == 0 {
+        "—".to_string()
+    } else {
+        crate::view::formatting::format_timestamp(ts_unix_ms)
+    }
 }
 
 /// Address-family label for the eBPF records' numeric `family` (AF_INET/AF_INET6).

@@ -153,8 +153,8 @@ impl EbpfState {
     /// Route one drained kernel record (#304): ESTABLISHED events feed the
     /// live map (tier 2b); close events retire the live entry, feed the
     /// recent-close map (tier 2a) and land in the tcplife ring.
-    fn ingest(&self, rec: &ConnRecord) {
-        let v = conn_record_view(rec);
+    fn ingest(&self, rec: &ConnRecord, anchor_ms: i64) {
+        let v = conn_record_view(rec, anchor_ms);
         if rec.event == CONN_EVENT_ESTABLISHED {
             self.inner.live.note(&v);
         } else {
@@ -293,6 +293,29 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
     Ok((bpf, state, ring))
 }
 
+/// Epoch milliseconds at this host's boot, for converting the kernel's
+/// boot-relative `bpf_ktime_get_ns()` stamps (#685).
+///
+/// `CLOCK_MONOTONIC` deliberately: `bpf_ktime_get_ns` excludes suspended time,
+/// and `CLOCK_BOOTTIME` includes it, so the pair must not be mixed. Recomputed
+/// per drain wakeup rather than cached at load, so a sensor that runs for weeks
+/// does not accumulate the drift between the two clocks.
+///
+/// Falls back to 0 if `clock_gettime` fails, which yields boot-relative
+/// timestamps rather than wrong-but-plausible ones.
+fn monotonic_anchor_ms() -> i64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: CLOCK_MONOTONIC with a valid timespec out-pointer.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    let mono_ms = (ts.tv_sec as i64) * 1_000 + (ts.tv_nsec as i64) / 1_000_000;
+    zensight_common::telemetry::current_timestamp_millis().saturating_sub(mono_ms)
+}
+
 /// Drain the connection ring buffer into the bounded in-memory ring until the
 /// fd closes. Best-effort: malformed/short records are skipped.
 pub async fn drain_ring(ring: RingBuf<MapData>, state: EbpfState) {
@@ -312,13 +335,16 @@ pub async fn drain_ring(ring: RingBuf<MapData>, state: EbpfState) {
                 return;
             }
         };
+        // One `clock_gettime` per wakeup, not per record: every record drained
+        // in this batch is within milliseconds of the others.
+        let anchor_ms = monotonic_anchor_ms();
         let ring = guard.get_inner_mut();
         while let Some(item) = ring.next() {
             if item.len() >= rec_size {
                 // SAFETY: ConnRecord is repr(C) POD; the kernel reserved exactly
                 // this layout. read_unaligned tolerates ring-buffer alignment.
                 let rec = unsafe { std::ptr::read_unaligned(item.as_ptr() as *const ConnRecord) };
-                state.ingest(&rec);
+                state.ingest(&rec, anchor_ms);
             }
         }
         guard.clear_ready();
@@ -362,6 +388,7 @@ mod tests {
             remote: "1.1.1.1".into(),
             rport: 443,
             duration_ms: 10,
+            ts_unix_ms: 0,
             tx_bytes: 0,
             rx_bytes: 0,
             segs_out: 0,

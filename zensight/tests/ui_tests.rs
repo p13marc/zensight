@@ -3279,6 +3279,8 @@ fn test_netlink_sockets_ebpf_section() {
             remote: "1.1.1.1".into(),
             rport: 443,
             duration_ms: 3200,
+            // 2026-08-20T12:00:00Z — the table renders an age from this.
+            ts_unix_ms: 1_787_313_600_000,
             tx_bytes: 8000,
             rx_bytes: 90000,
             segs_out: 60,

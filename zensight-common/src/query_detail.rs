@@ -508,6 +508,17 @@ pub struct ConnectionRecord {
     pub rport: u16,
     /// Established -> closed, in milliseconds.
     pub duration_ms: u64,
+    /// When the kernel stamped this event, in **Unix epoch milliseconds**.
+    ///
+    /// The kernel records `bpf_ktime_get_ns()`, which is boot-relative and
+    /// therefore meaningless to anyone who does not also know this host's boot
+    /// time. The sensor converts it against a `CLOCK_MONOTONIC` anchor before
+    /// publishing, so a consumer can order records and age them without
+    /// knowing anything about the producer (#685).
+    ///
+    /// `0` from a producer that predates the field.
+    #[serde(default)]
+    pub ts_unix_ms: i64,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub segs_out: u32,
