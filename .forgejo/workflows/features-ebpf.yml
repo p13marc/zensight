@@ -31,6 +31,13 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: /srv/cache/bin/sccache
   CARGO_INCREMENTAL: "0"
+  # Cap build parallelism, same as ci.yml: cargo otherwise defaults to nproc
+  # (6 on vm-runner-01) per job, against a lane capacity of 2. This job was a
+  # first-class casualty of the 2026-08-19 balloon, not a bystander — run #135
+  # installed the prebuilt linker successfully and then died with exitcode 137
+  # inside `cargo check --features ebpf`. ci.yml got this cap; this file is
+  # the other workflow that builds Rust, and it was left without one.
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   ebpf:
