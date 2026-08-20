@@ -345,6 +345,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Four small eBPF-frontier defects found during host validation** (#685). A
+  latency window that had barely happened was published as a full one:
+  `tokio::time::interval` fires its first tick immediately, so iteration one
+  deltaed against a zeroed baseline and labelled microseconds as
+  `window_secs`. It is now consumed as a priming read that seeds the baseline,
+  so the first window published is a true interval. The GUI's side of the same
+  report: two empty histograms rendered as a title and a Refresh button with a
+  blank gap between them — reachable on any idle host, and indistinguishable
+  from a broken panel. It now says the window had no samples, in its own words
+  rather than the unavailable-collector copy, since "attached but quiet" and
+  "cannot measure at all" are different problems. And `just ebpf=1 sysinfo`
+  built an eBPF binary, wrote `collect.ebpf: true` into its config, and then
+  ran it with no capabilities, because the recipe depended on `build configure`
+  while netring and netlink depend on `caps`; sysinfo's eBPF capabilities moved
+  into a `_sysinfo-caps` recipe that `just sysinfo` depends on and that is a
+  no-op off an eBPF build, so the unprivileged path still never prompts for
+  sudo. `scripts/gen-configs.sh` no longer claims `just configure` passes
+  `--ebpf` only when the capabilities are held — it gates on toolchain
+  detection alone.
+
 - **The eBPF features job had never once got past installing its linker**
   (#674). `cargo install bpf-linker --locked` builds an LLVM frontend against a
   *system* LLVM, and the runner image ships none: the only run this workflow has
