@@ -133,7 +133,7 @@ these programs had run anywhere. What holds and what does not:
 |---|---|
 | `connlat_us_{p50,p95}` | **correct** since #114 — verified against `netem` at 100 ms and 5 ms RTT. It previously measured SYN-construction time and understated a 200 ms handshake by ~6000×. |
 | `@rpc/netlink/retransmits` | **correct** — agrees with `nstat TcpRetransSegs` (per *skb*, so it reads lower than the segment count by whatever TSO coalesced). Per-peer, and cumulative since load rather than windowed. |
-| `@rpc/netlink/connections` | lifecycle and `pid`/`comm` **correct** since #114 (attribution was landing on softirq threads in a third of records). **Byte and segment counters are always zero** — they need `tcp_sock` offsets this build cannot resolve (#681). A zero there means "not measured", not "idle". |
+| `@rpc/netlink/connections` | lifecycle and `pid`/`comm` **correct** since #114 (attribution was landing on softirq threads in a third of records). `ts_unix_ms` is the kernel's own event time, converted from `bpf_ktime_get_ns()` against a `CLOCK_MONOTONIC` anchor at the sensor (#685) — records can be ordered and aged without knowing the producer's boot time. Byte and segment counters are read from `struct tcp_sock` using offsets resolved from the running kernel's BTF and injected at load time (#681), since CO-RE is unavailable to a rustc/bpf-linker build. If that resolution fails they stay zero and `counters_measured` is `false` — check the flag rather than reading a zero as "idle". |
 
 On Debian/Ubuntu, `perf_event_paranoid` defaults to 3 — a level above upstream's
 maximum — and every attach fails `EACCES` even with the capabilities above. See

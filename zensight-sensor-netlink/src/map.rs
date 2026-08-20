@@ -1284,26 +1284,49 @@ pub fn top_k_retransmits(snapshot: &[(RetransKey, u64)], k: usize) -> Vec<Retran
     recs
 }
 
+/// Convert a boot-relative kernel timestamp to Unix epoch milliseconds.
+///
+/// `bpf_ktime_get_ns()` counts from boot, so it is only meaningful next to an
+/// anchor measured on the same clock. `anchor_ms` is
+/// `now_epoch_ms - CLOCK_MONOTONIC_ms`, i.e. the epoch time of this host's
+/// boot; see `ebpf::monotonic_anchor_ms`.
+///
+/// **`CLOCK_MONOTONIC`, not `CLOCK_BOOTTIME`.** `bpf_ktime_get_ns` excludes
+/// time the machine spent suspended and `CLOCK_BOOTTIME` includes it, so
+/// pairing the two would skew every record by the suspend duration — silently,
+/// and only on machines that suspend.
+///
+/// Saturating, because a nonsensical anchor should yield a clamped timestamp
+/// rather than a panic in a sensor.
+pub fn boot_ns_to_unix_ms(ts_ns: u64, anchor_ms: i64) -> i64 {
+    anchor_ms.saturating_add((ts_ns / 1_000_000) as i64)
+}
+
 /// Build a wire record from a kernel `ConnRecord` (pure, testable).
 ///
 /// A free function rather than an inherent `impl`: the type is foreign now.
-pub fn conn_record_view(r: &ConnRecord) -> ConnectionRecord {
-    {
-        ConnectionRecord {
-            pid: r.pid,
-            comm: comm_str(&r.comm),
-            family: fam_digit(r.family),
-            local: fmt_addr(r.family, &r.saddr),
-            lport: r.sport,
-            remote: fmt_addr(r.family, &r.daddr),
-            rport: r.dport,
-            duration_ms: r.duration_ns / 1_000_000,
-            tx_bytes: r.tx_bytes,
-            rx_bytes: r.rx_bytes,
-            segs_out: r.segs_out,
-            segs_in: r.segs_in,
-            retrans: r.retrans,
-        }
+///
+/// `anchor_ms` converts the kernel's boot-relative stamp — see
+/// [`boot_ns_to_unix_ms`].
+pub fn conn_record_view(r: &ConnRecord, anchor_ms: i64) -> ConnectionRecord {
+    ConnectionRecord {
+        pid: r.pid,
+        comm: comm_str(&r.comm),
+        family: fam_digit(r.family),
+        local: fmt_addr(r.family, &r.saddr),
+        lport: r.sport,
+        remote: fmt_addr(r.family, &r.daddr),
+        rport: r.dport,
+        duration_ms: r.duration_ns / 1_000_000,
+        ts_unix_ms: boot_ns_to_unix_ms(r.ts_ns, anchor_ms),
+        tx_bytes: r.tx_bytes,
+        rx_bytes: r.rx_bytes,
+        segs_out: r.segs_out,
+        segs_in: r.segs_in,
+        retrans: r.retrans,
+        // The kernel program only fills these when userspace injected offsets
+        // it could resolve; `_pad2` is its channel for saying so (#681).
+        counters_measured: r.counters_measured != 0,
     }
 }
 
@@ -2126,7 +2149,9 @@ mod tests {
         let mut daddr = [0u8; 16];
         daddr[..4].copy_from_slice(&[93, 184, 216, 34]);
         let rec = ConnRecord {
-            ts_ns: 0,
+            // A real boot-relative stamp: with 0 the conversion could regress
+            // to a passthrough and nothing here would notice (#685).
+            ts_ns: 7_200_000_000_000, // 2h since boot
             pid: 4821,
             comm,
             family: 2,
@@ -2142,10 +2167,17 @@ mod tests {
             segs_out: 12,
             segs_in: 41,
             retrans: 0,
-            _pad2: 0,
+            counters_measured: 1,
         };
-        let v = conn_record_view(&rec);
+        // Anchor: boot happened at this epoch ms, so the event is anchor + 2h.
+        let anchor_ms = 1_700_000_000_000;
+        let v = conn_record_view(&rec, anchor_ms);
         assert_eq!(v.comm, "curl");
+        assert_eq!(
+            v.ts_unix_ms,
+            anchor_ms + 7_200_000,
+            "the kernel's boot-relative stamp must reach the wire as epoch ms"
+        );
         assert_eq!(v.family, 4);
         assert_eq!(v.local, "10.0.0.5");
         assert_eq!(v.remote, "93.184.216.34");
@@ -2155,6 +2187,33 @@ mod tests {
         let json = serde_json::to_string(&v).unwrap();
         let back: ConnectionRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(v, back);
+    }
+
+    /// The other half of the contract `fam_label` broke (#685): this is the
+    /// only thing that puts a family on the wire, and it emits digits, never
+    /// the raw `AF_*` constants it reads.
+    #[test]
+    fn fam_digit_emits_digits_not_af_constants() {
+        assert_eq!(fam_digit(2), 4, "AF_INET -> 4");
+        assert_eq!(fam_digit(10), 6, "AF_INET6 -> 6");
+        assert_eq!(fam_digit(0), 0, "unknown families collapse to 0");
+        assert_eq!(fam_digit(4), 0, "a digit is not a valid input");
+    }
+
+    /// The conversion is the whole point of the field: a boot-relative number
+    /// on the wire would be unusable to any consumer that does not also know
+    /// this host's boot time (#685).
+    #[test]
+    fn boot_ns_converts_against_its_anchor() {
+        let anchor = 1_700_000_000_000_i64;
+        assert_eq!(boot_ns_to_unix_ms(0, anchor), anchor, "boot itself");
+        assert_eq!(boot_ns_to_unix_ms(1_000_000, anchor), anchor + 1, "1ms");
+        assert_eq!(boot_ns_to_unix_ms(90_000_000_000, anchor), anchor + 90_000);
+        // Sub-millisecond truncates rather than rounding: a connection close is
+        // not a benchmark, and truncation keeps the value monotonic in ts_ns.
+        assert_eq!(boot_ns_to_unix_ms(999_999, anchor), anchor);
+        // A nonsensical anchor clamps instead of panicking in a sensor.
+        assert_eq!(boot_ns_to_unix_ms(u64::MAX, i64::MAX), i64::MAX);
     }
 
     /// The registry guard must actually bite. A conformance suite that cannot fail

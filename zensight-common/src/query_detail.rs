@@ -479,6 +479,11 @@ pub struct RetransmitRecord {
     /// Retransmitted skbs seen for this peer. Note `tcp_retransmit_skb` fires
     /// once per skb while `TcpRetransSegs` counts segments, so this reads lower
     /// than `nstat` by whatever TSO coalesced.
+    ///
+    /// Best-effort under concurrency: the kernel-side increment is a
+    /// load-add-store on a shared map, not a fetch-and-add, so simultaneous
+    /// retransmits to one peer on different CPUs can still lose a count
+    /// (#685). Undercounts, never overcounts, and top-K ordering is unaffected.
     pub count: u64,
 }
 
@@ -490,10 +495,12 @@ pub struct RetransmitRecord {
 /// socket there is no trustworthy owner and `pid` is 0; the `/proc` scan owns
 /// attribution there.
 ///
-/// **`tx_bytes` / `rx_bytes` / `segs_out` / `segs_in` / `retrans` are currently
-/// always zero** — they live in `struct tcp_sock`, which the kernel program
-/// cannot reach without load-time offset injection (#681). A zero here means
-/// "not measured", not "idle".
+/// `tx_bytes` / `rx_bytes` / `segs_out` / `segs_in` / `retrans` are read from
+/// `struct tcp_sock` using offsets the sensor resolves from the running
+/// kernel's BTF and injects at load time (#681) — CO-RE is not available to a
+/// rustc/bpf-linker build. When that resolution fails they are zero and
+/// [`counters_measured`](Self::counters_measured) is `false`; check the flag
+/// rather than reading a zero as "idle".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionRecord {
     /// TGID of the process that opened the socket; 0 when unattributed.
@@ -508,11 +515,30 @@ pub struct ConnectionRecord {
     pub rport: u16,
     /// Established -> closed, in milliseconds.
     pub duration_ms: u64,
+    /// When the kernel stamped this event, in **Unix epoch milliseconds**.
+    ///
+    /// The kernel records `bpf_ktime_get_ns()`, which is boot-relative and
+    /// therefore meaningless to anyone who does not also know this host's boot
+    /// time. The sensor converts it against a `CLOCK_MONOTONIC` anchor before
+    /// publishing, so a consumer can order records and age them without
+    /// knowing anything about the producer (#685).
+    ///
+    /// `0` from a producer that predates the field.
+    #[serde(default)]
+    pub ts_unix_ms: i64,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub segs_out: u32,
     pub segs_in: u32,
     pub retrans: u32,
+    /// Whether the five counters above were actually read from the kernel.
+    ///
+    /// `false` means the sensor could not resolve this kernel's `struct
+    /// tcp_sock` offsets, so they are zero because nothing measured them —
+    /// which is a different statement from "this connection moved no data",
+    /// and the two were previously indistinguishable (#681).
+    #[serde(default)]
+    pub counters_measured: bool,
 }
 
 /// One TCP socket (served filterable by state/port).
