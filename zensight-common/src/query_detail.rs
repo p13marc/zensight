@@ -479,6 +479,11 @@ pub struct RetransmitRecord {
     /// Retransmitted skbs seen for this peer. Note `tcp_retransmit_skb` fires
     /// once per skb while `TcpRetransSegs` counts segments, so this reads lower
     /// than `nstat` by whatever TSO coalesced.
+    ///
+    /// Best-effort under concurrency: the kernel-side increment is a
+    /// load-add-store on a shared map, not a fetch-and-add, so simultaneous
+    /// retransmits to one peer on different CPUs can still lose a count
+    /// (#685). Undercounts, never overcounts, and top-K ordering is unaffected.
     pub count: u64,
 }
 

@@ -135,8 +135,28 @@ mod prog {
             let a: [u8; 4] = unsafe { ctx.read_at(RT_DADDR_V4)? };
             key.addr[..4].copy_from_slice(&a);
         }
-        let next = unsafe { RETRANS.get(&key) }.map(|&c| c + 1).unwrap_or(1);
-        let _ = RETRANS.insert(&key, &next, 0);
+        // Increment in place. `get` -> `+1` -> `insert` is a read-modify-write
+        // across three map operations, and `tcp:tcp_retransmit_skb` fires in
+        // softirq on every CPU at once — two retransmits to the same peer on
+        // different CPUs would both read the same value and both write back
+        // the same +1, losing one. `get_ptr_mut` narrows that to the single
+        // load-add-store below (#685).
+        //
+        // Not exact: two CPUs inside this block at the same instant can still
+        // collide, because BPF has no fetch-and-add usable here without kernel
+        // >= 5.12 and LLVM cooperation this build cannot assume. An exact count
+        // needs a per-CPU hash, which multiplies 4096 entries by nproc — a
+        // capacity trade-off with its own decision to make, deliberately not
+        // made here.
+        if let Some(slot) = RETRANS.get_ptr_mut(&key) {
+            // SAFETY: the pointer is this map's value for `key`, valid for the
+            // duration of this program run.
+            unsafe {
+                *slot += 1;
+            }
+        } else {
+            let _ = RETRANS.insert(&key, &1, 0);
+        }
         Ok(0)
     }
 
