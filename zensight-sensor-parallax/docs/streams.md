@@ -38,8 +38,8 @@ counts a subscriber against that tier alone (pinned in `tests/e2e.rs`:
 *two viewers on distinct tiers stream independently*). See `docs/KEYSPACE.md`.
 
 Separate pipelines per profile/tier — deliberately **no tee**: the preview must
-keep its cadence whether or not any encoder runs, and closing or re-tuning one
-tier must not disturb another. The cost (one device open per tier on V4L2) is a
+keep its cadence whether or not any encoder runs, and closing one tier must not
+disturb another. The cost (one device open per tier on V4L2) is a
 documented limitation, see below; a shared-capture fanout (#508) is the
 deferred optimisation.
 
@@ -69,7 +69,13 @@ Notes:
   preview fps.
 - The H.264 encoder runs in `RateControlMode::Bitrate` with `skip_frames(true)`
   so the tier's `bitrate_kbps` is a real cap (OpenH264 silently overshoots a
-  bitrate target with skip-frames off).
+  bitrate target with skip-frames off). Note *how* it is held: on input the
+  encoder cannot compress further, it does not shrink each frame — it **sheds
+  frames**, so the cap moves throughput rather than frame size. `tests/e2e.rs`
+  pins this subscriber-side (*the ladder's bitrate cap bites on the wire*): two
+  rungs identical but for `bitrate_kbps`, on per-pixel noise, emit ~48 kB and
+  ~61 kB per access unit respectively — but 3 and 12 of them in the same window.
+  `{stream}/stats/rc_drops` is what the shedding looks like from inside (#510).
 - JPEG previews are always flagged `keyframe: true` in `FrameMeta` (every
   JPEG is independently decodable). The preview scaler caps the thumbnail at
   `preview.max_height` on every path that re-encodes; the one exception is
@@ -120,20 +126,35 @@ story, while OpenH264 writes the parameter sets into every IDR under every
 strategy (the strategy only renumbers ids) and the egress's
 self-contained-keyframe guarantee is derived from the bytes regardless.
 
-## Live control (no teardown) — #496
+## Why there is no live re-tune command
 
-Each tier's pipeline exposes control handles (`PipelineControls`), cloned from
-their elements **before** the executor starts:
+There isn't one, and that is the design — not an omission.
 
-- **bitrate** — seamless: routed through OpenH264 `SetOption`, no encoder
-  rebuild, no forced IDR.
-- **GOP / rate-control mode / resolution (scaler target)** — these rebuild the
-  inner encoder and start a fresh IDR (a clean decoder entry point). Rate-limit
-  these knobs; bitrate can change every frame.
-- **framerate** — the `Throttle`'s target rate.
-- **preview quality / preview fps / preview size** — the JPEG encoder's
-  quality, the preview `Throttle`, and the preview scaler's `max_height`
-  (absent on the MJPG passthrough preview, which has no scaler).
+Per-viewer quality is expressed by **which `<tier>` key you subscribe to**
+(#494), and redefining what a tier *means* is config-only (#513). `StreamControl`
+carries `open_stream` / `close_stream` / `request_keyframe` and nothing else;
+there is no `SetVideoParams`, no `tiers/set`, and no registry entry for either.
+To change the ladder, edit `configs/parallax.json5` and restart the sensor.
+
+The elements *do* expose live control handles, and `PipelineControls` clones
+every one of them before the executor starts — that mechanism is real and
+load-bearing, because it is the only way to reach an element after
+`Executor::start()` moves it into its task, and it is how keyframe forcing works
+at all (below). But the session actor drives **only the keyframe handle**. The
+bitrate, scaler, throttle and preview-quality handles are cloned and unused.
+They are kept because the clone must happen at construction or not at all, so a
+future retune path cannot be added later without them.
+
+Making one of them reachable is not a small change: it needs a new
+`StreamControl` variant, a registry and schema entry for it, and a rate-limit
+story — a bitrate change is seamless (OpenH264 `SetOption`), but GOP and
+resolution rebuild the inner encoder and emit a fresh IDR, so a slider wired
+straight through would re-key the stream on every pixel of travel. None of that
+exists today.
+
+*(This section previously described those knobs as working. They never did;
+#504 corrected it — the same class of defect as #513's phantom `tiers/set` and
+#479's phantom payload type.)*
 
 ## Keyframe control
 
@@ -302,6 +323,7 @@ Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
   cannot be opened (the advertised `FrameMeta`/catalogue size would be a lie).
 - **`max_height` is now real** for encoder-backed sources (test patterns and
   V4L2): the inserted `VideoScale` caps the encoded height aspect-preserving
-  (never upscaling) per tier, and the cap is a live `ScaleControl` (a resolution
-  change rebuilds the encoder → clean IDR). It is inert only on RTSP
-  passthrough, where there is no encoder to drive.
+  (never upscaling) per tier. The cap is applied when the tier's pipeline is
+  **built** — the scaler's `ScaleControl` is cloned and could retarget it live,
+  but nothing does (see "Why there is no live re-tune command"). It is inert
+  altogether on RTSP passthrough, where there is no encoder or scaler to drive.
