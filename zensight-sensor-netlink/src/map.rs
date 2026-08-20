@@ -1263,19 +1263,17 @@ pub fn connlat_points(host: &str, p50_us: u64, p95_us: u64) -> Vec<TelemetryPoin
     out
 }
 
-/// A per-peer retransmit count (`@rpc/netlink/retransmits`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RetransRecord {
-    pub peer: String,
-    pub family: u8,
-    pub count: u64,
-}
+/// The wire types for the two eBPF query channels live in `zensight-common`,
+/// under the names the registry declares for them. A reply type only the
+/// producer can name is a reply nobody can read — the rule #469 established
+/// when `LatencyReport` moved for the same reason.
+pub use zensight_common::query_detail::{ConnectionRecord, RetransmitRecord};
 
 /// Bounded top-K peers by retransmit count (count desc, stable peer tiebreak).
-pub fn top_k_retransmits(snapshot: &[(RetransKey, u64)], k: usize) -> Vec<RetransRecord> {
-    let mut recs: Vec<RetransRecord> = snapshot
+pub fn top_k_retransmits(snapshot: &[(RetransKey, u64)], k: usize) -> Vec<RetransmitRecord> {
+    let mut recs: Vec<RetransmitRecord> = snapshot
         .iter()
-        .map(|(key, count)| RetransRecord {
+        .map(|(key, count)| RetransmitRecord {
             peer: fmt_addr(key.family, &key.addr),
             family: fam_digit(key.family),
             count: *count,
@@ -1286,28 +1284,12 @@ pub fn top_k_retransmits(snapshot: &[(RetransKey, u64)], k: usize) -> Vec<Retran
     recs
 }
 
-/// A completed-connection record (tcplife, `@rpc/netlink/connections`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ConnView {
-    pub pid: u32,
-    pub comm: String,
-    pub family: u8,
-    pub local: String,
-    pub lport: u16,
-    pub remote: String,
-    pub rport: u16,
-    pub duration_ms: u64,
-    pub tx_bytes: u64,
-    pub rx_bytes: u64,
-    pub segs_out: u32,
-    pub segs_in: u32,
-    pub retrans: u32,
-}
-
-impl ConnView {
-    /// Build a wire record from a kernel `ConnRecord` (pure, testable).
-    pub fn from_record(r: &ConnRecord) -> Self {
-        Self {
+/// Build a wire record from a kernel `ConnRecord` (pure, testable).
+///
+/// A free function rather than an inherent `impl`: the type is foreign now.
+pub fn conn_record_view(r: &ConnRecord) -> ConnectionRecord {
+    {
+        ConnectionRecord {
             pid: r.pid,
             comm: comm_str(&r.comm),
             family: fam_digit(r.family),
@@ -2162,7 +2144,7 @@ mod tests {
             retrans: 0,
             _pad2: 0,
         };
-        let v = ConnView::from_record(&rec);
+        let v = conn_record_view(&rec);
         assert_eq!(v.comm, "curl");
         assert_eq!(v.family, 4);
         assert_eq!(v.local, "10.0.0.5");
@@ -2171,7 +2153,7 @@ mod tests {
         assert_eq!(v.duration_ms, 318);
         // serde round-trip
         let json = serde_json::to_string(&v).unwrap();
-        let back: ConnView = serde_json::from_str(&json).unwrap();
+        let back: ConnectionRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(v, back);
     }
 

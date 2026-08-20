@@ -464,6 +464,57 @@ pub struct ProcessRecord {
     pub user: Option<String>,
 }
 
+/// One peer's retransmit count from the netlink eBPF module
+/// (`@rpc/netlink/retransmits`, #114).
+///
+/// The key is the **peer address alone** — no pid, no port — so this is
+/// per-peer attribution, not per-process. Counts are cumulative since the
+/// module loaded, not windowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RetransmitRecord {
+    /// Peer address, rendered.
+    pub peer: String,
+    /// Address family as a digit: 4 or 6.
+    pub family: u8,
+    /// Retransmitted skbs seen for this peer. Note `tcp_retransmit_skb` fires
+    /// once per skb while `TcpRetransSegs` counts segments, so this reads lower
+    /// than `nstat` by whatever TSO coalesced.
+    pub count: u64,
+}
+
+/// One connection-lifecycle record from the netlink eBPF module
+/// (`@rpc/netlink/connections`, #114) — tcplife, **not conntrack**.
+///
+/// `pid`/`comm` are the process that opened the socket, captured inside
+/// `connect(2)` rather than read at close (#114). For an accepted inbound
+/// socket there is no trustworthy owner and `pid` is 0; the `/proc` scan owns
+/// attribution there.
+///
+/// **`tx_bytes` / `rx_bytes` / `segs_out` / `segs_in` / `retrans` are currently
+/// always zero** — they live in `struct tcp_sock`, which the kernel program
+/// cannot reach without load-time offset injection (#681). A zero here means
+/// "not measured", not "idle".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConnectionRecord {
+    /// TGID of the process that opened the socket; 0 when unattributed.
+    pub pid: u32,
+    /// `comm` of that process.
+    pub comm: String,
+    /// Address family as a digit: 4 or 6.
+    pub family: u8,
+    pub local: String,
+    pub lport: u16,
+    pub remote: String,
+    pub rport: u16,
+    /// Established -> closed, in milliseconds.
+    pub duration_ms: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub segs_out: u32,
+    pub segs_in: u32,
+    pub retrans: u32,
+}
+
 /// One TCP socket (served filterable by state/port).
 ///
 /// The richer fields (congestion control, congestion window, socket-memory
