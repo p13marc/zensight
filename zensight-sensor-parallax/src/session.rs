@@ -413,7 +413,7 @@ impl SessionManager {
             .video
             .tiers
             .iter()
-            .position(|t| t.name == name)
+            .position(|t| t.spec.name == name)
             .map(|i| i as u8)
     }
 
@@ -423,29 +423,41 @@ impl SessionManager {
             .unwrap_or(0)
     }
 
-    /// The tier spec at a ladder index.
-    fn tier_spec(&self, idx: u8) -> Option<&zensight_common::stream::TierSpec> {
+    /// The ladder rung at an index — the wire spec plus its sensor-local
+    /// encoder shaping (#509).
+    fn tier_config(&self, idx: u8) -> Option<&crate::config::TierConfig> {
         self.config.video.tiers.get(idx as usize)
     }
 
     /// The tier name for a ladder index (for the `<tier>` media key chunk).
     fn tier_name(&self, idx: u8) -> &str {
-        self.tier_spec(idx)
-            .map(|t| t.name.as_str())
+        self.tier_config(idx)
+            .map(|t| t.spec.name.as_str())
             .unwrap_or("default")
     }
 
-    /// Resolve a tier index to the encoder parameters `build_video` needs.
+    /// Resolve a tier index to the encoder parameters `build_video` needs:
+    /// the rung's advertised numbers plus its shaping resolved over the
+    /// shared `video.encoder` defaults.
     fn tier_params(&self, idx: u8) -> pipeline::VideoParams {
-        let (bitrate_kbps, fps, max_height) = self
-            .tier_spec(idx)
-            .map(|t| (t.bitrate_kbps, t.fps, t.max_height))
-            .unwrap_or((2000, 30, None));
+        let video = &self.config.video;
+        let (bitrate_kbps, fps, max_height, tuning) = self
+            .tier_config(idx)
+            .map(|t| {
+                (
+                    t.spec.bitrate_kbps,
+                    t.spec.fps,
+                    t.spec.max_height,
+                    video.tuning_for(t),
+                )
+            })
+            .unwrap_or((2000, 30, None, video.encoder));
         pipeline::VideoParams {
             bitrate_kbps,
-            gop_frames: self.config.video.gop_frames,
+            gop_frames: tuning.gop_frames.unwrap_or(video.gop_frames),
             fps,
             max_height,
+            tuning,
         }
     }
 
@@ -1158,8 +1170,11 @@ impl SessionManager {
                     applied: TierApplied {
                         width: p.width,
                         height: p.height,
-                        fps: self.tier_spec(idx).map(|t| t.fps).unwrap_or(0),
-                        bitrate_kbps: self.tier_spec(idx).map(|t| t.bitrate_kbps).unwrap_or(0),
+                        fps: self.tier_config(idx).map(|t| t.spec.fps).unwrap_or(0),
+                        bitrate_kbps: self
+                            .tier_config(idx)
+                            .map(|t| t.spec.bitrate_kbps)
+                            .unwrap_or(0),
                     },
                     viewers: if p.viewers { 1 } else { 0 },
                 })

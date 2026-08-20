@@ -121,7 +121,7 @@ async fn spawn_sensor_with_config(
     StatsRegistry,
 ) {
     let catalog = Arc::new(Catalog::build(&config));
-    let tiers = config.video.tiers.clone();
+    let tiers = config.video.ladder();
     let publisher = Publisher::new(session.clone(), "parallax", Format::Json);
     // v1: control/query surfaces key off the producer name (the origin
     // chunk scopes per host; the source label is payload-only).
@@ -784,6 +784,201 @@ async fn stats_ticker_publishes_fps_telemetry() {
     )
     .await;
     drop(media_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// Two rungs of one ladder, identical in geometry and framerate, far apart in
+/// `bitrate_kbps` alone, on a source no encoder can compress its way out of.
+///
+/// Both caps equal the source's native height, so `offered_tiers` offers both
+/// and the scaler is passthrough on each — the geometry is provably identical
+/// rather than merely configured identical, which the test asserts from
+/// `FrameMeta`. `snow` is per-pixel uniform noise: on the SMPTE bars the other
+/// tests use, *neither* cap binds (static bars encode at a fraction of 400
+/// kbps) and the comparison would assert nothing at all.
+fn bitrate_ladder_config() -> ParallaxConfig {
+    json5::from_str(
+        r#"{
+            enumerate_v4l2: false,
+            test_sources: [
+                { name: "noise", pattern: "snow", width: 320, height: 240, fps: 10 },
+            ],
+            preview: { fps: 1, quality: 70 },
+            video: {
+                gop_frames: 20,
+                default_tier: "thin",
+                tiers: [
+                    { name: "thin", max_height: 240, fps: 10, bitrate_kbps: 300  },
+                    { name: "fat",  max_height: 240, fps: 10, bitrate_kbps: 8000 },
+                ],
+            },
+            idle_timeout_secs: 5,
+        }"#,
+    )
+    .unwrap()
+}
+
+/// The ladder's other axis. `two_viewers_on_distinct_tiers_stream_independently`
+/// proves two tiers encode at different *geometry*; nothing proved the bitrate
+/// cap does anything, and no test asserted a value on `kbps` anywhere.
+///
+/// **What the cap actually moves is throughput, not frame size.** On
+/// incompressible input the encoder cannot shrink a frame below its QP band's
+/// floor — measured here, both rungs emit ~46 kB per access unit, which at 10
+/// fps would be ~3.7 Mbit/s from either. `RateControlMode::Bitrate` holds the
+/// target by *shedding frames* instead (which is exactly why the sensor pairs
+/// it with `skip_frames(true)`), so the cap shows up as bytes per second on the
+/// wire. Asserting bytes-per-frame would compare the one quantity the cap
+/// leaves alone.
+///
+/// Measured at the **subscriber**, on each tier's exact `<tier>` key, and the
+/// two tiers **concurrently** over equal windows. Subscriber-side because the
+/// telemetry plane structurally cannot answer this — `StatsRegistry` is keyed by
+/// stream, one handle shared across every open tier and the preview, and the
+/// registry declares `{stream}/stats/kbps` with no tier chunk — and because it
+/// asserts what a viewer receives rather than what the sensor says about itself.
+/// Concurrently because measuring one tier and then the other lets the second
+/// drain a queue that filled during the first, which reads as an absurd rate.
+///
+/// Deliberately NOT asserted: that measured throughput lands within X% of the
+/// configured target (OpenH264's rate control is a controller with a QP band,
+/// not a limiter); absolute byte figures for a resolution (they move with the
+/// vendored OpenH264); anything about which frames were shed — that is what
+/// `{stream}/stats/rc_drops` is for (#510).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_ladders_bitrate_cap_bites_on_the_wire() {
+    /// Long enough to average over several GOPs, short enough to keep the
+    /// suite quick.
+    const WINDOW: Duration = Duration::from_secs(6);
+
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-ladder";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor_with_config(sensor.clone(), source, bitrate_ladder_config())
+        .await
+        .0;
+
+    // Subscribe to both exact tier keys BEFORE opening, so no frames are lost.
+    let thin_sub = viewer
+        .declare_subscriber(
+            v1ctx()
+                .media_video_key("noise", "h264", "thin")
+                .as_keyexpr(),
+        )
+        .await
+        .expect("declare thin subscriber");
+    let fat_sub = viewer
+        .declare_subscriber(v1ctx().media_video_key("noise", "h264", "fat").as_keyexpr())
+        .await
+        .expect("declare fat subscriber");
+
+    for tier in ["thin", "fat"] {
+        send_control(
+            &viewer,
+            &host_prefix,
+            StreamControl::OpenStream {
+                stream: "noise".into(),
+                codec: Some("h264".into()),
+                tier: Some(tier.into()),
+            },
+        )
+        .await;
+    }
+
+    /// One tier's throughput: skip to the first keyframe (the startup IDR would
+    /// distort a short window), then drain for `window`, returning
+    /// (kbit/s, access units, mean bytes per AU, encoded geometry).
+    async fn measure(
+        sub: &zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+        window: Duration,
+    ) -> (f64, usize, f64, (u32, u32)) {
+        let mut started: Option<Instant> = None;
+        let (mut bytes, mut frames) = (0usize, 0usize);
+        let mut geometry = (0, 0);
+        loop {
+            if let Some(t0) = started
+                && t0.elapsed() >= window
+            {
+                break;
+            }
+            let Ok(Ok(sample)) =
+                tokio::time::timeout(Duration::from_secs(15), sub.recv_async()).await
+            else {
+                break;
+            };
+            let att = sample.attachment().expect("FrameMeta attachment");
+            let meta: FrameMeta = decode(&att.to_bytes(), Format::Cbor).expect("decode FrameMeta");
+            if started.is_none() {
+                if !meta.keyframe {
+                    continue; // wait for a clean entry point
+                }
+                started = Some(Instant::now());
+                geometry = (meta.width, meta.height);
+            }
+            bytes += sample.payload().len();
+            frames += 1;
+        }
+        let secs = started
+            .expect("no keyframe arrived on this tier")
+            .elapsed()
+            .as_secs_f64()
+            .max(1e-6);
+        let mean = if frames > 0 {
+            bytes as f64 / frames as f64
+        } else {
+            0.0
+        };
+        ((bytes as f64 * 8.0) / 1000.0 / secs, frames, mean, geometry)
+    }
+
+    // Concurrently — see the doc comment.
+    let (thin, fat) = tokio::join!(measure(&thin_sub, WINDOW), measure(&fat_sub, WINDOW));
+    let (thin_kbps, thin_frames, thin_mean, thin_geom) = thin;
+    let (fat_kbps, fat_frames, fat_mean, fat_geom) = fat;
+
+    // Always logged: a CI failure has to be diagnosable from the log alone.
+    eprintln!(
+        "ladder: thin {thin_kbps:.0} kbps ({thin_frames} AUs, {thin_mean:.0} B/AU, \
+         {}×{}) vs fat {fat_kbps:.0} kbps ({fat_frames} AUs, {fat_mean:.0} B/AU, {}×{})",
+        thin_geom.0, thin_geom.1, fat_geom.0, fat_geom.1
+    );
+
+    assert_eq!(
+        thin_geom, fat_geom,
+        "both rungs cap at the source's native height, so any throughput \
+         difference is the bitrate cap and nothing else"
+    );
+    assert!(
+        thin_kbps * 2.0 <= fat_kbps,
+        "the 300 kbps rung must carry materially less than the 8000 kbps rung \
+         (expected an order of magnitude, asserting 2×): thin {thin_kbps:.0} kbps, \
+         fat {fat_kbps:.0} kbps"
+    );
+    // The cap is a controller, not a limiter, so this is a smoke bound rather
+    // than a conformance claim: 4× the target catches "the cap is ignored",
+    // which is the failure worth catching.
+    assert!(
+        thin_kbps < 4.0 * 300.0,
+        "the thin rung overshot its 300 kbps cap wildly: {thin_kbps:.0} kbps"
+    );
+
+    for tier in ["thin", "fat"] {
+        send_control(
+            &viewer,
+            &host_prefix,
+            StreamControl::CloseStream {
+                stream: "noise".into(),
+                codec: Some("h264".into()),
+                tier: Some(tier.into()),
+            },
+        )
+        .await;
+    }
+    drop(thin_sub);
+    drop(fat_sub);
     wait_until_closed(&handle).await;
 
     viewer.close().await.unwrap();

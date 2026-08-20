@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The ladder's bitrate cap is pinned end to end** (#504). A headless e2e test
+  runs two rungs identical in geometry and framerate and far apart in
+  `bitrate_kbps` alone, on per-pixel noise, and measures what a subscriber
+  actually receives on each exact `<tier>` key. It measures **throughput, not
+  frame size**, which is the correction the measurement itself forced: on input
+  the encoder cannot compress further it does not shrink each frame — both rungs
+  emit ~48 kB and ~61 kB per access unit — it *sheds frames*, which is exactly
+  why the sensor pairs `RateControlMode::Bitrate` with `skip_frames(true)`. Over
+  one window the thin rung delivered 3 access units to the fat rung's 12. The
+  stats plane could not have answered this: the stats handle is per stream,
+  shared by every open tier and the preview, and `{stream}/stats/kbps` has no
+  tier chunk.
+
+- **The tier ladder shapes its encoder, not just its numbers** (#509).
+  parallax-pipeline exposes thirteen `H264EncoderConfig` knobs and the sensor set
+  five, so a tier could say what it delivers but nothing about how the encoder
+  got there. `video.encoder` now sets `profile` / `complexity` / `usage_type` /
+  `qp` / `max_slice_len` and a per-tier `gop_frames` override for every rung, and
+  any tier's own `encoder` block overrides it field by field.
+  - The knobs are **sensor-local by design**. `TierSpec` rides the catalogue and
+    is a derived entry in the fleet-wide `describe` schema every producer serves
+    (RFC 08 §7); putting encoder internals there would make an implementation
+    detail a bus contract, and a viewer picks a tier by resolution, framerate and
+    bitrate — never by entropy coder.
+  - **Every knob ships unset**, and each is applied only when set, so an unset
+    knob is OpenH264's own default by construction rather than by a copy of it
+    that can drift. A default build is byte-for-byte what it was.
+  - Two defaults were asked for and not shipped, with the reasons written into
+    the docs. `complexity` is documented as the answer to a firing
+    `encoder_overrun` — cheaper than dropping resolution, invisible to the
+    receiver — rather than given a value nobody measured. And `max_slice_len` is
+    documented as **not paying off yet**: MTU-sized NALs limit fragmentation
+    loss to one slice, but this sensor publishes a whole access unit as one
+    best-effort Zenoh sample, so a lost sample costs the whole AU however it was
+    sliced. It is wired and tested so it is ready for a downstream RTP/WebRTC
+    payloader; it is off until there is one.
+  - All three H.264 profiles are verified to decode through the GUI's own
+    OpenH264 path, so an operator can set any of them without discovering that
+    the project's own viewer cannot read the result.
+
 - **The encoder says when the bitrate cap is biting** (#510). parallax-pipeline
   0.6 hands out an `EncoderStatsHandle` — cloned before `Executor::start()` like
   every other live handle — and with it the one number this sensor could never
@@ -111,6 +151,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     consumer ask for a prefix).
 
 ### Changed
+
+- **The parallax docs no longer promise live re-tuning that no build serves**
+  (#504). `README.md` and a whole `docs/streams.md` section described
+  bitrate/GOP/framerate/preview-quality control running "on the pipeline's
+  control handles — no teardown". The handles are real and cloned before the
+  executor starts, but the session actor drives exactly one of them,
+  `keyframe`; there is no `set_bitrate`, `set_max_height` or `set_rate` call
+  anywhere in the crate. #494 designed the premise away — quality is which
+  `<tier>` you subscribe to — and #513 settled that redefining a tier is
+  config-only. The section is replaced by a short "why there is no live re-tune
+  command" that says what was decided and what such a knob would actually cost,
+  rather than a bare deletion: the claim has been written into this tree twice
+  already. The `max_height` limitation bullet loses the same false clause (the
+  cap is applied when the pipeline is built; nothing retargets the scaler).
+  - `TierApplied` called itself "actual, not requested". That is true of
+    `width`/`height`, which come from the built pipeline, and false of `fps`
+    and `bitrate_kbps`, which are the configured targets read back out of the
+    tier spec — and the GUI renders all four as the tile's real state. The doc
+    now says which is which and points at where a real measurement lives.
+
 
 - **`introspect` can no longer ship lies** (#484). RFC 08 §6.1's MUST — every
   registered procedure is served by the build advertising it — is now checked at

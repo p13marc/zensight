@@ -89,6 +89,38 @@ pub fn extract_param_sets(data: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// NAL unit type: coded slice of a non-IDR picture.
+const NAL_SLICE: u8 = 1;
+
+/// Every NAL unit in an access unit as `(type, payload length in bytes)`, in
+/// stream order. The length excludes the start code, so it is the quantity an
+/// MTU slice cap is compared against.
+///
+/// Used to check that `encoder.max_slice_len` (#509) actually reached OpenH264:
+/// with a cap set, one large keyframe comes back as several coded slices
+/// instead of one.
+pub fn nal_units(data: &[u8]) -> Vec<(u8, usize)> {
+    let offsets: Vec<(usize, usize)> = nal_offsets(data).collect();
+    offsets
+        .iter()
+        .enumerate()
+        .map(|(idx, &(_, payload))| {
+            let end = offsets.get(idx + 1).map_or(data.len(), |&(next, _)| next);
+            (data[payload] & 0x1F, end - payload)
+        })
+        .collect()
+}
+
+/// How many *coded slice* NALs (IDR or non-IDR) an access unit carries —
+/// parameter sets and SEI do not count. One per frame unless the encoder was
+/// given a slice-size cap.
+pub fn coded_slice_count(data: &[u8]) -> usize {
+    nal_units(data)
+        .into_iter()
+        .filter(|(t, _)| *t == NAL_SLICE || *t == NAL_IDR)
+        .count()
+}
+
 /// Prepend `param_sets` (as produced by [`extract_param_sets`]) to a keyframe
 /// access unit that lacks its own.
 pub fn prepend_param_sets(param_sets: &[u8], au: &[u8]) -> Vec<u8> {
@@ -112,6 +144,31 @@ mod tests {
         v.push(ty & 0x1F);
         v.extend_from_slice(payload);
         v
+    }
+
+    #[test]
+    fn nal_units_reports_types_and_lengths() {
+        // Mixed 3- and 4-byte start codes: the length must exclude both, and
+        // the last NAL must run to the end of the buffer.
+        let mut au = nal(true, 7, &[0xAA, 0xAA]); // SPS, payload 2 + header 1
+        au.extend(nal(false, 8, &[0xBB])); // PPS, payload 1 + header 1
+        au.extend(nal(true, 5, &[0xCC; 10])); // IDR slice, 10 + header 1
+
+        assert_eq!(nal_units(&au), vec![(7, 3), (8, 2), (5, 11)]);
+        assert_eq!(
+            coded_slice_count(&au),
+            1,
+            "parameter sets are not coded slices"
+        );
+
+        // A sliced keyframe: several coded slices in one access unit.
+        let mut sliced = nal(true, 7, &[0xAA]);
+        sliced.extend(nal(true, 5, &[0xCC; 4]));
+        sliced.extend(nal(true, 5, &[0xCC; 4]));
+        sliced.extend(nal(true, 1, &[0xDD; 4]));
+        assert_eq!(coded_slice_count(&sliced), 3);
+
+        assert!(nal_units(b"no start codes here").is_empty());
     }
 
     #[test]
