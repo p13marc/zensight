@@ -21,11 +21,15 @@ matching listener forces a keyframe the instant a subscriber appears.
   `close_stream {codec, tier}` / `request_keyframe {tier}`). The video plane is
   a *ladder* of tiers (`low`/`medium`/`high`), each an **independent** encoder
   published concurrently on its own `<tier>` key with its own
-  resolution/fps/bitrate. A viewer subscribes to exactly the one tier its link
-  can take, so two viewers on different links never fight over one encoder. Each
-  (stream, tier) and the preview is refcounted per requester and reaped after
-  `idle_timeout_secs` without viewers. Live re-tuning (bitrate seamless; GOP /
-  resolution rebuild + IDR) runs on the pipeline's control handles — no teardown.
+  resolution/fps/bitrate — plus optional per-tier **encoder shaping**
+  (profile / complexity / usage type / QP / GOP / MTU slicing, #509), which is
+  sensor-local config and never on the wire. A viewer subscribes to exactly the
+  one tier its link can take, so two viewers on different links never fight over
+  one encoder. Each (stream, tier) and the preview is refcounted per requester
+  and reaped after `idle_timeout_secs` without viewers. A tier's numbers are
+  **config**, not a command: there is no live re-tune knob (#504) — a viewer changes quality by
+  subscribing to a different `<tier>` (#494), and redefining what a tier means
+  is `configs/parallax.json5` plus a restart (#513).
 - **Media egress** — `zensight/v1/<origin>/@media/parallax/<stream>/video/h264/<tier>`
   (encoding `video/h264`) and `…/@media/parallax/<stream>/preview/jpeg`
   (encoding `image/jpeg`), every sample carrying a CBOR `FrameMeta` attachment
@@ -43,7 +47,7 @@ matching listener forces a keyframe the instant a subscriber appears.
   `state/parallax/stream/<stream>` (declared publisher; failed opens publish
   a definitive `open: false`; tombstoned on removal from config, not on
   close), and per-stream telemetry under
-  `<stream>/stats/{fps,kbps,drops,viewers,encode_ms}` so existing charts
+  `<stream>/stats/{fps,kbps,drops,rc_drops,viewers,encode_ms}` so existing charts
   light up for free.
 - **Liveliness + health + alerts** — one `state/parallax/device/<stream>/alive`
   token per catalogue entry; per-stream health tracking; alert rules for
@@ -64,8 +68,8 @@ unprivileged on most distros (`video` group).
 ## Documentation
 
 - [docs/streams.md](docs/streams.md) — the stream/tier model, demand-driven
-  simulcast, pipeline shapes per source kind, live control, keyframe control,
-  teardown, limitations.
+  simulcast, pipeline shapes per source kind, per-tier encoder shaping,
+  keyframe control, teardown, limitations.
 - [docs/configuration.md](docs/configuration.md) — every config key.
 - [../docs/KEYSPACE.md](../docs/KEYSPACE.md) — the authoritative
   key-expression contract (the `@media` plane: RFC 04/07).

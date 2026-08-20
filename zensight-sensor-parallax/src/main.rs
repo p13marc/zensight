@@ -168,7 +168,9 @@ async fn main() -> Result<()> {
         let q_session = session.clone();
         let q_producer = "parallax".to_string();
         let q_catalog = catalog.clone();
-        let q_tiers = parallax_config.video.tiers.clone();
+        // The catalogue advertises the wire ladder; the per-tier encoder
+        // shaping (#509) stays on this host.
+        let q_tiers = parallax_config.video.ladder();
         let q_handle = session_handle.clone();
         runner.spawn(async move {
             query::run(q_session, q_producer, q_catalog, q_tiers, q_handle).await;
@@ -180,7 +182,7 @@ async fn main() -> Result<()> {
         "source": source,
         "streams": catalog.stream_names().collect::<Vec<_>>(),
         "preview_fps": parallax_config.preview.fps,
-        "tiers": parallax_config.video.tiers.iter().map(|t| &t.name).collect::<Vec<_>>(),
+        "tiers": parallax_config.video.tiers.iter().map(|t| &t.spec.name).collect::<Vec<_>>(),
         "default_tier": parallax_config.video.default_tier,
         "idle_timeout_secs": parallax_config.idle_timeout_secs,
     });

@@ -103,6 +103,30 @@ fn tier_readout(detail: &ParallaxDetailState, name: &str, tile: &TileState) -> O
     ))
 }
 
+/// Is this stream's bitrate cap biting *right now*?
+///
+/// `{stream}/stats/rc_drops` counts frames the encoder's rate control swallowed
+/// to hold the tier's `bitrate_kbps` (#510). It is cumulative, so a non-zero
+/// value only says the cap bit at *some* point; growth between the two most
+/// recent samples is what says it is biting now.
+///
+/// The counter is per stream, summed over its open tiers — but the GUI opens
+/// one tier per stream, so it is that tier's.
+fn rc_capped(state: &DeviceDetailState, stream: &str) -> bool {
+    let history = match state.history.get(&format!("{stream}/stats/rc_drops")) {
+        Some(h) => h,
+        None => return false,
+    };
+    let mut counters = history.iter().rev().filter_map(|p| match p.value {
+        zensight_common::TelemetryValue::Counter(n) => Some(n),
+        _ => None,
+    });
+    match (counters.next(), counters.next()) {
+        (Some(latest), Some(previous)) => latest > previous,
+        _ => false,
+    }
+}
+
 /// A tier button's short label: `<name> ≤<cap>p` (or `<name> native` when the
 /// tier is uncapped). The full resolution/fps/bitrate lives in the tooltip.
 fn tier_button_label(spec: &zensight_common::stream::TierSpec) -> String {
@@ -195,6 +219,7 @@ fn tile<'a>(
     detail: &'a ParallaxDetailState,
     name: &'a str,
     tile: &'a TileState,
+    capped: bool,
 ) -> Element<'a, Message> {
     let picture: Element<'a, Message> = match (&tile.frame, &tile.ended) {
         (Some(handle), _) => preview_frame(handle.clone()),
@@ -216,9 +241,14 @@ fn tile<'a>(
     } else if tile.frame.is_some() {
         // For a video tile, prefer the sensor's applied per-tier readout
         // (resolution + bitrate, #503) over the client-side fps EMA alone.
+        // `· capped` says the encoder is shedding frames to hold the tier's
+        // bitrate — the difference between "this tier looks soft" and "this
+        // tier is soft *because you asked for 400 kbps*". Grid captions only:
+        // this is the surface where several streams are compared at once.
+        let cap = if capped { " · capped" } else { "" };
         match tier_readout(detail, name, tile) {
-            Some(readout) => format!("{name} · {readout} · {:.1} fps", tile.fps),
-            None => format!("{name} · seq {} · {:.1} fps", tile.last_seq, tile.fps),
+            Some(readout) => format!("{name} · {readout} · {:.1} fps{cap}", tile.fps),
+            None => format!("{name} · seq {} · {:.1} fps{cap}", tile.last_seq, tile.fps),
         }
     } else {
         format!("{name} · waiting for frames…")
@@ -381,7 +411,7 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
         for chunk in tiles.chunks(TILES_PER_ROW) {
             let mut grid_row = row![].spacing(space::MD);
             for (name, tile_state) in chunk {
-                grid_row = grid_row.push(tile(detail, name, tile_state));
+                grid_row = grid_row.push(tile(detail, name, tile_state, rc_capped(state, name)));
             }
             content = content.push(grid_row);
         }
@@ -403,6 +433,55 @@ mod tests {
     #[test]
     fn rejects_non_jpeg_bytes() {
         assert!(preview_handle_from_jpeg(b"definitely not a jpeg").is_none());
+    }
+
+    /// `rc_drops` is cumulative, so a non-zero value alone only says the cap
+    /// bit at *some* point in this stream's life. The caption marker is about
+    /// now, so it keys off growth between the two most recent samples.
+    #[test]
+    fn rc_capped_reads_growth_not_the_absolute_counter() {
+        use crate::view::device::DeviceDetailState;
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+        fn state_with(samples: &[u64]) -> DeviceDetailState {
+            let mut state = DeviceDetailState::new(crate::message::DeviceId {
+                protocol: Protocol::Parallax,
+                origin: "h-000000000000".to_string(),
+                source: "cam-host".to_string(),
+            });
+            state.history.insert(
+                "cam0/stats/rc_drops".to_string(),
+                samples
+                    .iter()
+                    .map(|n| {
+                        TelemetryPoint::new(
+                            "cam-host",
+                            Protocol::Parallax,
+                            "cam0/stats/rc_drops",
+                            TelemetryValue::Counter(*n),
+                        )
+                    })
+                    .collect(),
+            );
+            state
+        }
+
+        assert!(
+            rc_capped(&state_with(&[7, 11]), "cam0"),
+            "the counter grew between the last two ticks — the cap is biting now"
+        );
+        assert!(
+            !rc_capped(&state_with(&[11, 11]), "cam0"),
+            "a large but static counter means the cap bit earlier, not now"
+        );
+        assert!(
+            !rc_capped(&state_with(&[4]), "cam0"),
+            "one sample cannot show growth"
+        );
+        assert!(
+            !rc_capped(&state_with(&[]), "cam0"),
+            "a stream with no rate control publishes nothing to read"
+        );
     }
 
     #[test]

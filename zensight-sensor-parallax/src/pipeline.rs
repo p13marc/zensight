@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use parallax::buffer::Buffer;
-use parallax::control::{Controllable, EncoderControl, RateControlMode};
+use parallax::control::{Controllable, EncoderControl, EncoderStatsHandle, RateControlMode};
 use parallax::converters::PixelFormat as ConvFormat;
 use parallax::element::{Element, ProduceContext, ProduceResult, Source};
-use parallax::elements::codec::KeyframeHandle;
+use parallax::elements::codec::{Complexity, KeyframeHandle, Profile, UsageType};
 use parallax::elements::transform::VideoConvertElement;
 use parallax::elements::{
     AppSink, AppSinkHandle, AppSrc, AppSrcHandle, ColorType, H264Decoder, H264Encoder,
@@ -28,7 +28,7 @@ use parallax::elements::{
 use parallax::pipeline::{Executor, Pipeline, UnifiedExecutorConfig};
 
 use crate::catalog::SourceKind;
-use crate::config::PreviewConfig;
+use crate::config::{EncoderComplexity, EncoderTuning, EncoderUsage, H264Profile, PreviewConfig};
 use crate::stats::StreamStats;
 
 /// How many encoded frames an AppSink may queue before dropping the oldest.
@@ -135,6 +135,20 @@ impl<S: Source> Source for StoppableSource<S> {
 
 /// Wraps an encoder [`Element`] to time each `process()` call into the
 /// stream's stats (`encode_ms` telemetry + the encoder-overrun rule).
+///
+/// This survives parallax 0.6's [`EncoderStatsHandle`] (#510) on purpose, and
+/// the reason is easy to lose: the handle's `last_encode_ns` is a *store*, one
+/// sample of the most recent call, where `encode_ms` is a mean over every call
+/// in the tick interval. At the default 5 s interval on a 30 fps tier that is
+/// one sample in 150, and `encoder_overrun` compares that mean to a per-frame
+/// budget — a spot sample would turn a threshold rule into a coin flip. The
+/// handle also times only the inner `encode()`, while this wrapper covers the
+/// whole `process()` (pending-control application, the geometry lookup, the
+/// arena copy, the IDR scan), which is the work the budget is actually about.
+/// It is also the only encode timing the three JPEG preview paths have.
+///
+/// What the two *do* agree on is the denominator, and `pipeline.rs`'s tests
+/// pin it: `encoded_frames == frames_encoded() + frames_dropped_by_rc()`.
 struct TimedElement<E: Element> {
     inner: E,
     stats: Arc<StreamStats>,
@@ -183,14 +197,22 @@ impl<E: Element> Element for TimedElement<E> {
     }
 }
 
-/// Live control handles for a running pipeline (parallax 0.6).
+/// Live control **and observation** handles for a running pipeline (parallax 0.6).
 ///
 /// The unified executor **moves** every element into its task at
 /// `Executor::start()`, so a live element is unreachable except through a
-/// handle cloned **before** start. Every controllable knob a running video
-/// pipeline exposes is cloned here at construction; the session actor writes
-/// to them to reconfigure a stream without a teardown (#496). RTSP passthrough
-/// has no encoder in its graph, so its handles are all `None`.
+/// handle cloned **before** start. That pre-start rule is the invariant this
+/// struct encodes, and it is why the encoder's own counters live here next to
+/// the knobs rather than anywhere more obvious (#510).
+///
+/// Every controllable knob a running video pipeline exposes is cloned here at
+/// construction — it has to be done then or not at all. Note what the session
+/// actor actually *drives*: only [`Self::keyframe`]. The rest are cloned
+/// against a live-retune path that no command reaches, because there is no such
+/// command: quality is chosen by which `<tier>` a viewer subscribes to (#494)
+/// and redefining a tier is config-only (#513). See `docs/streams.md`, "Why
+/// there is no live re-tune command". RTSP passthrough has no encoder in its
+/// graph, so its handles are all `None`.
 #[derive(Default, Clone)]
 pub struct PipelineControls {
     /// Live H.264 bitrate / GOP / QP / rate-control. `None` for passthrough.
@@ -211,6 +233,12 @@ pub struct PipelineControls {
     /// graphs that re-encode; the MJPG passthrough has no scaler (the camera's
     /// JPEG bytes are forwarded verbatim).
     pub preview_scale: Option<ScaleControl>,
+    /// The H.264 encoder's own counters — `frames_dropped_by_rc`, the one
+    /// number this crate cannot compute for itself (#510). Cloned before start
+    /// like every other handle here. `None` for previews (JPEG has no rate
+    /// control, and parallax documents the counter as permanently zero there)
+    /// and for RTSP passthrough (no encoder in the graph at all).
+    pub encoder_stats: Option<EncoderStatsHandle>,
 }
 
 /// A constructed (not yet started) profile pipeline.
@@ -253,13 +281,56 @@ const FEED_QUEUE: usize = 8;
 /// quality at a low cap), and the encoder skips *further* only when even that
 /// rate exceeds the byte budget on a complex scene — exactly the graceful
 /// degradation a cheap tier wants.
+///
+/// Everything past those five is *tier shaping* (#509), resolved from
+/// `video.encoder` and the tier's own `encoder` block. Each is applied only
+/// when the operator set it, so an unset knob is OpenH264's default **by
+/// construction** rather than by our copy of it — which is why this reads as a
+/// chain of `if let` rather than a table of defaults.
+///
+/// `threads` and `sps_pps_strategy` stay unset deliberately: parallax
+/// auto-detects a thread count and a per-tier thread budget needs a host-wide
+/// story, while OpenH264 writes the parameter sets into every IDR under every
+/// strategy (the strategy only renumbers ids) and the egress's
+/// self-contained-keyframe guarantee is derived from the bytes regardless.
 fn video_encoder_config(params: &VideoParams) -> H264EncoderConfig {
-    H264EncoderConfig::new()
+    let t = &params.tuning;
+    let mut cfg = H264EncoderConfig::new()
         .bitrate(params.bitrate_kbps.saturating_mul(1000))
         .frame_rate(params.fps as f32)
         .keyframe_interval(params.gop_frames)
         .rate_control(RateControlMode::Bitrate)
-        .skip_frames(true)
+        .skip_frames(true);
+
+    if let Some(profile) = t.profile {
+        cfg = cfg.profile(match profile {
+            H264Profile::Baseline => Profile::Baseline,
+            H264Profile::Main => Profile::Main,
+            H264Profile::High => Profile::High,
+        });
+    }
+    if let Some(complexity) = t.complexity {
+        cfg = cfg.complexity(match complexity {
+            EncoderComplexity::Low => Complexity::Low,
+            EncoderComplexity::Medium => Complexity::Medium,
+            EncoderComplexity::High => Complexity::High,
+        });
+    }
+    if let Some(usage) = t.usage_type {
+        cfg = cfg.usage_type(match usage {
+            EncoderUsage::CameraRealtime => UsageType::CameraRealtime,
+            EncoderUsage::ScreenRealtime => UsageType::ScreenRealtime,
+            EncoderUsage::CameraNonRealtime => UsageType::CameraNonRealtime,
+            EncoderUsage::ScreenNonRealtime => UsageType::ScreenNonRealtime,
+        });
+    }
+    if let Some(bytes) = t.max_slice_len {
+        cfg = cfg.max_slice_len(bytes);
+    }
+    if let Some(qp) = t.qp {
+        cfg = cfg.qp(qp);
+    }
+    cfg
 }
 
 /// The resolved encoder parameters for one video tier — a config `TierSpec`
@@ -275,6 +346,9 @@ pub struct VideoParams {
     pub fps: u32,
     /// Aspect-preserving height cap; `None` = native.
     pub max_height: Option<u32>,
+    /// Resolved encoder shaping — the tier's `encoder` block over the shared
+    /// `video.encoder` defaults (#509). Sensor-local; never on the wire.
+    pub tuning: EncoderTuning,
 }
 
 /// A `VideoScale` element plus its live `ScaleControl`, seeded with the initial
@@ -331,6 +405,7 @@ pub fn build_video(
             // Clone every control handle BEFORE the elements move into the pipeline.
             let enc_ctl = encoder.control();
             let keyframe = encoder.keyframe_handle();
+            let enc_stats = encoder.stats();
 
             stats.tighten_budget(1_000_000_000 / params.fps.max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
@@ -368,6 +443,7 @@ pub fn build_video(
                     keyframe: Some(keyframe),
                     scale: Some(scale_ctl),
                     rate: Some(rate_ctl),
+                    encoder_stats: Some(enc_stats),
                     ..Default::default()
                 },
                 stop,
@@ -390,6 +466,7 @@ pub fn build_video(
                 H264Encoder::new(video_encoder_config(params)).context("create H.264 encoder")?;
             let enc_ctl = encoder.control();
             let keyframe = encoder.keyframe_handle();
+            let enc_stats = encoder.stats();
 
             stats.tighten_budget(1_000_000_000 / params.fps.max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
@@ -460,6 +537,7 @@ pub fn build_video(
                     keyframe: Some(keyframe),
                     scale: Some(scale_ctl),
                     rate: Some(rate_ctl),
+                    encoder_stats: Some(enc_stats),
                     ..Default::default()
                 },
                 stop,
@@ -799,6 +877,7 @@ mod tests {
             gop_frames: 60,
             fps,
             max_height,
+            tuning: EncoderTuning::default(),
         }
     }
 
@@ -848,6 +927,180 @@ mod tests {
             .expect("pipeline must shut down cleanly after StopHandle::stop()")
             .expect("pipeline tasks must end without error");
         frames
+    }
+
+    /// Only an encoder-backed video graph can report rate-control drops. A
+    /// preview re-encodes with JPEG (parallax documents `frames_dropped_by_rc`
+    /// as permanently zero there) and an RTSP tier is passthrough with no
+    /// encoder at all — both must hand back `None`, which is what stops the
+    /// stats ticker publishing a misleading zero (#510).
+    #[test]
+    fn only_video_graphs_expose_encoder_stats() {
+        let video =
+            build_video(&test_kind(15), &vparams(10, None), &Arc::default()).expect("build video");
+        assert!(
+            video.controls.encoder_stats.is_some(),
+            "an H.264 tier carries the encoder's own counters"
+        );
+
+        let preview = build_preview(
+            &test_kind(15),
+            &PreviewConfig {
+                fps: 5,
+                quality: 75,
+                max_height: None,
+            },
+            &Arc::default(),
+        )
+        .expect("build preview");
+        assert!(
+            preview.controls.encoder_stats.is_none(),
+            "JPEG has no rate control"
+        );
+    }
+
+    /// `TimedElement` survives `EncoderStatsHandle` because the handle cannot
+    /// produce an interval *mean* (see its doc comment). What the two do agree
+    /// on is the denominator — every `process()` call is either an emitted
+    /// frame or one the rate controller swallowed — so pin that, and the
+    /// "keep the wrapper" decision stays reviewable instead of asserted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn encoder_stats_agree_with_the_timed_element() {
+        let stats = Arc::new(StreamStats::default());
+        let built = build_video(&test_kind(15), &vparams(10, None), &stats).expect("build video");
+        // Clone the handle BEFORE the pull consumes `built` — the whole reason
+        // it is cloned before `Executor::start()` in the first place.
+        let handle = built
+            .controls
+            .encoder_stats
+            .clone()
+            .expect("video graph exposes encoder stats");
+
+        let frames = pull_frames(built, 6).await;
+        assert!(!frames.is_empty(), "the test source must produce frames");
+
+        let encoded = handle.frames_encoded();
+        let shed = handle.frames_dropped_by_rc();
+        assert!(encoded > 0, "the encoder emitted nothing");
+        assert!(handle.bytes_encoded() > 0, "the encoder produced no bytes");
+        assert_eq!(
+            stats.encoded_frames.load(Ordering::Relaxed),
+            encoded + shed,
+            "every timed `process()` call is either an emitted frame or an RC drop"
+        );
+    }
+
+    /// One kbit/s against per-pixel noise: `RateControlMode::Bitrate` with
+    /// `skip_frames(true)` leaves OpenH264 no way to hold that target except by
+    /// swallowing frames. This is the counter actually counting something.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rate_control_drops_frames_at_a_starved_bitrate() {
+        let kind = SourceKind::Test {
+            pattern: "snow".into(),
+            width: 320,
+            height: 240,
+            fps: 15,
+        };
+        let params = VideoParams {
+            bitrate_kbps: 1,
+            gop_frames: 60,
+            fps: 15,
+            max_height: None,
+            tuning: EncoderTuning::default(),
+        };
+        let mut built = build_video(&kind, &params, &Arc::default()).expect("build video");
+        let handle = built.controls.encoder_stats.clone().expect("encoder stats");
+        let sink = built.sink.clone();
+        let pipeline = executor()
+            .start(&mut built.pipeline)
+            .expect("start pipeline");
+
+        // Bounded by wall clock, not by a frame count: a starved encoder emits
+        // almost nothing, so waiting for N *published* frames would wait for
+        // the thing the test is asserting does not happen. Stop as soon as the
+        // counter moves.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && handle.frames_dropped_by_rc() == 0 {
+            let _ = sink.pull_buffer_timeout(Duration::from_millis(100)).await;
+        }
+        let (encoded, shed) = (handle.frames_encoded(), handle.frames_dropped_by_rc());
+
+        built.stop.stop();
+        tokio::time::timeout(Duration::from_secs(10), pipeline.wait())
+            .await
+            .expect("pipeline must shut down cleanly")
+            .expect("pipeline tasks must end without error");
+
+        eprintln!("starved encoder: {encoded} encoded, {shed} shed by RC");
+        assert!(
+            shed > 0,
+            "a 1 kbit/s cap on noise must make the rate controller shed frames \
+             ({encoded} encoded, {shed} shed)"
+        );
+    }
+
+    /// `encoder.max_slice_len` must actually reach OpenH264 (#509). On an
+    /// incompressible source a keyframe far larger than the cap comes back as
+    /// SEVERAL coded-slice NALs; the same graph with the knob unset produces
+    /// exactly one slice per access unit.
+    ///
+    /// The assertion is **structural** — slice *count*, not slice size. OpenH264
+    /// treats `uiSliceSizeConstraint` as a target it may overshoot on a
+    /// macroblock boundary, not as a limiter, so `every NAL <= 1200` would be a
+    /// flake with a plausible-sounding story. The generous per-slice bound below
+    /// only catches the knob being ignored outright.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mtu_slicing_splits_a_keyframe_into_packet_sized_nals() {
+        const CAP: u32 = 1200;
+        let kind = SourceKind::Test {
+            pattern: "snow".into(),
+            width: 640,
+            height: 360,
+            fps: 10,
+        };
+
+        async fn biggest_au(kind: &SourceKind, params: &VideoParams) -> Vec<u8> {
+            let built = build_video(kind, params, &Arc::default()).expect("build video");
+            pull_full_aus(built, 4)
+                .await
+                .into_iter()
+                .max_by_key(|au| au.len())
+                .expect("the encoder produced no access units")
+        }
+
+        let mut sliced = vparams(10, None);
+        sliced.tuning.max_slice_len = Some(CAP);
+        let au = biggest_au(&kind, &sliced).await;
+        let slices: Vec<usize> = crate::annexb::nal_units(&au)
+            .into_iter()
+            .filter(|(t, _)| *t == 1 || *t == 5)
+            .map(|(_, len)| len)
+            .collect();
+        eprintln!("sliced: {}-byte AU -> slices {slices:?}", au.len());
+        assert!(
+            au.len() as u32 > CAP * 2,
+            "640x360 noise must produce an AU well over the cap to slice at all \
+             (got {} bytes)",
+            au.len()
+        );
+        assert!(
+            slices.len() > 1,
+            "a {}-byte access unit under a {CAP}-byte cap must be sliced: {slices:?}",
+            au.len()
+        );
+        assert!(
+            slices.iter().all(|l| *l as u32 <= CAP * 2),
+            "a slice ran to {:?} against a {CAP}-byte cap — the knob looks ignored",
+            slices.iter().max()
+        );
+
+        // Control: the same graph with the knob unset is one slice per frame.
+        let au = biggest_au(&kind, &vparams(10, None)).await;
+        assert_eq!(
+            crate::annexb::coded_slice_count(&au),
+            1,
+            "without a cap OpenH264 emits one coded slice per access unit"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -993,6 +1246,55 @@ mod tests {
     /// size actually encoded. A non-mod-16 aspect-derived width (1280×720 →
     /// 854×480) is the awkward case; a floor/ceil disagreement here used to make
     /// the readout claim 852 while the pixels were 854.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn every_profile_the_ladder_can_name_decodes_like_the_gui() {
+        use parallax::converters::{PixelFormat, VideoConvert};
+
+        // The frontend decodes with OpenH264 too (`zensight`'s `h264` feature),
+        // so an encoder profile its decoder cannot read would be a
+        // self-inflicted outage. Nothing ships a profile today (#509 leaves
+        // every knob unset); this is the gate that has to pass before one does.
+        for profile in [
+            None,
+            Some(H264Profile::Baseline),
+            Some(H264Profile::Main),
+            Some(H264Profile::High),
+        ] {
+            let label = profile.map_or("unset".to_string(), |p| format!("{p:?}"));
+            let kind = SourceKind::Test {
+                pattern: "smpte".into(),
+                width: 640,
+                height: 360,
+                fps: 15,
+            };
+            let mut params = vparams(15, Some(240));
+            params.tuning.profile = profile;
+            let built = build_video(&kind, &params, &Arc::default()).expect("build video");
+            let aus = pull_full_aus(built, 6).await;
+            assert!(!aus.is_empty(), "{label}: no access units produced");
+
+            let mut decoder = H264Decoder::new().expect("decoder");
+            let mut decoded = false;
+            for au in &aus {
+                if let Some(frame) = decoder.decode(au).expect("decode must not error") {
+                    let (w, h) = (frame.width() as u32, frame.height() as u32);
+                    let yuv = frame.to_yuv420_planar();
+                    let conv = VideoConvert::new(PixelFormat::I420, PixelFormat::Rgba, w, h)
+                        .unwrap_or_else(|e| panic!("{label}: VideoConvert::new failed: {e}"));
+                    let mut rgba = vec![0u8; (w * h * 4) as usize];
+                    conv.convert(&yuv, &mut rgba)
+                        .unwrap_or_else(|e| panic!("{label}: convert failed: {e}"));
+                    decoded = true;
+                    break;
+                }
+            }
+            assert!(
+                decoded,
+                "{label}: the GUI's decoder produced no frame from this profile"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn scaled_tier_decodes_like_the_gui() {
         use parallax::converters::{PixelFormat, VideoConvert};

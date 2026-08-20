@@ -23,6 +23,10 @@ const EMITTED: &[&str] = &[
     "cam0/stats/fps",
     "cam0/stats/kbps",
     "cam0/stats/drops",
+    // Emitted only for a stream that ran a rate-controlled encoder — a preview
+    // or an RTSP passthrough has none, and reports nothing rather than zero
+    // (#510). Runtime-conditional like `encode_ms` below, not build-conditional.
+    "cam0/stats/rc_drops",
     "cam0/stats/viewers",
     // Emitted only when `derive()` produced an encode time — i.e. when frames
     // were actually encoded this interval. That is a *runtime* condition, not a

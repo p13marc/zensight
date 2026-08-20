@@ -171,8 +171,10 @@ struct ProfileSession {
     /// Cooperative source-EOS switch — the only way to end the source's
     /// blocking task (`abort()` alone leaks a live pipeline).
     stop: pipeline::StopHandle,
-    /// Live control handles (keyframe, bitrate, scale, framerate, preview
-    /// quality/fps) for reconfiguring this profile without a teardown (#496).
+    /// Handles cloned from this profile's elements before the executor moved
+    /// them into their tasks. Only `keyframe` is driven at runtime; the rest
+    /// are observation (`encoder_stats`, #510) or an unreached retune path —
+    /// see [`pipeline::PipelineControls`].
     controls: pipeline::PipelineControls,
     egress: JoinHandle<()>,
     matcher: JoinHandle<()>,
@@ -197,6 +199,9 @@ struct ProfileSession {
     /// the per-tier status doc. `0` = unknown (RTSP passthrough without SDP).
     width: u32,
     height: u32,
+    /// Last `frames_dropped_by_rc` folded from this incarnation's encoder
+    /// handle — the baseline [`StreamStats::fold_rc_drops`] subtracts against.
+    rc_drops_seen: u64,
 }
 
 impl Drop for ProfileSession {
@@ -253,6 +258,11 @@ impl StreamSession {
     /// The occupied profile slots (unordered).
     fn profiles(&self) -> impl Iterator<Item = (Profile, &ProfileSlot)> {
         self.slots.iter().map(|(p, s)| (*p, s))
+    }
+
+    /// The occupied profile slots, mutably (unordered).
+    fn profiles_mut(&mut self) -> impl Iterator<Item = &mut ProfileSlot> {
+        self.slots.values_mut()
     }
 
     /// Open profiles with matching subscribers (pending slots have none).
@@ -334,7 +344,10 @@ impl SessionManager {
                     Some(msg) => self.handle(msg).await,
                     None => break,
                 },
-                _ = reap_tick.tick() => self.reap_idle().await,
+                _ = reap_tick.tick() => {
+                    self.fold_encoder_stats();
+                    self.reap_idle().await;
+                }
             }
         }
         // Actor shutdown: tear every remaining profile down (pending
@@ -400,7 +413,7 @@ impl SessionManager {
             .video
             .tiers
             .iter()
-            .position(|t| t.name == name)
+            .position(|t| t.spec.name == name)
             .map(|i| i as u8)
     }
 
@@ -410,29 +423,41 @@ impl SessionManager {
             .unwrap_or(0)
     }
 
-    /// The tier spec at a ladder index.
-    fn tier_spec(&self, idx: u8) -> Option<&zensight_common::stream::TierSpec> {
+    /// The ladder rung at an index — the wire spec plus its sensor-local
+    /// encoder shaping (#509).
+    fn tier_config(&self, idx: u8) -> Option<&crate::config::TierConfig> {
         self.config.video.tiers.get(idx as usize)
     }
 
     /// The tier name for a ladder index (for the `<tier>` media key chunk).
     fn tier_name(&self, idx: u8) -> &str {
-        self.tier_spec(idx)
-            .map(|t| t.name.as_str())
+        self.tier_config(idx)
+            .map(|t| t.spec.name.as_str())
             .unwrap_or("default")
     }
 
-    /// Resolve a tier index to the encoder parameters `build_video` needs.
+    /// Resolve a tier index to the encoder parameters `build_video` needs:
+    /// the rung's advertised numbers plus its shaping resolved over the
+    /// shared `video.encoder` defaults.
     fn tier_params(&self, idx: u8) -> pipeline::VideoParams {
-        let (bitrate_kbps, fps, max_height) = self
-            .tier_spec(idx)
-            .map(|t| (t.bitrate_kbps, t.fps, t.max_height))
-            .unwrap_or((2000, 30, None));
+        let video = &self.config.video;
+        let (bitrate_kbps, fps, max_height, tuning) = self
+            .tier_config(idx)
+            .map(|t| {
+                (
+                    t.spec.bitrate_kbps,
+                    t.spec.fps,
+                    t.spec.max_height,
+                    video.tuning_for(t),
+                )
+            })
+            .unwrap_or((2000, 30, None, video.encoder));
         pipeline::VideoParams {
             bitrate_kbps,
-            gop_frames: self.config.video.gop_frames,
+            gop_frames: tuning.gop_frames.unwrap_or(video.gop_frames),
             fps,
             max_height,
+            tuning,
         }
     }
 
@@ -697,6 +722,14 @@ impl SessionManager {
             }
         };
 
+        // Sticky, and set here rather than at every fold: it is what makes
+        // `rc_drops` reportable at all. A stream that only ever ran an RTSP
+        // passthrough or a preview has no rate control, and a `0` there would
+        // read as "the cap is not biting" (#510).
+        if built.controls.encoder_stats.is_some() {
+            stream_stats.track_rc();
+        }
+
         // Declare the media publisher on the profile's concrete key — built
         // with the generated registry `Media` builders, so what this sensor
         // publishes and what the viewer subscribes to agree with the
@@ -841,6 +874,7 @@ impl SessionManager {
                     idle_since: if viewers { None } else { Some(Instant::now()) },
                     width: built.width,
                     height: built.height,
+                    rc_drops_seen: 0,
                 })),
             );
         self.publish_status(stream).await;
@@ -1006,6 +1040,27 @@ impl SessionManager {
         self.publish_status(stream).await;
     }
 
+    /// Fold every live encoder's rate-control drops into its stream's counter.
+    ///
+    /// Runs on the actor's existing 1 Hz reap tick — finer than the stats
+    /// ticker's interval, so the published counter is at most a second stale.
+    /// The actor is the right owner: it already holds `PipelineControls` per
+    /// profile and already writes the `viewers` gauge into `StreamStats`.
+    fn fold_encoder_stats(&mut self) {
+        // Clone the registry handle so the two field borrows stay disjoint.
+        let registry = self.stats.clone();
+        for (stream, session) in &mut self.sessions {
+            // Iterating `sessions` (not the registry) means `handle`'s
+            // create-on-miss can never resurrect a closed stream's entry.
+            let stats = registry.handle(stream);
+            for slot in session.profiles_mut() {
+                if let ProfileSlot::Open(p) = slot {
+                    fold_profile_rc(&stats, p);
+                }
+            }
+        }
+    }
+
     async fn reap_idle(&mut self) {
         let timeout = Duration::from_secs(self.config.idle_timeout_secs);
         let mut reap: Vec<(String, Profile)> = Vec::new();
@@ -1065,7 +1120,12 @@ impl SessionManager {
         };
         if let Some(slot) = session.remove_slot(profile) {
             match slot {
-                ProfileSlot::Open(p) => p.teardown(),
+                ProfileSlot::Open(mut p) => {
+                    // One last fold before the encoder handle dies, or a tier
+                    // switch silently loses up to a tick's worth of drops.
+                    fold_profile_rc(&self.stats.handle(stream), &mut p);
+                    p.teardown();
+                }
                 // A pending reservation has nothing running; dropping it
                 // makes the eventual `RtspConnected` a no-op.
                 ProfileSlot::Pending(_) => {}
@@ -1110,8 +1170,11 @@ impl SessionManager {
                     applied: TierApplied {
                         width: p.width,
                         height: p.height,
-                        fps: self.tier_spec(idx).map(|t| t.fps).unwrap_or(0),
-                        bitrate_kbps: self.tier_spec(idx).map(|t| t.bitrate_kbps).unwrap_or(0),
+                        fps: self.tier_config(idx).map(|t| t.spec.fps).unwrap_or(0),
+                        bitrate_kbps: self
+                            .tier_config(idx)
+                            .map(|t| t.spec.bitrate_kbps)
+                            .unwrap_or(0),
                     },
                     viewers: if p.viewers { 1 } else { 0 },
                 })
@@ -1181,6 +1244,17 @@ fn rtsp_video_dimensions(session: &RtspSession) -> Option<(u32, u32)> {
 /// errors, shedding frames when the pipeline is busy (live video must never
 /// back the network reader up). Ends the app stream on exit so the pipeline
 /// unwinds and the egress task reports `EgressEnded`.
+/// Fold one open profile's encoder rate-control drops into its stream's
+/// counter. A profile with no encoder in its graph (preview, RTSP passthrough)
+/// contributes nothing.
+fn fold_profile_rc(stats: &StreamStats, p: &mut ProfileSession) {
+    let Some(handle) = &p.controls.encoder_stats else {
+        return;
+    };
+    let now = handle.frames_dropped_by_rc();
+    stats.fold_rc_drops(&mut p.rc_drops_seen, now);
+}
+
 async fn rtsp_feed(mut rtsp: RtspSession, feed: AppSrcHandle, stream: String) {
     loop {
         match rtsp.next_buffer().await {

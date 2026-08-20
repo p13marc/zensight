@@ -10,7 +10,7 @@
 # gauge.
 
 [registry]
-version = "1.5"
+version = "1.6"
 app = "zensight"
 convention = 1
 
@@ -48,6 +48,14 @@ type = "TelemetryPoint"
 cardinality = 64
 since = "1.1"
 description = "dropped frames"
+
+[[subject]]
+path = "{stream}/stats/rc_drops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.6"
+description = "frames the encoder's rate control swallowed to hold the tier's bitrate cap; disjoint from drops (a swallowed frame leaves no sequence gap)"
 
 [[subject]]
 path = "{stream}/stats/viewers"

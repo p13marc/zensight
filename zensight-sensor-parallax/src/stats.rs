@@ -8,12 +8,17 @@
 //! bandwidth; fps counts every published frame, video + preview).
 //!
 //! Telemetry rides `zensight/v1/<origin>/telemetry/parallax/<stream>/stats/<metric>`
-//! (fps / kbps / drops / viewers / encode_ms), so existing charts light up
-//! for free; `streams/advertised` is published every tick so a parallax host
-//! shows up on the dashboard even before any stream is opened.
+//! (fps / kbps / drops / rc_drops / viewers / encode_ms), so existing charts
+//! light up for free; `streams/advertised` is published every tick so a
+//! parallax host shows up on the dashboard even before any stream is opened.
+//!
+//! `fps` and `kbps` are deliberately **egress**-sourced, not encoder-sourced
+//! (#510): they count what actually crossed Zenoh — injected SPS/PPS included,
+//! sink-shed frames excluded — and RTSP passthrough has no encoder to ask at
+//! all. `rc_drops` is the one number only the encoder knows.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,6 +45,23 @@ pub struct StreamStats {
     /// Strictest per-frame encode budget among open profiles (ns);
     /// 0 = no encoder (e.g. RTSP passthrough) → no overrun evaluation.
     pub budget_ns: AtomicU64,
+    /// Frames the H.264 rate controller swallowed to hold a tier's bitrate cap
+    /// (cumulative, summed over the stream's open video tiers).
+    ///
+    /// **Disjoint from [`Self::drops`] by construction.** The encoder stamps
+    /// its output sequence from its own *emitted*-frame count, and a swallowed
+    /// frame produces no buffer at all — so it leaves no gap for egress to see.
+    /// `drops` is therefore the `AppSink` shedding under a slow consumer;
+    /// this is the bitrate cap biting. `skip_frames(true)` is set precisely so
+    /// the encoder may do this, and until #510 nothing counted it.
+    pub rc_drops: AtomicU64,
+    /// Whether a rate-controlled encoder was ever attached to this stream.
+    ///
+    /// RTSP passthrough and preview-only streams have none, and publishing `0`
+    /// for them would read as "the cap is not biting" when the truth is "there
+    /// is no cap". The point is omitted instead — the precedent `encode_ms`
+    /// already sets.
+    pub rc_tracked: AtomicBool,
 }
 
 impl StreamStats {
@@ -58,6 +80,32 @@ impl StreamStats {
     pub fn record_encode(&self, ns: u64) {
         self.encode_ns.fetch_add(ns, Ordering::Relaxed);
         self.encoded_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Mark this stream as carrying a rate-controlled encoder, so its
+    /// `rc_drops` becomes reportable (see [`Self::rc_tracked`]).
+    pub fn track_rc(&self) {
+        self.rc_tracked.store(true, Ordering::Relaxed);
+    }
+
+    /// Fold one encoder's cumulative RC-drop count in as a **delta** against
+    /// what was last observed for that encoder incarnation, advancing `seen`.
+    ///
+    /// Deltas, not absolutes: several tiers feed one stream, and a torn-down
+    /// tier's replacement gets a fresh handle that restarts at zero. Summing
+    /// absolutes would make a published `Counter` go *backwards* on a tier
+    /// switch. `saturating_sub` also absorbs a handle that reset under us.
+    pub fn fold_rc_drops(&self, seen: &mut u64, now: u64) {
+        self.rc_drops
+            .fetch_add(now.saturating_sub(*seen), Ordering::Relaxed);
+        *seen = now;
+    }
+
+    /// The stream's RC drops, or `None` when it has no rate-controlled encoder.
+    pub fn rc_drops(&self) -> Option<u64> {
+        self.rc_tracked
+            .load(Ordering::Relaxed)
+            .then(|| self.rc_drops.load(Ordering::Relaxed))
     }
 
     /// Tighten the per-frame budget (keeps the strictest non-zero value).
@@ -199,6 +247,17 @@ pub async fn run_ticker(
                 TelemetryValue::Counter(stats.drops.load(Ordering::Relaxed)),
             )
             .await;
+            // Omitted, not zeroed, for a stream with no rate-controlled
+            // encoder — see `StreamStats::rc_tracked`.
+            if let Some(rc) = stats.rc_drops() {
+                publish(
+                    &publisher,
+                    &source,
+                    &format!("{stream}/stats/rc_drops"),
+                    TelemetryValue::Counter(rc),
+                )
+                .await;
+            }
             publish(
                 &publisher,
                 &source,
@@ -279,6 +338,46 @@ mod tests {
         assert_eq!(registry.snapshot().len(), 1);
         registry.remove("cam0");
         assert!(registry.snapshot().is_empty());
+    }
+
+    /// An RTSP passthrough or a preview-only stream has no rate control, and
+    /// must report *nothing* rather than a zero that reads as "the cap is not
+    /// biting".
+    #[test]
+    fn rc_drops_absent_without_an_encoder() {
+        let stats = StreamStats::default();
+        assert_eq!(stats.rc_drops(), None, "no encoder attached → no point");
+        stats.track_rc();
+        assert_eq!(stats.rc_drops(), Some(0), "attached but nothing shed yet");
+    }
+
+    /// The published value is a `Counter`, and a tier switch hands the stream a
+    /// *fresh* encoder handle that restarts at zero. Folding absolutes would
+    /// walk the counter backwards; folding deltas cannot.
+    #[test]
+    fn fold_rc_drops_is_monotonic_across_a_tier_switch() {
+        let stats = StreamStats::default();
+        stats.track_rc();
+
+        // One tier's incarnation, observed twice.
+        let mut seen = 0;
+        stats.fold_rc_drops(&mut seen, 5);
+        assert_eq!(stats.rc_drops(), Some(5));
+        stats.fold_rc_drops(&mut seen, 7);
+        assert_eq!(stats.rc_drops(), Some(7));
+
+        // Its replacement starts its own handle from zero.
+        let mut fresh = 0;
+        stats.fold_rc_drops(&mut fresh, 2);
+        assert_eq!(
+            stats.rc_drops(),
+            Some(9),
+            "the stream total only ever grows"
+        );
+
+        // Defensive: a handle that went backwards under us adds nothing.
+        stats.fold_rc_drops(&mut fresh, 1);
+        assert_eq!(stats.rc_drops(), Some(9));
     }
 
     #[test]
