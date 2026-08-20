@@ -62,7 +62,7 @@ chrono = "0.4"
 redb = "4"
 
 # H.264 decode for the opt-in live view (#409); `h264` feature only.
-parallax-pipeline = { version = "0.6.0", default-features = false, features = [
+parallax-pipeline = { version = "0.7.0", default-features = false, features = [
     "h264",
 ], optional = true }
 regex = "1.13.1"

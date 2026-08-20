@@ -38,8 +38,12 @@ mod real {
 
     use iced::futures::Stream;
     use iced::widget::image;
+    use parallax::buffer::{Buffer, MemoryHandle};
     use parallax::converters::{PixelFormat, VideoConvert};
+    use parallax::element::Element;
     use parallax::elements::H264Decoder;
+    use parallax::memory::SharedArena;
+    use parallax::metadata::Metadata;
     use zenoh::Session;
     use zensight_common::keyexpr::media_video_key;
     use zensight_common::stream::FrameMeta;
@@ -61,6 +65,20 @@ mod real {
     /// (the sensor IS publishing — it just can't be decoded/synced here). The
     /// window is generous enough to outlast a slow first keyframe (a late
     /// viewer waits up to one GOP for a natural IDR).
+    ///
+    /// This carries more weight since parallax 0.7 (#689). The decoder used to
+    /// return `Err` on an access unit it could not use, which tripped the
+    /// resync path below within one frame; it now *skips* such units and only
+    /// errors after 300 consecutive refusals — about 10 s at 30 fps, longer
+    /// below that. So the fast path out of an undecodable stream is no longer
+    /// the resync but this timeout, and a tile that receives AUs it can never
+    /// decode ends here rather than asking for keyframes it cannot use.
+    ///
+    /// That is the better trade and the reason it is left at 12 s rather than
+    /// tightened: a stream that hits one bad AU and recovers no longer spends a
+    /// keyframe request on it, which is exactly the spam #435 was about. The
+    /// cost is that a genuinely broken tier takes seconds rather than one frame
+    /// to give up, and it gives up with a reason either way.
     const NO_DECODE_TIMEOUT: Duration = Duration::from_secs(12);
 
     /// If a tile receives NO access unit at all within this window, the tier
@@ -77,13 +95,32 @@ mod real {
     pub struct H264TileDecoder {
         decoder: H264Decoder,
         converter: Option<(u32, u32, VideoConvert)>,
+        /// Backing store for the access units handed to the decoder.
+        ///
+        /// parallax 0.7 made a decoder an ordinary `Element` (#160), so the
+        /// input is a `Buffer` rather than a `&[u8]` and the caller owns the
+        /// memory it comes from. Slots are recycled, so this is one allocation
+        /// for the life of the tile rather than one per frame.
+        arena: SharedArena,
     }
+
+    /// Slot size for the access-unit arena.
+    ///
+    /// One compressed AU at the tier resolutions we publish; a keyframe at the
+    /// top tier is the worst case and lands far inside this. An AU larger than
+    /// a slot is refused rather than silently truncated — see `decode_to_rgba`.
+    const AU_SLOT_BYTES: usize = 1 << 20;
+
+    /// How many AUs may be in flight through the decoder at once. The decoder
+    /// holds a reference while it reorders, so this cannot be 1.
+    const AU_SLOTS: usize = 8;
 
     impl H264TileDecoder {
         pub fn new() -> Result<Self, String> {
             Ok(Self {
                 decoder: H264Decoder::new().map_err(|e| e.to_string())?,
                 converter: None,
+                arena: SharedArena::new(AU_SLOT_BYTES, AU_SLOTS).map_err(|e| e.to_string())?,
             })
         }
 
@@ -100,11 +137,32 @@ mod real {
             &mut self,
             nal: &[u8],
         ) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
-            let Some(frame) = self.decoder.decode(nal).map_err(|e| e.to_string())? else {
+            if nal.len() > AU_SLOT_BYTES {
+                return Err(format!(
+                    "access unit of {} bytes exceeds the {AU_SLOT_BYTES}-byte decoder slot",
+                    nal.len()
+                ));
+            }
+            // `None` means every slot is still held by the decoder or by a
+            // frame the UI has not dropped yet — transient backpressure, not
+            // an error, so the tile waits for the next AU rather than resyncing.
+            let Some(mut slot) = self.arena.acquire() else {
                 return Ok(None);
             };
-            let (w, h) = (frame.width() as u32, frame.height() as u32);
-            let yuv = frame.to_yuv420_planar();
+            slot.data_mut()[..nal.len()].copy_from_slice(nal);
+            let input = Buffer::new(MemoryHandle::with_len(slot, nal.len()), Metadata::default());
+
+            let Some(out) = self.decoder.process(input).map_err(|e| e.to_string())? else {
+                return Ok(None);
+            };
+            // Geometry travels on the buffer now: `DecodedFrame` is
+            // crate-internal in 0.7, and the legacy `"width"`/`"height"`
+            // metadata keys carry nothing (#160).
+            let (w, h) = out
+                .metadata()
+                .video_dims()
+                .ok_or_else(|| "decoded frame declared no geometry".to_string())?;
+
             if self
                 .converter
                 .as_ref()
@@ -116,7 +174,10 @@ mod real {
             }
             let (_, _, conv) = self.converter.as_ref().expect("converter just cached");
             let mut rgba = vec![0u8; (w * h * 4) as usize];
-            conv.convert(&yuv, &mut rgba).map_err(|e| e.to_string())?;
+            // 0.7 takes the input plane layout so a strided frame needs no
+            // repack (#196); the decoder hands back packed I420.
+            conv.convert(out.as_bytes(), conv.packed_input_layout(), &mut rgba)
+                .map_err(|e| e.to_string())?;
             Ok(Some((w, h, rgba)))
         }
     }

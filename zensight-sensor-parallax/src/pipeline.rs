@@ -40,13 +40,25 @@ const CHANNEL_CAPACITY: usize = 4;
 
 /// Build the executor these pipelines MUST be started with.
 ///
-/// The default inter-element channel capacity (16) exceeds the
-/// `JpegEncoder`'s 16-slot output arena: once the AppSink queue (4) is full,
-/// the in-flight JPEG buffers (channel backlog + queue) pin every arena slot
-/// and the encoder dies with "Failed to acquire buffer slot" (the
-/// `H264Encoder` survives only because its arena has 64 slots). A small
-/// channel keeps the whole in-flight budget inside the arena; the AppSink's
-/// `drop_on_full` sheds frames for slow consumers.
+/// **The reason for this is probably gone; the cap is kept until measured.**
+///
+/// It exists because the default inter-element channel capacity (16) exceeded
+/// the `JpegEncoder`'s then-fixed 16-slot output arena: once the AppSink queue
+/// (4) filled, the in-flight JPEG buffers pinned every arena slot and the
+/// encoder died with "Failed to acquire buffer slot" (the `H264Encoder`
+/// survived only because its arena had 64 slots). A small channel kept the
+/// whole in-flight budget inside the arena.
+///
+/// parallax 0.7 addresses that upstream: `Element::set_output_budget` tells an
+/// element how many buffers the downstream graph can hold, and the encoders
+/// size their arenas from it — upstream's own doc on that method describes
+/// exactly this failure. Since #689 both our wrapper types forward it, so the
+/// encoders finally receive it.
+///
+/// Re-deriving the number is #693's job, and wants a measurement rather than a
+/// deletion: the cap also bounds latency, so removing it changes throughput and
+/// buffering together. Left in place, with its rationale marked stale rather
+/// than restated as though it still held.
 pub fn executor() -> Executor {
     Executor::with_config(UnifiedExecutorConfig {
         channel_capacity: CHANNEL_CAPACITY,
@@ -120,16 +132,39 @@ impl<S: Source> Source for StoppableSource<S> {
         self.inner.preferred_buffer_size()
     }
 
+    // 0.7 added these to `Source`, and a wrapper that does not forward them
+    // silently answers for its inner source (#689). `set_output_budget` is the
+    // load-bearing one: the executor uses it to size an element's output arena,
+    // so swallowing it leaves the wrapped source on defaults.
+    fn set_output_budget(&mut self, budget: parallax::memory::OutputBudget) {
+        self.inner.set_output_budget(budget);
+    }
+
+    fn set_negotiated_memory(&mut self, memory: parallax::memory::MemoryType) {
+        self.inner.set_negotiated_memory(memory);
+    }
+
+    fn handle_upstream_event(
+        &mut self,
+        event: &parallax::event::Event,
+    ) -> parallax::event::EventResult {
+        self.inner.handle_upstream_event(event)
+    }
+
+    fn is_seekable(&self) -> bool {
+        self.inner.is_seekable()
+    }
+
+    fn query_position(&self) -> Option<parallax::pipeline::seek::PositionQuery> {
+        self.inner.query_position()
+    }
+
+    fn query_duration(&self) -> Option<parallax::pipeline::seek::DurationQuery> {
+        self.inner.query_duration()
+    }
+
     fn execution_hints(&self) -> parallax::element::ExecutionHints {
         self.inner.execution_hints()
-    }
-
-    fn handle_flow_signal(&mut self, signal: parallax::pipeline::flow::FlowSignal) {
-        self.inner.handle_flow_signal(signal)
-    }
-
-    fn flow_policy(&self) -> parallax::pipeline::flow::FlowPolicy {
-        self.inner.flow_policy()
     }
 }
 
@@ -194,6 +229,44 @@ impl<E: Element> Element for TimedElement<E> {
 
     fn execution_hints(&self) -> parallax::element::ExecutionHints {
         self.inner.execution_hints()
+    }
+
+    // Same reasoning as `StoppableSource` above: 0.7 added defaulted methods to
+    // `Element`, and this wrapper sits between the executor and every encoder we
+    // build. `set_output_budget` in particular is how `H264Encoder` and
+    // `JpegEncoder` size their output arenas (#689).
+    fn set_bus(&mut self, bus: parallax::pipeline::bus::BusHandle) {
+        self.inner.set_bus(bus);
+    }
+
+    fn set_output_budget(&mut self, budget: parallax::memory::OutputBudget) {
+        self.inner.set_output_budget(budget);
+    }
+
+    fn set_negotiated_memory(&mut self, memory: parallax::memory::MemoryType) {
+        self.inner.set_negotiated_memory(memory);
+    }
+
+    fn handle_downstream_event(
+        &mut self,
+        event: parallax::event::Event,
+    ) -> Option<parallax::event::Event> {
+        self.inner.handle_downstream_event(event)
+    }
+
+    fn handle_upstream_event(
+        &mut self,
+        event: &parallax::event::Event,
+    ) -> parallax::event::EventResult {
+        self.inner.handle_upstream_event(event)
+    }
+
+    fn latency(&self) -> Option<parallax::pipeline::seek::LatencyRange> {
+        self.inner.latency()
+    }
+
+    fn retained_buffers(&self) -> usize {
+        self.inner.retained_buffers()
     }
 }
 
@@ -419,7 +492,7 @@ pub fn build_video(
             let thr_id = pipeline.add_filter("video-throttle", throttle);
             let enc_id =
                 pipeline.add_filter("h264-encoder", TimedElement::new(encoder, stats.clone()));
-            let sink_id = pipeline.add_sink("app-sink", sink);
+            let sink_id = pipeline.add_async_sink("app-sink", sink);
             pipeline.link(src_id, conv_id).context("link src→convert")?;
             pipeline
                 .link(conv_id, scale_id)
@@ -479,7 +552,7 @@ pub fn build_video(
             let thr_id = pipeline.add_filter("video-throttle", throttle);
             let enc_id =
                 pipeline.add_filter("h264-encoder", TimedElement::new(encoder, stats.clone()));
-            let sink_id = pipeline.add_sink("app-sink", sink);
+            let sink_id = pipeline.add_async_sink("app-sink", sink);
             // The camera negotiates MJPG first, YUYV as fallback; both paths
             // end in I420 for the encoder.
             let to_i420 = match &fourcc {
@@ -568,7 +641,7 @@ pub fn build_rtsp_video_passthrough(dimensions: Option<(u32, u32)>) -> Result<Bu
 
     let mut pipeline = Pipeline::new();
     let src_id = pipeline.add_source("rtsp-feed", src);
-    let sink_id = pipeline.add_sink("app-sink", sink);
+    let sink_id = pipeline.add_async_sink("app-sink", sink);
     pipeline.link(src_id, sink_id).context("link feed→sink")?;
 
     let (width, height) = dimensions.unwrap_or((0, 0));
@@ -623,7 +696,7 @@ pub fn build_rtsp_preview(
     let scale_id = pipeline.add_filter("preview-scale", scale);
     let conv_id = pipeline.add_filter("convert-rgb", convert);
     let enc_id = pipeline.add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
-    let sink_id = pipeline.add_sink("app-sink", sink);
+    let sink_id = pipeline.add_async_sink("app-sink", sink);
     pipeline.link(src_id, dec_id).context("link feed→decoder")?;
     pipeline
         .link(dec_id, thr_id)
@@ -695,7 +768,7 @@ pub fn build_preview(
             let scale_id = pipeline.add_filter("preview-scale", scale);
             let enc_id =
                 pipeline.add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
-            let sink_id = pipeline.add_sink("app-sink", sink);
+            let sink_id = pipeline.add_async_sink("app-sink", sink);
             pipeline.link(src_id, scale_id).context("link src→scale")?;
             pipeline
                 .link(scale_id, enc_id)
@@ -740,7 +813,7 @@ pub fn build_preview(
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("v4l2-src", src);
             let thr_id = pipeline.add_filter("preview-throttle", throttle);
-            let sink_id = pipeline.add_sink("app-sink", sink);
+            let sink_id = pipeline.add_async_sink("app-sink", sink);
             pipeline.link(src_id, thr_id).context("link src→throttle")?;
             let (out_w, out_h) = match &fourcc {
                 // Camera already produces JPEG frames: pure passthrough (no
@@ -859,6 +932,8 @@ fn parse_pattern(name: &str) -> VideoPattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 0.7: pulls are a `Pulled`, not a `Result<Option<Buffer>>` (#689).
+    use parallax::elements::Pulled;
     use std::time::Duration;
 
     fn test_kind(fps: u32) -> SourceKind {
@@ -879,6 +954,47 @@ mod tests {
             max_height,
             tuning: EncoderTuning::default(),
         }
+    }
+
+    /// Decode one H.264 access unit to RGBA exactly as the GUI does.
+    ///
+    /// parallax 0.7 made `H264Decoder::decode` private and `DecodedFrame`
+    /// crate-internal (#160): a decoder is an `Element` now, so the access unit
+    /// goes in as a `Buffer` and the picture comes out as one, with geometry on
+    /// its `Metadata` rather than on a frame handle. These tests exist to keep
+    /// the sensor and the GUI's decode paths identical, so this mirrors
+    /// `zensight`'s `H264TileDecoder::decode_to_rgba` step for step (#689).
+    fn decode_au_to_rgba(
+        decoder: &mut H264Decoder,
+        arena: &parallax::memory::SharedArena,
+        au: &[u8],
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        use parallax::converters::{PixelFormat, VideoConvert};
+        use parallax::element::Element;
+        use parallax::metadata::Metadata;
+
+        let mut slot = arena.acquire().expect("arena slot");
+        slot.data_mut()[..au.len()].copy_from_slice(au);
+        let input = Buffer::new(
+            parallax::buffer::MemoryHandle::with_len(slot, au.len()),
+            Metadata::default(),
+        );
+
+        // A decoder may buffer for reordering: `None` means "needs more data".
+        let out = decoder.process(input).expect("decode must not error")?;
+        let (w, h) = out
+            .metadata()
+            .video_dims()
+            .expect("a decoded frame must declare its geometry");
+
+        let conv = VideoConvert::new(PixelFormat::I420, PixelFormat::Rgba, w, h)
+            .expect("VideoConvert::new");
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        // 0.7 takes the input's plane layout: the decoder hands back packed
+        // I420, so the packed layout is the right one (#196).
+        conv.convert(out.as_bytes(), conv.packed_input_layout(), &mut rgba)
+            .expect("convert");
+        Some((w, h, rgba))
     }
 
     /// What the tests need from one pulled frame; the Buffer itself is
@@ -902,7 +1018,7 @@ mod tests {
         let mut frames = Vec::new();
         for _ in 0..200 {
             match sink.pull_buffer_timeout(Duration::from_millis(500)).await {
-                Ok(Some(buf)) => {
+                Pulled::Buffer(buf) => {
                     frames.push(PulledFrame {
                         head: buf.as_bytes()[..8.min(buf.len())].to_vec(),
                         keyframe: buf.metadata().is_keyframe(),
@@ -912,12 +1028,10 @@ mod tests {
                         break;
                     }
                 }
-                Ok(None) => {
-                    if sink.is_eos() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+                // Terminal either way — a test that has what it needs does
+                // not care whether the stream ended cleanly.
+                Pulled::Ended(_) => break,
+                Pulled::Empty | Pulled::Flushing => {}
             }
         }
 
@@ -1220,18 +1334,14 @@ mod tests {
         let mut aus: Vec<Vec<u8>> = Vec::new();
         for _ in 0..200 {
             match sink.pull_buffer_timeout(Duration::from_millis(500)).await {
-                Ok(Some(buf)) => {
+                Pulled::Buffer(buf) => {
                     aus.push(buf.as_bytes().to_vec());
                     if aus.len() >= count {
                         break;
                     }
                 }
-                Ok(None) => {
-                    if sink.is_eos() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+                Pulled::Ended(_) => break,
+                Pulled::Empty | Pulled::Flushing => {}
             }
         }
         built.stop.stop();
@@ -1248,8 +1358,6 @@ mod tests {
     /// the readout claim 852 while the pixels were 854.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn every_profile_the_ladder_can_name_decodes_like_the_gui() {
-        use parallax::converters::{PixelFormat, VideoConvert};
-
         // The frontend decodes with OpenH264 too (`zensight`'s `h264` feature),
         // so an encoder profile its decoder cannot read would be a
         // self-inflicted outage. Nothing ships a profile today (#509 leaves
@@ -1274,16 +1382,14 @@ mod tests {
             assert!(!aus.is_empty(), "{label}: no access units produced");
 
             let mut decoder = H264Decoder::new().expect("decoder");
+            let arena = parallax::memory::SharedArena::new(
+                aus.iter().map(|a| a.len()).max().unwrap_or(4096).max(4096),
+                8,
+            )
+            .expect("arena");
             let mut decoded = false;
             for au in &aus {
-                if let Some(frame) = decoder.decode(au).expect("decode must not error") {
-                    let (w, h) = (frame.width() as u32, frame.height() as u32);
-                    let yuv = frame.to_yuv420_planar();
-                    let conv = VideoConvert::new(PixelFormat::I420, PixelFormat::Rgba, w, h)
-                        .unwrap_or_else(|e| panic!("{label}: VideoConvert::new failed: {e}"));
-                    let mut rgba = vec![0u8; (w * h * 4) as usize];
-                    conv.convert(&yuv, &mut rgba)
-                        .unwrap_or_else(|e| panic!("{label}: convert failed: {e}"));
+                if decode_au_to_rgba(&mut decoder, &arena, au).is_some() {
                     decoded = true;
                     break;
                 }
@@ -1297,8 +1403,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn scaled_tier_decodes_like_the_gui() {
-        use parallax::converters::{PixelFormat, VideoConvert};
-
         // (native_w, native_h, max_height): each row exercises the GUI decode
         // for an awkward scaled geometry — non-mod-16 widths are the suspect.
         let cases = [
@@ -1322,32 +1426,20 @@ mod tests {
             assert!(!aus.is_empty(), "{label}: no access units produced");
 
             let mut decoder = H264Decoder::new().expect("decoder");
-            let mut decoded: Option<(u32, u32, usize, usize)> = None;
+            let arena = parallax::memory::SharedArena::new(
+                aus.iter().map(|a| a.len()).max().unwrap_or(4096).max(4096),
+                8,
+            )
+            .expect("arena");
+            let mut decoded: Option<(u32, u32)> = None;
             for au in &aus {
-                if let Some(frame) = decoder.decode(au).expect("decode must not error") {
-                    let (w, h) = (frame.width() as u32, frame.height() as u32);
-                    let yuv = frame.to_yuv420_planar();
-                    let conv = VideoConvert::new(PixelFormat::I420, PixelFormat::Rgba, w, h)
-                        .unwrap_or_else(|e| {
-                            panic!("{label}: VideoConvert::new {w}×{h} failed: {e}")
-                        });
-                    let mut rgba = vec![0u8; (w * h * 4) as usize];
-                    let expected_yuv = (w * h * 3 / 2) as usize;
-                    conv.convert(&yuv, &mut rgba).unwrap_or_else(|e| {
-                        panic!(
-                            "{label}: convert {w}×{h} failed: {e} (yuv_len={}, expected={expected_yuv})",
-                            yuv.len()
-                        )
-                    });
-                    decoded = Some((w, h, yuv.len(), expected_yuv));
+                if let Some((w, h, _rgba)) = decode_au_to_rgba(&mut decoder, &arena, au) {
+                    decoded = Some((w, h));
                     break;
                 }
             }
-            let (w, h, yuv_len, expected) =
-                decoded.unwrap_or_else(|| panic!("{label}: decoder produced no frame"));
-            eprintln!(
-                "{label}: advertised={advertised:?} decoded={w}×{h} yuv_len={yuv_len} expected_yuv={expected}"
-            );
+            let (w, h) = decoded.unwrap_or_else(|| panic!("{label}: decoder produced no frame"));
+            eprintln!("{label}: advertised={advertised:?} decoded={w}×{h}");
             // The advertised size must equal what was actually encoded, or the
             // GUI's per-tier resolution/bandwidth readout lies about the pixels.
             assert_eq!(
@@ -1466,17 +1558,13 @@ mod tests {
         let mut frames = Vec::new();
         for _ in 0..100 {
             match sink.pull_buffer_timeout(Duration::from_millis(200)).await {
-                Ok(Some(buf)) => frames.push((
+                Pulled::Buffer(buf) => frames.push((
                     buf.as_bytes().to_vec(),
                     buf.metadata().is_keyframe(),
                     buf.metadata().sequence,
                 )),
-                Ok(None) => {
-                    if sink.is_eos() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+                Pulled::Ended(_) => break,
+                Pulled::Empty | Pulled::Flushing => {}
             }
         }
 

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **parallax-pipeline 0.6.0 → 0.7.0** (#689). 175 upstream commits, and the
+  `h264` GUI feature did not compile against it at all: `H264Decoder::decode`
+  became private and `DecodedFrame` crate-internal when decoders became plain
+  `Element`s, so the GUI's tile decoder now drives `Element::process` with its
+  own `SharedArena` and takes geometry from `Metadata::video_dims()`. Pulls
+  return a `Pulled { Buffer, Empty, Flushing, Ended(EndReason) }` instead of
+  `Result<Option<Buffer>>`, which lets the egress loop tell a clean end from a
+  failed one using the pipeline's own reason rather than inferring it from
+  `Ok(None)` plus `is_eos()`. `AppSink` became async-only (`add_async_sink`),
+  and `Source::handle_flow_signal`/`flow_policy` went away with the `Queue`
+  element. Two upstream changes are not in its changelog's breaking list and
+  were found by reading the source: `VideoConvert::convert` gained a
+  `PlaneLayout` argument, and — invisible to the compiler — `Element` and
+  `Source` grew defaulted methods that our `TimedElement`/`StoppableSource`
+  wrappers silently swallowed, including `set_output_budget`, which is how the
+  encoders size their output arenas; both wrappers now forward them. The
+  `channel_capacity: 4` workaround is kept but its rationale is marked stale:
+  0.7 fixes the arena-vs-channel collision it exists for, and re-deriving the
+  number is #693's, since the cap also bounds latency.
+
 ### Added
 
 - **The ladder's bitrate cap is pinned end to end** (#504). A headless e2e test

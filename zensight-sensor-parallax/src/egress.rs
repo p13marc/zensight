@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parallax::clock::ClockTime;
-use parallax::elements::AppSinkHandle;
+use parallax::elements::{AppSinkHandle, Pulled};
 use parallax::metadata::Metadata;
+use parallax::pipeline::EndReason;
 use zenoh::bytes::{Encoding, ZBytes};
 use zensight_common::stream::FrameMeta;
 use zensight_common::{Format, encode};
@@ -108,12 +109,25 @@ async fn run_with_watchdog(
     let h264 = !preview && encoding == Encoding::VIDEO_H264;
     let mut param_sets: Option<Vec<u8>> = None;
     loop {
+        // parallax 0.7 replaced `Result<Option<Buffer>>` with `Pulled`, and in
+        // doing so made a distinction this loop could not previously draw: a
+        // clean end and a failed one used to arrive as `Ok(None)` + `is_eos()`
+        // versus `Err`, with the sink's own reason unavailable. `Ended` now
+        // carries it, so a stream that finished and a stream that broke are
+        // told apart by the pipeline rather than inferred here (#689).
         let buffer = match sink.pull_buffer_timeout(PULL_TIMEOUT).await {
-            Ok(Some(buffer)) => buffer,
-            Ok(None) => {
-                if sink.is_eos() {
-                    return Ok(());
-                }
+            Pulled::Buffer(buffer) => buffer,
+            Pulled::Ended(EndReason::Eos) => return Ok(()),
+            Pulled::Ended(EndReason::Error(e)) => {
+                return Err(format!("pipeline sink error: {e}"));
+            }
+            // Only `PipelineHandle::ended` produces this — an aborted task
+            // cannot deliver to a sink — but the match must be total, and
+            // "we tore it down" is a clean end from the egress task's side.
+            Pulled::Ended(EndReason::Aborted) => return Ok(()),
+            // Not terminal: nothing here ever sets the handle flushing, so
+            // this is the same "nothing yet" case as a timeout.
+            Pulled::Empty | Pulled::Flushing => {
                 if !produced_any && started.elapsed() >= first_frame_timeout {
                     return Err(format!(
                         "no frames from source within {:.1}s of open",
@@ -122,7 +136,6 @@ async fn run_with_watchdog(
                 }
                 continue;
             }
-            Err(e) => return Err(format!("pipeline sink error: {e}")),
         };
         produced_any = true;
 
