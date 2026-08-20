@@ -67,12 +67,15 @@ _ebpf_detected := ```
 
 ebpf_on := if ebpf == "auto" { _ebpf_detected } else if ebpf == "1" { "1" } else if ebpf == "0" { "0" } else { error("ebpf must be auto|1|0, got '" + ebpf + "'") }
 
-# Only sysinfo. netlink's `ebpf` feature builds, but its connect-latency probe
-# measures the connect() call path rather than the SYN→SYN-ACK handshake, so it
-# would publish microseconds to any host on earth — a false gauge is worse than
-# an absent one. sysinfo's runqlat/biolatency are self-validating: each joins a
-# key written by one tracepoint against one read by another, so a bad offset
-# yields an empty histogram rather than a wrong one.
+# Only sysinfo, still — but for a smaller reason than before. netlink's
+# connect-latency probe used to measure the connect() call path rather than the
+# SYN→SYN-ACK handshake, publishing microseconds to any host on earth; that is
+# fixed and host-validated (#114). What keeps netlink out of the demo now is
+# that its tcplife byte/segment counters are still hardcoded zero, and a zero
+# that reads as "idle connection" is worse in a demo than an absent panel.
+# sysinfo's runqlat/biolatency are self-validating: each joins a key written by
+# one tracepoint against one read by another, so a bad offset yields an empty
+# histogram rather than a wrong one.
 #
 # Cargo merges every --features flag into ONE global set; `pkg/feature` is what
 # binds a feature to a package. (`-p a --features x -p b --features y` is NOT

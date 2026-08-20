@@ -41,6 +41,31 @@ pub const CONN_EVENT_CLOSE: u8 = 0;
 /// connect) — live-attribution record (#304, tier 2b).
 pub const CONN_EVENT_ESTABLISHED: u8 = 1;
 
+/// What `connect(2)` stamped when the socket left `CLOSE` for `SYN_SENT`.
+///
+/// `tcp_v4_connect()` calls `tcp_set_state(sk, TCP_SYN_SENT)` in **syscall
+/// context**, so this is the one moment in a client connection's life where
+/// `bpf_get_current_pid_tgid()` / `bpf_get_current_comm()` are certain to be
+/// the connecting task. The SYN-ACK that completes the handshake, and the
+/// FIN/RST that closes the socket, are both frequently processed in softirq —
+/// measured on a real host, 32 of 91 records for a single `curl` loop were
+/// attributed to `bash`, `python3`, `claude` and twice to `ksoftirqd/1` (#114).
+///
+/// So the identity is captured here and replayed at ESTABLISHED and CLOSE,
+/// and the timestamp doubles as the connect-latency start. Keyed by `sk`
+/// pointer, which is the only identifier both ends of that join share.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ConnectStart {
+    /// `bpf_ktime_get_ns()` at the CLOSE -> SYN_SENT transition.
+    pub ts_ns: u64,
+    /// TGID of the task that called `connect(2)`.
+    pub pid: u32,
+    pub _pad: u32,
+    /// `comm` of that task.
+    pub comm: [u8; 16],
+}
+
 /// A connection event record, submitted to the ring buffer when a socket
 /// transitions to `TCP_CLOSE` (`event == CONN_EVENT_CLOSE`, tcplife) or —
 /// tier 2b (#304) — when a client-side connect reaches `TCP_ESTABLISHED`

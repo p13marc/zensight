@@ -143,8 +143,13 @@ async fn main() -> Result<()> {
                 });
             }
             Err(e) => {
+                // `{e:#}` walks the whole anyhow chain. `%e` is Display, which
+                // prints only the OUTERMOST context ("load eBPF bytecode") and
+                // discards the aya error under it — including the verifier log,
+                // which is the one thing that distinguishes a rejected program
+                // from an EPERM (#168).
                 tracing::warn!(
-                    error = %e,
+                    error = format!("{e:#}"),
                     "eBPF latency collector unavailable (needs CAP_BPF + CAP_PERFMON, and \
                      CAP_DAC_READ_SEARCH to read the tracepoint id under a 0700 tracefs; \
                      a rootless container cannot load BPF at all). Streaming baseline \

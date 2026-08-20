@@ -76,7 +76,16 @@ async fn main() -> Result<()> {
                 ebpf_state = Some(state);
             }
             Err(e) => {
-                tracing::warn!(error = %e, "eBPF load failed (needs CAP_BPF + CAP_PERFMON, plus CAP_DAC_READ_SEARCH for the tracepoints under a 0700 tracefs); baseline unchanged");
+                // `{e:#}` walks the whole anyhow chain. `%e` is Display, which
+                // prints only the OUTERMOST context ("load eBPF bytecode") and
+                // discards the aya error under it — including the verifier log,
+                // which is the one thing that distinguishes a rejected program
+                // from an EPERM (#168).
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "eBPF load failed (needs CAP_BPF + CAP_PERFMON, plus CAP_DAC_READ_SEARCH \
+                     for the tracepoints under a 0700 tracefs); baseline unchanged"
+                );
             }
         }
     }
