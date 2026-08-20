@@ -365,6 +365,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--ebpf` only when the capabilities are held — it gates on toolchain
   detection alone.
 
+- **netlink's eBPF offsets are checked against the running kernel, and one
+  struct name was wrong** (#682). Two comments in the program crate pointed at
+  "the `btf_offsets` test in `-ebpf-common`". There was no such test: netlink's
+  eleven `SS_*` and three `RT_*` offsets were guarded by nothing, because they
+  sat as private constants inside a `#[cfg(target_arch = "bpf")]` module in a
+  crate with no lib target — invisible to a host test three ways over. They now
+  live in `-ebpf-common` beside a real `btf_offsets_match_this_kernel`, ported
+  from sysinfo's. The reader both crates use moved into a new dependency-free
+  `zensight-btf`, taken as a dev-dependency so it can never reach the
+  `bpfel-unknown-none` object, and hardened on the way: it cannot panic, which
+  the old test-only version could, and which #681 will need when it parses BTF
+  inside a running sensor. The naming defect: the comment credited
+  `trace_event_raw_tcp_retransmit_skb`, saying the event "has its OWN struct
+  rather than the shared template". That name is **not in this kernel's BTF at
+  all** — `tcp:tcp_retransmit_skb` is a `DEFINE_EVENT` of the
+  `tcp_event_sk_skb` class, so it resolves to
+  `trace_event_raw_tcp_event_sk_skb`, which is the size 80 the comment quoted.
+  The right struct had been read and the wrong name written down. Corrected as
+  a **candidate list** rather than a different single name, because the hazard
+  the episode actually reveals is a tracepoint changing event class, which
+  renames the struct and moves every field at once; the test also asserts every
+  field resolved against the *same* candidate, so a blend of two layouts fails
+  instead of looking right.
+
 - **The eBPF features job had never once got past installing its linker**
   (#674). `cargo install bpf-linker --locked` builds an LLVM frontend against a
   *system* LLVM, and the runner image ships none: the only run this workflow has

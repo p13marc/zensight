@@ -19,3 +19,11 @@ user = ["dep:aya"]
 
 [lib]
 path = "src/lib.rs"
+
+# Test-only: checks the offsets above against the running kernel's BTF (#682).
+# A dev-dependency on purpose — cargo never builds a dependency's
+# dev-dependencies, so nothing from it can reach the bpfel-unknown-none object
+# this crate also feeds.
+[dev-dependencies]
+zensight-btf = { path = "../zensight-btf" }
+

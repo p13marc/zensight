@@ -70,9 +70,15 @@ mod prog {
         maps::{LruHashMap, PerCpuArray, RingBuf},
         programs::TracePointContext,
     };
+    // The tracepoint offsets live in the shared crate, not here: this module
+    // only compiles for the `bpf` target, so a constant declared here is
+    // invisible to the host test that checks it against the running kernel's
+    // BTF (#682). Same placement as sysinfo's, for the same reason.
     use zensight_sensor_netlink_ebpf_common::{
         connlat_bucket, ConnRecord, ConnectStart, RetransKey, CONNLAT_BUCKETS, CONN_EVENT_CLOSE,
-        CONN_EVENT_ESTABLISHED,
+        CONN_EVENT_ESTABLISHED, RT_DADDR_V4, RT_DADDR_V6, RT_FAMILY, SS_DADDR_V4, SS_DADDR_V6,
+        SS_DPORT, SS_FAMILY, SS_NEWSTATE, SS_OLDSTATE, SS_PROTOCOL, SS_SADDR_V4, SS_SADDR_V6,
+        SS_SKADDR, SS_SPORT,
     };
 
     // -- connlat -------------------------------------------------------------
@@ -108,41 +114,6 @@ mod prog {
     const AF_INET6: u16 = 10;
     // inet_sock_set_state is shared with DCCP and SCTP; only TCP belongs here.
     const IPPROTO_TCP: u16 = 6;
-
-    // `inet_sock_set_state` field offsets, validated against
-    // `struct trace_event_raw_inet_sock_set_state` (size 72) in
-    // /sys/kernel/btf/vmlinux on 7.1.3-200.fc44 (2026-07-16). BTF member offsets
-    // come from the same offsetof() the tracepoint's `format` file is generated
-    // from, and BTF is world-readable where tracefs is 0700 — so it validates
-    // unprivileged and in CI. See the `btf_offsets` test in -ebpf-common.
-    //
-    // The four address offsets were previously off by one (31/35/39/55): they
-    // encoded an older layout where `protocol` was a __u8. It is a __u16 at
-    // offset 30 here, so every field after it shifts up a byte. The bug was
-    // invisible rather than loud — reading saddr at 31 yields [0x00, s0, s1, s2]
-    // (protocol's high byte, little-endian), so 192.168.1.5 renders as
-    // 0.192.168.1 and a plausible-looking address is published.
-    const SS_SKADDR: usize = 8;
-    const SS_OLDSTATE: usize = 16;
-    const SS_NEWSTATE: usize = 20;
-    const SS_SPORT: usize = 24;
-    const SS_DPORT: usize = 26;
-    const SS_PROTOCOL: usize = 30;
-    const SS_FAMILY: usize = 28;
-    const SS_SADDR_V4: usize = 32;
-    const SS_DADDR_V4: usize = 36;
-    const SS_SADDR_V6: usize = 40;
-    const SS_DADDR_V6: usize = 56;
-
-    // `tcp_retransmit_skb` field offsets, validated the same way against
-    // `struct trace_event_raw_tcp_retransmit_skb` (size 80) — note this event has
-    // its OWN struct rather than the shared `trace_event_raw_tcp_event_sk`
-    // template (which is also in BTF, and disagrees: family@20, daddr@26). These
-    // three happened to be right; they would have been badly wrong against the
-    // template.
-    const RT_FAMILY: usize = 32;
-    const RT_DADDR_V4: usize = 38;
-    const RT_DADDR_V6: usize = 58;
 
     // -- retransmit program --------------------------------------------------
     #[tracepoint]

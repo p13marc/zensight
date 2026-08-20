@@ -13966,6 +13966,7 @@ name = "zensight-sensor-netlink-ebpf-common"
 version = "0.10.1"
 dependencies = [
  "aya",
+ "zensight-btf",
 ]
 
 [[package]]
