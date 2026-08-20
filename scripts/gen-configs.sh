@@ -217,7 +217,17 @@ sysinfo_seds=(
 if [[ "$ebpf" == 1 ]]; then
     # runqlat + biolatency histograms on @rpc/sysinfo/latency (never streamed).
     # The binary is a no-op for this unless built --features ebpf AND holding
-    # CAP_BPF/CAP_PERFMON — `just configure` only passes --ebpf when both hold.
+    # CAP_BPF/CAP_PERFMON/CAP_DAC_READ_SEARCH, on a host whose
+    # perf_event_paranoid is <= 2 (#683).
+    #
+    # `just configure` passes --ebpf on the strength of *toolchain detection*
+    # alone (justfile's `ebpf_on`) — it knows nothing about whether the caps
+    # were granted, and said otherwise here until #685. Turning the flag on
+    # without them yields `available: false` and one warning, which is the
+    # designed-for outcome and not a lie in the config: `collect.ebpf` is a
+    # request, and the sensor reports honestly when it cannot serve it.
+    # `just sysinfo` now depends on `_sysinfo-caps`, so the two travel together
+    # on the demo path.
     sysinfo_seds+=(-e '/^    collect: \{/,/^    \},/ s/^( *)ebpf: false/\1ebpf: true/')
 fi
 if [[ -n "$snapshot_dir" ]]; then

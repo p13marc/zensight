@@ -138,7 +138,7 @@ build:
 #                            skips it. The narrower alternative is chmod 755 on
 #                            /sys/kernel/tracing, which is worse: it exposes
 #                            tracing to every user and resets each boot.
-caps: build
+caps: build _sysinfo-caps
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Granting CAP_NET_RAW,CAP_IPC_LOCK to {{bindir}}/zensight-sensor-netring (sudo)…"
@@ -146,44 +146,61 @@ caps: build
     echo "Granting CAP_NET_ADMIN to {{bindir}}/zensight-sensor-netlink (sudo)…"
     sudo setcap 'cap_net_admin=+ep' {{bindir}}/zensight-sensor-netlink
     if [[ "{{ebpf_on}}" == "1" ]]; then
-        echo "Granting CAP_BPF,CAP_PERFMON,CAP_DAC_READ_SEARCH to {{bindir}}/zensight-sensor-sysinfo (sudo)…"
-        sudo setcap 'cap_bpf,cap_perfmon,cap_dac_read_search=+ep' {{bindir}}/zensight-sensor-sysinfo
-        # A file capability only grants privilege in the user namespace that set
-        # it, but the kernel checks bpf_capable() against the *initial* userns —
-        # so inside a rootless container setcap is void and every load is EPERM.
-        # Say so here rather than let it surface as a mystery in the sensor log.
-        if [[ -e /run/.containerenv || -e /.dockerenv ]]; then
-            echo
-            echo "  WARNING: this is a rootless container. BPF loads are checked against the"
-            echo "  initial user namespace, so the caps above cannot take effect here and"
-            echo "  sysinfo will log 'eBPF latency collector unavailable'. The rest of the"
-            echo "  demo is unaffected. Run from a host terminal for the eBPF panel."
-            echo
-        fi
-        # The caps above are necessary and not sufficient (#683). Debian and
-        # Ubuntu ship perf_event_paranoid=3 — above upstream's maximum of 2 —
-        # which denies perf_event_open beyond what CAP_PERFMON relaxes. The
-        # programs LOAD and every attach then fails EACCES, which reads as a
-        # capability problem and is not one. Report it here, where the caps are
-        # granted, rather than let it surface as one line in the sensor log.
-        paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "?")
-        if [[ "$paranoid" =~ ^[0-9]+$ ]] && (( paranoid > 2 )); then
-            echo
-            echo "  WARNING: kernel.perf_event_paranoid=$paranoid (Debian/Ubuntu default is 3,"
-            echo "  above upstream's maximum of 2). The programs will load and every attach"
-            echo "  will fail with 'Permission denied', whatever the caps above say."
-            echo "    this session: sudo sysctl kernel.perf_event_paranoid=2"
-            echo "    persistent:   echo 'kernel.perf_event_paranoid = 2' | sudo tee /etc/sysctl.d/60-zensight-ebpf.conf"
-            echo "  It relaxes perf_event_open for every unprivileged process on the host, so"
-            echo "  it is your call to make, not something 'just caps' should do for you."
-            echo
-        else
-            echo "kernel.perf_event_paranoid=$paranoid — permits the attach (needs <= 2)."
-        fi
-        echo "logs + parallax need no capabilities."
+        echo "sysinfo's eBPF caps were granted above; logs + parallax need none."
     else
         echo "sysinfo + logs + parallax need no capabilities."
     fi
+
+# sysinfo's eBPF capabilities, on their own so `just sysinfo` can depend on them
+# without dragging in netring's and netlink's sudo setcaps (#685).
+#
+# `just ebpf=1 sysinfo` used to depend on `build configure` only, while netring
+# and netlink depend on `caps`. So it built an eBPF binary, wrote
+# `collect.ebpf: true` into the generated config, and then ran that binary with
+# no capabilities — the one combination guaranteed to log the warning and serve
+# `available: false`. Depending on `caps` outright would have been worse: a
+# plain `just sysinfo` would then sudo-setcap two binaries it never runs.
+#
+# A no-op unless ebpf_on == "1", so the unprivileged path never prompts for sudo.
+_sysinfo-caps: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "{{ebpf_on}}" != "1" ]]; then exit 0; fi
+    echo "Granting CAP_BPF,CAP_PERFMON,CAP_DAC_READ_SEARCH to {{bindir}}/zensight-sensor-sysinfo (sudo)…"
+    sudo setcap 'cap_bpf,cap_perfmon,cap_dac_read_search=+ep' {{bindir}}/zensight-sensor-sysinfo
+    # A file capability only grants privilege in the user namespace that set
+    # it, but the kernel checks bpf_capable() against the *initial* userns —
+    # so inside a rootless container setcap is void and every load is EPERM.
+    # Say so here rather than let it surface as a mystery in the sensor log.
+    if [[ -e /run/.containerenv || -e /.dockerenv ]]; then
+        echo
+        echo "  WARNING: this is a rootless container. BPF loads are checked against the"
+        echo "  initial user namespace, so the caps above cannot take effect here and"
+        echo "  sysinfo will log 'eBPF latency collector unavailable'. The rest of the"
+        echo "  demo is unaffected. Run from a host terminal for the eBPF panel."
+        echo
+    fi
+    # The caps above are necessary and not sufficient (#683). Debian and
+    # Ubuntu ship perf_event_paranoid=3 — above upstream's maximum of 2 —
+    # which denies perf_event_open beyond what CAP_PERFMON relaxes. The
+    # programs LOAD and every attach then fails EACCES, which reads as a
+    # capability problem and is not one. Report it here, where the caps are
+    # granted, rather than let it surface as one line in the sensor log.
+    paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "?")
+    if [[ "$paranoid" =~ ^[0-9]+$ ]] && (( paranoid > 2 )); then
+        echo
+        echo "  WARNING: kernel.perf_event_paranoid=$paranoid (Debian/Ubuntu default is 3,"
+        echo "  above upstream's maximum of 2). The programs will load and every attach"
+        echo "  will fail with 'Permission denied', whatever the caps above say."
+        echo "    this session: sudo sysctl kernel.perf_event_paranoid=2"
+        echo "    persistent:   echo 'kernel.perf_event_paranoid = 2' | sudo tee /etc/sysctl.d/60-zensight-ebpf.conf"
+        echo "  It relaxes perf_event_open for every unprivileged process on the host, so"
+        echo "  it is your call to make, not something 'just caps' should do for you."
+        echo
+    else
+        echo "kernel.perf_event_paranoid=$paranoid — permits the attach (needs <= 2)."
+    fi
+    echo "logs + parallax need no capabilities."
 
 # Build + grant capabilities.
 setup: build caps
@@ -224,7 +241,7 @@ netlink: caps configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5
 
 # Run the sysinfo sensor (CPU/memory/disk/network).
-sysinfo: build configure
+sysinfo: build _sysinfo-caps configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5
 
 # Run the logs sensor (systemd journal via journald + known-event alerts).
