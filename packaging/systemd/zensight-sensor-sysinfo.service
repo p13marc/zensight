@@ -32,6 +32,13 @@ ReadOnlyPaths=/etc/zensight
 # price of the panel. Uncomment ONLY for an eBPF build; leave commented for the
 # default unprivileged one. MemoryDenyWriteExecute would break the BPF JIT, so it
 # must stay off (it is, here).
+#
+# These three are necessary and NOT sufficient on Debian/Ubuntu: they ship
+# kernel.perf_event_paranoid=3, above upstream's maximum of 2, which denies the
+# attach whatever capabilities the unit holds. The programs load and every
+# attach returns EACCES, so it reads as a capability problem and is not one.
+# Needs kernel.perf_event_paranoid<=2 on the host — see #683 and
+# zensight-sensor-sysinfo/docs/configuration.md.
 # AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
 # CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
 # ProtectKernelTunables=no

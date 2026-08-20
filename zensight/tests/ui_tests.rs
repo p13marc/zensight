@@ -5981,6 +5981,45 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
     assert!(ui.find("Fetch failed: No sysinfo sensor responded").is_ok());
 }
 
+/// An attached collector on an idle host reports `available: true` with two
+/// empty histograms. The panel used to render its title and a Refresh button
+/// with nothing in between — a blank gap that reads as a broken view rather
+/// than a quiet host (#685).
+#[test]
+fn sysinfo_latency_panel_says_when_a_window_had_no_samples() {
+    use zensight_common::LatencyReport;
+
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+    state.sysinfo_detail.apply_latency(Ok(LatencyReport {
+        available: true,
+        window_secs: 5,
+        ..Default::default()
+    }));
+
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find(
+            "No samples in this window. The collector is attached and measuring — \
+                 the host was simply idle enough that nothing was scheduled off-CPU or \
+                 waiting on disk long enough to record."
+        )
+        .is_ok(),
+        "an empty window must be stated, not left as a blank panel"
+    );
+
+    // And it must NOT borrow the unavailable-collector copy: "attached but
+    // quiet" and "cannot measure at all" are different problems.
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("The sensor is not collecting these").is_err(),
+        "an idle host must not be reported as a collector that cannot run"
+    );
+}
+
 /// The encrypted-DNS destination inventory: an unrecognised resolver is what a
 /// DNS tunnel looks like from the wire, so it is called out, not left as a
 /// `false` in a cell.

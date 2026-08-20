@@ -345,6 +345,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Four small eBPF-frontier defects found during host validation** (#685). A
+  latency window that had barely happened was published as a full one:
+  `tokio::time::interval` fires its first tick immediately, so iteration one
+  deltaed against a zeroed baseline and labelled microseconds as
+  `window_secs`. It is now consumed as a priming read that seeds the baseline,
+  so the first window published is a true interval. The GUI's side of the same
+  report: two empty histograms rendered as a title and a Refresh button with a
+  blank gap between them — reachable on any idle host, and indistinguishable
+  from a broken panel. It now says the window had no samples, in its own words
+  rather than the unavailable-collector copy, since "attached but quiet" and
+  "cannot measure at all" are different problems. And `just ebpf=1 sysinfo`
+  built an eBPF binary, wrote `collect.ebpf: true` into its config, and then
+  ran it with no capabilities, because the recipe depended on `build configure`
+  while netring and netlink depend on `caps`; sysinfo's eBPF capabilities moved
+  into a `_sysinfo-caps` recipe that `just sysinfo` depends on and that is a
+  no-op off an eBPF build, so the unprivileged path still never prompts for
+  sudo. `scripts/gen-configs.sh` no longer claims `just configure` passes
+  `--ebpf` only when the capabilities are held — it gates on toolchain
+  detection alone.
+
 - **The eBPF features job had never once got past installing its linker**
   (#674). `cargo install bpf-linker --locked` builds an LLVM frontend against a
   *system* LLVM, and the runner image ships none: the only run this workflow has
@@ -438,6 +458,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     verified by `cargo build -p zensight-common`, whose build script enforces the
     compat lock. The GUI's two hand-written mirror structs are deleted in favour
     of the shared types, which is the drift this was always going to cause.
+
+- **The documented eBPF capability set is not sufficient on Debian/Ubuntu**
+  (#683). `CAP_BPF` + `CAP_PERFMON` + `CAP_DAC_READ_SEARCH` are necessary and
+  not sufficient there: both distributions ship `kernel.perf_event_paranoid=3`,
+  a patched level above upstream's maximum of 2, which restricts
+  `perf_event_open` beyond what `CAP_PERFMON` relaxes. The programs **load**;
+  every attach then fails `EACCES` — so the failure appears in the half of the
+  process nobody is looking at, and reads as a capability problem it is not.
+  Confirmed by changing nothing but the sysctl: at 3 the attach is denied, at 2
+  the histograms come up, same binary and same caps. Root was never affected
+  because `CAP_SYS_ADMIN` bypasses the check, which is why it survived the
+  original bring-up. `just caps` now reads the sysctl and says so where the
+  capabilities are granted, printing the confirmed-good value when it is fine;
+  the requirement is in the sysinfo requirements table with the load-vs-attach
+  distinction spelled out, and in the systemd unit's commented capability block.
+  It is documented rather than applied automatically: lowering it relaxes
+  `perf_event_open` for every unprivileged process on the host.
 
 - **The SNMP e2e harness had a 500 ms cliff under load** (#668).
   `collect_points` waited for *silence*, not for the points it wanted: a cycle
