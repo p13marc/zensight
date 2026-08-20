@@ -112,6 +112,61 @@ pub const RT_STRUCTS: [&str; 2] = [
 /// Size shared by both [`RT_STRUCTS`] candidates.
 pub const RT_SIZE: usize = 80;
 
+// ── tcp_sock byte/segment offsets (#681) ────────────────────────────────────
+//
+// The counters live in `struct tcp_sock`, not in the tracepoint's own
+// arguments, so reading them needs a field offset for the *running* kernel.
+// CO-RE is not available: its relocations come from clang's
+// `__builtin_preserve_access_index`, which rustc/bpf-linker do not emit.
+//
+// The documented substitute was `aya::EbpfLoader::set_global` writing a
+// `#[no_mangle] static`. **That does not work here.** Spiked on 6.12.101: with
+// `#[no_mangle]`, with `#[used]`, and with a deliberately non-zero initialiser
+// so it could not land in `.bss`, the built object contained no `.rodata`
+// section, no `TCP_SOCK_OFFSETS` symbol, and not even the magic constant's
+// bytes — bpf-linker internalises the static and folds the data away.
+//
+// What demonstrably survives is maps: every `#[map]` static appears in the
+// object as a `GLOBAL OBJECT` symbol. So the offsets travel in a one-entry
+// `Array`, populated by userspace after `load()` and before `attach()`. The
+// only thing given up is the verifier's ability to constant-fold the
+// `valid == 0` branch; the cost is one array lookup per connection close.
+
+/// Where the byte/segment counters sit in this kernel's `struct tcp_sock`.
+///
+/// Injected by userspace into a one-entry map before the programs attach; see
+/// `zensight_sensor_netlink::ebpf::inject_tcp_sock_offsets`. All-zero (the map's
+/// default) means userspace could not resolve them, and the kernel side then
+/// leaves the counters at 0 — which the wire type defines as "not measured".
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TcpSockOffsets {
+    /// 0 = nothing was injected; do not read `tcp_sock` at all.
+    pub valid: u32,
+    /// `tcp_sock.bytes_acked` — app-goodput the peer has ACKed.
+    pub bytes_acked: u32,
+    /// `tcp_sock.bytes_received`.
+    pub bytes_received: u32,
+    /// `tcp_sock.segs_out`.
+    pub segs_out: u32,
+    /// `tcp_sock.segs_in`.
+    pub segs_in: u32,
+    /// `tcp_sock.total_retrans`.
+    pub total_retrans: u32,
+}
+
+/// The `tcp_sock` members the offsets above name, in field order.
+///
+/// Shared so the userspace resolver and the offset struct cannot drift apart —
+/// the resolver iterates this, and a layout test pins that it matches.
+pub const TCP_SOCK_MEMBERS: [&str; 5] = [
+    "bytes_acked",
+    "bytes_received",
+    "segs_out",
+    "segs_in",
+    "total_retrans",
+];
+
 /// `ConnRecord.event`: the connection closed (tcplife record).
 pub const CONN_EVENT_CLOSE: u8 = 0;
 /// `ConnRecord.event`: the connection reached ESTABLISHED (client-side
@@ -173,7 +228,12 @@ pub struct ConnRecord {
     pub segs_out: u32,
     pub segs_in: u32,
     pub retrans: u32,
-    pub _pad2: u32,
+    /// Non-zero when the five counters above were actually read from
+    /// `tcp_sock`. Repurposed from the trailing `_pad2` word (#681) exactly as
+    /// `event` reused the first `_pad` byte in #304: old producers zeroed it,
+    /// and 0 == "not measured", so the layout AND the semantics stay
+    /// compatible.
+    pub counters_measured: u32,
 }
 
 #[cfg(feature = "user")]
@@ -183,6 +243,10 @@ unsafe impl aya::Pod for RetransKey {}
 #[cfg(feature = "user")]
 // SAFETY: see above.
 unsafe impl aya::Pod for ConnRecord {}
+#[cfg(feature = "user")]
+// SAFETY: `#[repr(C)]` plain-old-data, six `u32`s with no padding — valid to
+// hand to a BPF array map as raw bytes.
+unsafe impl aya::Pod for TcpSockOffsets {}
 
 #[cfg(test)]
 mod tests {
@@ -284,6 +348,32 @@ mod tests {
         );
     }
 
+    /// The offsets struct crosses into a BPF map as raw bytes, so its layout is
+    /// a contract. It also has to line up with `TCP_SOCK_MEMBERS`: the resolver
+    /// walks that list and writes the fields in order, so a field added to one
+    /// and not the other would silently shift every offset after it (#681).
+    #[test]
+    fn tcp_sock_offsets_layout_is_stable() {
+        use core::mem::{align_of, offset_of, size_of};
+
+        assert_eq!(size_of::<TcpSockOffsets>(), 24, "six u32s, no padding");
+        assert_eq!(align_of::<TcpSockOffsets>(), 4);
+
+        assert_eq!(offset_of!(TcpSockOffsets, valid), 0);
+        assert_eq!(offset_of!(TcpSockOffsets, bytes_acked), 4);
+        assert_eq!(offset_of!(TcpSockOffsets, bytes_received), 8);
+        assert_eq!(offset_of!(TcpSockOffsets, segs_out), 12);
+        assert_eq!(offset_of!(TcpSockOffsets, segs_in), 16);
+        assert_eq!(offset_of!(TcpSockOffsets, total_retrans), 20);
+
+        // One `valid` flag plus one field per member.
+        assert_eq!(
+            size_of::<TcpSockOffsets>() / size_of::<u32>(),
+            TCP_SOCK_MEMBERS.len() + 1,
+            "a member was added to one of these and not the other"
+        );
+    }
+
     #[test]
     fn bucket_edges_and_clamp() {
         assert_eq!(connlat_bucket(0), 0);
@@ -316,5 +406,7 @@ mod tests {
         assert_eq!(offset_of!(ConnRecord, dport), 66);
         assert_eq!(offset_of!(ConnRecord, duration_ns), 72);
         assert_eq!(offset_of!(ConnRecord, retrans), 104);
+        // Repurposed from `_pad2` (#681); the record must stay 112 bytes.
+        assert_eq!(offset_of!(ConnRecord, counters_measured), 108);
     }
 }

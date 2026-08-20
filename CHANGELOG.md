@@ -345,6 +345,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **tcplife's byte and segment counters are real** (#681). They were hardcoded
+  `0` in the kernel program — 0 of 196 records carried a non-zero counter on a
+  host where `ss -ti` had numbers for the same sockets — because they live in
+  `struct tcp_sock` rather than in the tracepoint's arguments, and CO-RE cannot
+  reach them: its field relocations come from clang's
+  `__builtin_preserve_access_index`, which rustc/bpf-linker do not emit. The
+  sensor now resolves the five offsets from the running kernel's own BTF
+  (`zensight-btf`, landed for #682) and injects them with
+  `aya::EbpfLoader::set_global` before load, with `must_exist: true` so a future
+  linker that stopped emitting the symbol fails loudly instead of silently
+  zeroing every counter. Where BTF cannot supply them the counters stay zero
+  and a new `counters_measured` flag says so, which is the distinction the wire
+  could not previously express — the GUI renders a dash rather than a `0`. A
+  host test parses the built object and performs the same symbol-and-size check
+  `set_global` does at load, so the mechanism is guarded at `cargo test` time
+  and needs no privilege; that test exists because the question of whether the
+  symbol survives linking was first answered wrongly, off a stale build
+  artifact.
+
 - **The netlink eBPF connections channel now carries the kernel's own timestamp,
   and the retransmit table renders its address family** (#685, the remaining
   three of five defects). `ConnRecord.ts_ns` was stamped by the BPF program for

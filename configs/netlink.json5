@@ -64,12 +64,14 @@
       // attribution is exact (110/110 on a curl loop that previously scored
       // 59/91). Retransmit peers agree with `nstat TcpRetransSegs`.
       //
-      // ONE GAP REMAINS: tcplife's byte/segment counters are always zero —
-      // they need `tcp_sock` field offsets this build cannot resolve (CO-RE is
-      // unavailable to rustc/bpf-linker). A zero there reads as "idle
-      // connection", not "not measured". Everything else on this tier is
-      // trustworthy. `just run` still leaves it off by default; sysinfo's eBPF
-      // histograms are the ones the demo turns on. See the module docs in
+      // The byte/segment gap is closed (#681): tcplife's counters are read
+      // from `struct tcp_sock` using offsets the sensor resolves from the
+      // running kernel's BTF and injects at load time, CO-RE being unavailable
+      // to rustc/bpf-linker. On a kernel whose BTF does not expose them the
+      // counters stay zero and `counters_measured` is false, so "not measured"
+      // is now sayable rather than indistinguishable from "idle". `just run`
+      // still leaves this tier off by default; sysinfo's eBPF histograms are
+      // the ones the demo turns on. See the module docs in
       // zensight-sensor-netlink-ebpf/src/main.rs.
       ebpf: false,
       // Socket→process attribution for the socket drill-down (#304): one

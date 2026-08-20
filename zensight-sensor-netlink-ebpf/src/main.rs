@@ -65,7 +65,9 @@ fn main() {}
 #[cfg(target_arch = "bpf")]
 mod prog {
     use aya_ebpf::{
-        helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns},
+        helpers::{
+            bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_kernel,
+        },
         macros::{map, tracepoint},
         maps::{LruHashMap, PerCpuArray, RingBuf},
         programs::TracePointContext,
@@ -75,10 +77,10 @@ mod prog {
     // invisible to the host test that checks it against the running kernel's
     // BTF (#682). Same placement as sysinfo's, for the same reason.
     use zensight_sensor_netlink_ebpf_common::{
-        connlat_bucket, ConnRecord, ConnectStart, RetransKey, CONNLAT_BUCKETS, CONN_EVENT_CLOSE,
-        CONN_EVENT_ESTABLISHED, RT_DADDR_V4, RT_DADDR_V6, RT_FAMILY, SS_DADDR_V4, SS_DADDR_V6,
-        SS_DPORT, SS_FAMILY, SS_NEWSTATE, SS_OLDSTATE, SS_PROTOCOL, SS_SADDR_V4, SS_SADDR_V6,
-        SS_SKADDR, SS_SPORT,
+        connlat_bucket, ConnRecord, ConnectStart, RetransKey, TcpSockOffsets, CONNLAT_BUCKETS,
+        CONN_EVENT_CLOSE, CONN_EVENT_ESTABLISHED, RT_DADDR_V4, RT_DADDR_V6, RT_FAMILY, SS_DADDR_V4,
+        SS_DADDR_V6, SS_DPORT, SS_FAMILY, SS_NEWSTATE, SS_OLDSTATE, SS_PROTOCOL, SS_SADDR_V4,
+        SS_SADDR_V6, SS_SKADDR, SS_SPORT,
     };
 
     // -- connlat -------------------------------------------------------------
@@ -88,6 +90,29 @@ mod prog {
     // insert — which the `let _ =` swallows, so recording would stop silently.
     #[map]
     static CONNECT_START: LruHashMap<u64, ConnectStart> = LruHashMap::with_max_entries(10240, 0);
+    /// Where `struct tcp_sock`'s counters live on the running kernel (#681).
+    ///
+    /// Patched into `.rodata` by `EbpfLoader::set_global` before load, because
+    /// CO-RE is unavailable to us: its relocations come from clang's
+    /// `__builtin_preserve_access_index`, which rustc/bpf-linker do not emit.
+    /// `valid == 0` — the compiled-in default — means userspace resolved
+    /// nothing and the counters must stay 0, which the wire defines as "not
+    /// measured" rather than "idle".
+    ///
+    /// Read through `read_volatile`. Without it LLVM folds the initialiser
+    /// into the instruction stream and the patched `.rodata` is never
+    /// consulted — the failure mode being that every counter reads 0 and
+    /// nothing anywhere reports an error.
+    #[unsafe(no_mangle)]
+    static TCP_SOCK_OFFSETS: TcpSockOffsets = TcpSockOffsets {
+        valid: 0,
+        bytes_acked: 0,
+        bytes_received: 0,
+        segs_out: 0,
+        segs_in: 0,
+        total_retrans: 0,
+    };
+
     #[map]
     static CONNLAT_HIST: PerCpuArray<u64> =
         PerCpuArray::with_max_entries(CONNLAT_BUCKETS as u32, 0);
@@ -263,6 +288,25 @@ mod prog {
         Ok(0)
     }
 
+    /// Read a `u64` at `base + off` from kernel memory; 0 if unreadable.
+    ///
+    /// A failed probe means a wrong offset or a socket already torn down;
+    /// either way 0 is the honest answer, and the wire type defines 0 as "not
+    /// measured".
+    #[inline(always)]
+    fn read_sk_u64(base: u64, off: u32) -> u64 {
+        // SAFETY: bpf_probe_read_kernel is the *checked* read — it returns Err
+        // rather than faulting on an address it cannot read.
+        unsafe { bpf_probe_read_kernel((base + off as u64) as *const u64).unwrap_or(0) }
+    }
+
+    /// See [`read_sk_u64`].
+    #[inline(always)]
+    fn read_sk_u32(base: u64, off: u32) -> u32 {
+        // SAFETY: see above.
+        unsafe { bpf_probe_read_kernel((base + off as u64) as *const u32).unwrap_or(0) }
+    }
+
     /// Build + submit one `ConnRecord` from the `inet_sock_set_state` context.
     /// Shared by the close (tcplife) and established (tier 2b, #304) paths.
     ///
@@ -299,13 +343,14 @@ mod prog {
             sport,
             dport,
             duration_ns,
-            // tcp_sock byte/seg fields need CO-RE; left 0 in the blind build.
+            // Filled below from `tcp_sock` when userspace resolved the offsets
+            // (#681); 0 otherwise, which the wire defines as "not measured".
             tx_bytes: 0,
             rx_bytes: 0,
             segs_out: 0,
             segs_in: 0,
             retrans: 0,
-            _pad2: 0,
+            counters_measured: 0,
         };
         if family == AF_INET6 {
             rec.saddr = unsafe { ctx.read_at(SS_SADDR_V6)? };
@@ -315,6 +360,31 @@ mod prog {
             let d: [u8; 4] = unsafe { ctx.read_at(SS_DADDR_V4)? };
             rec.saddr[..4].copy_from_slice(&s);
             rec.daddr[..4].copy_from_slice(&d);
+        }
+
+        // Counters, on the CLOSE path only: at ESTABLISHED they are ~0 and that
+        // record exists for attribution, not volume.
+        //
+        // `skaddr` is re-read here rather than passed in. BPF passes at most
+        // five arguments in r1-r5 and this function already takes exactly five;
+        // a sixth is what produced `R11 is invalid` before (see the doc above).
+        //
+        // `struct tcp_sock` embeds `inet_connection_sock` -> `inet_sock` ->
+        // `sock` at offset 0, so the tracepoint's `skaddr` IS the `tcp_sock`
+        // base. That looks like a bug on review and is not.
+        if event == CONN_EVENT_CLOSE {
+            // SAFETY: a plain read of a `.rodata` global; volatile so the
+            // injected value is actually loaded (see the static's doc).
+            let offs = unsafe { core::ptr::read_volatile(&TCP_SOCK_OFFSETS) };
+            if offs.valid != 0 {
+                let sk: u64 = unsafe { ctx.read_at(SS_SKADDR)? };
+                rec.tx_bytes = read_sk_u64(sk, offs.bytes_acked);
+                rec.rx_bytes = read_sk_u64(sk, offs.bytes_received);
+                rec.segs_out = read_sk_u32(sk, offs.segs_out);
+                rec.segs_in = read_sk_u32(sk, offs.segs_in);
+                rec.retrans = read_sk_u32(sk, offs.total_retrans);
+                rec.counters_measured = 1;
+            }
         }
 
         if let Some(mut entry) = CONNS.reserve::<ConnRecord>(0) {

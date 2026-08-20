@@ -586,9 +586,12 @@ fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>
                     // 0 means a producer older than #685, not 1970.
                     cell(&conn_age(c.ts_unix_ms), 80),
                     cell(&c.duration_ms.to_string(), 80),
-                    cell(&c.tx_bytes.to_string(), 80),
-                    cell(&c.rx_bytes.to_string(), 80),
-                    cell(&c.retrans.to_string(), 55),
+                    // A dash, not a 0, when the sensor could not resolve this
+                    // kernel's tcp_sock offsets (#681) — "not measured" and
+                    // "moved nothing" are different facts.
+                    cell(&counter(c.counters_measured, c.tx_bytes), 80),
+                    cell(&counter(c.counters_measured, c.rx_bytes), 80),
+                    cell(&counter(c.counters_measured, c.retrans as u64), 55),
                 ]
                 .spacing(8),
             );
@@ -603,6 +606,15 @@ fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>
     }
 
     Some(card(col))
+}
+
+/// A tcplife byte/segment counter, or a dash when nothing measured it (#681).
+fn counter(measured: bool, value: u64) -> String {
+    if measured {
+        value.to_string()
+    } else {
+        "—".to_string()
+    }
 }
 
 /// When a tcplife record closed, relative to now.
