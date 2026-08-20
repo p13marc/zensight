@@ -13666,6 +13666,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zensight-btf"
+version = "0.10.1"
+
+[[package]]
 name = "zensight-common"
 version = "0.10.1"
 dependencies = [
@@ -13962,6 +13966,7 @@ name = "zensight-sensor-netlink-ebpf-common"
 version = "0.10.1"
 dependencies = [
  "aya",
+ "zensight-btf",
 ]
 
 [[package]]
@@ -14078,6 +14083,9 @@ dependencies = [
 [[package]]
 name = "zensight-sensor-sysinfo-ebpf-common"
 version = "0.10.1"
+dependencies = [
+ "zensight-btf",
+]
 
 [[package]]
 name = "zensight-sensor-systemd"

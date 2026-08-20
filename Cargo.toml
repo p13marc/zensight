@@ -16,6 +16,10 @@ members = [
     "zensight-sensor-netlink",
     "zensight-sensor-netring",
     "zensight-sensor-parallax",
+    # Dependency-free BTF reader shared by the eBPF crates (#682, #681):
+    # a dev-dependency of the -ebpf-common crates (so it can never reach the
+    # bpfel-unknown-none object) and a real one of the userspace sensors.
+    "zensight-btf",
     "zensight-sensor-systemd",
     # EVALUATION ONLY (epic #415): Rerun visualization adapter prototype.
     # publish = false, nothing depends on it; may be removed wholesale if the

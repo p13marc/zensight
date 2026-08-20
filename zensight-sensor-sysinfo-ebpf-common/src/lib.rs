@@ -68,82 +68,6 @@ pub fn log2_bucket(us: u64) -> u32 {
     }
 }
 
-/// Minimal BTF reader, test-only: enough to find a struct by name and report its
-/// members' byte offsets.
-///
-/// BTF member offsets are emitted by the same `offsetof` the tracepoint's
-/// `format` file is generated from, so they are the authority for the constants
-/// above — and `/sys/kernel/btf/vmlinux` is world-readable where
-/// `/sys/kernel/tracing` is mode 0700, so this validates unprivileged, in a
-/// container, and in CI. Format: `Documentation/bpf/btf.rst`.
-#[cfg(test)]
-mod btf {
-    /// Byte offset of `member` in `struct <name>`, or `None` if either is absent.
-    pub fn member_offset(blob: &[u8], name: &str, member: &str) -> Option<usize> {
-        let u16_at = |o: usize| u16::from_le_bytes(blob[o..o + 2].try_into().unwrap());
-        let u32_at = |o: usize| u32::from_le_bytes(blob[o..o + 4].try_into().unwrap());
-
-        assert_eq!(u16_at(0), 0xEB9F, "bad BTF magic");
-        let hdr_len = u32_at(4) as usize;
-        let type_off = u32_at(8) as usize;
-        let type_len = u32_at(12) as usize;
-        let str_off = u32_at(16) as usize;
-
-        let strs = hdr_len + str_off;
-        let name_of = |off: u32| -> &str {
-            if off == 0 {
-                return "";
-            }
-            let start = strs + off as usize;
-            let end = start + blob[start..].iter().position(|&b| b == 0).unwrap();
-            core::str::from_utf8(&blob[start..end]).unwrap_or("")
-        };
-
-        let mut pos = hdr_len + type_off;
-        let end = pos + type_len;
-        while pos < end {
-            let name_off = u32_at(pos);
-            let info = u32_at(pos + 4);
-            let vlen = (info & 0xFFFF) as usize;
-            let kind = (info >> 24) & 0x1F;
-            let kind_flag = (info >> 31) & 1;
-            let body = pos + 12;
-
-            const STRUCT: u32 = 4;
-            const UNION: u32 = 5;
-            if (kind == STRUCT || kind == UNION) && name_of(name_off) == name {
-                for i in 0..vlen {
-                    let m = body + 12 * i;
-                    if name_of(u32_at(m)) == member {
-                        let raw = u32_at(m + 8);
-                        // With kind_flag the low 24 bits are the bit offset and
-                        // the high 8 are the bitfield size; without it the whole
-                        // word is the bit offset.
-                        let bit_off = if kind_flag == 1 {
-                            raw & 0x00FF_FFFF
-                        } else {
-                            raw
-                        };
-                        return Some(bit_off as usize / 8);
-                    }
-                }
-                return None;
-            }
-
-            // Skip this type's trailing payload, which is kind-dependent.
-            pos = body
-                + match kind {
-                    1 | 14 | 17 => 4,                      // INT, VAR, DECL_TAG
-                    3 => 12,                               // ARRAY
-                    STRUCT | UNION | 15 | 19 => 12 * vlen, // STRUCT/UNION/DATASEC/ENUM64
-                    6 | 13 => 8 * vlen,                    // ENUM, FUNC_PROTO
-                    _ => 0,
-                };
-        }
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,9 +83,11 @@ mod tests {
     /// (non-Linux, or a kernel built without CONFIG_DEBUG_INFO_BTF).
     #[test]
     fn btf_offsets_match_this_kernel() {
-        const VMLINUX: &str = "/sys/kernel/btf/vmlinux";
-        let Ok(blob) = std::fs::read(VMLINUX) else {
-            eprintln!("skipping: {VMLINUX} unreadable (no CONFIG_DEBUG_INFO_BTF?)");
+        let Some(blob) = zensight_btf::read_vmlinux() else {
+            eprintln!(
+                "skipping: {} unreadable (no CONFIG_DEBUG_INFO_BTF?)",
+                zensight_btf::VMLINUX_PATH
+            );
             return;
         };
 
@@ -190,7 +116,7 @@ mod tests {
 
         let mut checked = 0;
         for (strukt, member, ours) in cases {
-            let Some(truth) = btf::member_offset(&blob, strukt, member) else {
+            let Some(truth) = zensight_btf::member_offset(&blob, strukt, member) else {
                 panic!("BTF has no {strukt}.{member} — the tracepoint ABI moved");
             };
             assert_eq!(
