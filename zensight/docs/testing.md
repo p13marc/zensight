@@ -409,6 +409,41 @@ for cross-platform tests; mock time-dependent values.
 | `SelectorNotFound` | No element matches the selector |
 | `TargetNotVisible` | Element found but not visible |
 
+## If `ui_tests` segfaults
+
+On a headless Linux box with Mesa installed, `cargo test -p zensight --test ui_tests`
+segfaults intermittently — roughly one run in seven under load, with **no output at
+all**: the process dies before libtest prints a result line, so there is no `FAILED`
+and no panic message to grep for. It looks like this and nothing else:
+
+```
+error: test failed, to rerun pass `-p zensight --test ui_tests`
+Caused by:
+  process didn't exit successfully: … (signal: 11, SIGSEGV: invalid memory reference)
+```
+
+It is not your change. `iced_test::simulator` stands up a real **wgpu** device;
+wgpu picks the Vulkan backend; on a machine with no GPU that resolves to
+**lavapipe**, Mesa's software Vulkan; and 167 tests doing that concurrently
+crash inside the Vulkan loader. The faulting frame is in `libvulkan.so.1`, under
+`wgpu_core::snatch::SnatchLock` (#687).
+
+Force wgpu off Vulkan and it goes away — measured 6 crashes in 40 runs by
+default, 0 in 40 with:
+
+```bash
+WGPU_BACKEND=gl cargo test -p zensight --test ui_tests
+```
+
+Deliberately **not** set in `.cargo/config.toml`: that file's `[env]` block
+applies to `cargo run` as well, and downgrading the real GUI's renderer on every
+developer machine to fix a test-only problem is the wrong trade. Export it in
+your shell if this bites you.
+
+CI is unaffected — the runner image ships no Vulkan ICD, so wgpu never takes
+this path there. Which also means a red `test` job on CI is **not** this, and
+should be read as a real failure.
+
 ## See also
 
 - [Iced Testing PR #3059](https://github.com/iced-rs/iced/pull/3059) — original testing framework implementation.
