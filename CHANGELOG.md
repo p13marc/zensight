@@ -345,6 +345,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The netlink eBPF connections channel now carries the kernel's own timestamp,
+  and the retransmit table renders its address family** (#685, the remaining
+  three of five defects). `ConnRecord.ts_ns` was stamped by the BPF program for
+  every record and dropped in the userspace conversion, so
+  `@rpc/netlink/connections` came back with no times on it at all — records
+  could not be ordered or aged. It is not published raw: `bpf_ktime_get_ns()`
+  counts from boot, so the sensor converts it against a `CLOCK_MONOTONIC`
+  anchor (deliberately not `CLOCK_BOOTTIME`, which counts suspended time the
+  kernel clock does not) and publishes `ts_unix_ms` in epoch milliseconds, the
+  convention `DiscoveryReport` and `EventRecord` already use. The GUI grew a
+  "closed" column, since a field nothing renders is not a fix.
+  The `RETRANS` counter's `get`/`+1`/`insert` became a single `get_ptr_mut`
+  load-add-store: the old form lost increments whenever two CPUs took a
+  retransmit to the same peer at once, which softirq makes routine. It
+  undercounts less rather than exactly — the residual race is documented rather
+  than papered over, because closing it needs a per-CPU hash whose 4096×nproc
+  cost is its own decision.
+  And a fifth defect the issue did not list: `fam_digit` puts a **digit** (4 or
+  6) on the wire while the GUI's `fam_label` matched raw `AF_*` constants (2 or
+  10), so **every** retransmit row rendered its family as `?`. The test that
+  should have caught it used `family: 2` — a value the sensor cannot emit — and
+  asserted nothing about the label. Both functions now have unit tests, and the
+  UI test asserts the rendered value.
+
 - **Four small eBPF-frontier defects found during host validation** (#685). A
   latency window that had barely happened was published as a full one:
   `tokio::time::interval` fires its first tick immediately, so iteration one

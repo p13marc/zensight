@@ -2186,6 +2186,17 @@ mod tests {
         assert_eq!(v, back);
     }
 
+    /// The other half of the contract `fam_label` broke (#685): this is the
+    /// only thing that puts a family on the wire, and it emits digits, never
+    /// the raw `AF_*` constants it reads.
+    #[test]
+    fn fam_digit_emits_digits_not_af_constants() {
+        assert_eq!(fam_digit(2), 4, "AF_INET -> 4");
+        assert_eq!(fam_digit(10), 6, "AF_INET6 -> 6");
+        assert_eq!(fam_digit(0), 0, "unknown families collapse to 0");
+        assert_eq!(fam_digit(4), 0, "a digit is not a valid input");
+    }
+
     /// The conversion is the whole point of the field: a boot-relative number
     /// on the wire would be unusable to any consumer that does not also know
     /// this host's boot time (#685).

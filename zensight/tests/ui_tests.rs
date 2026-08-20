@@ -3264,7 +3264,9 @@ fn test_netlink_sockets_ebpf_section() {
         NetlinkDetailTopic::Retransmits,
         Ok(NetlinkDetailData::Retransmits(vec![RetransmitRecord {
             peer: "203.0.113.9".into(),
-            family: 2,
+            // 4, not AF_INET's 2: `fam_digit` is the only thing that puts a
+            // family on this wire and it emits digits (#685).
+            family: 4,
             count: 42,
         }])),
     );
@@ -3273,7 +3275,7 @@ fn test_netlink_sockets_ebpf_section() {
         Ok(NetlinkDetailData::Connections(vec![ConnectionRecord {
             pid: 1234,
             comm: "curl".into(),
-            family: 2,
+            family: 4,
             local: "10.0.0.1".into(),
             lport: 5555,
             remote: "1.1.1.1".into(),
@@ -3295,6 +3297,15 @@ fn test_netlink_sockets_ebpf_section() {
     assert!(ui.find("203.0.113.9").is_ok());
     assert!(ui.find("Recent connections (tcplife)").is_ok());
     assert!(ui.find("curl").is_ok());
+
+    // The family column must resolve. This test used to pass with the fixture
+    // set to AF_INET's 2 and no assertion on the label at all, which is how
+    // every real retransmit row rendered "?" unnoticed (#685).
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(
+        ui.find("IPv4").is_ok(),
+        "a family of 4 must render as IPv4, not as the unknown-family dash"
+    );
 }
 
 /// The netring view shows the TLS section (with a fetched inventory) and the
