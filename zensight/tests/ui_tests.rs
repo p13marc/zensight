@@ -3288,6 +3288,7 @@ fn test_netlink_sockets_ebpf_section() {
             segs_out: 60,
             segs_in: 80,
             retrans: 1,
+            counters_measured: true,
         }])),
     );
 

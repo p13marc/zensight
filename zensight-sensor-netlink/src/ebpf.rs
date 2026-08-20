@@ -25,7 +25,8 @@ use aya::{
 };
 use tokio::io::unix::AsyncFd;
 use zensight_sensor_netlink_ebpf_common::{
-    CONN_EVENT_ESTABLISHED, CONNLAT_BUCKETS, ConnRecord, RetransKey,
+    CONN_EVENT_ESTABLISHED, CONNLAT_BUCKETS, ConnRecord, RetransKey, TCP_SOCK_MEMBERS,
+    TcpSockOffsets,
 };
 
 use crate::map::{
@@ -244,7 +245,15 @@ impl EbpfState {
 pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapData>)> {
     bump_memlock();
 
-    let mut bpf = EbpfLoader::new()
+    let mut loader = EbpfLoader::new();
+    let offsets = resolve_tcp_sock_offsets();
+    // `must_exist: true` on purpose. If a future bpf-linker stops emitting this
+    // symbol, that must be a loud load failure — the alternative is every byte
+    // counter silently reading 0, which is exactly the state #681 exists to fix
+    // and is indistinguishable from an idle host.
+    let offset_bytes = offsets_to_bytes(&offsets);
+    let mut bpf = loader
+        .set_global("TCP_SOCK_OFFSETS", &offset_bytes[..], true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             // The bin-target name of the kernel crate (differs from its package
@@ -291,6 +300,84 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
         }),
     };
     Ok((bpf, state, ring))
+}
+
+/// Resolve this kernel's `struct tcp_sock` counter offsets from its own BTF.
+///
+/// CO-RE would normally do this at load time; it is unavailable to us because
+/// its relocations come from clang's `__builtin_preserve_access_index`, which
+/// rustc/bpf-linker do not emit (#681). BTF is the same `offsetof` the kernel
+/// was built with, and `/sys/kernel/btf/vmlinux` is world-readable, so this
+/// needs no privilege beyond what loading already requires.
+///
+/// Any failure yields `valid: 0` and one warning naming what was missing. The
+/// kernel side then leaves the counters at 0, which the wire type defines as
+/// "not measured" — a documented absence rather than a plausible lie.
+#[cfg(feature = "ebpf")]
+fn resolve_tcp_sock_offsets() -> TcpSockOffsets {
+    let Some(blob) = zensight_btf::read_vmlinux() else {
+        tracing::warn!(
+            path = zensight_btf::VMLINUX_PATH,
+            "eBPF: no kernel BTF; tcplife byte/segment counters stay unmeasured (#681)"
+        );
+        return TcpSockOffsets::default();
+    };
+
+    let mut resolved = [0u32; TCP_SOCK_MEMBERS.len()];
+    for (slot, member) in resolved.iter_mut().zip(TCP_SOCK_MEMBERS) {
+        match zensight_btf::member_offset(&blob, "tcp_sock", member) {
+            Some(off) => *slot = off as u32,
+            None => {
+                // Naming the member matters: "tcp_sock changed" is a kernel
+                // bump, and the field that moved is the whole diagnosis.
+                tracing::warn!(
+                    member,
+                    "eBPF: tcp_sock.{member} not in this kernel's BTF; \
+                     tcplife byte/segment counters stay unmeasured (#681)"
+                );
+                return TcpSockOffsets::default();
+            }
+        }
+    }
+
+    let offsets = TcpSockOffsets {
+        valid: 1,
+        bytes_acked: resolved[0],
+        bytes_received: resolved[1],
+        segs_out: resolved[2],
+        segs_in: resolved[3],
+        total_retrans: resolved[4],
+    };
+    // The line a future kernel bump gets diagnosed from.
+    tracing::debug!(
+        bytes_acked = offsets.bytes_acked,
+        bytes_received = offsets.bytes_received,
+        segs_out = offsets.segs_out,
+        segs_in = offsets.segs_in,
+        total_retrans = offsets.total_retrans,
+        "eBPF: resolved tcp_sock offsets from BTF"
+    );
+    offsets
+}
+
+/// `TcpSockOffsets` as the `.rodata` bytes `set_global` patches in.
+///
+/// `aya-obj` requires the byte length to equal the symbol's size exactly, which
+/// is what `tcp_sock_offsets_layout_is_stable` pins on the other side.
+#[cfg(feature = "ebpf")]
+fn offsets_to_bytes(o: &TcpSockOffsets) -> [u8; core::mem::size_of::<TcpSockOffsets>()] {
+    let mut out = [0u8; core::mem::size_of::<TcpSockOffsets>()];
+    for (chunk, value) in out.chunks_exact_mut(4).zip([
+        o.valid,
+        o.bytes_acked,
+        o.bytes_received,
+        o.segs_out,
+        o.segs_in,
+        o.total_retrans,
+    ]) {
+        chunk.copy_from_slice(&value.to_ne_bytes());
+    }
+    out
 }
 
 /// Epoch milliseconds at this host's boot, for converting the kernel's
@@ -376,6 +463,69 @@ fn bump_memlock() {
 
 #[cfg(test)]
 mod tests {
+
+    /// The symbol `set_global` patches must exist in the built object, at
+    /// exactly the size we hand it.
+    ///
+    /// This test exists because I got this wrong by hand: I concluded
+    /// bpf-linker discarded the static, having grepped a stale object from a
+    /// previous day's build rather than the one `aya-build` emits into
+    /// `OUT_DIR` (#681). A confident negative from the wrong file cost a
+    /// redesign. `patch_map_data` with `must_exist = true` is the same check
+    /// `EbpfLoader::set_global` performs at load — symbol present, section
+    /// mapped, and `data.len() == symbol.size` exactly — so this fails at
+    /// `cargo test` time instead of on a user's host, and needs no privilege.
+    #[test]
+    fn set_global_target_exists_in_the_built_object() {
+        use std::collections::HashMap;
+
+        let bytes =
+            aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/zensight-netlink-ebpf-prog"));
+        let mut obj = aya_obj::Object::parse(bytes).expect("the built object must parse");
+
+        let offsets = TcpSockOffsets {
+            valid: 1,
+            bytes_acked: 1840,
+            bytes_received: 1784,
+            segs_out: 1600,
+            segs_in: 1792,
+            total_retrans: 2216,
+        };
+        let data = offsets_to_bytes(&offsets);
+        let mut globals: HashMap<&str, (&[u8], bool)> = HashMap::new();
+        globals.insert("TCP_SOCK_OFFSETS", (&data[..], true));
+
+        obj.patch_map_data(globals).expect(
+            "TCP_SOCK_OFFSETS must be present in .rodata at exactly \
+             size_of::<TcpSockOffsets>() — if this fails, either bpf-linker \
+             stopped emitting the static or the struct changed size",
+        );
+    }
+
+    /// Whatever this kernel says, the resolver must either produce a complete
+    /// set or none at all — a half-filled `TcpSockOffsets` would read some
+    /// fields from the right place and some from garbage.
+    #[test]
+    fn resolver_is_all_or_nothing() {
+        let offs = resolve_tcp_sock_offsets();
+        if offs.valid == 0 {
+            // No BTF on this host, or the struct moved. Nothing more to check.
+            return;
+        }
+        for (name, value) in TCP_SOCK_MEMBERS.iter().zip([
+            offs.bytes_acked,
+            offs.bytes_received,
+            offs.segs_out,
+            offs.segs_in,
+            offs.total_retrans,
+        ]) {
+            assert!(
+                value > 0,
+                "tcp_sock.{name} resolved to offset 0, which is `sock` itself — \
+                 the resolver reported success on an incomplete set"
+            );
+        }
+    }
     use super::*;
 
     fn conn(local: &str, lport: u16, pid: u32, comm: &str) -> ConnectionRecord {
@@ -394,6 +544,7 @@ mod tests {
             segs_out: 0,
             segs_in: 0,
             retrans: 0,
+            counters_measured: false,
         }
     }
 

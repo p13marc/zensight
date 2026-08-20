@@ -495,10 +495,12 @@ pub struct RetransmitRecord {
 /// socket there is no trustworthy owner and `pid` is 0; the `/proc` scan owns
 /// attribution there.
 ///
-/// **`tx_bytes` / `rx_bytes` / `segs_out` / `segs_in` / `retrans` are currently
-/// always zero** — they live in `struct tcp_sock`, which the kernel program
-/// cannot reach without load-time offset injection (#681). A zero here means
-/// "not measured", not "idle".
+/// `tx_bytes` / `rx_bytes` / `segs_out` / `segs_in` / `retrans` are read from
+/// `struct tcp_sock` using offsets the sensor resolves from the running
+/// kernel's BTF and injects at load time (#681) — CO-RE is not available to a
+/// rustc/bpf-linker build. When that resolution fails they are zero and
+/// [`counters_measured`](Self::counters_measured) is `false`; check the flag
+/// rather than reading a zero as "idle".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionRecord {
     /// TGID of the process that opened the socket; 0 when unattributed.
@@ -529,6 +531,14 @@ pub struct ConnectionRecord {
     pub segs_out: u32,
     pub segs_in: u32,
     pub retrans: u32,
+    /// Whether the five counters above were actually read from the kernel.
+    ///
+    /// `false` means the sensor could not resolve this kernel's `struct
+    /// tcp_sock` offsets, so they are zero because nothing measured them —
+    /// which is a different statement from "this connection moved no data",
+    /// and the two were previously indistinguishable (#681).
+    #[serde(default)]
+    pub counters_measured: bool,
 }
 
 /// One TCP socket (served filterable by state/port).

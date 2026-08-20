@@ -1324,6 +1324,9 @@ pub fn conn_record_view(r: &ConnRecord, anchor_ms: i64) -> ConnectionRecord {
         segs_out: r.segs_out,
         segs_in: r.segs_in,
         retrans: r.retrans,
+        // The kernel program only fills these when userspace injected offsets
+        // it could resolve; `_pad2` is its channel for saying so (#681).
+        counters_measured: r.counters_measured != 0,
     }
 }
 
@@ -2164,7 +2167,7 @@ mod tests {
             segs_out: 12,
             segs_in: 41,
             retrans: 0,
-            _pad2: 0,
+            counters_measured: 1,
         };
         // Anchor: boot happened at this epoch ms, so the event is anchor + 2h.
         let anchor_ms = 1_700_000_000_000;
