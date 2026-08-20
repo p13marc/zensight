@@ -4588,16 +4588,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kanal"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e3953adf0cd667798b396c2fa13552d6d9b3269d7dd1154c4c416442d1ff574"
-dependencies = [
- "futures-core",
- "lock_api",
-]
-
-[[package]]
 name = "keccak"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6347,9 +6337,9 @@ dependencies = [
 
 [[package]]
 name = "parallax-pipeline"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3b7cc62b7a0832ad8ddcfefd8e2c2df23127489025d20c94f4adf57e29165ed"
+checksum = "893b7a869c3c14169dfb26e70e8d2d2115b9b867151baf2f10d6b56306d3f4bf"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6357,7 +6347,6 @@ dependencies = [
  "dynosaur",
  "futures",
  "jpeg-encoder",
- "kanal",
  "libc",
  "libloading 0.9.0",
  "metrics",
