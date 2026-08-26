@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Every firing alert re-keys: `alert_key` is now the normative RFC 11 §3.1
+  derivation** (#736, #738). ZenSight had its own recipe with the same hash
+  (FNV-1a-64) and the same 16-lowercase-hex output, but two byte differences
+  from the spec: the framing put `\0` *after* the rule and after each `k=v`
+  rather than `\n` *before* each label with none trailing, and the exclusion
+  matched only the `host.` prefix, so the RFC's own bare `host` label was
+  hashed in. `Alert::alert_key()` is now a thin wrapper over
+  `zenkey::alert::alert_key`, so two independent implementations mint the same
+  key for the same alert. The RFC's test vector — rule `link_down`, labels
+  `{peer: r2, port: eth0, host: h-3fa9c2d41b7e}` → `a659f813308ad1da` — is
+  pinned in `alert.rs`; that same alert used to key as `c25da085d5c5b7e7`.
+
+  **Alerts are LWW state keyed by the thing that changed**, so every alert
+  firing at the moment of the upgrade leaves a permanent phantom at its old key
+  that nothing will ever clear. See [`RELEASING.md`](RELEASING.md), "Re-keying
+  the alert state on upgrade" (#737), for the sweep — it is a
+  GET-then-delete-per-concrete-key enumeration, run **after** every publisher
+  is upgraded, and it is needed only where a Zenoh storage is pointed at
+  `v1/*/state/**`. `just run` and the e2e suites carry no persistent state and
+  need nothing.
+
+  **`host.*` stays excluded, and that is byte-normative, not a deviation.**
+  RFC 11 §3.1 excludes "the label named `host`, *and any label the producer
+  documents as host-scoped*", because only the producer knows its vocabulary.
+  ZenSight's is the `host.` annotation namespace, now declared in code as
+  `zensight_common::alert::{HOST_SCOPED_PREFIX, is_host_scoped}` and in
+  `docs/KEYSPACE.md`. Excluding it is load-bearing: `AlertReporter.active` is
+  keyed by `alert_key()` and the resolve path re-derives it, so an identity
+  refresh between fire and resolve would leave the `Firing` on the old key
+  forever while the `Resolved` and its tombstone landed on a new one — a
+  permanent phantom, with nothing logged.
+  `a_host_annotation_change_does_not_orphan_a_firing_alert` in
+  `zensight-sensor-core/tests/alert_reporter.rs` is that invariant; it fails if
+  the host-scoped vocabulary is ever dropped from the wrapper.
+
+  `Alert::alert_key()` stays **infallible**: it is called from ~35 places, and
+  the errors `zenkey::alert::alert_key` returns are framing-injectivity
+  violations (a `\n` in a rule forges a label) that no ZenSight rule produces.
+  On refusal the offending bytes become `_`, a WARN names the rule, and the
+  normative derivation runs on that — deterministic, so a `Firing` and its
+  `Resolved` still agree.
+
 - **`zenkey` and `zenkey-build` 0.6 → 0.7** (#735). The wire is unchanged —
   the `identity.rs` golden host-id vector (`h-` + first 12 hex of
   `sha256(machine_id + salt)`) still passes, so no origin re-keys — but three

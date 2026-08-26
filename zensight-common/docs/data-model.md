@@ -92,17 +92,47 @@ stateDiagram-v2
 
 ### alert_key
 
-`Alert::alert_key()` derives the stable key segment from `rule` + sorted
-`labels`, hashed with FNV-1a (stable across runs/platforms, unlike
-`DefaultHasher`) and rendered as 16 lowercase hex. Two alerts describing the same
-condition on the same host share a key, so a `Put` replaces state in place and a
-later `Resolved`/`Delete` clears exactly that alert. Two rules:
+`Alert::alert_key()` is a thin wrapper over **`zenkey::alert::alert_key`**, the
+normative RFC 11 §3.1 derivation (adopted in #736 — before that ZenSight had
+its own, byte-different, recipe):
 
-- **`source` is *not* hashed** — the `<origin>` and `<producer>` key chunks
-  already scope the key per host, so alerts from different hosts never collide.
-- **Labels prefixed `host.`** are the identity-annotation namespace and are
-  **excluded** — the origin already distinguishes hosts, and keying on annotations
-  would orphan a firing alert whenever the identity envelope refreshes.
+```text
+input     = rule ++ ( "\n" ++ label_name ++ "=" ++ label_value )*
+            for each discriminating label, ascending by name (byte order)
+alert_key = lowercase_hex(fnv1a_64(utf8(input)))          16 chars, all 64 bits
+```
+
+FNV-1a-64 with offset basis `0xcbf29ce484222325` and prime `0x100000001b3` —
+stable across runs and platforms, unlike `DefaultHasher`. Two alerts describing
+the same condition on the same host share a key, so a `Put` replaces state in
+place and a later `Resolved`/`Delete` clears exactly that alert. The RFC's test
+vector, which `alert.rs` pins: rule `link_down`, labels
+`{peer: r2, port: eth0, host: h-3fa9c2d41b7e}` → `a659f813308ad1da`.
+
+Three rules:
+
+- **The origin is *not* hashed** — the `<origin>` and `<producer>` key chunks
+  already scope the key per host. That exclusion is what makes the *same alert
+  on two hosts the same key under two origins*, which is the property the whole
+  derivation exists for.
+- **Host-scoped labels are excluded before sorting.** RFC 11 §3.1 excludes the
+  label named `host` and "any label the producer documents as host-scoped".
+  **ZenSight's host-scoped vocabulary is the `host.` annotation namespace**
+  (`host.id`, `host.boot_id`, …) — declared in code as
+  `zensight_common::alert::{HOST_SCOPED_PREFIX, is_host_scoped}`, which is what
+  the wrapper filters on before calling the zenkey function. These are identity
+  annotations stamped on for correlation, not part of what the alert is about,
+  and keying on them would orphan a firing alert every time the identity
+  envelope refreshed: the `Firing` would sit on the old key forever while the
+  `Resolved` landed on a new one (#738,
+  `zensight-sensor-core/tests/alert_reporter.rs`).
+- **The wrapper is infallible.** `zenkey::alert::alert_key` refuses inputs that
+  would break the framing's injectivity (a `\n` in a rule forges a label, an
+  `=` in a label name forges a value). `Alert::alert_key()` is called from ~35
+  places where a `Result` would buy nothing, so on refusal it replaces the
+  offending bytes with `_`, logs a WARN naming the rule, and runs the normative
+  derivation on that — deterministic, so a `Firing` and its `Resolved` still
+  agree, which is the one property a key must never lose.
 
 High-cardinality detail (offending IP, JA4, expected/actual) belongs in `labels`
 / `summary`, never in the key — so a 1000-port scan stays one alert.

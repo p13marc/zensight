@@ -33,6 +33,15 @@ zensight/v1/@catalog/…                                   the identity catalog
   planes (`@rpc`/`@media`/`@blob`) are verbatim chunks no data selector can
   reach (RFC [04](https://github.com/p13marc/zenkey/blob/main/rfcs/04-planes.md),
   [07](https://github.com/p13marc/zenkey/blob/main/rfcs/07-bulk-planes.md)).
+- **Alerts** are LWW state at `…/state/<producer>/alert/<alert_key>`, where
+  `alert_key` is the normative RFC 11 §3.1 derivation —
+  `lowercase_hex(fnv1a_64(rule ++ ("\n" ++ name ++ "=" ++ value)*))`, 16 chars,
+  labels ascending by name — computed by `zenkey::alert::alert_key` (#736).
+  The origin is never hashed in (it is already a key chunk), and host-scoped
+  labels are excluded before sorting: the RFC's own `host`, plus **ZenSight's
+  declared host-scoped vocabulary, the `host.` annotation namespace**
+  (`zensight_common::alert::is_host_scoped`), which is what keeps a firing
+  alert's key stable across an identity refresh (#738).
 - Presence = liveliness tokens at `…/state/<producer>/alive` (+
   `…/state/<producer>/device/<device>/alive`,
   `…/@catalog/state/alive`). Alive ⇒ callable: RPC queryables are declared
