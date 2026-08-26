@@ -71,5 +71,7 @@ unprivileged on most distros (`video` group).
   simulcast, pipeline shapes per source kind, per-tier encoder shaping,
   keyframe control, teardown, limitations.
 - [docs/configuration.md](docs/configuration.md) — every config key.
+- [docs/qos-express.md](docs/qos-express.md) — why the `@media` plane leaves
+  Zenoh's `express` flag off, where parallax's own sink turns it on (#733).
 - [../docs/KEYSPACE.md](../docs/KEYSPACE.md) — the authoritative
   key-expression contract (the `@media` plane: RFC 04/07).

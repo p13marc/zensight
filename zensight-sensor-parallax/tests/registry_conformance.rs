@@ -33,6 +33,12 @@ const EMITTED: &[&str] = &[
     // build one, so it is covered rather than a ledger entry: this build can
     // publish it, which is the question the reverse check asks.
     "cam0/stats/encode_ms",
+    // Emitted only for a stream with an H.264 `EncoderStatsHandle` — the JPEG
+    // preview paths are timed by `TimedElement` (so they have `encode_ms`) but
+    // parallax keeps no histogram for them, and RTSP passthrough has no encoder
+    // at all (#729). Runtime-conditional, like the two above.
+    "cam0/stats/encode_p95_ms",
+    "cam0/stats/encode_p99_ms",
 ];
 
 /// Registered parallax telemetry families this build can never emit, and why.

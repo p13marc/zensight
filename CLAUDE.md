@@ -65,12 +65,25 @@ workspace there; otherwise `--exclude` those crates and say so.
 
 ## Linting and Formatting
 
-CI (`.github/workflows/rust.yml`) enforces, as a merge gate:
-`cargo test --workspace --locked`, `cargo fmt --check`, `cargo clippy -D warnings`, **a
-design-system color guard** (no ad-hoc `Color::from_rgb`/`from_rgba` outside
-`zensight/src/view/{theme.rs,tokens.rs,components/}` — see
-[`zensight/docs/design-system.md`](zensight/docs/design-system.md)), and **a `session.put`/
-`session.delete` ban** (control-plane must publish through declared publishers, not ad-hoc puts).
+CI is **Forgejo Actions** (`.forgejo/workflows/`) — there is no `.github/` in this repo;
+GitHub is a passive push mirror. `ci.yml` enforces, as a merge gate, in four jobs:
+
+- **test** — `cargo test --workspace --locked`
+- **demo-smoke** — `PROFILE=debug scripts/demo-verify.sh`: one real sensor, one real
+  exporter, one real scrape. Nothing in CI had ever *executed* an exporter before it.
+- **features** — `cargo check` per optional feature (`zensight` `tester`/`h264`, netring's
+  six detectors). A default workspace build never type-checks these; `h264` shipped broken
+  for a week under exactly that blind spot. The `ebpf` legs are out-of-band in
+  `features-ebpf.yml` (nightly + `bpf-linker`).
+- **lint** — `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, plus five grep guards: a **design-system color guard** (no ad-hoc
+  `Color::from_rgb`/`from_rgba` outside `zensight/src/view/{theme.rs,tokens.rs,components/}`
+  — see [`zensight/docs/design-system.md`](zensight/docs/design-system.md)), a
+  **`session.put`/`session.delete` ban** (publish through declared publishers), a ban on
+  exporters hand-rolling `declare_subscriber` (history/recovery, #763), a ban on raw
+  `declare_queryable` (serve through `served::serve_queryable`, #484), and the two #466
+  checks — no `"zensight/` literal in application source, and only
+  `zensight_common::session` may call `zenoh::open`.
 
 Two CI jobs execute rather than compile, because the suite could not see what they
 cover: **demo-smoke** (`scripts/demo-verify.sh` — one real sensor, one real exporter,

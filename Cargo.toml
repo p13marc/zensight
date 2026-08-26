@@ -121,6 +121,13 @@ aya = "0.13"
 aya-log = "0.2"
 aya-build = "0.1"
 
+# The video pipeline engine (lib name `parallax`) — the parallax sensor's
+# encoder/source graph and the frontend's opt-in `h264` decoder. Promoted to a
+# workspace dep (#727) so the sensor that *encodes* and the GUI that *decodes*
+# can never drift onto two versions of the same bitstream contract. Default
+# features are empty on purpose; each member opts into exactly what it needs.
+parallax-pipeline = { version = "0.8.0", default-features = false }
+
 # Internal crates
 zensight-common = { path = "zensight-common" }
 # The keyspace convention crate — external since the zenkey extraction (RFC set
