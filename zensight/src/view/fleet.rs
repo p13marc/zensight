@@ -20,11 +20,31 @@
 //! (we have its sensor doc) but answers no `introspect` is listed as `silent` —
 //! an old build, or a broken queryable. Reporting only what answered would let
 //! exactly the hosts you most need to see disappear from the inventory.
+//!
+//! # Where the work happens (#745)
+//!
+//! The comparison is [`zenkey_fleet`]'s, not ours. A served slice and a
+//! compiled-in one are both [`SliceSet`]s, and
+//! [`SliceSet::diff`](zenkey_fleet::SliceSet::diff) is the set-level join —
+//! including the two one-sided cases (served but unknown to us; declared here
+//! but served by nobody) that this view used to spell by hand and get half
+//! right. What is left here is the part that is genuinely ours: the
+//! **per-origin** shape of the question. Upstream's `SliceSet::from_bus` and
+//! `fleet_registry` collapse the fleet to one slice per producer — right for a
+//! decoder that only needs *a* slice, wrong for an inventory whose whole
+//! subject is which **host** disagrees. So the sweep keeps each reply's origin
+//! (see [`FleetReply`]) and the fold diffs one `SliceSet` per host.
+//!
+//! The sweep itself is bounded, and the bound reports what it cost — see
+//! [`FleetSweep::elided`]. A fleet larger than the bound must not read as a
+//! fleet that answered.
+
+use std::collections::BTreeMap;
 
 use iced::widget::{button, column, text};
 use iced::{Element, Length};
 
-use zenkey::slice::{SliceFinding, parse_slice};
+use zenkey_fleet::SliceSet;
 
 use crate::message::Message;
 use crate::view::components::{
@@ -43,6 +63,22 @@ pub struct FleetReply {
     pub origin: String,
     pub producer: String,
     pub toml: String,
+}
+
+/// One `introspect` sweep, whole: what came back **and what the bound refused**.
+///
+/// The second half is not decoration. The fan-in is bounded
+/// ([`zenkey_fleet::DEFAULT_MAX_REPLIES`]), and a bound that hides data has to
+/// say so (RFC 13 §3 O6) — otherwise a fleet too large for the bound renders
+/// exactly like a fleet that answered in full, and does so *more* readily the
+/// bigger the fleet gets, which is backwards.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FleetSweep {
+    pub replies: Vec<FleetReply>,
+    /// Replies that arrived and were not kept, across the sweep's queriers.
+    pub elided: u64,
+    /// The per-querier reply bound that refused them.
+    pub bound: usize,
 }
 
 /// What a host is, relative to us.
@@ -92,7 +128,9 @@ pub struct FleetRow {
     pub subjects: usize,
     pub procedures: usize,
     pub status: FleetStatus,
-    pub findings: Vec<SliceFinding>,
+    /// RFC 08 §6 findings, already rendered by the engine
+    /// ([`zenkey_fleet::report::ProducerDiff`]).
+    pub findings: Vec<String>,
 }
 
 impl FleetRow {
@@ -112,6 +150,9 @@ pub struct FleetState {
     pub table: TableState,
     /// Which row's findings are expanded.
     pub expanded: Option<String>,
+    /// What the last sweep's reply bound refused, and the bound itself.
+    pub elided: u64,
+    pub bound: usize,
 }
 
 impl FleetState {
@@ -119,17 +160,39 @@ impl FleetState {
         self.rows = Fetch::Loading;
     }
 
-    /// Fold the fan-out into rows: parse each reply, diff it against the slice
-    /// this build compiled in, and add a `silent` row for every alive producer
-    /// that did not answer.
-    pub fn apply(&mut self, result: Result<Vec<FleetReply>, String>, alive: &[AliveProducer]) {
-        self.rows = Fetch::from_result(result.map(|replies| build_rows(replies, alive)));
+    /// Fold the fan-out into rows: diff each host's served slices against the
+    /// slices this build compiled in, and add a `silent` row for every alive
+    /// producer that did not answer.
+    pub fn apply(&mut self, result: Result<FleetSweep, String>, alive: &[AliveProducer]) {
+        if let Ok(sweep) = &result {
+            self.elided = sweep.elided;
+            self.bound = sweep.bound;
+        }
+        self.rows = Fetch::from_result(result.map(|sweep| build_rows(&sweep, alive)));
     }
 }
 
-/// Pure fold — replies + who we know is alive → the table. Kept free of Iced so
+/// The slices *this build* compiled in, as a [`SliceSet`] — the local side of
+/// every diff below.
+///
+/// `REGISTRIES` is the same TOML text `zenkey-build` compiled the typed
+/// builders from, so a slice that fails to parse here is a build-time
+/// impossibility rather than a runtime condition; it is skipped rather than
+/// panicking a view.
+fn local_registry() -> SliceSet {
+    SliceSet::from_slices(
+        zensight_common::registry::REGISTRIES
+            .iter()
+            .filter_map(|(_, toml)| zenkey::slice::parse_slice(toml).ok())
+            .collect(),
+    )
+}
+
+/// Pure fold — a sweep + who we know is alive → the table. Kept free of Iced so
 /// it can be tested as what it is: a diff.
-pub fn build_rows(replies: Vec<FleetReply>, alive: &[AliveProducer]) -> Vec<FleetRow> {
+pub fn build_rows(sweep: &FleetSweep, alive: &[AliveProducer]) -> Vec<FleetRow> {
+    let local = local_registry();
+
     let name_of = |origin: &str, producer: &str| -> String {
         alive
             .iter()
@@ -138,66 +201,74 @@ pub fn build_rows(replies: Vec<FleetReply>, alive: &[AliveProducer]) -> Vec<Flee
             .unwrap_or_else(|| origin.to_string())
     };
 
-    let mut rows: Vec<FleetRow> = Vec::new();
-    for reply in &replies {
-        let host = name_of(&reply.origin, &reply.producer);
+    // One `SliceSet` per **origin**: the fleet's disagreements are per host, and
+    // a set-level diff of the whole fleet at once would average them away.
+    let mut served: BTreeMap<&str, Vec<zenkey::RegistrySlice>> = BTreeMap::new();
+    let mut unreadable: Vec<(&str, &str, String)> = Vec::new();
+    for reply in &sweep.replies {
         // A slice we cannot parse is itself a finding — not a reason to drop
         // the host from the inventory.
-        let Ok(served) = parse_slice(&reply.toml) else {
+        match zenkey::slice::parse_slice(&reply.toml) {
+            Ok(slice) => served.entry(&reply.origin).or_default().push(slice),
+            Err(e) => unreadable.push((&reply.origin, &reply.producer, e.to_string())),
+        }
+    }
+
+    let mut rows: Vec<FleetRow> = Vec::new();
+    for (origin, slices) in served {
+        let set = SliceSet::from_slices(slices);
+        // Diff against *only* the producers this host serves. The full local
+        // set would emit "declared locally, served by nobody" for every producer
+        // this host does not happen to run — true of the fleet, a lie about the
+        // host.
+        let mine = SliceSet::from_slices(
+            set.slices()
+                .iter()
+                .filter_map(|s| local.get(&s.name).cloned())
+                .collect(),
+        );
+
+        for diff in set.diff(&mine).producers {
+            let slice = set.get(&diff.producer);
+            let status = if diff.findings.is_empty() {
+                FleetStatus::InSync
+            } else if diff.local_version.as_deref() != diff.served_version.as_deref() {
+                // A version that differs — including one we have never heard
+                // of, which is the same skew seen from the other side.
+                FleetStatus::Skew
+            } else {
+                FleetStatus::Drift
+            };
             rows.push(FleetRow {
-                origin: reply.origin.clone(),
-                host,
-                producer: reply.producer.clone(),
-                version: "unreadable".into(),
-                subjects: 0,
-                procedures: 0,
-                status: FleetStatus::Drift,
-                findings: Vec::new(),
+                origin: origin.to_string(),
+                host: name_of(origin, &diff.producer),
+                version: diff.served_version.clone().unwrap_or_default(),
+                subjects: slice.map_or(0, |s| s.subjects.len()),
+                procedures: slice.map_or(0, |s| s.procedures.len()),
+                status,
+                findings: diff.findings,
+                producer: diff.producer,
             });
-            continue;
-        };
+        }
+    }
 
-        // The slice this build compiled in, for the same producer. A producer
-        // we have never heard of has nothing to diff against — it is newer than
-        // us, which is exactly the skew we want reported, not hidden.
-        let local = zensight_common::registry::REGISTRIES
-            .iter()
-            .find(|(n, _)| *n == reply.producer)
-            .and_then(|(_, t)| parse_slice(t).ok());
-
-        let (status, findings) = match &local {
-            Some(local) => {
-                let findings = zenkey::slice::diff(&served, local);
-                let status = if findings.is_empty() {
-                    FleetStatus::InSync
-                } else if findings
-                    .iter()
-                    .any(|f| matches!(f, SliceFinding::VersionSkew { .. }))
-                {
-                    FleetStatus::Skew
-                } else {
-                    FleetStatus::Drift
-                };
-                (status, findings)
-            }
-            None => (FleetStatus::Skew, Vec::new()),
-        };
-
+    for (origin, producer, why) in unreadable {
         rows.push(FleetRow {
-            origin: reply.origin.clone(),
-            host,
-            producer: reply.producer.clone(),
-            version: served.version.clone(),
-            subjects: served.subjects.len(),
-            procedures: served.procedures.len(),
-            status,
-            findings,
+            origin: origin.to_string(),
+            host: name_of(origin, producer),
+            producer: producer.to_string(),
+            version: "unreadable".into(),
+            subjects: 0,
+            procedures: 0,
+            status: FleetStatus::Drift,
+            findings: vec![format!("the served slice did not parse: {why}")],
         });
     }
 
     // Alive but silent: up on the bus, no answer to introspect.
     for (origin, producer, host) in alive {
-        let answered = replies
+        let answered = sweep
+            .replies
             .iter()
             .any(|r| &r.origin == origin && &r.producer == producer);
         if !answered {
@@ -321,19 +392,20 @@ pub fn fleet_view(state: &FleetState) -> Element<'_, Message> {
         }),
     ];
 
-    let mut body = column![
-        header,
-        blurb,
-        refresh_button(),
+    let mut body = column![header, blurb, refresh_button()]
+        .spacing(space::SM)
+        .padding(space::MD);
+    if let Some(note) = elision_note(state) {
+        body = body.push(note);
+    }
+    body = body.push(
         DataTable::new(columns)
             .searchable(FleetRow::search_key)
             .on_sort(Message::FleetTableSort)
             .on_filter(Message::FleetTableFilter)
             .noun("producers")
             .view(rows, &state.table),
-    ]
-    .spacing(space::SM)
-    .padding(space::MD);
+    );
 
     if let Some(id) = &state.expanded
         && let Some(r) = rows.iter().find(|r| &row_id(r) == id)
@@ -343,6 +415,27 @@ pub fn fleet_view(state: &FleetState) -> Element<'_, Message> {
     body.into()
 }
 
+/// What the sweep's reply bound cost, said out loud (#745).
+///
+/// Silent truncation is the failure mode a bounded fan-out invites: the table
+/// looks complete, and looks *more* complete the larger the fleet grows. A
+/// sweep that dropped replies is an incomplete inventory and says so.
+fn elision_note(state: &FleetState) -> Option<Element<'static, Message>> {
+    elision_summary(state.elided, state.bound).map(|note| badge(theme::STATUS_DEGRADED, note))
+}
+
+/// The sentence [`elision_note`] renders, as a value — so a test can pin the
+/// wording without going through a widget tree.
+pub fn elision_summary(elided: u64, bound: usize) -> Option<String> {
+    (elided > 0).then(|| {
+        format!(
+            "incomplete: {elided} repl{} arrived past the {bound}-reply bound and were \
+             dropped — this inventory is a sample, not the fleet",
+            if elided == 1 { "y" } else { "ies" },
+        )
+    })
+}
+
 /// The findings for one row, spelled out. A count in a cell tells you something
 /// is wrong; this tells you what.
 fn findings_panel(r: &FleetRow) -> Element<'_, Message> {
@@ -350,7 +443,7 @@ fn findings_panel(r: &FleetRow) -> Element<'_, Message> {
         column![text(format!("{} · {} — findings", r.host, r.producer)).size(font::EMPHASIS),]
             .spacing(space::XS);
     for f in &r.findings {
-        col = col.push(text(f.summary()).size(font::CAPTION));
+        col = col.push(text(f.clone()).size(font::CAPTION));
     }
     col.width(Length::Fill).into()
 }
@@ -368,6 +461,22 @@ fn refresh_button() -> iced::widget::Button<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sweep(replies: Vec<FleetReply>) -> FleetSweep {
+        FleetSweep {
+            replies,
+            elided: 0,
+            bound: zenkey_fleet::DEFAULT_MAX_REPLIES,
+        }
+    }
+
+    fn compiled(producer: &str) -> String {
+        zensight_common::registry::REGISTRIES
+            .iter()
+            .find(|(n, _)| *n == producer)
+            .map(|(_, t)| (*t).to_string())
+            .expect("producer is in the compiled registry")
+    }
 
     fn slice_toml(producer: &str, version: &str, extra_subject: Option<&str>) -> String {
         let mut s = format!(
@@ -387,16 +496,12 @@ mod tests {
     /// view should be able to give at a glance.
     #[test]
     fn a_matching_build_is_in_sync() {
-        let (_, local) = zensight_common::registry::REGISTRIES
-            .iter()
-            .find(|(n, _)| *n == "sysinfo")
-            .unwrap();
         let rows = build_rows(
-            vec![FleetReply {
+            &sweep(vec![FleetReply {
                 origin: "h-aaaaaaaaaaaa".into(),
                 producer: "sysinfo".into(),
-                toml: (*local).to_string(),
-            }],
+                toml: compiled("sysinfo"),
+            }]),
             &[],
         );
         assert_eq!(rows.len(), 1);
@@ -409,20 +514,61 @@ mod tests {
     #[test]
     fn a_different_version_is_skew() {
         let rows = build_rows(
-            vec![FleetReply {
+            &sweep(vec![FleetReply {
                 origin: "h-bbbbbbbbbbbb".into(),
                 producer: "sysinfo".into(),
                 toml: slice_toml("sysinfo", "9.9", Some("cpu/usage")),
-            }],
+            }]),
             &[],
         );
         assert_eq!(rows[0].status, FleetStatus::Skew);
         assert_eq!(rows[0].version, "9.9");
         assert!(
+            rows[0].findings.iter().any(|f| f.contains("9.9")),
+            "the engine's rendered version-skew finding names the served version: {:?}",
+            rows[0].findings
+        );
+    }
+
+    /// Same version, different content — the alarming one, and the case a
+    /// version-only check misses entirely.
+    #[test]
+    fn same_version_different_content_is_drift() {
+        let version = zenkey::slice::parse_slice(&compiled("sysinfo"))
+            .unwrap()
+            .version;
+        let rows = build_rows(
+            &sweep(vec![FleetReply {
+                origin: "h-dddddddddddd".into(),
+                producer: "sysinfo".into(),
+                toml: slice_toml("sysinfo", &version, Some("cpu/invented")),
+            }]),
+            &[],
+        );
+        assert_eq!(rows[0].status, FleetStatus::Drift);
+        assert!(!rows[0].findings.is_empty());
+    }
+
+    /// A producer only the *fleet* knows is skew, not silence: it is newer than
+    /// us, and the engine's set-level join is what says so.
+    #[test]
+    fn a_producer_we_never_compiled_in_is_skew() {
+        let rows = build_rows(
+            &sweep(vec![FleetReply {
+                origin: "h-eeeeeeeeeeee".into(),
+                producer: "invented".into(),
+                toml: slice_toml("invented", "1.0", Some("thing/count")),
+            }]),
+            &[],
+        );
+        assert_eq!(rows[0].status, FleetStatus::Skew);
+        assert!(
             rows[0]
                 .findings
                 .iter()
-                .any(|f| matches!(f, SliceFinding::VersionSkew { .. }))
+                .any(|f| f.contains("absent from the local registry")),
+            "{:?}",
+            rows[0].findings
         );
     }
 
@@ -435,7 +581,7 @@ mod tests {
             "netring".to_string(),
             "edge01".to_string(),
         )];
-        let rows = build_rows(Vec::new(), &alive);
+        let rows = build_rows(&sweep(Vec::new()), &alive);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, FleetStatus::Silent);
         assert_eq!(rows[0].host, "edge01");
@@ -444,23 +590,19 @@ mod tests {
     /// Worst first: a drifting host must not sort below ten healthy ones.
     #[test]
     fn rows_sort_worst_first() {
-        let (_, sysinfo) = zensight_common::registry::REGISTRIES
-            .iter()
-            .find(|(n, _)| *n == "sysinfo")
-            .unwrap();
         let rows = build_rows(
-            vec![
+            &sweep(vec![
                 FleetReply {
                     origin: "h-aaaaaaaaaaaa".into(),
                     producer: "sysinfo".into(),
-                    toml: (*sysinfo).to_string(),
+                    toml: compiled("sysinfo"),
                 },
                 FleetReply {
                     origin: "h-bbbbbbbbbbbb".into(),
                     producer: "sysinfo".into(),
                     toml: "not toml at all {{{".into(),
                 },
-            ],
+            ]),
             &[],
         );
         assert_eq!(rows[0].status, FleetStatus::Drift);
@@ -468,23 +610,72 @@ mod tests {
         assert_eq!(rows[1].status, FleetStatus::InSync);
     }
 
+    /// One host's disagreement must stay one host's: diffing per origin is what
+    /// keeps a skewed edge box from tarring the server that is fine.
+    #[test]
+    fn hosts_are_diffed_independently() {
+        let rows = build_rows(
+            &sweep(vec![
+                FleetReply {
+                    origin: "h-aaaaaaaaaaaa".into(),
+                    producer: "sysinfo".into(),
+                    toml: compiled("sysinfo"),
+                },
+                FleetReply {
+                    origin: "h-bbbbbbbbbbbb".into(),
+                    producer: "sysinfo".into(),
+                    toml: slice_toml("sysinfo", "0.1", None),
+                },
+            ]),
+            &[],
+        );
+        assert_eq!(rows.len(), 2);
+        let by_origin: std::collections::HashMap<_, _> =
+            rows.iter().map(|r| (r.origin.as_str(), r.status)).collect();
+        assert_eq!(by_origin["h-aaaaaaaaaaaa"], FleetStatus::InSync);
+        assert_eq!(by_origin["h-bbbbbbbbbbbb"], FleetStatus::Skew);
+    }
+
     #[test]
     fn renders_a_populated_table() {
-        let (_, sysinfo) = zensight_common::registry::REGISTRIES
-            .iter()
-            .find(|(n, _)| *n == "sysinfo")
-            .unwrap();
         let mut state = FleetState::default();
         state.apply(
-            Ok(vec![FleetReply {
+            Ok(sweep(vec![FleetReply {
                 origin: "h-aaaaaaaaaaaa".into(),
                 producer: "sysinfo".into(),
-                toml: (*sysinfo).to_string(),
-            }]),
+                toml: compiled("sysinfo"),
+            }])),
             &[("h-aaaaaaaaaaaa".into(), "sysinfo".into(), "server01".into())],
         );
         let mut ui = iced_test::simulator(fleet_view(&state));
         assert!(ui.find("server01").is_ok());
         assert!(ui.find("in sync").is_ok());
+    }
+
+    /// A truncated sweep says so. Without this the table reads as the whole
+    /// fleet, and reads that way *more* readily the larger the fleet is.
+    #[test]
+    fn a_truncated_sweep_says_what_the_bound_cost() {
+        let mut state = FleetState::default();
+        state.apply(
+            Ok(FleetSweep {
+                replies: vec![FleetReply {
+                    origin: "h-aaaaaaaaaaaa".into(),
+                    producer: "sysinfo".into(),
+                    toml: compiled("sysinfo"),
+                }],
+                elided: 7,
+                bound: 1,
+            }),
+            &[],
+        );
+        let note = elision_summary(7, 1).expect("a sweep that dropped replies has a note");
+        let mut ui = iced_test::simulator(fleet_view(&state));
+        assert!(ui.find(note.as_str()).is_ok(), "the note reads: {note}");
+        assert_eq!(
+            elision_summary(0, 4096),
+            None,
+            "a complete sweep says nothing about a bound it never hit"
+        );
     }
 }

@@ -1089,7 +1089,7 @@ mod tests {
 /// what the view is for. A demo where every host is in sync demonstrates
 /// nothing.
 pub mod fleet {
-    use crate::view::fleet::FleetReply;
+    use crate::view::fleet::{FleetReply, FleetSweep};
 
     fn slice(name: &str) -> String {
         zensight_common::registry::REGISTRIES
@@ -1115,6 +1115,16 @@ pub mod fleet {
             }
         }
         out
+    }
+
+    /// The demo sweep: replies, and a bound the demo never hits (nothing was
+    /// dropped, so the view says nothing about a bound — which is the point).
+    pub fn sweep() -> FleetSweep {
+        FleetSweep {
+            replies: replies(),
+            elided: 0,
+            bound: zenkey_fleet::DEFAULT_MAX_REPLIES,
+        }
     }
 
     pub fn replies() -> Vec<FleetReply> {

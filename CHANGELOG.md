@@ -121,6 +121,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Fleet view runs on the upstream fleet engine** (#745). `view/fleet.rs`
+  was hand-rolling `zenkey-fleet`'s core job: fan `introspect` across the
+  fleet, parse each reply into a `RegistrySlice`, diff it against the
+  compiled-in slice, classify the result. It now delegates all four.
+
+  What that buys, beyond deleted code:
+
+  - **The fan-in discipline is upstream's, in one place.** `RepeatingQuery`
+    applies the RFC 05 §2.1 triple — target `All`, consolidation `None`,
+    **attribution by the reply's own key**. The old sweep set `target(All)`
+    but never `consolidation(None)`, so a producer that echoed the wildcard
+    selector instead of replying on its own concrete key could collapse the
+    fleet's replies to one.
+  - **A bounded sweep that says what the bound cost.** The old fan-out was
+    unbounded: a large fleet truncated at whatever the timeout caught, silently.
+    Replies are now capped (`DEFAULT_MAX_REPLIES` = 4096, drained past the cap
+    so the count is exact) and a sweep that dropped any renders a banner —
+    "this inventory is a sample, not the fleet". Silent truncation gets *more*
+    likely as the fleet grows, which is exactly backwards.
+  - **Declared queriers.** The refresh path reuses two declared queriers
+    instead of building a fresh `session.get` per producer per refresh, so the
+    network keeps its routing state warm. They are replaced on (dis)connect: a
+    querier belongs to the session it was declared on.
+  - **One wildcard sweep, not one GET per compiled-in producer.**
+    `v1/*/@rpc/*/introspect` plus `@catalog` by name (a `*` never matches a
+    verbatim service origin, grammar property D4). The GUI no longer needs a
+    compiled-in producer list to know who to ask, so a producer *newer than
+    this build* now appears in the inventory instead of being unaskable.
+  - **The comparison is `SliceSet::diff`**, per origin, against only the
+    producers that origin serves — including the one-sided cases the view used
+    to spell by hand. Findings arrive already rendered.
+
+  `zenkey-fleet` is a **GUI-only** dependency: it pulls full tokio, zenoh-ext,
+  arc-swap, base64, ciborium and serde_json, so it must never enter
+  `zensight-common` or any crate a sensor links. The GUI does **not** open a
+  session through it — `zenkey_fleet::open` builds an un-namespaced explorer
+  session (RFC 09 §5) and refuses a `zenoh.namespace`, while the frontend's
+  session is a production one from `zensight_common::session`;
+  `Fleet::new(&session, "")` only borrows it.
+
 - **Payload conformance verdicts, behind a `validate-json` feature on
   `zensight-common`** (#741). `SCHEMAS` — the RFC 08 §7 type table every
   producer serves on `describe` — had never been *used*: nothing validated a

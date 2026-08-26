@@ -6089,7 +6089,7 @@ fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
 /// skew row is the case worth pinning — and it must sort above the healthy hosts.
 #[test]
 fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
-    use zensight::view::fleet::{FleetReply, FleetState, fleet_view};
+    use zensight::view::fleet::{FleetReply, FleetState, FleetSweep, fleet_view};
 
     let sysinfo_slice = zensight_common::registry::REGISTRIES
         .iter()
@@ -6103,18 +6103,21 @@ fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
 
     let mut state = FleetState::default();
     state.apply(
-        Ok(vec![
-            FleetReply {
-                origin: "h-aaaaaaaaaaaa".into(),
-                producer: "sysinfo".into(),
-                toml: sysinfo_slice,
-            },
-            FleetReply {
-                origin: "h-bbbbbbbbbbbb".into(),
-                producer: "sysinfo".into(),
-                toml: skewed,
-            },
-        ]),
+        Ok(FleetSweep {
+            replies: vec![
+                FleetReply {
+                    origin: "h-aaaaaaaaaaaa".into(),
+                    producer: "sysinfo".into(),
+                    toml: sysinfo_slice,
+                },
+                FleetReply {
+                    origin: "h-bbbbbbbbbbbb".into(),
+                    producer: "sysinfo".into(),
+                    toml: skewed,
+                },
+            ],
+            ..FleetSweep::default()
+        }),
         &[
             ("h-aaaaaaaaaaaa".into(), "sysinfo".into(), "server01".into()),
             ("h-bbbbbbbbbbbb".into(), "sysinfo".into(), "edge01".into()),
@@ -6139,11 +6142,11 @@ fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
 /// "deployed and not answering", and the second is the row you need to see.
 #[test]
 fn fleet_view_shows_an_alive_but_silent_producer() {
-    use zensight::view::fleet::{FleetState, fleet_view};
+    use zensight::view::fleet::{FleetState, FleetSweep, fleet_view};
 
     let mut state = FleetState::default();
     state.apply(
-        Ok(Vec::new()),
+        Ok(FleetSweep::default()),
         &[("h-cccccccccccc".into(), "netring".into(), "edge01".into())],
     );
 

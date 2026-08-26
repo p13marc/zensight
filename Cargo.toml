@@ -124,6 +124,14 @@ zensight-common = { path = "zensight-common" }
 # (zensight-common/registry/), compiled at build time by zenkey-build.
 zenkey = "0.7"
 zenkey-build = "0.7"
+# The upstream fleet engine (#745): the RFC 05 §2.1 fan-in discipline, bounded
+# and elision-reporting fan-out, declared queriers, registry-slice sets and
+# RFC 13's `Judgement`. **GUI only.** It drags full tokio, zenoh-ext, arc-swap,
+# base64, ciborium and serde_json, so it must never enter `zensight-common` or
+# any crate a sensor links; `zensight` is the one acceptable home.
+# `default-features = false` drops the `decode` seam (schema-aware payload
+# decode), which the fleet view does not use.
+zenkey-fleet = { version = "0.10", default-features = false }
 schemars = "1"
 # Draft-2020-12 payload conformance, behind zensight-common's `validate-json`
 # feature (#741). `default-features = false` keeps the format/regex extras out.

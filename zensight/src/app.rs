@@ -213,6 +213,12 @@ pub struct ZenSight {
     /// cache per key) — set on connect, so command sends never use a one-shot
     /// `session.put`. `None` while disconnected or in demo mode.
     command_registry: Option<std::sync::Arc<zensight_common::PublisherRegistry>>,
+    /// The Fleet view's declared `introspect` queriers (#745), declared on the
+    /// first sweep and reused by every refresh — a fresh `session.get` per
+    /// refresh rebuilds the network's routing state each time. Replaced
+    /// wholesale on (dis)connect: a querier belongs to the session it was
+    /// declared on.
+    fleet_queriers: std::sync::Arc<tokio::sync::OnceCell<FleetQueriers>>,
     /// In-flight artifact download state (report / snapshot / capture).
     artifact_fetch: crate::view::artifact_fetch::ArtifactFetch,
     /// The in-flight download's identity (key prefix, kind, id, delivery, dest).
@@ -451,6 +457,7 @@ impl ZenSight {
             toasts: ToastState::default(),
             session: None,
             command_registry: None,
+            fleet_queriers: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             artifact_fetch: crate::view::artifact_fetch::ArtifactFetch::default(),
             artifact_job: None,
             blob_tags: if demo_mode {
@@ -2193,6 +2200,9 @@ impl ZenSight {
                     std::sync::Arc::new(zensight_common::PublisherRegistry::new(s.clone()))
                 });
                 self.session = session;
+                // A declared querier belongs to the session it was declared on
+                // (#745): a reconnect must not fetch through a dead one.
+                self.fleet_queriers = std::sync::Arc::new(tokio::sync::OnceCell::new());
                 self.dashboard.connected = true;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Connected;
@@ -2226,6 +2236,7 @@ impl ZenSight {
                 let _ = self.teardown_parallax_tiles();
                 self.session = None;
                 self.command_registry = None;
+                self.fleet_queriers = std::sync::Arc::new(tokio::sync::OnceCell::new());
                 self.dashboard.connected = false;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
@@ -6731,76 +6742,58 @@ impl ZenSight {
         out
     }
 
-    /// Fan `introspect` out across the fleet (#469, RFC 08 §6).
+    /// Fan `introspect` out across the fleet (#469, RFC 08 §6, #745).
     ///
-    /// One GET per registered producer, `QueryTarget::All` so a `complete`
-    /// queryable on one host cannot short-circuit the multi-host consolidation
-    /// (RFC 05 §2.1). The origin comes from the *answering key* — a registry
-    /// slice describes a build, not a deployment, so it does not name its host.
+    /// The fan-in discipline is **upstream's**, not ours: `zenkey-fleet`'s
+    /// declared querier applies the RFC 05 §2.1 triple — target `All` (so a
+    /// `complete` queryable on one host cannot short-circuit the multi-host
+    /// consolidation), consolidation `None`, and attribution by the reply's own
+    /// key. The origin comes from the answering key because a registry slice
+    /// describes a build, not a deployment, so it does not name its host.
     ///
-    /// `@catalog` is a service origin, and a verbatim `@` chunk is structurally
-    /// unmatchable by the `*` in a fleet selector (design property D2). So it
-    /// takes its own key rather than riding the fan-out — which is the grammar
-    /// working, not an exception to it.
+    /// Bounded, and the bound reports its cost: `RepeatingQuery` keeps at most
+    /// [`zenkey_fleet::DEFAULT_MAX_REPLIES`] replies per fetch and counts what
+    /// it refused, which rides back on [`FleetSweep::elided`]. The sweep this
+    /// replaced was unbounded and truncated silently at whatever the timeout
+    /// caught.
     fn query_fleet(&self) -> Task<Message> {
-        use crate::view::fleet::FleetReply;
-
         if self.demo_mode {
-            return Task::done(Message::FleetLoaded(Ok(crate::mock::fleet::replies())));
+            return Task::done(Message::FleetLoaded(Ok(crate::mock::fleet::sweep())));
         }
         let Some(session) = self.session.clone() else {
             return Task::done(Message::FleetLoaded(Err(
                 "Not connected to Zenoh".to_string()
             )));
         };
-
-        let keys: Vec<(String, String)> = zensight_common::registry::REGISTRIES
-            .iter()
-            .map(|(name, _)| {
-                let key = if *name == "catalog" {
-                    zensight_common::catalog_rpc_key("introspect")
-                } else {
-                    zensight_common::fleet_rpc_key(name, "introspect")
-                };
-                (name.to_string(), key)
-            })
-            .collect();
+        let queriers = self.fleet_queriers.clone();
 
         Task::future(async move {
-            let mut replies: Vec<FleetReply> = Vec::new();
-            let mut errors = 0usize;
-            for (producer, key) in keys {
-                let Ok(stream) = session
-                    .get(&key)
-                    .target(zenoh::query::QueryTarget::All)
-                    .timeout(std::time::Duration::from_secs(3))
-                    .await
-                else {
-                    errors += 1;
-                    continue;
-                };
-                while let Ok(reply) = stream.recv_async().await {
-                    let Ok(sample) = reply.result() else { continue };
-                    // The concrete key that answered carries the origin.
-                    let Some(parsed) =
-                        zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
-                    else {
-                        continue;
-                    };
-                    let Ok(toml) = String::from_utf8(sample.payload().to_bytes().to_vec()) else {
-                        continue;
-                    };
-                    replies.push(FleetReply {
-                        origin: parsed.origin.chunk().to_string(),
-                        producer: producer.clone(),
-                        toml,
-                    });
+            // Base `""`: this session is the application's own, so it is
+            // namespaced by `zenoh.namespace` (empty by default) and zenoh has
+            // already stripped the base from every key it hands us. A `Fleet`
+            // over it therefore carries no base of its own — see
+            // `zensight_common::keyexpr`'s note on the two parsers.
+            //
+            // This is also why the GUI never calls `zenkey_fleet::open`: that
+            // opens an un-namespaced explorer session (RFC 09 §5) and *refuses*
+            // a config carrying a namespace, and the frontend's session must
+            // come from `zensight_common::session` regardless.
+            let fleet = zenkey_fleet::Fleet::new(&session, "");
+            let queriers = match queriers
+                .get_or_try_init(|| FleetQueriers::declare(&fleet))
+                .await
+            {
+                Ok(q) => q,
+                Err(e) => {
+                    return Message::FleetLoaded(Err(format!(
+                        "could not declare the introspect queriers: {e}"
+                    )));
                 }
+            };
+            match queriers.sweep().await {
+                Ok(sweep) => Message::FleetLoaded(Ok(sweep)),
+                Err(e) => Message::FleetLoaded(Err(format!("introspect sweep failed: {e}"))),
             }
-            if replies.is_empty() && errors > 0 {
-                return Message::FleetLoaded(Err(format!("{errors} introspect queries failed")));
-            }
-            Message::FleetLoaded(Ok(replies))
         })
     }
 
@@ -8155,6 +8148,100 @@ fn now_ms() -> i64 {
 fn point_is_log_line(point: &TelemetryPoint) -> bool {
     point.protocol == zensight_common::Protocol::Logs
         && matches!(point.value, TelemetryValue::Text(_))
+}
+
+/// The Fleet view's declared `introspect` queriers (#745).
+///
+/// Two, not one: the wildcard-producer fan-out (`v1/*/@rpc/*/introspect`) plus
+/// `@catalog` **by name**. A `*` in the origin position never matches a
+/// verbatim service origin (grammar property D4), so the wildcard sweep cannot
+/// enumerate services and the identity service has to be asked for itself. The
+/// two therefore cannot double-count.
+///
+/// That is exactly [`zenkey_fleet::RepeatingRegistry`]'s shape, and this is not
+/// an accident: it is spelled out here because `RepeatingRegistry::fetch`
+/// returns `Vec<(RegistrySlice, String)>` and **drops the origin**, which is
+/// right for a decoder that needs *a* slice per producer and wrong for an
+/// inventory whose entire subject is which host disagrees. What is reused is
+/// the part that matters — [`zenkey_fleet::RepeatingQuery`], which carries the
+/// RFC 05 §2.1 discipline, the reply bound, and the elision ledger.
+struct FleetQueriers {
+    wildcard: zenkey_fleet::RepeatingQuery,
+    catalog: zenkey_fleet::RepeatingQuery,
+}
+
+impl FleetQueriers {
+    async fn declare(fleet: &zenkey_fleet::Fleet<'_>) -> zenkey_fleet::Result<FleetQueriers> {
+        // A GUI refresh is interactive: three seconds is the wait a person will
+        // sit through, and the same bound the undeclared sweep used.
+        let timeout = std::time::Duration::from_secs(3);
+        let wildcard = fleet.wire(zenkey::selector::rpc(
+            zenkey::selector::Scope::fleet(),
+            zenkey::selector::Producers::all(),
+            &["introspect"],
+        ));
+        let catalog = fleet.wire(zenkey::selector::service_rpc(
+            &zenkey::ServiceOrigin::catalog(),
+            &["introspect"],
+        ));
+        Ok(FleetQueriers {
+            wildcard: zenkey_fleet::declare_repeating(fleet, &wildcard, timeout).await?,
+            catalog: zenkey_fleet::declare_repeating(fleet, &catalog, timeout).await?,
+        })
+    }
+
+    /// One sweep. Every reply is attributed by its **own** key, and what the
+    /// reply bound refused rides back as [`FleetSweep::elided`] — the queriers'
+    /// ledgers are cumulative, so the sweep reports the delta.
+    async fn sweep(&self) -> zenkey_fleet::Result<crate::view::fleet::FleetSweep> {
+        use crate::view::fleet::{FleetReply, FleetSweep};
+
+        let before = self.wildcard.elided() + self.catalog.elided();
+        let mut replies: Vec<FleetReply> = Vec::new();
+        for querier in [&self.wildcard, &self.catalog] {
+            for answer in querier.fetch().await? {
+                let zenkey_fleet::Answer::Value(payload) = answer.answer else {
+                    // An error reply is an answer, and RFC 05 §3 says it means
+                    // failure — but it carries no slice, so there is nothing to
+                    // diff. The producer stays in the inventory through the
+                    // liveliness join, which is where "alive and told us
+                    // nothing usable" belongs.
+                    continue;
+                };
+                // The producer chunk comes from the answering key too — the
+                // wildcard sweep asks `@rpc/*/introspect`, so the key is the
+                // only place that says which producer replied.
+                let Some(parsed) = zensight_common::keyexpr::parse_key(&answer.key) else {
+                    continue;
+                };
+                let producer = match parsed.producer() {
+                    Some(p) => p.name().to_string(),
+                    // A service origin carries no producer chunk (RFC 03 §1.5);
+                    // its own name is the producer name (`@catalog` → catalog).
+                    None => match &parsed.origin {
+                        zenkey::Origin::Service(svc) => {
+                            svc.as_str().trim_start_matches('@').to_string()
+                        }
+                        zenkey::Origin::Host(_) => continue,
+                    },
+                };
+                let Ok(toml) = String::from_utf8(payload.to_bytes().to_vec()) else {
+                    continue;
+                };
+                replies.push(FleetReply {
+                    origin: answer.origin,
+                    producer,
+                    toml,
+                });
+            }
+        }
+        let elided = (self.wildcard.elided() + self.catalog.elided()).saturating_sub(before);
+        Ok(FleetSweep {
+            replies,
+            elided,
+            bound: self.wildcard.reply_bound(),
+        })
+    }
 }
 
 /// The primary on-demand detail channels to prefetch when a device of this
