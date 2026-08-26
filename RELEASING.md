@@ -139,6 +139,61 @@ curl -LO https://git.marcpardo.eu/marcpardo/zensight/releases/download/<ver>/zen
 flatpak remote-ls marcpardo | grep ZenSight                      # after ~5 min
 ```
 
+## Migration: re-keying the alert state on upgrade (#737)
+
+**Applies to the release that carries #736** (the normative RFC 11 §3.1
+`alert_key`), and to any future release whose CHANGELOG says the alert-key
+derivation moved. Nothing else in this file is version-specific; this section
+is, deliberately.
+
+**Why there is anything to do.** Alerts are **LWW state** at
+`<base>/v1/<origin>/state/<producer>/alert/<alert_key>` — the key *is* the
+identity. Change the derivation and every alert that was firing at the moment
+of the upgrade is stranded: the upgraded producer publishes its `Resolved` and
+its `Delete` tombstone on the **new** key, so the old key is never written
+again. If a Zenoh storage is holding that key, it holds it forever — a phantom
+alert in every GUI that seeds from the storage, with nothing logged anywhere
+to explain it.
+
+**Who needs this.**
+
+| Deployment | Sweep needed? |
+|---|---|
+| `just run`, `just demo-*`, the e2e suites | **No.** No storage, no persistence — state lives only in the publishers, which restart. |
+| A fleet with **no** Zenoh storage on `v1/*/state/**` | **No.** Same reason: the only copy of an alert is its live publisher. |
+| A fleet with a storage pointed at `v1/*/state/**` (`configs/router-*.json5`) | **Yes.** |
+
+**Order matters: sweep *after* every publisher is upgraded.** A single sensor
+still on the old build re-publishes its firing alerts on old-shaped keys within
+its next evaluation cycle, so a sweep run mid-rollout deletes keys that
+immediately come back — and now you cannot tell a leftover from a live one.
+Upgrade the whole fleet, confirm no old-version producer remains
+(`zenctl node list`, or the GUI's fleet view, which flags version skew), and
+only then sweep.
+
+**The sweep is GET-then-delete, one concrete key at a time.** RFC 04 §1.2
+refuses a wildcard delete as an operator act, and for a good reason: `delete
+v1/*/state/*/alert/*` cannot distinguish a stranded old key from an alert that
+fired one second ago, and there is no undo. So:
+
+1. **Enumerate.** GET the selector `v1/*/state/*/alert/*` and collect the
+   concrete key of every reply. A storage answers one reply per stored key.
+2. **Delete each concrete key**, individually — the key the GET replied on,
+   verbatim, never a pattern built from it.
+
+**Use `zenctl`, not a one-shot binary.** `zenctl`'s `Publication::retire`
+already implements exactly this, and its `check_retire` already refuses the
+unsafe shapes (a wildcard in the key to delete, a selector that is not a state
+selector). Adding a sweep tool to this tree would be a second, less careful
+implementation of a destructive operation that already exists — and it would
+be dead code the moment the migration is over.
+
+**Verify.** After the sweep, GET `v1/*/state/*/alert/*` again and check that
+every remaining key is one a currently-running producer will claim: cross-check
+against the fleet's live firing set (the same selector answered by the
+producers themselves, which is what a GUI seeds from). A key no live producer
+answers is a leftover.
+
 ## Notes
 
 - **Not every workspace member is packaged.** `zensight-sensor-parallax` ships in no
