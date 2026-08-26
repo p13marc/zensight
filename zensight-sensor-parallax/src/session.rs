@@ -445,7 +445,6 @@ impl SessionManager {
     }
 
     /// The config ladder index of a tier by name.
-    #[allow(dead_code)]
     fn tier_index(&self, name: &str) -> Option<u8> {
         self.config
             .video
