@@ -373,6 +373,8 @@ subject	parallax	stream/{stream}	state	StreamStatus
 subject	parallax	streams/advertised	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/drops	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/encode_ms	telemetry	TelemetryPoint
+subject	parallax	{stream}/stats/encode_p95_ms	telemetry	TelemetryPoint
+subject	parallax	{stream}/stats/encode_p99_ms	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/fps	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/kbps	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/rc_drops	telemetry	TelemetryPoint

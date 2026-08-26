@@ -45,6 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Encode-latency percentiles in stream telemetry** (#729):
+  `{stream}/stats/encode_p95_ms` and `{stream}/stats/encode_p99_ms`, read off
+  the lock-free histogram parallax 0.8 keeps inside the H.264 encoder. The
+  `encoder_overrun` alert is now judged on **p95** rather than the interval
+  mean — a stream whose average frame fits the budget while its p95 does not is
+  exactly the one that stutters, and overrun is what the rule is named for. The
+  mean stays the fallback for the JPEG preview paths, which `TimedElement` times
+  but parallax does not histogram.
+
+  `encode_ms` is **not** removed, and neither is `TimedElement`: the histogram
+  is all-time (a tail needs history) so it yields no interval mean, it covers
+  only the inner `encode()` rather than the whole `process()` call, and it does
+  not exist at all for the previews. Registry `parallax.toml` goes to 1.7.
+
+
 - **`just demo-prometheus` and `just demo-otel`** (#751) — one command each for a
   working dashboard. Until now the exporters had **no run path at all**: zero
   mentions in the 442-line justfile, one service in `docker/docker-compose.yml`,
@@ -70,6 +85,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **RTSP streams reconnect instead of dying** (#731, delivers most of #410). A
+  dropped RTSP stream — a camera rebooting, a switch flapping, a Wi-Fi bridge
+  dropping a packet — used to end the pipeline and close the stream, leaving the
+  viewer to re-open by hand. parallax 0.8 makes `RtspSession` an `AsyncSource`
+  whose `produce()` carries the retry loop, so the hand-written feeder task and
+  its `AppSrc` are gone and the reconnect is the source's own: exponential
+  backoff from 500 ms to a 30 s ceiling with full jitter, so a rack of cameras
+  behind one switch does not retry in lockstep.
+
+  `rtsp_connect_failed` changes meaning with it, and had to: it now fires on
+  *sustained* failure — the initial connect, or a drop that outlasted the whole
+  reconnect ladder — rather than on the first hiccup. That is what the rule was
+  always named for. The ladder is deliberately **bounded** (8 attempts, ≈ 90 s)
+  where upstream defaults to retrying forever, because forever would mean a
+  camera that is gone never produces an error and the alert could never fire
+  again.
+
+  The first buffer after a reconnect carries `DISCONT`, and the egress re-arms
+  on it: the cached SPS/PPS belong to the previous session, so it clears them
+  and refills from the camera's own in-band sets rather than prepending stale
+  geometry to the resumed stream's first keyframe.
+
+- **`FrameMeta.dts_ns` is omitted when it equals `pts_ns`** (#728), as its own
+  documentation always said ("if distinct from `pts_ns`") and as parallax's
+  byte-compatible twin has always done. The producer wrote it unconditionally
+  whenever the clock was set, so — our encoders emitting no B-frames — *every*
+  frame on the `@media` plane carried a redundant copy of its own pts. Consumers
+  that read `dts_ns.or(pts_ns)` (the documented shape) are unaffected. The
+  attachment is pinned from now on against parallax's three canonical CBOR
+  vectors, checked into `zensight-common/tests/fixtures/framemeta/` and
+  round-tripped byte for byte — which settles #711 as **two types, one corpus**:
+  `zensight-common` cannot depend on the video engine and parallax cannot depend
+  on Zenoh, so the shared artifact is the bytes, not the type.
+
 - **Duplicate label names are now structurally impossible** (#753). Both
   exporters assembled labels by pushing sources in order and de-duplicating
   against a hard-coded `source`/`protocol` list — so `disk/<dev>/io/*` emitted
@@ -90,6 +139,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `configs/*.json5` comments stating the default were wrong in the same way.
 
 ### Changed
+
+- **Decision recorded: the `@media` plane keeps `express` off** (#733). parallax
+  0.8's `ZenohSink::media` applies express *on* to the `frame` profile
+  ("a stale frame is worthless"), while zenkey RFC v1.26 M1 removed it from that
+  profile ("batching engages only under back-pressure, so express is a no-op on
+  an unsaturated link and spends per-message overhead exactly when a `drop`
+  profile should be shedding"). We were already on the newer rule —
+  `QosClass::express` returns `false` for every class — so nothing changes; the
+  parallax sensor keeps publishing through `RawMediaPublisher` and does not
+  adopt `ZenohSink::media`. The reasoning is written down in
+  `zensight-sensor-parallax/docs/qos-express.md` and the behaviour is pinned by
+  a named `express_is_off_for_every_class` test rather than by an assertion
+  buried inside two others, so it does not get "fixed" toward parallax's table.
+
+- **The executor preset comes from parallax** (#732, closes #693). `executor()`
+  built a `UnifiedExecutorConfig` around a local `CHANNEL_CAPACITY = 4` whose
+  own comment admitted "the reason for this is probably gone; the cap is kept
+  until measured" — it was a workaround for a `JpegEncoder` arena-vs-channel
+  collision that parallax 0.7 fixed with `set_output_budget`. 0.8 ships the
+  number *and* the reasoning as `ExecutorConfig::live_video()`
+  (`SchedulingMode::Async`, `channel_capacity: 4`, `shed_fatal_after: None`), so
+  the constant and the stale rationale are replaced by the preset. Same values,
+  same behaviour; the engine that owns both the queue and the arenas now owns
+  the number too.
+
+- **The hand-rolled Annex-B helpers are parallax's now** (#730, closes #708).
+  `zensight-sensor-parallax/src/annexb.rs` was 230 lines of start-code scanning
+  and an extract/cache/prepend dance the egress drove by hand; parallax 0.8
+  ships all of it in `parallax::codec::annexb`, compiled unconditionally (that
+  module deliberately links no codec, so "is this a keyframe" needs no encoder)
+  and **codec-aware** — `is_entry_point`/`has_param_sets` take a `NalCodec` and
+  answer correctly for H.265, where our `& 0x1F` on a two-byte NAL header
+  returned nonsense. `ParamSetCache::prepare` replaces the whole loop and
+  borrows rather than copies for every delta frame and every keyframe that
+  already carries its sets, so a *repaired* keyframe now copies once where it
+  used to copy twice. Our module keeps one helper with no upstream equivalent,
+  `coded_slice_count`, reimplemented over upstream's scanner. No wire change.
+  `annexb::h264_profile_level_id` is re-exported for #707 but deliberately not
+  put on the stream catalogue — see below.
+
+- **parallax-pipeline 0.7.0 → 0.8.0** (#727), and the pin is now a single
+  `[workspace.dependencies]` entry so the sensor that *encodes* and the `h264`
+  GUI feature that *decodes* cannot drift onto two versions of the same
+  bitstream contract. No source change was required: `Source`, `AsyncSource`
+  and `Element` are method-for-method identical to 0.7, so the hand-written
+  `StoppableSource`/`TimedElement` forwarding wrappers — the silent-breakage
+  hazard that bit the 0.6 → 0.7 bump — still cover every method. 0.8's new
+  defaulted method (`finish`, the terminal goodbye) landed on `Sink`/`AsyncSink`
+  only, and we wrap neither. The three upstream breaks all miss us: we never
+  construct `Metadata` literally (so its new public `coded` field is
+  irrelevant), we never compare an `EncoderStats` (so its lost `Eq` is), and
+  `RtspSrc` reconnecting by default is what #731 wants anyway.
 
 - **parallax-pipeline 0.6.0 → 0.7.0** (#689). 175 upstream commits, and the
   `h264` GUI feature did not compile against it at all: `H264Decoder::decode`
