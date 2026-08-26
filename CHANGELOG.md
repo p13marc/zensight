@@ -167,6 +167,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The conditional-subject ledger is a real file now** (#739). RFC 08 §6.1
+  requires every registered subject to be served by the build that ships it,
+  and the exemption for a genuinely gated subject used to live as a
+  `CONDITIONAL_FAMILIES` const in each sensor's `tests/registry_conformance.rs`
+  — because the registry TOML has no `feature`/`when` field to say so in the
+  slice itself. zenkey-build 0.7 adds that field's stand-in, so the fact now
+  lives in `zensight-common/registry/conditional.lock`, and **zenkey-build
+  fails the build** if a line names no live registry subject — a build error
+  rather than a test failure, firing even for a producer with no conformance
+  test. The ledger is two lines (netlink's eBPF-gated connect-latency
+  percentiles) for the whole workspace, and the file's header explains why that
+  is correct rather than an oversight: a gated *procedure* is declared
+  unconditionally and answers `error/gated` / `error/unsupported`, so it needs
+  no exemption, and netring's detector features widen the value space of
+  `anomaly/{kind}/total` rather than adding subjects. Only a gauge with no
+  honest reading needs excusing.
+- **`deprecated.lock` documents `kind = "procedure"`** (#740). zenkey 0.7 /
+  RFC 08 v1.26 extended `[[deprecated]]` from subjects to procedures, with a
+  three-field ledger line `<kind>\t<producer>\t<path>`. Purely additive:
+  the 18 shipped two-field lines still parse as `kind = subject` and nothing
+  migrated. The ledger's header and `docs/KEYSPACE.md` now record that **kind
+  is part of identity** — retiring a subject never releases a procedure of the
+  same name — which matters concretely, because `parallax` has a `streams`
+  procedure beside stream-shaped subjects and `@catalog` has
+  `names`/`describe`/`introspect` beside `entity`/`alias`.
+
 - **The cross-producer key expressions come from zenkey now, not from string
   literals** (#742). zenkey 0.7 added `selector::common_family(scope, family)`
   — the `*`-producer complement to the generated per-producer

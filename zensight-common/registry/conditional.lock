@@ -1,0 +1,35 @@
+# Conditional-subject ledger (RFC 08 §6.1, zenkey ≥ 0.7).
+#
+# One line per registered subject this build may legitimately never emit:
+#   <producer>\t<path>\t<condition>
+# The condition is free text, for the human deciding whether the gate still
+# exists. NOT append-only, unlike deprecated.lock: a line leaves when its
+# condition does, and the subject re-enters the emitted-surface check by
+# deletion. zenkey-build fails the build if a line names no live registry
+# subject, so the ledger cannot outlive what it excuses.
+#
+# RFC 08 §6.1 requires every subject to be served by the build that ships it.
+# The ledger is the exemption, and it is deliberately tiny — TWO lines for the
+# whole workspace. That is not an oversight, and the next reader should not
+# "fix" it by adding the gated surfaces that are missing here:
+#
+#   * Gated PROCEDURES are declared unconditionally and answer an error when
+#     the gate is shut. There is a two-token vocabulary for saying which:
+#     `query::gated(proc, config_key)` for "built, but switched off in config"
+#     and `query::unsupported(proc, feature)` for "not built at all". A caller
+#     that asks gets a machine-readable refusal instead of silence, which is
+#     the whole point — silence is emitted equally by a shut gate, an offline
+#     host and an older build. So sysinfo and systemd have NO lines here.
+#
+#   * netring's detector features (`sigma`, `yara`, `lateral`, `ja4plus`)
+#     widen the *value space* of `anomaly/{kind}/total` — they add kinds, not
+#     subjects. The subject is emitted either way, so there is nothing to
+#     exempt. netring has NO lines here.
+#
+# What is left is the case where neither answer works: a GAUGE with no
+# reading. A procedure can say "unsupported"; a gauge cannot. A sentinel value
+# corrupts every consumer downstream, and publishing nothing is
+# indistinguishable from a quiet host. Those subjects stay registered, stay
+# conditional, and are excused here.
+netlink	sockets/tcp/connlat_us_p50	eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)
+netlink	sockets/tcp/connlat_us_p95	eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)

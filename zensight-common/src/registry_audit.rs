@@ -143,6 +143,41 @@ pub fn uncovered_families<S: AsRef<str>>(
         .collect()
 }
 
+/// The RFC 08 §6.1 conditional-subject ledger for `producer`, as
+/// `(subject path, why this build may never emit it)` pairs in file order.
+///
+/// The ledger is `zensight-common/registry/conditional.lock`, compiled in with
+/// `include_str!`. It used to be a `CONDITIONAL_FAMILIES` const in each
+/// sensor's `tests/registry_conformance.rs`, because the registry TOML has no
+/// `feature`/`when` field to say so in the slice itself — zenkey 0.7 added the
+/// ledger for exactly that, and it is now the single source of truth.
+///
+/// **`zenkey-build` validates it at build time**, in the direction it can see:
+/// a line naming no live registry subject fails the build, so an excuse cannot
+/// outlive the entry it excuses. That is strictly better than the test-time
+/// staleness check it replaces — a build error rather than a test failure, and
+/// it fires even for a producer with no conformance test.
+///
+/// Read the lock file's header for why it is only two lines long; the short
+/// version is that a gated *procedure* is declared unconditionally and answers
+/// `error/gated` or `error/unsupported`, so it needs no exemption. Only a
+/// gauge with no honest reading does.
+#[must_use]
+pub fn conditional_families(producer: &str) -> Vec<(&'static str, &'static str)> {
+    const LEDGER: &str = include_str!("../registry/conditional.lock");
+    LEDGER
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            match (f.next(), f.next(), f.next()) {
+                (Some(p), Some(path), Some(condition)) if p == producer => Some((path, condition)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Assert every registered telemetry family is either emitted by `emitted` or
 /// listed in `conditional` with a reason.
 ///

@@ -110,6 +110,27 @@ zensight/v1/@catalog/…                                   the identity catalog
   `declare_queryable`), and each producer checks its registry slice against
   what it actually declared at the moment it starts serving `introspect` —
   debug panic, release warn, the same posture as the metric guard.
+- **Two ledgers sit beside the registry TOMLs**, both checked by `zenkey-build`
+  at build time:
+  - [`deprecated.lock`](../zensight-common/registry/deprecated.lock) —
+    **append-only** retirement (RFC 08 §3/§5). A line is `<producer>\t<path>`,
+    or since zenkey 0.7 / RFC 08 v1.26 `<kind>\t<producer>\t<path>` with
+    `kind = subject | procedure`; the two-field form reads as `kind = subject`,
+    which is what all 18 shipped lines are. **Kind is part of identity**:
+    retiring a subject never releases a procedure of the same name, or the
+    reverse — which matters here, because `parallax` has a `streams` procedure
+    beside stream-shaped subjects and `@catalog` has `names`/`describe`/
+    `introspect` beside `entity`/`alias`. A procedure retirement must spell its
+    kind.
+  - [`conditional.lock`](../zensight-common/registry/conditional.lock) — the
+    RFC 08 §6.1 conditional-subject ledger (zenkey 0.7), the exemption from
+    *registered ⊆ served* for a subject this build can legitimately never emit.
+    Deliberately **not** append-only: a line leaves when its gate does. It is
+    two lines for the whole workspace, and that is correct — a gated
+    *procedure* is declared unconditionally and answers `error/gated` or
+    `error/unsupported`, so it needs no exemption; only a gauge with no honest
+    reading does. The file's header says so, so the absence is not "fixed" by
+    the next reader.
 - **Type table + self-description** (RFC 08 §5/§7):
   [`zensight-common/registry/types.toml`](../zensight-common/registry/types.toml)
   is the RFC 08 §5 type table — a registry `type`/`request`/`reply` name with no

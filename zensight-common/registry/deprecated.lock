@@ -1,7 +1,23 @@
 # Append-only deprecation ledger (RFC 08 §3/§5).
-# One line per retired subject: <producer>\t<path>. Lines are never removed;
-# build.rs fails if a ledger line loses its [[deprecated]] entry or a
-# [[deprecated]] entry is missing from the ledger.
+# One line per retired entry. Lines are never removed; build.rs fails if a
+# ledger line loses its [[deprecated]] entry or a [[deprecated]] entry is
+# missing from the ledger.
+#
+# Two spellings:
+#   <producer>\t<path>            retires a SUBJECT (the two-field form; this
+#                                 is what every line below is)
+#   <kind>\t<producer>\t<path>    kind = subject | procedure
+#
+# The three-field form arrived with zenkey 0.7 / RFC 08 v1.26, which extended
+# [[deprecated]] to `kind = "procedure"`. It is purely additive — the
+# two-field lines below still parse, as `kind = subject`.
+#
+# KIND IS PART OF IDENTITY, and that matters here: retiring a subject never
+# retires a procedure of the same name, or the reverse. `parallax` has both a
+# `streams` procedure and stream-shaped subjects; `@catalog` has
+# `names`/`describe`/`introspect` alongside `entity`/`alias`. A two-field line
+# for one of those names retires the *subject* and leaves the procedure live —
+# which is correct, and is why a procedure retirement must spell its kind.
 logs	logs/ingest/received_total
 logs	logs/ingest/parsed_total
 logs	logs/ingest/parse_failed_total
