@@ -33,7 +33,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline) |
 | `zensight-correlator/` | fuses identity evidence → one `HostEntity` per host |
 | `zensight-exporter-{prometheus,otel}/` | forward telemetry/alerts to external systems |
-| `zensight-conformance/` | CI harness (#744): stands a deployment up and runs `zenkey-fleet`'s RFC judges against it. `publish = false`, and the **only** crate that may link `zenkey-fleet` |
+| `zensight-conformance/` | CI harness (#744): stands a deployment up and runs `zenkey-fleet`'s RFC judges against it. `publish = false`. It links `zenkey-fleet`, as does `zensight` for the fleet view (#745); the invariant is that **no crate a sensor links may** — see `Cargo.toml`'s note on the dependency |
 | [`zblob`](https://github.com/p13marc/zblob) | resumable content-addressed large-data transfer (external repo, was in-tree `zenoh-blob/`) |
 | `zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/` | opt-in eBPF programs (compile to host stubs) |
 

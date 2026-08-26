@@ -424,21 +424,24 @@ Caused by:
 
 It is not your change. `iced_test::simulator` stands up a real **wgpu** device;
 wgpu picks the Vulkan backend; on a machine with no GPU that resolves to
-**lavapipe**, Mesa's software Vulkan; and 167 tests doing that concurrently
+**lavapipe**, Mesa's software Vulkan; and 169 tests doing that concurrently
 crash inside the Vulkan loader. The faulting frame is in `libvulkan.so.1`, under
 `wgpu_core::snatch::SnatchLock` (#687).
 
 Force wgpu off Vulkan and it goes away — measured 6 crashes in 40 runs by
-default, 0 in 40 with:
+default, 0 in 40 with `WGPU_BACKEND=gl`. **There is a recipe, so you do not have
+to remember that:**
 
 ```bash
-WGPU_BACKEND=gl cargo test -p zensight --test ui_tests
+just test-ui                    # WGPU_BACKEND=gl, for you
+just test-ui test_dashboard     # takes the usual filter and flags
 ```
 
 Deliberately **not** set in `.cargo/config.toml`: that file's `[env]` block
 applies to `cargo run` as well, and downgrading the real GUI's renderer on every
-developer machine to fix a test-only problem is the wrong trade. Export it in
-your shell if this bites you.
+developer machine to fix a test-only problem is the wrong trade. A recipe is the
+right shape — it is opt-in, it is discoverable from `just --list`, and it
+carries the reasoning with it.
 
 CI is unaffected — the runner image ships no Vulkan ICD, so wgpu never takes
 this path there. Which also means a red `test` job on CI is **not** this, and

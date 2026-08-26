@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The verify scripts blamed Zenoh discovery when a binary was simply missing**
+  (#790). `BIN="${BINDIR:-target/${PROFILE}}"` is repo-relative, so anyone with
+  `CARGO_TARGET_DIR` set — a shared build dir, a worktree that builds elsewhere,
+  sccache — built to one place and was launched from another. `cargo build`
+  reports success, so the script's own build step gave no hint; the run then
+  waited 40 s for a roster that could never populate and failed with a paragraph
+  about multicast that was true in general and irrelevant to what happened. It
+  cost a wrong diagnosis before the cause was found.
+
+  Three fixes, in a new `scripts/lib/verify.sh` shared by
+  `conformance-verify.sh` and `demo-verify.sh`, because both had all three:
+
+  - **`require_bins`** fails before starting anything, naming each missing path,
+    the `BIN`/`BINDIR`/`PROFILE` it derived it from, and the `BINDIR=…` command
+    that fixes it.
+  - **The failure message can tell a dead child from an undiscovered one.** The
+    discovery paragraph is the right diagnosis when the processes are alive and
+    cannot find each other, and the wrong one when a process has already exited
+    — which the preflight cannot catch, because a binary can exist and still die
+    on a bad config or a busy port. Both scripts now ask `kill -0` first and
+    print the dead child's log tail instead of the discovery text.
+  - **The evidence outlives the exit trap.** Every failure message ended with
+    `logs: $tmp/*.log`, pointing into a `mktemp -d` the `EXIT` trap had just
+    deleted. Failures now keep the directory *and* inline the last 20 lines of
+    each log, so the message is self-contained even if the directory is not.
+
+- **`zenoh_e2e` saw a sibling test's sample under parallel load** (#785). Its
+  four sessions were plain `zenoh::Config::default()` — peer mode with multicast
+  scouting **and** gossip on — so they discovered each other, plus
+  `publisher_registry.rs`'s, plus any live sensor on the host. Under
+  `cargo test --workspace` the telemetry test would occasionally receive the
+  CBOR test's sample and fail with `left: "cbor-device"`.
+
+  The per-test key prefixes were never the bug: a `test_<nanos>/**` subscription
+  cannot match a sibling's tree. The session layer was, and the fix was already
+  written twice in the same directory — `publisher_registry.rs` and
+  `router_storage.rs` both define an `isolated_config()` for exactly this
+  reason, and `zenoh_e2e.rs` is the one file that never got it. Deliberately not
+  `--test-threads=1`, which hides the coupling rather than removing it.
+
+### Changed
+
+- **The `zenoh::open` CI guard greps more than one spelling** (#789). It matched
+  the literal `zenoh::open(`, so `zenkey_fleet::open()` / `open_with_config()` —
+  reachable since #745 put `zenkey-fleet` in the GUI's dependency tree — walked
+  straight past it. Neither crate does it today (`Fleet::new(&session, base)`
+  only *borrows* a session, which is how upstream's own `zengui` works), so this
+  was never a live violation; it was a guard that no longer covered the ways a
+  session can be opened, which is worse than it sounds, because the guard's
+  value is making the rule unbreakable by accident.
+
+  It now matches any lowercase-module `::open(` / `::open_*(` — `File::open` and
+  every other type-associated constructor is capitalised and does not match —
+  minus an explicit allowlist of the sanctioned entry points
+  (`session::{open_session,connect,build_config}`), so *calling* the wrapper is
+  recognised as the behaviour the guard exists to produce. The step now says in
+  place that it is spelling-based and must grow.
+
+- **`just test-ui`** (#687). `cargo test -p zensight --test ui_tests` segfaults
+  on a headless Linux box with Mesa installed, about one run in seven, printing
+  nothing at all — the process dies before libtest writes a result line. It is
+  lavapipe: `iced_test::simulator` stands up a real wgpu device, wgpu picks
+  Vulkan, a GPU-less host resolves that to Mesa's software Vulkan, and 169 tests
+  doing it at once crash inside the loader. `WGPU_BACKEND=gl` avoids the path
+  entirely (0 crashes in 40 runs, against 6 in 40 by default).
+
+  That was documented in `zensight/docs/testing.md` and nowhere a developer
+  would trip over it. It is now a recipe that carries its own reasoning, and the
+  doc points at the recipe. Still deliberately not `.cargo/config.toml`'s
+  `[env]`, which would downgrade the real GUI's renderer too. CI is unaffected —
+  the runner image ships no Vulkan ICD — so a red `test` job is not this.
+
+- **The `zenkey-fleet` boundary is stated as an invariant, not as a count**
+  (#792). `CLAUDE.md` and `zensight-conformance/{Cargo.toml,README.md}` all said
+  `zensight-conformance` was the **only** crate that may link `zenkey-fleet`.
+  #745 falsified that in the same wave by rebuilding the fleet view on the same
+  engine. The rule that matters is unchanged and is now what all three say: the
+  engine must never enter `zensight-common` **or any crate a sensor links**. Two
+  consumer-side members link it, which is what the rule permits.
+
 ### Breaking
 
 - **Every firing alert re-keys: `alert_key` is now the normative RFC 11 §3.1

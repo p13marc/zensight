@@ -502,6 +502,36 @@ demo-stop: stop
 demo-verify:
     scripts/demo-verify.sh
 
+# ── Tests that need a flag you would not guess ───────────────────────────────
+
+# The GUI test suite, on a renderer that survives 169 concurrent wgpu devices.
+#
+# WHY THIS RECIPE EXISTS (#687)
+#
+# `cargo test -p zensight --test ui_tests` segfaults on a headless Linux box
+# with Mesa installed — about one run in seven under load — and prints NOTHING
+# while doing it: the process dies before libtest writes a result line, so there
+# is no FAILED and no panic to grep for. The only available reading is "my
+# change broke something", and it is wrong.
+#
+# `iced_test::simulator` stands up a real wgpu device; wgpu picks Vulkan; a
+# GPU-less host resolves that to lavapipe, Mesa's software Vulkan; and 169 tests
+# doing it at once crash inside the Vulkan loader, under
+# `wgpu_core::snatch::SnatchLock`. Measured: 6 crashes in 40 runs by default,
+# 0 in 40 with WGPU_BACKEND=gl, interleaved so machine load was controlled.
+#
+# Deliberately NOT in .cargo/config.toml's [env] block: that applies to
+# `cargo run` too, and downgrading the real GUI's renderer on every developer
+# machine to fix a test-only problem is the wrong trade.
+#
+# CI is unaffected — the runner image ships no Vulkan ICD, so wgpu never takes
+# this path there. Which also means a red `test` job on CI is NOT this, and
+# should be read as a real failure.
+
+# GUI tests on a renderer that survives 169 concurrent wgpu devices (#687)
+test-ui *ARGS:
+    WGPU_BACKEND=gl cargo test -p zensight --test ui_tests {{ARGS}}
+
 # ── Container image ──────────────────────────────────────────────────────────
 
 # Build the all-in-one sensors image (see docs/DEPLOYMENT.md for running it).
