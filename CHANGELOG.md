@@ -125,6 +125,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The executor preset comes from parallax** (#732, closes #693). `executor()`
+  built a `UnifiedExecutorConfig` around a local `CHANNEL_CAPACITY = 4` whose
+  own comment admitted "the reason for this is probably gone; the cap is kept
+  until measured" — it was a workaround for a `JpegEncoder` arena-vs-channel
+  collision that parallax 0.7 fixed with `set_output_budget`. 0.8 ships the
+  number *and* the reasoning as `ExecutorConfig::live_video()`
+  (`SchedulingMode::Async`, `channel_capacity: 4`, `shed_fatal_after: None`), so
+  the constant and the stale rationale are replaced by the preset. Same values,
+  same behaviour; the engine that owns both the queue and the arenas now owns
+  the number too.
+
 - **The hand-rolled Annex-B helpers are parallax's now** (#730, closes #708).
   `zensight-sensor-parallax/src/annexb.rs` was 230 lines of start-code scanning
   and an extract/cache/prepend dance the egress drove by hand; parallax 0.8

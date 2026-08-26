@@ -35,35 +35,23 @@ use crate::stats::StreamStats;
 /// Live media: a slow egress must never block the encoder.
 const SINK_QUEUE: usize = 4;
 
-/// Inter-element channel capacity for our executors (see [`executor`]).
-const CHANNEL_CAPACITY: usize = 4;
-
 /// Build the executor these pipelines MUST be started with.
 ///
-/// **The reason for this is probably gone; the cap is kept until measured.**
+/// `ExecutorConfig::live_video()` — upstream owns the numbers now (#693,
+/// #732). It is the same shallow `channel_capacity: 4` this crate carried as a
+/// local constant for two releases, plus `SchedulingMode::Async` and
+/// `shed_fatal_after: None`, and upstream's doc on it gives the reasoning for
+/// each: the link channel *is* the queue, so its depth is the latency floor;
+/// nothing in a camera-to-network graph is RT-safe; and a dropped frame beats a
+/// dead live pipeline.
 ///
-/// It exists because the default inter-element channel capacity (16) exceeded
-/// the `JpegEncoder`'s then-fixed 16-slot output arena: once the AppSink queue
-/// (4) filled, the in-flight JPEG buffers pinned every arena slot and the
-/// encoder died with "Failed to acquire buffer slot" (the `H264Encoder`
-/// survived only because its arena had 64 slots). A small channel kept the
-/// whole in-flight budget inside the arena.
-///
-/// parallax 0.7 addresses that upstream: `Element::set_output_budget` tells an
-/// element how many buffers the downstream graph can hold, and the encoders
-/// size their arenas from it — upstream's own doc on that method describes
-/// exactly this failure. Since #689 both our wrapper types forward it, so the
-/// encoders finally receive it.
-///
-/// Re-deriving the number is #693's job, and wants a measurement rather than a
-/// deletion: the cap also bounds latency, so removing it changes throughput and
-/// buffering together. Left in place, with its rationale marked stale rather
-/// than restated as though it still held.
+/// Our own rationale for the 4 had gone stale — it was a workaround for a
+/// `JpegEncoder` arena/channel collision that parallax 0.7 fixed with
+/// `set_output_budget` — and re-deriving it was never a good use of a
+/// measurement when the engine that owns both the queue and the arenas is
+/// willing to state the number itself. This is that.
 pub fn executor() -> Executor {
-    Executor::with_config(UnifiedExecutorConfig {
-        channel_capacity: CHANNEL_CAPACITY,
-        ..Default::default()
-    })
+    Executor::with_config(UnifiedExecutorConfig::live_video())
 }
 
 /// Cooperative stop signal for a pipeline's source.
