@@ -7,7 +7,7 @@ use tracing::{info, trace, warn};
 use zenoh::sample::{Sample, SampleKind};
 use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
-use zensight_common::keyexpr::all_alerts_wildcard;
+use zensight_common::keyexpr::{all_alerts_wildcard, all_events_wildcard};
 use zensight_common::telemetry::TelemetryPoint;
 
 use crate::exporter::SharedExporter;
@@ -99,6 +99,24 @@ impl TelemetrySubscriber {
             None
         };
 
+        // The `events` class (#534) — append-only records on
+        // `v1/<origin>/events/<producer>/<subject…>/<ulid>`. Its own class, so
+        // neither the telemetry selector nor the alerts selector can reach it,
+        // which is why SNMP traps and systemd unit failures never reached OTLP
+        // at all (#762).
+        let event_subscriber = if self.exporter.export_events() {
+            let events_key = all_events_wildcard();
+            info!(key_expr = %events_key, "Subscribing to the events class");
+            Some(
+                session
+                    .declare_subscriber(&events_key)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create event subscriber: {}", e))?,
+            )
+        } else {
+            None
+        };
+
         info!("Subscriber started, waiting for telemetry...");
 
         loop {
@@ -124,6 +142,16 @@ impl TelemetrySubscriber {
                         }
                         Ok(_) => {}
                         Err(e) => warn!("Error receiving alert sample: {}", e),
+                    }
+                }
+
+                // Receive events-class records (only polled when enabled).
+                sample = async { event_subscriber.as_ref().unwrap().recv_async().await },
+                    if event_subscriber.is_some() =>
+                {
+                    match sample {
+                        Ok(sample) => self.handle_event_sample(&sample),
+                        Err(e) => warn!("Error receiving event sample: {}", e),
                     }
                 }
 
@@ -187,6 +215,12 @@ impl TelemetrySubscriber {
             .undeclare()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to undeclare subscriber: {}", e))?;
+        if let Some(event_subscriber) = event_subscriber {
+            event_subscriber
+                .undeclare()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to undeclare event subscriber: {}", e))?;
+        }
         if let Some(alert_subscriber) = alert_subscriber {
             alert_subscriber
                 .undeclare()
@@ -204,6 +238,28 @@ impl TelemetrySubscriber {
 
     /// Decode an alert sample (a firing/resolved Put) and emit it as an OTLP
     /// log event.
+    /// Decode an events-class record and hand it to the exporter.
+    ///
+    /// Records are append-only and ULID-keyed — one key per record, nothing
+    /// overwrites — so there is no tombstone to handle here, unlike alerts.
+    fn handle_event_sample(&self, sample: &Sample) {
+        if sample.kind() == SampleKind::Delete {
+            return;
+        }
+        let payload = sample.payload().to_bytes();
+        match zensight_common::decode_auto::<zensight_common::event::EventRecord>(&payload) {
+            Ok(event) => self
+                .exporter
+                .record_event(sample.key_expr().as_str(), &event),
+            Err(e) => warn!(
+                key = %sample.key_expr(),
+                payload_len = payload.len(),
+                error = %e,
+                "Failed to decode events-class record"
+            ),
+        }
+    }
+
     fn handle_alert_sample(&self, sample: &Sample) {
         let payload = sample.payload().to_bytes();
         let alert: Option<Alert> = serde_json::from_slice(&payload)
@@ -290,6 +346,37 @@ mod tests {
         assert!(
             alerts_sub.intersects(&alert),
             "the alerts selector must match alert state keys"
+        );
+    }
+
+    /// The events class needs its own subscription too (#762).
+    ///
+    /// `events` is a third class, disjoint from both `telemetry` and `state` by
+    /// construction — which is exactly why SNMP traps and systemd unit failures
+    /// reached the GUI and a Zenoh storage while never reaching OTLP at all.
+    /// Neither existing selector could ever have seen them.
+    #[test]
+    fn the_events_class_needs_its_own_subscription() {
+        use zenoh::key_expr::KeyExpr;
+
+        let event =
+            KeyExpr::new("v1/h-3fa9c2d41b7e/events/snmp/trap/01hqzz000000000000000000ab").unwrap();
+        let telemetry = KeyExpr::new(DEFAULT_KEY_EXPR).unwrap();
+        let alerts_sub = KeyExpr::new(all_alerts_wildcard()).unwrap();
+        let events_sub = KeyExpr::new(all_events_wildcard()).unwrap();
+
+        assert!(
+            !telemetry.intersects(&event),
+            "the telemetry selector cannot reach the events class"
+        );
+        assert!(
+            !alerts_sub.intersects(&event),
+            "the alerts selector cannot reach the events class either — which is \
+             why a third subscriber is required, not optional"
+        );
+        assert!(
+            events_sub.intersects(&event),
+            "the events selector must match events-class keys"
         );
     }
 }

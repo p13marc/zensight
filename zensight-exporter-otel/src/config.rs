@@ -108,6 +108,20 @@ pub struct OtelConfig {
     #[serde(default = "default_true")]
     pub export_alerts: bool,
 
+    /// Export the `events` class (#534) as OTLP log records.
+    ///
+    /// The events plane carries append-only records — SNMP traps, systemd unit
+    /// failures — that reached the GUI and a Zenoh storage but **never reached
+    /// OTLP at all** (#762). A trap is arguably the most alert-worthy thing on
+    /// the bus.
+    ///
+    /// Logs only, deliberately. On `/metrics` an append-only ULID-keyed stream
+    /// is the per-line-log cardinality explosion the Prometheus exporter
+    /// already guards against (#104); events are log-shaped and belong on the
+    /// logs signal.
+    #[serde(default = "default_true")]
+    pub export_events: bool,
+
     /// Traces signal: synthesized spans (default: disabled).
     ///
     /// ZenSight has no distributed-tracing context propagation; spans are
@@ -208,6 +222,7 @@ impl Default for OtelConfig {
             export_metrics: true,
             export_logs: true,
             export_alerts: true,
+            export_events: true,
             traces: TracesConfig::default(),
             resource: HashMap::new(),
             resource_mode: ResourceMode::default(),

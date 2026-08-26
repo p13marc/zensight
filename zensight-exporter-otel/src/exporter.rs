@@ -244,6 +244,7 @@ struct SignalStack {
     logger_provider: Option<SdkLoggerProvider>,
     logger: Option<SdkLogger>,
     alert_logger: Option<SdkLogger>,
+    event_logger: Option<SdkLogger>,
 }
 
 /// OpenTelemetry exporter that receives telemetry and exports via OTLP.
@@ -275,6 +276,10 @@ pub struct OtelExporter {
     export_logs: bool,
     /// Whether alert export is enabled.
     export_alerts: bool,
+    /// Whether events-class export is enabled.
+    export_events: bool,
+    /// Cached logger for the events class (scope `zensight.events`).
+    event_logger: Option<SdkLogger>,
     /// Telemetry filter.
     filter: TelemetryFilter,
     /// Export statistics.
@@ -340,6 +345,8 @@ impl OtelExporter {
             logger_provider,
             logger,
             alert_logger,
+            event_logger: None,
+            export_events: false,
             span_processor: None,
             span_scope: InstrumentationScope::builder("zensight.alerts").build(),
             alert_spans: None,
@@ -400,14 +407,15 @@ impl OtelExporter {
         // Initialize logger provider if logs enabled
         // The logger pipeline backs both syslog logs and alert events, so
         // initialize it if either is enabled.
-        let logger_provider = if otel_config.export_logs || otel_config.export_alerts {
-            Some(Self::init_logger_provider_sync(
-                otel_config,
-                resource.clone(),
-            )?)
-        } else {
-            None
-        };
+        let logger_provider =
+            if otel_config.export_logs || otel_config.export_alerts || otel_config.export_events {
+                Some(Self::init_logger_provider_sync(
+                    otel_config,
+                    resource.clone(),
+                )?)
+            } else {
+                None
+            };
 
         // Initialize the span pipeline if the traces signal is enabled.
         let span_processor = if otel_config.traces.enabled {
@@ -431,6 +439,13 @@ impl OtelExporter {
         } else {
             None
         };
+        let event_logger = if otel_config.export_events {
+            logger_provider
+                .as_ref()
+                .map(|lp| lp.logger("zensight.events"))
+        } else {
+            None
+        };
 
         let alert_spans = otel_config
             .traces
@@ -449,6 +464,8 @@ impl OtelExporter {
             export_metrics: otel_config.export_metrics,
             export_logs: otel_config.export_logs,
             export_alerts: otel_config.export_alerts,
+            export_events: otel_config.export_events,
+            event_logger,
             filter: TelemetryFilter::new(filter_config),
             stats: RwLock::new(ExporterStats::default()),
             observations: Arc::new(RwLock::new(HashMap::new())),
@@ -889,11 +906,12 @@ impl OtelExporter {
         } else {
             None
         };
-        let logger_provider = if self.config.export_logs || self.config.export_alerts {
-            Some(Self::init_logger_provider_sync(&self.config, resource)?)
-        } else {
-            None
-        };
+        let logger_provider =
+            if self.config.export_logs || self.config.export_alerts || self.config.export_events {
+                Some(Self::init_logger_provider_sync(&self.config, resource)?)
+            } else {
+                None
+            };
 
         let meter = meter_provider.as_ref().map(|mp| mp.meter("zensight"));
         let logger = self
@@ -914,6 +932,15 @@ impl OtelExporter {
                     .map(|lp| lp.logger("zensight.alerts"))
             })
             .flatten();
+        let event_logger = self
+            .config
+            .export_events
+            .then(|| {
+                logger_provider
+                    .as_ref()
+                    .map(|lp| lp.logger("zensight.events"))
+            })
+            .flatten();
 
         Ok(SignalStack {
             meter_provider,
@@ -921,6 +948,7 @@ impl OtelExporter {
             logger_provider,
             logger,
             alert_logger,
+            event_logger,
         })
     }
 
@@ -1047,6 +1075,70 @@ impl OtelExporter {
 
         let mut stats = self.stats.write();
         stats.logs_exported += 1;
+    }
+
+    /// Record one `events`-class record as an OTLP log (#762).
+    ///
+    /// `key` is the record's own key (`…/events/<producer>/<subject…>/<ulid>`),
+    /// which carries the origin, so the record lands on that host's resource
+    /// like every other signal.
+    ///
+    /// The ULID rides as `event.id`: it is the record's identity on the bus
+    /// (one key per record, nothing overwrites), which makes it the natural
+    /// de-duplication key for a consumer replaying a storage.
+    pub fn record_event(&self, key: &str, event: &zensight_common::event::EventRecord) {
+        if !self.export_events {
+            return;
+        }
+
+        let stack = zensight_common::keyexpr::parse_key(key)
+            .and_then(|parsed| {
+                let producer = parsed.producer.as_ref()?.name().to_string();
+                Some(ObservedHost {
+                    origin: parsed.origin.to_string(),
+                    host_name: event.source.clone(),
+                    producer,
+                })
+            })
+            .and_then(|h| self.stack_for(&h));
+
+        let logger = match stack.as_ref().and_then(|s| s.event_logger.as_ref()) {
+            Some(l) => l,
+            None => match &self.event_logger {
+                Some(l) => l,
+                None => return,
+            },
+        };
+
+        let mut rec = logger.create_log_record();
+        rec.set_event_name("zensight.event");
+        rec.set_timestamp(ms_to_system_time(event.timestamp));
+        rec.set_observed_timestamp(SystemTime::now());
+        rec.set_body(event.summary.clone().into());
+        rec.set_severity_number(alert_severity_to_otel(event.severity));
+        rec.set_severity_text(event.severity.as_str());
+
+        rec.add_attribute("event.id", event.id.clone());
+        rec.add_attribute("event.kind", event.kind.clone());
+        rec.add_attribute("event.source", event.source.clone());
+        rec.add_attribute("event.protocol", event.protocol.as_str().to_string());
+        // #651: when the producer mapped this record to an alert transition,
+        // carrying the key is what lets a consumer join the two.
+        if let Some(alert_key) = &event.alert_key {
+            rec.add_attribute("alert.key", alert_key.clone());
+        }
+        for (k, v) in &event.fields {
+            rec.add_attribute(format!("event.field.{k}"), v.clone());
+        }
+
+        logger.emit(rec);
+        self.stats.write().logs_exported += 1;
+    }
+
+    /// Whether event export is enabled (drives whether the subscriber declares
+    /// the events subscriber at all).
+    pub fn export_events(&self) -> bool {
+        self.export_events
     }
 
     /// Whether alert export is enabled (drives whether the subscriber decodes
@@ -1632,5 +1724,89 @@ mod tests {
             "a shared resource must not claim to be some particular host"
         );
         assert!(attrs.iter().any(|kv| kv.key.as_str() == "service.name"));
+    }
+
+    /// An events-class record reaches OTLP as a log, with its ULID as
+    /// `event.id` (#762).
+    ///
+    /// The events plane reached the GUI and a Zenoh storage and **never
+    /// reached OTLP at all** — an SNMP trap is arguably the most alert-worthy
+    /// thing on the bus.
+    #[test]
+    fn an_events_record_reaches_otlp_as_a_log() {
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+        use zensight_common::event::EventRecord;
+
+        let sink = InMemoryLogExporter::default();
+        let lp = SdkLoggerProvider::builder()
+            .with_simple_exporter(sink.clone())
+            .build();
+        let mut exporter = OtelExporter::with_providers(None, Some(lp));
+        exporter.export_events = true;
+        exporter.event_logger = exporter
+            .logger_provider
+            .as_ref()
+            .map(|lp| lp.logger("zensight.events"));
+
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("ifIndex".to_string(), "2".to_string());
+        let event = EventRecord {
+            id: "01hqzz000000000000000000ab".into(),
+            timestamp: 1_700_000_321_000,
+            source: "sw1".into(),
+            protocol: Protocol::Snmp,
+            kind: "trap/link_down".into(),
+            severity: AlertSeverity::Warning,
+            summary: "link down on eth2".into(),
+            alert_key: Some("deadbeefdeadbeef".into()),
+            fields,
+        };
+        exporter.record_event("v1/h-0123456789ab/events/snmp/trap/01hq", &event);
+
+        exporter
+            .logger_provider
+            .as_ref()
+            .expect("logger provider")
+            .force_flush()
+            .expect("flush");
+
+        let logs = sink.get_emitted_logs().expect("emitted logs");
+        assert_eq!(logs.len(), 1, "one record");
+        let rec = &logs[0].record;
+
+        assert_eq!(
+            rec.timestamp(),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_321_000)),
+            "events carry the observation time, not ingestion time"
+        );
+
+        let attr = |k: &str| {
+            rec.attributes_iter()
+                .find(|(key, _)| key.as_str() == k)
+                .map(|(_, v)| format!("{v:?}"))
+        };
+        let is = |k: &str, want: &str| attr(k).is_some_and(|v| v.contains(want));
+        assert!(
+            is("event.id", "01hqzz000000000000000000ab"),
+            "the ULID is the record's identity on the bus, so it is the natural \
+             de-duplication key for a replaying consumer: {:?}",
+            attr("event.id")
+        );
+        assert!(
+            is("event.kind", "trap/link_down"),
+            "{:?}",
+            attr("event.kind")
+        );
+        assert!(
+            is("alert.key", "deadbeefdeadbeef"),
+            "#651: carrying the key is what lets a consumer join a record to \
+             the alert transition it drove: {:?}",
+            attr("alert.key")
+        );
+        assert!(
+            is("event.field.ifIndex", "2"),
+            "{:?}",
+            attr("event.field.ifIndex")
+        );
     }
 }

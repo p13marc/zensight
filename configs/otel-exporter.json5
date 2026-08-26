@@ -52,6 +52,16 @@
     // alert.* attributes). Set false to skip alert export.
     export_alerts: true,
 
+    // Export the `events` class (#534) — SNMP traps, systemd unit failures —
+    // as OTLP log records on the "zensight.events" scope.
+    //
+    // `events` is its own keyspace class, disjoint from both telemetry and
+    // state, so neither of the subscribers above could ever see it: these
+    // records reached the GUI and a Zenoh storage and never reached OTLP at
+    // all (#762). Logs only — an append-only ULID-keyed stream on /metrics is
+    // a cardinality explosion (#104).
+    export_events: true,
+
     // Traces: alert lifecycles synthesized into OTLP spans (`alert:<rule>`),
     // one span per firing -> resolved transition.
     //
