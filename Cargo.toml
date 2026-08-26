@@ -36,6 +36,10 @@ members = [
     "zensight-sensor-sysinfo-ebpf",
     "zensight-sensor-netlink-ebpf-common",
     "zensight-sensor-netlink-ebpf",
+    # CI conformance harness (#744): stands a deployment up and runs
+    # zenkey-fleet's RFC judges against it. publish = false, and the ONLY
+    # crate here that may link zenkey-fleet — see its README, "The boundary".
+    "zensight-conformance",
 ]
 
 [workspace.package]
@@ -131,13 +135,24 @@ zensight-common = { path = "zensight-common" }
 # (zensight-common/registry/), compiled at build time by zenkey-build.
 zenkey = "0.7"
 zenkey-build = "0.7"
-# The upstream fleet engine (#745): the RFC 05 §2.1 fan-in discipline, bounded
-# and elision-reporting fan-out, declared queriers, registry-slice sets and
-# RFC 13's `Judgement`. **GUI only.** It drags full tokio, zenoh-ext, arc-swap,
-# base64, ciborium and serde_json, so it must never enter `zensight-common` or
-# any crate a sensor links; `zensight` is the one acceptable home.
+# The upstream fleet engine: the RFC 05 §2.1 fan-in discipline, bounded and
+# elision-reporting fan-out, declared queriers, registry-slice sets, RFC 13's
+# `Judgement`, and the conformance judges `run_doctor` exposes.
+#
+# Two members link it and NOTHING ELSE MAY: `zensight` for the fleet view
+# (#745/#746) and `zensight-conformance` for the CI judges (#744). It drags a
+# full tokio + zenoh-ext + arc-swap + base64 + ciborium + serde_json tree, so it
+# must never enter `zensight-common` or any crate a sensor links.
+#
 # `default-features = false` drops the `decode` seam (schema-aware payload
-# decode), which the fleet view does not use.
+# decode) here, because the fleet view does not use it. `zensight-conformance`
+# opts back in explicitly — its payload checks are exactly that seam — so the
+# cost is declared at the crate that incurs it rather than paid fleet-wide by
+# default.
+#
+# NOTE the package license is **Apache-2.0**, not the MIT of the zenkey
+# workspace root it lives in. Nothing here is published, so the only
+# obligation is attribution wherever a built binary ships.
 zenkey-fleet = { version = "0.10", default-features = false }
 schemars = "1"
 # Draft-2020-12 payload conformance, behind zensight-common's `validate-json`

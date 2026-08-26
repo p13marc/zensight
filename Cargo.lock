@@ -13749,6 +13749,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zensight-conformance"
+version = "0.10.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zenkey-fleet",
+]
+
+[[package]]
 name = "zensight-correlator"
 version = "0.10.1"
 dependencies = [
