@@ -151,6 +151,12 @@ impl StoredMetric {
     /// is exposed under its stored name.
     pub fn emitted_name(&self) -> String {
         match self.metric_type {
+            // Idempotent, like the `_total` and unit suffixes (#767): a subject
+            // whose leaf is already `info` (netlink's `iface/{iface}/info`)
+            // would otherwise render `..._iface_info_info`.
+            PrometheusType::Text if self.key.name.ends_with(crate::mapping::INFO_SUFFIX) => {
+                self.key.name.clone()
+            }
             PrometheusType::Text => {
                 format!("{}{}", self.key.name, crate::mapping::INFO_SUFFIX)
             }

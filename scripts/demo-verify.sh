@@ -170,15 +170,22 @@ naming regressed, and per-entity subjects are back in metric names"
 # silently — a panel with no data reads as "the exporter is broken". This is the
 # check that keeps demo/ honest.
 #
-# `zensight_alert` and the systemd families need sensors this harness does not
-# run, so they are deferred rather than asserted.
+# This harness runs sysinfo only and fires no alerts, so families from other
+# sensors are deferred rather than asserted. Everything a provisioned dashboard
+# names that sysinfo CAN produce must exist.
 stale=$(python3 - "$metrics" <<'PY'
-import glob, json, re, sys
+import glob, re, sys
+
 live = set(re.findall(r'(?m)^(zensight_[a-z_0-9]+)', sys.argv[1]))
-deferred = {"zensight_alert", "zensight_systemd_unit_active", "zensight_systemd_units_failed"}
+
 used = set()
 for f in glob.glob("demo/prometheus/dashboards/*.json"):
     used |= set(re.findall(r'zensight_[a-z_0-9]+', open(f).read()))
+
+OTHER_SENSORS = ("zensight_netlink_", "zensight_systemd_", "zensight_netring_")
+deferred = {m for m in used if m.startswith(OTHER_SENSORS)}
+deferred.add("zensight_alert")
+
 print("\n".join(sorted(used - live - deferred)))
 PY
 )
