@@ -149,19 +149,41 @@ async fn test_full_flow_counter_metrics() {
         Protocol::Snmp,
         "if/1/in_octets",
         TelemetryValue::Counter(1_000_000),
-        [("interface".to_string(), "eth0".to_string())]
-            .into_iter()
-            .collect(),
+        [
+            ("interface".to_string(), "eth0".to_string()),
+            // The table index rides as a label (#769), and since registry snmp
+            // 1.8 (#779) it is no longer duplicated in the metric name.
+            ("index".to_string(), "1".to_string()),
+        ]
+        .into_iter()
+        .collect(),
     );
 
     collector.record(&key_for(&point), &point);
 
     let output = collector.render();
 
-    // Verify counter is present with correct type (full name includes prefix and protocol)
+    // The name carries the COLUMN, never the index (#779).
+    //
+    // This assertion used to read `zensight_snmp_if_1_in_octets_total`, and
+    // that was the defect: `snmp` matched only its rest-var catch-all, so the
+    // family name came from the rest variable's *value* and interface 1 and
+    // interface 2 were two unrelated families. Registering the ifTable columns
+    // moved the index out of the name and into a label, which is what makes
+    // `sum by (index)` writable.
     assert!(
-        output.contains("# TYPE zensight_snmp_if_1_in_octets_total counter"),
+        output.contains("# TYPE zensight_snmp_if_in_octets_total counter"),
         "Should have counter type. Output: {}",
+        output
+    );
+    assert!(
+        !output.contains("zensight_snmp_if_1_in_octets"),
+        "The index must not be in the metric name (#779). Output: {}",
+        output
+    );
+    assert!(
+        output.contains("index=\"1\""),
+        "The index must ride as a label (#769). Output: {}",
         output
     );
     assert!(output.contains("1000000"), "Should contain counter value");

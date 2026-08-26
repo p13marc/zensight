@@ -16,9 +16,16 @@
 # the same time as `just demo-otel`, which wants both. `just demo-stop` clears
 # them. Bind failures here are loud and correct.
 
+# Images are pinned BY DIGEST, with the tag kept beside it for readability.
+# A tag is a moving pointer: `v3.14.0` is stable in practice but nothing stops
+# it being re-pushed, and a demo whose whole job is to be reproducible should
+# not depend on that promise. The tag comment is the human name; the digest is
+# what actually runs. To refresh: resolve the tag, replace both, and re-verify.
+
 services:
   prometheus:
-    image: docker.io/prom/prometheus:v3.14.0
+    # docker.io/prom/prometheus:v3.14.0
+    image: docker.io/prom/prometheus@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
     network_mode: host
     # The bind mounts below are repo files. Matches the label=disable precedent
     # already set by docker/docker-compose.yml.
@@ -42,7 +49,8 @@ services:
     restart: on-failure
 
   grafana:
-    image: docker.io/grafana/grafana:13.2.0
+    # docker.io/grafana/grafana:13.2.0
+    image: docker.io/grafana/grafana@sha256:3fd54ae1214669f8355f065ec9f6445d5279a3d77095ab048ca045685272429b
     network_mode: host
     security_opt: [label=disable]
     environment:

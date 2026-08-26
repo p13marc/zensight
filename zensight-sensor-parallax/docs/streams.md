@@ -55,7 +55,7 @@ construction — geometry travels in the data):
 | Test | `VideoTestSrc` (Rgb24, live) → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `VideoTestSrc` (preview fps, live) → `VideoScale` → `JpegEncoder`(Rgb) → `AppSink` |
 | V4L2 MJPG | `V4l2Src` → `JpegDecoder` → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `V4l2Src` → `Throttle` → `AppSink` (MJPG passthrough — no scaler, `preview.max_height` does not apply) |
 | V4L2 YUYV | `V4l2Src` → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `V4l2Src` → `Throttle` → `VideoScale`(Yuyv) → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
-| RTSP H.264 | `RtspSrc` → `AppSink` (**passthrough** — no re-encode, no scale) | `RtspSrc` → `H264Decoder` → `Throttle` → `VideoScale`(I420) → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
+| RTSP H.264 | `RtspSession` → `AppSink` (**passthrough** — no re-encode, no scale) | `RtspSession` → `H264Decoder` → `Throttle` → `VideoScale`(I420) → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
 
 Notes:
 
@@ -170,6 +170,34 @@ RTSP video is passthrough — the sensor cannot force a remote camera's IDR, so
 `request_keyframe` logs and no-ops; viewers instead gate on the in-band IDRs
 (`FrameMeta.keyframe`, GOP-rate).
 
+### RTSP reconnect (#410, #731)
+
+The connected `RtspSession` **is** the graph's source (`add_async_source`),
+not a hand-written task shovelling frames into an `AppSrc`, so the retry loop
+is upstream's and runs inside `produce()`: exponential backoff from 500 ms to a
+30 s ceiling, with full jitter so a rack of cameras behind one switch does not
+retry in lockstep.
+
+Two consequences worth knowing:
+
+- **A clean end is retried too.** RTSP has no in-band end-of-stream for a live
+  stream, so a server whose process dies looks exactly like one that finished.
+  Configuring a reconnect policy *is* the statement "this source is live", and
+  every source in our catalogue is a live camera. A finite stream — a recording
+  served over RTSP — would want `.without_reconnect()` instead; nothing in
+  `configs/parallax.json5` can configure one today.
+- **The ladder is bounded** (8 attempts, ≈ 90 s) even though upstream's default
+  is "retry forever". Forever would mean a camera that is *gone* never produces
+  an error, so `rtsp_connect_failed` could never fire again after the initial
+  connect and a dead stream would sit silently "open". Exhausting the ladder
+  fails the pipeline, which is what turns sustained failure back into an alert.
+
+The first buffer after a successful reconnect carries `BufferFlags::DISCONT`.
+The egress re-arms on it: the cached SPS/PPS belong to the *previous* session,
+so replaying them in front of the resumed stream's first keyframe could hand a
+decoder a geometry the bytes no longer match. The cache is cleared and refills
+from the camera's own in-band sets, and sequence-gap accounting restarts.
+
 ### Self-contained keyframes (#435)
 
 The video egress guarantees, at the byte level, that every access unit it
@@ -187,6 +215,24 @@ publishes with `keyframe: true` is a **self-contained decoder entry point**:
 An RTSP keyframe that arrives before *any* in-band parameter sets have been
 seen is published as-is — there is nothing to prepend yet.
 
+The extract/cache/prepend logic itself is `parallax::codec::annexb`'s
+`ParamSetCache` (#730), not ours: it is codec-aware (H.265's two-byte NAL header
+included, where our `& 0x1F` returned nonsense) and returns the input slice
+borrowed for every delta frame and every keyframe that already carries its sets,
+so only a genuinely repaired keyframe copies. `zensight-sensor-parallax`'s own
+`annexb` module is down to one helper with no upstream equivalent,
+`coded_slice_count`, which exists to prove `encoder.max_slice_len` (#509)
+reached OpenH264.
+
+A stream's H.264 `profile-level-id` (`avc1.<6 hex>`, what a WebCodecs client
+configures a decoder with) is **not** on the catalogue and not in `FrameMeta`.
+The catalogue is built from config at startup and answers for closed streams,
+while the value only exists once a keyframe has been encoded — it would be
+`None` in exactly the case a viewer consults the catalogue for. A consumer
+derives it from the first keyframe instead, which is possible precisely because
+of the parameter-set promise above; `annexb::h264_profile_level_id` is the
+three-byte read that does it (#707).
+
 ## Frame metadata
 
 Every media sample carries a CBOR `FrameMeta` attachment
@@ -196,6 +242,22 @@ path width/height are the **tier's encoded (post-scale) dimensions**, so a low
 tier reports 240-high frames while the high tier reports native height on the
 same source. Sequence gaps mean dropped frames (LiveVideo QoS is best-effort by
 design).
+
+Two encoding rules are normative wire shape rather than compression, and a
+viewer may rely on both:
+
+- **Absent is not null.** A timing field the pipeline never stamped is *missing
+  from the CBOR map*, not present-and-null.
+- **`dts_ns` is omitted when it equals `pts_ns`** — the field means "decode
+  timestamp *if distinct*". Our encoders emit no B-frames, so in practice `dts`
+  equals `pts` on essentially every frame and the field is simply absent; a
+  decoder that wants a value reads `dts_ns.or(pts_ns)`.
+
+`parallax::wire::FrameMeta` is a byte-compatible twin of the zensight type
+(#711: two types, one corpus — neither crate can depend on the other). The
+binding artifact is a set of canonical CBOR vectors checked into both repos;
+ours live in `zensight-common/tests/fixtures/framemeta/` and are pinned by
+`zensight-common/tests/framemeta_corpus.rs`.
 
 ## Teardown
 
@@ -276,8 +338,25 @@ here (#510):
   paying for. The encoder's own `bytes_encoded` over-reports on both counts, and
   an RTSP passthrough has no encoder to ask. For the same reason `encode_ms`
   remains a mean over whole `process()` calls rather than the encoder handle's
-  `last_encode_ns`, which is a single sample of the inner encode: the
-  `encoder_overrun` rule compares a mean to a per-frame budget.
+  `last_encode_ns`, which is a single sample of the inner encode.
+- **`encode_p95_ms` / `encode_p99_ms` are the tail** (#729), read off parallax's
+  own lock-free histogram inside the H.264 encoder. They sit *beside*
+  `encode_ms`, not instead of it: the mean is an interval figure the all-time
+  histogram cannot give, it covers the whole `process()` call (pending-control
+  application, geometry lookup, arena copy, IDR scan) where the histogram times
+  only the inner `encode()`, and it is the only encode timing the JPEG preview
+  paths have at all. Two properties to know when reading them: they are
+  **all-time for that tier's encoder incarnation** (a tail needs history; a 5 s
+  window at 30 fps holds 150 samples, of which p99 is one), and they are bucket
+  upper bounds — at most 19% high, never low. A stream with several open tiers
+  reports its **worst** live tier; the figures disappear when that tier closes.
+- **`encoder_overrun` is judged on the tail**, not the mean. A stream whose
+  average frame fits the budget while its p95 does not is exactly the one that
+  stutters, and overrun is what the rule is named for. The interval mean stays
+  the fallback for the JPEG preview paths, which are timed but not
+  histogrammed. Because the histogram is all-time, the rule clears more slowly
+  than a windowed one would: a bad patch stays in the distribution until later
+  frames dilute it or the tier is rebuilt.
 
 For per-tier **applied** resolution/viewers, read the `StreamStatus` doc's
 `tiers[]` — that is what the GUI's per-tile bandwidth readout shows. Note that
@@ -297,9 +376,14 @@ Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
 
 - `camera_disappeared` — an advertised V4L2 device vanished from periodic
   re-enumeration.
-- `rtsp_connect_failed` — an `open_stream` could not reach the RTSP camera.
-- `encoder_overrun` — average `encode_ms` above the strictest open tier's
-  per-frame budget (1000 / fps).
+- `rtsp_connect_failed` — the RTSP camera is not delivering: either the initial
+  `open_stream` connect failed, or a stream that had opened dropped and the
+  source's reconnect ladder ran out. Since #731 the source retries a dropped
+  stream itself, so a single blip no longer fires this — only sustained failure
+  does, which is what the rule is named for.
+- `encoder_overrun` — `encode_p95_ms` above the strictest open tier's per-frame
+  budget (1000 / fps), falling back to the `encode_ms` mean on a path with no
+  encoder histogram (the JPEG previews).
 
 ## Limitations
 
