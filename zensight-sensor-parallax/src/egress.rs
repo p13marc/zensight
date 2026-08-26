@@ -37,16 +37,25 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// `ClockTime::NONE` (the u64::MAX sentinel) maps to `Option::None`; the
 /// preview path overrides `keyframe` to `true` (every JPEG is independently
 /// decodable, whatever the upstream flags say).
+///
+/// `dts_ns` is omitted when it *equals* `pts_ns`, not only when the clock is
+/// absent (#728). `FrameMeta::dts_ns` is documented "if distinct from
+/// `pts_ns`", and parallax's own `FrameMeta::from_metadata` elides it the same
+/// way — the two encoders are byte-compatible twins pinned by a shared
+/// conformance corpus (`zensight-common/tests/framemeta_corpus.rs`), so this is
+/// wire shape, not a saving. It is not a small one either: our encoders emit no
+/// B-frames, so *every* frame carried a redundant copy of its own pts.
 pub fn metadata_to_frame_meta(
     meta: &Metadata,
     width: u32,
     height: u32,
     preview: bool,
 ) -> FrameMeta {
+    let pts_ns = clock_ns(meta.pts);
     FrameMeta {
         keyframe: preview || meta.is_keyframe(),
-        pts_ns: clock_ns(meta.pts),
-        dts_ns: clock_ns(meta.dts),
+        pts_ns,
+        dts_ns: clock_ns(meta.dts).filter(|dts| Some(*dts) != pts_ns),
         duration_ns: clock_ns(meta.duration),
         sequence: meta.sequence,
         width,
@@ -196,6 +205,34 @@ mod tests {
         assert!(!metadata_to_frame_meta(&delta, 320, 240, false).keyframe);
         // …but the preview path always flags keyframe (JPEG).
         assert!(metadata_to_frame_meta(&delta, 320, 240, true).keyframe);
+    }
+
+    #[test]
+    fn dts_is_omitted_when_it_equals_pts() {
+        // The common case for us: no B-frames, so the encoder stamps dts == pts
+        // on every single frame. `dts_ns` is "if distinct from pts_ns" (#728).
+        let mut meta = Metadata::default();
+        meta.pts = ClockTime::from_nanos(5_000);
+        meta.dts = ClockTime::from_nanos(5_000);
+
+        let fm = metadata_to_frame_meta(&meta, 320, 240, false);
+        assert_eq!(fm.pts_ns, Some(5_000));
+        assert_eq!(fm.dts_ns, None, "equal to pts_ns, so it is not on the wire");
+
+        // A genuinely distinct dts still travels.
+        meta.dts = ClockTime::from_nanos(4_000);
+        assert_eq!(
+            metadata_to_frame_meta(&meta, 320, 240, false).dts_ns,
+            Some(4_000)
+        );
+
+        // And ZERO is a real timestamp, not an absent one: a producer that
+        // stamps pts and leaves dts at its default publishes `Some(0)`.
+        meta.dts = ClockTime::from_nanos(0);
+        assert_eq!(
+            metadata_to_frame_meta(&meta, 320, 240, false).dts_ns,
+            Some(0)
+        );
     }
 
     /// A profile whose source never delivers a single frame must error out

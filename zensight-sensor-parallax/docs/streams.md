@@ -197,6 +197,22 @@ tier reports 240-high frames while the high tier reports native height on the
 same source. Sequence gaps mean dropped frames (LiveVideo QoS is best-effort by
 design).
 
+Two encoding rules are normative wire shape rather than compression, and a
+viewer may rely on both:
+
+- **Absent is not null.** A timing field the pipeline never stamped is *missing
+  from the CBOR map*, not present-and-null.
+- **`dts_ns` is omitted when it equals `pts_ns`** — the field means "decode
+  timestamp *if distinct*". Our encoders emit no B-frames, so in practice `dts`
+  equals `pts` on essentially every frame and the field is simply absent; a
+  decoder that wants a value reads `dts_ns.or(pts_ns)`.
+
+`parallax::wire::FrameMeta` is a byte-compatible twin of the zensight type
+(#711: two types, one corpus — neither crate can depend on the other). The
+binding artifact is a set of canonical CBOR vectors checked into both repos;
+ours live in `zensight-common/tests/fixtures/framemeta/` and are pinned by
+`zensight-common/tests/framemeta_corpus.rs`.
+
 ## Teardown
 
 `close_stream` (with the tile's `codec` + `tier`) decrements that profile's

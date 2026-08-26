@@ -70,6 +70,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`FrameMeta.dts_ns` is omitted when it equals `pts_ns`** (#728), as its own
+  documentation always said ("if distinct from `pts_ns`") and as parallax's
+  byte-compatible twin has always done. The producer wrote it unconditionally
+  whenever the clock was set, so — our encoders emitting no B-frames — *every*
+  frame on the `@media` plane carried a redundant copy of its own pts. Consumers
+  that read `dts_ns.or(pts_ns)` (the documented shape) are unaffected. The
+  attachment is pinned from now on against parallax's three canonical CBOR
+  vectors, checked into `zensight-common/tests/fixtures/framemeta/` and
+  round-tripped byte for byte — which settles #711 as **two types, one corpus**:
+  `zensight-common` cannot depend on the video engine and parallax cannot depend
+  on Zenoh, so the shared artifact is the bytes, not the type.
+
 - **Duplicate label names are now structurally impossible** (#753). Both
   exporters assembled labels by pushing sources in order and de-duplicating
   against a hard-coded `source`/`protocol` list — so `disk/<dev>/io/*` emitted
