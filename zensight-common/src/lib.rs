@@ -21,6 +21,7 @@ pub mod entity;
 pub mod error;
 pub mod event;
 pub mod evidence;
+pub mod exposition;
 pub mod health;
 pub mod interfaces;
 pub mod keyexpr;
