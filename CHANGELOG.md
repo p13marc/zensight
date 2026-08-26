@@ -91,6 +91,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **parallax-pipeline 0.7.0 → 0.8.0** (#727), and the pin is now a single
+  `[workspace.dependencies]` entry so the sensor that *encodes* and the `h264`
+  GUI feature that *decodes* cannot drift onto two versions of the same
+  bitstream contract. No source change was required: `Source`, `AsyncSource`
+  and `Element` are method-for-method identical to 0.7, so the hand-written
+  `StoppableSource`/`TimedElement` forwarding wrappers — the silent-breakage
+  hazard that bit the 0.6 → 0.7 bump — still cover every method. 0.8's new
+  defaulted method (`finish`, the terminal goodbye) landed on `Sink`/`AsyncSink`
+  only, and we wrap neither. The three upstream breaks all miss us: we never
+  construct `Metadata` literally (so its new public `coded` field is
+  irrelevant), we never compare an `EncoderStats` (so its lost `Eq` is), and
+  `RtspSrc` reconnecting by default is what #731 wants anyway.
+
 - **parallax-pipeline 0.6.0 → 0.7.0** (#689). 175 upstream commits, and the
   `h264` GUI feature did not compile against it at all: `H264Decoder::decode`
   became private and `DecodedFrame` crate-internal when decoders became plain
