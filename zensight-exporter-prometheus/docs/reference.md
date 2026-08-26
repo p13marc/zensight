@@ -67,7 +67,8 @@ The collector stores one `StoredMetric` per unique series key.
   reached (counted in `points_dropped_max_series`), bounding memory against a
   cardinality explosion.
 
-`render()` groups series by name and emits `# HELP` / `# TYPE` comments per group
+`render()` groups series by name and emits a `# TYPE` comment per group (`# HELP` is currently emitted only for
+alerts — see #768)
 in the standard `text/plain; version=0.0.4` exposition format.
 
 ## Endpoints

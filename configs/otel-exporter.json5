@@ -41,6 +41,25 @@
     // alert.* attributes). Set false to skip alert export.
     export_alerts: true,
 
+    // Traces: alert lifecycles synthesized into OTLP spans (`alert:<rule>`),
+    // one span per firing -> resolved transition.
+    //
+    // OFF by default, and deliberately so: ZenSight propagates no W3C trace
+    // context across sensors, so these spans are DERIVED, not observed. Each is
+    // a single parentless span with an id hashed from the alert key and its
+    // firing timestamp. There is no service graph and no waterfall, and only a
+    // RESOLVED alert produces a span at all — an alert that is still firing
+    // shows nothing.
+    //
+    // Worth turning on for a Tempo demo ("how long was this alert firing", flap
+    // patterns) as long as that is understood. `gen-configs.sh --exporters`
+    // turns it on for the demo-max profile; the key is spelled out here, rather
+    // than left to the Rust default, because that script can only flip a key
+    // that really exists in this file (see its header).
+    traces: {
+      enabled: false,
+    },
+
     // Service name for OTEL resource
     service_name: "zensight",
 
@@ -62,7 +81,9 @@
   // Telemetry filtering (optional)
   filters: {
     // Zenoh subscription key expression for telemetry
-    // (default "zensight/v1/*/telemetry/**" — the v1 class selector).
+    // (default "v1/*/telemetry/**" — the v1 class selector, base-RELATIVE:
+    // since #466 the deployment base is the session *namespace*, not a key
+    // chunk, so a "zensight/"-prefixed selector here matches NOTHING).
     // Narrow it to tame the firehose at the subscription — unwanted protocols
     // and the state/media planes never reach this exporter over the wire.
     // The state/*/alert/* subscriber is separate and unaffected.
