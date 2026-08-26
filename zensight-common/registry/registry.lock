@@ -387,6 +387,7 @@ subject	snmp	evidence/device/{device}	state	HostEvidence
 subject	snmp	evidence/self	state	HostEvidence
 subject	snmp	health	state	HealthSnapshot
 subject	snmp	sensor	state	SensorInfo
+subject	snmp	{device}/cpu/{index}/load	telemetry	TelemetryPoint
 subject	snmp	{device}/if/{index}/admin_status	telemetry	TelemetryPoint
 subject	snmp	{device}/if/{index}/descr	telemetry	TelemetryPoint
 subject	snmp	{device}/if/{index}/in_discards	telemetry	TelemetryPoint
@@ -420,6 +421,15 @@ subject	snmp	{device}/ifx/{index}/hc_out_octets.rate	telemetry	TelemetryPoint
 subject	snmp	{device}/ifx/{index}/high_speed	telemetry	TelemetryPoint
 subject	snmp	{device}/ifx/{index}/name	telemetry	TelemetryPoint
 subject	snmp	{device}/interfaces	state	InterfaceTable
+subject	snmp	{device}/ip/{index}/addr	telemetry	TelemetryPoint
+subject	snmp	{device}/ip/{index}/if_index	telemetry	TelemetryPoint
+subject	snmp	{device}/ip/{index}/netmask	telemetry	TelemetryPoint
+subject	snmp	{device}/storage/{index}/allocation_units	telemetry	TelemetryPoint
+subject	snmp	{device}/storage/{index}/descr	telemetry	TelemetryPoint
+subject	snmp	{device}/storage/{index}/index	telemetry	TelemetryPoint
+subject	snmp	{device}/storage/{index}/size	telemetry	TelemetryPoint
+subject	snmp	{device}/storage/{index}/type	telemetry	TelemetryPoint
+subject	snmp	{device}/storage/{index}/used	telemetry	TelemetryPoint
 subject	snmp	{device}/trap/{id}	events	EventRecord
 subject	snmp	{device}/{metric...}	telemetry	TelemetryPoint
 subject	sysinfo	alert/{alert_key}	state	Alert

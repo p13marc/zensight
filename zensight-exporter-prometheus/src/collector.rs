@@ -1026,6 +1026,100 @@ mod tests {
         );
     }
 
+    /// #783: the other three indexed tables aggregate too.
+    ///
+    /// Same claim as `interface_columns_aggregate_across_indices`, three more
+    /// times — two rows of one table are ONE family told apart by the `index`
+    /// label, so `sum by (index)` becomes writable for CPUs, IP addresses and
+    /// storage volumes. Before the registry change these matched only the
+    /// rest-var catch-all, the family name came from the rest variable's
+    /// *value*, and `zensight_snmp_storage_1_size` and
+    /// `zensight_snmp_storage_2_size` were two unrelated families.
+    #[test]
+    fn cpu_ip_and_storage_columns_aggregate_across_indices() {
+        let indexed = |metric: &str, index: &str, value: TelemetryValue| {
+            let mut p = make_point("router01", Protocol::Snmp, metric, value);
+            p.labels.insert("index".to_string(), index.to_string());
+            SeriesKey::from_identity(&identity_of(&p), "zensight")
+        };
+
+        for (a, b, expected) in [
+            (
+                indexed("cpu/1/load", "1", TelemetryValue::Gauge(12.0)),
+                indexed("cpu/2/load", "2", TelemetryValue::Gauge(31.0)),
+                "zensight_snmp_cpu_load",
+            ),
+            (
+                indexed("storage/1/size", "1", TelemetryValue::Gauge(1024.0)),
+                indexed("storage/2/size", "2", TelemetryValue::Gauge(2048.0)),
+                "zensight_snmp_storage_size",
+            ),
+            (
+                indexed("ip/1/if_index", "1", TelemetryValue::Gauge(2.0)),
+                indexed("ip/2/if_index", "2", TelemetryValue::Gauge(3.0)),
+                "zensight_snmp_ip_if_index",
+            ),
+        ] {
+            assert_eq!(a.name, expected, "the index must not be in the name");
+            assert_eq!(a.name, b.name, "two rows of one table, one family");
+            assert_ne!(a.labels, b.labels, "the label is what tells them apart");
+        }
+    }
+
+    /// Columns of these tables stay in separate families too — the same
+    /// one-subject-per-column reasoning as ifTable, and the reason a storage
+    /// row's `descr` (a string) can never collide with its `size` (a gauge).
+    #[test]
+    fn storage_columns_are_not_collapsed_into_one_family() {
+        let size = make_point(
+            "router01",
+            Protocol::Snmp,
+            "storage/1/size",
+            TelemetryValue::Gauge(1024.0),
+        );
+        let descr = make_point(
+            "router01",
+            Protocol::Snmp,
+            "storage/1/descr",
+            TelemetryValue::Text("/dev/sda1".into()),
+        );
+
+        let k_size = SeriesKey::from_identity(&identity_of(&size), "zensight");
+        let k_descr = SeriesKey::from_identity(&identity_of(&descr), "zensight");
+
+        assert_eq!(k_size.name, "zensight_snmp_storage_size");
+        assert_ne!(
+            k_size.name, k_descr.name,
+            "a gauge and a text series must never share a name (#752)"
+        );
+    }
+
+    /// The `ip/` group's SCALARS are 3-chunk keys and stay on the catch-all,
+    /// which is correct rather than an oversight: their rest-var family name
+    /// already carries no index, so a registration would fix nothing — and
+    /// they must not be captured by the new 4-chunk `{device}/ip/{index}/…`
+    /// patterns, which would put a scalar in an indexed family.
+    #[test]
+    fn the_ip_scalars_are_untouched_by_the_indexed_patterns() {
+        for (metric, expected) in [
+            ("ip/forwarding", "zensight_snmp_ip_forwarding"),
+            ("ip/default_ttl", "zensight_snmp_ip_default_ttl"),
+        ] {
+            let p = make_point(
+                "router01",
+                Protocol::Snmp,
+                metric,
+                TelemetryValue::Gauge(1.0),
+            );
+            let key = SeriesKey::from_identity(&identity_of(&p), "zensight");
+            assert_eq!(key.name, expected, "scalar {metric} took an indexed name");
+            assert!(
+                !key.labels.iter().any(|(n, _)| n == "index"),
+                "a scalar has no table index"
+            );
+        }
+    }
+
     #[test]
     fn test_stored_metric_binary_not_exportable() {
         let point = make_point(

@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.8"
+version = "1.9"
 app = "zensight"
 convention = 1
 
@@ -44,8 +44,9 @@ description = "polled device metric tree"
 #
 # ifTable and ifXTable are one table split across two MIB modules — the same
 # split `zensight-common/src/interfaces.rs` joins for the InterfaceTable state
-# doc. cpu/, ip/ and storage/ have the same shape and the same problem; they
-# are deliberately left on the catch-all here (see the #779 follow-up).
+# doc. The other three indexed tables — hrProcessorTable, ipAddrTable and
+# hrStorageTable — are registered the same way further down (#783); everything
+# else this poller can emit still rides the catch-all.
 
 [[subject]]
 path = "{device}/if/{index}/index"
@@ -302,6 +303,115 @@ type = "TelemetryPoint"
 cardinality = 4096
 since = "1.8"
 description = "bytes sent (ifHCOutOctets, 64-bit) — derived per-second rate (poller sibling, Gauge)"
+# The three remaining indexed tables (#783), registered column by column for
+# exactly the reason ifTable was (#779): while a key matches only the rest-var
+# catch-all, #764's family rule has no literal chunks to name from and falls
+# back to the rest variable's VALUE — so the table index rides in the metric
+# NAME (`zensight_snmp_storage_1_size`, `zensight_snmp_cpu_1_load`) and
+# `sum by (index)` is unwritable. #769 already attaches the index as a label;
+# these patterns are the other half.
+#
+# One subject per column, for the reason spelled out above the interface table:
+# a single `{column}` variable would be dropped from the family name along with
+# the others, collapsing a table's columns into one family carrying counters,
+# gauges and strings at once.
+#
+# NO `.rate` SIBLINGS HERE, and that is a difference from ifTable rather than an
+# omission. The poller derives a rate from the **wire tag** — `Counter32` /
+# `Counter64`, or a Gauge32 the MIB declares as a counter (`poller.rs`,
+# "Counter → rate") — and not one column of these three tables is a counter in
+# the builtin MIB: hrStorage is INTEGER throughout, hrProcessorLoad is INTEGER,
+# ipAddrTable is IpAddress/INTEGER. ifTable needed them because `in_octets` and
+# friends genuinely are counters. Registering twelve dead `.rate` patterns to
+# look symmetrical would make the registry claim a surface no build can emit,
+# which is the exact class of lie RFC 08 §6.1 and #484 exist to prevent.
+#
+# The scalars in the `ip/` group (`ip/forwarding`, `ip/default_ttl`,
+# `ip/in_receives` and its `.rate`) stay on the catch-all deliberately: they are
+# 3-chunk keys, so the 4-chunk patterns below cannot match them, and their
+# rest-var family name already carries no index — there is nothing for a
+# registration to fix.
+
+[[subject]]
+path = "{device}/cpu/{index}/load"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.9"
+description = "per-processor load, 1-minute average (hrProcessorLoad)"
+
+[[subject]]
+path = "{device}/ip/{index}/addr"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "interface IP address (ipAdEntAddr)"
+
+[[subject]]
+path = "{device}/ip/{index}/if_index"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "the ifIndex this address is bound to (ipAdEntIfIndex)"
+
+[[subject]]
+path = "{device}/ip/{index}/netmask"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "subnet mask for this address (ipAdEntNetMask)"
+
+[[subject]]
+path = "{device}/storage/{index}/index"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "storage index (hrStorageIndex)"
+
+[[subject]]
+path = "{device}/storage/{index}/type"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "storage type OID (hrStorageType)"
+
+[[subject]]
+path = "{device}/storage/{index}/descr"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "storage description (hrStorageDescr)"
+
+[[subject]]
+path = "{device}/storage/{index}/allocation_units"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "allocation unit size in bytes (hrStorageAllocationUnits)"
+
+[[subject]]
+path = "{device}/storage/{index}/size"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "total size in allocation units (hrStorageSize)"
+
+[[subject]]
+path = "{device}/storage/{index}/used"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.9"
+description = "used space in allocation units (hrStorageUsed)"
+
 [[subject]]
 path = "health"
 common = "health"

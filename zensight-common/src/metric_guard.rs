@@ -87,7 +87,19 @@ mod tests {
     #[test]
     fn rest_var_producers_pass() {
         // snmp's tree is whatever the device exposes — a rest-var by design.
+        //
+        // Only *half* true since #779 and #783: the four indexed tables
+        // (ifTable, ifXTable, hrProcessorTable, ipAddrTable, hrStorageTable)
+        // are now registered column by column, so those keys match a real
+        // pattern and the catch-all is what everything *else* rides. Both
+        // routes pass this guard, which is the point — the guard asks whether
+        // a key is buildable, not which entry built it.
         check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/if/1/in_octets");
+        check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/storage/1/size");
+        check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/cpu/1/load");
+        check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/ip/1/netmask");
+        // …and the ip group's scalars, which stay on the catch-all.
+        check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/ip/in_receives.rate");
         // `.rate` siblings (#527), trap counters, and the dotted-OID fallback
         // are all grammar-valid chunks and ride the same rest-var.
         check_telemetry_key("v1/h-0123456789ab/telemetry/snmp/router1/if/1/in_octets.rate");

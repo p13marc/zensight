@@ -196,6 +196,31 @@ fn a_rest_var_producer_is_named_from_its_value() {
     );
 }
 
+/// What the three tables #783 registered looked like *before* it, so the
+/// improvement is pinned rather than asserted.
+///
+/// The catch-all has no literal chunks, so the family name is the rest
+/// variable's value — index and all. `zensight_snmp_storage_1_size` and
+/// `zensight_snmp_storage_2_size` were two unrelated families, and
+/// `sum by (index)` could not be written. The exporter-side half is
+/// `cpu_ip_and_storage_columns_aggregate_across_indices` in
+/// `zensight-exporter-prometheus/src/collector.rs`.
+#[test]
+fn the_catch_all_would_still_bury_the_table_index_in_the_name() {
+    for (value, buried) in [
+        ("storage/1/size", vec!["storage", "1", "size"]),
+        ("cpu/2/load", vec!["cpu", "2", "load"]),
+        ("ip/1/if_index", vec!["ip", "1", "if_index"]),
+    ] {
+        let vars = vec![("device", "sw1".to_string()), ("metric", value.to_string())];
+        assert_eq!(
+            family_chunks("snmp", "{device}/{metric...}", &vars),
+            buried,
+            "the catch-all names from the rest variable's value, index included"
+        );
+    }
+}
+
 /// The plain rule, spelled out on a representative pattern.
 #[test]
 fn the_family_rule_drops_variable_chunks() {

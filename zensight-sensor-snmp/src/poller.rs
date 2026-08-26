@@ -788,12 +788,20 @@ impl SnmpPoller {
             .with_label("oid", oid_str);
         // The table index as a LABEL (#769).
         //
-        // snmp is registered as a rest-var catch-all (`{device}/{metric...}`),
-        // so the index is part of the metric NAME — `if/1/in_octets` and
-        // `if/2/in_octets` are two unrelated families and `sum by (interface)`
-        // cannot be written. No exporter-side naming rule can fix that; only
-        // the producer can, and the MIB resolver already knew the index and
-        // was discarding it.
+        // It used to be part of the metric NAME: snmp's whole tree was a
+        // rest-var catch-all (`{device}/{metric...}`), whose family name comes
+        // from the rest variable's *value*, so `if/1/in_octets` and
+        // `if/2/in_octets` were two unrelated families and `sum by (index)`
+        // could not be written. No exporter-side naming rule can fix that;
+        // only the producer can, and the MIB resolver already knew the index
+        // and was discarding it.
+        //
+        // The other half arrived with the registry: the five indexed tables
+        // (ifTable/ifXTable #779, hrProcessorTable/ipAddrTable/hrStorageTable
+        // #783) are registered column by column, so their keys match a pattern
+        // with literal chunks and the generic family rule takes over. Anything
+        // outside those tables still rides the catch-all, and for it the index
+        // — if the device even has one — is still in the name.
         if let Some(index) = table_index {
             point = point.with_label("index", index);
         }
