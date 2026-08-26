@@ -307,6 +307,50 @@ ambiguity. A producer that is alive on the bus but answers no `introspect` is
 listed rather than omitted; fanning out alone cannot distinguish "not deployed"
 from "deployed and not answering", and the second is the one you need to see.
 
+### The four poles (#746)
+
+Every row is a judgement about one claim — *this host serves the slice we
+compiled in* — and RFC 13 says a judgement has four poles, not two. The row's
+`FleetStatus` is a **surface naming**; `FleetStatus::judgement()` is the
+documented mapping back onto `zenkey_fleet::Judgement`, and it is what decides
+the badge colour and what the tally line above the table counts.
+
+| pole | row | swatch | means |
+|---|---|---|---|
+| `Established` | `in sync` | `STATUS_ONLINE` | asked, answered, the claim holds |
+| `NotEstablished` | `version skew` | `STATUS_DEGRADED` | asked, answered, a different `[registry] version` |
+| `NotEstablished` | `drift` | `STATUS_OFFLINE` | asked, answered, same version and different content |
+| `Unobservable` | `no answer` | `JUDGEMENT_UNOBSERVABLE` | alive, and it answered nothing — an old build, or a broken queryable |
+| `Unobservable` | `unreadable` | `JUDGEMENT_UNOBSERVABLE` | it answered, and the answer will not parse |
+| `NotAsked` | `not asked` | `STATUS_UNKNOWN` | the question never reached it |
+
+Six namings over four poles, because `version skew` and `drift` deserve
+different colours even though both are `NotEstablished`: a version that differs
+is a rollout in progress, content that differs *under an equal version* is a
+build lying about what it is.
+
+This was one state, `silent`, doing two jobs, and the dangerous half is
+`NotAsked`. A host missing because the sweep's reply bound cut the fan-in short
+rendered exactly like a fleet-wide failure to answer — and did so *more* readily
+the larger the fleet grew, which is backwards. Both unestablished poles get a
+swatch that is not an answer's (RFC 09 §5.1 O4: not asked is not answered no;
+O6: asked-and-could-not-tell is neither fine nor fire), and both sort **between**
+the findings and the clean rows: not verdicts, so they must not outrank one; not
+passing checks, so they must not sink below one either.
+
+Which pole an absent-but-alive producer gets depends on whether the sweep was
+whole. Past the reply bound, replies are drained but not kept, so a missing
+producer may have answered and had its answer discarded, or may never have been
+reached — and the view cannot tell which. Claiming "alive, and it answered
+nothing" about a host whose answer was thrown away is the false verdict O4
+forbids, so a truncated sweep reports `not asked` and names the bound. A whole
+sweep genuinely did put the question, so it reports `no answer`.
+
+The `why` column (not `findings`) opens the reason: an unestablished row has no
+findings — that is what unestablished *means* — but it does have the `reason`
+RFC 13 requires it to carry, and an empty cell was how `silent` got away with
+doing two jobs.
+
 The engine is upstream's (`zenkey-fleet`, #745), and the split is worth stating
 because it is the same split every future bus-facing view should make:
 

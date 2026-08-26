@@ -6137,11 +6137,14 @@ fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
     assert!(ui.find("in sync").is_ok(), "server01 agrees with us");
 }
 
-/// A producer that is alive on the bus but answers no `introspect` must appear as
-/// `silent`, not vanish. Fanning out alone cannot tell "not deployed" from
-/// "deployed and not answering", and the second is the row you need to see.
+/// A producer that is alive on the bus but answers no `introspect` must appear,
+/// not vanish. Fanning out alone cannot tell "not deployed" from "deployed and
+/// not answering", and the second is the row you need to see.
+///
+/// The sweep here was **whole**, so the question really was put and really got
+/// nothing back: RFC 13's `Unobservable`, rendered `no answer`.
 #[test]
-fn fleet_view_shows_an_alive_but_silent_producer() {
+fn fleet_view_shows_an_alive_but_unanswering_producer() {
     use zensight::view::fleet::{FleetState, FleetSweep, fleet_view};
 
     let mut state = FleetState::default();
@@ -6153,10 +6156,61 @@ fn fleet_view_shows_an_alive_but_silent_producer() {
     let mut ui = simulator(fleet_view(&state));
     assert!(
         ui.find("edge01").is_ok(),
-        "the silent host must still be listed"
+        "the unanswering host must still be listed"
     );
     let mut ui = simulator(fleet_view(&state));
-    assert!(ui.find("silent").is_ok());
+    assert!(ui.find("no answer").is_ok());
+}
+
+/// #746's whole point, at the view: a host missing because the sweep's reply
+/// bound cut the fan-in short renders as `not asked`, and **not** as any of the
+/// three answers — not as `drift` or `version skew` (asked, and the answer was
+/// no), not as `no answer` (asked, and nothing came back), and not as `in sync`.
+///
+/// Truncation gets more likely the larger the fleet grows, so without this the
+/// worst-truncated fleet is the one that looks most confidently broken. The
+/// banner has to say the inventory is a sample, too.
+#[test]
+fn fleet_view_renders_not_asked_distinguishably_from_a_host_that_answered_nothing() {
+    use zensight::view::fleet::{FleetState, FleetSweep, elision_summary, fleet_view};
+
+    let alive = [("h-cccccccccccc".into(), "netring".into(), "edge01".into())];
+
+    let mut truncated = FleetState::default();
+    truncated.apply(
+        Ok(FleetSweep {
+            replies: Vec::new(),
+            elided: 9,
+            bound: 2,
+        }),
+        &alive,
+    );
+
+    let mut ui = simulator(fleet_view(&truncated));
+    assert!(
+        ui.find("not asked").is_ok(),
+        "a producer beyond the reply bound was never reached, and says so"
+    );
+    for answer in ["no answer", "drift", "version skew", "in sync"] {
+        let mut ui = simulator(fleet_view(&truncated));
+        assert!(
+            ui.find(answer).is_err(),
+            "a truncated sweep must not render as {answer:?} — not asked is not answered no"
+        );
+    }
+
+    // ...and the table says out loud that it is a sample, not the fleet.
+    let note = elision_summary(9, 2).expect("a sweep that dropped replies has a note");
+    let mut ui = simulator(fleet_view(&truncated));
+    assert!(ui.find(note.as_str()).is_ok(), "the note reads: {note}");
+
+    // The same producer, under a whole sweep, lands on the other pole.
+    let mut whole = FleetState::default();
+    whole.apply(Ok(FleetSweep::default()), &alive);
+    let mut ui = simulator(fleet_view(&whole));
+    assert!(ui.find("no answer").is_ok());
+    let mut ui = simulator(fleet_view(&whole));
+    assert!(ui.find("not asked").is_err());
 }
 
 /// SNMP fleet overview (#533): rate-based top talkers, down hotlist, error

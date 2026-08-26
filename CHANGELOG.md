@@ -121,6 +121,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Fleet view judges on RFC 13's four poles** (#746). `FleetStatus` had
+  `InSync` / `Skew` / `Drift` / `Silent`, and `Silent` was doing two jobs. A
+  host that is alive but answered no `introspect` might be an old build with no
+  queryable, a broken queryable, one whose answer cannot be interpreted, or one
+  the sweep never reached — and the view rendered all four identically.
+
+  Rows now map onto `zenkey_fleet::Judgement`
+  (`Established` / `NotEstablished` / `Unobservable` / `NotAsked`) through
+  `FleetStatus::judgement()`, with six surface namings over the four poles:
+  `in sync`, `version skew`, `drift`, `unreadable`, `no answer`, `not asked`.
+  A tally line above the table counts all four.
+
+  **The dangerous case is `NotAsked`.** A host missing because the sweep's
+  reply bound cut the fan-in short rendered exactly like a fleet-wide failure
+  to answer — and did so *more* readily the larger the fleet grew, which is
+  backwards. Past the bound, replies are drained but not kept, so a missing
+  producer may have answered and had its answer discarded; claiming "alive, and
+  it answered nothing" about it is the false verdict RFC 09 §5.1 O4 forbids. A
+  truncated sweep therefore reports `not asked` and names the bound; a whole
+  sweep reports `no answer`.
+
+  Neither unestablished pole borrows an answer's swatch (a new
+  `theme::JUDGEMENT_UNOBSERVABLE`, and `STATUS_UNKNOWN` for `not asked`), and
+  both sort between the findings and the clean rows — not verdicts, so they may
+  not outrank one; not passing checks, so they may not sink below one.
+  `not_asked_renders_distinguishably_from_every_other_pole` and
+  `fleet_view_renders_not_asked_distinguishably_from_a_host_that_answered_nothing`
+  pin it; without a test the distinction regresses.
+
+  An unreadable slice moved too: it was `drift`, which is a claim about the
+  content of a slice we managed to parse. It is `Unobservable` now, and the
+  parse error — previously dropped on the floor — is the reason it carries.
+
 - **The Fleet view runs on the upstream fleet engine** (#745). `view/fleet.rs`
   was hand-rolling `zenkey-fleet`'s core job: fan `introspect` across the
   fleet, parse each reply into a `RegistrySlice`, diff it against the
