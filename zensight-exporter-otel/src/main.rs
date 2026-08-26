@@ -25,8 +25,12 @@ struct Args {
     endpoint: Option<String>,
 
     /// Log level (trace, debug, info, warn, error).
-    #[arg(long, default_value = "info")]
-    log_level: String,
+    ///
+    /// No `default_value`, deliberately: with one, the flag always wins and
+    /// `logging.level` in the config file is unreachable — which is exactly why
+    /// it was dead config (#757). Absent here means "use the file".
+    #[arg(long)]
+    log_level: Option<String>,
 }
 
 #[tokio::main]
@@ -46,7 +50,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize logging
-    let log_level = args.log_level.parse().unwrap_or(Level::INFO);
+    // The CLI flag OVERRIDES the file rather than replacing it, so both work
+    // and the more specific one wins (#757).
+    let level_str = args
+        .log_level
+        .clone()
+        .unwrap_or_else(|| config.logging.level.clone());
+    let log_level = level_str.parse().unwrap_or(Level::INFO);
     let filter = EnvFilter::from_default_env()
         .add_directive(format!("zensight_exporter_otel={}", log_level).parse()?)
         .add_directive(format!("zenoh={}", Level::WARN).parse()?)
@@ -124,9 +134,19 @@ async fn main() -> anyhow::Result<()> {
 
     // Start subscriber
     let subscriber_shutdown = shutdown_rx.clone();
+    // A dead pipeline winds the process down rather than lingering in a state
+    // whose only symptom is silence (#757). This exporter has no /health to
+    // report through — it pushes rather than being scraped — so exiting
+    // non-zero, and letting the systemd unit's `Restart=on-failure` do its job,
+    // IS the signal.
+    let subscriber_fail_tx = shutdown_tx.clone();
+    let pipeline_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failed_flag = pipeline_failed.clone();
     let subscriber_task = tokio::spawn(async move {
         if let Err(e) = subscriber.run(subscriber_shutdown).await {
             error!("Subscriber error: {}", e);
+            failed_flag.store(true, std::sync::atomic::Ordering::Release);
+            let _ = subscriber_fail_tx.send(true);
         }
     });
 
@@ -171,6 +191,13 @@ async fn main() -> anyhow::Result<()> {
         logs_exported = stats.logs_exported,
         "Final statistics"
     );
+
+    // Exit non-zero when the pipeline died, so a supervisor restarts us instead
+    // of leaving a process that is running and exporting nothing (#757).
+    if pipeline_failed.load(std::sync::atomic::Ordering::Acquire) {
+        error!("Exporter stopped because its telemetry pipeline failed");
+        anyhow::bail!("telemetry pipeline failed");
+    }
 
     info!("Exporter stopped");
     Ok(())

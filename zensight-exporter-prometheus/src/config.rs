@@ -313,11 +313,62 @@ impl ExporterConfig {
             )));
         }
 
+        // `prefix` is interpolated raw into every metric name, so a malformed
+        // one makes EVERY series invalid. Reject rather than sanitize: a
+        // silently-renamed prefix breaks every dashboard without a log line
+        // (#757).
+        if !self.prometheus.prefix.is_empty() {
+            let mut chars = self.prometheus.prefix.chars();
+            let head_ok = chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == ':');
+            let tail_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':');
+            if !(head_ok && tail_ok) {
+                return Err(ConfigError::Validation(format!(
+                    "prometheus.prefix {:?} is not a valid Prometheus metric-name prefix \
+                     ([a-zA-Z_:][a-zA-Z0-9_:]*) — it is interpolated into every metric name, \
+                     so this would make every series invalid",
+                    self.prometheus.prefix
+                )));
+            }
+        }
+
         // Validate path starts with /
         if !self.prometheus.path.starts_with('/') {
             return Err(ConfigError::Validation(
                 "Metrics path must start with /".to_string(),
             ));
+        }
+
+        // A selector that spells the deployment base matches NOTHING (#466) —
+        // with a perfectly healthy session and an empty dashboard. Both READMEs
+        // recommended exactly that until #761. The validator already existed
+        // and produces the precise diagnostic; it simply was never called here.
+        if let Some(ke) = &self.filters.key_expr
+            && let Err(e) = zensight_common::keyexpr::validate_relative_selector(ke)
+        {
+            return Err(ConfigError::Validation(format!("filters.key_expr: {e}")));
+        }
+
+        // An unknown protocol token silently filters out everything it was
+        // meant to include. `include_protocols: [..., "syslog"]` — the token is
+        // `logs` — dropped 100% of log records while `export_logs: true`.
+        for (field, list) in [
+            ("include_protocols", &self.filters.include_protocols),
+            ("exclude_protocols", &self.filters.exclude_protocols),
+        ] {
+            for token in list {
+                if token
+                    .parse::<zensight_common::telemetry::Protocol>()
+                    .is_err()
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "filters.{field} contains unknown protocol {token:?}. Valid tokens: \
+                         snmp, logs, gnmi, netflow, opcua, modbus, sysinfo, netlink, netring, \
+                         systemd, parallax"
+                    )));
+                }
+            }
         }
 
         // Validate remote-write settings (only when enabled).
@@ -527,5 +578,59 @@ mod tests {
 
         let result = ExporterConfig::parse(json);
         assert!(result.is_err());
+    }
+
+    /// `prefix` is interpolated raw into every metric name, so a malformed one
+    /// makes every series invalid. It is REJECTED, not sanitized: a silently
+    /// renamed prefix breaks every dashboard without a log line (#757).
+    #[test]
+    fn a_malformed_prefix_is_rejected_not_sanitized() {
+        let mut cfg = ExporterConfig::default();
+        cfg.prometheus.prefix = "my-app".to_string();
+        let err = cfg
+            .validate()
+            .expect_err("a hyphen is not legal in a metric name");
+        assert!(format!("{err}").contains("prefix"), "{err}");
+
+        cfg.prometheus.prefix = "my_app".to_string();
+        assert!(cfg.validate().is_ok());
+
+        // Empty is fine — it just means "no prefix".
+        cfg.prometheus.prefix = String::new();
+        assert!(cfg.validate().is_ok());
+    }
+
+    /// A selector spelling the deployment base matches NOTHING since #466, with
+    /// a perfectly healthy session and an empty dashboard. Both READMEs
+    /// recommended exactly this shape until #761.
+    #[test]
+    fn a_base_prefixed_key_expr_is_rejected() {
+        let mut cfg = ExporterConfig::default();
+        cfg.filters.key_expr = Some("zensight/v1/*/telemetry/**".to_string());
+        let err = cfg
+            .validate()
+            .expect_err("base-prefixed selectors match nothing");
+        assert!(format!("{err}").contains("key_expr"), "{err}");
+
+        cfg.filters.key_expr = Some("v1/*/telemetry/**".to_string());
+        assert!(cfg.validate().is_ok(), "the base-relative form is correct");
+    }
+
+    /// An unknown protocol token silently filters out everything it was meant
+    /// to include — `"syslog"` (the token is `logs`) dropped 100% of log
+    /// records while `export_logs: true`.
+    #[test]
+    fn an_unknown_protocol_token_is_rejected() {
+        let mut cfg = ExporterConfig::default();
+        cfg.filters.include_protocols = vec!["snmp".into(), "syslog".into()];
+        let err = cfg.validate().expect_err("syslog is not a protocol token");
+        assert!(format!("{err}").contains("syslog"), "{err}");
+        assert!(
+            format!("{err}").contains("logs"),
+            "the error must name the valid token: {err}"
+        );
+
+        cfg.filters.include_protocols = vec!["snmp".into(), "logs".into()];
+        assert!(cfg.validate().is_ok());
     }
 }

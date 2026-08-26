@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
+use zensight_common::pipeline_health::PipelineHealth;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 use zensight_exporter_prometheus::{ExporterConfig, HttpServer, MetricCollector, SharedCollector};
 
@@ -468,7 +469,12 @@ async fn test_http_server_metrics_endpoint() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let _server = HttpServer::new(collector.clone(), addr, "/metrics".to_string());
+    let _server = HttpServer::new(
+        collector.clone(),
+        addr,
+        "/metrics".to_string(),
+        PipelineHealth::new(),
+    );
 
     // We need to bind and get the actual port
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -476,7 +482,12 @@ async fn test_http_server_metrics_endpoint() {
     drop(listener); // Release the port
 
     // Start server in background
-    let server = HttpServer::new(collector, actual_addr, "/metrics".to_string());
+    let server = HttpServer::new(
+        collector,
+        actual_addr,
+        "/metrics".to_string(),
+        PipelineHealth::new(),
+    );
     let server_handle = tokio::spawn(async move {
         let _ = server.run(shutdown_rx).await;
     });

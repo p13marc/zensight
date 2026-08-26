@@ -11,17 +11,20 @@ use tokio::sync::watch;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use zensight_common::pipeline_health::PipelineHealth;
+
 use crate::collector::SharedCollector;
 
 /// Application state shared across handlers.
 #[derive(Clone)]
 struct AppState {
     collector: SharedCollector,
+    health: PipelineHealth,
 }
 
 /// Create the HTTP router.
-fn create_router(collector: SharedCollector, metrics_path: &str) -> Router {
-    let state = AppState { collector };
+fn create_router(collector: SharedCollector, metrics_path: &str, health: PipelineHealth) -> Router {
+    let state = AppState { collector, health };
 
     Router::new()
         .route(metrics_path, get(metrics_handler))
@@ -44,8 +47,22 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
 }
 
 /// Handler for the /health endpoint.
-async fn health_handler() -> Response {
-    (StatusCode::OK, "healthy\n").into_response()
+///
+/// Reports the INGEST PIPELINE's state, not merely "the process is running"
+/// (#757). A failed subscriber used to leave this at 200 forever while
+/// `/metrics` stayed empty — indistinguishable, to a probe, from "connected, no
+/// data yet". `/ready` already covers that second case; this covers "there is
+/// no pipeline at all".
+async fn health_handler(State(state): State<AppState>) -> Response {
+    if state.health.is_healthy() {
+        (StatusCode::OK, "healthy\n").into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unhealthy - the telemetry pipeline failed\n",
+        )
+            .into_response()
+    }
 }
 
 /// Handler for the /ready endpoint.
@@ -70,21 +87,28 @@ pub struct HttpServer {
     collector: SharedCollector,
     listen_addr: SocketAddr,
     metrics_path: String,
+    health: PipelineHealth,
 }
 
 impl HttpServer {
     /// Create a new HTTP server.
-    pub fn new(collector: SharedCollector, listen_addr: SocketAddr, metrics_path: String) -> Self {
+    pub fn new(
+        collector: SharedCollector,
+        listen_addr: SocketAddr,
+        metrics_path: String,
+        health: PipelineHealth,
+    ) -> Self {
         Self {
             collector,
             listen_addr,
             metrics_path,
+            health,
         }
     }
 
     /// Run the HTTP server until the shutdown signal is received.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
-        let router = create_router(self.collector, &self.metrics_path);
+        let router = create_router(self.collector, &self.metrics_path, self.health);
 
         info!(
             addr = %self.listen_addr,
@@ -145,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_endpoint() {
         let collector = make_collector();
-        let router = create_router(collector, "/metrics");
+        let router = create_router(collector, "/metrics", PipelineHealth::new());
 
         let response = router
             .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
@@ -161,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_endpoint() {
         let collector = make_collector();
-        let router = create_router(collector, "/metrics");
+        let router = create_router(collector, "/metrics", PipelineHealth::new());
 
         let response = router
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
@@ -174,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn test_ready_endpoint_not_ready() {
         let collector = make_collector();
-        let router = create_router(collector, "/metrics");
+        let router = create_router(collector, "/metrics", PipelineHealth::new());
 
         let response = router
             .oneshot(Request::get("/ready").body(Body::empty()).unwrap())
@@ -201,7 +225,7 @@ mod tests {
         );
         collector.record(&key, &point);
 
-        let router = create_router(collector, "/metrics");
+        let router = create_router(collector, "/metrics", PipelineHealth::new());
 
         let response = router
             .oneshot(Request::get("/ready").body(Body::empty()).unwrap())
@@ -214,7 +238,7 @@ mod tests {
     #[tokio::test]
     async fn test_custom_metrics_path() {
         let collector = make_collector();
-        let router = create_router(collector, "/prometheus/metrics");
+        let router = create_router(collector, "/prometheus/metrics", PipelineHealth::new());
 
         // Custom path should work
         let response = router
