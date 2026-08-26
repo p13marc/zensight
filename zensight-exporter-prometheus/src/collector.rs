@@ -913,6 +913,119 @@ mod tests {
         assert_eq!(stored.value, Some(1000.0));
     }
 
+    /// #779: two interfaces of one device are ONE family, told apart by a
+    /// label — which is the whole point of registering the interface table.
+    ///
+    /// Before the registry change, `snmp` matched only its rest-var catch-all
+    /// (`{device}/{metric...}`), so the family name came from the rest
+    /// variable's *value* and the table index rode in the metric NAME:
+    /// `zensight_snmp_if_1_in_octets` and `zensight_snmp_if_2_in_octets` were
+    /// two unrelated families and `sum by (index)` could not be written.
+    /// #769 attached the index as a label; this asserts the other half.
+    #[test]
+    fn interface_columns_aggregate_across_indices() {
+        let if1 = {
+            let mut p = make_point(
+                "router01",
+                Protocol::Snmp,
+                "if/1/in_octets",
+                TelemetryValue::Counter(1000),
+            );
+            p.labels.insert("index".to_string(), "1".to_string());
+            p
+        };
+        let if2 = {
+            let mut p = make_point(
+                "router01",
+                Protocol::Snmp,
+                "if/2/in_octets",
+                TelemetryValue::Counter(2000),
+            );
+            p.labels.insert("index".to_string(), "2".to_string());
+            p
+        };
+
+        let k1 = SeriesKey::from_identity(&identity_of(&if1), "zensight");
+        let k2 = SeriesKey::from_identity(&identity_of(&if2), "zensight");
+
+        assert_eq!(
+            k1.name, "zensight_snmp_if_in_octets_total",
+            "the index must not be in the metric name"
+        );
+        assert_eq!(k1.name, k2.name, "two interfaces, one family");
+
+        let index_of = |k: &SeriesKey| {
+            k.labels
+                .iter()
+                .find(|(n, _)| n == "index")
+                .map(|(_, v)| v.clone())
+                .expect("the table index rides as a label (#769)")
+        };
+        assert_eq!(index_of(&k1), "1");
+        assert_eq!(index_of(&k2), "2");
+        assert_ne!(k1.labels, k2.labels, "the label is what tells them apart");
+    }
+
+    /// Columns of the same table stay in *separate* families.
+    ///
+    /// This is why the registry spells one subject per column rather than the
+    /// `{device}/if/{index}/{column}` shape #779 sketched: a `{column}`
+    /// variable would be dropped from the name with every other variable,
+    /// collapsing counters, gauges and strings into one `zensight_snmp_if`
+    /// family and emitting two `# TYPE` lines for one name — the scrape-killer
+    /// class #752 fixed.
+    #[test]
+    fn interface_columns_are_not_collapsed_into_one_family() {
+        let octets = make_point(
+            "router01",
+            Protocol::Snmp,
+            "if/1/in_octets",
+            TelemetryValue::Counter(1000),
+        );
+        let mtu = make_point(
+            "router01",
+            Protocol::Snmp,
+            "if/1/mtu",
+            TelemetryValue::Gauge(1500.0),
+        );
+
+        let k_octets = SeriesKey::from_identity(&identity_of(&octets), "zensight");
+        let k_mtu = SeriesKey::from_identity(&identity_of(&mtu), "zensight");
+
+        assert_eq!(k_octets.name, "zensight_snmp_if_in_octets_total");
+        assert_eq!(k_mtu.name, "zensight_snmp_if_mtu");
+        assert_ne!(
+            k_octets.name, k_mtu.name,
+            "a counter and a gauge must never share a name"
+        );
+    }
+
+    /// The derived per-second sibling the poller publishes for every counter
+    /// is registered too — an unregistered `.rate` would fall back to the
+    /// catch-all and keep the index in its name.
+    #[test]
+    fn the_derived_rate_sibling_aggregates_too() {
+        let mut p = make_point(
+            "router01",
+            Protocol::Snmp,
+            "if/1/in_octets.rate",
+            TelemetryValue::Gauge(12.5),
+        );
+        p.labels.insert("index".to_string(), "1".to_string());
+
+        let key = SeriesKey::from_identity(&identity_of(&p), "zensight");
+        assert!(
+            !key.name.contains("_1_"),
+            "the index must not be in the name: {}",
+            key.name
+        );
+        assert!(
+            key.name.starts_with("zensight_snmp_if_in_octets_rate"),
+            "unexpected name: {}",
+            key.name
+        );
+    }
+
     #[test]
     fn test_stored_metric_binary_not_exportable() {
         let point = make_point(

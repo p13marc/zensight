@@ -59,6 +59,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the inner `encode()` rather than the whole `process()` call, and it does
   not exist at all for the previews. Registry `parallax.toml` goes to 1.7.
 
+- **The SNMP interface table is a registered subject tree, so `sum by (index)`
+  works** (#779). `zensight-common/registry/snmp.toml` registered a single
+  rest-var catch-all, `{device}/{metric...}`. That pattern has **no literal
+  chunks**, so the registry-driven family rule (#764) had nothing to name from
+  and fell back to naming the family after the rest variable's *value* — which
+  left the table index inside the metric name: `zensight_snmp_if_1_in_octets`
+  and `zensight_snmp_if_2_in_octets` were two unrelated families, and no
+  exporter-side rule could factor them back together. #769 had already made the
+  index available as a label; this is the other half. Registry `snmp` moves
+  **1.7 → 1.8** and registers the `ifTable`/`ifXTable` columns explicitly, one
+  subject per column (`{device}/if/{index}/in_octets`, …, plus the `.rate`
+  sibling the poller derives for every counter), which the generated parser
+  tries ahead of the catch-all. The exported series becomes
+  `zensight_snmp_if_in_octets_total{device="…",index="1"}`.
+
+  **Not a wire change** — the poller publishes exactly the same keys it always
+  did; only the exporters' reading of them moved. A Grafana panel or recording
+  rule written against the old `zensight_snmp_if_<n>_<column>` names needs
+  updating. `cpu/{index}/…`, `ip/{index}/…` and `storage/{index}/…` have the
+  same shape and are deliberately still on the catch-all.
 
 - **`just demo-prometheus` and `just demo-otel`** (#751) — one command each for a
   working dashboard. Until now the exporters had **no run path at all**: zero
