@@ -64,8 +64,10 @@ pub fn registered_telemetry_patterns(producer: &str) -> Vec<String> {
 /// Built once per producer on first use. Empty for an unknown producer or an
 /// unparseable slice, matching the silent-pass posture above.
 pub fn telemetry_subject_docs(producer: &str, pattern: &str) -> Option<SubjectDocs> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<HashMap<String, SubjectDocs>>>>> =
-        OnceLock::new();
+    /// One producer's `pattern -> docs` table, shared by every lookup.
+    type ProducerDocs = Arc<HashMap<String, SubjectDocs>>;
+
+    static CACHE: OnceLock<Mutex<HashMap<String, ProducerDocs>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
 
     let per_producer = {
@@ -87,7 +89,7 @@ pub fn telemetry_subject_docs(producer: &str, pattern: &str) -> Option<SubjectDo
                     );
                 }
             }
-            let arc = Arc::new(map);
+            let arc: ProducerDocs = Arc::new(map);
             guard.insert(producer.to_string(), Arc::clone(&arc));
             arc
         }

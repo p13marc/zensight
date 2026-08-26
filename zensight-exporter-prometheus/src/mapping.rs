@@ -231,9 +231,86 @@ pub fn is_exportable(value: &TelemetryValue) -> bool {
     !matches!(value, TelemetryValue::Binary(_))
 }
 
+/// The Prometheus name suffix a UCUM-ish unit implies.
+///
+/// Convention only — the VALUE is never rescaled. A `ms` unit gets no suffix
+/// because renaming it `_seconds` without dividing by 1000 would be a lie, and
+/// dividing would silently change what every existing dashboard reads. When
+/// there is no suffix the unit still reaches the reader, in `# HELP`.
+pub fn unit_suffix(unit: &str) -> Option<&'static str> {
+    match unit {
+        "By" | "bytes" => Some("_bytes"),
+        "s" | "seconds" => Some("_seconds"),
+        "By/s" => Some("_bytes_per_second"),
+        "1/s" => Some("_per_second"),
+        "%" | "percent" => Some("_percent"),
+        "Cel" => Some("_celsius"),
+        _ => None,
+    }
+}
+
+/// Apply the Prometheus naming conventions to a family name.
+///
+/// A counter gains `_total`; a unit with a conventional suffix gains it. Both
+/// are idempotent — a name that already ends the right way is left alone,
+/// because `..._bytes_bytes` helps nobody.
+pub fn apply_conventions(name: &str, kind: PrometheusType, unit: Option<&str>) -> String {
+    let mut out = name.to_string();
+    if let Some(suffix) = unit.and_then(unit_suffix)
+        && !out.ends_with(suffix)
+    {
+        out.push_str(suffix);
+    }
+    if kind == PrometheusType::Counter && !out.ends_with("_total") {
+        out.push_str("_total");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The conventions are idempotent, so a name that already ends the right
+    /// way is left alone — `..._bytes_bytes` helps nobody.
+    #[test]
+    fn conventions_are_idempotent() {
+        assert_eq!(
+            apply_conventions(
+                "zensight_netlink_iface_rx_bytes",
+                PrometheusType::Counter,
+                Some("By")
+            ),
+            "zensight_netlink_iface_rx_bytes_total",
+            "the name already ends _bytes, so only _total is appended"
+        );
+        assert_eq!(
+            apply_conventions("x_total", PrometheusType::Counter, None),
+            "x_total"
+        );
+        assert_eq!(
+            apply_conventions("x", PrometheusType::Counter, Some("By")),
+            "x_bytes_total"
+        );
+        assert_eq!(
+            apply_conventions("x", PrometheusType::Gauge, Some("By")),
+            "x_bytes",
+            "a gauge never gains _total"
+        );
+    }
+
+    /// A unit with no conventional suffix must NOT be renamed. Calling a
+    /// millisecond metric `_seconds` without dividing by 1000 is a lie, and
+    /// dividing would silently change what every dashboard reads — so the unit
+    /// rides in `# HELP` instead.
+    #[test]
+    fn an_unconvertible_unit_gets_no_suffix() {
+        assert_eq!(unit_suffix("ms"), None);
+        assert_eq!(
+            apply_conventions("latency", PrometheusType::Gauge, Some("ms")),
+            "latency"
+        );
+    }
 
     #[test]
     fn test_sanitize_metric_name_simple() {
@@ -420,40 +497,4 @@ mod tests {
             );
         }
     }
-}
-
-/// The Prometheus name suffix a UCUM-ish unit implies.
-///
-/// Convention only — the VALUE is never rescaled. A `ms` unit gets no suffix
-/// because renaming it `_seconds` without dividing by 1000 would be a lie, and
-/// dividing would silently change what every existing dashboard reads. When
-/// there is no suffix the unit still reaches the reader, in `# HELP`.
-pub fn unit_suffix(unit: &str) -> Option<&'static str> {
-    match unit {
-        "By" | "bytes" => Some("_bytes"),
-        "s" | "seconds" => Some("_seconds"),
-        "By/s" => Some("_bytes_per_second"),
-        "1/s" => Some("_per_second"),
-        "%" | "percent" => Some("_percent"),
-        "Cel" => Some("_celsius"),
-        _ => None,
-    }
-}
-
-/// Apply the Prometheus naming conventions to a family name.
-///
-/// A counter gains `_total`; a unit with a conventional suffix gains it. Both
-/// are idempotent — a name that already ends the right way is left alone,
-/// because `..._bytes_bytes` helps nobody.
-pub fn apply_conventions(name: &str, kind: PrometheusType, unit: Option<&str>) -> String {
-    let mut out = name.to_string();
-    if let Some(suffix) = unit.and_then(unit_suffix)
-        && !out.ends_with(suffix)
-    {
-        out.push_str(suffix);
-    }
-    if kind == PrometheusType::Counter && !out.ends_with("_total") {
-        out.push_str("_total");
-    }
-    out
 }
