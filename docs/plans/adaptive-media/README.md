@@ -18,16 +18,18 @@ Four gaps, in dependency order:
 
 1. **Nothing measures latency.** `FrameMeta.pts_ns` is a producer-local pipeline clock and the
    GUI never reads it. The clock is already on the wire — zenoh stamps every sample and
-   `zensight-common/src/session.rs:89` enables timestamping fleet-wide — and nothing is allowed
-   to use it. (zenkey #366; parallax #245 for the sender that doesn't stamp.)
+   `zensight-common/src/session.rs:89` enables timestamping fleet-wide — and nothing reads it.
+   RFC 07 §1.3 now names that clock; #714 puts it in a wire type; #716 is what finally acts
+   on it.
 2. **The H.264 path cannot shed.** It decodes every access unit serially with no backlog drain,
    unlike the preview's latest-frame-wins loop (`parallax_detail.rs:424`). Latency grows in the
    subscriber queue, invisibly. Arena exhaustion returns `Ok(None)` uncounted
    (`parallax_h264.rs:149`).
-3. **The producer never hears from the consumer.** Feedback has no home in the grammar —
-   RFC 04 R6 makes the data planes producer→consumer only. (zenkey #367.)
-4. **Adaptation is a human clicking a tier.** With a clock and a report it can be a controller.
-   (zenkey #368.)
+3. ~~**The producer never hears from the consumer.**~~ **Closed by #714/#715.** RFC 04 R6 makes
+   the data planes producer→consumer only, so feedback had no home in the grammar; RFC 07 §1.1
+   gave it one on `@rpc`, and the sensor serves it and publishes the per-tier aggregate.
+4. **Adaptation is a human clicking a tier.** The clock and the report both exist now, so this
+   is a controller waiting to be written — #720, gated only on #713's loss measurement.
 
 ## What is already done — do not re-plan it
 
@@ -71,29 +73,35 @@ datagrams at a 1200 B MTU and one lost fragment loses the whole keyframe — at 
 sample is one access unit; it stops holding if slices become samples. #509 already added
 `max_slice_len` as a tier knob and nothing has ever exercised it on a lossy link.
 
-**The two implementations disagree on `express`.** parallax's `@media` sink sets it true
-(`zenoh.rs:1417`), matching RFC 04 §3's `frame` profile; `zensight-common/src/qos.rs:87` returns
-false for every class and pins it with a test. That is zenkey #304 — now shipping on both sides
-of one wire, and it gates any latency claim this epic makes.
+**The `express` disagreement is settled, our way.** RFC 04 §3 M1 (v1.26) takes `express` off the
+`frame` profile: transport batching engages only under back-pressure, which is exactly when
+`frame`'s `drop` says to shed stale frames rather than spend per-message framing overhead.
+`zensight-common/src/qos.rs` has always returned false and #733 pinned it with
+`express_is_off_for_every_class` plus `zensight-sensor-parallax/docs/qos-express.md`. parallax's
+own `@media` sink still sets it true, which is now upstream's deviation and not ours — and one
+more reason we publish through our own egress rather than its `ZenohSink` (#710, closed).
 
 ## Issues
 
-### Decide first — zenkey (they block code)
+### Protocol — settled (zenkey RFC **v1.26**, 2026-08-25)
 
-| Issue | What it settles |
+All four were ratified together, in the media-consumer amendment batch. Nothing
+in this epic is waiting on a decision.
+
+| Was | Now |
 |---|---|
-| [zenkey #366](https://git.marcpardo.eu/marcpardo/zenkey/issues/366) | Name the frame-age clock: `Sample.timestamp()`, with #119's observed-skewed honesty; require an `@media` publisher to enable timestamping |
-| [zenkey #367](https://git.marcpardo.eu/marcpardo/zenkey/issues/367) | Receiver feedback is an `@rpc` write (`stream/report`), not a publication; records the rejected viewer-origin-telemetry alternative |
-| [zenkey #368](https://git.marcpardo.eu/marcpardo/zenkey/issues/368) | Tiers are the quality knob; bound what a producer may do with feedback |
-| [zenkey #304](https://git.marcpardo.eu/marcpardo/zenkey/issues/304) | The `express` divergence (pre-existing, now load-bearing) |
+| zenkey #366 | **RFC 07 §1.3** — the frame-age clock is the publisher's HLC sample timestamp, read as *observed skewed latency*: negatives shown not clamped, unstamped counted separately and **never as zero**. `FrameMeta` gains no wallclock. |
+| zenkey #367 | **RFC 07 §1.1** — `@rpc/<producer>/stream/report`, `write`, `MediaReceiverReport` → `Ack`, `idempotent = true`. Consumer id in the payload, never in the key. |
+| zenkey #368 | **RFC 07 §1.2, normative** — a producer MUST NOT re-tune a shared tier from one consumer's report; aggregate action needs a stated arbitration rule that is not "the most recent report". The escape hatch is a tier of its own. |
+| zenkey #304 | **RFC 04 §3 M1** — `frame` **loses** `express`; `alert` keeps it. We are the conformant side: `qos.rs` has always returned false, and #733 pinned it. |
 
 ### This repo — milestone *Adaptive media: feedback and control*
 
 | Issue | Stage |
 |---|---|
 | #713 | Measure — what does `@media` loss actually look like? **Blocks #720** |
-| #714 | `MediaReceiverReport` + the `stream/report` RPC (type, registry, CBOR corpus) |
-| #715 | Sensor serves `stream/report`, keeps bounded per-consumer state, publishes the aggregate |
+| #714 | **Done.** `MediaReceiverReport` + the `stream/report` RPC (type, registry, CBOR corpus) |
+| #715 | **Done.** Sensor serves `stream/report`, keeps bounded per-consumer state, publishes the `{stream}/rx/{tier}/*` aggregate |
 | #716 | Frame-age deadline — shed instead of drifting behind live |
 | #717 | Bound the decode queue and count the drops |
 | #718 | Publish `MediaReceiverReport` from the parallax tiles |
@@ -112,7 +120,7 @@ of one wire, and it gates any latency claim this epic makes.
 
 | Issue | Note |
 |---|---|
-| [parallax #245](https://git.marcpardo.eu/marcpardo/parallax/issues/245) | The `@media` session leaves timestamping off — every frame unstamped. **Blocks #716** |
+| [parallax #245](https://git.marcpardo.eu/marcpardo/parallax/issues/245) | The `@media` session leaves timestamping off — every frame unstamped. **Blocks nothing here**: our sensor publishes through `zensight_sensor_core::RawMediaPublisher`, a declared publisher on a `zensight_common::session` session that forces `timestamping/enabled = true`, and we do not adopt parallax's `ZenohSink` (#710). Upstream's problem for upstream's own users |
 | [parallax #246](https://git.marcpardo.eu/marcpardo/parallax/issues/246) | Derived rate metrics — fps and kbps, not just counters |
 | [parallax #247](https://git.marcpardo.eu/marcpardo/parallax/issues/247) | `plans/bandwidth-control.md` says "not started" and Phase A shipped |
 
@@ -121,11 +129,9 @@ of one wire, and it gates any latency claim this epic makes.
 ```
 zenkey #366 #367 #368            protocol, decided first
         │
-        ├── parallax #245 ──┐    a stamped sample
-        │                   │
-        ├── #714 ───────────┼──► #715 ──► #718
-        │                   │
-        └───────────────────┴──► #716, #717 ──► #719
+        ├── #714 ✔ ─────────────► #715 ✔ ──► #718
+        │
+        └───────────────────────► #716, #717 ──► #719
                                                   │
         #713 (measure) ───────────────────────────┴──► #720
 ```

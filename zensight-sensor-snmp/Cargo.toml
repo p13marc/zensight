@@ -28,7 +28,7 @@ json5.workspace = true
 async-snmp = { version = "=0.17.0", default-features = false, features = ["crypto-rustcrypto", "mib"] }
 bytes = "1"
 
-toml = "1.1.3"
+toml.workspace = true
 mib-rs = "0.8"
 rand = "0.9"
 # Chunk grammar + slug at the publish boundary (#559); already a transitive

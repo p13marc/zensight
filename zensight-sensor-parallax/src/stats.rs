@@ -231,6 +231,7 @@ pub async fn run_ticker(
     advertised_streams: usize,
     interval: Duration,
     alerts: Option<Arc<crate::alerts::ParallaxAlerts>>,
+    reports: Arc<crate::reports::ReceiverReports>,
 ) {
     let interval_secs = interval.as_secs_f64();
     let mut tick = tokio::time::interval(interval);
@@ -249,6 +250,10 @@ pub async fn run_ticker(
             TelemetryValue::Gauge(advertised_streams as f64),
         )
         .await;
+
+        // The receiver-feedback aggregate (#715), before the per-stream loop
+        // and independent of the open set.
+        publish_rx_aggregate(&publisher, &source, &reports).await;
 
         let open = registry.snapshot();
         // Forget closed streams' rate baselines.
@@ -355,6 +360,50 @@ pub async fn run_ticker(
                             .await;
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Publish the receiver-feedback aggregate (#715).
+///
+/// Independent of the open set on purpose: a report for a tier that closed a
+/// moment ago still surfaces once and then ages out, rather than vanishing at
+/// exactly the moment an operator wants to know why it closed.
+///
+/// The timing families are **omitted, not zeroed**, when no live report carried
+/// one — same discipline as `stats/rc_drops`, and RFC 07 §1.3's rule that an
+/// unstamped stream's frame age is *not asked* rather than zero.
+async fn publish_rx_aggregate(
+    publisher: &Publisher,
+    source: &str,
+    reports: &crate::reports::ReceiverReports,
+) {
+    for agg in reports.aggregate(std::time::Instant::now()) {
+        let base = format!("{}/rx/{}", agg.stream, agg.tier);
+        publish(
+            publisher,
+            source,
+            &format!("{base}/consumers"),
+            TelemetryValue::Gauge(f64::from(agg.consumers)),
+        )
+        .await;
+        for (leaf, value) in [
+            ("loss_pct_max", agg.loss_pct_max),
+            ("loss_pct_p50", agg.loss_pct_p50),
+            ("frame_age_ms_max", agg.frame_age_ms_max),
+            ("frame_age_ms_p50", agg.frame_age_ms_p50),
+            ("decode_queue_max", agg.decode_queue_max),
+            ("decode_queue_p50", agg.decode_queue_p50),
+        ] {
+            if let Some(value) = value {
+                publish(
+                    publisher,
+                    source,
+                    &format!("{base}/{leaf}"),
+                    TelemetryValue::Gauge(value),
+                )
+                .await;
             }
         }
     }

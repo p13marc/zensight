@@ -44,6 +44,23 @@ pub fn command_key(producer: &str, topic: &str) -> String {
     rpc(producer, &[topic, "set"])
 }
 
+/// The receiver-feedback write: `…/@rpc/<producer>/stream/report`
+/// (RFC 07 §1.1, #714).
+///
+/// Named rather than spelled through [`nested_query_key`], which would produce
+/// the same string: that helper is named for reads, and this is a write. One
+/// key for every consumer — a report names its sender in the **payload**, never
+/// in the key.
+///
+/// ```
+/// # use zensight_common::command::stream_report_key;
+/// let k = stream_report_key("parallax");
+/// assert!(k.ends_with("/@rpc/parallax/stream/report"));
+/// ```
+pub fn stream_report_key(producer: &str) -> String {
+    rpc(producer, &["stream", "report"])
+}
+
 /// The read procedure for a control topic: `…/@rpc/<producer>/<topic>`
 /// (the reply carries the topic's current configuration/status).
 pub fn status_key(producer: &str, topic: &str) -> String {

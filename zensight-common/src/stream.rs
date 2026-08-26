@@ -238,6 +238,130 @@ pub struct StreamStatus {
     pub tiers: Vec<TierStatus>,
 }
 
+/// Receiver feedback for one `@media` key — the payload of
+/// `@rpc/<producer>/stream/report` (RFC 07 §1.1, #714).
+///
+/// # What it is, and what a producer may do with it
+///
+/// A **snapshot**, which is what makes the procedure's `idempotent = true`
+/// true: every counter is cumulative since this consumer subscribed, so a
+/// resend under RFC 05 retry repeats a statement rather than adding to one. A
+/// delta payload would not be idempotent.
+///
+/// RFC 07 §1.2 is **normative** about the other half: a producer **MUST NOT**
+/// re-tune a shared tier from one consumer's report, and where it acts on
+/// *aggregate* feedback it must state its arbitration rule — which must not be
+/// "the most recent report". Two viewers share a tier; one reports loss; the
+/// bitrate drops; the healthy viewer's picture degrades for a reason it cannot
+/// see, caused by a peer it does not know exists. **Feedback informs; it does
+/// not command.** The sanctioned adaptation is the *consumer* changing which
+/// tier key it subscribes to, and the escape hatch for a viewer that needs its
+/// own rate is a tier of its own.
+///
+/// # Absent is not zero
+///
+/// Four fields are `Option` because "not measured" and "measured as zero" are
+/// different observations and a controller must be able to tell them apart.
+/// The `skip_serializing_if` attributes are wire shape, not style: an absent
+/// field is **missing from the map**, never present-and-null. RFC 07 §1.3 makes
+/// this normative for frame age — where a deployment does not timestamp, frame
+/// age is *not asked*, **never zero** — and the same reasoning covers a
+/// consumer with no decode queue to report.
+///
+/// Field order is pinned by `tests/receiver_report_corpus.rs`, since serde
+/// emits fields in declaration order and the vectors are compared byte for
+/// byte.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MediaReceiverReport {
+    // ── which key this is about: the same selector `StreamControl` uses ──
+    /// Stream identifier.
+    pub stream: String,
+    /// Codec, as in [`StreamControl::CloseStream`]. `None` means the
+    /// producer's default video profile.
+    ///
+    /// Present because `(stream, tier)` alone cannot name the JPEG preview
+    /// key, and because reusing the open/close selector shape means a report
+    /// can never name a key an `OpenStream` could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    /// Tier name. `None` means the producer's default tier, as in
+    /// [`StreamControl::OpenStream`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+
+    // ── who is reporting ──
+    /// Stable for this viewer instance, regenerated when a tile reopens.
+    ///
+    /// **In the payload, never in a key** (RFC 07 §1.1). N viewers are N
+    /// callers of one key, told apart here — which is why the feedback surface
+    /// costs no keyspace at all, and why viewer-origin telemetry was rejected.
+    pub consumer_id: String,
+
+    // ── the span this snapshot covers ──
+    /// Milliseconds covered by this report.
+    ///
+    /// A **duration**, deliberately, where a wallclock instant would have been
+    /// the obvious choice. A consumer's wallclock is a second skewed cross-host
+    /// clock, and its only plausible use — `now - report_ms` — is precisely the
+    /// laundered-latency mistake RFC 07 §1.3 forbids. The producer already
+    /// knows when the report arrived; what it cannot know is the window the
+    /// counters cover, which is what turns them into rates.
+    pub interval_ms: u32,
+
+    // ── counters, cumulative since this consumer subscribed ──
+    /// Samples received on this key.
+    pub received_frames: u64,
+    /// Frames inferred missing from sequence gaps — *network* loss.
+    pub lost_frames: u64,
+    /// Frames the consumer shed on purpose (a deadline miss, a resync).
+    pub dropped_frames: u64,
+    /// Frames that reached the screen.
+    pub decoded_frames: u64,
+    /// The highest `FrameMeta.sequence` seen.
+    pub last_sequence: u64,
+
+    // ── timing: absent means NOT MEASURED (RFC 07 §1.3) ──
+    /// Inter-arrival jitter, milliseconds. Undefined before the second frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interarrival_jitter_ms: Option<f32>,
+    /// **Median** frame age over the interval: publisher HLC minus local
+    /// arrival, in milliseconds.
+    ///
+    /// *Observed skewed latency* in RFC 07 §1.3's sense — an observation, never
+    /// a verdict on the transport. **Negative values are reported, not
+    /// clamped**, because a negative age *is* the skew evidence. Absent when
+    /// the samples arrived unstamped: that is "not asked", and treating it as
+    /// zero silently disables every deadline built on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_age_ms: Option<f32>,
+    /// **Maximum** frame age over the interval, same clock and same caveats.
+    ///
+    /// Both a median and a max, because a producer aggregating N consumers must
+    /// publish both a worst case and a typical case, and one scalar per
+    /// consumer can feed only one of them honestly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_age_max_ms: Option<f32>,
+    /// Decoder queue depth at the end of the interval.
+    ///
+    /// Absent when the consumer has no queue to report — which is the iced
+    /// H.264 tile today, since it decodes serially. `0` would read "queue
+    /// empty" where the truth is "no queue".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_queue_depth: Option<u32>,
+
+    // ── recovery ──
+    /// Sequence number of the last keyframe the consumer decoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_keyframe_sequence: Option<u64>,
+    /// Consumer-local milliseconds elapsed since that keyframe.
+    ///
+    /// Monotonic elapsed time on one host, not a cross-host subtraction: it can
+    /// never be negative, and it must not share a mental bucket with
+    /// [`Self::frame_age_ms`], which can. Hence the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_last_keyframe_ms: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +530,147 @@ mod tests {
         assert!(json.get("pts_ns").is_none(), "None fields are omitted");
         assert!(json.get("dts_ns").is_none());
         assert!(json.get("duration_ns").is_none());
+    }
+
+    fn a_report() -> MediaReceiverReport {
+        MediaReceiverReport {
+            stream: "cam0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+            consumer_id: "tile-7f3a".into(),
+            interval_ms: 2000,
+            received_frames: 100,
+            lost_frames: 1,
+            dropped_frames: 2,
+            decoded_frames: 97,
+            last_sequence: 103,
+            interarrival_jitter_ms: Some(3.5),
+            frame_age_ms: Some(42.0),
+            frame_age_max_ms: Some(118.25),
+            decoder_queue_depth: Some(2),
+            last_keyframe_sequence: Some(100),
+            since_last_keyframe_ms: Some(533),
+        }
+    }
+
+    #[test]
+    fn media_receiver_report_roundtrips_both_encodings() {
+        for format in [Format::Json, Format::Cbor] {
+            let bytes = encode(&a_report(), format).expect("encode");
+            let back: MediaReceiverReport = decode(&bytes, format).expect("decode");
+            assert_eq!(back, a_report(), "{format:?}");
+        }
+    }
+
+    /// Absent is not null and not zero — the JSON half of the rule the CBOR
+    /// corpus pins at the byte level (`tests/receiver_report_corpus.rs`).
+    ///
+    /// The report rides `@rpc`, where `decode_auto` sniffs the first byte, so
+    /// JSON is equally on the wire and a browser client may send it. RFC 07
+    /// §1.3 makes the distinction normative for frame age: unstamped is *not
+    /// asked*, never zero.
+    #[test]
+    fn media_receiver_report_omits_absent_options() {
+        let report = MediaReceiverReport {
+            codec: None,
+            tier: None,
+            interarrival_jitter_ms: None,
+            frame_age_ms: None,
+            frame_age_max_ms: None,
+            decoder_queue_depth: None,
+            last_keyframe_sequence: None,
+            since_last_keyframe_ms: None,
+            ..a_report()
+        };
+        let json = serde_json::to_value(&report).unwrap();
+
+        // Present, because they are not Options.
+        assert_eq!(json["stream"], "cam0");
+        assert_eq!(json["consumer_id"], "tile-7f3a");
+        assert_eq!(json["interval_ms"], 2000);
+        assert_eq!(json["lost_frames"], 1);
+
+        for absent in [
+            "codec",
+            "tier",
+            "interarrival_jitter_ms",
+            "frame_age_ms",
+            "frame_age_max_ms",
+            "decoder_queue_depth",
+            "last_keyframe_sequence",
+            "since_last_keyframe_ms",
+        ] {
+            assert!(
+                json.get(absent).is_none(),
+                "{absent} must be omitted, not null — a controller reading null \
+                 as zero would treat 'not measured' as 'perfectly fresh'"
+            );
+        }
+    }
+
+    /// A negative frame age is an observation, not an error (RFC 07 §1.3).
+    #[test]
+    fn a_negative_frame_age_is_not_clamped_by_serde() {
+        let report = MediaReceiverReport {
+            frame_age_ms: Some(-12.5),
+            ..a_report()
+        };
+        for format in [Format::Json, Format::Cbor] {
+            let bytes = encode(&report, format).expect("encode");
+            let back: MediaReceiverReport = decode(&bytes, format).expect("decode");
+            assert_eq!(back.frame_age_ms, Some(-12.5), "{format:?}");
+        }
+    }
+
+    /// A zero decoder queue and an absent one are different statements.
+    ///
+    /// `Some(0)` is "I have a queue and it is empty"; `None` is "I have no
+    /// queue" — which is the iced H.264 tile today, since it decodes serially.
+    /// Collapsing them would make an aggregate publish a queue depth for
+    /// consumers that have no queue at all.
+    #[test]
+    fn an_empty_queue_and_no_queue_are_distinguishable() {
+        let empty = MediaReceiverReport {
+            decoder_queue_depth: Some(0),
+            ..a_report()
+        };
+        let none = MediaReceiverReport {
+            decoder_queue_depth: None,
+            ..a_report()
+        };
+        assert_ne!(empty, none);
+        let ej = serde_json::to_value(&empty).unwrap();
+        let nj = serde_json::to_value(&none).unwrap();
+        assert_eq!(ej["decoder_queue_depth"], 0);
+        assert!(nj.get("decoder_queue_depth").is_none());
+    }
+
+    /// The report names the same key an `OpenStream` would.
+    ///
+    /// `(stream, codec, tier)` is deliberately the selector shape
+    /// `StreamControl` already uses, so a report cannot name a key that could
+    /// not have been opened — and so the sensor can resolve both through one
+    /// function instead of two that can disagree.
+    #[test]
+    fn the_report_selector_matches_stream_controls() {
+        let open = StreamControl::OpenStream {
+            stream: "cam0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+        };
+        let report = a_report();
+        match open {
+            StreamControl::OpenStream {
+                stream,
+                codec,
+                tier,
+            } => {
+                assert_eq!(stream, report.stream);
+                assert_eq!(codec, report.codec);
+                assert_eq!(tier, report.tier);
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

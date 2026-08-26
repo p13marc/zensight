@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Receiver feedback on `@media`: `MediaReceiverReport` and the
+  `stream/report` procedure** (#714, #715 — the keystone of epic #712).
+
+  A consumer can now tell a producer how the stream is actually *arriving*.
+  Until now it could not, and the reason was structural rather than an
+  oversight: RFC 04 R6 makes the data planes producer→consumer only, so
+  feedback had no home in the grammar at all. zenkey **RFC v1.26**
+  (2026-08-25) gave it one, and this is the implementation of §1.1–§1.3.
+
+  **The type.** `zensight_common::stream::MediaReceiverReport` — a *snapshot*
+  with counters cumulative since the consumer subscribed, which is what makes
+  the procedure's `idempotent = true` true (a delta payload would not be).
+  Four loss counters rather than one, so a controller can tell network loss
+  from consumer shedding from decoder overload. Five differences from the
+  original sketch in #714, each earning its place:
+
+  - **`codec` added, `tier` becomes `Option`** — `(stream, tier)` alone cannot
+    name the JPEG preview key, and reusing the `StreamControl` selector shape
+    means a report can never name a key an `OpenStream` could not. The sensor
+    resolves both through one function, so the two cannot disagree.
+  - **`report_ms` → `interval_ms`** — a consumer's wallclock is a *second*
+    skewed cross-host clock, and its only plausible use (`now - report_ms`) is
+    exactly the laundered-latency mistake RFC 07 §1.3 forbids. A duration is
+    consumer-local, skew-free, and is what turns cumulative counters into rates.
+  - **`decoder_queue_depth` becomes `Option`** — the iced H.264 tile decodes
+    serially and has no queue; `0` would read "queue empty" where the truth is
+    "no queue". Same precedent as `stats/rc_drops`.
+  - **`frame_age_max_ms` added** — the aggregate must publish both a worst case
+    and a typical case, and one scalar per consumer can feed only one of them
+    honestly. Median-of-medians and max-of-maxes each mean something.
+  - **`last_keyframe_age_ms` → `since_last_keyframe_ms`** — it is consumer-local
+    monotonic elapsed, never negative, and must not share a mental bucket with
+    `frame_age_ms`, which can be.
+
+  **Absent is not zero, and it is pinned at the byte level.**
+  `tests/receiver_report_corpus.rs` carries three CBOR vectors; the one that
+  matters is `unstamped.cbor`, a **10-entry map** where a naive encoder would
+  emit 16 with nulls. RFC 07 §1.3 makes that normative — where a deployment
+  does not timestamp, frame age is *not asked*, **never zero** — and a
+  `frame_age_ms` of `0.0` tells a controller the stream is perfectly fresh at
+  the exact moment nobody knows. Unlike `framemeta_corpus.rs`, this corpus binds
+  no existing twin: it is a *forward* pin for #718's Rust publisher and #722's
+  hand-rolled TypeScript one, and hand-rolled encoders get `Option` omission
+  wrong first. A negative frame age survives both encodings unclamped, because
+  a negative age *is* the skew evidence.
+
+  **The sensor half** keeps the latest report per
+  `(consumer_id, stream, profile)`, bounded and aged out on **the tier reaper's
+  own window** — `idle_timeout_secs`, one field with two readers and a test
+  asserting they agree, because a browser tab that closes never says goodbye and
+  the tier reaper already assumes that. The selector refusal is what bounds the
+  key space (a consumer cannot mint tier names); the `consumer_id` length check
+  bounds the other dimension; over-rate is refused with `error/busy` naming the
+  limit, so a caller can back off machine-readably. A well-formed but
+  self-contradictory report (`decoded > received`) is **accepted** — that is a
+  consumer lying about itself, which the aggregate should show rather than the
+  producer hide.
+
+  **The aggregate** publishes per *tier*, not per stream, on
+  `telemetry/parallax/{stream}/rx/{tier}/{consumers,loss_pct_*,frame_age_ms_*,decode_queue_*}`.
+  A stream-level average would hide the case the whole epic exists for — one
+  tier healthy, another not. `consumers` is a real integer, unlike
+  `has_viewers()` (a boolean; zenoh's `MatchingStatus` carries no count) — and
+  it is honestly a **lower bound** on viewers, since one that never reports is
+  invisible to it. That is in the registry description, so nobody later "fixes"
+  the discrepancy against `stats/viewers`.
+
+  **RFC 07 §1.2 is normative and this code obeys it structurally.** A producer
+  MUST NOT re-tune a shared tier from one consumer's report: two viewers share a
+  tier, one reports loss, the bitrate drops, and the *healthy* viewer's picture
+  degrades for a reason it cannot see, caused by a peer it does not know exists.
+  `command::run` takes a `SessionHandle` because that channel is how a
+  `StreamControl` reaches the encoder; **`reports::run` takes an
+  `Arc<ReceiverReports>` and nothing else** — no handle, no `SessionMsg`, no
+  `PipelineControls`. A comment saying "do not re-tune from a report" is obeyed
+  until the next person wires up something helpful; a module that cannot reach
+  the knobs is obeyed by the compiler. Three checks keep it that way: a source
+  grep in `tests/rfc07_receiver_driven.rs`, the same grep as a CI step so a
+  branch that never runs the parallax suite still fails, and
+  `reports_never_retune_a_shared_tier` in `tests/e2e.rs`, which points a viewer
+  screaming about 95 % loss at a live tier and asserts `TierApplied` never moves.
+
+  Registry `parallax` 1.7 → **1.8**: one procedure, seven subjects,
+  `registry.lock` regenerated. The procedure carries a `rate` ceiling because
+  RFC 07 §1.1 says a report's rate *"belongs in the registry entry rather than
+  in prose"* — but RFC 08 §2 scopes `rate` to `events` subjects and
+  `zenkey-build` 0.7 does not lint it on a procedure, so nothing upstream checks
+  it. It still reaches the fleet (`introspect` serves the TOML verbatim), and
+  `the_registry_declares_the_rate_ceiling_the_sensor_enforces` pins it against
+  `reports::REPORT_MIN_INTERVAL` locally. **Worth filing upstream**: RFC 07 §1.1
+  assumes a field RFC 08 §2's table does not grant.
+
+  Deliberately **not** in this change: the GUI publisher (#718), the frame-age
+  deadline (#716), the decode-queue accounting (#717) — which is why
+  `decoder_queue_depth` is `Option` — and the tier controller (#720).
+
+- **`RpcError::busy`** — `ERR_BUSY` has been in the RFC 05 vocabulary since the
+  start and had no constructor until a rate-limited procedure needed one (#715).
+
 ### Breaking
 
 - **The SNMP CPU, IP-address and storage tables are registered subject trees, so

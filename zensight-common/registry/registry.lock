@@ -88,6 +88,7 @@ procedure	parallax	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	parallax	artifact/status	read	-	ArtifactStatus
 procedure	parallax	describe	read	-	SchemaSet
 procedure	parallax	introspect	read	-	RegistrySlice
+procedure	parallax	stream/report	write	MediaReceiverReport	Ack
 procedure	parallax	stream/set	write	Command<StreamControl>	Ack
 procedure	parallax	streams	read	-	Vec<StreamDescriptor>
 procedure	snmp	artifact/cancel	write	-	Ack
@@ -371,6 +372,13 @@ subject	parallax	health	state	HealthSnapshot
 subject	parallax	sensor	state	SensorInfo
 subject	parallax	stream/{stream}	state	StreamStatus
 subject	parallax	streams/advertised	telemetry	TelemetryPoint
+subject	parallax	{stream}/rx/{tier}/consumers	telemetry	TelemetryPoint
+subject	parallax	{stream}/rx/{tier}/decode_queue_max	telemetry	TelemetryPoint
+subject	parallax	{stream}/rx/{tier}/decode_queue_p50	telemetry	TelemetryPoint
+subject	parallax	{stream}/rx/{tier}/frame_age_ms_max	telemetry	TelemetryPoint
+subject	parallax	{stream}/rx/{tier}/frame_age_ms_p50	telemetry	TelemetryPoint
+subject	parallax	{stream}/rx/{tier}/loss_pct_max	telemetry	TelemetryPoint
+subject	parallax	{stream}/rx/{tier}/loss_pct_p50	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/drops	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/encode_ms	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/encode_p95_ms	telemetry	TelemetryPoint
