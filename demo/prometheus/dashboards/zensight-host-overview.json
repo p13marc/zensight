@@ -1,0 +1,444 @@
+{
+  "uid": "zensight-host-overview",
+  "title": "ZenSight \u2014 Host overview",
+  "description": "sysinfo + systemd via zensight-exporter-prometheus. Every query here uses a semconv-mapped name (zensight-common/src/semconv.rs), so it aggregates by label. Producers whose per-entity subjects are still baked into metric NAMES (netlink iface, netring app/proto, snmp ifIndex) cannot be aggregated yet \u2014 those panels live in demo/prometheus/dashboards-blocked/.",
+  "tags": [
+    "zensight"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "source",
+        "label": "Host",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "zensight-prom"
+        },
+        "definition": "label_values(zensight_system_cpu_utilization, source)",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(zensight_system_cpu_utilization, source)",
+          "refId": "source"
+        },
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "CPU utilization",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_system_cpu_utilization{source=~\"$source\", cpu=\"\"}",
+          "legendFormat": "{{source}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Memory utilization",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_system_memory_utilization{source=~\"$source\"}",
+          "legendFormat": "{{source}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Failed systemd units",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_systemd_units_failed{source=~\"$source\"}",
+          "legendFormat": "{{source}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Exported series",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_exporter_series_total",
+          "legendFormat": "series"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Points accepted/s",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(zensight_exporter_points_accepted_total[$__rate_interval])",
+          "legendFormat": "accepted"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Exporter up",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"zensight-exporter\"}",
+          "legendFormat": "up"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory by state",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_system_memory_usage{source=~\"$source\"}",
+          "legendFormat": "{{source}} {{state}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-core CPU",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_system_cpu_utilization{source=~\"$source\", cpu!=\"\"}",
+          "legendFormat": "{{source}} cpu{{cpu}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Network I/O",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (device, direction) (rate(zensight_system_network_io{source=~\"$source\"}[$__rate_interval]))",
+          "legendFormat": "{{device}} {{direction}}"
+        }
+      ],
+      "description": "sysinfo's network/{iface}/* keys are semconv-mapped to system.network.io{device,direction}, so this aggregates. netlink publishes the same counters under iface-in-the-name metrics that cannot \u2014 see dashboards-blocked/.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk I/O",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (device, direction) (rate(zensight_system_disk_io{source=~\"$source\"}[$__rate_interval]))",
+          "legendFormat": "{{device}} {{direction}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Filesystem utilization",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_system_filesystem_utilization{source=~\"$source\"}",
+          "legendFormat": "{{device}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Filesystem usage by state",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_system_filesystem_usage{source=~\"$source\"}",
+          "legendFormat": "{{device}} {{state}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Active systemd units",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source) (zensight_systemd_unit_active{source=~\"$source\"})",
+          "legendFormat": "{{source}} active"
+        }
+      ]
+    }
+  ]
+}

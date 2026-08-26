@@ -1,0 +1,210 @@
+{
+  "uid": "zensight-alerts-exporter",
+  "title": "ZenSight \u2014 Alerts & exporter",
+  "description": "Firing alerts and the exporter's own health. A `zensight_alert` series exists only while the alert is firing \u2014 it is removed on resolve and on the sensor's DELETE tombstone. So an EMPTY table is the healthy state, not a broken panel.",
+  "tags": [
+    "zensight"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "table",
+      "title": "Firing alerts",
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "description": "Empty is healthy: the series only exists while firing.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_alert",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true
+            },
+            "indexByName": {
+              "alert_key": 0,
+              "source": 1,
+              "protocol": 2,
+              "rule": 3,
+              "severity": 4,
+              "summary": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "piechart",
+      "title": "Alerts by severity",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count by (severity) (zensight_alert)",
+          "legendFormat": "{{severity}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Points in / accepted / filtered",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(zensight_exporter_points_received_total[$__rate_interval])",
+          "legendFormat": "received"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(zensight_exporter_points_accepted_total[$__rate_interval])",
+          "legendFormat": "accepted"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(zensight_exporter_points_filtered_total[$__rate_interval])",
+          "legendFormat": "filtered"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Exported series",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_exporter_series_total",
+          "legendFormat": "series"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scrape duration",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "scrape_duration_seconds{job=\"zensight-exporter\"}",
+          "legendFormat": "scrape"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "Exporter reachability",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"zensight-exporter\"}",
+          "legendFormat": "up"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

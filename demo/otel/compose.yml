@@ -1,0 +1,48 @@
+# ZenSight OpenTelemetry demo: Grafana's official all-in-one LGTM image
+# (OpenTelemetry Collector + Prometheus + Tempo + Loki + Pyroscope + Grafana in
+# one container). Brought up by `just demo-otel`. See ../README.md.
+#
+# ONE service on purpose. A hand-rolled Collector + Prometheus + Tempo + Loki +
+# Grafana stack is five images, four config files and a datasource-provisioning
+# problem, all to arrive at what this image already is. The exporter's job is to
+# speak OTLP correctly; proving that needs a correct OTLP receiver, not one of
+# ours.
+#
+# Ports it takes on the host network: 3000 (Grafana), 4317 (OTLP gRPC),
+# 4318 (OTLP HTTP), 9090 (its own Prometheus). It therefore CANNOT run alongside
+# `just demo-prometheus`, which wants 3000 and 9090. `just demo-stop` clears
+# either.
+#
+# Host networking: same reason as ../prometheus/compose.yml — the exporter runs
+# on the host so it can reach the loopback Zenoh hub, and pushes OTLP to
+# 127.0.0.1:4317. (A bridged container would work for the OTLP direction alone,
+# since the exporter dials OUT; host networking keeps ONE model across both
+# demos and keeps this image's Prometheus reachable at 127.0.0.1:9090.)
+
+services:
+  lgtm:
+    # Pinned to a tag rather than :latest. This image moves fast and its
+    # internal Grafana provisioning paths have changed between minor versions.
+    image: docker.io/grafana/otel-lgtm:0.11.14
+    network_mode: host
+    security_opt: [label=disable]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: dark
+    #
+    # DASHBOARD PROVISIONING IS DELIBERATELY NOT MOUNTED.
+    #
+    # The path under this image's Grafana provisioning tree has moved between
+    # versions, and a wrong bind mount here fails SILENTLY — it provisions
+    # nothing and says nothing, which is the failure class this repo's comments
+    # exist to prevent. The image already provisions its own Prometheus, Tempo
+    # and Loki datasources, so the demo is fully usable through Explore without
+    # a dashboard.
+    #
+    # To use the dashboards in ./dashboards/, import them through the Grafana
+    # UI (Dashboards -> New -> Import -> Upload JSON). Two clicks, and it
+    # cannot fail quietly. If you verify the provisioning path for a pinned
+    # digest, add the mount here with the digest recorded next to it.
+    restart: on-failure
