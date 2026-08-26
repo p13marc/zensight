@@ -125,6 +125,9 @@ zensight-common = { path = "zensight-common" }
 zenkey = "0.7"
 zenkey-build = "0.7"
 schemars = "1"
+# Draft-2020-12 payload conformance, behind zensight-common's `validate-json`
+# feature (#741). `default-features = false` keeps the format/regex extras out.
+jsonschema = { version = "0.49", default-features = false }
 zensight-sensor-core = { path = "zensight-sensor-core" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # graduated from in-tree `zenoh-blob/` — epic #193; renamed on extraction).

@@ -146,9 +146,179 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
 /// serves this same superset next to its `introspect`.
 pub static DESCRIBE_JSON: LazyLock<String> = LazyLock::new(|| SCHEMAS.to_json());
 
+// ---------------------------------------------------------------------------
+// Payload conformance (RFC 08 §7, #741)
+//
+// `SCHEMAS` above has always been *served* — every producer answers `describe`
+// with it — and never *used*: nothing in this workspace validated a payload
+// against it. `verdict_for` closes that, behind the `validate-json` feature.
+//
+// **The GUI wiring is deliberately NOT here yet.** #741 asks for the verdict to
+// be surfaced in "the GUI's payload-inspection paths (subject/detail views,
+// artifact/query paths)". Those paths do not exist: the GUI decodes bytes into
+// typed structs at `zensight/src/subscription.rs`'s `decode_sample` and drops
+// them, `zensight/src/store.rs` keeps numeric samples only, and no view renders
+// a payload body except systemd's unit file (verbatim text, not a schema'd
+// type). There is no place to put a verdict chip, so wiring one in means
+// building a payload inspector first — a feature, not an upgrade consequence.
+//
+// What that change needs, when it happens: a reply's declared type name, which
+// the generated registry already carries (`ProcedureId::reply_type()`); the
+// ~10 `String::from_utf8_lossy(&sample.payload()…)` RPC-reply parse sites in
+// `zensight/src/app.rs`; and a three-state chip built on
+// `view::components::kit::badge` with `theme::colors(..).status_healthy()` /
+// `status_error()` / `status_unknown()` — never a two-state check mark, since
+// the whole point is that `NotValidated` must read as absent rather than as a
+// pass.
+// ---------------------------------------------------------------------------
+
+/// Did a payload conform to the schema its registry type declares?
+///
+/// Re-exported so a consumer gets the three-state answer without a direct
+/// `zenkey` dependency, the same way [`crate::CommonState`] is.
+pub use zenkey::schema::validate::{NotValidated, Verdict};
+
+/// Compiled JSON Schema validators, keyed by schema hash — compiling one per
+/// sample would put a schema compile on every row of a payload inspector.
+#[cfg(feature = "validate-json")]
+static VALIDATORS: LazyLock<zenkey::schema::compiled::CompiledCache<jsonschema::Validator>> =
+    LazyLock::new(zenkey::schema::compiled::CompiledCache::new);
+
+/// Validate `value` against the fleet type table's schema for `type_name`
+/// (RFC 08 §7).
+///
+/// **Three states, never a boolean.** "I did not check" must never render like
+/// "I checked and it passed", so the not-checked case says *why*:
+///
+/// | Answer | Meaning |
+/// |---|---|
+/// | [`Verdict::Valid`] | checked against a real draft-2020-12 schema, conformant |
+/// | [`Verdict::Invalid`] | checked, with one sentence per violation and its instance path |
+/// | [`NotValidated::FeatureOff`] | this binary was built without `validate-json` |
+/// | [`NotValidated::NoSchema`] | the table was consulted and serves nothing for this type |
+/// | [`NotValidated::KindUnsupported`] | the entry is a `protobuf`/`cdr` schema, which has no validator beyond its own decode |
+/// | [`NotValidated::BadSchema`] | the served document does not compile as a schema |
+///
+/// `NoSchema` and `FeatureOff` are deliberately different answers, and neither
+/// is `Valid`: one is "asked, and the type has none", the other is "nobody
+/// looked" (RFC 09 §5.1 O4).
+///
+/// Note what a `Valid` from this table is worth for the *summary* entries in
+/// [`SCHEMAS`] — the types whose Rust definition lives in a sensor crate get
+/// `{"type": "object"}`, so conformance to one means "it is a JSON object" and
+/// no more. That is honest, not a bug: the schema is thin, so the claim is
+/// thin. Upgrading those is the same follow-up noted on each entry.
+#[must_use]
+pub fn verdict_for(type_name: &str, value: &serde_json::Value) -> Verdict {
+    let Some(schema) = SCHEMAS.get(type_name) else {
+        return Verdict::NotValidated(NotValidated::NoSchema);
+    };
+    verdict_against(schema, value)
+}
+
+/// [`verdict_for`] against an already-resolved schema entry — for a consumer
+/// holding a [`SchemaSet`] parsed from a remote producer's `describe` reply
+/// rather than this build's compiled-in table.
+#[must_use]
+#[cfg_attr(not(feature = "validate-json"), expect(unused_variables))]
+pub fn verdict_against(schema: &TypeSchema, value: &serde_json::Value) -> Verdict {
+    #[cfg(not(feature = "validate-json"))]
+    {
+        Verdict::NotValidated(NotValidated::FeatureOff)
+    }
+    #[cfg(feature = "validate-json")]
+    {
+        let Some(document) = schema.json_document() else {
+            // protobuf / cdr: a successful decode already proves structural
+            // conformance to the served descriptor, and there is no schema
+            // language underneath to violate while still decoding.
+            return Verdict::NotValidated(NotValidated::KindUnsupported);
+        };
+        let compiled = VALIDATORS.get_or_compile(schema, |_| jsonschema::validator_for(document));
+        match compiled {
+            Ok(validator) => zenkey::schema::validate::validate_json(&validator, value),
+            Err(e) => {
+                tracing::debug!(error = %e, "served schema does not compile");
+                Verdict::NotValidated(NotValidated::BadSchema)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three states are three states. Whatever the build, a payload that
+    /// was not checked must never come back as [`Verdict::Valid`] — that is
+    /// the whole contract (#741, RFC 09 §5.1 O4).
+    #[test]
+    fn an_unknown_type_is_not_validated_rather_than_valid() {
+        let v = verdict_for("NoSuchTypeName", &serde_json::json!({}));
+        assert_eq!(v, Verdict::NotValidated(NotValidated::NoSchema));
+        assert_ne!(v, Verdict::Valid);
+        // The two silences must not share a spelling: "the table has nothing
+        // for this type" is not "this binary cannot check".
+        assert_ne!(
+            NotValidated::NoSchema.to_string(),
+            NotValidated::FeatureOff.to_string()
+        );
+    }
+
+    /// Without the `validate-json` feature every checkable type answers
+    /// `FeatureOff` — honest, and never a fake pass.
+    #[cfg(not(feature = "validate-json"))]
+    #[test]
+    fn without_the_feature_a_real_type_is_feature_off() {
+        let point = crate::TelemetryPoint::new(
+            "h",
+            crate::Protocol::Sysinfo,
+            "m",
+            crate::TelemetryValue::Gauge(1.0),
+        );
+        let v = verdict_for("TelemetryPoint", &serde_json::to_value(&point).unwrap());
+        assert_eq!(v, Verdict::NotValidated(NotValidated::FeatureOff));
+    }
+
+    /// With the feature, a real payload validates against its own derived
+    /// schema, and a malformed one is `Invalid` with a violation per problem.
+    #[cfg(feature = "validate-json")]
+    #[test]
+    fn with_the_feature_valid_and_invalid_are_both_reachable() {
+        let point = crate::TelemetryPoint::new(
+            "h",
+            crate::Protocol::Sysinfo,
+            "m",
+            crate::TelemetryValue::Gauge(1.0),
+        );
+        assert_eq!(
+            verdict_for("TelemetryPoint", &serde_json::to_value(&point).unwrap()),
+            Verdict::Valid
+        );
+
+        // A `TelemetryPoint` is an object with required fields; a bare array
+        // is not one.
+        match verdict_for("TelemetryPoint", &serde_json::json!([])) {
+            Verdict::Invalid(errors) => assert!(!errors.is_empty(), "no violations reported"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    /// A summary entry (`{"type": "object"}`) validates thinly and says so by
+    /// being thin, not by pretending. Pinned so nobody reads a `Valid` from
+    /// one of these as a real conformance claim.
+    #[cfg(feature = "validate-json")]
+    #[test]
+    fn a_summary_schema_is_a_thin_claim_not_a_missing_one() {
+        assert_eq!(
+            verdict_for("Ack", &serde_json::json!({"x": 1})),
+            Verdict::Valid
+        );
+        match verdict_for("Ack", &serde_json::json!("not an object")) {
+            Verdict::Invalid(_) => {}
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
 
     /// RFC 08 §5: "A `type` name not present in the type table fails CI."
     /// `build_verified` panics on a gap; instantiating is the assertion.

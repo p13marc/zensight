@@ -121,6 +121,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Payload conformance verdicts, behind a `validate-json` feature on
+  `zensight-common`** (#741). `SCHEMAS` — the RFC 08 §7 type table every
+  producer serves on `describe` — had never been *used*: nothing validated a
+  payload against it. `zensight_common::schema::verdict_for(type_name, &value)`
+  does, with real draft-2020-12 validation and a compiled-validator cache keyed
+  by schema hash.
+
+  The answer is **three states, never a boolean** — "I did not check" must
+  never render like "I checked and it passed". `NotValidated` says why:
+  `FeatureOff` (built without the feature), `NoSchema` (the table was consulted
+  and serves nothing for this type), `KindUnsupported` (a `protobuf`/`cdr`
+  entry, whose decode *is* the check), `BadSchema`. `NoSchema` and `FeatureOff`
+  are deliberately different answers and neither is `Valid`: one is "asked, and
+  the type has none", the other is "nobody looked".
+
+  The feature is **off by default and nothing turns it on yet.** `jsonschema` is
+  real weight and a sensor has no use for it — a producer validating its own
+  payload against its own derived schema is checking `schemars` against
+  `schemars`. The consumer that has a use is a payload inspector, and **the GUI
+  does not have one**: it decodes bytes into typed structs at `subscription.rs`
+  and drops them, and no view renders a payload body. Building that surface is
+  a feature in its own right rather than an upgrade consequence, so the GUI
+  wiring #741 also asks for is **deferred**, with a note in
+  `zensight-common/src/schema.rs` recording exactly what it needs.
+
+
 - **`just demo-prometheus` and `just demo-otel`** (#751) — one command each for a
   working dashboard. Until now the exporters had **no run path at all**: zero
   mentions in the 442-line justfile, one service in `docker/docker-compose.yml`,

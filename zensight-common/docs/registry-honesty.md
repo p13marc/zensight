@@ -52,11 +52,19 @@ mappers, which is a question about code rather than about this host.
 
 ## Conditional surfaces — the actual gap
 
-A registry entry has no way to say *"only in builds with feature X"*. The TOML
-schema is owned by the external `zenkey` crate; adding a `feature`/`when` field
-needs a schema change, a codegen change and a crates.io release. Until then a
-build-conditional surface has exactly two honest options, and **silence is not
-one of them** (#648):
+A registry entry still has no way to say *"only in builds with feature X"* —
+the `feature`/`when` field remains deferred upstream (zenkey #171). What zenkey
+0.7 added instead is a **ledger beside** the TOMLs:
+[`registry/conditional.lock`](../registry/conditional.lock), one
+`<producer>\t<path>\t<condition>` line per conditional subject, checked by
+`zenkey-build` at build time (a line naming no live registry subject fails the
+build) and read at test time through
+`registry_audit::conditional_families(producer)`. The ledger *conditions* an
+entry; it does not replace one — the subject is still declared and still served
+through `introspect` unmarked.
+
+So a build-conditional surface still has exactly two honest options, and
+**silence is not one of them** (#648):
 
 **Procedures — declare unconditionally, answer an error.** This is now the rule
 throughout the workspace. Four outcomes stay distinguishable for a caller:
@@ -75,11 +83,22 @@ into the fourth. Both are the silence the check exists to prevent.
 *reply*; a gauge that has no reading cannot *publish*. A sentinel value
 (`-1`, `NaN`) would corrupt every downstream consumer, and publishing nothing is
 indistinguishable from an idle host. There is no honest wire representation of
-"this gauge does not exist in this build", so such families are listed in the
-sensor's `CONDITIONAL_FAMILIES` ledger with the condition that gates them.
-`registry_audit::assert_families_covered` checks the ledger in both directions —
-an entry the build *does* emit fails, and an entry the registry no longer
-declares fails — so it cannot decay into a permanent excuse.
+"this gauge does not exist in this build", so such families are listed in
+`registry/conditional.lock` with the condition that gates them.
+
+The ledger is checked in both directions, and since #739 the two halves live in
+two places on purpose: **`zenkey-build` fails the build** when a line names no
+live registry subject (so an excuse cannot outlive its entry, even for a
+producer with no conformance test), and `registry_audit::assert_families_covered`
+fails the test when a ledgered family *is* emitted (so the excuse cannot outlive
+the gate). Neither half lets it decay into a permanent excuse.
+
+The whole workspace has **two** lines, and that is correct rather than an
+oversight — the lock file's header says why, at length, so the next reader does
+not "fix" it. In short: a gated *procedure* needs no exemption, because it is
+declared unconditionally and answers `error/gated` or `error/unsupported`; and
+netring's detector features widen the value space of `anomaly/{kind}/total`
+rather than adding subjects.
 
 ## Coverage today
 
@@ -88,7 +107,7 @@ Every producer with a finite telemetry tree is now covered (#654).
 | Producer | Families | Ledger |
 |---|---|---|
 | `sysinfo` | 121 | empty |
-| `netlink` | 106 | **2** — `sockets/tcp/connlat_us_{p50,p95}` |
+| `netlink` | 106 | **2** — `sockets/tcp/connlat_us_{p50,p95}` (the only two in the workspace) |
 | `netring` | 70 | empty |
 | `systemd` | 37 | empty |
 | `logs` | 23 | empty |
@@ -126,6 +145,42 @@ that both look like a registry bug:
 Also watch for mappers that pick a *name* from an argument: netring's
 `shed_points` chooses `sampled_total` or `new_flows_total` by policy, so one
 call covers one family. Call it once per branch.
+
+## What none of the four checks checks: does the payload conform?
+
+Every check above is about *names* — is this subject registered, is this
+procedure served, does this type appear in the type table. None of them looks at
+a single byte of payload. A producer can register `TelemetryPoint`, serve
+`describe` with its schema, and publish something else entirely.
+
+`zensight_common::schema::verdict_for(type_name, &value)` (#741, behind the
+`validate-json` feature) is the byte-level check: real draft-2020-12 validation
+against the served schema. It answers in **three states, never a boolean** —
+"I did not check" must never render like "I checked and it passed":
+
+| Answer | Meaning |
+|---|---|
+| `Valid` | checked against a real schema, conformant |
+| `Invalid(errors)` | checked, one sentence per violation with its instance path |
+| `NotValidated(FeatureOff)` | this binary was built without `validate-json` |
+| `NotValidated(NoSchema)` | the table was consulted and serves nothing for this type |
+| `NotValidated(KindUnsupported)` | a `protobuf`/`cdr` entry, whose decode *is* the check |
+| `NotValidated(BadSchema)` | the served document does not compile as a schema |
+
+`NoSchema` and `FeatureOff` are deliberately different: one is "asked, and the
+type has none", the other is "nobody looked" (RFC 09 §5.1 O4).
+
+Two limits worth knowing before reading a `Valid` as a strong claim:
+
+- The **summary entries** in `SCHEMAS` — types whose Rust definition lives in a
+  sensor crate, plus the declared-only names — are `{"type": "object"}`. A
+  `Valid` against one means "it is a JSON object" and no more. The schema is
+  thin, so the claim is thin; that is honest, and upgrading it is the follow-up
+  already noted per entry.
+- **Nothing calls it yet.** The GUI is the natural consumer, and it has no
+  payload-inspection surface — it decodes bytes into typed structs at
+  `subscription.rs`'s `decode_sample` and drops them. Building that surface is
+  a feature in its own right; `src/schema.rs` carries the note on what it needs.
 
 ## See also
 
