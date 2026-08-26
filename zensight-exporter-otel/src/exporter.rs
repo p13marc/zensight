@@ -10,7 +10,9 @@ use opentelemetry::trace::{
     SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
 };
 use opentelemetry::{InstrumentationScope, KeyValue};
-use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{
+    LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
+};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
@@ -116,6 +118,38 @@ pub(crate) fn ms_to_system_time(ms: i64) -> SystemTime {
     } else {
         SystemTime::UNIX_EPOCH
     }
+}
+
+/// Whether a resolved endpoint needs TLS.
+fn is_tls(endpoint: &str) -> bool {
+    endpoint.starts_with("https://")
+}
+
+/// gRPC metadata from the configured headers.
+///
+/// Header names are lower-cased because gRPC metadata keys must be; a name or
+/// value that cannot be represented is a config error, surfaced at startup
+/// rather than as a silent 401 (#756). `remote_write.rs` already does exactly
+/// this for the Prometheus push path.
+fn grpc_metadata(
+    headers: &HashMap<String, String>,
+) -> anyhow::Result<opentelemetry_otlp::tonic_types::metadata::MetadataMap> {
+    use opentelemetry_otlp::tonic_types::metadata::MetadataMap;
+
+    // `MetadataMap` is built from an http::HeaderMap, which is the shape the
+    // Prometheus remote-write path already validates headers into.
+    let mut http_headers = http::HeaderMap::with_capacity(headers.len());
+    for (k, v) in headers {
+        let name: http::header::HeaderName = k
+            .to_ascii_lowercase()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid OTLP header name {k:?}: {e}"))?;
+        let value: http::header::HeaderValue = v
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid OTLP header value for {k:?}: {e}"))?;
+        http_headers.insert(name, value);
+    }
+    Ok(MetadataMap::from_headers(http_headers))
 }
 
 /// Build OTel [`SpanData`] from a synthesized alert span.
@@ -381,17 +415,33 @@ impl OtelExporter {
         config: &OtelConfig,
         resource: Resource,
     ) -> anyhow::Result<SdkMeterProvider> {
+        // Per-signal endpoint (#756): under HTTP the signal path is appended to
+        // the base, which opentelemetry-otlp does not do for a programmatic
+        // endpoint — only for one read from the environment. Under gRPC the
+        // base passes through, because gRPC routes by service name.
+        let endpoint = config.signal_endpoint(crate::config::Signal::Metrics);
+
         let exporter = match config.protocol {
-            OtlpProtocol::Grpc => MetricExporter::builder()
-                .with_tonic()
-                .with_endpoint(&config.endpoint)
-                .with_timeout(config.timeout())
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to create gRPC metric exporter: {}", e))?,
+            OtlpProtocol::Grpc => {
+                let mut b = MetricExporter::builder()
+                    .with_tonic()
+                    .with_endpoint(&endpoint)
+                    .with_timeout(config.timeout())
+                    .with_metadata(grpc_metadata(&config.headers)?);
+                if is_tls(&endpoint) {
+                    b = b.with_tls_config(
+                        opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
+                            .with_enabled_roots(),
+                    );
+                }
+                b.build()
+                    .map_err(|e| anyhow::anyhow!("Failed to create gRPC metric exporter: {}", e))?
+            }
             OtlpProtocol::Http => MetricExporter::builder()
                 .with_http()
-                .with_endpoint(&config.endpoint)
+                .with_endpoint(&endpoint)
                 .with_timeout(config.timeout())
+                .with_headers(config.headers.clone())
                 .build()
                 .map_err(|e| anyhow::anyhow!("Failed to create HTTP metric exporter: {}", e))?,
         };
@@ -413,17 +463,33 @@ impl OtelExporter {
         config: &OtelConfig,
         resource: Resource,
     ) -> anyhow::Result<SdkLoggerProvider> {
+        // Per-signal endpoint (#756): under HTTP the signal path is appended to
+        // the base, which opentelemetry-otlp does not do for a programmatic
+        // endpoint — only for one read from the environment. Under gRPC the
+        // base passes through, because gRPC routes by service name.
+        let endpoint = config.signal_endpoint(crate::config::Signal::Logs);
+
         let exporter = match config.protocol {
-            OtlpProtocol::Grpc => LogExporter::builder()
-                .with_tonic()
-                .with_endpoint(&config.endpoint)
-                .with_timeout(config.timeout())
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to create gRPC log exporter: {}", e))?,
+            OtlpProtocol::Grpc => {
+                let mut b = LogExporter::builder()
+                    .with_tonic()
+                    .with_endpoint(&endpoint)
+                    .with_timeout(config.timeout())
+                    .with_metadata(grpc_metadata(&config.headers)?);
+                if is_tls(&endpoint) {
+                    b = b.with_tls_config(
+                        opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
+                            .with_enabled_roots(),
+                    );
+                }
+                b.build()
+                    .map_err(|e| anyhow::anyhow!("Failed to create gRPC log exporter: {}", e))?
+            }
             OtlpProtocol::Http => LogExporter::builder()
                 .with_http()
-                .with_endpoint(&config.endpoint)
+                .with_endpoint(&endpoint)
                 .with_timeout(config.timeout())
+                .with_headers(config.headers.clone())
                 .build()
                 .map_err(|e| anyhow::anyhow!("Failed to create HTTP log exporter: {}", e))?,
         };
@@ -452,17 +518,33 @@ impl OtelExporter {
         config: &OtelConfig,
         resource: &Resource,
     ) -> anyhow::Result<BatchSpanProcessor> {
+        // Per-signal endpoint (#756): under HTTP the signal path is appended to
+        // the base, which opentelemetry-otlp does not do for a programmatic
+        // endpoint — only for one read from the environment. Under gRPC the
+        // base passes through, because gRPC routes by service name.
+        let endpoint = config.signal_endpoint(crate::config::Signal::Traces);
+
         let exporter = match config.protocol {
-            OtlpProtocol::Grpc => SpanExporter::builder()
-                .with_tonic()
-                .with_endpoint(&config.endpoint)
-                .with_timeout(config.timeout())
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to create gRPC span exporter: {}", e))?,
+            OtlpProtocol::Grpc => {
+                let mut b = SpanExporter::builder()
+                    .with_tonic()
+                    .with_endpoint(&endpoint)
+                    .with_timeout(config.timeout())
+                    .with_metadata(grpc_metadata(&config.headers)?);
+                if is_tls(&endpoint) {
+                    b = b.with_tls_config(
+                        opentelemetry_otlp::tonic_types::transport::ClientTlsConfig::new()
+                            .with_enabled_roots(),
+                    );
+                }
+                b.build()
+                    .map_err(|e| anyhow::anyhow!("Failed to create gRPC span exporter: {}", e))?
+            }
             OtlpProtocol::Http => SpanExporter::builder()
                 .with_http()
-                .with_endpoint(&config.endpoint)
+                .with_endpoint(&endpoint)
                 .with_timeout(config.timeout())
+                .with_headers(config.headers.clone())
                 .build()
                 .map_err(|e| anyhow::anyhow!("Failed to create HTTP span exporter: {}", e))?,
         };

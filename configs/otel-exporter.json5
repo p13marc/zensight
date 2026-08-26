@@ -22,7 +22,18 @@
     endpoint: "http://localhost:4317",
 
     // Protocol: "grpc" or "http"
+    //
+    // Under "http" the per-signal path (/v1/metrics, /v1/logs, /v1/traces) is
+    // appended to `endpoint` automatically. Do NOT append it yourself: one
+    // field serves three signals, so a hand-appended /v1/metrics would fix
+    // metrics and break logs and traces.
     protocol: "grpc",
+
+    // Per-signal endpoint overrides (optional). Only needed for a split
+    // backend — metrics to one collector, logs to another.
+    // metrics_endpoint: "http://collector:4318/v1/metrics",
+    // logs_endpoint: "https://logs.example.com/ingest",
+    // traces_endpoint: "http://tempo:4318/v1/traces",
 
     // Export interval in seconds
     export_interval_secs: 10,
@@ -66,7 +77,12 @@
     // Service version (optional)
     // service_version: "1.0.0",
 
-    // Headers for authentication (optional)
+    // Headers for authentication (optional).
+    //
+    // These reach the exporter now (#756) — they were parsed and then never
+    // used, so every authenticated backend got a 401 with no hint why. An
+    // https:// endpoint also works now; TLS was never enabled at the crate
+    // level, so it used to kill the process at startup.
     // headers: {
     //   "Authorization": "Bearer your-token-here",
     // },

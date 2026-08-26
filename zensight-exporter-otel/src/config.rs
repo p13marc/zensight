@@ -41,15 +41,45 @@ pub struct ExporterConfig {
 /// OpenTelemetry OTLP configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OtelConfig {
-    /// OTLP endpoint (e.g., "http://localhost:4317" for gRPC).
+    /// Base OTLP endpoint (e.g. `http://localhost:4317` for gRPC).
+    ///
+    /// Under `protocol: "http"` the per-signal path is appended to this base —
+    /// `/v1/metrics`, `/v1/logs`, `/v1/traces` — unless overridden below. That
+    /// is the fix for #756: `opentelemetry-otlp` takes a *programmatic*
+    /// endpoint VERBATIM and only appends a signal path when falling back to
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` from the environment. So all three signals
+    /// POSTed to `/` and the collector 404'd everything — and because one field
+    /// served three signals, appending `/v1/metrics` by hand fixed metrics and
+    /// broke logs and traces.
+    ///
+    /// Under `grpc` the base is passed through unchanged; gRPC routes by
+    /// service name, not path.
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
+
+    /// Override the metrics endpoint. Defaults to the base (+ `/v1/metrics`
+    /// under HTTP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_endpoint: Option<String>,
+
+    /// Override the logs endpoint. Defaults to the base (+ `/v1/logs` under HTTP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs_endpoint: Option<String>,
+
+    /// Override the traces endpoint. Defaults to the base (+ `/v1/traces` under HTTP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traces_endpoint: Option<String>,
 
     /// Protocol: "grpc" or "http".
     #[serde(default = "default_protocol")]
     pub protocol: OtlpProtocol,
 
-    /// Headers to include in OTLP requests (e.g., for authentication).
+    /// Headers to include in OTLP requests (e.g. for authentication).
+    ///
+    /// These were parsed and then **never used** (#756) — `with_headers` /
+    /// `with_metadata` appeared nowhere in the crate — so every authenticated
+    /// backend the README advertises (Grafana Cloud, Honeycomb, Datadog, New
+    /// Relic) got a 401 with no hint why.
     #[serde(default)]
     pub headers: HashMap<String, String>,
 
@@ -130,6 +160,9 @@ impl Default for OtelConfig {
     fn default() -> Self {
         Self {
             endpoint: default_endpoint(),
+            metrics_endpoint: None,
+            logs_endpoint: None,
+            traces_endpoint: None,
             protocol: default_protocol(),
             headers: HashMap::new(),
             export_interval_secs: default_export_interval(),
@@ -158,7 +191,58 @@ pub struct TracesConfig {
     pub enabled: bool,
 }
 
+/// Which OTLP signal an endpoint is being resolved for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    Metrics,
+    Logs,
+    Traces,
+}
+
+impl Signal {
+    /// The path OTLP/HTTP defines for this signal.
+    fn path(self) -> &'static str {
+        match self {
+            Signal::Metrics => "/v1/metrics",
+            Signal::Logs => "/v1/logs",
+            Signal::Traces => "/v1/traces",
+        }
+    }
+}
+
 impl OtelConfig {
+    /// The endpoint to use for one signal.
+    ///
+    /// An explicit per-signal override wins. Otherwise, under HTTP the signal
+    /// path is appended to the base — which `opentelemetry-otlp` does NOT do
+    /// for a programmatic endpoint, only for one read from the environment
+    /// (#756). Under gRPC the base is returned unchanged, because gRPC routes
+    /// by service name rather than path.
+    ///
+    /// Trailing slashes on the base are collapsed, and a base that already ends
+    /// with the signal path is left alone — so a config carried over from
+    /// before this change keeps working.
+    pub fn signal_endpoint(&self, signal: Signal) -> String {
+        let explicit = match signal {
+            Signal::Metrics => self.metrics_endpoint.as_deref(),
+            Signal::Logs => self.logs_endpoint.as_deref(),
+            Signal::Traces => self.traces_endpoint.as_deref(),
+        };
+        if let Some(url) = explicit {
+            return url.to_string();
+        }
+        if self.protocol != OtlpProtocol::Http {
+            return self.endpoint.clone();
+        }
+        let base = self.endpoint.trim_end_matches('/');
+        let path = signal.path();
+        if base.ends_with(path) {
+            base.to_string()
+        } else {
+            format!("{base}{path}")
+        }
+    }
+
     /// Get export interval as Duration.
     pub fn export_interval(&self) -> Duration {
         Duration::from_secs(self.export_interval_secs)
@@ -570,5 +654,83 @@ mod tests {
 
         cfg.filters.include_protocols = vec!["snmp".into(), "logs".into()];
         assert!(cfg.validate().is_ok());
+    }
+
+    /// Under HTTP the signal path is appended to the base (#756).
+    ///
+    /// `opentelemetry-otlp` takes a *programmatic* endpoint verbatim and only
+    /// appends a path when falling back to `OTEL_EXPORTER_OTLP_ENDPOINT` from
+    /// the environment — so all three signals POSTed to `/` and the collector
+    /// 404'd everything. And because one field served three signals, appending
+    /// `/v1/metrics` by hand fixed metrics while breaking logs and traces.
+    #[test]
+    fn http_appends_the_signal_path() {
+        let mut cfg = OtelConfig {
+            endpoint: "http://collector:4318".into(),
+            protocol: OtlpProtocol::Http,
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.signal_endpoint(Signal::Metrics),
+            "http://collector:4318/v1/metrics"
+        );
+        assert_eq!(
+            cfg.signal_endpoint(Signal::Logs),
+            "http://collector:4318/v1/logs"
+        );
+        assert_eq!(
+            cfg.signal_endpoint(Signal::Traces),
+            "http://collector:4318/v1/traces"
+        );
+
+        // A trailing slash must not double up.
+        cfg.endpoint = "http://collector:4318/".into();
+        assert_eq!(
+            cfg.signal_endpoint(Signal::Metrics),
+            "http://collector:4318/v1/metrics"
+        );
+
+        // A config carried over from before this change, where somebody had
+        // already appended the path by hand, keeps working.
+        cfg.endpoint = "http://collector:4318/v1/metrics".into();
+        assert_eq!(
+            cfg.signal_endpoint(Signal::Metrics),
+            "http://collector:4318/v1/metrics"
+        );
+    }
+
+    /// gRPC routes by service name, not path, so the base passes through.
+    #[test]
+    fn grpc_leaves_the_endpoint_alone() {
+        let cfg = OtelConfig {
+            endpoint: "http://collector:4317".into(),
+            protocol: OtlpProtocol::Grpc,
+            ..Default::default()
+        };
+        for signal in [Signal::Metrics, Signal::Logs, Signal::Traces] {
+            assert_eq!(cfg.signal_endpoint(signal), "http://collector:4317");
+        }
+    }
+
+    /// An explicit per-signal override wins over both the base and the
+    /// appended path — which is what makes a split-backend deployment
+    /// expressible at all.
+    #[test]
+    fn an_explicit_signal_endpoint_wins() {
+        let cfg = OtelConfig {
+            endpoint: "http://collector:4318".into(),
+            protocol: OtlpProtocol::Http,
+            logs_endpoint: Some("https://logs.example.com/ingest".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.signal_endpoint(Signal::Logs),
+            "https://logs.example.com/ingest"
+        );
+        assert_eq!(
+            cfg.signal_endpoint(Signal::Metrics),
+            "http://collector:4318/v1/metrics",
+            "the other signals still follow the base"
+        );
     }
 }

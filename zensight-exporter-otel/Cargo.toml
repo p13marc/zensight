@@ -39,7 +39,24 @@ clap.workspace = true
 # OpenTelemetry
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "metrics", "trace"] }
-opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics", "logs", "trace"] }
+# `tls-ring` + `tls-webpki-roots` are what make an https:// endpoint work at
+# all (#756). Without a TLS feature, opentelemetry-otlp HARD-ERRORS on an
+# https endpoint, which propagated out of `OtelExporter::new` and killed the
+# process at startup. The features existed upstream all along; this crate
+# simply never enabled them.
+# `MetadataMap::from_headers` takes an `http::HeaderMap`, which is how the
+# configured OTLP auth headers reach a gRPC exporter (#756). Already in the tree
+# via tonic/reqwest; named here because we use it directly.
+http = "1"
+
+opentelemetry-otlp = { version = "0.32", features = [
+    "grpc-tonic",
+    "metrics",
+    "logs",
+    "trace",
+    "tls-ring",
+    "tls-webpki-roots",
+] }
 
 # Utilities
 parking_lot = "0.12"
