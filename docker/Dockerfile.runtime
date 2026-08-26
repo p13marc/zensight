@@ -9,8 +9,11 @@
 #   docker-bins/docker-binaries-<targetarch>/<BINARY_PACKAGE>
 # (the layout produced by actions/download-artifact with pattern matching).
 #
-# For local one-off builds without prebuilt binaries, use Dockerfile.sensor /
-# Dockerfile.exporter instead — they compile from source.
+# For a local one-off sensor build without prebuilt binaries, use
+# Dockerfile.sensor — it compiles from source. There is no exporter equivalent:
+# the exporters are plain unprivileged binaries, and the demo runs them on the
+# host (see demo/README.md) rather than in a container, because the Zenoh hub
+# they attach to is a loopback listener a bridged container cannot reach.
 
 ARG BINARY_PACKAGE=zensight-sensor-logs
 
@@ -42,7 +45,7 @@ USER zensight
 WORKDIR /home/zensight
 
 # 7447: Zenoh default port (TCP). Sensor-specific ports (syslog 514, SNMP
-# traps 162, Prometheus 9090, …) are documented per sensor in docs/SENSORS.md.
+# traps 162, Prometheus exporter 9464, …) are documented per sensor in docs/SENSORS.md.
 EXPOSE 7447
 
 ENV ZENSIGHT_BINARY=${BINARY_PACKAGE}

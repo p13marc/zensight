@@ -48,7 +48,15 @@ pub struct ExporterConfig {
 /// Prometheus HTTP endpoint configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrometheusConfig {
-    /// Address to listen on (default: "0.0.0.0:9090").
+    /// Address to listen on (default: "127.0.0.1:9464").
+    ///
+    /// NOT 9090: that is the Prometheus *server's* own port, and binding it here
+    /// meant the shipped `README.md` told you to scrape `localhost:9090` — i.e.
+    /// Prometheus scraping itself. 9464 is the conventional OpenTelemetry /
+    /// Prometheus-exporter port. Loopback rather than `0.0.0.0` because an
+    /// exporter that binds every interface by default is a leak; the container
+    /// and systemd deployments set `listen` explicitly, and the demo recipes
+    /// pass `--listen`.
     #[serde(default = "default_listen")]
     pub listen: String,
 
@@ -75,7 +83,7 @@ pub struct PrometheusConfig {
 }
 
 fn default_listen() -> String {
-    "0.0.0.0:9090".to_string()
+    "127.0.0.1:9464".to_string()
 }
 
 fn default_path() -> String {
@@ -342,7 +350,7 @@ mod tests {
         let json = "{}";
         let config = ExporterConfig::parse(json).unwrap();
 
-        assert_eq!(config.prometheus.listen, "0.0.0.0:9090");
+        assert_eq!(config.prometheus.listen, "127.0.0.1:9464");
         assert_eq!(config.prometheus.path, "/metrics");
         assert_eq!(config.prometheus.prefix, "zensight");
         assert_eq!(config.aggregation.stale_timeout_secs, 300);
