@@ -92,3 +92,42 @@ async fn invalid_subject_chunks_error_instead_of_panicking() {
     let result = events.publish(&["Not A Chunk!"], &record).await;
     assert!(result.is_err(), "invalid chunk must be a publish error");
 }
+
+/// RFC 04 §1.3: the events id chunk is a ULID, key-encoded lowercase — that is
+/// what makes the trailing chunk time-sortable, which is the events class's
+/// one ordering guarantee. A non-ULID id can still be a perfectly legal
+/// *chunk*, so without `zenkey::slug::ulid_slug` this would mint a key the
+/// grammar accepts and the guarantee silently does not hold for (#742).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_ulid_event_id_is_refused() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session, "snmp", Format::Json);
+    let events = EventPublisher::new(publisher);
+
+    let mut record = EventRecord::new(
+        "dev",
+        Protocol::Snmp,
+        "k",
+        AlertSeverity::Info,
+        "non-ulid id test",
+    );
+    // A freshly minted record is fine.
+    assert!(events.publish(&["trap"], &record).await.is_ok());
+
+    // `not-a-ulid` is a legal plain chunk and is NOT a legal event id.
+    record.id = "not-a-ulid".to_string();
+    let err = events
+        .publish(&["trap"], &record)
+        .await
+        .expect_err("a non-ULID event id must be a publish error");
+    assert!(err.to_string().contains("ULID"), "unhelpful error: {err}");
+
+    // Wrong length is the other way to miss (25 Crockford chars).
+    record.id = "0123456789abcdefghjkmnpqr".to_string();
+    assert!(events.publish(&["trap"], &record).await.is_err());
+
+    // An uppercase ULID is the canonical `ulid` crate rendering and IS legal —
+    // it is key-encoded to lowercase, not refused.
+    record.id = "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string();
+    assert!(events.publish(&["trap"], &record).await.is_ok());
+}

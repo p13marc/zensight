@@ -32,10 +32,26 @@ impl EventPublisher {
     /// Subject chunks must be grammar-valid (lowercase alnum + `._-`);
     /// invalid chunks are an error, not a panic — a malformed device name
     /// must never kill a sensor loop.
+    ///
+    /// The id goes through `zenkey::slug::ulid_slug`, which is RFC 04 §1.3's
+    /// id encoding (a 26-char Crockford-base32 ULID, key-encoded lowercase).
+    /// It is not merely a case fold: a non-ULID id can still be a perfectly
+    /// legal *chunk*, so without this check it would mint a key the grammar
+    /// accepts and the events class's one guarantee — that the trailing chunk
+    /// sorts by time — silently does not hold for. A refusal is a producer
+    /// bug, so it surfaces as a publish error naming the RFC rather than as
+    /// an unsortable key nobody notices.
     fn event_key(&self, subject: &[&str], id: &str) -> Result<String> {
         let ctx = self.publisher.v1();
+        let id = zenkey::slug::ulid_slug(id).ok_or_else(|| SensorError::Publish {
+            key: format!("events/{}", subject.join("/")),
+            message: format!(
+                "event id {id:?} is not a ULID; RFC 04 §1.3 requires the events id chunk to be \
+                 a time-sortable ULID, key-encoded lowercase"
+            ),
+        })?;
         let mut chunks: Vec<&str> = subject.to_vec();
-        chunks.push(id);
+        chunks.push(&id);
         zenkey::grammar::data_key(
             ctx.origin(),
             zenkey::grammar::Class::Events,

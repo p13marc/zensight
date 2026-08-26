@@ -167,6 +167,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The cross-producer key expressions come from zenkey now, not from string
+  literals** (#742). zenkey 0.7 added `selector::common_family(scope, family)`
+  — the `*`-producer complement to the generated per-producer
+  `Family::selector(scope)` — which retires the hand-spelled
+  `all_health_wildcard`, `all_alerts_wildcard`, `all_name_evidence_wildcard`
+  and the tail of `origin_alerts_wildcard`. The bytes are unchanged and a test
+  pins that. Every expression still hand-spelled in `keyexpr.rs` now carries a
+  rationale written **against 0.7** rather than against the version that first
+  justified it — a stale rationale is worse than none — and
+  `zensight-common/docs/keyspace-helpers.md` carries the same table. The
+  focus-mode builders' `format!` fallback arms are a silent-routing hazard (a
+  narrowing of `RemoteOrigin::parse` would quietly send every focus-mode
+  subscription down the string path), so a new test pins that the typed and
+  hand-spelled arms agree for a legal origin.
+- **A non-ULID event id is now a publish error** (#742). RFC 04 §1.3 requires
+  the trailing chunk of `events/<producer>/<subject…>/<id>` to be a
+  time-sortable ULID, key-encoded lowercase, and that is the events class's
+  only ordering guarantee. A non-ULID id can still be a perfectly legal
+  *chunk*, so it used to mint a key the grammar accepts and the guarantee
+  silently does not hold for. `EventPublisher` routes the id through zenkey
+  0.7's `slug::ulid_slug`, so a producer bug surfaces as an error naming the
+  RFC. Uppercase ULIDs (the `ulid` crate's own rendering) are key-encoded, not
+  refused.
+
 - **`zenoh` and `zenoh-ext` 1.9 → 1.10, workspace-wide** (#734). 17 crates take
   `zenoh`, four take `zenoh-ext`; 27 lockfile packages moved together. **The
   wire is compatible in both directions** — `zenoh-protocol`'s `VERSION` stays

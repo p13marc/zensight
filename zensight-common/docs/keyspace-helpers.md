@@ -35,6 +35,33 @@ State is its own late-joiner seed: a plain GET on any of these state selectors i
 answered storage-shaped (one reply per concrete key) by producer-side queryables
 and/or a router latest-value storage.
 
+### Which of these are still hand-spelled, and why (#742)
+
+zenkey 0.7 added `selector::common_family(scope, family)` — the `*`-producer
+complement to the generated per-producer `Family::selector(scope)` — so the
+cross-producer families now come from the grammar crate rather than from string
+literals: `all_health_wildcard`, `all_alerts_wildcard`,
+`all_name_evidence_wildcard`, and the tail of `origin_alerts_wildcard`. Their
+bytes did not change (`common_family_selectors_are_byte_identical_to_the_hand_spelling`
+pins that).
+
+What is **still** hand-spelled is hand-spelled on purpose, and each site says
+so against 0.7 rather than against the version that first justified it:
+
+| Helper | Why it stays a string |
+|--------|-----------------------|
+| `all_evidence_wildcard()` | `evidence/**` is the union of three `CommonFamily` variants; `common_family` names one at a time, and a subscriber wants this as one subscription. |
+| `all_device_liveliness_wildcard()`, `origin_device_liveliness_expr()` | `selector::all_liveliness` covers only the producer-token shape (`state/*/alive`); there is no device rung in `CommonFamily` (`EvidenceDevice` is `evidence/device/{device}`, a different subject). |
+| `catalog_claim_key()`, `catalog_claims_wildcard()` | `claim/{zid}` is deliberately *not registered* — a liveliness token, not a data surface — and a `*` scope cannot reach the verbatim `@catalog` origin anyway (D4). |
+| `all_pdns_wildcard()` | The generated `Family::Pdns.selector()` is the narrower `…/pdns/*`, and `pdns` is a `@catalog` subject rather than a `CommonFamily`. This string configures router-side storage selectors, so narrowing it is a deliberate change, not a refactor. |
+
+The focus-mode builders (`origin_*`) keep a `format!` fallback arm for an
+origin read off the wire that does not parse. That arm is a silent-routing
+hazard — a narrowing of `RemoteOrigin::parse` would quietly send every
+focus-mode subscription down the string path — so
+`the_typed_and_hand_spelled_arms_agree` pins that the two spellings match for a
+legal origin.
+
 ## `@rpc` — runtime control (request/reply, no publications)
 
 Commands do not exist in v1: writes are GETs on `<topic>/set`, reads on
