@@ -164,7 +164,7 @@ async fn spawn_sensor_with_config(
 /// The sensor runs in-process, so the test's v1 context (same global host
 /// origin) yields exactly the keys the sensor publishes on (epic #453).
 fn v1ctx() -> zensight_sensor_core::v1::V1Context {
-    zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "parallax")
+    zensight_sensor_core::v1::for_producer("parallax")
 }
 
 async fn query_catalogue(viewer: &zenoh::Session, _host_prefix: &str) -> Vec<StreamDescriptor> {
@@ -246,7 +246,9 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     let handle = spawn_sensor(sensor.clone(), source).await;
 
     // Subscribe FIRST so the very first published frame is observed.
-    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
     let sub = viewer
         .declare_subscriber(preview_key.as_keyexpr())
         .await
@@ -255,7 +257,9 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     // storage in this harness; LWW without a seed means catch-the-transition).
     let status_sub = viewer
         .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
-            v1ctx().state_key(&["stream", "test0"]),
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
         ))
         .await
         .expect("declare status sub");
@@ -356,14 +360,18 @@ async fn open_h264_video_streams_with_keyframe_control() {
     // The open below uses `tier: None`, which resolves to the sensor default
     // (`medium`); the matching listener must see this subscriber as a viewer
     // (asserted below via the status doc).
-    let video_key = v1ctx().media_video_key("test0", "h264", "medium");
+    let video_key = v1ctx()
+        .media_video_key("test0", "h264", "medium")
+        .expect("a constant test stream/subject is a legal key");
     let sub = viewer
         .declare_subscriber(video_key.as_keyexpr())
         .await
         .expect("declare video subscriber");
     let status_sub = viewer
         .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
-            v1ctx().state_key(&["stream", "test0"]),
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
         ))
         .await
         .expect("declare status sub");
@@ -561,8 +569,12 @@ async fn two_viewers_on_distinct_tiers_stream_independently() {
 
     // Subscribe to each tier's EXACT key (v1.3 revoked the `video/h264/*`
     // wildcard) BEFORE opening, so each first IDR is observed.
-    let low_key = v1ctx().media_video_key("test0", "h264", "low");
-    let high_key = v1ctx().media_video_key("test0", "h264", "high");
+    let low_key = v1ctx()
+        .media_video_key("test0", "h264", "low")
+        .expect("a constant test stream/subject is a legal key");
+    let high_key = v1ctx()
+        .media_video_key("test0", "h264", "high")
+        .expect("a constant test stream/subject is a legal key");
     let low_sub = viewer
         .declare_subscriber(low_key.as_keyexpr())
         .await
@@ -573,7 +585,9 @@ async fn two_viewers_on_distinct_tiers_stream_independently() {
         .expect("declare high-tier subscriber");
     let status_sub = viewer
         .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
-            v1ctx().state_key(&["stream", "test0"]),
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
         ))
         .await
         .expect("declare status sub");
@@ -734,7 +748,9 @@ async fn stats_ticker_publishes_fps_telemetry() {
         .expect("declare stats subscriber");
 
     // Keep a media viewer subscribed so the 1 s idle reaper never fires.
-    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
     let media_sub = viewer
         .declare_subscriber(preview_key.as_keyexpr())
         .await
@@ -866,12 +882,18 @@ async fn the_ladders_bitrate_cap_bites_on_the_wire() {
         .declare_subscriber(
             v1ctx()
                 .media_video_key("noise", "h264", "thin")
+                .expect("a constant test stream/subject is a legal key")
                 .as_keyexpr(),
         )
         .await
         .expect("declare thin subscriber");
     let fat_sub = viewer
-        .declare_subscriber(v1ctx().media_video_key("noise", "h264", "fat").as_keyexpr())
+        .declare_subscriber(
+            v1ctx()
+                .media_video_key("noise", "h264", "fat")
+                .expect("a constant test stream/subject is a legal key")
+                .as_keyexpr(),
+        )
         .await
         .expect("declare fat subscriber");
 
@@ -1024,7 +1046,9 @@ async fn stats_ticker_publishes_rc_drops_for_a_video_tier() {
         .await
         .expect("declare stats subscriber");
     // Hold a media viewer so the idle reaper never tears the tier down.
-    let video_key = v1ctx().media_video_key("test0", "h264", "low");
+    let video_key = v1ctx()
+        .media_video_key("test0", "h264", "low")
+        .expect("a constant test stream/subject is a legal key");
     let media_sub = viewer
         .declare_subscriber(video_key.as_keyexpr())
         .await
@@ -1103,7 +1127,9 @@ async fn preview_only_stream_publishes_no_rc_drops() {
         .declare_subscriber(format!("{}/test0/stats/**", v1ctx().telemetry_prefix()))
         .await
         .expect("declare stats subscriber");
-    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
     let media_sub = viewer
         .declare_subscriber(preview_key.as_keyexpr())
         .await
@@ -1182,7 +1208,9 @@ async fn close_and_idle_reaper_tear_stream_down() {
     let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
-    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
     let sub = viewer
         .declare_subscriber(preview_key.as_keyexpr())
         .await
@@ -1269,7 +1297,9 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
     // Watch the status transitions BEFORE opening.
     let status_sub = viewer
         .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
-            v1ctx().state_key(&["stream", "deadcam"]),
+            v1ctx()
+                .state_key(&["stream", "deadcam"])
+                .expect("a constant test stream/subject is a legal key"),
         ))
         .await
         .expect("declare status subscriber");

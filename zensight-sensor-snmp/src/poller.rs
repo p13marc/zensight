@@ -177,11 +177,21 @@ impl SnmpPoller {
         &mut self,
         registry: Arc<zensight_sensor_core::AdvancedPublisherRegistry>,
     ) {
-        let key =
-            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
-                .state_key(&[&self.device.name, "interfaces"])
-                .into();
-        self.interfaces_doc = Some((registry, key));
+        // The device name is operator-configured, so zenkey 0.7's
+        // reserved-token refusal is reachable here: a device called `alive`
+        // would mint a key colliding with the liveliness leaf (RFC 03 §3).
+        // Refusing it costs this one state doc; minting it would cost the
+        // device's liveliness.
+        match zensight_sensor_core::v1::for_producer("snmp")
+            .state_key(&[&self.device.name, "interfaces"])
+        {
+            Ok(key) => self.interfaces_doc = Some((registry, key.into())),
+            Err(e) => tracing::warn!(
+                device = %self.device.name,
+                error = %e,
+                "device name is not a legal state subject; no interfaces doc for it"
+            ),
+        }
     }
 
     /// Attach threshold alerting (#528). When the interface rules are on,

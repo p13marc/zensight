@@ -461,8 +461,7 @@ pub async fn rig(device: DeviceConfig) -> TestRig {
     poller.with_interfaces_doc(Arc::new(
         zensight_sensor_core::AdvancedPublisherRegistry::new(
             session.clone(),
-            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
-                .telemetry_prefix(),
+            zensight_sensor_core::v1::for_producer("snmp").telemetry_prefix(),
             Format::Json,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
         )

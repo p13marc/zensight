@@ -314,10 +314,7 @@ impl SessionManager {
         alerts: Option<Arc<ParallaxAlerts>>,
     ) -> SessionHandle {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let state_ctx = zensight_sensor_core::v1::V1Context::for_producer(
-            &zensight_common::PROFILE,
-            "parallax",
-        );
+        let state_ctx = zensight_sensor_core::v1::for_producer("parallax");
         let manager = SessionManager {
             catalog,
             config,
@@ -1199,7 +1196,17 @@ impl SessionManager {
                 tiers: Vec::new(),
             },
         };
-        let key = self.state_ctx.state_key(&["stream", stream]);
+        // A stream name is operator-configured, i.e. foreign data, so this
+        // is one of the few places zenkey 0.7's reserved-token refusal is
+        // genuinely reachable: a stream called `alive` would otherwise mint
+        // a key colliding with the liveliness leaf (RFC 03 §3).
+        let key = match self.state_ctx.state_key(&["stream", stream]) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(stream, error = %e, "stream name is not a legal state subject");
+                return;
+            }
+        };
         if let Err(e) = self
             .publisher
             .publish_json(&key, &status, QosClass::Command)

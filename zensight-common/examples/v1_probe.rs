@@ -125,7 +125,7 @@ async fn main() {
                     parsed.class,
                     zenkey::grammar::ClassOrPlane::Class(zenkey::grammar::Class::Telemetry)
                 )
-                && let Some(producer) = parsed.producer.as_ref()
+                && let Some(producer) = parsed.producer()
             {
                 let tail: &[&str] = &parsed.subject;
                 seen_log

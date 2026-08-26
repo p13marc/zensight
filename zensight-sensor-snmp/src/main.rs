@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use zensight_common::v1::V1ContextExt;
 use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 
 use zensight_sensor_snmp::config::SnmpSensorConfig;
@@ -166,11 +167,7 @@ async fn main() -> Result<()> {
         Arc::new(
             zensight_sensor_core::AdvancedPublisherRegistry::new(
                 session.clone(),
-                zensight_sensor_core::v1::V1Context::for_producer(
-                    &zensight_common::PROFILE,
-                    "snmp",
-                )
-                .telemetry_prefix(),
+                zensight_sensor_core::v1::for_producer("snmp").telemetry_prefix(),
                 serialization,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
             )
@@ -184,11 +181,7 @@ async fn main() -> Result<()> {
         Arc::new(
             zensight_sensor_core::AdvancedPublisherRegistry::new(
                 session.clone(),
-                zensight_sensor_core::v1::V1Context::for_producer(
-                    &zensight_common::PROFILE,
-                    "snmp",
-                )
-                .telemetry_prefix(),
+                zensight_sensor_core::v1::for_producer("snmp").telemetry_prefix(),
                 serialization,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
             )
@@ -316,16 +309,14 @@ async fn main() -> Result<()> {
 
         let report_registry = zensight_sensor_core::AdvancedPublisherRegistry::new(
             session.clone(),
-            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
-                .telemetry_prefix(),
+            zensight_sensor_core::v1::for_producer("snmp").telemetry_prefix(),
             serialization,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
         )
         .with_qos(zensight_common::QosClass::HealthLiveness);
-        let report_key: String =
-            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "snmp")
-                .state_key(&["discovery"])
-                .into();
+        let report_key: String = zensight_sensor_core::v1::for_producer("snmp")
+            .const_state_key(&["discovery"])
+            .into();
 
         runner.spawn(async move {
             loop {

@@ -50,13 +50,13 @@ pub fn refine_key(key: &str) -> Option<(StructuralKey<'_>, String, AnySubject)> 
     let ClassOrPlane::Class(class) = parsed.class else {
         return None;
     };
-    let name = match parsed.producer.as_ref() {
+    let name = match parsed.producer() {
         // The instance suffix (`netring-2`) is already stripped, so the
         // registry lookup sees the base name.
         Some(p) => p.name().to_string(),
         // Service origins (`@catalog`) carry no producer chunk.
         None => match &parsed.origin {
-            Origin::Service(s) => s.trim_start_matches('@').to_string(),
+            Origin::Service(s) => s.as_str().trim_start_matches('@').to_string(),
             Origin::Host(_) => return None,
         },
     };

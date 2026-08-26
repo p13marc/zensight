@@ -1093,7 +1093,7 @@ impl OtelExporter {
 
         let stack = zensight_common::keyexpr::parse_key(key)
             .and_then(|parsed| {
-                let producer = parsed.producer.as_ref()?.name().to_string();
+                let producer = parsed.producer()?.name().to_string();
                 Some(ObservedHost {
                     origin: parsed.origin.to_string(),
                     host_name: event.source.clone(),
@@ -1185,7 +1185,7 @@ impl OtelExporter {
         // resource (#755).
         let stack = zensight_common::keyexpr::parse_key(key)
             .and_then(|parsed| {
-                let producer = parsed.producer.as_ref()?.name().to_string();
+                let producer = parsed.producer()?.name().to_string();
                 Some(ObservedHost {
                     origin: parsed.origin.to_string(),
                     host_name: alert.source.clone(),

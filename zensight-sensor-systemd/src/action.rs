@@ -658,7 +658,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let producer = format!("test_{nanos}/systemd");
+        let producer = format!("test-{nanos}-systemd");
 
         // Multicast scouting OFF. A default-config session joins whatever mesh
         // it can reach — including a live fleet on the same host — so a test

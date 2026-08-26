@@ -48,7 +48,7 @@ pub fn registered_telemetry_patterns(producer: &str) -> Vec<String> {
     slice
         .subjects
         .iter()
-        .filter(|s| s.class == "telemetry")
+        .filter(|s| s.class.is(&zenkey::grammar::Class::Telemetry))
         .map(|s| s.path.clone())
         .collect()
 }
@@ -79,7 +79,11 @@ pub fn telemetry_subject_docs(producer: &str, pattern: &str) -> Option<SubjectDo
             if let Some(toml) = crate::registry::registry_toml(producer)
                 && let Ok(slice) = zenkey::parse_slice(toml)
             {
-                for s in slice.subjects.iter().filter(|s| s.class == "telemetry") {
+                for s in slice
+                    .subjects
+                    .iter()
+                    .filter(|s| s.class.is(&zenkey::grammar::Class::Telemetry))
+                {
                     map.insert(
                         s.path.clone(),
                         SubjectDocs {

@@ -85,7 +85,7 @@ probing. The generated app-level module is `zensight_common::registry::blob`
 §2.5 probe form that deliberately does not convert into a fetchable key). The
 three prefix helpers above remain the producer-side entry points.
 
-## Producer-side keys — `zensight_keyspace::V1Context`
+## Producer-side keys — `zenkey::V1Context`
 
 Producers (sensors) build their own keys through `V1Context` (re-exported as
 `zensight_sensor_core::v1`): `from_prefix`, `telemetry_prefix()`
@@ -94,6 +94,36 @@ Producers (sensors) build their own keys through `V1Context` (re-exported as
 `device_liveness_key`, `alive_key`, `device_alive_key`, `rpc_key(&[…])`,
 `media_video_key` / `media_key(&[…])`, and `blob_prefix(tier)`. Registry
 violations are build errors (`zensight-common/registry/*.toml`).
+
+### Getting a `V1Context` — `zensight_common::v1::for_producer`
+
+zenkey 0.7 made `V1Context::for_producer` **fallible**: 0.6 slugged an illegal
+producer name and, failing that, fell back to the literal `sensor`, so a
+misconfigured producer published its whole keyspace under a different identity
+— silently, and colliding with every other misconfigured producer.
+
+ZenSight absorbs that in **one** place, `zensight_common::v1::for_producer`
+(re-exported as `zensight_sensor_core::v1::for_producer`), which is what every
+sensor calls. It is infallible because a ZenSight producer name is a
+compile-time constant of the sensor that owns it — one of the names in
+`zensight-common/registry/` — and `v1.rs`'s own test asserts every registered
+name is a legal chunk, so an illegal one fails `cargo test` rather than a
+fleet. A name that genuinely *is* foreign data must cross the boundary
+explicitly, with `Producer::new(Chunk::slug(name).as_str())`.
+
+### The fallible key builders — `V1ContextExt`
+
+`state_key` and `rpc_key` also became `Result` in 0.7, for exactly one reason:
+a chunk that is literally `alive`, the reserved liveliness leaf (RFC 03 §3).
+Every other malformed chunk is slugged, as before. So the error is reachable
+only from a *dynamic* chunk.
+
+`zensight_common::v1::V1ContextExt` names that: `const_state_key` /
+`const_rpc_key` are for subjects that are compile-time constants (`["health"]`,
+`["artifact", "request"]`) or hex digests (`["alert", <16 hex>]`), where the
+refusal is unreachable. A builder whose chunks *are* foreign data — an SNMP
+device name, a parallax stream name — must call `state_key` and handle the
+refusal, because refusing a device called `alive` is the point of the check.
 
 Two producer-side evidence builders live in `keyexpr.rs` because non-sensor code
 uses them too (both mint the **local** origin):

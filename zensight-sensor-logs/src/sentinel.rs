@@ -568,9 +568,8 @@ pub const RULES_TOPIC: &str = "rules";
 /// `expectations`/`expectations/set` (#543).
 pub async fn serve_rules(session: Arc<zenoh::Session>, producer: String, handle: SentinelHandle) {
     use zensight_sensor_core::rpc::{self, RpcError};
-    use zensight_sensor_core::v1::V1Context;
 
-    let ctx = V1Context::for_producer(&zensight_common::PROFILE, &producer);
+    let ctx = zensight_sensor_core::v1::for_producer(&producer);
     let apply = handle.clone();
     let tasks = rpc::serve_topic::<LogRulesConfig, _, _, _, _>(
         session,

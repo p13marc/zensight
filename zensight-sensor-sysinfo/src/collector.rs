@@ -61,12 +61,9 @@ impl SystemCollector {
             system: System::new_all(),
             disks: Disks::new_with_refreshed_list(),
             networks: Networks::new_with_refreshed_list(),
-            telemetry_prefix: zensight_sensor_core::v1::V1Context::for_producer(
-                &zensight_common::PROFILE,
-                "sysinfo",
-            )
-            .telemetry_prefix()
-            .into(),
+            telemetry_prefix: zensight_sensor_core::v1::for_producer("sysinfo")
+                .telemetry_prefix()
+                .into(),
             source,
             config,
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
@@ -1506,9 +1503,7 @@ mod tests {
     fn test_build_key_expr() {
         // v1 (epic #453): the origin in the prefix replaces the hostname
         // chunk — subjects start at the metric.
-        let prefix =
-            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "sysinfo")
-                .telemetry_prefix();
+        let prefix = zensight_sensor_core::v1::for_producer("sysinfo").telemetry_prefix();
         let key = build_key_expr(&prefix, "server01", "cpu/usage");
         assert!(key.starts_with("v1/h-"), "{key}");
         assert!(key.ends_with("/telemetry/sysinfo/cpu/usage"), "{key}");

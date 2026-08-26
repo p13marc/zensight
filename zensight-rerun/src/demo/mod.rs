@@ -23,13 +23,14 @@ use zensight_common::keyexpr::entity_key;
 use zensight_common::qos::QosClass;
 use zensight_common::serialization::Format;
 use zensight_common::telemetry::TelemetryPoint;
+use zensight_common::v1::V1ContextExt;
 
 /// The v1 key context for one demo producer. The origin is this machine's
 /// minted `h-` id — demo *payloads* keep their synthetic sources; consumers
 /// read source/protocol from the payload, and the class selectors match any
 /// origin.
 fn v1ctx(producer: &str) -> V1Context {
-    V1Context::for_producer(&zensight_common::PROFILE, producer)
+    zensight_common::v1::for_producer(producer)
 }
 
 /// A demo publishing context over one isolated session.
@@ -79,7 +80,9 @@ impl DemoContext {
 
     /// Publish one alert transition on its keyed `state/<producer>/alert/<key>` doc.
     pub async fn publish_alert(&self, alert: &Alert) -> anyhow::Result<()> {
-        let key = v1ctx(alert.protocol.as_str()).state_key(&["alert", &alert.alert_key()]);
+        // The alert key is a hex digest, so zenkey 0.7's reserved-token
+        // refusal is unreachable (`V1ContextExt`).
+        let key = v1ctx(alert.protocol.as_str()).const_state_key(&["alert", &alert.alert_key()]);
         self.registry
             .put_serializable(&key, alert, Format::Cbor, QosClass::Alert)
             .await?;

@@ -1731,11 +1731,7 @@ async fn polled_device_publishes_identity_evidence() {
         std::sync::Arc::new(
             zensight_sensor_core::AdvancedPublisherRegistry::new(
                 rig.session.clone(),
-                zensight_sensor_core::v1::V1Context::for_producer(
-                    &zensight_common::PROFILE,
-                    "snmp",
-                )
-                .telemetry_prefix(),
+                zensight_sensor_core::v1::for_producer("snmp").telemetry_prefix(),
                 zensight_common::Format::Json,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
             )

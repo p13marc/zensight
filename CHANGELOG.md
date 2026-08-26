@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`zenkey` and `zenkey-build` 0.6 → 0.7** (#735). The wire is unchanged —
+  the `identity.rs` golden host-id vector (`h-` + first 12 hex of
+  `sha256(machine_id + salt)`) still passes, so no origin re-keys — but three
+  API surfaces moved, and one of them was silently wrong before.
+  - `V1Context::for_producer` is now `Result<Self, KeyError>`. 0.6 slugged an
+    illegal producer name and, failing that, fell back to the literal
+    `sensor`: a misconfigured producer published its **entire keyspace under a
+    different identity**, with no `Err`, no panic and no log, colliding with
+    every other misconfigured producer in the fleet. ZenSight absorbs the new
+    `Result` **once**, in `zensight_common::v1::for_producer` (re-exported as
+    `zensight_sensor_core::v1::for_producer`), rather than threading `?`
+    through 47 call sites: a ZenSight producer name is a compile-time constant
+    from `zensight-common/registry/`, and a new test asserts every registered
+    name is chunk-legal, so an illegal one now fails `cargo test`. That change
+    found four real cases — the logs and systemd test harnesses were passing
+    `test_<nanos>/logs` as a *producer chunk*, which 0.6 had been quietly
+    renaming into something else.
+  - `V1Context::state_key` / `rpc_key` are now `Result` too, for one reason: a
+    chunk that is literally `alive`, the reserved liveliness leaf (RFC 03 §3).
+    `zensight_common::v1::V1ContextExt::{const_state_key, const_rpc_key}`
+    carries the constant-subject case; the two builders whose chunks really
+    are foreign data — an SNMP device name, a parallax stream name — now
+    *refuse* a device or stream called `alive` and log it, instead of minting
+    a key that collides with that producer's liveliness token.
+  - `AppProfile::new` takes `AppName` / `OriginSalt` newtypes, because
+    `AppProfile::new("zensight-host-id-v1", "zensight")` used to compile and
+    re-key the whole fleet. Both constructors stayed `const fn`, so
+    `zensight_common::PROFILE` is still a plain `static`.
+  - `StructuralKey::producer` became a method (`Position5` now holds
+    producer-or-blob-tier-or-chunk), `ServiceOrigin` is a newtype rather than
+    a `String`, and `SubjectDecl::class` is a typed `Declared<Class>` — the
+    last of which broke `registry_audit.rs` at **compile time** rather than
+    silently returning an empty `Vec`, which was the risk.
+
 - **The Prometheus exporter's scrape port default moves `0.0.0.0:9090` →
   `127.0.0.1:9464`** (#771). 9090 is the Prometheus *server's* own port, and the
   shipped `README.md` told you to scrape `localhost:9090` — i.e. Prometheus

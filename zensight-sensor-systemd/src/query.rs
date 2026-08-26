@@ -823,7 +823,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let producer = format!("test_{nanos}/systemd");
+        let producer = format!("test-{nanos}-systemd");
 
         // Scouting off: a test that joins the local mesh is a participant, not
         // a test (RFC 09 §0.1).
