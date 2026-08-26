@@ -139,7 +139,7 @@ participants of one deployment must agree on it.
 
 ## Development Notes
 
-- Rust edition 2024; Iced 0.14 (tokio, canvas, svg); Zenoh 1.9 (`unstable`); tokio async runtime.
+- Rust edition 2024; Iced 0.14 (tokio, canvas, svg); Zenoh 1.10 (`unstable`); tokio async runtime.
 - Conventional commits (`feat:`/`fix:`/`chore:`/`docs:`). Key expressions: v1 grammar via
   `zenkey`/`zensight-common` builders (never ad-hoc `format!`). Each view uses a
   per-view state struct; UI tests use `iced_test::simulator` (see `zensight/docs/testing.md`).

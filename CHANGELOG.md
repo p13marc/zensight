@@ -91,6 +91,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`zenoh` and `zenoh-ext` 1.9 → 1.10, workspace-wide** (#734). 17 crates take
+  `zenoh`, four take `zenoh-ext`; 27 lockfile packages moved together. **The
+  wire is compatible in both directions** — `zenoh-protocol`'s `VERSION` stays
+  `0x09`, so a 1.9 sensor and a 1.10 frontend (or the reverse) open a session
+  and exchange data normally, and a fleet may be rolled forward node by node.
+  The two wire-format changes 1.10 makes are both to *non-mandatory*
+  extensions, which a peer that does not recognise them skips rather than
+  rejecting: the new timestamp-instrumentation stack (`0x7`, off by default)
+  and the SHM handshake probe, which moved from a `Z64` to a `ZBuf` encoding
+  (`shared-memory` is not enabled in this workspace, so it does not arise
+  here — a mixed-version fleet that *does* enable SHM loses the SHM
+  optimisation across a version boundary, not the session).
+  No ZenSight source changed: all nine zenoh config-key paths
+  `zensight-common/src/session.rs` writes still exist under the same names
+  (`mode`, `namespace`, `connect/endpoints`, `listen/endpoints`,
+  `timestamping/enabled`, `scouting/{multicast,gossip}/enabled`, and the three
+  `transport/link/tls/*` keys), `timestamping/enabled` still defaults to
+  router-only (`{router: true, peer: false, client: false}`) so the
+  unconditional insert stays load-bearing for every peer-mode sensor, and both
+  scouting switches still default *on*, which is what the unset case relies on.
+  In `zenoh-ext`, `RecoveryConfig` gained a `retention_period` (default 1h) for
+  publisher last-sample state and `CacheConfig::max_samples` became
+  `NonZeroUsize`-checked — every call site here passes `1`, so the new
+  zero-is-an-error path is unreachable. `just router-verify` /
+  `just router-plugins` now pin `zenohd` and its plugins at 1.10.0: a
+  version-mismatched storage plugin loads, logs one line and serves no storage.
+
 - **parallax-pipeline 0.6.0 → 0.7.0** (#689). 175 upstream commits, and the
   `h264` GUI feature did not compile against it at all: `H264Decoder::decode`
   became private and `DecodedFrame` crate-internal when decoders became plain

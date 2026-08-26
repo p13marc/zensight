@@ -526,11 +526,11 @@ clean-run:
 # choosing an `fs` volume over InfluxDB), `*` cannot match @catalog, and a fleet
 # @rpc GET still fans in (no `complete` storage).
 #
-# Needs zenohd AND its plugins, all at the workspace's zenoh version (1.9).
+# Needs zenohd AND its plugins, all at the workspace's zenoh version (1.10).
 # The plugins are cdylibs, not binaries — `cargo install` refuses them, and the
 # volume name `fs` is NOT the crate name (it is zenoh-backend-*filesystem*):
 #
-#   cargo install zenohd --version 1.9.0 --locked
+#   cargo install zenohd --version 1.10.0 --locked
 #   just router-plugins        # builds the two .so files into ~/.zenoh/lib
 #
 # A version-mismatched plugin is the trap: zenohd loads, logs one line, and
@@ -542,7 +542,7 @@ router-verify:
     #!/usr/bin/env bash
     set -euo pipefail
     command -v zenohd >/dev/null || {
-      echo "zenohd not on PATH — cargo install zenohd --version 1.9.0 --locked" >&2
+      echo "zenohd not on PATH — cargo install zenohd --version 1.10.0 --locked" >&2
       exit 1
     }
     for so in libzenoh_plugin_storage_manager.so libzenoh_backend_fs.so; do
@@ -576,7 +576,7 @@ router-verify:
 #  3. The fs backend vendors rocksdb, whose C++ predates GCC 13's stricter header
 #     hygiene — hence CXXFLAGS. Do NOT also set CFLAGS: the `-include` lands on a
 #     zstd .S assembly file and breaks the build.
-router-plugins version="1.9.0":
+router-plugins version="1.10.0":
     #!/usr/bin/env bash
     set -euo pipefail
     # OUTSIDE the repo, and not in /tmp.
