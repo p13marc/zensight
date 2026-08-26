@@ -53,7 +53,16 @@ where
     H: Fn(RpcRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = RpcResult> + Send + 'static,
 {
-    let key = ctx.rpc_key(procedure);
+    // zenkey 0.7 made `rpc_key` fallible: it refuses the reserved `alive`
+    // token in a procedure path (RFC 03 §3). `serve` is already `Result`, so
+    // the refusal reaches the sensor that asked for the illegal procedure
+    // rather than being swallowed here.
+    let key = ctx.rpc_key(procedure).map_err(|e| {
+        SensorError::Config(format!(
+            "{procedure:?} is not a legal @rpc procedure path for producer {}: {e}",
+            ctx.producer().name()
+        ))
+    })?;
     let queryable = zensight_common::served::serve_queryable(&session, key.as_str())
         .await
         .map_err(|e| SensorError::Publish {

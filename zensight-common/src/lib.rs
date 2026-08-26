@@ -42,6 +42,7 @@ pub mod state;
 pub mod stream;
 pub mod subscribe;
 pub mod telemetry;
+pub mod v1;
 
 // Re-export commonly used types at the crate root
 pub use action::{ActionCapability, ActionStatus, ServiceAction, UnitFileChange, Verb};
@@ -112,7 +113,10 @@ pub use zenkey::CommonState;
 /// deployment *base* is deliberately not an application constant — it names
 /// the deployment, not the software, and is optional session configuration
 /// (`zenoh.namespace` / `ZENSIGHT_ZENOH_NAMESPACE`; see [`CONVENTIONAL_BASE`]).
-pub static PROFILE: zenkey::AppProfile = zenkey::AppProfile::new("zensight", "zensight-host-id-v1");
+pub static PROFILE: zenkey::AppProfile = zenkey::AppProfile::new(
+    zenkey::AppName::new("zensight"),
+    zenkey::OriginSalt::new("zensight-host-id-v1"),
+);
 
 /// The *conventional example* base (session namespace, RFC 03 §1.1).
 ///

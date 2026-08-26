@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use zensight_common::rpc::{RpcError, RpcResult};
 use zensight_common::served;
-use zensight_sensor_core::v1::V1Context;
 
 fn isolated_config() -> zenoh::Config {
     let mut config = zenoh::Config::default();
@@ -25,7 +24,7 @@ fn isolated_config() -> zenoh::Config {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serving_a_procedure_closes_its_coverage_gap() {
     let session = Arc::new(zenoh::open(isolated_config()).await.expect("open session"));
-    let ctx = V1Context::for_producer(&zensight_common::PROFILE, "sysinfo");
+    let ctx = zensight_sensor_core::v1::for_producer("sysinfo");
 
     // sysinfo's registry declares `processes` among its procedures. Before it
     // is served, the guard must name it — this is the state the #453 audit

@@ -1,4 +1,5 @@
 use crate::registry::{self, AnySubject};
+use zenkey::CommonFamily;
 use zenkey::grammar::{self, Class, ClassOrPlane, Origin, StructuralKey};
 use zenkey::origin::{RemoteOrigin, ServiceOrigin};
 use zenkey::selector::{self, Scope};
@@ -50,13 +51,13 @@ pub fn refine_key(key: &str) -> Option<(StructuralKey<'_>, String, AnySubject)> 
     let ClassOrPlane::Class(class) = parsed.class else {
         return None;
     };
-    let name = match parsed.producer.as_ref() {
+    let name = match parsed.producer() {
         // The instance suffix (`netring-2`) is already stripped, so the
         // registry lookup sees the base name.
         Some(p) => p.name().to_string(),
         // Service origins (`@catalog`) carry no producer chunk.
         None => match &parsed.origin {
-            Origin::Service(s) => s.trim_start_matches('@').to_string(),
+            Origin::Service(s) => s.as_str().trim_start_matches('@').to_string(),
             Origin::Host(_) => return None,
         },
     };
@@ -211,11 +212,7 @@ pub fn all_events_wildcard() -> String {
 /// assert_eq!(all_health_wildcard(), "v1/*/state/*/health");
 /// ```
 pub fn all_health_wildcard() -> String {
-    // Hand-spelled: zenkey 0.6 has no cross-producer common-family selector —
-    // the generated `Family::Health.selector(scope)` interpolates one
-    // producer's name literal, not `*`. (Upstream candidate: a
-    // `selector::common_family(scope, family)`.)
-    "v1/*/state/*/health".to_string()
+    selector::common_family(Scope::fleet(), CommonFamily::Health).into()
 }
 
 // `host_evidence_key(sensor, device)` and `name_observation_key(sensor, ip)`
@@ -237,6 +234,13 @@ pub fn all_health_wildcard() -> String {
 /// ```
 pub fn all_evidence_wildcard() -> String {
     // v1 (RFC 06 §4): evidence is ordinary per-origin state.
+    //
+    // Hand-spelled against **zenkey 0.7**: `selector::common_family` names one
+    // family at a time, and evidence is three of them (`EvidenceSelf`,
+    // `EvidenceDevice`, `EvidenceNames`). This is the union — `evidence/**` —
+    // which no single `CommonFamily` spells, and which a subscriber wants as
+    // ONE subscription rather than three. Its narrower per-family siblings do
+    // come from the generated selector: see [`all_name_evidence_wildcard`].
     "v1/*/state/*/evidence/**".to_string()
 }
 
@@ -253,7 +257,7 @@ pub fn all_evidence_wildcard() -> String {
 /// );
 /// ```
 pub fn all_name_evidence_wildcard() -> String {
-    "v1/*/state/*/evidence/names/*".to_string()
+    selector::common_family(Scope::fleet(), CommonFamily::EvidenceNames).into()
 }
 
 /// Build the entity key for one resolved host, published by the correlator on
@@ -378,10 +382,13 @@ pub fn correlator_alive_key() -> String {
 /// Build a catalog ownership-claim token key (RFC 06 §5.3). Every candidate
 /// declares one; the lexically-lowest claim chunk wins the election.
 ///
-/// Hand-spelled: `claim/{zid}` is *deliberately not registered* (see the
-/// header comment of `registry/catalog.toml`) — it is a liveliness token, not
-/// a data surface, and zenkey-build has no token/liveliness section yet, so
-/// there is no generated builder for it. The zid is lowercased here because
+/// Hand-spelled against **zenkey 0.7**: `claim/{zid}` is *deliberately not
+/// registered* (see the header comment of `registry/catalog.toml`) — it is a
+/// liveliness token, not a data surface, and zenkey-build still has no
+/// token/liveliness section, so there is no generated builder for it. 0.7's
+/// `selector::common_family` does not reach it either: it is restricted to
+/// [`CommonFamily`], and by design a `*` scope cannot match the verbatim
+/// `@catalog` origin at all (D4). The zid is lowercased here because
 /// `Chunk::slug` escapes rather than folds case, and the wire form must stay
 /// the canonical lowercase.
 pub fn catalog_claim_key(zid: &str) -> String {
@@ -405,9 +412,7 @@ pub fn catalog_claims_wildcard() -> String {
 /// assert_eq!(all_alerts_wildcard(), "v1/*/state/*/alert/*");
 /// ```
 pub fn all_alerts_wildcard() -> String {
-    // Hand-spelled: no cross-producer common-family selector in zenkey 0.6
-    // (see [`all_health_wildcard`]).
-    "v1/*/state/*/alert/*".to_string()
+    selector::common_family(Scope::fleet(), CommonFamily::Alert).into()
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +437,13 @@ pub fn all_alerts_wildcard() -> String {
 /// falls back to the legacy literal spelling via the caller's `format!` arm —
 /// such a selector never parsed before either and simply matched nothing,
 /// which is the behavior to keep for a focus target read off the wire.
+///
+/// The `format!` arms are a **silent-routing hazard**, not just dead code: if
+/// `RemoteOrigin::parse` or `Scope::origin` ever narrowed, every focus-mode
+/// subscription would quietly start using the hand-spelled string instead, and
+/// nothing would say so. [`the_typed_and_hand_spelled_arms_agree`] pins that
+/// the two produce the same selector for a legal origin, so a divergence is a
+/// test failure rather than a subscription that matches the wrong keys.
 fn origin_scope(origin: &str) -> Option<Scope> {
     RemoteOrigin::parse(origin).ok().map(|o| Scope::origin(&o))
 }
@@ -452,11 +464,12 @@ pub fn origin_state_wildcard(origin: &str) -> String {
     }
 }
 
-/// One host's firing alerts (the late-joiner seed GET). Hand-spelled tail: no
-/// cross-producer common-family selector in zenkey 0.6 (see
-/// [`all_health_wildcard`]).
+/// One host's firing alerts (the late-joiner seed GET).
 pub fn origin_alerts_wildcard(origin: &str) -> String {
-    format!("v1/{origin}/state/*/alert/*")
+    match origin_scope(origin) {
+        Some(scope) => selector::common_family(scope, CommonFamily::Alert).into(),
+        None => format!("v1/{origin}/state/*/alert/*"),
+    }
 }
 
 /// One host's events plane (#536).
@@ -476,6 +489,13 @@ pub fn origin_liveliness_expr(origin: &str) -> String {
 }
 
 /// One host's device liveliness tokens.
+///
+/// Hand-spelled against zenkey 0.7, deliberately and for the same reason as
+/// [`all_device_liveliness_wildcard`]: `selector::all_liveliness` covers only
+/// the producer-token shape (`state/*/alive`), and there is no device rung in
+/// `CommonFamily` — `evidence/device/{device}` is the device *evidence*
+/// family, a different subject. Unlike its siblings this one has no typed
+/// branch at all, so there is nothing for `origin_scope` to route to.
 pub fn origin_device_liveliness_expr(origin: &str) -> String {
     format!("v1/{origin}/state/*/device/*/alive")
 }
@@ -500,8 +520,13 @@ pub fn all_liveliness_wildcard() -> String {
 }
 
 /// The whole fleet's device liveliness tokens (producers that track downstream
-/// devices — RFC 04 §5). Hand-spelled: `selector::all_liveliness` covers only
-/// the producer-token shape (`state/*/alive`), not the device rung.
+/// devices — RFC 04 §5).
+///
+/// Hand-spelled against **zenkey 0.7**: `selector::all_liveliness` still covers
+/// only the producer-token shape (`state/*/alive`), and 0.7's new
+/// `selector::common_family` is restricted to [`CommonFamily`], which has no
+/// device-liveliness rung — its `EvidenceDevice` is `evidence/device/{device}`,
+/// a different subject entirely.
 pub fn all_device_liveliness_wildcard() -> String {
     "v1/*/state/*/device/*/alive".to_string()
 }
@@ -639,8 +664,11 @@ pub fn pdns_key(ip: &str) -> String {
 /// assert_eq!(all_pdns_wildcard(), "v1/@catalog/state/pdns/**");
 /// ```
 pub fn all_pdns_wildcard() -> String {
-    // Hand-spelled: the generated `Family::Pdns.selector()` is the narrower
-    // single-chunk `…/pdns/*`. Semantically equivalent for the registered
+    // Hand-spelled against **zenkey 0.7**: the generated
+    // `Family::Pdns.selector()` is the narrower single-chunk `…/pdns/*`, and
+    // `selector::common_family` cannot spell it either — `pdns` is a
+    // `@catalog` subject, not one of the cross-producer [`CommonFamily`]
+    // families. Semantically equivalent to `…/pdns/*` for the registered
     // family, but byte-different — and this string configures router-side
     // storage selectors, so narrowing it is a deliberate change, not a
     // refactor.
@@ -817,6 +845,51 @@ mod tests {
                 origin_device_liveliness_expr(ORIGIN),
                 "v1/h-3fa9c2d41b7e/state/*/device/*/alive"
             );
+        }
+
+        /// The typed and hand-spelled arms of the focus-mode builders must
+        /// agree for a legal origin. They are two spellings of one selector,
+        /// and the `format!` arm exists only for an origin read off the wire
+        /// that does not parse — so if `RemoteOrigin::parse` or
+        /// `Scope::origin` ever narrows, focus mode would silently fall
+        /// through to the strings with nothing to say so. This is what makes
+        /// that a test failure instead.
+        #[test]
+        fn the_typed_and_hand_spelled_arms_agree() {
+            assert!(
+                super::origin_scope(ORIGIN).is_some(),
+                "a legal origin must take the typed arm; the assertions below \
+                 would otherwise compare each string to itself"
+            );
+            assert_eq!(
+                origin_telemetry_wildcard(ORIGIN),
+                format!("v1/{ORIGIN}/telemetry/**")
+            );
+            assert_eq!(
+                origin_state_wildcard(ORIGIN),
+                format!("v1/{ORIGIN}/state/**")
+            );
+            assert_eq!(
+                origin_events_wildcard(ORIGIN),
+                format!("v1/{ORIGIN}/events/**")
+            );
+            assert_eq!(
+                origin_liveliness_expr(ORIGIN),
+                format!("v1/{ORIGIN}/state/*/alive")
+            );
+            assert_eq!(
+                origin_alerts_wildcard(ORIGIN),
+                format!("v1/{ORIGIN}/state/*/alert/*")
+            );
+        }
+
+        /// The fleet-wide common-family selectors are zenkey 0.7's
+        /// `selector::common_family` now, not strings — pin that the bytes did
+        /// not move when they stopped being hand-spelled (#742).
+        #[test]
+        fn common_family_selectors_are_byte_identical_to_the_hand_spelling() {
+            assert_eq!(all_health_wildcard(), "v1/*/state/*/health");
+            assert_eq!(all_alerts_wildcard(), "v1/*/state/*/alert/*");
         }
 
         #[test]

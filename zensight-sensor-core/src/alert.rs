@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use zensight_common::v1::V1ContextExt;
 use zensight_common::{Alert, AlertSeverity, Format, Protocol, encode};
 
 use crate::error::Result;
@@ -86,7 +87,12 @@ impl AlertReporter {
     fn alert_key_expr(&self, alert_key: &str) -> String {
         // v1 (RFC 04 §1.2): alerts are LWW state under the producer, keyed by
         // the origin — the legacy protocol-shared channel is gone.
-        self.publisher.v1().state_key(&["alert", alert_key]).into()
+        // `alert_key` is a 16-hex digest, so the reserved-token refusal
+        // zenkey 0.7 added is unreachable here (see `V1ContextExt`).
+        self.publisher
+            .v1()
+            .const_state_key(&["alert", alert_key])
+            .into()
     }
 
     /// Report that `alert` is currently violated. Publishes a `Put(Firing)` once
@@ -333,7 +339,10 @@ impl AlertReporter {
 /// producer-side leg covers live producers; the storage covers crashed ones).
 pub async fn serve_alerts_query(reporter: std::sync::Arc<AlertReporter>) {
     let session = reporter.publisher().session().clone();
-    let selector = format!("{}/*", reporter.publisher().v1().state_key(&["alert"]));
+    let selector = format!(
+        "{}/*",
+        reporter.publisher().v1().const_state_key(&["alert"])
+    );
     let queryable = match zensight_common::served::serve_queryable(&session, &selector).await {
         Ok(q) => q,
         Err(e) => {

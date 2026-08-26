@@ -172,3 +172,56 @@ async fn reconcile_labeled_scopes_to_the_label() {
         .expect("reconcile a clear");
     assert_eq!(reporter.active_count(), 0);
 }
+
+/// **The `host.*` stability invariant** (#738).
+///
+/// `AlertReporter.active` is keyed by `Alert::alert_key()`, and the resolve
+/// path re-derives that key from the (possibly re-stamped) alert. So if a
+/// `host.*` annotation changing between fire and resolve changed the key, the
+/// `Firing` would sit on the old key forever while the `Resolved` + tombstone
+/// landed on a new one — a permanent phantom alert, with nothing logged.
+///
+/// This is why ZenSight's `host.*` namespace is *documented host-scoped* and
+/// excluded from the derivation, which RFC 11 §3.1 explicitly provides for
+/// ("the label named `host`, **and any label the producer documents as
+/// host-scoped**, are excluded before sorting"). Adopting
+/// `zenkey::alert::alert_key` without passing that vocabulary through fails
+/// here, which is the point of the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_annotation_change_does_not_orphan_a_firing_alert() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+
+    // Fire, stamped with one identity.
+    let firing = sample_alert(&source).with_label("host.id", "h-aaaaaaaaaaaa");
+    reporter
+        .observe(firing.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    assert_eq!(reporter.active_count(), 1, "the alert fired");
+
+    // The identity envelope refreshes mid-flight — a re-mint, a boot-id
+    // change, a late-arriving `host.id`. Everything that identifies the
+    // *alert* (rule, discriminating labels) is untouched.
+    let restamped = sample_alert(&source).with_label("host.id", "h-bbbbbbbbbbbb");
+    assert_eq!(
+        firing.alert_key(),
+        restamped.alert_key(),
+        "a host.* annotation must not re-key a firing alert"
+    );
+
+    // Resolving the re-stamped alert must clear the entry the first one made.
+    reporter
+        .resolve_matching("ssh-listening", &[("port", "22")])
+        .await
+        .expect("resolve");
+    assert_eq!(
+        reporter.active_count(),
+        0,
+        "the firing alert was orphaned: its Resolved landed on a different key"
+    );
+    assert!(reporter.firing_alerts().is_empty(), "alert list not empty");
+}

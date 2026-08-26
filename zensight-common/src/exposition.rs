@@ -471,9 +471,7 @@ where
     merger.offer("origin", parsed.origin.to_string(), LabelSource::Structural);
     merger.offer("source", point.source.clone(), LabelSource::Structural);
     merger.offer("protocol", producer.clone(), LabelSource::Structural);
-    // NB: `producer` is a field in zenkey 0.6; it collapses into `Position5`
-    // in 0.7 (#735), at which point this becomes `parsed.producer()`.
-    if let Some(p) = parsed.producer.as_ref()
+    if let Some(p) = parsed.producer()
         && let Some(instance) = p.instance()
     {
         merger.offer(

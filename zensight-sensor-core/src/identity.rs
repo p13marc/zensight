@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 /// The application salt lives in ZenSight's [`zensight_common::PROFILE`]
 /// (RFC 06 §1); routed through here for the doc trail. The wire `host_id`
 /// IS the v1 origin id.
-fn host_id_salt() -> &'static str {
+fn host_id_salt() -> zenkey::OriginSalt {
     zensight_common::PROFILE.salt()
 }
 

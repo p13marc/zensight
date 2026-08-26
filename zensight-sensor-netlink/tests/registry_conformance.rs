@@ -8,32 +8,43 @@ use zensight_sensor_netlink::route_history::RouteHistory;
 
 /// Registered netlink telemetry families this build can never emit, and why.
 ///
-/// The connect-latency percentiles are the workspace's canonical
-/// build-conditional *subjects* — `map::connlat_points` compiles everywhere,
-/// but its only caller is behind `#[cfg(feature = "ebpf")]`, so a default build
-/// has no path that reaches it. Unlike a conditional *procedure*, which can be
-/// declared and answer `error/unsupported`, a gauge with no reading has no
-/// honest wire value: a sentinel corrupts every consumer downstream and
-/// publishing nothing is indistinguishable from a quiet host. So they stay
-/// registered, stay conditional, and are excused here with the gate that
-/// governs them (zenkey RFC 08 §6.1 v1.20, "Conditional surfaces").
+/// The list itself lives in `zensight-common/registry/conditional.lock` — the
+/// RFC 08 §6.1 conditional-subject ledger, which zenkey 0.7 added and which
+/// zenkey-build validates at build time. It used to be a const here, because
+/// the registry TOML has no `feature`/`when` field to say so in the slice
+/// itself; the ledger is that field's stand-in, and it is now the one place
+/// the fact is written.
+///
+/// The connect-latency percentiles are the workspace's only entries and its
+/// canonical build-conditional *subjects*: `map::connlat_points` compiles
+/// everywhere, but its only caller is behind `#[cfg(feature = "ebpf")]`, so a
+/// default build has no path that reaches it. Unlike a conditional
+/// *procedure*, which can be declared and answer `error/unsupported`, a gauge
+/// with no reading has no honest wire value — a sentinel corrupts every
+/// consumer downstream, and publishing nothing is indistinguishable from a
+/// quiet host.
 #[cfg(not(feature = "ebpf"))]
-const CONDITIONAL_FAMILIES: &[(&str, &str)] = &[
-    (
-        "sockets/tcp/connlat_us_p50",
-        "eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)",
-    ),
-    (
-        "sockets/tcp/connlat_us_p95",
-        "eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)",
-    ),
-];
+fn conditional_families() -> Vec<(&'static str, &'static str)> {
+    let ledger = registry_audit::conditional_families("netlink");
+    assert_eq!(
+        ledger.len(),
+        2,
+        "conditional.lock lost netlink's connect-latency entries — a default \
+         build cannot emit them, so dropping the excuse turns the coverage \
+         check into a false failure"
+    );
+    ledger
+}
 
-/// On an `ebpf` build the collector does reach `connlat_points`, so the ledger
-/// is empty — and the audit helper *fails* on a stale excuse, which is what
-/// keeps these two lists from drifting apart.
+/// On an `ebpf` build the collector *does* reach `connlat_points`, so nothing
+/// is excused — and `assert_families_covered`'s "the ledger excuses families
+/// this build DOES emit" check then becomes a positive proof that the
+/// ledger's condition is real: if the gate stopped being what makes the
+/// difference, this build would fail here.
 #[cfg(feature = "ebpf")]
-const CONDITIONAL_FAMILIES: &[(&str, &str)] = &[];
+fn conditional_families() -> Vec<(&'static str, &'static str)> {
+    Vec::new()
+}
 
 #[test]
 fn every_registered_family_has_an_emitter() {
@@ -228,6 +239,6 @@ fn every_registered_family_has_an_emitter() {
         "netlink",
         &emitted,
         |m| Subject::parse_metric(m).map(|s| s.pattern()),
-        CONDITIONAL_FAMILIES,
+        &conditional_families(),
     );
 }

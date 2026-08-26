@@ -178,8 +178,7 @@ impl Collector {
     ) -> Self {
         let registry = AdvancedPublisherRegistry::new(
             session,
-            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "netlink")
-                .telemetry_prefix(),
+            zensight_sensor_core::v1::for_producer("netlink").telemetry_prefix(),
             format,
             AdvancedPublisherConfig::default(),
         );

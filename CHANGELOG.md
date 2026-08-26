@@ -9,6 +9,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Every firing alert re-keys: `alert_key` is now the normative RFC 11 §3.1
+  derivation** (#736, #738). ZenSight had its own recipe with the same hash
+  (FNV-1a-64) and the same 16-lowercase-hex output, but two byte differences
+  from the spec: the framing put `\0` *after* the rule and after each `k=v`
+  rather than `\n` *before* each label with none trailing, and the exclusion
+  matched only the `host.` prefix, so the RFC's own bare `host` label was
+  hashed in. `Alert::alert_key()` is now a thin wrapper over
+  `zenkey::alert::alert_key`, so two independent implementations mint the same
+  key for the same alert. The RFC's test vector — rule `link_down`, labels
+  `{peer: r2, port: eth0, host: h-3fa9c2d41b7e}` → `a659f813308ad1da` — is
+  pinned in `alert.rs`; that same alert used to key as `c25da085d5c5b7e7`.
+
+  **Alerts are LWW state keyed by the thing that changed**, so every alert
+  firing at the moment of the upgrade leaves a permanent phantom at its old key
+  that nothing will ever clear. See [`RELEASING.md`](RELEASING.md), "Re-keying
+  the alert state on upgrade" (#737), for the sweep — it is a
+  GET-then-delete-per-concrete-key enumeration, run **after** every publisher
+  is upgraded, and it is needed only where a Zenoh storage is pointed at
+  `v1/*/state/**`. `just run` and the e2e suites carry no persistent state and
+  need nothing.
+
+  **`host.*` stays excluded, and that is byte-normative, not a deviation.**
+  RFC 11 §3.1 excludes "the label named `host`, *and any label the producer
+  documents as host-scoped*", because only the producer knows its vocabulary.
+  ZenSight's is the `host.` annotation namespace, now declared in code as
+  `zensight_common::alert::{HOST_SCOPED_PREFIX, is_host_scoped}` and in
+  `docs/KEYSPACE.md`. Excluding it is load-bearing: `AlertReporter.active` is
+  keyed by `alert_key()` and the resolve path re-derives it, so an identity
+  refresh between fire and resolve would leave the `Firing` on the old key
+  forever while the `Resolved` and its tombstone landed on a new one — a
+  permanent phantom, with nothing logged.
+  `a_host_annotation_change_does_not_orphan_a_firing_alert` in
+  `zensight-sensor-core/tests/alert_reporter.rs` is that invariant; it fails if
+  the host-scoped vocabulary is ever dropped from the wrapper.
+
+  `Alert::alert_key()` stays **infallible**: it is called from ~35 places, and
+  the errors `zenkey::alert::alert_key` returns are framing-injectivity
+  violations (a `\n` in a rule forges a label) that no ZenSight rule produces.
+  On refusal the offending bytes become `_`, a WARN names the rule, and the
+  normative derivation runs on that — deterministic, so a `Firing` and its
+  `Resolved` still agree.
+
+- **`zenkey` and `zenkey-build` 0.6 → 0.7** (#735). The wire is unchanged —
+  the `identity.rs` golden host-id vector (`h-` + first 12 hex of
+  `sha256(machine_id + salt)`) still passes, so no origin re-keys — but three
+  API surfaces moved, and one of them was silently wrong before.
+  - `V1Context::for_producer` is now `Result<Self, KeyError>`. 0.6 slugged an
+    illegal producer name and, failing that, fell back to the literal
+    `sensor`: a misconfigured producer published its **entire keyspace under a
+    different identity**, with no `Err`, no panic and no log, colliding with
+    every other misconfigured producer in the fleet. ZenSight absorbs the new
+    `Result` **once**, in `zensight_common::v1::for_producer` (re-exported as
+    `zensight_sensor_core::v1::for_producer`), rather than threading `?`
+    through 47 call sites: a ZenSight producer name is a compile-time constant
+    from `zensight-common/registry/`, and a new test asserts every registered
+    name is chunk-legal, so an illegal one now fails `cargo test`. That change
+    found four real cases — the logs and systemd test harnesses were passing
+    `test_<nanos>/logs` as a *producer chunk*, which 0.6 had been quietly
+    renaming into something else.
+  - `V1Context::state_key` / `rpc_key` are now `Result` too, for one reason: a
+    chunk that is literally `alive`, the reserved liveliness leaf (RFC 03 §3).
+    `zensight_common::v1::V1ContextExt::{const_state_key, const_rpc_key}`
+    carries the constant-subject case; the two builders whose chunks really
+    are foreign data — an SNMP device name, a parallax stream name — now
+    *refuse* a device or stream called `alive` and log it, instead of minting
+    a key that collides with that producer's liveliness token.
+  - `AppProfile::new` takes `AppName` / `OriginSalt` newtypes, because
+    `AppProfile::new("zensight-host-id-v1", "zensight")` used to compile and
+    re-key the whole fleet. Both constructors stayed `const fn`, so
+    `zensight_common::PROFILE` is still a plain `static`.
+  - `StructuralKey::producer` became a method (`Position5` now holds
+    producer-or-blob-tier-or-chunk), `ServiceOrigin` is a newtype rather than
+    a `String`, and `SubjectDecl::class` is a typed `Declared<Class>` — the
+    last of which broke `registry_audit.rs` at **compile time** rather than
+    silently returning an empty `Vec`, which was the risk.
+
 - **The Prometheus exporter's scrape port default moves `0.0.0.0:9090` →
   `127.0.0.1:9464`** (#771). 9090 is the Prometheus *server's* own port, and the
   shipped `README.md` told you to scrape `localhost:9090` — i.e. Prometheus
@@ -79,6 +155,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule written against the old `zensight_snmp_if_<n>_<column>` names needs
   updating. `cpu/{index}/…`, `ip/{index}/…` and `storage/{index}/…` have the
   same shape and are deliberately still on the catch-all.
+
+- **Payload conformance verdicts, behind a `validate-json` feature on
+  `zensight-common`** (#741). `SCHEMAS` — the RFC 08 §7 type table every
+  producer serves on `describe` — had never been *used*: nothing validated a
+  payload against it. `zensight_common::schema::verdict_for(type_name, &value)`
+  does, with real draft-2020-12 validation and a compiled-validator cache keyed
+  by schema hash.
+
+  The answer is **three states, never a boolean** — "I did not check" must
+  never render like "I checked and it passed". `NotValidated` says why:
+  `FeatureOff` (built without the feature), `NoSchema` (the table was consulted
+  and serves nothing for this type), `KindUnsupported` (a `protobuf`/`cdr`
+  entry, whose decode *is* the check), `BadSchema`. `NoSchema` and `FeatureOff`
+  are deliberately different answers and neither is `Valid`: one is "asked, and
+  the type has none", the other is "nobody looked".
+
+  The feature is **off by default and nothing turns it on yet.** `jsonschema` is
+  real weight and a sensor has no use for it — a producer validating its own
+  payload against its own derived schema is checking `schemars` against
+  `schemars`. The consumer that has a use is a payload inspector, and **the GUI
+  does not have one**: it decodes bytes into typed structs at `subscription.rs`
+  and drops them, and no view renders a payload body. Building that surface is
+  a feature in its own right rather than an upgrade consequence, so the GUI
+  wiring #741 also asks for is **deferred**, with a note in
+  `zensight-common/src/schema.rs` recording exactly what it needs.
 
 - **`just demo-prometheus` and `just demo-otel`** (#751) — one command each for a
   working dashboard. Until now the exporters had **no run path at all**: zero
@@ -211,6 +312,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construct `Metadata` literally (so its new public `coded` field is
   irrelevant), we never compare an `EncoderStats` (so its lost `Eq` is), and
   `RtspSrc` reconnecting by default is what #731 wants anyway.
+
+- **The conditional-subject ledger is a real file now** (#739). RFC 08 §6.1
+  requires every registered subject to be served by the build that ships it,
+  and the exemption for a genuinely gated subject used to live as a
+  `CONDITIONAL_FAMILIES` const in each sensor's `tests/registry_conformance.rs`
+  — because the registry TOML has no `feature`/`when` field to say so in the
+  slice itself. zenkey-build 0.7 adds that field's stand-in, so the fact now
+  lives in `zensight-common/registry/conditional.lock`, and **zenkey-build
+  fails the build** if a line names no live registry subject — a build error
+  rather than a test failure, firing even for a producer with no conformance
+  test. The ledger is two lines (netlink's eBPF-gated connect-latency
+  percentiles) for the whole workspace, and the file's header explains why that
+  is correct rather than an oversight: a gated *procedure* is declared
+  unconditionally and answers `error/gated` / `error/unsupported`, so it needs
+  no exemption, and netring's detector features widen the value space of
+  `anomaly/{kind}/total` rather than adding subjects. Only a gauge with no
+  honest reading needs excusing.
+- **`deprecated.lock` documents `kind = "procedure"`** (#740). zenkey 0.7 /
+  RFC 08 v1.26 extended `[[deprecated]]` from subjects to procedures, with a
+  three-field ledger line `<kind>\t<producer>\t<path>`. Purely additive:
+  the 18 shipped two-field lines still parse as `kind = subject` and nothing
+  migrated. The ledger's header and `docs/KEYSPACE.md` now record that **kind
+  is part of identity** — retiring a subject never releases a procedure of the
+  same name — which matters concretely, because `parallax` has a `streams`
+  procedure beside stream-shaped subjects and `@catalog` has
+  `names`/`describe`/`introspect` beside `entity`/`alias`.
+
+- **The cross-producer key expressions come from zenkey now, not from string
+  literals** (#742). zenkey 0.7 added `selector::common_family(scope, family)`
+  — the `*`-producer complement to the generated per-producer
+  `Family::selector(scope)` — which retires the hand-spelled
+  `all_health_wildcard`, `all_alerts_wildcard`, `all_name_evidence_wildcard`
+  and the tail of `origin_alerts_wildcard`. The bytes are unchanged and a test
+  pins that. Every expression still hand-spelled in `keyexpr.rs` now carries a
+  rationale written **against 0.7** rather than against the version that first
+  justified it — a stale rationale is worse than none — and
+  `zensight-common/docs/keyspace-helpers.md` carries the same table. The
+  focus-mode builders' `format!` fallback arms are a silent-routing hazard (a
+  narrowing of `RemoteOrigin::parse` would quietly send every focus-mode
+  subscription down the string path), so a new test pins that the typed and
+  hand-spelled arms agree for a legal origin.
+- **A non-ULID event id is now a publish error** (#742). RFC 04 §1.3 requires
+  the trailing chunk of `events/<producer>/<subject…>/<id>` to be a
+  time-sortable ULID, key-encoded lowercase, and that is the events class's
+  only ordering guarantee. A non-ULID id can still be a perfectly legal
+  *chunk*, so it used to mint a key the grammar accepts and the guarantee
+  silently does not hold for. `EventPublisher` routes the id through zenkey
+  0.7's `slug::ulid_slug`, so a producer bug surfaces as an error naming the
+  RFC. Uppercase ULIDs (the `ulid` crate's own rendering) are key-encoded, not
+  refused.
+
+- **`zenoh` and `zenoh-ext` 1.9 → 1.10, workspace-wide** (#734). 17 crates take
+  `zenoh`, four take `zenoh-ext`; 27 lockfile packages moved together. **The
+  wire is compatible in both directions** — `zenoh-protocol`'s `VERSION` stays
+  `0x09`, so a 1.9 sensor and a 1.10 frontend (or the reverse) open a session
+  and exchange data normally, and a fleet may be rolled forward node by node.
+  The two wire-format changes 1.10 makes are both to *non-mandatory*
+  extensions, which a peer that does not recognise them skips rather than
+  rejecting: the new timestamp-instrumentation stack (`0x7`, off by default)
+  and the SHM handshake probe, which moved from a `Z64` to a `ZBuf` encoding
+  (`shared-memory` is not enabled in this workspace, so it does not arise
+  here — a mixed-version fleet that *does* enable SHM loses the SHM
+  optimisation across a version boundary, not the session).
+  No ZenSight source changed: all nine zenoh config-key paths
+  `zensight-common/src/session.rs` writes still exist under the same names
+  (`mode`, `namespace`, `connect/endpoints`, `listen/endpoints`,
+  `timestamping/enabled`, `scouting/{multicast,gossip}/enabled`, and the three
+  `transport/link/tls/*` keys), `timestamping/enabled` still defaults to
+  router-only (`{router: true, peer: false, client: false}`) so the
+  unconditional insert stays load-bearing for every peer-mode sensor, and both
+  scouting switches still default *on*, which is what the unset case relies on.
+  In `zenoh-ext`, `RecoveryConfig` gained a `retention_period` (default 1h) for
+  publisher last-sample state and `CacheConfig::max_samples` became
+  `NonZeroUsize`-checked — every call site here passes `1`, so the new
+  zero-is-an-error path is unreachable. `just router-verify` /
+  `just router-plugins` now pin `zenohd` and its plugins at 1.10.0: a
+  version-mismatched storage plugin loads, logs one line and serves no storage.
 
 - **parallax-pipeline 0.6.0 → 0.7.0** (#689). 175 upstream commits, and the
   `h264` GUI feature did not compile against it at all: `H264Decoder::decode`

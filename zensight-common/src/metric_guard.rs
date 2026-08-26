@@ -49,7 +49,7 @@ pub fn check_telemetry_key(key: &str) {
     if !matches!(parsed.class, ClassOrPlane::Class(Class::Telemetry)) {
         return;
     }
-    let Some(producer) = parsed.producer.as_ref() else {
+    let Some(producer) = parsed.producer() else {
         return;
     };
     let tail: &[&str] = &parsed.subject;

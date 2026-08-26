@@ -151,7 +151,7 @@ impl RigBuilder {
             .unwrap()
             .as_nanos();
         // Unique producer prefix so parallel rigs don't share keys on one origin.
-        let producer = format!("test_{nanos}/logs");
+        let producer = format!("test-{nanos}-logs");
         let filter = Arc::new(FilterManager::pass_all());
         let (ring, capacity) = query::new_ring(10_000);
 
