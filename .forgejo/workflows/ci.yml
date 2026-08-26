@@ -66,6 +66,43 @@ jobs:
       # the sensor costs minutes for no extra signal.
       - run: PROFILE=debug scripts/demo-verify.sh
 
+  # Nothing in CI had ever asked a running FLEET whether it obeys its own
+  # contract.
+  #
+  # `cargo test --workspace` proves the code agrees with itself, and
+  # demo-smoke proves the exporter path carries data. Neither can say whether
+  # what a running sensor PUTS ON THE WIRE agrees with the keyspace-v2 RFCs and
+  # with the registry TOMLs that same binary serves on `@rpc/…/introspect`:
+  # the served-vs-declared slice diff, `alive => callable` (RFC 04 §5), schema
+  # drift, declared-vs-observed QoS, freshness against declared ttl_s,
+  # cardinality budgets. Those are properties of a deployment, and only a
+  # deployment can be asked.
+  #
+  # This asks: one real sensor, the real registry, the real judges
+  # (zenkey-fleet's `run_doctor` — the same entry point `zenctl doctor` calls),
+  # on an isolated port with no containers and no privileges.
+  #
+  # What it gates on, and the one check it excludes (upstream zenkey#384 — the
+  # schema-drift walker does not descend `oneOf`, so every adjacently-tagged
+  # TelemetryValue reports two phantom `field-new` warnings), is documented in
+  # zensight-conformance/README.md. The exclusion is in code, named, and lifts
+  # when #384 lands.
+  #
+  # Debug profile and a 12s listen window: this asserts behaviour, not speed,
+  # and the runner has two build lanes.
+  conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: conformance
+          cache-targets: false
+      - run: PROFILE=debug scripts/conformance-verify.sh
+
   # Optional features gate real code that a default build never type-checks:
   # `#[cfg(feature = ...)]` blocks in `main.rs`/`query.rs` and, in netring's
   # case, whole detector modules. #485 shipped `h264` broken for a week under

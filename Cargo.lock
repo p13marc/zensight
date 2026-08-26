@@ -13127,6 +13127,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenkey-fleet"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55a60f60db6c3d698b1773eea8ac61c03e45eb790d5e842028cc2f01e536af6b"
+dependencies = [
+ "arc-swap",
+ "base64 0.23.1",
+ "ciborium",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "zenkey",
+ "zenoh",
+ "zenoh-ext",
+]
+
+[[package]]
 name = "zeno"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13726,6 +13745,18 @@ dependencies = [
  "zenkey-build",
  "zenoh",
  "zenoh-ext",
+]
+
+[[package]]
+name = "zensight-conformance"
+version = "0.10.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zenkey-fleet",
 ]
 
 [[package]]

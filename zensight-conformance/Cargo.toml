@@ -1,0 +1,23 @@
+[package]
+name = "zensight-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Runs zenkey-fleet's RFC conformance judges against a live ZenSight deployment, and turns the report into an exit code"
+# Never published: this is a CI harness, and it is the one crate in the
+# workspace allowed to link `zenkey-fleet` (see README.md — "The boundary").
+publish = false
+
+[[bin]]
+name = "zensight-conformance"
+path = "src/main.rs"
+
+[dependencies]
+zenkey-fleet = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
