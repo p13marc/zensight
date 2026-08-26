@@ -9,6 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **No queryable reply carried an HLC timestamp, so no state-class seed could
+  be LWW-ordered** (#782). Zenoh's session HLC stamps a `put`. It does **not**
+  stamp a queryable *reply*. `zensight-common/src/session.rs` forces
+  `timestamping/enabled = true` on every session and a test pins it, so the
+  reflex reading — "some path missed the setting" — was wrong; the setting was
+  never the mechanism.
+
+  RFC 04 §3.2 makes a producer answering a plain GET on a state selector a
+  *storage* for the duration of that reply — the reply-key discipline is
+  storage-shaped on purpose, so seeding works with or without a real one — and
+  closes with the corollary that **an untimestamped sample cannot be
+  reconciled**. Every seeded state sample this workspace ever served was
+  therefore unorderable against its own successors, silently, because nothing
+  in the tree reads `Sample::timestamp()`.
+
+  It was not silent to `zenctl doctor --deep`, which reported `unstamped-state`
+  at warning severity. The originally-reported instance was the correlator's
+  entity seed, which is why `scripts/conformance-verify.sh` held the correlator
+  back behind `CORRELATOR=1`. Chasing it found a **second, worse** one: the
+  firing-alert seed in `zensight-sensor-core` has the identical defect and *is*
+  in the default CI deployment. It only looked clean because a sensor that
+  raises no alert inside the listen window replies zero samples — on a host with
+  two disks over 90 % full it replies two, and the `conformance` job goes red.
+  The gate was a coin flip on the runner's free space rather than on the branch
+  under test.
+
+  **The rule, and it is the deliverable rather than the patch:** *a queryable
+  reply whose key is in the `state` class MUST carry a timestamp; a reply on an
+  `@rpc` key MUST NOT.* An `@rpc` reply is a computed answer to a parameterised
+  question, never the value at a key — no storage selector reaches it, nothing
+  merges it into an LWW store, and stamping it would assert a reconcilability
+  that does not exist. Only **two** of the ~35 `query.reply` sites in the
+  workspace are state-class; the other 33 are unchanged, which is the point of
+  stating a rule instead of shipping a list.
+
+  Enforced as a type, not a convention. `served::serve_state_queryable` returns
+  a `StateQueryable` whose `StateQuery` exposes **no** `reply()` — only
+  `reply_state`, which takes a stamp — so an unstamped state seed is not
+  something a caller can write through the seam. `serve_queryable` debug-panics
+  (release-warns) on a state selector, the same policy as
+  `check_registry_coverage`, so a producer's own tests fail on it; a CI grep
+  tripwire covers the case that runs no test.
+
+  The stamp is `seed_stamp(&session)` — the session HLC, **taken inside the same
+  critical section as the snapshot it describes**. Stamping per reply instead is
+  a resurrection bug: a seed loop snapshots and *then* replies, so a value
+  updated mid-loop has its live `put` stamped `T` while the loop replies the
+  stale snapshot value stamped `T' > T`, and LWW keeps the stale one.
+  `a_seed_batch_never_out_stamps_a_later_put` is that invariant in its
+  observable form. Deliberately **not** the payload's own write time:
+  `HostEntity.last_updated` is wall-clock epoch millis, minting a `Timestamp`
+  from it under the session's own id forges HLC state for that id, and it would
+  turn `unstamped-state` (warning) into `stale-state` (**error**) for any
+  entity older than its `ttl_s`.
+
+  Costs nothing at the manifest: `.timestamp()` is `TimestampBuilderTrait`,
+  which zenoh marks `#[zenoh_macros::internal_trait]` — a macro whose documented
+  job is to *also* emit an inherent method — so neither the import nor zenoh's
+  `internal` cargo feature is needed. `state_reply_builder_still_takes_a_timestamp`
+  is a compile-level pin on that shim, so a future zenoh upgrade that drops it
+  becomes a named build failure rather than a silent return to unstamped seeds.
+
+  **The correlator now runs in the default conformance deployment.** Both
+  `scripts/conformance-verify.sh` and `zensight-conformance/README.md` promised
+  that would happen "the day the correlator stamps its seed replies", with no
+  change to the gate — `unstamped-state` was never in `DEFAULT_EXCLUDED`, so
+  nothing needed un-excluding. It also buys real coverage: `@catalog` is a
+  *service* origin whose verbatim `@` chunk is a structurally different
+  introspect key (RFC 08 §6, property D4), so running both halves covers both
+  halves of the slice diff.
+
+  Wire-observable on the seed path, and nothing else: the payloads are
+  byte-identical, no schema moves, no key moves, no registry entry changes
+  (`catalog.toml` and `sysinfo.toml` already declare these families as
+  `class = "state"` with a `ttl_s`, which is *why* the stamp is a MUST — the
+  code caught up with the registry, not the other way round). All three in-tree
+  consumers ignore `Sample::timestamp()` today, so nothing in ZenSight changes
+  behaviour. An external consumer that implemented §3.2's merge honestly, and
+  therefore had to special-case the unstamped seed, will now see it participate
+  properly. No re-keying, no phantom state, no operator sweep.
+
 - **The verify scripts blamed Zenoh discovery when a binary was simply missing**
   (#790). `BIN="${BINDIR:-target/${PROFILE}}"` is repo-relative, so anyone with
   `CARGO_TARGET_DIR` set — a shared build dir, a worktree that builds elsewhere,

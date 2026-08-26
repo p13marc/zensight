@@ -245,6 +245,32 @@ jobs:
             exit 1
           fi
 
+      # #782: a state-class seed's replies must be stamped.
+      - name: state-class seeds are served through the stamping seam (#782)
+        run: |
+          # A queryable on a STATE selector answers RFC 04 §3.2's plain-GET
+          # seed path storage-shaped, and a storage's samples are timestamped —
+          # "an untimestamped sample cannot be reconciled". Zenoh's session HLC
+          # stamps a `put` and does NOT stamp a queryable reply, so the seed
+          # path needs `served::serve_state_queryable`, whose `StateQuery`
+          # exposes no unstamped `reply()` at all.
+          #
+          # The real check is structural: `serve_queryable` debug-panics on a
+          # state selector, so a producer's own test suite fails. This step is
+          # the tripwire for the case that never runs a test — matched on the
+          # key-builder names the two seed call sites actually use. A grep
+          # cannot classify a key; it can only notice the shapes we know about.
+          hits=$(grep -rnE 'serve_queryable\([^)]*(entities_query_key|state_key)' \
+            zensight-common/src zensight-correlator/src \
+            zensight-sensor-core/src zensight-sensor-*/src \
+            --include='*.rs' \
+            | grep -vE 'served\.rs|/tests/|mod tests' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::A state-class queryable declared through the unstamped seam — use served::serve_state_queryable, whose replies carry the seed's HLC stamp (RFC 04 §3.2, #782):"
+            echo "$hits"
+            exit 1
+          fi
+
       # #466: keys are base-relative; the deployment base is never spelled.
       - name: application code never spells the deployment base (#466)
         run: |

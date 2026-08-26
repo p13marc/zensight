@@ -343,7 +343,8 @@ pub async fn serve_alerts_query(reporter: std::sync::Arc<AlertReporter>) {
         "{}/*",
         reporter.publisher().v1().const_state_key(&["alert"])
     );
-    let queryable = match zensight_common::served::serve_queryable(&session, &selector).await {
+    let queryable = match zensight_common::served::serve_state_queryable(&session, &selector).await
+    {
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %selector, "failed to declare alert seed queryable");
@@ -352,14 +353,23 @@ pub async fn serve_alerts_query(reporter: std::sync::Arc<AlertReporter>) {
     };
     tracing::info!(key = %selector, "alert state seed ready");
     while let Ok(query) = queryable.recv_async().await {
-        let firing = reporter.firing_alerts();
+        // The stamp is taken WITH the snapshot, not per reply (#782). Stamping
+        // each reply as it goes out would let an alert that fires mid-loop have
+        // its live `put` stamped earlier than this loop's stale copy of the
+        // same key, and LWW would keep the stale one. Drawn from the same
+        // session as every alert `put`, so the two are totally ordered.
+        let (firing, stamp) = (
+            reporter.firing_alerts(),
+            zensight_common::served::seed_stamp(&session),
+        );
         for alert in firing {
             let key = reporter.alert_key_expr(&alert.alert_key());
             match serde_json::to_vec(&alert) {
                 Ok(payload) => {
                     // One reply per firing alert on its concrete state key —
-                    // storage-shaped (RFC 05 §2.1 reply-key discipline).
-                    if let Err(e) = query.reply(key, payload).await {
+                    // storage-shaped (RFC 05 §2.1 reply-key discipline), and
+                    // stamped, because a storage's samples are (RFC 04 §3.2).
+                    if let Err(e) = query.reply_state(&key, payload, stamp).await {
                         tracing::warn!(error = %e, "failed to reply alert seed");
                     }
                 }

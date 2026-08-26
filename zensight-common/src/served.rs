@@ -70,9 +70,163 @@ pub async fn serve_queryable(
     key: &str,
 ) -> zenoh::Result<zenoh::query::Queryable<zenoh::handlers::FifoChannelHandler<zenoh::query::Query>>>
 {
+    // #782: a state-class selector is a *seed*, and its replies must be
+    // stamped. This seam cannot stamp them — it hands out a bare `Query` whose
+    // `reply()` carries no timestamp — so route those through
+    // `serve_state_queryable`, which can and which has no unstamped reply path
+    // to reach for.
+    //
+    // Debug-panics and release-warns, the same policy as
+    // `check_registry_coverage` below and for the same reason: a sensor's own
+    // tests should fail on it, and a running fleet is better served by a noisy
+    // producer than a dead one.
+    if crate::keyexpr::is_state_key(key) {
+        debug_assert!(
+            false,
+            "state-class queryable {key} declared through serve_queryable — its replies seed \
+             the LWW plane and MUST carry an HLC timestamp (RFC 04 §3.2, #782). Use \
+             served::serve_state_queryable."
+        );
+        tracing::warn!(
+            key = %key,
+            "state-class queryable declared through the unstamped seam; its seed replies \
+             cannot be LWW-ordered against live samples (RFC 04 §3.2, #782)"
+        );
+    }
     let queryable = session.declare_queryable(key).await?;
     note_served(key);
     Ok(queryable)
+}
+
+/// A queryable on a **state-class** selector, whose replies are stamped (#782).
+///
+/// # Why this is a separate type
+///
+/// RFC 04 §3.2 makes a producer answering a plain GET on a state selector a
+/// *storage* for the duration of that reply — the reply-key discipline is
+/// storage-shaped on purpose, so seeding works with or without a real one. And
+/// §3.2 closes with the corollary: *"state publishers and storages MUST run
+/// timestamped — an untimestamped sample cannot be reconciled."*
+///
+/// Zenoh's session HLC stamps a `put`. **It does not stamp a queryable reply.**
+/// So for as long as the seed path went through the ordinary
+/// [`serve_queryable`] seam, every seeded state sample arrived with no
+/// timestamp: a consumer could not LWW-order it against a live sample, and
+/// `zenctl doctor --deep` reported `unstamped-state` against the deployment.
+///
+/// The fix is a type rather than a convention. [`StateQuery`] exposes **no**
+/// `reply()` — only [`StateQuery::reply_state`], which takes a stamp — so an
+/// unstamped state seed is not something a caller can write through this seam.
+/// A convention would have been a comment, and the comment would have been
+/// obeyed until the next call site.
+///
+/// `@rpc` replies keep the ordinary seam, deliberately. They are computed
+/// answers to parameterised questions, never the value at a key; no storage
+/// selector reaches them and nothing merges them into an LWW store. Stamping
+/// them would invite a consumer to cache them as state.
+pub struct StateQueryable {
+    inner: zenoh::query::Queryable<zenoh::handlers::FifoChannelHandler<zenoh::query::Query>>,
+    key: String,
+}
+
+/// One GET against a state-class selector. See [`StateQueryable`].
+pub struct StateQuery(zenoh::query::Query);
+
+/// Declare a state-class seed queryable, recorded as served like any other.
+///
+/// Refuses a non-state selector: this seam stamps, and stamping an `@rpc`
+/// reply is as wrong as not stamping a state one.
+pub async fn serve_state_queryable(
+    session: &zenoh::Session,
+    selector: &str,
+) -> zenoh::Result<StateQueryable> {
+    debug_assert!(
+        crate::keyexpr::is_state_key(selector),
+        "serve_state_queryable called with a non-state selector {selector} — an @rpc reply is \
+         a computed answer, not the value at a key, and must NOT be stamped (#782)"
+    );
+    let inner = session.declare_queryable(selector).await?;
+    note_served(selector);
+    Ok(StateQueryable {
+        inner,
+        key: selector.to_string(),
+    })
+}
+
+/// The HLC stamp for one seed batch.
+///
+/// **Take this inside the same critical section as the snapshot it describes.**
+/// Stamping at reply time instead is a resurrection bug: a seed loop snapshots
+/// and *then* replies, so a value updated mid-loop has its live `put` stamped
+/// `T` while the loop replies the stale snapshot value stamped `T' > T`, and
+/// LWW picks the stale one. Taking the stamp with the snapshot closes that
+/// window — every mutation not visible in the snapshot is `put` strictly later
+/// and correctly wins.
+///
+/// Total by construction: with timestamping off, zenoh falls back to wall clock
+/// plus the session's zid, so a seed reply is stamped unconditionally — a
+/// stronger guarantee than `put` gives. (ZenSight forces timestamping on in
+/// [`crate::session`] anyway.)
+pub fn seed_stamp(session: &zenoh::Session) -> zenoh::time::Timestamp {
+    session.new_timestamp()
+}
+
+impl StateQueryable {
+    /// The selector this queryable answers.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Await the next GET. `Err` when the session has closed.
+    pub async fn recv_async(&self) -> zenoh::Result<StateQuery> {
+        self.inner.recv_async().await.map(StateQuery)
+    }
+
+    /// Stop answering.
+    pub async fn undeclare(self) -> zenoh::Result<()> {
+        self.inner.undeclare().await
+    }
+}
+
+impl StateQuery {
+    /// The selector's parameters, for a seed that takes one.
+    pub fn parameters(&self) -> &zenoh::query::Parameters<'static> {
+        self.0.parameters()
+    }
+
+    /// The key expression this GET asked for.
+    pub fn key_expr(&self) -> &zenoh::key_expr::KeyExpr<'static> {
+        self.0.key_expr()
+    }
+
+    /// Reply with one state document on its concrete key, stamped.
+    ///
+    /// `stamp` comes from [`seed_stamp`] and is shared by every reply in one
+    /// batch — see that function for why it must be taken with the snapshot.
+    pub async fn reply_state(
+        &self,
+        key: &str,
+        payload: impl Into<zenoh::bytes::ZBytes>,
+        stamp: zenoh::time::Timestamp,
+    ) -> zenoh::Result<()> {
+        debug_assert!(
+            crate::keyexpr::is_state_key(key),
+            "reply_state called with a non-state reply key {key} (#782)"
+        );
+        // `.timestamp()` is `TimestampBuilderTrait`, which zenoh marks
+        // `#[zenoh_macros::internal_trait]` — a macro whose documented purpose
+        // is to ALSO emit an inherent method, so no import and no `internal`
+        // cargo feature is needed. `state_reply_builder_still_takes_a_timestamp`
+        // below is the compile-level pin: if upstream ever drops that shim,
+        // this turns into a named build failure rather than silently losing
+        // the stamp again.
+        self.0.reply(key, payload).timestamp(Some(stamp)).await
+    }
+
+    /// Refuse the GET.
+    pub async fn reply_err(&self, payload: impl Into<zenoh::bytes::ZBytes>) -> zenoh::Result<()> {
+        self.0.reply_err(payload).await
+    }
 }
 
 /// Declare `keys` and answer `err` on every call, until the session closes.
@@ -251,6 +405,64 @@ pub async fn await_registry_coverage(producer: &str, grace: std::time::Duration)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The state/`@rpc` split this module's stamping rule turns on (#782).
+    ///
+    /// Not a test of `is_state_key` — that lives in `keyexpr` — but of the
+    /// *classification* the two seams disagree on, spelled with the real key
+    /// shapes both call sites produce. If either of these flips, one seam
+    /// starts refusing what the other requires.
+    #[test]
+    fn the_two_seed_selectors_are_state_and_every_rpc_key_is_not() {
+        // The two state-class seeds, and the only two in the workspace.
+        assert!(crate::keyexpr::is_state_key(
+            "v1/@catalog/state/entity/h-0123456789ab"
+        ));
+        assert!(crate::keyexpr::is_state_key(
+            "v1/h-0123456789ab/state/sysinfo/alert/a659f813308ad1da"
+        ));
+        // The service origin matters: an origin gate would exempt @catalog,
+        // which is the family that found this bug.
+        assert!(crate::keyexpr::is_state_key(
+            "v1/@catalog/state/alias/h-dead"
+        ));
+
+        // Everything else replies on @rpc, and must NOT be stamped.
+        for rpc in [
+            "v1/h-0123456789ab/@rpc/netring/flows",
+            "v1/h-0123456789ab/@rpc/sysinfo/processes",
+            "v1/@catalog/@rpc/catalog/names",
+            "v1/h-0123456789ab/@rpc/parallax/stream/set",
+        ] {
+            assert!(
+                !crate::keyexpr::is_state_key(rpc),
+                "{rpc} must not be state"
+            );
+        }
+    }
+
+    /// A compile-level pin on the one upstream detail `reply_state` leans on.
+    ///
+    /// `ReplyBuilder`'s `.timestamp()` comes from `TimestampBuilderTrait`,
+    /// which zenoh annotates `#[zenoh_macros::internal_trait]` — a macro whose
+    /// documented job is to *also* emit an inherent method, so we need neither
+    /// the import nor zenoh's `internal` cargo feature. That is a convenience
+    /// shim, not a stability promise: if a zenoh upgrade drops it, we want a
+    /// named build failure here rather than a silent return to unstamped
+    /// seeds, which is the exact state #782 exists to leave behind.
+    ///
+    /// (This is a *compile* assertion. It never runs the closure — building
+    /// a real `Query` needs a session and a live GET, which the e2e tests do.)
+    #[test]
+    fn state_reply_builder_still_takes_a_timestamp() {
+        #[allow(dead_code)]
+        async fn pin(query: &zenoh::query::Query, stamp: zenoh::time::Timestamp) {
+            let _ = query
+                .reply("v1/@catalog/state/entity/x", Vec::<u8>::new())
+                .timestamp(Some(stamp))
+                .await;
+        }
+    }
 
     /// A procedure is "served" under its serve-side spelling — `{var}` chunks
     /// widened to `*`, which is what a producer actually declares.

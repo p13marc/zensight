@@ -162,32 +162,40 @@ change, `--strict-window` included.
 
 ## Known findings
 
-Things a real run reports today that are **not** excluded, and are not fixed
-here because they are not #744:
+**None.** The one that lived here — `unstamped-state` from the correlator's
+entity seed — was fixed by **#782**, and the fix was broader than the finding.
 
-* **The correlator's entities seed queryable replies untimestamped**, which the
-  deep freshness check reports as
-  `[warn] unstamped-state · fleet: 1 state sample(s) carry no HLC timestamp`.
-  `zensight-correlator/src/query.rs::serve_entities` answers
-  `v1/@catalog/state/entity/*` storage-shaped (RFC 05 §4, one reply per entity
-  on its concrete key) with a bare `query.reply(key, payload)`. Session HLC
-  timestamping applies to `put`, not to a queryable reply, so a consumer seeding
-  from the catalog cannot LWW-order the seed against a live sample (RFC 04 §4).
-  It needs its own issue, and a decision this crate should not make: reply with
-  the session HLC at reply time, or carry the entity's own write timestamp.
+Zenoh's session HLC stamps a `put`; it does **not** stamp a queryable reply. So
+*every* state-class seed in the workspace answered unstamped, not just the
+correlator's: `zensight-sensor-core`'s firing-alert seed had the identical
+defect and was invisible here only because a sensor that raises no alert inside
+the listen window replies zero samples. On a host with two disks over 90 % full
+it reported exactly two, which made this gate a coin flip on the runner's free
+space rather than on the branch under test.
 
-  Because of it, `scripts/conformance-verify.sh` runs the correlator only under
-  `CORRELATOR=1`, which is how you reproduce the finding. It is **not** excluded
-  from the gate, so the day the correlator stamps its seed replies the
-  correlator joins the CI deployment with no change to the gate.
+Both now go through `zensight_common::served::serve_state_queryable`, whose
+`StateQuery` exposes no unstamped `reply()` at all — the rule is a type, not a
+convention. `@rpc` replies keep the ordinary seam, deliberately: they are
+computed answers to questions, never the value at a key.
+
+Which is why `CORRELATOR=1` is no longer needed:
+`scripts/conformance-verify.sh` runs the correlator **by default**, exactly as
+the previous version of this section promised it would *"the day the correlator
+stamps its seed replies"* — and with no change to the gate, since
+`unstamped-state` was never excluded.
 
 ## Adding to the deployment
 
-`scripts/conformance-verify.sh` takes `SENSORS="sysinfo logs …"` and
-`CORRELATOR=1`. The first sensor listed becomes the rendezvous (the same trick
-demo-verify.sh plays with the exporter — no router, no container, no
-privileges); everything else dials it, multicast off on both sides, on port
-`17447` and never `7447`.
+`scripts/conformance-verify.sh` takes `SENSORS="sysinfo logs …"`, and
+`CORRELATOR=0` to leave the catalog out (it is **on** by default since #782).
+The first sensor listed becomes the rendezvous (the same trick demo-verify.sh
+plays with the exporter — no router, no container, no privileges); everything
+else dials it, multicast off on both sides, on port `17447` and never `7447`.
+
+The correlator earns its default place beyond having stopped failing:
+`@catalog` is a **service** origin, whose verbatim `@` chunk makes it a
+structurally different introspect key (RFC 08 §6, property D4), so running both
+covers both halves of the slice diff.
 
 Keep the CI deployment bounded: the runner has two build lanes, and every
 producer added is a build plus a share of the listen window.

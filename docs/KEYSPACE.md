@@ -51,7 +51,13 @@ zensight/v1/@catalog/…                                   the identity catalog
   [05](https://github.com/p13marc/zenkey/blob/main/rfcs/05-control-rpc.md)). Fleet callers select
   `zensight/v1/*/@rpc/…` with query target `All`.
 - Late joiners seed with a plain GET on the same state selectors (state is
-  its own seed; storage-shaped queryables answer one reply per concrete key).
+  its own seed; storage-shaped queryables answer one reply per concrete key,
+  **stamped from the producer's session HLC** — a producer answering that GET
+  is a storage for the duration of the reply, and a consumer merges the seed
+  with live samples by timestamp, so an unstamped seed cannot be reconciled
+  (RFC 04 §3.2, #782). Serve one through
+  `zensight_common::served::serve_state_queryable`; an `@rpc` reply is a
+  computed answer, not the value at a key, and is deliberately *not* stamped).
 - The `events` class is instantiated (#534): append-only records ride
   `v1/<origin>/events/<producer>/<subject...>/<id>` where `<id>` is the
   record's lowercase ULID — one key per record, nothing overwrites. The

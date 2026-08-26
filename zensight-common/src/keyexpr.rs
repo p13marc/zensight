@@ -97,6 +97,24 @@ pub fn is_telemetry_key(key: &str) -> bool {
     })
 }
 
+/// Whether a base-relative key is in the **state** class (RFC 04 §3).
+///
+/// Unlike [`is_telemetry_key`] this does *not* pin the origin to a host: the
+/// correlator's entity documents live on the `@catalog` **service** origin and
+/// are state, so an origin gate here would exempt exactly the family that
+/// found the bug this exists for (#782).
+///
+/// The rule it enforces lives in [`crate::served::serve_state_queryable`]: a
+/// queryable reply on a state key **must** carry an HLC timestamp, because a
+/// consumer merges seed replies with live samples by that timestamp (RFC 04
+/// §3.2), and an untimestamped sample cannot be reconciled. A reply on an
+/// `@rpc` key must not — it is a computed answer to a question, never the value
+/// at a key, and stamping it would assert a reconcilability that does not
+/// exist.
+pub fn is_state_key(key: &str) -> bool {
+    parse_key(key).is_some_and(|k| matches!(k.class, ClassOrPlane::Class(Class::State)))
+}
+
 /// Validate a **config-supplied** key expression.
 ///
 /// Config selectors are base-relative like everything else (#466): the session
