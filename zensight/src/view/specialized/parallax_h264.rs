@@ -156,7 +156,7 @@ mod real {
                 return Ok(None);
             };
             // Geometry travels on the buffer now: `DecodedFrame` is
-            // crate-internal in 0.7, and the legacy `"width"`/`"height"`
+            // crate-internal in 0.8, and the legacy `"width"`/`"height"`
             // metadata keys carry nothing (#160).
             let (w, h) = out
                 .metadata()
@@ -174,7 +174,7 @@ mod real {
             }
             let (_, _, conv) = self.converter.as_ref().expect("converter just cached");
             let mut rgba = vec![0u8; (w * h * 4) as usize];
-            // 0.7 takes the input plane layout so a strided frame needs no
+            // 0.8 takes the input plane layout so a strided frame needs no
             // repack (#196); the decoder hands back packed I420.
             conv.convert(out.as_bytes(), conv.packed_input_layout(), &mut rgba)
                 .map_err(|e| e.to_string())?;

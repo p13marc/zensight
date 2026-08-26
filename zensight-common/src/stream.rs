@@ -103,6 +103,29 @@ pub enum StreamControl {
 /// telemetry envelope (`TelemetryPoint`/`Format` never appear on `@media`),
 /// just a small struct serialized compactly. `None` timing fields are omitted
 /// on the wire (the encoder had no clock for them).
+///
+/// # Two types, one corpus (#711, #728)
+///
+/// `parallax::wire::FrameMeta` is a byte-compatible twin of this struct, and
+/// that is deliberate: neither crate can import the other's. Depending on
+/// `parallax-pipeline` here would drag the whole video engine into every sensor
+/// that links `zensight-common`, most of which never touch video; the reverse
+/// would drag Zenoh into parallax. What binds them instead is a **conformance
+/// corpus** of canonical CBOR vectors, checked into both repos and pinned by a
+/// test on both sides — ours is `tests/framemeta_corpus.rs`.
+///
+/// Two rules in that corpus are wire shape, not style, and "tidying" either one
+/// breaks the twin:
+///
+/// - the `skip_serializing_if` attributes below mean an absent timestamp is
+///   **missing from the CBOR map**, not present-and-null — a consumer reading
+///   the map sees the difference;
+/// - `dts_ns` is omitted when it *equals* `pts_ns` (the field is "if distinct",
+///   below). That elision belongs to the **producer**; see
+///   `zensight-sensor-parallax`'s `metadata_to_frame_meta`.
+///
+/// Field order is also pinned, since serde emits struct fields in declaration
+/// order and the corpus is compared byte for byte.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
 )]

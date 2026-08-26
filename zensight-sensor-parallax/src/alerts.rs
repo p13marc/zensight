@@ -56,7 +56,16 @@ impl ParallaxAlerts {
         self.set(RULE_CAMERA, stream, alert, !present).await;
     }
 
-    /// An RTSP open failed (fires) or later succeeded (resolves).
+    /// An RTSP camera is unreachable (fires) or is reachable again (resolves).
+    ///
+    /// Two callers, one meaning — *this camera is not delivering*:
+    ///
+    /// - the initial `connect()` failed, so the stream never opened;
+    /// - a stream that had opened dropped and the source's reconnect ladder ran
+    ///   out (#731). Since parallax 0.8 the RTSP source retries a dropped
+    ///   stream itself, with exponential backoff and jitter, so a single drop
+    ///   no longer reaches here — only a *sustained* one does, which is what
+    ///   this rule was always named for.
     pub async fn rtsp_connect(&self, stream: &str, error: Option<&str>) {
         let summary = match error {
             Some(e) => format!("rtsp connect for stream {stream} failed: {e}"),
@@ -75,23 +84,44 @@ impl ParallaxAlerts {
     }
 
     /// Encoder overrun evaluation for one stream (called by the stats ticker
-    /// each interval with the current average encode time and budget).
+    /// each interval).
+    ///
+    /// **Judged on the tail, not the mean** (#729). Overrun is a tail
+    /// phenomenon — a stream whose *average* frame fits the budget while its
+    /// p95 does not is precisely the one that stutters — and "overrun" is what
+    /// this rule is named for. `p95_ms` is `None` for a path with no
+    /// `EncoderStatsHandle` to ask (the JPEG previews, which `TimedElement`
+    /// times but parallax does not histogram); there the interval mean is the
+    /// only figure there is and the caller judges on it instead.
+    ///
+    /// The histogram behind `p95_ms` is all-time for the encoder incarnation,
+    /// so the rule clears more slowly than a windowed one would: a bad patch
+    /// stays in the distribution until later frames dilute it, or until the
+    /// tier is torn down and rebuilt.
     pub async fn encoder_overrun(
         &self,
         stream: &str,
-        encode_ms: f64,
+        p95_ms: Option<f64>,
+        mean_ms: f64,
         budget_ms: f64,
         firing: bool,
     ) {
+        let summary = match p95_ms {
+            Some(p95) => format!(
+                "stream {stream}: p95 encode {p95:.1} ms/frame exceeds the \
+                 {budget_ms:.1} ms budget (interval mean {mean_ms:.1} ms)"
+            ),
+            None => format!(
+                "stream {stream}: encoding {mean_ms:.1} ms/frame exceeds the {budget_ms:.1} ms budget"
+            ),
+        };
         let alert = Alert::new(
             &self.source,
             Protocol::Parallax,
             AlertKind::SensorHealth,
             RULE_OVERRUN,
             AlertSeverity::Warning,
-            format!(
-                "stream {stream}: encoding {encode_ms:.1} ms/frame exceeds the {budget_ms:.1} ms budget"
-            ),
+            summary,
         )
         .with_label("stream", stream);
         self.set(RULE_OVERRUN, stream, alert, firing).await;
