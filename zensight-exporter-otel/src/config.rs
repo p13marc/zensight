@@ -300,6 +300,42 @@ impl ExporterConfig {
 
 #[cfg(test)]
 mod tests {
+
+    /// The shipped config must SPELL OUT `opentelemetry.traces.enabled`.
+    ///
+    /// `scripts/gen-configs.sh` transforms the committed examples with `sed`,
+    /// and its header states the rule: a sed can only flip a key that is really
+    /// in `configs/*.json5`. The demo profile flips this one to `true`, so if
+    /// the key ever stops being written out the sed silently does nothing and
+    /// the OTel demo's Tempo pane is quietly empty.
+    ///
+    /// Asserting the PARSED value would be vacuous — `false` is also the Rust
+    /// default, so a missing key parses to exactly the same struct. The raw
+    /// JSON5 tree is therefore what gets walked.
+    #[test]
+    fn shipped_config_spells_out_the_traces_flag() {
+        let raw = include_str!("../../configs/otel-exporter.json5");
+
+        // It parses, and traces are off by default.
+        let cfg = ExporterConfig::parse(raw).expect("shipped config parses");
+        assert!(
+            !cfg.opentelemetry.traces.enabled,
+            "traces stay opt-in in the shipped config"
+        );
+
+        // And the key is physically present for the sed to find.
+        let tree: serde_json::Value = json5::from_str(raw).expect("shipped config is valid JSON5");
+        let enabled = tree
+            .get("opentelemetry")
+            .and_then(|o| o.get("traces"))
+            .and_then(|t| t.get("enabled"));
+        assert_eq!(
+            enabled,
+            Some(&serde_json::Value::Bool(false)),
+            "configs/otel-exporter.json5 must spell out \
+             opentelemetry.traces.enabled = false — gen-configs.sh flips it"
+        );
+    }
     use super::*;
 
     #[test]
