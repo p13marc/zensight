@@ -140,6 +140,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Decision recorded: the `@media` plane keeps `express` off** (#733). parallax
+  0.8's `ZenohSink::media` applies express *on* to the `frame` profile
+  ("a stale frame is worthless"), while zenkey RFC v1.26 M1 removed it from that
+  profile ("batching engages only under back-pressure, so express is a no-op on
+  an unsaturated link and spends per-message overhead exactly when a `drop`
+  profile should be shedding"). We were already on the newer rule —
+  `QosClass::express` returns `false` for every class — so nothing changes; the
+  parallax sensor keeps publishing through `RawMediaPublisher` and does not
+  adopt `ZenohSink::media`. The reasoning is written down in
+  `zensight-sensor-parallax/docs/qos-express.md` and the behaviour is pinned by
+  a named `express_is_off_for_every_class` test rather than by an assertion
+  buried inside two others, so it does not get "fixed" toward parallax's table.
+
 - **The executor preset comes from parallax** (#732, closes #693). `executor()`
   built a `UnifiedExecutorConfig` around a local `CHANNEL_CAPACITY = 4` whose
   own comment admitted "the reason for this is probably gone; the cap is kept
