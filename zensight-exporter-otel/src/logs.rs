@@ -182,8 +182,20 @@ pub struct LogRecord {
     pub appname: Option<String>,
     /// Hostname/source.
     pub hostname: String,
-    /// Timestamp in nanoseconds since epoch.
-    pub timestamp_nanos: i64,
+    /// When the event happened, as the sensor reported it.
+    ///
+    /// A `SystemTime`, not an `i64` of nanoseconds, deliberately (#760). The
+    /// field used to be `timestamp_nanos: i64`, computed and then **never
+    /// read** — every OTLP log record shipped with `time_unix_nano = 0`, so
+    /// Grafana and Loki timestamped every line at INGESTION. A backlog after a
+    /// reconnect plotted as one spike; a line from thirty seconds ago plotted
+    /// as "now".
+    ///
+    /// The type change is what stops it silently going unused again — and it
+    /// removes a live overflow: `point.timestamp * 1_000_000` overflows `i64`
+    /// on a malformed timestamp, panicking in debug builds, for a value nothing
+    /// was reading.
+    pub timestamp: std::time::SystemTime,
     /// OTel `log.record.uid` — stable per-line id (#104), if the sensor set it.
     pub uid: Option<String>,
     /// OTel `log.record.original` — the verbatim raw line (#104), if present.
@@ -227,7 +239,7 @@ impl LogRecord {
             facility,
             appname,
             hostname: point.source.clone(),
-            timestamp_nanos: point.timestamp * 1_000_000, // ms to ns
+            timestamp: crate::exporter::ms_to_system_time(point.timestamp),
             uid: point.labels.get("log.record.uid").cloned(),
             original: point.labels.get("log.record.original").cloned(),
         })
@@ -307,7 +319,11 @@ mod tests {
         assert_eq!(record.facility, Some(SyslogFacility::Daemon));
         assert_eq!(record.appname, Some("nginx".to_string()));
         assert_eq!(record.hostname, "server01");
-        assert_eq!(record.timestamp_nanos, 1_234_567_890_000_000_000);
+        assert_eq!(
+            record.timestamp,
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_234_567_890_000),
+            "the sensor's own event time, not ingestion time"
+        );
     }
 
     #[test]

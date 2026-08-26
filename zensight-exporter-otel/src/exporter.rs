@@ -110,7 +110,7 @@ fn build_series_key(metric_name: &str, attributes: &[opentelemetry::KeyValue]) -
 
 /// Convert a Unix-epoch-millis timestamp to a [`SystemTime`] (clamped at the
 /// epoch for the — not expected — negative case).
-fn ms_to_system_time(ms: i64) -> SystemTime {
+pub(crate) fn ms_to_system_time(ms: i64) -> SystemTime {
     if ms >= 0 {
         SystemTime::UNIX_EPOCH + Duration::from_millis(ms as u64)
     } else {
@@ -249,19 +249,39 @@ impl OtelExporter {
     /// could tell `add(absolute)` from `observe(absolute)`.
     #[cfg(test)]
     fn with_meter_provider(meter_provider: SdkMeterProvider) -> Self {
-        let meter = meter_provider.meter("zensight");
+        Self::with_providers(Some(meter_provider), None)
+    }
+
+    /// Build an exporter around already-constructed providers.
+    ///
+    /// Test-only seam, so the logs path can be asserted **on the wire** with
+    /// `InMemoryLogExporter` rather than through a log line. The log-timestamp
+    /// bug (#760) shipped precisely because nothing inspected an emitted
+    /// record.
+    #[cfg(test)]
+    fn with_providers(
+        meter_provider: Option<SdkMeterProvider>,
+        logger_provider: Option<SdkLoggerProvider>,
+    ) -> Self {
+        let meter = meter_provider.as_ref().map(|mp| mp.meter("zensight"));
+        let logger = logger_provider
+            .as_ref()
+            .map(|lp| lp.logger("zensight.syslog"));
+        let alert_logger = logger_provider
+            .as_ref()
+            .map(|lp| lp.logger("zensight.alerts"));
         Self {
-            meter_provider: Some(meter_provider),
-            meter: Some(meter),
-            logger_provider: None,
-            logger: None,
-            alert_logger: None,
+            meter_provider,
+            meter,
+            logger_provider,
+            logger,
+            alert_logger,
             span_processor: None,
             span_scope: InstrumentationScope::builder("zensight.alerts").build(),
             alert_spans: None,
             export_metrics: true,
-            export_logs: false,
-            export_alerts: false,
+            export_logs: true,
+            export_alerts: true,
             filter: TelemetryFilter::new(&FilterConfig::default()),
             stats: RwLock::new(ExporterStats::default()),
             observations: Arc::new(RwLock::new(HashMap::new())),
@@ -679,6 +699,11 @@ impl OtelExporter {
         let mut log_record = logger.create_log_record();
 
         // Set body
+        // The event's own time, and separately when we saw it (#760). Without
+        // these an OTLP record ships `time_unix_nano = 0` and every line is
+        // timestamped at ingestion.
+        log_record.set_timestamp(record.timestamp);
+        log_record.set_observed_timestamp(SystemTime::now());
         log_record.set_body(record.body.clone().into());
 
         // Set severity
@@ -760,6 +785,8 @@ impl OtelExporter {
 
         let mut rec = logger.create_log_record();
         rec.set_event_name("zensight.alert");
+        rec.set_timestamp(ms_to_system_time(alert.timestamp));
+        rec.set_observed_timestamp(SystemTime::now());
         rec.set_body(alert.summary.clone().into());
         rec.set_severity_number(alert_severity_to_otel(alert.severity));
         rec.set_severity_text(alert.severity.as_str());
@@ -1131,5 +1158,55 @@ mod tests {
         assert_eq!(exporter.registered.read().len(), 1);
         assert_eq!(exporter._counters.read().len(), 1);
         assert_eq!(exporter.series_count(), 1, "one series, ten updates");
+    }
+
+    /// A log record must carry the SENSOR's event time, not the time we saw it.
+    ///
+    /// Without `set_timestamp` an OTLP record ships `time_unix_nano = 0`, and
+    /// Loki/Grafana fall back to ingestion time — so a backlog after a
+    /// reconnect plots as a single spike and a line from thirty seconds ago
+    /// plots as "now". Nothing inspected an emitted record before (#760), which
+    /// is how a computed-then-discarded field survived.
+    #[test]
+    fn a_log_record_carries_the_sensor_event_time() {
+        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+
+        let sink = InMemoryLogExporter::default();
+        let lp = SdkLoggerProvider::builder()
+            .with_simple_exporter(sink.clone())
+            .build();
+        let exporter = OtelExporter::with_providers(None, Some(lp));
+
+        const EVENT_MS: i64 = 1_700_000_123_000;
+        let mut p = point(
+            "host01",
+            "syslog",
+            TelemetryValue::Text("sshd: accepted".into()),
+        );
+        p.protocol = Protocol::Logs;
+        p.timestamp = EVENT_MS;
+        exporter.record_log(&p);
+
+        exporter
+            .logger_provider
+            .as_ref()
+            .expect("logger provider")
+            .force_flush()
+            .expect("flush");
+
+        let logs = sink.get_emitted_logs().expect("emitted logs");
+        assert_eq!(logs.len(), 1, "one record");
+        let rec = &logs[0].record;
+
+        let expected = SystemTime::UNIX_EPOCH + Duration::from_millis(EVENT_MS as u64);
+        assert_eq!(
+            rec.timestamp(),
+            Some(expected),
+            "the record must carry the sensor's event time"
+        );
+        assert!(
+            rec.observed_timestamp().is_some_and(|o| o >= expected),
+            "observed_timestamp is when WE saw it, and is distinct from the event time"
+        );
     }
 }
