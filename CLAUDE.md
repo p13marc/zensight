@@ -43,8 +43,11 @@ cargo build --release --workspace                       # everything
 cargo run -p zensight --release                         # frontend
 cargo run -p zensight-sensor-snmp --release -- --config configs/snmp.json5
 cargo run -p zensight-exporter-prometheus --release -- --config configs/prometheus-exporter.json5
+cargo run -p zensight-exporter-otel --release -- --config configs/otel-exporter.json5
 cargo run -p zensight-correlator --release -- --config configs/correlator.json5 [--demo]
 just run                                                # GUI + local sensors (see README)
+just demo-prometheus                                    # sensors + exporter + Prometheus + Grafana (demo/)
+just demo-otel                                          # sensors + exporter + grafana/otel-lgtm (demo/)
 ```
 
 ## Testing

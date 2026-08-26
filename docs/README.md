@@ -47,6 +47,10 @@ reference pages are under `<crate>/docs/`.
 cargo build --release --workspace
 just run          # GUI + local sensors (netring, netlink, sysinfo, logs/journald)
 just netring      # one sensor: netring | netlink | sysinfo | logs
+
+just demo-prometheus   # sensors + exporter + Prometheus + Grafana  (demo/README.md)
+just demo-otel         # sensors + exporter + grafana/otel-lgtm     (demo/README.md)
+just demo-verify       # prove sensor -> exporter -> /metrics, no containers
 ```
 
 See the top-level [`README.md`](../README.md) and [`CLAUDE.md`](../CLAUDE.md) for the project

@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **The Prometheus exporter's scrape port default moves `0.0.0.0:9090` →
+  `127.0.0.1:9464`** (#771). 9090 is the Prometheus *server's* own port, and the
+  shipped `README.md` told you to scrape `localhost:9090` — i.e. Prometheus
+  scraping itself. Any stack running both on one host collided. It also now binds
+  loopback rather than every interface; the container and systemd deployments set
+  `listen` explicitly and are unaffected. 9464 is the conventional
+  OpenTelemetry/Prometheus-exporter port.
+- **Text telemetry is exposed under an `_info` family with a named label**
+  (#752). A `TelemetryValue::Text` point used to render `# TYPE <name> info` —
+  and `info` is an **OpenMetrics** type that the `version=0.0.4` text format we
+  serve does not admit. Prometheus's parser aborted on the unknown token and
+  **rolled back every sample in the scrape**, while the target still reported
+  healthy. One netlink MAC address, one SNMP `sysDescr` or any gnmi string was
+  enough to empty the whole endpoint. Text now renders as
+  `<name>_info{…,<leaf>="<text>"} 1` with type `gauge`, the text rides under a
+  label named for the subject leaf instead of a literal `value`, and the value is
+  stripped of control characters and clamped to 128 bytes. `/metrics` and
+  remote-write spell the series identically. Opt out with
+  `prometheus.export_text_metrics: false`.
+- **OTel counters are exported through asynchronous instruments** (#754).
+  `counter.add()` was being fed the **absolute** device reading, so under
+  cumulative temporality the exported Sum became a running total of absolute
+  readings — an interface at 1 000 000 octets reported 1e6, 2e6, 3e6, forever.
+  Every `rate()` was meaningless and the series never decreased across a counter
+  reset. `TelemetryValue::Counter` is already the cumulative total, so it is now
+  reported by an `ObservableCounter` rather than added to. This also gives stale
+  series a real **gap** instead of a flat line: `cleanup_stale_observations`
+  (previously dead code with zero callers) is now wired to a sweep task, and an
+  evicted series stops being observed.
+- **`docker/Dockerfile.exporter` is deleted** (#778). Referenced by nothing —
+  not compose, not CI, not the justfile — with a dead `EXPORTER_NAME` arg, a
+  `CMD ["--help"]` and no config baked in, and an `EXPOSE 9090` encoding the port
+  collision above. The images that ship are built from `Dockerfile.runtime`.
+
+### Added
+
+- **`just demo-prometheus` and `just demo-otel`** (#751) — one command each for a
+  working dashboard. Until now the exporters had **no run path at all**: zero
+  mentions in the 442-line justfile, one service in `docker/docker-compose.yml`,
+  and not one occurrence of the word "exporter" in `docs/DEPLOYMENT.md`. The
+  stacks live in [`demo/`](demo/README.md): Prometheus v3.14.0 + Grafana 13.2.0
+  with a provisioned datasource and dashboards, and `grafana/otel-lgtm` for the
+  OTLP side. The exporter plays the Zenoh rendezvous the GUI plays under
+  `just run`, so the demo is headless; the third-party stack runs on
+  `network_mode: host` because the hub is a *loopback* listener a bridged
+  container structurally cannot reach.
+- **`scripts/demo-verify.sh`** and a `demo-smoke` CI job (#776) — sensor → Zenoh
+  → exporter → `/metrics`, end to end, on isolated ports with no containers and
+  no privileges. It validates every `# TYPE` token and rejects any series with a
+  duplicate label name, which is exactly what would have caught the two bugs
+  above on their first commit. `release.yml` now also `--help`-smokes the two
+  exporter images, which were previously built and **pushed without ever being
+  executed**.
+- **`scripts/gen-configs.sh --exporters`** (#775) — emits the two exporter run
+  configs into `.run/`, with `demo-max` enabling the OTel traces signal. The
+  `traces` block is now spelled out in `configs/otel-exporter.json5` and pinned by
+  a `shipped_config_spells_out_the_traces_flag` test, per that script's rule that
+  a sed may only flip a key that really exists.
+
+### Fixed
+
+- **Duplicate label names are now structurally impossible** (#753). Both
+  exporters assembled labels by pushing sources in order and de-duplicating
+  against a hard-coded `source`/`protocol` list — so `disk/<dev>/io/*` emitted
+  `device` twice, once from the semconv table and once from the sysinfo sensor's
+  own labels, producing `zensight_system_disk_io{device="sda",device="sda",…}`.
+  Prometheus rejects such a sample and a remote-write receiver rejects the whole
+  batch; the OTel side had no de-duplication at all. There is now one merge in
+  `zensight-common::exposition` with a stated precedence — structural, semconv,
+  pattern vars, point labels, config defaults — where later never overwrites
+  earlier and a shadowed candidate is dropped and counted rather than appended.
+  A sensor can no longer forge `origin`, `source` or `protocol`.
+- **Exporter documentation that produced an empty dashboard** (#761). Both
+  READMEs recommended `key_expr: "zensight/v1/*/telemetry/**"`; since #466 the
+  deployment base is the session *namespace*, not a key chunk, so that selector
+  matches **nothing** — with a perfectly healthy session. The OTel README's
+  `include_protocols: [… "syslog"]` matched nothing either (the token is
+  `"logs"`), silently dropping every log record while `export_logs: true`. The
+  `configs/*.json5` comments stating the default were wrong in the same way.
+
 ### Changed
 
 - **parallax-pipeline 0.6.0 → 0.7.0** (#689). 175 upstream commits, and the
