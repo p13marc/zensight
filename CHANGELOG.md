@@ -121,6 +121,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-conformance`: CI now asks a running fleet whether it obeys its
+  own contract** (#744). A new `publish = false` workspace member that opens an
+  un-namespaced observer session, runs `zenkey_fleet::run_doctor` — the same
+  entry point `zenctl doctor` and the zengui doctor panel call — against a live
+  deployment and turns the report into an exit code, plus
+  `scripts/conformance-verify.sh` to stand that deployment up (isolated port
+  17447, no containers, no privileges, the same `gen-configs.sh` every other
+  run path uses) and a `conformance` job in `.forgejo/workflows/ci.yml` that
+  runs both on every push.
+
+  `cargo test --workspace` proves the code agrees with itself; `demo-smoke`
+  proves the exporter path carries data. Neither could say whether what a
+  *running* sensor puts on the wire agrees with the keyspace-v2 RFCs and with
+  the registry TOMLs that same binary serves on `@rpc/…/introspect` — the
+  served-vs-declared slice diff, `alive ⇒ callable` (RFC 04 §5), schema drift
+  at field granularity, declared-vs-observed QoS, freshness against declared
+  `ttl_s`, cardinality budgets. Those are properties of a deployment, and only
+  a deployment can be asked.
+
+  Exit codes are `zenkey_fleet::judgement_exit_code`'s, unmodified (RFC 13
+  v1.24): `0` clean, `1` gated findings, `2` the run could not carry a verdict.
+  An **empty roster is `2`, never `0`** — a harness that stood nothing up must
+  not report a clean fleet.
+
+  **`zenkey-fleet` is confined to this crate** and must not enter
+  `zensight-common` or anything a sensor links: it is a bus-*explorer* engine
+  and drags a full tokio, zenoh-ext, arc-swap, base64, ciborium and serde_json
+  tree. Note also that its *package* license is Apache-2.0, not the MIT of the
+  zenkey workspace root.
+
+  **One check is excluded from the gate, in code, with the condition that lifts
+  it: `field-new`, upstream zenkey#384.** `schema_drift`'s declared-field-path
+  walker descends `properties` and not `oneOf`/`anyOf`, so every
+  adjacently-tagged `TelemetryValue` (`#[serde(tag = "type", content =
+  "value")]`, which schemars renders as a `oneOf` whose branches each require
+  `type` and `value`) reports two phantom "never declared" warnings per
+  telemetry key — 141 of them on a four-producer deployment. The served schema
+  does declare both. Without the exclusion `--fail-on warning` is unusable, and
+  a gate nobody can turn on protects nothing; `--deny field-new` re-arms it,
+  which is how you find out whether #384 has landed. Nothing else is excluded —
+  `info` findings (`admin-unreachable`, `storage-coverage`,
+  `describe-missing`, the `{var...}` cardinality exemptions) simply sit below
+  the severity floor, as facts about a deployment rather than defects in it.
+
+  First real catch, reported and **not** excluded: the correlator's entities
+  seed queryable answers `v1/@catalog/state/entity/*` storage-shaped with a bare
+  `query.reply(key, payload)`, and session HLC timestamping applies to `put`,
+  not to a queryable reply — so the seed carries no timestamp and cannot be
+  LWW-ordered against a live sample (RFC 04 §4). It needs its own issue and a
+  decision about *which* timestamp, so the CI deployment runs the correlator
+  only under `CORRELATOR=1`; the check stays gated, and the correlator rejoins
+  CI the day it stamps its replies. See `zensight-conformance/README.md`.
+
 - **Payload conformance verdicts, behind a `validate-json` feature on
   `zensight-common`** (#741). `SCHEMAS` — the RFC 08 §7 type table every
   producer serves on `describe` — had never been *used*: nothing validated a

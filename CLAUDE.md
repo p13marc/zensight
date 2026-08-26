@@ -33,6 +33,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline) |
 | `zensight-correlator/` | fuses identity evidence → one `HostEntity` per host |
 | `zensight-exporter-{prometheus,otel}/` | forward telemetry/alerts to external systems |
+| `zensight-conformance/` | CI harness (#744): stands a deployment up and runs `zenkey-fleet`'s RFC judges against it. `publish = false`, and the **only** crate that may link `zenkey-fleet` |
 | [`zblob`](https://github.com/p13marc/zblob) | resumable content-addressed large-data transfer (external repo, was in-tree `zenoh-blob/`) |
 | `zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/` | opt-in eBPF programs (compile to host stubs) |
 
@@ -71,9 +72,19 @@ design-system color guard** (no ad-hoc `Color::from_rgb`/`from_rgba` outside
 [`zensight/docs/design-system.md`](zensight/docs/design-system.md)), and **a `session.put`/
 `session.delete` ban** (control-plane must publish through declared publishers, not ad-hoc puts).
 
+Two CI jobs execute rather than compile, because the suite could not see what they
+cover: **demo-smoke** (`scripts/demo-verify.sh` — one real sensor, one real exporter,
+one real scrape; nothing in CI had ever *executed* an exporter) and **conformance**
+(`scripts/conformance-verify.sh` — one real sensor and `zenkey-fleet`'s RFC judges
+against the live bus; nothing had ever asked a running fleet whether it *conforms*:
+slice sync, `alive ⇒ callable`, schema drift, QoS, freshness, cardinality). What the
+conformance gate fails on, and the one check it excludes with the condition that lifts
+it, are in [`zensight-conformance/README.md`](zensight-conformance/README.md).
+
 ```bash
 cargo fmt --all
 cargo clippy --workspace -- -D warnings
+scripts/conformance-verify.sh            # judge a live deployment (isolated port)
 ```
 
 ## Architecture (one screen)
