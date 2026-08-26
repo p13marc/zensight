@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parallax::clock::ClockTime;
+use parallax::codec::annexb::{NalCodec, ParamSetCache, is_entry_point};
 use parallax::elements::{AppSinkHandle, Pulled};
 use parallax::metadata::Metadata;
 use parallax::pipeline::EndReason;
@@ -19,7 +20,6 @@ use zensight_common::stream::FrameMeta;
 use zensight_common::{Format, encode};
 use zensight_sensor_core::RawMediaPublisher;
 
-use crate::annexb;
 use crate::stats::StreamStats;
 
 /// How long one pull waits before re-checking for EOS/abort.
@@ -115,8 +115,13 @@ async fn run_with_watchdog(
     // prepending the stream's cached SPS/PPS when the AU arrived without
     // its own (e.g. RTSP cameras announcing parameter sets only
     // out-of-band in the SDP).
+    //
+    // The extract/cache/prepend dance is upstream's `ParamSetCache` since
+    // parallax 0.8 (#730) — codec-aware, and `Cow::Borrowed` on every delta
+    // frame and every keyframe that already carries its sets, so only a
+    // genuinely repaired keyframe copies twice.
     let h264 = !preview && encoding == Encoding::VIDEO_H264;
-    let mut param_sets: Option<Vec<u8>> = None;
+    let mut param_sets = ParamSetCache::new(NalCodec::H264);
     loop {
         // parallax 0.7 replaced `Result<Option<Buffer>>` with `Pulled`, and in
         // doing so made a distinction this loop could not previously draw: a
@@ -157,22 +162,30 @@ async fn run_with_watchdog(
             }
             last_sequence = Some(frame_meta.sequence);
         }
-        let mut payload = buffer.as_bytes().to_vec();
-        if h264 {
-            frame_meta.keyframe = annexb::has_idr(&payload);
-            if let Some(fresh) = annexb::extract_param_sets(&payload) {
-                param_sets = Some(fresh);
-            } else if frame_meta.keyframe
-                && let Some(cached) = &param_sets
-            {
-                payload = annexb::prepend_param_sets(cached, &payload);
-            }
-        }
+        // Borrow the encoded bytes rather than copying them up front: on the
+        // h264 path `prepare` hands back the same slice for everything but a
+        // repaired keyframe, so the repair path now copies once (into a Vec
+        // sized for sets + AU) where it used to copy twice. `put` wants an
+        // owned `Vec`, so the borrowed path still materializes one — but that
+        // copy was always there.
+        let bytes = buffer.as_bytes();
+        let payload: std::borrow::Cow<'_, [u8]> = if h264 {
+            let prepared = param_sets.prepare(bytes);
+            // Read the keyframe verdict off the bytes that actually ship.
+            frame_meta.keyframe = is_entry_point(&prepared, NalCodec::H264);
+            prepared
+        } else {
+            std::borrow::Cow::Borrowed(bytes)
+        };
         let attachment =
             encode(&frame_meta, Format::Cbor).map_err(|e| format!("encode FrameMeta: {e}"))?;
         stats.record_frame(payload.len());
         publisher
-            .put(payload, encoding.clone(), ZBytes::from(attachment))
+            .put(
+                payload.into_owned(),
+                encoding.clone(),
+                ZBytes::from(attachment),
+            )
             .await
             .map_err(|e| format!("media publish failed: {e}"))?;
     }

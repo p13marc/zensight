@@ -187,6 +187,24 @@ publishes with `keyframe: true` is a **self-contained decoder entry point**:
 An RTSP keyframe that arrives before *any* in-band parameter sets have been
 seen is published as-is — there is nothing to prepend yet.
 
+The extract/cache/prepend logic itself is `parallax::codec::annexb`'s
+`ParamSetCache` (#730), not ours: it is codec-aware (H.265's two-byte NAL header
+included, where our `& 0x1F` returned nonsense) and returns the input slice
+borrowed for every delta frame and every keyframe that already carries its sets,
+so only a genuinely repaired keyframe copies. `zensight-sensor-parallax`'s own
+`annexb` module is down to one helper with no upstream equivalent,
+`coded_slice_count`, which exists to prove `encoder.max_slice_len` (#509)
+reached OpenH264.
+
+A stream's H.264 `profile-level-id` (`avc1.<6 hex>`, what a WebCodecs client
+configures a decoder with) is **not** on the catalogue and not in `FrameMeta`.
+The catalogue is built from config at startup and answers for closed streams,
+while the value only exists once a keyframe has been encoded — it would be
+`None` in exactly the case a viewer consults the catalogue for. A consumer
+derives it from the first keyframe instead, which is possible precisely because
+of the parameter-set promise above; `annexb::h264_profile_level_id` is the
+three-byte read that does it (#707).
+
 ## Frame metadata
 
 Every media sample carries a CBOR `FrameMeta` attachment

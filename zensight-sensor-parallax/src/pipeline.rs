@@ -1185,10 +1185,9 @@ mod tests {
         let mut sliced = vparams(10, None);
         sliced.tuning.max_slice_len = Some(CAP);
         let au = biggest_au(&kind, &sliced).await;
-        let slices: Vec<usize> = crate::annexb::nal_units(&au)
-            .into_iter()
-            .filter(|(t, _)| *t == 1 || *t == 5)
-            .map(|(_, len)| len)
+        let slices: Vec<usize> = parallax::codec::annexb::nal_units(&au)
+            .filter(|n| matches!(n.nal_type(), 1 | 5))
+            .map(|n| n.data.len())
             .collect();
         eprintln!("sliced: {}-byte AU -> slices {slices:?}", au.len());
         assert!(

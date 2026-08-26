@@ -103,6 +103,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The hand-rolled Annex-B helpers are parallax's now** (#730, closes #708).
+  `zensight-sensor-parallax/src/annexb.rs` was 230 lines of start-code scanning
+  and an extract/cache/prepend dance the egress drove by hand; parallax 0.8
+  ships all of it in `parallax::codec::annexb`, compiled unconditionally (that
+  module deliberately links no codec, so "is this a keyframe" needs no encoder)
+  and **codec-aware** — `is_entry_point`/`has_param_sets` take a `NalCodec` and
+  answer correctly for H.265, where our `& 0x1F` on a two-byte NAL header
+  returned nonsense. `ParamSetCache::prepare` replaces the whole loop and
+  borrows rather than copies for every delta frame and every keyframe that
+  already carries its sets, so a *repaired* keyframe now copies once where it
+  used to copy twice. Our module keeps one helper with no upstream equivalent,
+  `coded_slice_count`, reimplemented over upstream's scanner. No wire change.
+  `annexb::h264_profile_level_id` is re-exported for #707 but deliberately not
+  put on the stream catalogue — see below.
+
 - **parallax-pipeline 0.7.0 → 0.8.0** (#727), and the pin is now a single
   `[workspace.dependencies]` entry so the sensor that *encodes* and the `h264`
   GUI feature that *decodes* cannot drift onto two versions of the same

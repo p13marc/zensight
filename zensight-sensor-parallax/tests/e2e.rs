@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parallax::codec::annexb::{NalCodec, has_param_sets, is_entry_point};
 use zensight_common::command::{Command, command_key, query_key};
 use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
 use zensight_common::{Format, decode};
@@ -19,7 +20,7 @@ use zensight_sensor_parallax::catalog::Catalog;
 use zensight_sensor_parallax::config::ParallaxConfig;
 use zensight_sensor_parallax::session::SessionManager;
 use zensight_sensor_parallax::stats::StatsRegistry;
-use zensight_sensor_parallax::{annexb, command, query, stats};
+use zensight_sensor_parallax::{command, query, stats};
 
 /// Scouting off so concurrent tests (and live sensors on the host) can't
 /// cross-contaminate; the two peers are wired together with an explicit
@@ -399,7 +400,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
         // into a dsNoParamSets loop.
         assert_eq!(
             meta.keyframe,
-            annexb::has_idr(&payload),
+            is_entry_point(&payload, NalCodec::H264),
             "FrameMeta.keyframe must match IDR presence (seq {})",
             meta.sequence
         );
@@ -407,7 +408,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
         // point — SPS/PPS ride in the same access unit.
         if meta.keyframe {
             assert!(
-                annexb::has_param_sets(&payload),
+                has_param_sets(&payload, NalCodec::H264),
                 "keyframe AU without SPS/PPS (seq {})",
                 meta.sequence
             );
@@ -465,7 +466,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
             // The forced IDR is exactly what a resyncing viewer decodes
             // from — next_frame already asserted SPS/PPS are aboard, and a
             // fresh decoder gate opens here.
-            assert!(annexb::has_idr(&payload));
+            assert!(is_entry_point(&payload, NalCodec::H264));
             forced = true;
             break;
         }
@@ -620,7 +621,8 @@ async fn two_viewers_on_distinct_tiers_stream_independently() {
             let (meta, payload) = next_h264(sub).await;
             if meta.keyframe {
                 assert!(
-                    annexb::has_idr(&payload) && annexb::has_param_sets(&payload),
+                    is_entry_point(&payload, NalCodec::H264)
+                        && has_param_sets(&payload, NalCodec::H264),
                     "keyframe AU must carry an IDR + SPS/PPS (seq {})",
                     meta.sequence
                 );
