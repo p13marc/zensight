@@ -1050,10 +1050,11 @@ impl SessionManager {
         self.publish_status(stream).await;
     }
 
-    /// Fold every live encoder's rate-control drops into its stream's counter.
+    /// Fold every live encoder's counters into its stream's [`StreamStats`]:
+    /// rate-control drops, and the p95/p99 encode-latency tail (#729).
     ///
     /// Runs on the actor's existing 1 Hz reap tick — finer than the stats
-    /// ticker's interval, so the published counter is at most a second stale.
+    /// ticker's interval, so the published numbers are at most a second stale.
     /// The actor is the right owner: it already holds `PipelineControls` per
     /// profile and already writes the `viewers` gauge into `StreamStats`.
     fn fold_encoder_stats(&mut self) {
@@ -1063,11 +1064,22 @@ impl SessionManager {
             // Iterating `sessions` (not the registry) means `handle`'s
             // create-on-miss can never resurrect a closed stream's entry.
             let stats = registry.handle(stream);
+            // RC drops are summed across tiers (they are counts); the latency
+            // tail is not summable, so the stream reports its **worst live
+            // tier**. Recomputed from scratch each tick rather than folded, so
+            // a torn-down tier's tail stops being reported.
+            let (mut p95_ns, mut p99_ns) = (0u64, 0u64);
             for slot in session.profiles_mut() {
                 if let ProfileSlot::Open(p) = slot {
                     fold_profile_rc(&stats, p);
+                    if let Some(handle) = &p.controls.encoder_stats {
+                        let latency = handle.encode_latency();
+                        p95_ns = p95_ns.max(latency.p95_ns);
+                        p99_ns = p99_ns.max(latency.p99_ns);
+                    }
                 }
             }
+            stats.set_encode_tail(p95_ns, p99_ns);
         }
     }
 

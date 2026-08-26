@@ -338,8 +338,25 @@ here (#510):
   paying for. The encoder's own `bytes_encoded` over-reports on both counts, and
   an RTSP passthrough has no encoder to ask. For the same reason `encode_ms`
   remains a mean over whole `process()` calls rather than the encoder handle's
-  `last_encode_ns`, which is a single sample of the inner encode: the
-  `encoder_overrun` rule compares a mean to a per-frame budget.
+  `last_encode_ns`, which is a single sample of the inner encode.
+- **`encode_p95_ms` / `encode_p99_ms` are the tail** (#729), read off parallax's
+  own lock-free histogram inside the H.264 encoder. They sit *beside*
+  `encode_ms`, not instead of it: the mean is an interval figure the all-time
+  histogram cannot give, it covers the whole `process()` call (pending-control
+  application, geometry lookup, arena copy, IDR scan) where the histogram times
+  only the inner `encode()`, and it is the only encode timing the JPEG preview
+  paths have at all. Two properties to know when reading them: they are
+  **all-time for that tier's encoder incarnation** (a tail needs history; a 5 s
+  window at 30 fps holds 150 samples, of which p99 is one), and they are bucket
+  upper bounds — at most 19% high, never low. A stream with several open tiers
+  reports its **worst** live tier; the figures disappear when that tier closes.
+- **`encoder_overrun` is judged on the tail**, not the mean. A stream whose
+  average frame fits the budget while its p95 does not is exactly the one that
+  stutters, and overrun is what the rule is named for. The interval mean stays
+  the fallback for the JPEG preview paths, which are timed but not
+  histogrammed. Because the histogram is all-time, the rule clears more slowly
+  than a windowed one would: a bad patch stays in the distribution until later
+  frames dilute it or the tier is rebuilt.
 
 For per-tier **applied** resolution/viewers, read the `StreamStatus` doc's
 `tiers[]` — that is what the GUI's per-tile bandwidth readout shows. Note that
@@ -364,8 +381,9 @@ Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
   source's reconnect ladder ran out. Since #731 the source retries a dropped
   stream itself, so a single blip no longer fires this — only sustained failure
   does, which is what the rule is named for.
-- `encoder_overrun` — average `encode_ms` above the strictest open tier's
-  per-frame budget (1000 / fps).
+- `encoder_overrun` — `encode_p95_ms` above the strictest open tier's per-frame
+  budget (1000 / fps), falling back to the `encode_ms` mean on a path with no
+  encoder histogram (the JPEG previews).
 
 ## Limitations
 

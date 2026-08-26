@@ -45,6 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Encode-latency percentiles in stream telemetry** (#729):
+  `{stream}/stats/encode_p95_ms` and `{stream}/stats/encode_p99_ms`, read off
+  the lock-free histogram parallax 0.8 keeps inside the H.264 encoder. The
+  `encoder_overrun` alert is now judged on **p95** rather than the interval
+  mean — a stream whose average frame fits the budget while its p95 does not is
+  exactly the one that stutters, and overrun is what the rule is named for. The
+  mean stays the fallback for the JPEG preview paths, which `TimedElement` times
+  but parallax does not histogram.
+
+  `encode_ms` is **not** removed, and neither is `TimedElement`: the histogram
+  is all-time (a tail needs history) so it yields no interval mean, it covers
+  only the inner `encode()` rather than the whole `process()` call, and it does
+  not exist at all for the previews. Registry `parallax.toml` goes to 1.7.
+
+
 - **`just demo-prometheus` and `just demo-otel`** (#751) — one command each for a
   working dashboard. Until now the exporters had **no run path at all**: zero
   mentions in the 442-line justfile, one service in `docker/docker-compose.yml`,

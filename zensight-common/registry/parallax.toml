@@ -10,7 +10,7 @@
 # gauge.
 
 [registry]
-version = "1.6"
+version = "1.7"
 app = "zensight"
 convention = 1
 
@@ -72,6 +72,22 @@ type = "TelemetryPoint"
 cardinality = 64
 since = "1.1"
 description = "encode time per frame"
+
+[[subject]]
+path = "{stream}/stats/encode_p95_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.7"
+description = "95th-percentile encode time per frame, from the encoder's own histogram; all-time for the tier's encoder incarnation, not an interval figure like encode_ms"
+
+[[subject]]
+path = "{stream}/stats/encode_p99_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.7"
+description = "99th-percentile encode time per frame; see encode_p95_ms"
 
 [[subject]]
 path = "stream/{stream}"
