@@ -91,6 +91,37 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Evict series nobody is reporting any more.
+    //
+    // This task is the missing caller for `cleanup_stale_observations` (#754):
+    // the method existed with ZERO callers and its store was write-only, so a
+    // host that went quiet kept flat-lining its last value forever. The
+    // asynchronous instrument callbacks read that same store, so an evicted
+    // series stops being observed and the metric gaps — which is the honest
+    // rendering of "this host stopped reporting".
+    //
+    // Cadence mirrors the Prometheus exporter's stale sweep so the two
+    // exporters age a dead sensor out at the same rate.
+    const STALE_AFTER: Duration = Duration::from_secs(300);
+    const SWEEP_EVERY: Duration = Duration::from_secs(60);
+    let cleanup_exporter = exporter.clone();
+    let mut cleanup_shutdown = shutdown_rx.clone();
+    let cleanup_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(SWEEP_EVERY);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    cleanup_exporter.cleanup_stale_observations(STALE_AFTER);
+                }
+                _ = cleanup_shutdown.changed() => {
+                    if *cleanup_shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     // Start subscriber
     let subscriber_shutdown = shutdown_rx.clone();
     let subscriber_task = tokio::spawn(async move {
@@ -128,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = tokio::time::timeout(Duration::from_secs(5), subscriber_task).await;
 
     // Shutdown OTEL exporter
+    cleanup_task.abort();
     exporter.shutdown()?;
 
     // Print final stats

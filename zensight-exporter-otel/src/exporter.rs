@@ -99,7 +99,7 @@ pub struct ExporterStats {
 /// Build a collision-resistant gauge key from metric name and attributes.
 ///
 /// Attributes are sorted and separated by null bytes to prevent collisions.
-fn build_gauge_key(metric_name: &str, attributes: &[opentelemetry::KeyValue]) -> String {
+fn build_series_key(metric_name: &str, attributes: &[opentelemetry::KeyValue]) -> String {
     let mut sorted_attrs: Vec<_> = attributes
         .iter()
         .map(|kv| format!("{}={}", kv.key, kv.value.as_str()))
@@ -165,13 +165,33 @@ fn alert_severity_to_otel(severity: AlertSeverity) -> Severity {
     }
 }
 
-/// A stored gauge value with staleness tracking.
+/// Which asynchronous instrument a series is observed through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObsKind {
+    /// `TelemetryValue::Counter` — a cumulative total, observed as a monotonic Sum.
+    Counter,
+    /// `TelemetryValue::Gauge` / `Boolean` — a current level.
+    Gauge,
+}
+
+/// One observed series: its latest value, its attributes, and when it last
+/// moved.
+///
+/// This replaces the old write-only `GaugeEntry` map, whose `value` field was
+/// `#[allow(dead_code)]` because nothing ever read it (#754). The store is now
+/// the single source the asynchronous callbacks read on every collection, which
+/// is what makes both counter semantics correct and staleness observable: an
+/// entry evicted here stops being observed, producing a real **gap** rather
+/// than a value that flat-lines forever.
 #[derive(Debug, Clone)]
-struct GaugeEntry {
-    #[allow(dead_code)]
+struct Observation {
     value: f64,
+    attrs: Vec<opentelemetry::KeyValue>,
     last_updated: Instant,
 }
+
+/// metric name -> (series key -> observation)
+type ObservationStore = Arc<RwLock<HashMap<String, HashMap<String, Observation>>>>;
 
 /// OpenTelemetry exporter that receives telemetry and exports via OTLP.
 pub struct OtelExporter {
@@ -206,13 +226,52 @@ pub struct OtelExporter {
     filter: TelemetryFilter,
     /// Export statistics.
     stats: RwLock<ExporterStats>,
-    /// Registered gauges for updating, with staleness tracking.
-    gauges: RwLock<HashMap<String, GaugeEntry>>,
-    /// Maximum number of gauge series to store.
+    /// Every observed series, read by the asynchronous instrument callbacks.
+    observations: ObservationStore,
+    /// Which metric names already have an instrument registered, and of which
+    /// kind. Registering twice would create a duplicate stream; changing kind
+    /// mid-flight is a sensor bug we report rather than paper over.
+    registered: RwLock<HashMap<String, ObsKind>>,
+    /// Instrument handles, kept alive for the lifetime of the exporter.
+    _counters: RwLock<Vec<opentelemetry::metrics::ObservableCounter<u64>>>,
+    _gauges: RwLock<Vec<opentelemetry::metrics::ObservableGauge<f64>>>,
+    /// Maximum number of series to store, across all metric names.
     max_gauge_series: usize,
 }
 
 impl OtelExporter {
+    /// Build an exporter around an already-constructed meter provider.
+    ///
+    /// Test-only seam. It exists so the metrics path can be asserted **on the
+    /// wire** with `InMemoryMetricExporter` rather than through a log line —
+    /// which is exactly the coverage whose absence let the counter bug (#754)
+    /// ship: every existing test was a pure conversion test, and none of them
+    /// could tell `add(absolute)` from `observe(absolute)`.
+    #[cfg(test)]
+    fn with_meter_provider(meter_provider: SdkMeterProvider) -> Self {
+        let meter = meter_provider.meter("zensight");
+        Self {
+            meter_provider: Some(meter_provider),
+            meter: Some(meter),
+            logger_provider: None,
+            logger: None,
+            alert_logger: None,
+            span_processor: None,
+            span_scope: InstrumentationScope::builder("zensight.alerts").build(),
+            alert_spans: None,
+            export_metrics: true,
+            export_logs: false,
+            export_alerts: false,
+            filter: TelemetryFilter::new(&FilterConfig::default()),
+            stats: RwLock::new(ExporterStats::default()),
+            observations: Arc::new(RwLock::new(HashMap::new())),
+            registered: RwLock::new(HashMap::new()),
+            _counters: RwLock::new(Vec::new()),
+            _gauges: RwLock::new(Vec::new()),
+            max_gauge_series: 100_000,
+        }
+    }
+
     /// Create a new OTLP exporter.
     pub async fn new(
         otel_config: &OtelConfig,
@@ -290,7 +349,10 @@ impl OtelExporter {
             export_alerts: otel_config.export_alerts,
             filter: TelemetryFilter::new(filter_config),
             stats: RwLock::new(ExporterStats::default()),
-            gauges: RwLock::new(HashMap::new()),
+            observations: Arc::new(RwLock::new(HashMap::new())),
+            registered: RwLock::new(HashMap::new()),
+            _counters: RwLock::new(Vec::new()),
+            _gauges: RwLock::new(Vec::new()),
             max_gauge_series: 100_000,
         })
     }
@@ -430,85 +492,150 @@ impl OtelExporter {
         let metric_name = build_metric_name(point.protocol, &point.metric);
         let attributes = build_metric_attributes(point);
 
-        match OtelMetricType::from_value(&point.value) {
-            OtelMetricType::Counter => {
-                let Some(value) = extract_value(&point.value) else {
-                    warn!(
-                        metric = %metric_name,
-                        source = %point.source,
-                        "Counter marked as exportable but value extraction failed"
-                    );
-                    let mut stats = self.stats.write();
-                    stats.metrics_failed += 1;
-                    return;
-                };
-                let mut builder = meter.u64_counter(metric_name.clone());
-                if let Some(unit) = &point.unit {
-                    builder = builder.with_unit(unit.clone());
-                }
-                let counter = builder.build();
-                counter.add(value as u64, &attributes);
+        let kind = match OtelMetricType::from_value(&point.value) {
+            OtelMetricType::Counter => ObsKind::Counter,
+            OtelMetricType::Gauge => ObsKind::Gauge,
+            OtelMetricType::NotExportable => return,
+        };
 
-                trace!(
-                    metric = %metric_name,
-                    value = value,
-                    "Recorded counter"
-                );
+        let Some(value) = extract_value(&point.value) else {
+            warn!(
+                metric = %metric_name,
+                source = %point.source,
+                "Value marked as exportable but extraction failed"
+            );
+            self.stats.write().metrics_failed += 1;
+            return;
+        };
 
-                let mut stats = self.stats.write();
-                stats.metrics_exported += 1;
-            }
-            OtelMetricType::Gauge => {
-                let Some(value) = extract_value(&point.value) else {
-                    warn!(
-                        metric = %metric_name,
-                        source = %point.source,
-                        "Gauge marked as exportable but value extraction failed"
-                    );
-                    let mut stats = self.stats.write();
-                    stats.metrics_failed += 1;
-                    return;
-                };
-                // For gauges, we use an observable gauge pattern
-                // Store the value and let the SDK read it periodically
-                let key = build_gauge_key(&metric_name, &attributes);
-
-                let mut gauges = self.gauges.write();
-                if !gauges.contains_key(&key) && gauges.len() >= self.max_gauge_series {
+        // Store the observation. The asynchronous callback registered below
+        // reads this on every collection cycle.
+        //
+        // This is the fix for #754. The old counter path called
+        // `counter.add(value)` with the **absolute** device reading, so under
+        // cumulative temporality the exported Sum became a running total of
+        // absolute readings: an interface sitting at 1_000_000 octets reported
+        // 1e6, then 2e6, then 3e6, forever. `rate()` returned
+        // `reading / interval` and the series never decreased even across a
+        // counter reset — silently wrong, which is worse than broken.
+        //
+        // `TelemetryValue::Counter` is already the cumulative total
+        // (`zensight-common/src/telemetry.rs`), so the right instrument is an
+        // asynchronous one that *reports* that total, not a synchronous one
+        // that adds to it. A delta cache would be the wrong shape too: it would
+        // have to invent reset semantics it cannot observe.
+        let series_key = build_series_key(&metric_name, &attributes);
+        {
+            let mut store = self.observations.write();
+            let series = store.entry(metric_name.clone()).or_default();
+            if !series.contains_key(&series_key) {
+                let total: usize = store.values().map(HashMap::len).sum();
+                if total >= self.max_gauge_series {
                     warn!(
                         max = self.max_gauge_series,
-                        "Max gauge series limit reached, dropping new gauge"
+                        "Max series limit reached, dropping new series"
                     );
-                    let mut stats = self.stats.write();
-                    stats.metrics_failed += 1;
+                    self.stats.write().metrics_failed += 1;
                     return;
                 }
-                gauges.insert(
-                    key,
-                    GaugeEntry {
+                let series = store.entry(metric_name.clone()).or_default();
+                series.insert(
+                    series_key,
+                    Observation {
                         value,
+                        attrs: attributes,
                         last_updated: Instant::now(),
                     },
                 );
-
-                // Create/update gauge
-                let mut builder = meter.f64_gauge(metric_name.clone());
-                if let Some(unit) = &point.unit {
-                    builder = builder.with_unit(unit.clone());
-                }
-                let gauge = builder.build();
-                gauge.record(value, &attributes);
-
-                trace!(
-                    metric = %metric_name,
-                    value = value,
-                    "Recorded gauge"
-                );
-
-                let mut stats = self.stats.write();
-                stats.metrics_exported += 1;
+            } else {
+                let obs = series
+                    .get_mut(&series_key)
+                    .expect("checked present immediately above");
+                obs.value = value;
+                obs.attrs = attributes;
+                obs.last_updated = Instant::now();
             }
-            OtelMetricType::NotExportable => {}
+        }
+
+        // Register the instrument once per metric name. The SDK resolves an
+        // instrument to a stream, so rebuilding it per point (as the old code
+        // did on every single sample) was a lock, an allocation and a pipeline
+        // lookup on the Zenoh receive path for no gain.
+        let already = self.registered.read().get(&metric_name).copied();
+        match already {
+            Some(existing) if existing == kind => {}
+            Some(existing) => {
+                // Two value variants under one metric name. Reporting a level
+                // as a monotonic Sum is a contract violation, so say so rather
+                // than silently picking one.
+                warn!(
+                    metric = %metric_name,
+                    ?existing,
+                    attempted = ?kind,
+                    "Metric changed value kind mid-flight; keeping the first"
+                );
+                self.stats.write().metrics_failed += 1;
+                return;
+            }
+            None => {
+                self.register_instrument(meter, &metric_name, kind, point.unit.as_deref());
+                self.registered.write().insert(metric_name.clone(), kind);
+            }
+        }
+
+        trace!(metric = %metric_name, value, ?kind, "Recorded observation");
+        self.stats.write().metrics_exported += 1;
+    }
+
+    /// Register the asynchronous instrument for one metric name.
+    ///
+    /// The callback closes over a clone of the observation store, so a series
+    /// removed by [`Self::cleanup_stale_observations`] simply stops being observed on
+    /// the next collection — a gap, which is the honest rendering of "this host
+    /// stopped reporting".
+    fn register_instrument(
+        &self,
+        meter: &Meter,
+        metric_name: &str,
+        kind: ObsKind,
+        unit: Option<&str>,
+    ) {
+        let store = Arc::clone(&self.observations);
+        let name_for_cb = metric_name.to_string();
+
+        match kind {
+            ObsKind::Counter => {
+                let mut b = meter.u64_observable_counter(metric_name.to_string());
+                if let Some(u) = unit {
+                    b = b.with_unit(u.to_string());
+                }
+                let inst = b
+                    .with_callback(move |observer| {
+                        if let Some(series) = store.read().get(&name_for_cb) {
+                            for obs in series.values() {
+                                observer.observe(obs.value as u64, &obs.attrs);
+                            }
+                        }
+                    })
+                    .build();
+                self._counters.write().push(inst);
+            }
+            ObsKind::Gauge => {
+                let mut b = meter.f64_observable_gauge(metric_name.to_string());
+                if let Some(u) = unit {
+                    b = b.with_unit(u.to_string());
+                }
+                let inst = b
+                    .with_callback(move |observer| {
+                        if let Some(series) = store.read().get(&name_for_cb) {
+                            for obs in series.values() {
+                                observer.observe(obs.value, &obs.attrs);
+                            }
+                        }
+                    })
+                    .build();
+                self._gauges.write().push(inst);
+            }
         }
     }
 
@@ -651,20 +778,36 @@ impl OtelExporter {
     }
 
     /// Remove stale gauge entries that haven't been updated within the given duration.
-    pub fn cleanup_stale_gauges(&self, max_age: Duration) -> usize {
-        let mut gauges = self.gauges.write();
-        let before = gauges.len();
-        gauges.retain(|_, entry| entry.last_updated.elapsed() < max_age);
-        let removed = before - gauges.len();
+    /// Drop series not updated within `max_age`, and return how many went.
+    ///
+    /// This has teeth now. It previously had **zero callers** and its store was
+    /// write-only, so a host that went quiet kept flat-lining its last value
+    /// forever (#754). The asynchronous callbacks read the same store, so an
+    /// evicted series simply stops being observed on the next collection —
+    /// which renders as a gap, the honest answer.
+    pub fn cleanup_stale_observations(&self, max_age: Duration) -> usize {
+        let mut store = self.observations.write();
+        let before: usize = store.values().map(HashMap::len).sum();
+        for series in store.values_mut() {
+            series.retain(|_, obs| obs.last_updated.elapsed() < max_age);
+        }
+        // Drop metric names with no series left, so the map does not grow
+        // without bound on a fleet with churn. The instrument stays registered
+        // (its callback just observes nothing), which is correct: the metric
+        // still exists, nothing is currently reporting it.
+        store.retain(|_, series| !series.is_empty());
+        let after: usize = store.values().map(HashMap::len).sum();
+        let removed = before - after;
         if removed > 0 {
-            info!(removed, remaining = gauges.len(), "Cleaned up stale gauges");
+            info!(removed, remaining = after, "Cleaned up stale series");
         }
         removed
     }
 
     /// Get the number of stored gauge series.
-    pub fn gauge_count(&self) -> usize {
-        self.gauges.read().len()
+    /// Total observed series across all metric names.
+    pub fn series_count(&self) -> usize {
+        self.observations.read().values().map(HashMap::len).sum()
     }
 
     /// Get current statistics.
@@ -827,5 +970,123 @@ mod tests {
 
         assert!(!filter.should_include(&point1));
         assert!(filter.should_include(&point2));
+    }
+
+    // ---- OTLP wire assertions (#754) --------------------------------------
+    //
+    // These assert what actually leaves the process, not what a conversion
+    // helper returns. Everything above this line could pass with the counter
+    // bug intact, which is how it shipped.
+
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader};
+
+    fn point(source: &str, metric: &str, value: TelemetryValue) -> TelemetryPoint {
+        TelemetryPoint {
+            timestamp: 1_700_000_000_000,
+            source: source.to_string(),
+            protocol: Protocol::Snmp,
+            metric: metric.to_string(),
+            value,
+            labels: std::collections::HashMap::new(),
+            unit: None,
+        }
+    }
+
+    fn harness() -> (OtelExporter, InMemoryMetricExporter) {
+        let sink = InMemoryMetricExporter::default();
+        let reader = PeriodicReader::builder(sink.clone()).build();
+        let mp = SdkMeterProvider::builder().with_reader(reader).build();
+        (OtelExporter::with_meter_provider(mp), sink)
+    }
+
+    /// A cumulative counter must report the reading, not accumulate readings.
+    ///
+    /// Feeding 100, 150, 150 must export **150** — the device's current total.
+    /// The old `counter.add(absolute)` exported 400, so `rate()` returned
+    /// `reading / interval` and the series never decreased even on a reset.
+    #[test]
+    fn a_counter_reports_its_reading_not_the_sum_of_readings() {
+        let (exporter, sink) = harness();
+
+        for v in [100u64, 150, 150] {
+            exporter.record_metric(&point("sw1", "if/1/in_octets", TelemetryValue::Counter(v)));
+        }
+        exporter
+            .meter_provider
+            .as_ref()
+            .expect("meter provider")
+            .force_flush()
+            .expect("flush");
+
+        let metrics = sink.get_finished_metrics().expect("finished metrics");
+        let mut seen = None;
+        for rm in &metrics {
+            for sm in rm.scope_metrics() {
+                for m in sm.metrics() {
+                    if !m.name().contains("in_octets") {
+                        continue;
+                    }
+                    let AggregatedMetrics::U64(MetricData::Sum(sum)) = m.data() else {
+                        panic!("a Counter must export as a Sum, got {:?}", m.name());
+                    };
+                    assert!(sum.is_monotonic(), "a counter Sum must be monotonic");
+                    for dp in sum.data_points() {
+                        seen = Some(dp.value());
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            Some(150),
+            "the exported Sum must be the last reading (150), not the running \
+             total of readings (400)"
+        );
+    }
+
+    /// A series nobody has reported since the cutoff stops being observed, so
+    /// the metric gaps instead of flat-lining its last value forever.
+    #[test]
+    fn an_evicted_series_stops_being_observed() {
+        let (exporter, sink) = harness();
+        exporter.record_metric(&point("sw1", "cpu/load", TelemetryValue::Gauge(0.5)));
+
+        let removed = exporter.cleanup_stale_observations(Duration::from_secs(0));
+        assert_eq!(removed, 1, "the series is evicted");
+        assert_eq!(exporter.series_count(), 0);
+
+        exporter
+            .meter_provider
+            .as_ref()
+            .expect("meter provider")
+            .force_flush()
+            .expect("flush");
+
+        let metrics = sink.get_finished_metrics().expect("finished metrics");
+        let points: usize = metrics
+            .iter()
+            .flat_map(|rm| rm.scope_metrics())
+            .flat_map(|sm| sm.metrics())
+            .filter(|m| m.name().contains("cpu_load") || m.name().contains("cpu/load"))
+            .map(|m| match m.data() {
+                AggregatedMetrics::F64(MetricData::Gauge(g)) => g.data_points().count(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(points, 0, "an evicted series must produce no data points");
+    }
+
+    /// One instrument per metric name, however many points arrive. The old path
+    /// rebuilt the instrument on every single sample.
+    #[test]
+    fn an_instrument_is_registered_once_per_metric_name() {
+        let (exporter, _sink) = harness();
+        for i in 0..10u64 {
+            exporter.record_metric(&point("sw1", "if/1/in_octets", TelemetryValue::Counter(i)));
+        }
+        assert_eq!(exporter.registered.read().len(), 1);
+        assert_eq!(exporter._counters.read().len(), 1);
+        assert_eq!(exporter.series_count(), 1, "one series, ten updates");
     }
 }

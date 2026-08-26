@@ -47,6 +47,17 @@ parking_lot = "0.12"
 [dev-dependencies]
 tempfile = "3"
 
+# `testing` unlocks `InMemoryMetricExporter` / `InMemoryLogExporter`, which is
+# how the metrics path is asserted ON THE WIRE rather than through a log line.
+# Every pre-existing test was a pure conversion test that could not tell
+# `add(absolute)` from `observe(absolute)` — which is how #754 shipped.
+opentelemetry_sdk = { version = "0.32", features = [
+    "rt-tokio",
+    "metrics",
+    "trace",
+    "testing",
+] }
+
 # =============================================================================
 # Package metadata for cargo-deb
 # =============================================================================

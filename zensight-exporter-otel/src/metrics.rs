@@ -1,6 +1,7 @@
 //! Mapping from ZenSight TelemetryPoint to OpenTelemetry metrics.
 
 use opentelemetry::KeyValue;
+use zensight_common::exposition::{LabelMerger, LabelSource};
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
 /// Build resource attributes from configuration and telemetry.
@@ -25,30 +26,38 @@ pub fn build_resource_attributes(
 }
 
 /// Build metric attributes from a TelemetryPoint.
+///
+/// Goes through the shared merge (#753) so an attribute key can never be
+/// emitted twice. This side had **no** de-duplication at all: it pushed
+/// `source`, `protocol`, every semconv attribute and every point label
+/// unconditionally, so a sysinfo disk-I/O point produced `device` twice — and a
+/// sensor could shadow `source` or `protocol` outright.
 pub fn build_metric_attributes(point: &TelemetryPoint) -> Vec<KeyValue> {
-    let mut attrs = Vec::with_capacity(2 + point.labels.len());
+    // OTLP attribute keys are unconstrained, so the sanitizer is identity — the
+    // collision guarantee comes from the merge, not from the normalisation.
+    let mut merger = LabelMerger::new(|n: &str| n.to_string());
 
-    // Always include source and protocol
-    attrs.push(KeyValue::new("source", point.source.clone()));
-    attrs.push(KeyValue::new(
+    merger.offer("source", point.source.clone(), LabelSource::Structural);
+    merger.offer(
         "protocol",
         point.protocol.as_str().to_string(),
-    ));
+        LabelSource::Structural,
+    );
 
     // OTel host-metrics semconv (#100): factor state/direction/device/cpu out of
     // the metric name into attributes via the shared table.
     if let Some(sc) = zensight_common::semconv::metric_semconv(point.protocol, &point.metric) {
-        for (k, v) in sc.attributes {
-            attrs.push(KeyValue::new(k, v));
-        }
+        merger.offer_all(sc.attributes, LabelSource::SemconvConstant);
     }
 
-    // Add telemetry labels
-    for (k, v) in &point.labels {
-        attrs.push(KeyValue::new(k.clone(), v.clone()));
-    }
+    merger.offer_all(&point.labels, LabelSource::PointLabel);
 
-    attrs
+    merger
+        .finish()
+        .labels
+        .into_iter()
+        .map(|(k, v)| KeyValue::new(k, v))
+        .collect()
 }
 
 /// Build a metric name from protocol and metric path.
