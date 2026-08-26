@@ -421,3 +421,39 @@ mod tests {
         }
     }
 }
+
+/// The Prometheus name suffix a UCUM-ish unit implies.
+///
+/// Convention only — the VALUE is never rescaled. A `ms` unit gets no suffix
+/// because renaming it `_seconds` without dividing by 1000 would be a lie, and
+/// dividing would silently change what every existing dashboard reads. When
+/// there is no suffix the unit still reaches the reader, in `# HELP`.
+pub fn unit_suffix(unit: &str) -> Option<&'static str> {
+    match unit {
+        "By" | "bytes" => Some("_bytes"),
+        "s" | "seconds" => Some("_seconds"),
+        "By/s" => Some("_bytes_per_second"),
+        "1/s" => Some("_per_second"),
+        "%" | "percent" => Some("_percent"),
+        "Cel" => Some("_celsius"),
+        _ => None,
+    }
+}
+
+/// Apply the Prometheus naming conventions to a family name.
+///
+/// A counter gains `_total`; a unit with a conventional suffix gains it. Both
+/// are idempotent — a name that already ends the right way is left alone,
+/// because `..._bytes_bytes` helps nobody.
+pub fn apply_conventions(name: &str, kind: PrometheusType, unit: Option<&str>) -> String {
+    let mut out = name.to_string();
+    if let Some(suffix) = unit.and_then(unit_suffix)
+        && !out.ends_with(suffix)
+    {
+        out.push_str(suffix);
+    }
+    if kind == PrometheusType::Counter && !out.ends_with("_total") {
+        out.push_str("_total");
+    }
+    out
+}

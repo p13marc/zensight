@@ -35,11 +35,19 @@ impl SeriesKey {
     pub fn from_identity(identity: &MetricIdentity, prefix: &str) -> Self {
         let joined = identity.name.join("_");
         let sanitized = sanitize_metric_name(&joined);
-        let name = if prefix.is_empty() {
+        let base = if prefix.is_empty() {
             sanitized
         } else {
             format!("{prefix}_{sanitized}")
         };
+        // `_total` for counters, `_bytes`/`_seconds`/… from the unit (#767).
+        // Values are never rescaled — see `mapping::unit_suffix`.
+        let kind = match identity.kind {
+            MetricKind::Counter => PrometheusType::Counter,
+            MetricKind::Text => PrometheusType::Text,
+            _ => PrometheusType::Gauge,
+        };
+        let name = crate::mapping::apply_conventions(&base, kind, identity.unit.as_deref());
 
         Self {
             name,
@@ -78,6 +86,11 @@ pub struct StoredMetric {
     /// Label name the text value rides under, derived from the subject leaf
     /// (#752). `None` for numeric metrics.
     pub text_label: Option<String>,
+    /// The registry's sentence for this subject, rendered as `# HELP` (#768).
+    pub help: Option<String>,
+    /// The resolved unit, appended to `# HELP` when it did not become a name
+    /// suffix.
+    pub unit: Option<String>,
     /// When this metric was last updated.
     pub last_updated: Instant,
     /// Original timestamp from the telemetry point.
@@ -124,6 +137,8 @@ impl StoredMetric {
             value,
             text_value,
             text_label,
+            help: identity.description.clone(),
+            unit: identity.unit.clone(),
             last_updated: Instant::now(),
             timestamp_ms: point.timestamp,
         })
@@ -498,6 +513,24 @@ impl MetricCollector {
             // Get type from first series
             let metric_type = series[0].metric_type;
 
+            // `# HELP` from the registry's own sentence for this subject
+            // (#768). The registry has carried a description per subject all
+            // along; it was simply unreachable at runtime, which is why HELP
+            // was emitted only for alerts while the docs claimed otherwise.
+            //
+            // The unit is appended when it did NOT become a name suffix, so a
+            // `ms` metric still tells the reader its unit even though renaming
+            // it `_seconds` without rescaling would be a lie.
+            if let Some(help) = series[0].help.as_deref() {
+                let unit_note = series[0]
+                    .unit
+                    .as_deref()
+                    .filter(|u| crate::mapping::unit_suffix(u).is_none())
+                    .map(|u| format!(" ({u})"))
+                    .unwrap_or_default();
+                write_or_count!(output, "# HELP {} {}{}", name, escape_help(help), unit_note);
+            }
+
             // Write TYPE comment
             write_or_count!(output, "# TYPE {} {}", name, metric_type.as_str());
 
@@ -546,12 +579,12 @@ impl MetricCollector {
         let _ = writeln!(output);
         write_or_count!(
             output,
-            "# TYPE {}_exporter_series_total gauge",
+            "# TYPE {}_exporter_series gauge",
             self.prometheus_config.prefix
         );
         write_or_count!(
             output,
-            "{}_exporter_series_total {}",
+            "{}_exporter_series {}",
             self.prometheus_config.prefix,
             metrics.len()
         );
@@ -642,6 +675,12 @@ fn format_value(value: f64) -> String {
     } else {
         format!("{}", value)
     }
+}
+
+/// Escape a `# HELP` text per the exposition format: backslash and newline
+/// only (a comment is not a label value, so quotes ride through unescaped).
+fn escape_help(help: &str) -> String {
+    help.replace('\\', "\\\\").replace('\n', "\\n")
 }
 
 /// Format labels for Prometheus exposition format.
@@ -762,7 +801,8 @@ mod tests {
         );
         let key = SeriesKey::from_identity(&identity_of(&point), "zensight");
 
-        assert_eq!(key.name, "zensight_snmp_sysuptime");
+        // `_total` is the counter convention (#767), applied idempotently.
+        assert_eq!(key.name, "zensight_snmp_sysuptime_total");
         // The device is now a real label, lifted out of the key's `{device}`
         // chunk — it used to be reachable only as `source` (#764).
         assert!(
@@ -955,8 +995,8 @@ mod tests {
         assert_eq!(collector.series_count(), 1);
 
         let output = collector.render();
-        assert!(output.contains("# TYPE zensight_snmp_sysuptime counter"));
-        assert!(output.contains("zensight_snmp_sysuptime{"));
+        assert!(output.contains("# TYPE zensight_snmp_sysuptime_total counter"));
+        assert!(output.contains("zensight_snmp_sysuptime_total{"));
         assert!(output.contains("source=\"router01\""));
         assert!(output.contains("12345"));
     }

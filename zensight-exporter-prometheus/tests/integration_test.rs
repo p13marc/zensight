@@ -159,7 +159,7 @@ async fn test_full_flow_counter_metrics() {
 
     // Verify counter is present with correct type (full name includes prefix and protocol)
     assert!(
-        output.contains("# TYPE zensight_snmp_if_1_in_octets counter"),
+        output.contains("# TYPE zensight_snmp_if_1_in_octets_total counter"),
         "Should have counter type. Output: {}",
         output
     );

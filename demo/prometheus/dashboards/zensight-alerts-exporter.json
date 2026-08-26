@@ -131,7 +131,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "zensight_exporter_series_total",
+          "expr": "zensight_exporter_series",
           "legendFormat": "series"
         }
       ]

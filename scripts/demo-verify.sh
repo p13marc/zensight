@@ -153,8 +153,39 @@ $dupes"
 # --- The semconv path fired, not merely "some series exist" ----------------
 grep -q '^zensight_system_cpu_utilization' <<<"$metrics" \
     || die "no zensight_system_cpu_utilization — the semconv mapping did not fire"
-grep -q '^zensight_system_memory_usage{.*state="used"' <<<"$metrics" \
+grep -q '^zensight_system_memory_usage_bytes{.*state="used"' <<<"$metrics" \
     || die "memory did not factor its state into a LABEL (semconv regression)"
+
+# The registry-driven rename put per-entity subjects in LABELS (#764). Before
+# it, each mount was its own metric family and `sum by (mount)` could not be
+# written at all.
+grep -q '^zensight_sysinfo_disk_inodes_total{.*mount=' <<<"$metrics" \
+    || die "disk inodes did not factor the mount into a LABEL — the registry-driven \
+naming regressed, and per-entity subjects are back in metric names"
+
+# --- the provisioned dashboards must query names that actually exist --------
+#
+# Metric names come from the registry now (#764) and carry unit/_total
+# conventions (#767), so a rename lands in the exposition and the dashboards rot
+# silently — a panel with no data reads as "the exporter is broken". This is the
+# check that keeps demo/ honest.
+#
+# `zensight_alert` and the systemd families need sensors this harness does not
+# run, so they are deferred rather than asserted.
+stale=$(python3 - "$metrics" <<'PY'
+import glob, json, re, sys
+live = set(re.findall(r'(?m)^(zensight_[a-z_0-9]+)', sys.argv[1]))
+deferred = {"zensight_alert", "zensight_systemd_unit_active", "zensight_systemd_units_failed"}
+used = set()
+for f in glob.glob("demo/prometheus/dashboards/*.json"):
+    used |= set(re.findall(r'zensight_[a-z_0-9]+', open(f).read()))
+print("\n".join(sorted(used - live - deferred)))
+PY
+)
+[[ -z "$stale" ]] || die "provisioned dashboards query metrics that no longer exist:
+$stale
+
+The exposition renamed something and demo/prometheus/dashboards/ was not updated."
 
 accepted=$(awk '/^zensight_exporter_points_accepted_total /{print $2}' <<<"$metrics")
 [[ "${accepted:-0}" -gt 0 ]] \

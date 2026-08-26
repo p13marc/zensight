@@ -350,7 +350,7 @@ mod tests {
             timeseries: vec![TimeSeries {
                 labels: vec![Label {
                     name: "__name__".into(),
-                    value: "zensight_snmp_sysuptime".into(),
+                    value: "zensight_snmp_sysuptime_total".into(),
                 }],
                 samples: vec![Sample {
                     value: 3.5,
@@ -402,7 +402,7 @@ mod tests {
         let counter = req
             .timeseries
             .iter()
-            .find(|ts| label(ts, "__name__") == Some("zensight_snmp_sysuptime"))
+            .find(|ts| label(ts, "__name__") == Some("zensight_snmp_sysuptime_total"))
             .expect("counter series present");
         assert_eq!(counter.samples[0].value, 12345.0);
 
@@ -561,7 +561,7 @@ mod tests {
         let req = WriteRequest::decode(&raw[..]).unwrap();
         assert_eq!(req.timeseries.len(), 1);
         let ts = &req.timeseries[0];
-        assert_eq!(label(ts, "__name__"), Some("zensight_snmp_sysuptime"));
+        assert_eq!(label(ts, "__name__"), Some("zensight_snmp_sysuptime_total"));
         assert_eq!(label(ts, "source"), Some("router01"));
         assert_eq!(ts.samples[0].value, 7.0);
         assert!(ts.samples[0].timestamp > 0);
