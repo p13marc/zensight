@@ -17,13 +17,13 @@ use anyhow::{Context, Result, bail};
 use parallax::buffer::Buffer;
 use parallax::control::{Controllable, EncoderControl, EncoderStatsHandle, RateControlMode};
 use parallax::converters::PixelFormat as ConvFormat;
-use parallax::element::{Element, ProduceContext, ProduceResult, Source};
+use parallax::element::{AsyncSource, Element, ProduceContext, ProduceResult, Source};
 use parallax::elements::codec::{Complexity, KeyframeHandle, Profile, UsageType};
 use parallax::elements::transform::VideoConvertElement;
 use parallax::elements::{
-    AppSink, AppSinkHandle, AppSrc, AppSrcHandle, ColorType, H264Decoder, H264Encoder,
-    H264EncoderConfig, JpegDecoder, JpegEncoder, JpegQualityControl, ScaleControl, Throttle,
-    ThrottleControl, V4l2Src, VideoPattern, VideoScale, VideoTestSrc,
+    AppSink, AppSinkHandle, ColorType, H264Decoder, H264Encoder, H264EncoderConfig, JpegDecoder,
+    JpegEncoder, JpegQualityControl, ScaleControl, Throttle, ThrottleControl, V4l2Src,
+    VideoPattern, VideoScale, VideoTestSrc,
 };
 use parallax::pipeline::{Executor, Pipeline, UnifiedExecutorConfig};
 
@@ -71,10 +71,16 @@ pub fn executor() -> Executor {
 /// The unified executor runs source loops on blocking threads and ignores
 /// downstream channel closure, so `PipelineHandle::abort()` alone cannot stop
 /// a live (infinite) source — the blocking task would keep the runtime (and
-/// the pipeline) alive forever. Every source we build is wrapped in a
-/// [`StoppableSource`]; flipping this flag makes its next `produce()` return
-/// EOS, which unwinds the whole pipeline cleanly. Teardown latency is at most
-/// one frame period (the live source's internal pacing).
+/// the pipeline) alive forever. Every **synchronous** source we build is
+/// wrapped in a [`StoppableSource`]; flipping this flag makes its next
+/// `produce()` return EOS, which unwinds the whole pipeline cleanly. Teardown
+/// latency is at most one frame period (the live source's internal pacing).
+///
+/// Not every graph has one any more (#709 is the ticket for retiring it): the
+/// RTSP paths became `AsyncSource`-driven in #731 and need no switch, because
+/// an async source is a future and aborting its task cancels it at the next
+/// await point. `V4l2Src` and `VideoTestSrc` are still synchronous `Source`s,
+/// so the wrapper stays until they are not.
 #[derive(Clone, Debug)]
 pub struct StopHandle(Arc<AtomicBool>);
 
@@ -324,20 +330,30 @@ pub struct BuiltPipeline {
     pub controls: PipelineControls,
     /// Cooperative source stop — MUST be triggered at teardown (see
     /// [`StopHandle`]); `PipelineHandle::abort()` alone leaks the source.
-    pub stop: StopHandle,
-    /// Push side of an `AppSrc`-fed pipeline (RTSP): the caller must run a
-    /// feeder task that pushes buffers and calls `end_stream()` on source
-    /// loss. `None` for self-driving sources (test pattern, V4L2).
-    pub feed: Option<AppSrcHandle>,
+    ///
+    /// `None` for a graph whose source is an [`AsyncSource`] (RTSP, #731):
+    /// there is nothing to leak. The switch exists because a *synchronous*
+    /// `Source` is pumped on a blocking thread that `abort()` cannot cancel;
+    /// an async source is a future, and aborting the task cancels it at its
+    /// next await point. Use [`Self::stop_source`] rather than the field.
+    pub stop: Option<StopHandle>,
     /// Encoded frame dimensions (stamped into every `FrameMeta`;
     /// `0` = unknown, e.g. RTSP passthrough without SDP dimensions).
     pub width: u32,
     pub height: u32,
 }
 
-/// How many buffers an RTSP feeder may queue in the `AppSrc` before frames
-/// are shed (live video: never let the feeder back up).
-const FEED_QUEUE: usize = 8;
+impl BuiltPipeline {
+    /// Flip the source's cooperative EOS switch, if this graph has one.
+    ///
+    /// A no-op for an [`AsyncSource`]-driven graph, where aborting the
+    /// pipeline is enough.
+    pub fn stop_source(&self) {
+        if let Some(stop) = &self.stop {
+            stop.stop();
+        }
+    }
+}
 
 /// The H.264 encoder config for a video graph (parallax 0.6).
 ///
@@ -519,8 +535,7 @@ pub fn build_video(
                     encoder_stats: Some(enc_stats),
                     ..Default::default()
                 },
-                stop,
-                feed: None,
+                stop: Some(stop),
                 width: w,
                 height: h,
             })
@@ -613,8 +628,7 @@ pub fn build_video(
                     encoder_stats: Some(enc_stats),
                     ..Default::default()
                 },
-                stop,
-                feed: None,
+                stop: Some(stop),
                 width: out_w,
                 height: out_h,
             })
@@ -627,22 +641,28 @@ pub fn build_video(
     }
 }
 
-/// Build the RTSP video-profile pipeline: pure **passthrough** (`AppSrc` →
-/// `AppSink`), no re-encode — the camera's H.264 access units are forwarded
-/// as-is, so there is no keyframe handle (`request_keyframe` is a no-op) and
-/// bitrate/GOP config does not apply. `dimensions` come from the SDP when
-/// known (`None` → 0x0 = unknown in `FrameMeta`).
-pub fn build_rtsp_video_passthrough(dimensions: Option<(u32, u32)>) -> Result<BuiltPipeline> {
-    let src = AppSrc::with_max_buffers(FEED_QUEUE);
-    let feed = src.handle();
+/// Build the RTSP video-profile pipeline: pure **passthrough** (the camera
+/// session → `AppSink`), no re-encode — the camera's H.264 access units are
+/// forwarded as-is, so there is no keyframe handle (`request_keyframe` is a
+/// no-op) and bitrate/GOP config does not apply. `dimensions` come from the SDP
+/// when known (`None` → 0x0 = unknown in `FrameMeta`).
+///
+/// `source` is the connected `RtspSession` itself, which is an
+/// [`AsyncSource`] since parallax 0.8 (#731): the `AppSrc` + hand-written
+/// feeder task this used to need is gone, and with it the retry loop the
+/// feeder never had. Generic rather than typed on `RtspSession` so the shape
+/// is testable without a camera.
+pub fn build_rtsp_video_passthrough<S: AsyncSource + 'static>(
+    source: S,
+    dimensions: Option<(u32, u32)>,
+) -> Result<BuiltPipeline> {
     let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
     let sink_handle = sink.handle();
-    let (src, stop) = StoppableSource::new(src);
 
     let mut pipeline = Pipeline::new();
-    let src_id = pipeline.add_source("rtsp-feed", src);
+    let src_id = pipeline.add_async_source("rtsp", source);
     let sink_id = pipeline.add_async_sink("app-sink", sink);
-    pipeline.link(src_id, sink_id).context("link feed→sink")?;
+    pipeline.link(src_id, sink_id).context("link rtsp→sink")?;
 
     let (width, height) = dimensions.unwrap_or((0, 0));
     Ok(BuiltPipeline {
@@ -650,8 +670,7 @@ pub fn build_rtsp_video_passthrough(dimensions: Option<(u32, u32)>) -> Result<Bu
         sink: sink_handle,
         // Passthrough: no encoder in the graph, so no live controls at all.
         controls: PipelineControls::default(),
-        stop,
-        feed: Some(feed),
+        stop: None,
         width,
         height,
     })
@@ -661,14 +680,13 @@ pub fn build_rtsp_video_passthrough(dimensions: Option<(u32, u32)>) -> Result<Bu
 /// throttle to the preview fps, downscale to `preview.max_height`, convert
 /// to RGB, and JPEG-encode. Needs the stream dimensions (from the SDP) for
 /// the advertised `FrameMeta` size.
-pub fn build_rtsp_preview(
+pub fn build_rtsp_preview<S: AsyncSource + 'static>(
+    source: S,
     width: u32,
     height: u32,
     preview: &PreviewConfig,
     stats: &Arc<StreamStats>,
 ) -> Result<BuiltPipeline> {
-    let src = AppSrc::with_max_buffers(FEED_QUEUE);
-    let feed = src.handle();
     let decoder = H264Decoder::new().context("create H.264 decoder")?;
     // Decode everything (delta frames need their references), THEN drop down
     // to the preview rate before the expensive scale+convert+encode.
@@ -687,17 +705,16 @@ pub fn build_rtsp_preview(
     stats.tighten_budget(1_000_000_000 / preview.fps.max(1) as u64);
     let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
     let sink_handle = sink.handle();
-    let (src, stop) = StoppableSource::new(src);
 
     let mut pipeline = Pipeline::new();
-    let src_id = pipeline.add_source("rtsp-feed", src);
+    let src_id = pipeline.add_async_source("rtsp", source);
     let dec_id = pipeline.add_filter("h264-decoder", decoder);
     let thr_id = pipeline.add_filter("preview-throttle", throttle);
     let scale_id = pipeline.add_filter("preview-scale", scale);
     let conv_id = pipeline.add_filter("convert-rgb", convert);
     let enc_id = pipeline.add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
     let sink_id = pipeline.add_async_sink("app-sink", sink);
-    pipeline.link(src_id, dec_id).context("link feed→decoder")?;
+    pipeline.link(src_id, dec_id).context("link rtsp→decoder")?;
     pipeline
         .link(dec_id, thr_id)
         .context("link decoder→throttle")?;
@@ -724,8 +741,7 @@ pub fn build_rtsp_preview(
             preview_scale: Some(preview_scale),
             ..Default::default()
         },
-        stop,
-        feed: Some(feed),
+        stop: None,
         width: out_w,
         height: out_h,
     })
@@ -786,8 +802,7 @@ pub fn build_preview(
                     preview_scale: Some(preview_scale),
                     ..Default::default()
                 },
-                stop,
-                feed: None,
+                stop: Some(stop),
                 width: out_w,
                 height: out_h,
             })
@@ -872,8 +887,7 @@ pub fn build_preview(
                     preview_scale,
                     ..Default::default()
                 },
-                stop,
-                feed: None,
+                stop: Some(stop),
                 width: out_w,
                 height: out_h,
             })
@@ -1035,7 +1049,7 @@ mod tests {
             }
         }
 
-        built.stop.stop();
+        built.stop_source();
         tokio::time::timeout(Duration::from_secs(10), handle.wait())
             .await
             .expect("pipeline must shut down cleanly after StopHandle::stop()")
@@ -1139,7 +1153,7 @@ mod tests {
         }
         let (encoded, shed) = (handle.frames_encoded(), handle.frames_dropped_by_rc());
 
-        built.stop.stop();
+        built.stop_source();
         tokio::time::timeout(Duration::from_secs(10), pipeline.wait())
             .await
             .expect("pipeline must shut down cleanly")
@@ -1343,7 +1357,7 @@ mod tests {
                 Pulled::Empty | Pulled::Flushing => {}
             }
         }
-        built.stop.stop();
+        built.stop_source();
         let _ = tokio::time::timeout(Duration::from_secs(10), handle.wait()).await;
         aus
     }
@@ -1500,59 +1514,102 @@ mod tests {
         assert!(build_preview(&rtsp, &PreviewConfig::default(), &Arc::default()).is_err());
     }
 
-    #[test]
-    fn rtsp_builders_construct() {
-        let v = build_rtsp_video_passthrough(Some((1280, 720))).expect("passthrough");
-        assert!(
-            v.controls.keyframe.is_none(),
-            "passthrough cannot force keyframes"
-        );
-        assert!(v.feed.is_some(), "rtsp pipelines are AppSrc-fed");
-        assert_eq!((v.width, v.height), (1280, 720));
-
-        let unknown = build_rtsp_video_passthrough(None).expect("passthrough w/o dims");
-        assert_eq!((unknown.width, unknown.height), (0, 0), "0 = unknown");
-
-        let p = build_rtsp_preview(640, 360, &PreviewConfig::default(), &Arc::default())
-            .expect("preview");
-        assert!(p.controls.keyframe.is_none());
-        assert!(p.feed.is_some());
-        assert_eq!((p.width, p.height), (640, 360));
+    /// A stand-in for a connected `RtspSession`: yields `count` canned Annex-B
+    /// access units, then EOS.
+    ///
+    /// The builders are generic over [`AsyncSource`] precisely so this exists —
+    /// `RtspSession` itself cannot be constructed without a camera, and the
+    /// graph shape (and its unwind) is worth testing without one.
+    struct CannedRtsp {
+        arena: parallax::memory::SharedArena,
+        next: u64,
+        count: u64,
     }
 
-    /// Feed canned "access units" through the RTSP passthrough pipeline and
-    /// require them to come out unaltered, then a clean EOS unwind.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn rtsp_passthrough_forwards_bytes_and_ends_cleanly() {
-        use parallax::buffer::{Buffer, MemoryHandle};
-        use parallax::memory::SharedArena;
-        use parallax::metadata::{BufferFlags, Metadata};
+    impl AsyncSource for CannedRtsp {
+        async fn produce(
+            &mut self,
+            _ctx: &mut parallax::element::ProduceContext<'_>,
+        ) -> parallax::error::Result<ProduceResult> {
+            use parallax::buffer::{Buffer, MemoryHandle};
+            use parallax::metadata::{BufferFlags, Metadata};
 
-        let mut built = build_rtsp_video_passthrough(Some((320, 240))).expect("build");
-        let feed = built.feed.take().expect("feed handle");
-        let sink = built.sink.clone();
-        let handle = executor()
-            .start(&mut built.pipeline)
-            .expect("start pipeline");
+            if self.next >= self.count {
+                return Ok(ProduceResult::Eos);
+            }
+            let seq = self.next;
+            self.next += 1;
 
-        // Push three fake NAL payloads, first flagged as a keyframe.
-        let arena = SharedArena::new(64, 8).expect("arena");
-        for seq in 0..3u64 {
             let payload = [0x00, 0x00, 0x00, 0x01, 0x65, seq as u8];
-            let mut slot = arena.acquire().expect("slot");
+            let mut slot = self
+                .arena
+                .acquire()
+                .ok_or_else(|| parallax::error::Error::Element("no arena slot".into()))?;
             slot.data_mut()[..payload.len()].copy_from_slice(&payload);
             let mut metadata = Metadata::from_sequence(seq);
             if seq == 0 {
                 metadata.flags |= BufferFlags::SYNC_POINT;
             }
-            feed.push_buffer(Buffer::new(
+            Ok(ProduceResult::OwnBuffer(Buffer::new(
                 MemoryHandle::with_len(slot, payload.len()),
                 metadata,
-            ))
-            .await
-            .expect("push");
+            )))
         }
-        feed.end_stream();
+
+        fn name(&self) -> &str {
+            "canned-rtsp"
+        }
+    }
+
+    fn canned_rtsp(count: u64) -> CannedRtsp {
+        CannedRtsp {
+            arena: parallax::memory::SharedArena::new(64, 8).expect("arena"),
+            next: 0,
+            count,
+        }
+    }
+
+    #[test]
+    fn rtsp_builders_construct() {
+        let v =
+            build_rtsp_video_passthrough(canned_rtsp(0), Some((1280, 720))).expect("passthrough");
+        assert!(
+            v.controls.keyframe.is_none(),
+            "passthrough cannot force keyframes"
+        );
+        assert!(
+            v.stop.is_none(),
+            "an AsyncSource needs no cooperative EOS switch (#731)"
+        );
+        assert_eq!((v.width, v.height), (1280, 720));
+
+        let unknown =
+            build_rtsp_video_passthrough(canned_rtsp(0), None).expect("passthrough w/o dims");
+        assert_eq!((unknown.width, unknown.height), (0, 0), "0 = unknown");
+
+        let p = build_rtsp_preview(
+            canned_rtsp(0),
+            640,
+            360,
+            &PreviewConfig::default(),
+            &Arc::default(),
+        )
+        .expect("preview");
+        assert!(p.controls.keyframe.is_none());
+        assert!(p.stop.is_none());
+        assert_eq!((p.width, p.height), (640, 360));
+    }
+
+    /// Run canned "access units" through the RTSP passthrough pipeline and
+    /// require them to come out unaltered, then a clean EOS unwind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rtsp_passthrough_forwards_bytes_and_ends_cleanly() {
+        let mut built =
+            build_rtsp_video_passthrough(canned_rtsp(3), Some((320, 240))).expect("build");
+        let sink = built.sink.clone();
+        let handle = executor()
+            .start(&mut built.pipeline)
+            .expect("start pipeline");
 
         let mut frames = Vec::new();
         for _ in 0..100 {
@@ -1576,7 +1633,8 @@ mod tests {
             vec![0, 1, 2]
         );
 
-        // end_stream → source EOS → the whole pipeline unwinds cleanly.
+        // Source EOS → the whole pipeline unwinds cleanly, with no
+        // cooperative stop switch involved.
         tokio::time::timeout(Duration::from_secs(10), handle.wait())
             .await
             .expect("pipeline must end after end_stream")

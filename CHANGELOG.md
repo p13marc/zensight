@@ -70,6 +70,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **RTSP streams reconnect instead of dying** (#731, delivers most of #410). A
+  dropped RTSP stream — a camera rebooting, a switch flapping, a Wi-Fi bridge
+  dropping a packet — used to end the pipeline and close the stream, leaving the
+  viewer to re-open by hand. parallax 0.8 makes `RtspSession` an `AsyncSource`
+  whose `produce()` carries the retry loop, so the hand-written feeder task and
+  its `AppSrc` are gone and the reconnect is the source's own: exponential
+  backoff from 500 ms to a 30 s ceiling with full jitter, so a rack of cameras
+  behind one switch does not retry in lockstep.
+
+  `rtsp_connect_failed` changes meaning with it, and had to: it now fires on
+  *sustained* failure — the initial connect, or a drop that outlasted the whole
+  reconnect ladder — rather than on the first hiccup. That is what the rule was
+  always named for. The ladder is deliberately **bounded** (8 attempts, ≈ 90 s)
+  where upstream defaults to retrying forever, because forever would mean a
+  camera that is gone never produces an error and the alert could never fire
+  again.
+
+  The first buffer after a reconnect carries `DISCONT`, and the egress re-arms
+  on it: the cached SPS/PPS belong to the previous session, so it clears them
+  and refills from the camera's own in-band sets rather than prepending stale
+  geometry to the resumed stream's first keyframe.
+
 - **`FrameMeta.dts_ns` is omitted when it equals `pts_ns`** (#728), as its own
   documentation always said ("if distinct from `pts_ns`") and as parallax's
   byte-compatible twin has always done. The producer wrote it unconditionally

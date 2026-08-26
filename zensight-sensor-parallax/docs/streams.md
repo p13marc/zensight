@@ -55,7 +55,7 @@ construction — geometry travels in the data):
 | Test | `VideoTestSrc` (Rgb24, live) → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `VideoTestSrc` (preview fps, live) → `VideoScale` → `JpegEncoder`(Rgb) → `AppSink` |
 | V4L2 MJPG | `V4l2Src` → `JpegDecoder` → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `V4l2Src` → `Throttle` → `AppSink` (MJPG passthrough — no scaler, `preview.max_height` does not apply) |
 | V4L2 YUYV | `V4l2Src` → `VideoConvert`(→I420) → `VideoScale` → `Throttle` → `H264Encoder` → `AppSink` | `V4l2Src` → `Throttle` → `VideoScale`(Yuyv) → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
-| RTSP H.264 | `RtspSrc` → `AppSink` (**passthrough** — no re-encode, no scale) | `RtspSrc` → `H264Decoder` → `Throttle` → `VideoScale`(I420) → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
+| RTSP H.264 | `RtspSession` → `AppSink` (**passthrough** — no re-encode, no scale) | `RtspSession` → `H264Decoder` → `Throttle` → `VideoScale`(I420) → `VideoConvert`(→Rgb) → `JpegEncoder` → `AppSink` |
 
 Notes:
 
@@ -169,6 +169,34 @@ forced when:
 RTSP video is passthrough — the sensor cannot force a remote camera's IDR, so
 `request_keyframe` logs and no-ops; viewers instead gate on the in-band IDRs
 (`FrameMeta.keyframe`, GOP-rate).
+
+### RTSP reconnect (#410, #731)
+
+The connected `RtspSession` **is** the graph's source (`add_async_source`),
+not a hand-written task shovelling frames into an `AppSrc`, so the retry loop
+is upstream's and runs inside `produce()`: exponential backoff from 500 ms to a
+30 s ceiling, with full jitter so a rack of cameras behind one switch does not
+retry in lockstep.
+
+Two consequences worth knowing:
+
+- **A clean end is retried too.** RTSP has no in-band end-of-stream for a live
+  stream, so a server whose process dies looks exactly like one that finished.
+  Configuring a reconnect policy *is* the statement "this source is live", and
+  every source in our catalogue is a live camera. A finite stream — a recording
+  served over RTSP — would want `.without_reconnect()` instead; nothing in
+  `configs/parallax.json5` can configure one today.
+- **The ladder is bounded** (8 attempts, ≈ 90 s) even though upstream's default
+  is "retry forever". Forever would mean a camera that is *gone* never produces
+  an error, so `rtsp_connect_failed` could never fire again after the initial
+  connect and a dead stream would sit silently "open". Exhausting the ladder
+  fails the pipeline, which is what turns sustained failure back into an alert.
+
+The first buffer after a successful reconnect carries `BufferFlags::DISCONT`.
+The egress re-arms on it: the cached SPS/PPS belong to the *previous* session,
+so replaying them in front of the resumed stream's first keyframe could hand a
+decoder a geometry the bytes no longer match. The cache is cleared and refills
+from the camera's own in-band sets, and sequence-gap accounting restarts.
 
 ### Self-contained keyframes (#435)
 
@@ -331,7 +359,11 @@ Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
 
 - `camera_disappeared` — an advertised V4L2 device vanished from periodic
   re-enumeration.
-- `rtsp_connect_failed` — an `open_stream` could not reach the RTSP camera.
+- `rtsp_connect_failed` — the RTSP camera is not delivering: either the initial
+  `open_stream` connect failed, or a stream that had opened dropped and the
+  source's reconnect ladder ran out. Since #731 the source retries a dropped
+  stream itself, so a single blip no longer fires this — only sustained failure
+  does, which is what the rule is named for.
 - `encoder_overrun` — average `encode_ms` above the strictest open tier's
   per-frame budget (1000 / fps).
 

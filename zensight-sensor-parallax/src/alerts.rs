@@ -56,7 +56,16 @@ impl ParallaxAlerts {
         self.set(RULE_CAMERA, stream, alert, !present).await;
     }
 
-    /// An RTSP open failed (fires) or later succeeded (resolves).
+    /// An RTSP camera is unreachable (fires) or is reachable again (resolves).
+    ///
+    /// Two callers, one meaning — *this camera is not delivering*:
+    ///
+    /// - the initial `connect()` failed, so the stream never opened;
+    /// - a stream that had opened dropped and the source's reconnect ladder ran
+    ///   out (#731). Since parallax 0.8 the RTSP source retries a dropped
+    ///   stream itself, with exponential backoff and jitter, so a single drop
+    ///   no longer reaches here — only a *sustained* one does, which is what
+    ///   this rule was always named for.
     pub async fn rtsp_connect(&self, stream: &str, error: Option<&str>) {
         let summary = match error {
             Some(e) => format!("rtsp connect for stream {stream} failed: {e}"),

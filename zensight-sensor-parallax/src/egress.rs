@@ -168,6 +168,18 @@ async fn run_with_watchdog(
         // sized for sets + AU) where it used to copy twice. `put` wants an
         // owned `Vec`, so the borrowed path still materializes one — but that
         // copy was always there.
+        // A discontinuity re-arms the parameter-set cache (#731): the RTSP
+        // source stamps DISCONT on the first buffer after a reconnect, and the
+        // sets it cached belong to the *previous* session. Replaying stale
+        // SPS/PPS in front of the resumed stream's first keyframe would hand a
+        // decoder a picture geometry the bytes no longer match — worse than
+        // publishing the keyframe unrepaired and letting the camera's own
+        // in-band sets (which arrive within a keyframe on AnnexB) refill the
+        // cache.
+        if buffer.metadata().is_discont() {
+            param_sets.reset();
+            last_sequence = None;
+        }
         let bytes = buffer.as_bytes();
         let payload: std::borrow::Cow<'_, [u8]> = if h264 {
             let prepared = param_sets.prepare(bytes);
