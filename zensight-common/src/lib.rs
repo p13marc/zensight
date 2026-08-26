@@ -40,6 +40,7 @@ pub mod served;
 pub mod session;
 pub mod state;
 pub mod stream;
+pub mod subscribe;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root

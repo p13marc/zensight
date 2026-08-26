@@ -175,6 +175,26 @@ jobs:
 
       # #484: every queryable goes through zensight_common::served, so the
       # registry-vs-served check knows what this build actually serves.
+      - name: The exporters must not hand-roll a plain telemetry subscriber
+        run: |
+          # Sensors publish telemetry through an AdvancedPublisher, and the GUI
+          # has always consumed with history + recovery. Both exporters used a
+          # plain `declare_subscriber`, so one started after the sensors got no
+          # backfill and a sample dropped in flight was simply lost (#763).
+          #
+          # The alert, liveliness and events subscribers are deliberately plain:
+          # they carry LWW state or append-only records, not a recoverable
+          # stream, so they are matched out by name below.
+          hits=$(grep -rn '\.declare_subscriber(' \
+            zensight-exporter-*/src \
+            --include='*.rs' \
+            | grep -vE 'alerts_key|alive_key|events_key|/tests/|mod tests' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Raw declare_subscriber in an exporter — use zensight_common::subscribe::declare_telemetry_subscriber so history/recovery cannot silently regress (#763):"
+            echo "$hits"
+            exit 1
+          fi
+
       - name: queryables are declared through served::serve_queryable (#484)
         run: |
           hits=$(grep -rn '\.declare_queryable(' \

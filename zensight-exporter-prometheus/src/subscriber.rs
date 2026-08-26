@@ -8,7 +8,6 @@ use zenoh::sample::{Sample, SampleKind};
 use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
 use zensight_common::keyexpr::{all_alerts_wildcard, all_liveliness_wildcard};
-use zensight_common::telemetry::TelemetryPoint;
 
 use crate::collector::SharedCollector;
 
@@ -24,6 +23,7 @@ pub const DEFAULT_KEY_EXPR: &str = "v1/*/telemetry/**";
 ///
 /// This was a hand-rolled 4-chunk positional gate, copy-pasted byte-for-byte
 /// into the OTel exporter. It is now one registry-backed helper (issue #475).
+#[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use zensight_common::keyexpr::is_telemetry_key;
 
 /// Statistics for the subscriber.
@@ -118,10 +118,16 @@ impl TelemetrySubscriber {
 
         // Subscribe to telemetry
         info!(key_expr = %self.key_expr, "Subscribing to telemetry");
-        let subscriber = session
-            .declare_subscriber(&self.key_expr)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create subscriber: {}", e))?;
+        // An ADVANCED subscriber, not a plain one (#763). Sensors publish
+        // telemetry through an `AdvancedPublisher` and the GUI has always
+        // consumed with history + recovery; both exporters used a plain
+        // subscriber, so one started after the sensors got no backfill and a
+        // sample dropped in flight was simply lost. For a metrics pipeline that
+        // is the wrong trade — a gap in a dashboard is a claim about the world.
+        let subscriber =
+            zensight_common::subscribe::declare_telemetry_subscriber(&session, &self.key_expr)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create subscriber: {}", e))?;
 
         // Firing alerts are state, not telemetry (`…/state/<producer>/alert/*`),
         // so the telemetry class selector never sees them — they need their
@@ -246,23 +252,21 @@ impl TelemetrySubscriber {
                                 continue;
                             }
 
-                            // Skip non-telemetry channels (health, liveness,
-                            // errors, alerts, _meta) — they are not TelemetryPoints
-                            // and must not count as decode failures.
-                            if !is_telemetry_key(sample.key_expr().as_str()) {
-                                trace!(key = %sample.key_expr(), "Ignoring non-telemetry key");
-                                continue;
-                            }
-
-                            // Try to decode the payload
-                            let payload = sample.payload().to_bytes();
+                            // Shared with the OTel exporter (#763): the class
+                            // guard and the JSON-then-CBOR sniff were
+                            // byte-identical in both, and a non-telemetry
+                            // channel (health, liveness, errors, alerts) must
+                            // NOT count as a decode failure.
                             self.stats.samples_received.fetch_add(1, Ordering::Relaxed);
-
-                            // Try JSON first, then CBOR
-                            let point: Option<TelemetryPoint> =
-                                serde_json::from_slice(&payload).ok().or_else(|| {
-                                    ciborium::from_reader(&payload[..]).ok()
-                                });
+                            let decoded = zensight_common::subscribe::decode_telemetry(&sample);
+                            let point = match decoded {
+                                Ok(p) => Some(p),
+                                Err(zensight_common::subscribe::DecodeReject::NotTelemetry) => {
+                                    trace!(key = %sample.key_expr(), "Ignoring non-telemetry key");
+                                    continue;
+                                }
+                                Err(zensight_common::subscribe::DecodeReject::Undecodable) => None,
+                            };
 
                             match point {
                                 Some(point) => {
@@ -283,7 +287,7 @@ impl TelemetrySubscriber {
                                     self.stats.decode_failures.fetch_add(1, Ordering::Relaxed);
                                     warn!(
                                         key = %sample.key_expr(),
-                                        payload_len = payload.len(),
+                                        payload_len = sample.payload().len(),
                                         "Failed to decode telemetry point as JSON or CBOR"
                                     );
                                 }

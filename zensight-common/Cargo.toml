@@ -8,6 +8,10 @@ description = "Common types and utilities for ZenSight observability sensors"
 [dependencies]
 zenkey = { workspace = true, features = ["schemars"] }
 zenoh.workspace = true
+# The exporters' shared subscriber uses an AdvancedSubscriber (history +
+# recovery), matching how sensors publish and how the GUI has always consumed
+# (#763). Already a workspace dep used by sensor-core, the correlator and the GUI.
+zenoh-ext.workspace = true
 tokio.workspace = true
 serde.workspace = true
 schemars.workspace = true

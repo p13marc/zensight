@@ -13679,6 +13679,7 @@ dependencies = [
  "zenkey",
  "zenkey-build",
  "zenoh",
+ "zenoh-ext",
 ]
 
 [[package]]
