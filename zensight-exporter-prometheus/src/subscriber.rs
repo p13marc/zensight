@@ -7,7 +7,7 @@ use tracing::{info, trace, warn};
 use zenoh::sample::{Sample, SampleKind};
 use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
-use zensight_common::keyexpr::all_alerts_wildcard;
+use zensight_common::keyexpr::{all_alerts_wildcard, all_liveliness_wildcard};
 use zensight_common::telemetry::TelemetryPoint;
 
 use crate::collector::SharedCollector;
@@ -59,6 +59,48 @@ impl TelemetrySubscriber {
         self
     }
 
+    /// Fetch the currently-firing alert set with one GET, so a restarted
+    /// exporter does not start blind.
+    ///
+    /// Alerts are LWW state (`…/state/<producer>/alert/<key>`) with a TTL, so
+    /// the documents are on the bus. Taking only live `Put`s meant a restart
+    /// silently lost every firing alert until its next state transition — the
+    /// same "absence is not evidence" mistake the staleness sweep made, from
+    /// the other end. The GUI has always seeded this way.
+    async fn seed_alerts(session: &zenoh::Session, collector: &SharedCollector) -> usize {
+        const SEED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+        let replies = match session
+            .get(all_alerts_wildcard())
+            .target(zenoh::query::QueryTarget::All)
+            .timeout(SEED_TIMEOUT)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Not fatal: without a storage on the state plane there is
+                // nothing to answer, which is a normal deployment.
+                warn!(error = %e, "Alert seed GET failed; starting with an empty firing set");
+                return 0;
+            }
+        };
+
+        let mut seeded = 0usize;
+        while let Ok(reply) = replies.recv_async().await {
+            let Ok(sample) = reply.result() else { continue };
+            if sample.kind() == SampleKind::Delete {
+                continue;
+            }
+            if let Some(alert) =
+                zensight_common::decode_auto::<Alert>(&sample.payload().to_bytes()).ok()
+            {
+                collector.record_alert(alert);
+                seeded += 1;
+            }
+        }
+        seeded
+    }
+
     /// Run the subscriber until the shutdown signal is received.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
         info!("Connecting to Zenoh...");
@@ -99,6 +141,50 @@ impl TelemetrySubscriber {
             None
         };
 
+        // Liveliness, which is how a departed sensor's alerts are dropped
+        // (#758). RFC 04 §5: a producer holds a token at
+        // `…/state/<producer>/alive`, so the token vanishing IS "the sensor
+        // died" — the event a 300s staleness timer was only standing in for,
+        // and which that timer got wrong for every alert older than five
+        // minutes.
+        //
+        // `history(true)` so a sensor already alive when we start is known,
+        // rather than only sensors that come up afterwards.
+        let liveliness = if self.collector.export_alerts() {
+            let alive_key = all_liveliness_wildcard();
+            info!(key_expr = %alive_key, "Watching sensor liveliness");
+            match session
+                .liveliness()
+                .declare_subscriber(&alive_key)
+                .history(true)
+                .await
+            {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    // Not fatal: without it a dead sensor's alerts linger until
+                    // it comes back and tombstones them, which is the old
+                    // behaviour minus the false resolves.
+                    warn!(error = %e, "Liveliness watch unavailable; departed sensors will keep their alerts");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Seed the firing set (#758).
+        //
+        // Alerts are LWW state with a TTL, so the docs are on the bus to be
+        // fetched — but this exporter only ever took live `Put`s, so a RESTART
+        // lost every firing alert until its next state transition. Same class
+        // of bug as the staleness sweep, from the other end.
+        if self.collector.export_alerts() {
+            let seeded = Self::seed_alerts(&session, &self.collector).await;
+            if seeded > 0 {
+                info!(seeded, "Seeded firing alerts from the bus");
+            }
+        }
+
         info!("Subscriber started, waiting for telemetry...");
 
         loop {
@@ -118,6 +204,38 @@ impl TelemetrySubscriber {
                     match sample {
                         Ok(sample) => self.handle_alert_sample(&sample),
                         Err(e) => warn!("Error receiving alert sample: {}", e),
+                    }
+                }
+
+                // A liveliness token vanishing is the real "this sensor died"
+                // signal (#758), and the only thing that may drop a firing
+                // alert other than the sensor itself.
+                sample = async { liveliness.as_ref().unwrap().recv_async().await },
+                    if liveliness.is_some() =>
+                {
+                    match sample {
+                        Ok(sample) => {
+                            if sample.kind() == SampleKind::Delete {
+                                // `…/state/<producer>/alive` — the source is the
+                                // ORIGIN chunk, which is what alerts carry as
+                                // `source`. Parse it rather than splitting by
+                                // hand (#475).
+                                if let Some(parsed) =
+                                    zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
+                                {
+                                    let origin = parsed.origin.to_string();
+                                    let dropped = self.collector.drop_source_alerts(&origin);
+                                    if dropped > 0 {
+                                        info!(
+                                            origin = %origin,
+                                            dropped,
+                                            "Sensor liveliness lost; dropped its firing alerts"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => warn!("Error receiving liveliness sample: {}", e),
                     }
                 }
 

@@ -450,12 +450,21 @@ impl MetricCollector {
         }
         drop(metrics);
 
-        // Evict alerts from sensors that went away without tombstoning them.
-        let alerts_removed = self.alerts.cleanup_stale(timeout);
-        if alerts_removed > 0 {
-            debug!(removed = alerts_removed, "Cleaned up stale alerts");
-        }
+        // Alerts are deliberately NOT swept on a timer (#758). Sensors publish
+        // them edge-triggered, so "not re-received in 300s" means "still firing
+        // and nothing changed" far more often than it means "gone" — and since
+        // absence is the resolve signal, a sweep here silently closed live
+        // incidents. A sensor that dies is caught by its liveliness token
+        // disappearing instead; see `AlertStore::drop_source`.
+        removed
+    }
 
+    /// Drop every firing alert from a source whose liveliness token vanished.
+    pub fn drop_source_alerts(&self, source: &str) -> usize {
+        let removed = self.alerts.drop_source(source);
+        if removed > 0 {
+            debug!(source, removed, "Dropped alerts for a departed sensor");
+        }
         removed
     }
 
