@@ -13713,6 +13713,7 @@ dependencies = [
  "ulid",
  "zblob",
  "zenkey",
+ "zenkey-fleet",
  "zenoh",
  "zenoh-ext",
  "zensight-common",

@@ -676,6 +676,27 @@ pub const TOAST_WARNING: Color = Color::from_rgb(0.9, 0.7, 0.0);
 /// See [`TOAST_INFO`].
 pub const TOAST_ERROR: Color = Color::from_rgb(0.9, 0.2, 0.2);
 
+/// The swatch an **unestablished** judgement resolves through (RFC 13, #746).
+///
+/// RFC 13's four poles are `Established` / `NotEstablished` / `NotAsked` /
+/// `Unobservable`, and only the first two are answers. The two that are not
+/// must never borrow an answer's swatch — RFC 09 §5.1 O4 forbids rendering
+/// "we did not ask" as "we asked and the answer was no", and O6 forbids
+/// rendering "we asked and could not tell" as either. So the scale is:
+///
+/// | pole | swatch |
+/// |---|---|
+/// | `Established` (clean) | [`STATUS_ONLINE`] |
+/// | `NotEstablished` | [`STATUS_DEGRADED`] / [`STATUS_OFFLINE`], by how bad |
+/// | `Unobservable` | this one — muted violet: information, but not an answer |
+/// | `NotAsked` | [`STATUS_UNKNOWN`] — the dim slot, absence of information |
+///
+/// Its own hue rather than a second grey, because the two unestablished poles
+/// are different facts and a fleet inventory has to tell them apart at a
+/// glance: one host was asked and could not answer, the other was never
+/// reached.
+pub const JUDGEMENT_UNOBSERVABLE: Color = Color::from_rgb(0.58, 0.50, 0.80);
+
 /// Gold accent for a pinned/favorite indicator (★).
 pub const ACCENT_GOLD: Color = Color::from_rgb(0.95, 0.75, 0.1);
 /// Amber accent for a "stale data" marker.
@@ -751,6 +772,10 @@ mod tests {
                 ("status_connected", c.status_connected()),
                 ("status_disconnected", c.status_disconnected()),
                 ("warning", c.warning()),
+                // The unestablished swatch is a badge dot like any other, and
+                // it is the one a reader must not mistake for the dim
+                // "not asked" grey beside it (#746).
+                ("judgement_unobservable", JUDGEMENT_UNOBSERVABLE),
             ] {
                 let r = contrast_ratio(fg, bg);
                 assert!(

@@ -15,7 +15,11 @@ name = "zensight-conformance"
 path = "src/main.rs"
 
 [dependencies]
-zenkey-fleet = { workspace = true }
+# `decode` explicitly: the workspace pin turns default features off for the
+# GUI's sake (it does not use the seam), and the payload checks this crate
+# gates on ARE that seam. Opting in here keeps the cost at the crate that
+# incurs it.
+zenkey-fleet = { workspace = true, features = ["decode"] }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

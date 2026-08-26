@@ -135,16 +135,25 @@ zensight-common = { path = "zensight-common" }
 # (zensight-common/registry/), compiled at build time by zenkey-build.
 zenkey = "0.7"
 zenkey-build = "0.7"
-# The bus-explorer engine behind `zenctl` — the RFC conformance judges
-# (`run_doctor`) that `zensight-conformance` runs against a live deployment
-# in CI (#744). It drags a full tokio + zenoh-ext + serde_json + ciborium +
-# arc-swap + base64 tree, so it is confined to that one crate and must never
-# reach `zensight-common` or anything a sensor links.
+# The upstream fleet engine: the RFC 05 §2.1 fan-in discipline, bounded and
+# elision-reporting fan-out, declared queriers, registry-slice sets, RFC 13's
+# `Judgement`, and the conformance judges `run_doctor` exposes.
+#
+# Two members link it and NOTHING ELSE MAY: `zensight` for the fleet view
+# (#745/#746) and `zensight-conformance` for the CI judges (#744). It drags a
+# full tokio + zenoh-ext + arc-swap + base64 + ciborium + serde_json tree, so it
+# must never enter `zensight-common` or any crate a sensor links.
+#
+# `default-features = false` drops the `decode` seam (schema-aware payload
+# decode) here, because the fleet view does not use it. `zensight-conformance`
+# opts back in explicitly — its payload checks are exactly that seam — so the
+# cost is declared at the crate that incurs it rather than paid fleet-wide by
+# default.
 #
 # NOTE the package license is **Apache-2.0**, not the MIT of the zenkey
 # workspace root it lives in. Nothing here is published, so the only
 # obligation is attribution wherever a built binary ships.
-zenkey-fleet = "0.10"
+zenkey-fleet = { version = "0.10", default-features = false }
 schemars = "1"
 # Draft-2020-12 payload conformance, behind zensight-common's `validate-json`
 # feature (#741). `default-features = false` keeps the format/regex extras out.

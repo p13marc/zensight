@@ -264,8 +264,9 @@ pub enum Message {
     OpenFleet,
     /// Re-ask the fleet what it serves (`@rpc/<producer>/introspect`).
     RefreshFleet,
-    /// The fan-out's replies: one raw registry slice per (origin, producer).
-    FleetLoaded(Result<Vec<crate::view::fleet::FleetReply>, String>),
+    /// The sweep's outcome: one raw registry slice per (origin, producer), plus
+    /// what the fan-in's reply bound refused (#745).
+    FleetLoaded(Result<crate::view::fleet::FleetSweep, String>),
     /// Expand/collapse one row's registry findings.
     ToggleFleetFindings(String),
     /// Sort the fleet table by column index.

@@ -299,15 +299,102 @@ explorer (JA3/JA4/JA4H/SNI/HASSH), joined against correlated host entities.
 (bmon/nethogs style).
 
 **Fleet** (`view/fleet.rs`) — what each host's build actually says it serves. Fans
-the `introspect` procedure out across every registered producer (`QueryTarget::All`;
-`@catalog` takes its own key, since a verbatim `@` chunk is structurally unmatchable
-by a `*` fleet selector) and diffs each reply against the registry slice this GUI
-compiled in. Answers, without SSH: what does this host speak, is it the same build
-as us, is it serving anything deprecated, and does its registry match reality — RFC
-08 §6 calls a disagreement here a *finding*, not an ambiguity. A producer that is
-alive on the bus but answers no `introspect` is listed as `silent` rather than
-omitted; fanning out alone cannot distinguish "not deployed" from "deployed and not
-answering", and the second is the one you need to see.
+the `introspect` procedure out across the fleet and diffs each reply against the
+registry slice this GUI compiled in. Answers, without SSH: what does this host
+speak, is it the same build as us, is it serving anything deprecated, and does its
+registry match reality — RFC 08 §6 calls a disagreement here a *finding*, not an
+ambiguity. A producer that is alive on the bus but answers no `introspect` is
+listed rather than omitted; fanning out alone cannot distinguish "not deployed"
+from "deployed and not answering", and the second is the one you need to see.
+
+### The four poles (#746)
+
+Every row is a judgement about one claim — *this host serves the slice we
+compiled in* — and RFC 13 says a judgement has four poles, not two. The row's
+`FleetStatus` is a **surface naming**; `FleetStatus::judgement()` is the
+documented mapping back onto `zenkey_fleet::Judgement`, and it is what decides
+the badge colour and what the tally line above the table counts.
+
+| pole | row | swatch | means |
+|---|---|---|---|
+| `Established` | `in sync` | `STATUS_ONLINE` | asked, answered, the claim holds |
+| `NotEstablished` | `version skew` | `STATUS_DEGRADED` | asked, answered, a different `[registry] version` |
+| `NotEstablished` | `drift` | `STATUS_OFFLINE` | asked, answered, same version and different content |
+| `Unobservable` | `no answer` | `JUDGEMENT_UNOBSERVABLE` | alive, and it answered nothing — an old build, or a broken queryable |
+| `Unobservable` | `unreadable` | `JUDGEMENT_UNOBSERVABLE` | it answered, and the answer will not parse |
+| `NotAsked` | `not asked` | `STATUS_UNKNOWN` | the question never reached it |
+
+Six namings over four poles, because `version skew` and `drift` deserve
+different colours even though both are `NotEstablished`: a version that differs
+is a rollout in progress, content that differs *under an equal version* is a
+build lying about what it is.
+
+This was one state, `silent`, doing two jobs, and the dangerous half is
+`NotAsked`. A host missing because the sweep's reply bound cut the fan-in short
+rendered exactly like a fleet-wide failure to answer — and did so *more* readily
+the larger the fleet grew, which is backwards. Both unestablished poles get a
+swatch that is not an answer's (RFC 09 §5.1 O4: not asked is not answered no;
+O6: asked-and-could-not-tell is neither fine nor fire), and both sort **between**
+the findings and the clean rows: not verdicts, so they must not outrank one; not
+passing checks, so they must not sink below one either.
+
+Which pole an absent-but-alive producer gets depends on whether the sweep was
+whole. Past the reply bound, replies are drained but not kept, so a missing
+producer may have answered and had its answer discarded, or may never have been
+reached — and the view cannot tell which. Claiming "alive, and it answered
+nothing" about a host whose answer was thrown away is the false verdict O4
+forbids, so a truncated sweep reports `not asked` and names the bound. A whole
+sweep genuinely did put the question, so it reports `no answer`.
+
+The `why` column (not `findings`) opens the reason: an unestablished row has no
+findings — that is what unestablished *means* — but it does have the `reason`
+RFC 13 requires it to carry, and an empty cell was how `silent` got away with
+doing two jobs.
+
+The engine is upstream's (`zenkey-fleet`, #745), and the split is worth stating
+because it is the same split every future bus-facing view should make:
+
+| upstream's | ours |
+|---|---|
+| the RFC 05 §2.1 fan-in triple — target `All`, consolidation `None`, **attribution by the reply's own key** | which question to ask, and of whom |
+| the reply bound (`DEFAULT_MAX_REPLIES` = 4096) and the ledger of what it refused | saying so on screen |
+| declared queriers (`RepeatingQuery`), so a refresh reuses routing state | when to refresh |
+| the slice comparison — `SliceSet::diff` → `RegistryDiff`, findings already rendered | the **per-host** shape of it |
+
+Two sweeps run, not one: the wildcard-producer fan-out
+(`v1/*/@rpc/*/introspect`) plus `@catalog` **by name**, because a `*` in the
+origin position never matches a verbatim service origin (grammar property D4),
+so the sweep cannot enumerate services and the identity service has to be asked
+for itself. This is `zenkey_fleet::RepeatingRegistry`'s exact shape, spelled out
+in `app.rs` rather than called: `RepeatingRegistry::fetch` returns
+`(RegistrySlice, raw)` and **drops the origin**, which is right for a decoder
+that needs *a* slice per producer and wrong for an inventory whose entire
+subject is which host disagrees. The origin is recovered from the *answering
+key*, never the payload — a registry slice describes a build, not a deployment,
+so it does not name its host (RFC 08 §2).
+
+`SliceSet::diff` is a set-level join, so it runs **per origin**, against only
+the producers that origin actually serves. Diffing one host against the whole
+local registry would report "declared locally, served by nobody" for every
+producer that host does not happen to run — true of the fleet, a lie about the
+host.
+
+**The sweep is bounded and says what the bound cost.** Past the bound replies
+are drained but not kept, and the count is exact; a sweep that dropped any
+renders a banner saying the inventory is a sample, not the fleet. Silent
+truncation is the failure mode a bounded fan-out invites, and it gets *more*
+likely as the fleet grows, which is backwards.
+
+**The GUI never opens a session through `zenkey-fleet`.** `zenkey_fleet::open` /
+`open_with_config` deliberately build an *un-namespaced* explorer session
+(RFC 09 §5) and refuse a config that sets `zenoh.namespace`; the frontend's
+session is a production session and must come from `zensight_common::session`
+(CI enforces that only that module and `zensight-rerun` may call `zenoh::open`).
+`zenkey_fleet::Fleet::new(&session, "")` merely *borrows* the session the app
+already has. The base is `""` because a namespaced session has already had the
+base stripped from every key it is handed — which also means a namespaced
+deployment is observable here exactly as an un-namespaced one is, unlike a
+`zenctl` pointed at it.
 
 ## Streamed rollups vs pulled records
 
