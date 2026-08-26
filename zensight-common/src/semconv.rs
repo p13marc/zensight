@@ -101,7 +101,8 @@ impl Entry {
 /// back to the raw name, which is the honest answer for EDAC, md-raid,
 /// schedstat, cgroup and conntrack keys.
 fn entry(producer: &str, pattern: &str) -> Option<Entry> {
-    let e = |name, constants: &'static [(&'static str, &'static str)],
+    let e = |name,
+             constants: &'static [(&'static str, &'static str)],
              var_renames: &'static [(&'static str, &'static str)]| {
         Some(Entry {
             name,
@@ -117,9 +118,7 @@ fn entry(producer: &str, pattern: &str) -> Option<Entry> {
         // is the *intended* family collision the naming rule allows (#770's
         // INTENDED_COLLISIONS): an aggregate and its per-entity refinement.
         ("sysinfo", "cpu/usage") => e("system.cpu.utilization", &[], &[]),
-        ("sysinfo", "cpu/{core}/usage") => {
-            e("system.cpu.utilization", &[], &[("core", "cpu")])
-        }
+        ("sysinfo", "cpu/{core}/usage") => e("system.cpu.utilization", &[], &[("core", "cpu")]),
 
         // ── Memory (semconv states: used / cached / buffered / free) ──
         ("sysinfo", "memory/used") => e("system.memory.usage", &[("state", "used")], &[]),
@@ -220,11 +219,9 @@ fn entry(producer: &str, pattern: &str) -> Option<Entry> {
             &[("state", "free")],
             &[("mount", "device")],
         ),
-        ("sysinfo", "disk/{mount}/usage_percent") => e(
-            "system.filesystem.utilization",
-            &[],
-            &[("mount", "device")],
-        ),
+        ("sysinfo", "disk/{mount}/usage_percent") => {
+            e("system.filesystem.utilization", &[], &[("mount", "device")])
+        }
 
         // ── systemd per-unit series (#282) ──
         //
@@ -516,8 +513,9 @@ mod tests {
                  telemetry subject — the entry maps nothing"
             );
 
-            let e = entry(producer, pattern)
-                .unwrap_or_else(|| panic!("MAPPED_PATTERNS lists ({producer}, {pattern:?}) but `entry` returns None"));
+            let e = entry(producer, pattern).unwrap_or_else(|| {
+                panic!("MAPPED_PATTERNS lists ({producer}, {pattern:?}) but `entry` returns None")
+            });
             for (var, attr) in e.var_renames {
                 assert!(
                     pattern.contains(&format!("{{{var}}}")),
