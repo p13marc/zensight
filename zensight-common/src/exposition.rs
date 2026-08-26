@@ -350,6 +350,8 @@ pub struct MetricIdentity {
     pub shadowed: u32,
     /// UCUM-ish unit, when the registry or the point supplies one.
     pub unit: Option<String>,
+    /// The registry's own sentence for this subject, for `# HELP` (#768).
+    pub description: Option<String>,
     pub kind: MetricKind,
 }
 
@@ -513,9 +515,17 @@ where
     // producer except systemd, where `{unit}` is the systemd unit name and has
     // already been claimed at a stronger stage. Consume it rather than emitting
     // a dimension that is not one.
+    //
+    // The generated `AnySubject::unit()` reads the registry's `unit =` column.
+    // Only one subject in the whole registry declares one today (netring's
+    // `ms`), so this is plumbing ahead of data — populate the TOMLs and every
+    // exporter gets it for free, because the registry is the only place that
+    // value belongs (#767).
+    let docs = crate::registry_audit::telemetry_subject_docs(&producer, pattern);
     let mut unit = subject
         .unit()
         .map(str::to_string)
+        .or_else(|| docs.as_ref().and_then(|d| d.unit.clone()))
         .or_else(|| point.unit.clone());
     for (k, v) in &point.labels {
         if k == "unit" && !merger.holds("unit") && unit.is_none() {
@@ -550,15 +560,45 @@ where
         labels: merged.labels,
         shadowed: merged.shadowed,
         unit,
+        description: docs.and_then(|d| d.description),
         kind,
     })
 }
 
-/// Corrections for producers that publish a level under a cumulative value
-/// type.
+/// Patterns that are a LEVEL however the sensor typed them.
 ///
-/// Populated by #766; the sensor fix is the real one, but an exporter must be
-/// right against any sensor on the bus, including an older build.
-fn kind_override(_producer: &str, _pattern: &str) -> Option<MetricKind> {
-    None
+/// #766 fixed the sysinfo sensor: `memory/used`, the filesystem levels, the TCP
+/// state counts and friends were published as `TelemetryValue::Counter` even
+/// though they go **down**. This is the backstop for the same keys arriving
+/// from a sensor that has not been upgraded — an exporter has to be right
+/// against whatever is on the bus, and a level exported as a monotonic Sum is a
+/// contract violation on the OTel side, not merely a bad panel on the
+/// Prometheus one.
+///
+/// The tell is a doubled suffix: a level typed as a counter renders as
+/// `..._bytes_total`, which is how these were found.
+///
+/// The principled fix is a `monotonic = true|false` column in the registry, so
+/// the answer lives with the subject instead of in a table here. That needs a
+/// `zenkey`/`zenkey-build` release (`zenkey-build` lints unknown keys, so it
+/// cannot be added to the TOMLs unilaterally) and is filed upstream.
+pub const KIND_OVERRIDE: &[(&str, &str, MetricKind)] = &[
+    ("sysinfo", "system/uptime", MetricKind::Gauge),
+    ("sysinfo", "system/boot_time", MetricKind::Gauge),
+    ("sysinfo", "memory/total", MetricKind::Gauge),
+    ("sysinfo", "memory/used", MetricKind::Gauge),
+    ("sysinfo", "memory/available", MetricKind::Gauge),
+    ("sysinfo", "memory/swap_total", MetricKind::Gauge),
+    ("sysinfo", "memory/swap_used", MetricKind::Gauge),
+    ("sysinfo", "disk/{mount}/total", MetricKind::Gauge),
+    ("sysinfo", "disk/{mount}/used", MetricKind::Gauge),
+    ("sysinfo", "disk/{mount}/available", MetricKind::Gauge),
+    ("sysinfo", "process/{rank}/memory", MetricKind::Gauge),
+];
+
+fn kind_override(producer: &str, pattern: &str) -> Option<MetricKind> {
+    KIND_OVERRIDE
+        .iter()
+        .find(|(p, pat, _)| *p == producer && *pat == pattern)
+        .map(|(_, _, k)| *k)
 }

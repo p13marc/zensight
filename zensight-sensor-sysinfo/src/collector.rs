@@ -627,7 +627,7 @@ impl SystemCollector {
         let uptime = System::uptime();
         self.publish(
             "system/uptime",
-            TelemetryValue::Counter(uptime),
+            TelemetryValue::Gauge(uptime as f64),
             timestamp,
             HashMap::new(),
         )
@@ -674,7 +674,7 @@ impl SystemCollector {
         let boot_time = System::boot_time();
         self.publish(
             "system/boot_time",
-            TelemetryValue::Counter(boot_time),
+            TelemetryValue::Gauge(boot_time as f64),
             timestamp,
             HashMap::new(),
         )
@@ -744,7 +744,7 @@ impl SystemCollector {
         labels.insert("unit".to_string(), "bytes".to_string());
         self.publish(
             "memory/total",
-            TelemetryValue::Counter(total),
+            TelemetryValue::Gauge(total as f64),
             timestamp,
             labels.clone(),
         )
@@ -755,7 +755,7 @@ impl SystemCollector {
         let used = self.system.used_memory();
         self.publish(
             "memory/used",
-            TelemetryValue::Counter(used),
+            TelemetryValue::Gauge(used as f64),
             timestamp,
             labels.clone(),
         )
@@ -766,7 +766,7 @@ impl SystemCollector {
         let available = self.system.available_memory();
         self.publish(
             "memory/available",
-            TelemetryValue::Counter(available),
+            TelemetryValue::Gauge(available as f64),
             timestamp,
             labels.clone(),
         )
@@ -817,7 +817,7 @@ impl SystemCollector {
         if swap_total > 0 {
             self.publish(
                 "memory/swap_total",
-                TelemetryValue::Counter(swap_total),
+                TelemetryValue::Gauge(swap_total as f64),
                 timestamp,
                 labels.clone(),
             )
@@ -826,7 +826,7 @@ impl SystemCollector {
 
             self.publish(
                 "memory/swap_used",
-                TelemetryValue::Counter(swap_used),
+                TelemetryValue::Gauge(swap_used as f64),
                 timestamp,
                 labels,
             )
@@ -878,7 +878,7 @@ impl SystemCollector {
 
             self.publish(
                 &format!("disk/{}/total", mount_key),
-                TelemetryValue::Counter(total),
+                TelemetryValue::Gauge(total as f64),
                 timestamp,
                 labels.clone(),
             )
@@ -887,7 +887,7 @@ impl SystemCollector {
 
             self.publish(
                 &format!("disk/{}/used", mount_key),
-                TelemetryValue::Counter(used),
+                TelemetryValue::Gauge(used as f64),
                 timestamp,
                 labels.clone(),
             )
@@ -896,7 +896,7 @@ impl SystemCollector {
 
             self.publish(
                 &format!("disk/{}/available", mount_key),
-                TelemetryValue::Counter(available),
+                TelemetryValue::Gauge(available as f64),
                 timestamp,
                 labels.clone(),
             )
@@ -1098,7 +1098,7 @@ impl SystemCollector {
             labels.insert("unit".to_string(), "bytes".to_string());
             self.publish(
                 &format!("process/{}/memory", rank + 1),
-                TelemetryValue::Counter(proc.memory()),
+                TelemetryValue::Gauge(proc.memory() as f64),
                 timestamp,
                 labels,
             )
@@ -1430,7 +1430,7 @@ impl SystemCollector {
 
             self.publish(
                 &format!("tcp/{}", state_name),
-                TelemetryValue::Counter(value),
+                TelemetryValue::Gauge(value as f64),
                 timestamp,
                 labels,
             )
@@ -1442,7 +1442,7 @@ impl SystemCollector {
         let total: u64 = state_values.iter().map(|(_, v)| v).sum();
         self.publish(
             "tcp/total",
-            TelemetryValue::Counter(total),
+            TelemetryValue::Gauge(total as f64),
             timestamp,
             HashMap::new(),
         )

@@ -222,3 +222,19 @@ fn a_leading_variable_pattern_rejoins_its_family() {
         vec!["cpu", "times"],
     );
 }
+
+/// Every `KIND_OVERRIDE` entry must name a pattern the registry actually has.
+///
+/// Without this, a registry rename leaves a dead correction behind and the
+/// level it was protecting silently goes back to being exported as a counter.
+#[test]
+fn kind_overrides_name_real_patterns() {
+    for (producer, pattern, _) in zensight_common::exposition::KIND_OVERRIDE {
+        let registered = registered_telemetry_patterns(producer);
+        assert!(
+            registered.iter().any(|p| p == pattern),
+            "KIND_OVERRIDE corrects ({producer}, {pattern:?}) but the registry has \
+             no such telemetry subject — the correction is dead"
+        );
+    }
+}
