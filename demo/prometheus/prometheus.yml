@@ -1,0 +1,30 @@
+# ZenSight demo scrape config.
+#
+# Prometheus runs on the HOST network (compose.yml), so 127.0.0.1 here is the
+# host's loopback — the same loopback the exporter binds.
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+  external_labels:
+    stack: zensight-demo
+
+scrape_configs:
+  # The ZenSight Prometheus exporter.
+  #
+  # NOT :9090. That is Prometheus's own port, and it was the exporter's shipped
+  # default until this demo landed — so the README told you to point Prometheus
+  # at itself. 9464 is the conventional OpenTelemetry/Prometheus-exporter port.
+  - job_name: zensight-exporter
+    static_configs:
+      - targets: ['127.0.0.1:9464']
+    # The exporter re-renders its entire in-memory state on every scrape and
+    # emits no per-sample timestamps, so a timed-out scrape is a hole in every
+    # series at once rather than a gap in one.
+    scrape_timeout: 5s
+
+  # Prometheus itself. `up{job="zensight-exporter"}` and scrape_duration are the
+  # fastest way to tell "the exporter is down" from "the exporter is up and the
+  # sensors are not reaching it" — the two failure modes this demo has.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['127.0.0.1:9090']

@@ -559,6 +559,7 @@ impl SnmpPoller {
                     TelemetryValue::Text(selection.applied.join(",")),
                     None,
                     None,
+                    None,
                 )
                 .await;
                 *self.selection.lock().unwrap() = Some(selection);
@@ -678,7 +679,7 @@ impl SnmpPoller {
     ) -> Option<f64> {
         // Naming: explicit tables (builtins/config/profiles) first; loaded
         // SMI MIBs fill the gaps; unresolvable stays the dotted OID (#532).
-        let mut metric_name = self.mib_resolver.resolve(oid_str);
+        let (mut metric_name, table_index) = self.mib_resolver.resolve_indexed(oid_str);
         if metric_name == oid_str
             && let Some(name) = self.smi.as_ref().and_then(|s| s.metric_name(oid_str))
         {
@@ -723,6 +724,7 @@ impl SnmpPoller {
             telemetry_value,
             unit.as_deref(),
             enum_label,
+            table_index.as_deref(),
         )
         .await;
 
@@ -756,6 +758,7 @@ impl SnmpPoller {
                 TelemetryValue::Gauge(rate),
                 Some(unit),
                 None,
+                table_index.as_deref(),
             )
             .await;
         }
@@ -769,9 +772,21 @@ impl SnmpPoller {
         value: TelemetryValue,
         unit: Option<&str>,
         enum_label: Option<String>,
+        table_index: Option<&str>,
     ) {
         let mut point = TelemetryPoint::new(&self.device.name, Protocol::Snmp, metric_name, value)
             .with_label("oid", oid_str);
+        // The table index as a LABEL (#769).
+        //
+        // snmp is registered as a rest-var catch-all (`{device}/{metric...}`),
+        // so the index is part of the metric NAME — `if/1/in_octets` and
+        // `if/2/in_octets` are two unrelated families and `sum by (interface)`
+        // cannot be written. No exporter-side naming rule can fix that; only
+        // the producer can, and the MIB resolver already knew the index and
+        // was discarding it.
+        if let Some(index) = table_index {
+            point = point.with_label("index", index);
+        }
         if let Some(unit) = unit {
             point = point.with_unit(unit);
         }

@@ -21,10 +21,12 @@ pub mod entity;
 pub mod error;
 pub mod event;
 pub mod evidence;
+pub mod exposition;
 pub mod health;
 pub mod interfaces;
 pub mod keyexpr;
 pub mod metric_guard;
+pub mod pipeline_health;
 pub mod publisher_registry;
 pub mod qos;
 pub mod query_detail;
@@ -38,6 +40,7 @@ pub mod served;
 pub mod session;
 pub mod state;
 pub mod stream;
+pub mod subscribe;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root

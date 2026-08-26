@@ -88,9 +88,16 @@ Create a JSON5 configuration file:
   // Filtering (optional)
   filters: {
     // Subscription selector (default: the v1 telemetry class selector).
-    // Narrow it per producer, e.g. "zensight/v1/*/telemetry/netring/**".
-    key_expr: "zensight/v1/*/telemetry/**",
-    include_protocols: ["snmp", "sysinfo", "syslog"],
+    // Narrow it per producer, e.g. "v1/*/telemetry/netring/**".
+    // Base-RELATIVE. Since #466 the deployment base is the Zenoh session
+    // *namespace*, not a key chunk, so a `zensight/`-prefixed selector is
+    // re-prefixed on the wire and matches NOTHING — with a perfectly healthy
+    // session and an empty dashboard. Default is `v1/*/telemetry/**`.
+    key_expr: "v1/*/telemetry/**",
+    // NB: the log protocol token is "logs", not "syslog" — `Protocol::Logs`
+    // (zensight-common/src/telemetry.rs). "syslog" matches nothing, so it
+    // silently drops every log record while `export_logs: true`.
+    include_protocols: ["snmp", "sysinfo", "logs"],
     exclude_sources: ["test-device"],
   },
 }

@@ -1,0 +1,22 @@
+apiVersion: 1
+providers:
+  - name: zensight
+    orgId: 1
+    folder: ZenSight
+    type: file
+    disableDeletion: false
+    # Grafana POLLS these files, re-stat'ing every file in the tree each tick.
+    # Under a bind mount that costs more than it looks, and on some backing
+    # filesystems mtime granularity makes sub-10s polling useless anyway.
+    # 30s is plenty for hand-editing a demo dashboard.
+    updateIntervalSeconds: 30
+    # Tinker in the UI; the file wins on the next poll. Without this the UI is
+    # read-only and every experiment has to be a file edit.
+    allowUiUpdates: true
+    options:
+      # NOTE: a file provider walks SUBDIRECTORIES. That is why the blocked
+      # dashboards live in ../../dashboards-blocked/ — a sibling of this path,
+      # not a child of it. A `blocked/` folder inside would be provisioned as a
+      # Grafana folder full of empty panels, which is the opposite of the point.
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

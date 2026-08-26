@@ -1,0 +1,69 @@
+# ZenSight Prometheus demo: Prometheus + Grafana, both on the HOST network.
+# Brought up by `just demo-prometheus`. See ../README.md.
+#
+# HOST NETWORKING IS LOAD-BEARING, not a shortcut:
+#
+#   * The Zenoh rendezvous this demo feeds off is tcp/127.0.0.1:7447 — a
+#     LOOPBACK listener. A bridged container reaches the host via its gateway
+#     address (host.containers.internal / host.docker.internal), and a socket
+#     bound to 127.0.0.1 does not answer there. So the exporter runs on the
+#     host, and Prometheus must scrape a host loopback port.
+#   * It is one addressing model, byte-identical under docker and podman, with
+#     no engine-specific magic hostname and no `extra_hosts: host-gateway`.
+#
+# Consequence: `ports:` is meaningless here and deliberately absent. This stack
+# OCCUPIES host TCP 9090 (Prometheus) and 3000 (Grafana), so it cannot run at
+# the same time as `just demo-otel`, which wants both. `just demo-stop` clears
+# them. Bind failures here are loud and correct.
+
+services:
+  prometheus:
+    image: docker.io/prom/prometheus:v3.14.0
+    network_mode: host
+    # The bind mounts below are repo files. Matches the label=disable precedent
+    # already set by docker/docker-compose.yml.
+    security_opt: [label=disable]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # The demo TSDB lives in the container's own writable layer and is wiped
+      # with the container: no named volume means no rootless-podman uid-map
+      # surprises, and no stale series confusing the next demo run.
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+      # Prometheus 3.x wants the FLAG. The old
+      # `--enable-feature=remote-write-receiver` spelling is deprecated and
+      # ignored. Only needed if you turn the exporter's push path on (see
+      # ../README.md "Remote-write"); harmless otherwise, and cheaper than
+      # maintaining a second compose file for it.
+      - --web.enable-remote-write-receiver
+      - --web.enable-lifecycle
+    restart: on-failure
+
+  grafana:
+    image: docker.io/grafana/grafana:13.2.0
+    network_mode: host
+    security_opt: [label=disable]
+    environment:
+      # Loopback-only demo: skip the login wall entirely.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: dark
+      # Land on the ZenSight overview, not Grafana's welcome page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/zensight-host-overview.json
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      # A read-only bind on a SUBPATH of Grafana's writable /var/lib/grafana,
+      # so grafana.db stays in the container layer and stays writable.
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    # Ordering only, deliberately NOT `condition: service_healthy`.
+    #
+    # The exporter's /ready returns 503 until its FIRST telemetry point, and
+    # telemetry only arrives once the sensors connect to the exporter — so a
+    # health-gated dependency would wait on the thing it is gating. The
+    # exporter is not in this compose file at all, which avoids the trap
+    # structurally; this note is here so nobody "fixes" that later.
+    depends_on: [prometheus]
+    restart: on-failure

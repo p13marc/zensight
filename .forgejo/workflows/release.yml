@@ -134,6 +134,15 @@ jobs:
           ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-correlator:${VERSION}")
           buildah --storage-driver vfs run "$ctr" -- /usr/local/bin/zensight-correlator --help >/dev/null
           buildah --storage-driver vfs rm "$ctr"
+          # The exporter images were built and PUSHED without ever being
+          # executed (#776). Same one-binary smoke as above, so a glibc or
+          # shared-library skew in those two images is caught here rather than
+          # by whoever pulls them.
+          for c in zensight-exporter-prometheus zensight-exporter-otel; do
+            ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/$c:${VERSION}")
+            buildah --storage-driver vfs run "$ctr" -- "/usr/local/bin/$c" --help >/dev/null
+            buildah --storage-driver vfs rm "$ctr"
+          done
       - name: Push images
         if: startsWith(github.ref, 'refs/tags/')
         run: |

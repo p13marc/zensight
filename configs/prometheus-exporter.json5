@@ -19,7 +19,11 @@
   // Prometheus exporter settings
   prometheus: {
     // Address to listen on for HTTP requests
-    listen: "0.0.0.0:9090",
+    // NOT 9090 — that is the Prometheus server's own port. Binding it here
+    // made the shipped docs tell you to scrape `localhost:9090`, i.e. Prometheus
+    // scraping itself, and collided in any stack running both on one host.
+    // 9464 is the conventional OTel/Prometheus-exporter port.
+    listen: "127.0.0.1:9464",
 
     // Path for the metrics endpoint
     path: "/metrics",
@@ -77,7 +81,9 @@
   // Metric filtering (optional)
   filters: {
     // Zenoh subscription key expression for telemetry
-    // (default "zensight/v1/*/telemetry/**" — the v1 class selector).
+    // (default "v1/*/telemetry/**" — the v1 class selector, base-RELATIVE:
+    // since #466 the deployment base is the session *namespace*, not a key
+    // chunk, so a "zensight/"-prefixed selector here matches NOTHING).
     // Narrow it to tame the firehose at the subscription — unwanted protocols
     // and the state/media planes never reach this exporter over the wire.
     // The state/*/alert/* subscriber is separate and unaffected.

@@ -38,6 +38,34 @@ jobs:
           cache-targets: false
       - run: cargo test --workspace --locked
 
+  # Nothing in CI had ever EXECUTED an exporter.
+  #
+  # release.yml builds and pushes twelve component images, both exporters
+  # included, and smoke-runs `--help` on exactly two of them (sysinfo,
+  # correlator). And while `cargo test --workspace` covers the exporters' unit
+  # tests, nothing anywhere started a hub, a sensor and an exporter and scraped
+  # /metrics. That gap is how two scrape-killers shipped: a `# TYPE ... info`
+  # token that made Prometheus discard every sample in the body (#752), and a
+  # duplicate `device` label that made it reject the sample outright (#753).
+  # Both were invisible to the whole suite, which only ever asserted substrings
+  # of a body it never validated.
+  #
+  # This closes it: one real sensor, one real exporter, one real scrape, on
+  # isolated ports with no containers and no privileges.
+  demo-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+      # Debug profile: this asserts behaviour, not speed, and a release build of
+      # the sensor costs minutes for no extra signal.
+      - run: PROFILE=debug scripts/demo-verify.sh
+
   # Optional features gate real code that a default build never type-checks:
   # `#[cfg(feature = ...)]` blocks in `main.rs`/`query.rs` and, in netring's
   # case, whole detector modules. #485 shipped `h264` broken for a week under
@@ -147,6 +175,26 @@ jobs:
 
       # #484: every queryable goes through zensight_common::served, so the
       # registry-vs-served check knows what this build actually serves.
+      - name: The exporters must not hand-roll a plain telemetry subscriber
+        run: |
+          # Sensors publish telemetry through an AdvancedPublisher, and the GUI
+          # has always consumed with history + recovery. Both exporters used a
+          # plain `declare_subscriber`, so one started after the sensors got no
+          # backfill and a sample dropped in flight was simply lost (#763).
+          #
+          # The alert, liveliness and events subscribers are deliberately plain:
+          # they carry LWW state or append-only records, not a recoverable
+          # stream, so they are matched out by name below.
+          hits=$(grep -rn '\.declare_subscriber(' \
+            zensight-exporter-*/src \
+            --include='*.rs' \
+            | grep -vE 'alerts_key|alive_key|events_key|/tests/|mod tests' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Raw declare_subscriber in an exporter — use zensight_common::subscribe::declare_telemetry_subscriber so history/recovery cannot silently regress (#763):"
+            echo "$hits"
+            exit 1
+          fi
+
       - name: queryables are declared through served::serve_queryable (#484)
         run: |
           hits=$(grep -rn '\.declare_queryable(' \

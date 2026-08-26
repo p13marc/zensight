@@ -10,12 +10,47 @@
 //! Each firing alert is one `<prefix>_alert` series with value `1`. When the
 //! alert resolves (a `Resolved` Put or a Zenoh `Delete` tombstone) the series is
 //! removed — Alertmanager treats a vanished `ALERTS`-style series as resolved,
-//! so no explicit `0` is needed. Alerts are low-cardinality and high-value, so
-//! (unlike metrics) they are not subject to the metric filter or `max_series`.
+//! so no explicit `0` is needed. Alerts are high-value, so (unlike metrics) they
+//! are not subject to the metric filter or `max_series`.
+//!
+//! # Absence means resolved, so absence must never be an accident (#758)
+//!
+//! This store used to evict any alert not *re-received* within
+//! `stale_timeout_secs` (300 s). But sensors publish alerts **edge-triggered**:
+//! `zensight-sensor-core`'s alert engine returns `Action::None` when an alert is
+//! already published and its severity has not changed, so a firing alert is put
+//! **once**, and again only to resolve.
+//!
+//! The two facts together meant every alert older than five minutes silently
+//! removed itself, and — because absence is the resolve signal — Alertmanager
+//! closed a live incident. The staleness sweep did the exact opposite of its
+//! stated purpose.
+//!
+//! A firing alert now leaves this store for exactly three reasons, all of them
+//! real events:
+//!
+//! 1. a `Resolved` put from the sensor,
+//! 2. a Zenoh `Delete` tombstone,
+//! 3. the sensor's **liveliness token vanishing** ([`AlertStore::drop_source`])
+//!    — the actual "the sensor died" signal, which a 300 s timer was only ever
+//!    standing in for.
+//!
+//! # On `summary` and cardinality
+//!
+//! `summary` is a label, and sensor summaries embed live values
+//! (`"disk at 91.3%"`), which looks like a cardinality hazard: every re-publish
+//! with a different number would mint a new series.
+//!
+//! It is not, and the reason is the same edge-triggering above. A sensor
+//! updates its stored alert every evaluation but returns `Action::None` unless
+//! the **severity** changed — a changed summary alone never reaches the wire.
+//! So the number of label sets per alert is bounded by how many severity
+//! transitions it makes, not by how often it is evaluated, and the old series
+//! goes stale naturally when a transition does happen.
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use parking_lot::RwLock;
 use zensight_common::alert::{Alert, AlertState};
@@ -35,9 +70,14 @@ const RESERVED: &[&str] = &[
     "summary",
 ];
 
-/// A firing alert plus when it was last seen (for staleness eviction).
+/// A firing alert plus when it was last seen.
+///
+/// `received` is diagnostic only. It is deliberately NOT an eviction input:
+/// see the module note on why a timer is the wrong liveness signal for an
+/// edge-triggered publisher.
 struct StoredAlert {
     alert: Alert,
+    #[allow(dead_code)]
     received: Instant,
 }
 
@@ -85,13 +125,19 @@ impl AlertStore {
         self.alerts.read().is_empty()
     }
 
-    /// Evict alerts not refreshed within `timeout` (a sensor that died without
-    /// tombstoning its alerts shouldn't leave them firing forever). Returns the
-    /// number removed.
-    pub fn cleanup_stale(&self, timeout: Duration) -> usize {
+    /// Drop every firing alert from one source, because its liveliness token
+    /// vanished.
+    ///
+    /// This is the honest replacement for the staleness sweep: a sensor that
+    /// died without tombstoning its alerts is exactly what a disappearing
+    /// liveliness token means (RFC 04 §5), and unlike a timer it cannot fire
+    /// for a sensor that is alive and simply had nothing new to say.
+    ///
+    /// Returns the number removed.
+    pub fn drop_source(&self, source: &str) -> usize {
         let mut map = self.alerts.write();
         let before = map.len();
-        map.retain(|_, a| a.received.elapsed() < timeout);
+        map.retain(|_, a| a.alert.source != source);
         before - map.len()
     }
 
@@ -249,12 +295,40 @@ mod tests {
         assert!(out.contains(r#"summary=\"quotes\""#) || out.contains("\\\""));
     }
 
+    /// A firing alert leaves only when its SOURCE goes away (#758).
+    ///
+    /// This replaces `stale_alerts_are_evicted`, which asserted the bug:
+    /// sensors publish alerts edge-triggered, so "not re-received in 300s"
+    /// almost always meant "still firing, nothing changed" — and because
+    /// absence is the resolve signal, evicting on that timer silently closed
+    /// live incidents.
     #[test]
-    fn stale_alerts_are_evicted() {
+    fn a_departed_source_loses_its_alerts() {
         let store = AlertStore::new();
         store.apply(firing());
-        assert_eq!(store.cleanup_stale(Duration::from_secs(3600)), 0);
-        assert_eq!(store.cleanup_stale(Duration::ZERO), 1);
+        assert_eq!(store.len(), 1);
+
+        // A different host going away must not touch it.
+        assert_eq!(store.drop_source("some-other-host"), 0);
+        assert_eq!(store.len(), 1, "another host's death is not evidence");
+
+        let source = firing().source;
+        assert_eq!(store.drop_source(&source), 1);
         assert_eq!(store.len(), 0);
+    }
+
+    /// Time alone never removes a firing alert. If this ever fails, something
+    /// has reintroduced a staleness sweep and live incidents will close
+    /// themselves again.
+    #[test]
+    fn nothing_evicts_a_firing_alert_on_a_timer() {
+        let store = AlertStore::new();
+        store.apply(firing());
+
+        // The only public ways out are a resolve, a tombstone, or a departed
+        // source. There is deliberately no timer-based entry point at all.
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.drop_source("unrelated"), 0);
+        assert_eq!(store.len(), 1);
     }
 }

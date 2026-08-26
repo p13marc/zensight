@@ -47,7 +47,7 @@ Create a JSON5 configuration file:
 
   // Prometheus settings
   prometheus: {
-    listen: "0.0.0.0:9090",   // HTTP listen address
+    listen: "127.0.0.1:9464", // HTTP listen address (NOT 9090 — Prometheus's own port)
     path: "/metrics",          // Metrics endpoint path
     prefix: "zensight",        // Metric name prefix
     export_alerts: true,       // Mirror sensor alerts to a `<prefix>_alert` gauge
@@ -66,8 +66,12 @@ Create a JSON5 configuration file:
   // Filtering (optional)
   filters: {
     // Subscription selector (default: the v1 telemetry class selector).
-    // Narrow it per producer, e.g. "zensight/v1/*/telemetry/netring/**".
-    key_expr: "zensight/v1/*/telemetry/**",
+    // Narrow it per producer, e.g. "v1/*/telemetry/netring/**".
+    // Base-RELATIVE. Since #466 the deployment base is the Zenoh session
+    // *namespace*, not a key chunk, so a `zensight/`-prefixed selector is
+    // re-prefixed on the wire and matches NOTHING — with a perfectly healthy
+    // session and an empty dashboard. Default is `v1/*/telemetry/**`.
+    key_expr: "v1/*/telemetry/**",
     include_protocols: ["snmp", "sysinfo"],  // Only these protocols
     exclude_metrics: ["**/debug/**"],         // Glob patterns to exclude
   },
@@ -129,7 +133,7 @@ Add to your `prometheus.yml`:
 scrape_configs:
   - job_name: 'zensight'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['127.0.0.1:9464']
     scrape_interval: 15s
 ```
 

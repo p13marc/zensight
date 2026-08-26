@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
+use zensight_common::pipeline_health::PipelineHealth;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 use zensight_exporter_prometheus::{ExporterConfig, HttpServer, MetricCollector, SharedCollector};
 
@@ -23,6 +24,30 @@ fn create_collector() -> SharedCollector {
 }
 
 /// Helper to create a telemetry point with labels.
+/// A base-relative telemetry key for a point, as the wire carries it.
+///
+/// Naming flows from the KEY through the registry (#764), so a test that only
+/// builds a `TelemetryPoint` exercises nothing the exporter actually does.
+/// snmp/modbus/gnmi/netflow register a rest-var catch-all `<device>/<metric...>`,
+/// so their keys carry a device chunk `point.metric` does not.
+fn key_for(point: &TelemetryPoint) -> String {
+    let producer = point.protocol.as_str();
+    if matches!(producer, "snmp" | "modbus" | "gnmi" | "netflow") {
+        format!(
+            "v1/h-0123456789ab/telemetry/{producer}/{}/{}",
+            point.source, point.metric
+        )
+    } else {
+        format!("v1/h-0123456789ab/telemetry/{producer}/{}", point.metric)
+    }
+}
+
+/// Record a point under its wire key. Same arity as the old
+/// `rec(&collector, make_point(..))`, so the call sites stay readable.
+fn rec(collector: &MetricCollector, point: TelemetryPoint) {
+    collector.record(&key_for(&point), &point);
+}
+
 fn make_point(
     source: &str,
     protocol: Protocol,
@@ -86,9 +111,9 @@ async fn test_full_flow_gauge_metrics() {
         HashMap::new(),
     );
 
-    collector.record(&point1);
-    collector.record(&point2);
-    collector.record(&point3);
+    collector.record(&key_for(&point1), &point1);
+    collector.record(&key_for(&point2), &point2);
+    collector.record(&key_for(&point3), &point3);
 
     // Render metrics
     let output = collector.render();
@@ -122,54 +147,190 @@ async fn test_full_flow_counter_metrics() {
     let point = make_point(
         "router01",
         Protocol::Snmp,
-        "if/1/ifInOctets",
+        "if/1/in_octets",
         TelemetryValue::Counter(1_000_000),
         [("interface".to_string(), "eth0".to_string())]
             .into_iter()
             .collect(),
     );
 
-    collector.record(&point);
+    collector.record(&key_for(&point), &point);
 
     let output = collector.render();
 
     // Verify counter is present with correct type (full name includes prefix and protocol)
     assert!(
-        output.contains("# TYPE zensight_snmp_if_1_ifInOctets counter"),
+        output.contains("# TYPE zensight_snmp_if_1_in_octets_total counter"),
         "Should have counter type. Output: {}",
         output
     );
     assert!(output.contains("1000000"), "Should contain counter value");
 }
 
+/// A text point is exposed as an info-style **gauge**, under an `_info` family,
+/// with the text in a label named for the subject leaf.
+///
+/// This test used to assert `# TYPE ... info`, which was the bug (#752): `info`
+/// is an OpenMetrics type, and emitting it into the `version=0.0.4` body we
+/// serve made Prometheus's parser abort and discard **every sample in the
+/// scrape** while the target still reported healthy. The suite asserted the
+/// broken behaviour, which is why it survived.
 #[tokio::test]
-async fn test_full_flow_text_metrics_as_info() {
+async fn text_points_are_info_style_gauges_not_the_openmetrics_info_type() {
     let collector = create_collector();
 
-    // Record text metric (should become info type)
     let point = make_point(
         "router01",
         Protocol::Snmp,
-        "system/sysDescr",
+        "system/sysdescr",
         TelemetryValue::Text("Cisco IOS XE Software".to_string()),
         HashMap::new(),
     );
 
-    collector.record(&point);
-
+    collector.record(&key_for(&point), &point);
     let output = collector.render();
 
-    // Info metrics have value 1 with the text as a label
-    // The full metric name includes prefix_protocol_metric
     assert!(
-        output.contains("# TYPE zensight_snmp_system_sysDescr info"),
-        "Should have info type for info metric. Output: {}",
-        output
+        output.contains("# TYPE zensight_snmp_system_sysdescr_info gauge"),
+        "text families must be a `gauge` under an `_info` name. Output: {output}"
     );
     assert!(
-        output.contains("Cisco IOS XE Software"),
-        "Should contain text value as label"
+        !output.contains(" info\n"),
+        "`info` is not a legal type token in the 0.0.4 text format. Output: {output}"
     );
+    assert!(
+        output.contains(r#"sysdescr="Cisco IOS XE Software""#),
+        "the text rides under the subject leaf, not a literal `value` label. Output: {output}"
+    );
+}
+
+/// The exact shape of #753, end to end through the real collector.
+///
+/// `disk/sda/io/read_bytes` gets `device="sda"` from the semconv table
+/// (`semconv.rs` maps `disk/{dev}/io/{field}` to `system.disk.io{device,direction}`)
+/// and `device="sda"` again from the sysinfo sensor's own point labels. The old
+/// merge de-duplicated only against `source`/`protocol`, so it emitted both —
+/// an invalid series that Prometheus drops and remote-write 400s wholesale.
+#[tokio::test]
+async fn a_semconv_attribute_and_a_point_label_never_duplicate() {
+    let collector = create_collector();
+
+    let mut labels = HashMap::new();
+    labels.insert("device".to_string(), "sda".to_string());
+    labels.insert("unit".to_string(), "bytes".to_string());
+
+    rec(
+        &collector,
+        make_point(
+            "host01",
+            Protocol::Sysinfo,
+            "disk/sda/io/read_bytes",
+            TelemetryValue::Counter(12_345),
+            labels,
+        ),
+    );
+
+    let output = collector.render();
+    let line = output
+        .lines()
+        .find(|l| l.starts_with("zensight_system_disk_io"))
+        .unwrap_or_else(|| panic!("disk io series missing. Output: {output}"));
+
+    assert_eq!(
+        line.matches("device=").count(),
+        1,
+        "`device` must appear exactly once. Line: {line}"
+    );
+    assert!(
+        line.contains(r#"device="sda""#) && line.contains(r#"direction="read""#),
+        "both the pattern var and the semconv constant survive. Line: {line}"
+    );
+}
+
+/// No rendered series may carry the same label name twice, whatever the sensor
+/// attached. This is the invariant, asserted over every series in the body.
+#[tokio::test]
+async fn no_series_carries_a_duplicate_label_name() {
+    let collector = create_collector();
+
+    // A sensor doing everything wrong at once: shadowing structural labels,
+    // shadowing a semconv attribute, and shadowing a pattern var.
+    let mut hostile = HashMap::new();
+    for (k, v) in [
+        ("device", "not-sda"),
+        ("direction", "sideways"),
+        ("source", "impostor"),
+        ("protocol", "impostor"),
+    ] {
+        hostile.insert(k.to_string(), v.to_string());
+    }
+
+    rec(
+        &collector,
+        make_point(
+            "host01",
+            Protocol::Sysinfo,
+            "disk/sda/io/read_bytes",
+            TelemetryValue::Counter(1),
+            hostile,
+        ),
+    );
+
+    for line in collector.render().lines() {
+        let Some(open) = line.find('{') else { continue };
+        let Some(close) = line.rfind('}') else {
+            continue;
+        };
+        let mut names = Vec::new();
+        for part in line[open + 1..close].split("\",") {
+            if let Some((k, _)) = part.split_once('=') {
+                names.push(k.trim().to_string());
+            }
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            names.len(),
+            "duplicate label name in series: {line}"
+        );
+    }
+}
+
+/// Every `# TYPE` token in a rendered body must be one the Prometheus 0.0.4
+/// grammar accepts. This is the invariant #752 violated, asserted directly
+/// rather than through a proxy — a full validator lands with the exposition
+/// test suite.
+#[tokio::test]
+async fn every_type_token_is_legal_in_the_text_format() {
+    const LEGAL: [&str; 5] = ["counter", "gauge", "histogram", "summary", "untyped"];
+
+    let collector = create_collector();
+    let cases = [
+        ("system/sysdescr", TelemetryValue::Text("Cisco".into())),
+        ("if/1/in_octets", TelemetryValue::Counter(1_000)),
+        ("cpu/load", TelemetryValue::Gauge(0.5)),
+        ("link/up", TelemetryValue::Boolean(true)),
+    ];
+    for (metric, value) in cases {
+        rec(
+            &collector,
+            make_point("router01", Protocol::Snmp, metric, value, HashMap::new()),
+        );
+    }
+
+    for line in collector.render().lines() {
+        let Some(rest) = line.strip_prefix("# TYPE ") else {
+            continue;
+        };
+        let token = rest.rsplit(' ').next().expect("a TYPE line has a token");
+        assert!(
+            LEGAL.contains(&token),
+            "illegal `# TYPE` token {token:?} in line {line:?} — Prometheus \
+             rejects the entire scrape body on an unknown type"
+        );
+    }
 }
 
 #[tokio::test]
@@ -180,7 +341,7 @@ async fn test_full_flow_multiple_protocols() {
     let snmp_point = make_point(
         "router01",
         Protocol::Snmp,
-        "sysUpTime",
+        "sysuptime",
         TelemetryValue::Counter(123456),
         HashMap::new(),
     );
@@ -199,9 +360,9 @@ async fn test_full_flow_multiple_protocols() {
         HashMap::new(),
     );
 
-    collector.record(&snmp_point);
-    collector.record(&sysinfo_point);
-    collector.record(&modbus_point);
+    collector.record(&key_for(&snmp_point), &snmp_point);
+    collector.record(&key_for(&sysinfo_point), &sysinfo_point);
+    collector.record(&key_for(&modbus_point), &modbus_point);
 
     let output = collector.render();
 
@@ -232,7 +393,7 @@ async fn test_metric_updates_preserve_latest_value() {
         TelemetryValue::Gauge(50.0),
         HashMap::new(),
     );
-    collector.record(&point1);
+    collector.record(&key_for(&point1), &point1);
 
     // Update with new value
     let point2 = make_point(
@@ -242,7 +403,7 @@ async fn test_metric_updates_preserve_latest_value() {
         TelemetryValue::Gauge(75.0),
         HashMap::new(),
     );
-    collector.record(&point2);
+    collector.record(&key_for(&point2), &point2);
 
     let output = collector.render();
 
@@ -275,7 +436,7 @@ async fn test_collector_stats() {
             TelemetryValue::Gauge(i as f64 * 10.0),
             HashMap::new(),
         );
-        collector.record(&point);
+        collector.record(&key_for(&point), &point);
     }
 
     let stats = collector.stats();
@@ -292,20 +453,28 @@ async fn test_http_server_metrics_endpoint() {
     let collector = create_collector();
 
     // Add a metric
+    // A REGISTERED subject: naming flows from the key through the registry
+    // (#764), so an invented metric name never refines and this test would be
+    // asserting against an empty body.
     let point = make_point(
         "test",
         Protocol::Sysinfo,
-        "test_metric",
+        "memory/usage_percent",
         TelemetryValue::Gauge(42.0),
         HashMap::new(),
     );
-    collector.record(&point);
+    collector.record(&key_for(&point), &point);
 
     // Start HTTP server on random port
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let _server = HttpServer::new(collector.clone(), addr, "/metrics".to_string());
+    let _server = HttpServer::new(
+        collector.clone(),
+        addr,
+        "/metrics".to_string(),
+        PipelineHealth::new(),
+    );
 
     // We need to bind and get the actual port
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -313,7 +482,12 @@ async fn test_http_server_metrics_endpoint() {
     drop(listener); // Release the port
 
     // Start server in background
-    let server = HttpServer::new(collector, actual_addr, "/metrics".to_string());
+    let server = HttpServer::new(
+        collector,
+        actual_addr,
+        "/metrics".to_string(),
+        PipelineHealth::new(),
+    );
     let server_handle = tokio::spawn(async move {
         let _ = server.run(shutdown_rx).await;
     });
@@ -337,7 +511,7 @@ async fn test_http_server_metrics_endpoint() {
         Ok(resp) => {
             assert!(resp.status().is_success());
             let body = resp.text().await.unwrap();
-            assert!(body.contains("test_metric"));
+            assert!(body.contains("zensight_system_memory_utilization"));
         }
         Err(e) => {
             // Server might not have started in time - this is acceptable in CI
@@ -366,8 +540,8 @@ async fn test_special_characters_in_metric_names() {
         HashMap::new(),
     );
 
-    collector.record(&point1);
-    collector.record(&point2);
+    collector.record(&key_for(&point1), &point1);
+    collector.record(&key_for(&point2), &point2);
 
     let output = collector.render();
 
@@ -422,7 +596,7 @@ async fn test_high_cardinality_protection() {
             TelemetryValue::Gauge(i as f64),
             HashMap::new(),
         );
-        collector.record(&point);
+        collector.record(&key_for(&point), &point);
     }
 
     // Should be capped at max_series
@@ -440,27 +614,27 @@ async fn test_boolean_metrics() {
     let point_true = make_point(
         "router01",
         Protocol::Snmp,
-        "if/1/ifOperStatus",
+        "if/1/oper_status",
         TelemetryValue::Boolean(true),
         HashMap::new(),
     );
     let point_false = make_point(
         "router02",
         Protocol::Snmp,
-        "if/1/ifOperStatus",
+        "if/1/oper_status",
         TelemetryValue::Boolean(false),
         HashMap::new(),
     );
 
-    collector.record(&point_true);
-    collector.record(&point_false);
+    collector.record(&key_for(&point_true), &point_true);
+    collector.record(&key_for(&point_false), &point_false);
 
     let output = collector.render();
 
     // Boolean true should be 1, false should be 0
     let lines: Vec<&str> = output
         .lines()
-        .filter(|l| l.contains("ifOperStatus") && !l.starts_with('#'))
+        .filter(|l| l.contains("oper_status") && !l.starts_with('#'))
         .collect();
 
     assert_eq!(lines.len(), 2, "Should have two metric lines");
@@ -508,7 +682,7 @@ async fn test_concurrent_recording() {
                         TelemetryValue::Gauge((i * 100 + j) as f64),
                         HashMap::new(),
                     );
-                    collector.record(&point);
+                    collector.record(&key_for(&point), &point);
                 }
             })
         })

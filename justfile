@@ -89,6 +89,23 @@ ebpf_features := if ebpf_on == "1" { "--features zensight-sensor-sysinfo/ebpf" }
 # tailscale/docker). Honored via the ZENSIGHT_ZENOH_* env vars.
 hub := "tcp/127.0.0.1:7447"
 
+# The Prometheus exporter's scrape port. NOT 9090 — that is the Prometheus
+# *server's* own port, and the demo stack runs both on the host network. 9464 is
+# the conventional OpenTelemetry/Prometheus-exporter port and is now the shipped
+# default in configs/prometheus-exporter.json5 too.
+exporter_port := "9464"
+
+# Compose front-end for the demo stacks. `docker compose` is canonical for this
+# repo's compose files (docker/docker-compose.yml documents itself that way);
+# `podman compose` is accepted because `just image` already builds with podman
+# and some hosts have only that. Detected once so the recipes don't each decide.
+_compose := ```
+    if docker compose version >/dev/null 2>&1; then echo "docker compose"
+    elif podman compose version >/dev/null 2>&1; then echo "podman compose"
+    elif command -v podman-compose >/dev/null 2>&1; then echo "podman-compose"
+    else echo ""; fi
+```
+
 _default:
     @just --list
 
@@ -215,6 +232,7 @@ configure:
         --configs-dir "{{justfile_directory()}}/configs" \
         --snapshot-dir "{{justfile_directory()}}/docs" \
         --pcap-dir "{{justfile_directory()}}/{{rundir}}/pcap" \
+        --exporters \
         {{ if ebpf_on == "1" { "--ebpf" } else { "" } }}
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
@@ -332,6 +350,157 @@ run rerun="": setup configure
     export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
     export RUST_LOG="${RUST_LOG:-info}"
     ZENSIGHT_ZENOH_LISTEN="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight 2>&1 | tee {{rundir}}/gui.log
+
+# ── Demo: exporters + a real TSDB / dashboard stack ──────────────────────────
+#
+# `just demo-prometheus` and `just demo-otel` are the two "one command, working
+# demo" entry points for the exporters — which, until these landed, had NO run
+# path at all: zero mentions in this justfile, one service in
+# docker/docker-compose.yml, and not one occurrence of the word "exporter" in
+# docs/DEPLOYMENT.md.
+#
+# THE TOPOLOGY. `just run` makes the GUI the Zenoh rendezvous (it LISTENS on
+# {{hub}}; everything else CONNECTS). These demos are headless, so the EXPORTER
+# plays that role instead: it listens on {{hub}} and scripts/run-sensors.sh
+# points the full sensor set at it. Same shape, one fewer process, and no "start
+# the GUI in another terminal first". If a hub is already up (you ran `just run`
+# elsewhere), the recipe detects it and attaches as a spoke instead of fighting
+# for the port.
+#
+# THE FOOTGUN THESE RECIPES DISARM. configs/{prometheus,otel}-exporter.json5
+# both say `mode: "peer"` with `connect` COMMENTED OUT. Per
+# zensight-common/src/config.rs a peer with no explicit connect gets multicast
+# scouting ON — but every ZenSight demo path turns multicast OFF, deliberately
+# (VPNs and extra interfaces make it unreliable, and on loopback it triggers a
+# CONNECTION_TO_SELF error storm). Run the shipped config naively next to
+# `just run` and the exporter finds nothing, silently, forever. Hence
+# ZENSIGHT_ZENOH_{LISTEN,CONNECT,SCOUTING} on every line below.
+#
+# Both stacks bind host TCP 3000 and 9090, so they are MUTUALLY EXCLUSIVE.
+
+# Deliberately NOT folded into `build`: `just run` does not need them, and they
+# pull the OTLP/tonic stack.
+#
+# Build both exporters.
+build-exporters:
+    cargo build {{relflag}} -p zensight-exporter-prometheus -p zensight-exporter-otel
+
+# Prometheus + Grafana demo: the full `just run` sensor set on the host, the
+# Prometheus exporter on the host as the Zenoh rendezvous, Prometheus + Grafana
+# in containers on the host network.
+#
+#   Grafana   http://127.0.0.1:3000   (anonymous; opens on ZenSight — Host overview)
+#   Prom      http://127.0.0.1:9090   (target zensight-exporter must be UP)
+#   /metrics  http://127.0.0.1:{{exporter_port}}/metrics
+#
+# Ctrl-C stops the exporter, the sensors AND the containers.
+#
+# Demo: sensors + Prometheus exporter on the host, Prometheus + Grafana in containers.
+demo-prometheus: setup configure build-exporters
+    #!/usr/bin/env bash
+    set -euo pipefail
+    compose="{{_compose}}"
+    [[ -n "$compose" ]] || {
+      echo "error: no compose front-end found (docker compose | podman compose | podman-compose)" >&2
+      exit 1
+    }
+    # Is something already listening on the hub? (a `just run` GUI, or a
+    # previous demo that did not tear down). If so, attach as a spoke.
+    if (exec 3<>/dev/tcp/127.0.0.1/7447) 2>/dev/null; then
+        exec 3>&-
+        echo "Hub {{hub}} is already up — attaching the exporter as a spoke (not spawning sensors)."
+        zenoh_env=(ZENSIGHT_ZENOH_CONNECT="{{hub}}")
+        own_hub=0
+    else
+        echo "No hub on {{hub}} — the exporter will BE the rendezvous and spawn the sensors."
+        zenoh_env=(ZENSIGHT_ZENOH_LISTEN="{{hub}}")
+        own_hub=1
+    fi
+    $compose -f demo/prometheus/compose.yml up -d
+    trap 'echo; echo "Stopping…"; '"$compose"' -f demo/prometheus/compose.yml down >/dev/null 2>&1 || true; kill 0' EXIT
+    echo
+    echo "  Grafana   http://127.0.0.1:3000   (ZenSight folder — provisioned)"
+    echo "  Prom      http://127.0.0.1:9090   (target zensight-exporter must be UP)"
+    echo "  /metrics  http://127.0.0.1:{{exporter_port}}/metrics"
+    echo
+    # The exporter first, so the listener exists before the sensors dial it.
+    env "${zenoh_env[@]}" ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-exporter-prometheus \
+            --config {{rundir}}/prometheus-exporter.json5 \
+            --listen 127.0.0.1:{{exporter_port}} 2>&1 | sed -u 's/^/[exporter] /' &
+    sleep 1
+    if [[ "$own_hub" == 1 ]]; then
+        BINDIR="{{bindir}}" CONFDIR="{{rundir}}" LOGDIR="{{rundir}}" \
+        CONNECT="{{hub}}" WITH_CORRELATOR=1 scripts/run-sensors.sh
+    else
+        wait
+    fi
+
+# OpenTelemetry demo: the same sensor set and the same rendezvous trick, with
+# the OTel exporter pushing OTLP/gRPC to grafana/otel-lgtm (Collector +
+# Prometheus + Tempo + Loki + Grafana in one container).
+#
+#   Grafana   http://127.0.0.1:3000   (Explore → Prometheus / Tempo / Loki)
+#   OTLP      127.0.0.1:4317 (gRPC) · 127.0.0.1:4318 (HTTP)
+#
+# The exporter's shipped endpoint (configs/otel-exporter.json5) is already
+# http://localhost:4317 with protocol "grpc" — nothing to override.
+#
+# Demo: sensors + OTel exporter on the host, grafana/otel-lgtm in one container.
+demo-otel: setup configure build-exporters
+    #!/usr/bin/env bash
+    set -euo pipefail
+    compose="{{_compose}}"
+    [[ -n "$compose" ]] || { echo "error: no compose front-end found" >&2; exit 1; }
+    if (exec 3<>/dev/tcp/127.0.0.1/7447) 2>/dev/null; then
+        exec 3>&-
+        echo "Hub {{hub}} is already up — attaching the exporter as a spoke (not spawning sensors)."
+        zenoh_env=(ZENSIGHT_ZENOH_CONNECT="{{hub}}"); own_hub=0
+    else
+        echo "No hub on {{hub}} — the exporter will BE the rendezvous and spawn the sensors."
+        zenoh_env=(ZENSIGHT_ZENOH_LISTEN="{{hub}}"); own_hub=1
+    fi
+    $compose -f demo/otel/compose.yml up -d
+    trap 'echo; echo "Stopping…"; '"$compose"' -f demo/otel/compose.yml down >/dev/null 2>&1 || true; kill 0' EXIT
+    echo
+    echo "  Grafana   http://127.0.0.1:3000   (Explore → Prometheus / Tempo / Loki)"
+    echo "  OTLP      127.0.0.1:4317 gRPC"
+    echo
+    # otel-lgtm needs a few seconds before its OTLP receiver binds. The exporter
+    # retries anyway, but starting into a refused connection makes the log look
+    # broken when it is merely early.
+    sleep 5
+    env "${zenoh_env[@]}" ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-exporter-otel \
+            --config {{rundir}}/otel-exporter.json5 2>&1 | sed -u 's/^/[exporter] /' &
+    sleep 1
+    if [[ "$own_hub" == 1 ]]; then
+        BINDIR="{{bindir}}" CONFDIR="{{rundir}}" LOGDIR="{{rundir}}" \
+        CONNECT="{{hub}}" WITH_CORRELATOR=1 scripts/run-sensors.sh
+    else
+        wait
+    fi
+
+# Safe when nothing is up. `just stop` handles the sensors; this adds the
+# exporters and the containers.
+#
+# Tear down both demo stacks and anything they left running.
+demo-stop: stop
+    #!/usr/bin/env bash
+    set -euo pipefail
+    compose="{{_compose}}"
+    if [[ -n "$compose" ]]; then
+        $compose -f demo/prometheus/compose.yml down >/dev/null 2>&1 || true
+        $compose -f demo/otel/compose.yml down >/dev/null 2>&1 || true
+    fi
+    pkill -f 'zensight-exporter-(prometheus|otel)' 2>/dev/null || true
+    echo "Demo stacks stopped."
+
+# Isolated ports, no containers, no sudo. This is what CI runs.
+#
+# Prove sensor -> Zenoh -> exporter -> /metrics works end to end.
+demo-verify:
+    scripts/demo-verify.sh
 
 # ── Container image ──────────────────────────────────────────────────────────
 
