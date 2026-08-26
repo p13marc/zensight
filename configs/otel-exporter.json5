@@ -71,7 +71,28 @@
       enabled: false,
     },
 
-    // Service name for OTEL resource
+    // How host identity reaches the OTLP Resource (#755).
+    //
+    //   "per-origin" (default) — one Resource per observed host, carrying
+    //       host.id (the RFC 06 minted origin), host.name and
+    //       service.instance.id. This is what OTel semconv expects, and the
+    //       only shape that works for LOGS: a backend derives stream identity
+    //       from the resource, so a shared one collapses the whole fleet into
+    //       a single log stream.
+    //
+    //   "flat" — one shared Resource, host identity carried as data-point and
+    //       log-record attributes instead. For backends that cope badly with
+    //       many resources. Metrics stay queryable; logs lose per-host streams.
+    //
+    // resource_mode: "per-origin",
+
+    // Cap on distinct per-host resources. Each owns its own signal providers,
+    // so this bounds memory and pipelines; past it, further hosts share the
+    // flat resource and are counted rather than growing without limit.
+    // max_resources: 512,
+
+    // Service name for OTEL resource. Under per-origin the producer is
+    // appended, so a netlink sensor reports `zensight.netlink`.
     service_name: "zensight",
 
     // Service version (optional)

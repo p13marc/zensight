@@ -211,7 +211,9 @@ impl TelemetrySubscriber {
             .or_else(|| ciborium::from_reader(&payload[..]).ok());
 
         match alert {
-            Some(alert) => self.exporter.record_alert(&alert),
+            Some(alert) => self
+                .exporter
+                .record_alert(sample.key_expr().as_str(), &alert),
             None => warn!(
                 key = %sample.key_expr(),
                 payload_len = payload.len(),

@@ -3,22 +3,70 @@
 use opentelemetry::KeyValue;
 use zensight_common::telemetry::{Protocol, TelemetryValue};
 
-/// Build resource attributes from configuration and telemetry.
+/// The host an observed signal came from, for its OTLP `Resource` (#755).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedHost {
+    /// The RFC 06 minted origin chunk, e.g. `h-0ead7da13eea`. Stable across
+    /// hostname changes, which is why it and not `host.name` is the identity.
+    pub origin: String,
+    /// The sensor's self-reported hostname.
+    pub host_name: String,
+    /// The registry producer that emitted this, with its instance suffix when
+    /// it has one (`netring-2`).
+    pub producer: String,
+}
+
+/// Build resource attributes.
+///
+/// # Why the observed host belongs here and not on the data point (#755)
+///
+/// This used to emit `service.name`, an optional `service.version` and whatever
+/// the operator hand-wrote — and nothing else. Every host on the bus therefore
+/// shared ONE `Resource`, despite the keyspace origin being literally
+/// `h-<12hex>`.
+///
+/// For metrics that shows up as `job="zensight", instance=""`. For **logs** it
+/// is worse: a backend derives stream identity from the resource, so the whole
+/// fleet collapsed into a single log stream with the host demoted to structured
+/// metadata. For traces the spans carried no host at all.
+///
+/// `service.name` is per-producer (`zensight.netlink`), because that is what a
+/// service *is* here — the thing emitting the signal — and it is what makes a
+/// service map meaningful rather than one node called "zensight".
+///
+/// Operator-supplied `resource` attributes and `service.version` merge
+/// underneath and never override these: they are configuration, and this is
+/// observed truth off the wire.
 pub fn build_resource_attributes(
     service_name: &str,
     service_version: Option<&str>,
     extra_attrs: &std::collections::HashMap<String, String>,
+    host: Option<&ObservedHost>,
 ) -> Vec<KeyValue> {
-    let mut attrs = Vec::with_capacity(2 + extra_attrs.len());
+    let mut attrs = Vec::with_capacity(5 + extra_attrs.len());
 
-    attrs.push(KeyValue::new("service.name", service_name.to_string()));
-
+    // Weakest first, so the loop below cannot clobber observed truth.
+    for (k, v) in extra_attrs {
+        attrs.push(KeyValue::new(k.clone(), v.clone()));
+    }
     if let Some(version) = service_version {
         attrs.push(KeyValue::new("service.version", version.to_string()));
     }
 
-    for (k, v) in extra_attrs {
-        attrs.push(KeyValue::new(k.clone(), v.clone()));
+    match host {
+        Some(h) => {
+            attrs.push(KeyValue::new(
+                "service.name",
+                format!("{service_name}.{}", h.producer),
+            ));
+            attrs.push(KeyValue::new("host.id", h.origin.clone()));
+            attrs.push(KeyValue::new("host.name", h.host_name.clone()));
+            attrs.push(KeyValue::new(
+                "service.instance.id",
+                format!("{}/{}", h.origin, h.producer),
+            ));
+        }
+        None => attrs.push(KeyValue::new("service.name", service_name.to_string())),
     }
 
     attrs
@@ -93,7 +141,7 @@ mod tests {
         let mut extra = HashMap::new();
         extra.insert("env".to_string(), "prod".to_string());
 
-        let attrs = build_resource_attributes("zensight", Some("1.0.0"), &extra);
+        let attrs = build_resource_attributes("zensight", Some("1.0.0"), &extra, None);
 
         assert!(attrs.iter().any(|kv| kv.key.as_str() == "service.name"));
         assert!(attrs.iter().any(|kv| kv.key.as_str() == "service.version"));

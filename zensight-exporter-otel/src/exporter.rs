@@ -20,15 +20,15 @@ use opentelemetry_sdk::trace::{
     BatchSpanProcessor, SpanData, SpanEvents, SpanLinks, SpanProcessor,
 };
 use parking_lot::{Mutex, RwLock};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use zensight_common::alert::{Alert, AlertSeverity, AlertState};
 use zensight_common::exposition::{MetricKind, identify};
 use zensight_common::telemetry::TelemetryPoint;
 
-use crate::config::{FilterConfig, OtelConfig, OtlpProtocol};
+use crate::config::{FilterConfig, OtelConfig, OtlpProtocol, ResourceMode};
 use crate::logs::LogRecord;
 use crate::metrics::{
-    build_resource_attributes, extract_value, is_log_exportable, is_metric_exportable,
+    ObservedHost, build_resource_attributes, extract_value, is_log_exportable, is_metric_exportable,
 };
 use crate::traces::{AlertSpan, AlertSpanTracker};
 
@@ -225,7 +225,26 @@ struct Observation {
 }
 
 /// metric name -> (series key -> observation)
-type ObservationStore = Arc<RwLock<HashMap<String, HashMap<String, Observation>>>>;
+/// `(origin, metric name) -> (series key -> observation)`.
+///
+/// Keyed by origin as well as name because each host has its own meter and
+/// therefore its own instruments (#755); a callback must observe only its own
+/// host's series or every resource would report the whole fleet.
+type ObservationStore = Arc<RwLock<HashMap<(String, String), HashMap<String, Observation>>>>;
+
+/// One host's signal providers, each pinned to that host's `Resource`.
+///
+/// OTel binds a `Resource` to a **provider**, not to a record, so "one resource
+/// per observed host" necessarily means one provider set per host (#755). They
+/// are built lazily on the first sample from an origin and capped by
+/// `max_resources`.
+struct SignalStack {
+    meter_provider: Option<SdkMeterProvider>,
+    meter: Option<Meter>,
+    logger_provider: Option<SdkLoggerProvider>,
+    logger: Option<SdkLogger>,
+    alert_logger: Option<SdkLogger>,
+}
 
 /// OpenTelemetry exporter that receives telemetry and exports via OTLP.
 pub struct OtelExporter {
@@ -262,10 +281,21 @@ pub struct OtelExporter {
     stats: RwLock<ExporterStats>,
     /// Every observed series, read by the asynchronous instrument callbacks.
     observations: ObservationStore,
-    /// Which metric names already have an instrument registered, and of which
-    /// kind. Registering twice would create a duplicate stream; changing kind
-    /// mid-flight is a sensor bug we report rather than paper over.
-    registered: RwLock<HashMap<String, ObsKind>>,
+    /// Which `(origin, metric name)` pairs already have an instrument
+    /// registered, and of which kind. Registering twice would create a
+    /// duplicate stream; changing kind mid-flight is a sensor bug we report
+    /// rather than paper over.
+    ///
+    /// Keyed by origin as well as name because each host has its own meter
+    /// (#755) — the same metric name on two hosts is two instruments.
+    registered: RwLock<HashMap<(String, String), ObsKind>>,
+    /// Per-host signal providers, built lazily. Empty in `Flat` mode.
+    per_origin: RwLock<HashMap<String, Arc<SignalStack>>>,
+    /// The exporter config, kept so a stack can be built on first sight of a
+    /// host rather than only at startup.
+    config: OtelConfig,
+    /// Origins refused because `max_resources` was reached.
+    dropped_resources: RwLock<u64>,
     /// Instrument handles, kept alive for the lifetime of the exporter.
     _counters: RwLock<Vec<opentelemetry::metrics::ObservableCounter<u64>>>,
     _gauges: RwLock<Vec<opentelemetry::metrics::ObservableGauge<f64>>>,
@@ -320,6 +350,14 @@ impl OtelExporter {
             stats: RwLock::new(ExporterStats::default()),
             observations: Arc::new(RwLock::new(HashMap::new())),
             registered: RwLock::new(HashMap::new()),
+            per_origin: RwLock::new(HashMap::new()),
+            // The seam injects providers directly, so the pool stays empty and
+            // every record uses them — `Flat` says exactly that.
+            config: OtelConfig {
+                resource_mode: ResourceMode::Flat,
+                ..Default::default()
+            },
+            dropped_resources: RwLock::new(0),
             _counters: RwLock::new(Vec::new()),
             _gauges: RwLock::new(Vec::new()),
             max_gauge_series: 100_000,
@@ -338,16 +376,23 @@ impl OtelExporter {
         );
 
         // Build resource attributes
+        // The SHARED resource, used in `Flat` mode and as the fallback past
+        // `max_resources`. It deliberately carries no host identity — there is
+        // no single host it could honestly name (#755).
         let resource_attrs = build_resource_attributes(
             &otel_config.service_name,
             otel_config.service_version.as_deref(),
             &otel_config.resource,
+            None,
         );
         let resource = Resource::builder().with_attributes(resource_attrs).build();
 
         // Initialize meter provider if metrics enabled
         let meter_provider = if otel_config.export_metrics {
-            Some(Self::init_meter_provider(otel_config, resource.clone()).await?)
+            Some(Self::init_meter_provider_sync(
+                otel_config,
+                resource.clone(),
+            )?)
         } else {
             None
         };
@@ -356,7 +401,10 @@ impl OtelExporter {
         // The logger pipeline backs both syslog logs and alert events, so
         // initialize it if either is enabled.
         let logger_provider = if otel_config.export_logs || otel_config.export_alerts {
-            Some(Self::init_logger_provider(otel_config, resource.clone()).await?)
+            Some(Self::init_logger_provider_sync(
+                otel_config,
+                resource.clone(),
+            )?)
         } else {
             None
         };
@@ -405,13 +453,20 @@ impl OtelExporter {
             stats: RwLock::new(ExporterStats::default()),
             observations: Arc::new(RwLock::new(HashMap::new())),
             registered: RwLock::new(HashMap::new()),
+            per_origin: RwLock::new(HashMap::new()),
+            config: otel_config.clone(),
+            dropped_resources: RwLock::new(0),
             _counters: RwLock::new(Vec::new()),
             _gauges: RwLock::new(Vec::new()),
             max_gauge_series: 100_000,
         })
     }
 
-    async fn init_meter_provider(
+    /// Not `async`: the builders are synchronous — the original signature only
+    /// needed a live tokio runtime for the gRPC exporter's lazy connect, which
+    /// the caller already provides. Making it sync is what lets a per-host
+    /// stack be built on first sight of a host rather than only at startup.
+    fn init_meter_provider_sync(
         config: &OtelConfig,
         resource: Resource,
     ) -> anyhow::Result<SdkMeterProvider> {
@@ -459,7 +514,7 @@ impl OtelExporter {
         Ok(provider)
     }
 
-    async fn init_logger_provider(
+    fn init_logger_provider_sync(
         config: &OtelConfig,
         resource: Resource,
     ) -> anyhow::Result<SdkLoggerProvider> {
@@ -584,17 +639,46 @@ impl OtelExporter {
             self.record_metric(key, point);
         }
 
-        // Export as log if applicable
+        // Export as log if applicable.
+        //
+        // Logs are the signal that MOST needs a per-host resource (#755): a
+        // backend derives stream identity from the resource, so a shared one
+        // collapses the whole fleet into a single log stream.
         if self.export_logs && is_log_exportable(&point.value, point.protocol) {
-            self.record_log(point);
+            self.record_log(key, point);
         }
     }
 
-    fn record_metric(&self, key: &str, point: &TelemetryPoint) {
-        let Some(meter) = &self.meter else {
-            return;
+    /// The host a refined sample came from.
+    ///
+    /// `origin` comes off the KEY (via `identify`'s structural labels), which
+    /// is the only place it exists — a payload cannot assert its own RFC 06
+    /// host id, and a hostname is not one.
+    fn host_of(
+        identity: &zensight_common::exposition::MetricIdentity,
+        point: &TelemetryPoint,
+    ) -> Option<ObservedHost> {
+        let label = |n: &str| {
+            identity
+                .labels
+                .iter()
+                .find(|(k, _)| k == n)
+                .map(|(_, v)| v.clone())
         };
+        let origin = label("origin")?;
+        let producer = label("protocol")?;
+        let producer = match label("producer_instance") {
+            Some(i) => format!("{producer}-{i}"),
+            None => producer,
+        };
+        Some(ObservedHost {
+            origin,
+            host_name: point.source.clone(),
+            producer,
+        })
+    }
 
+    fn record_metric(&self, key: &str, point: &TelemetryPoint) {
         // Naming flows from the KEY through the registry (#764). OTLP attribute
         // keys are unconstrained, so the sanitizer is identity — the collision
         // guarantee comes from the merge, not the normalisation.
@@ -627,6 +711,26 @@ impl OtelExporter {
             MetricKind::Text | MetricKind::Unsupported => return,
         };
 
+        // One resource per observed host (#755). The stack owns the meter, so
+        // the instrument and its callback belong to that host's provider.
+        let host = Self::host_of(&identity, point);
+        let stack = host.as_ref().and_then(|h| self.stack_for(h));
+        let meter = match stack.as_ref().and_then(|s| s.meter.as_ref()) {
+            Some(m) => m.clone(),
+            None => match &self.meter {
+                Some(m) => m.clone(),
+                None => return,
+            },
+        };
+        // Instruments and observations are scoped to the host whose meter owns
+        // them; in Flat mode every host shares one scope, which is what "flat"
+        // means.
+        let scope = match (&self.config.resource_mode, &host) {
+            (ResourceMode::PerOrigin, Some(h)) if stack.is_some() => h.origin.clone(),
+            _ => String::new(),
+        };
+        let store_key = (scope.clone(), metric_name.clone());
+
         let Some(value) = extract_value(&point.value) else {
             warn!(
                 metric = %metric_name,
@@ -656,7 +760,7 @@ impl OtelExporter {
         let series_key = build_series_key(&metric_name, &attributes);
         {
             let mut store = self.observations.write();
-            let series = store.entry(metric_name.clone()).or_default();
+            let series = store.entry(store_key.clone()).or_default();
             if !series.contains_key(&series_key) {
                 let total: usize = store.values().map(HashMap::len).sum();
                 if total >= self.max_gauge_series {
@@ -667,7 +771,7 @@ impl OtelExporter {
                     self.stats.write().metrics_failed += 1;
                     return;
                 }
-                let series = store.entry(metric_name.clone()).or_default();
+                let series = store.entry(store_key.clone()).or_default();
                 series.insert(
                     series_key,
                     Observation {
@@ -690,7 +794,7 @@ impl OtelExporter {
         // instrument to a stream, so rebuilding it per point (as the old code
         // did on every single sample) was a lock, an allocation and a pipeline
         // lookup on the Zenoh receive path for no gain.
-        let already = self.registered.read().get(&metric_name).copied();
+        let already = self.registered.read().get(&store_key).copied();
         match already {
             Some(existing) if existing == kind => {}
             Some(existing) => {
@@ -707,13 +811,117 @@ impl OtelExporter {
                 return;
             }
             None => {
-                self.register_instrument(meter, &metric_name, kind, identity.unit.as_deref());
-                self.registered.write().insert(metric_name.clone(), kind);
+                self.register_instrument(
+                    &meter,
+                    &scope,
+                    &metric_name,
+                    kind,
+                    identity.unit.as_deref(),
+                );
+                self.registered.write().insert(store_key.clone(), kind);
             }
         }
 
         trace!(metric = %metric_name, value, ?kind, "Recorded observation");
         self.stats.write().metrics_exported += 1;
+    }
+
+    /// The signal providers for one observed host.
+    ///
+    /// In `Flat` mode this is always the shared stack. In `PerOrigin` it is
+    /// built on first sight and cached; past `max_resources` the host falls
+    /// back to the shared stack and is counted, which is a degraded but honest
+    /// answer rather than unbounded growth.
+    fn stack_for(&self, host: &ObservedHost) -> Option<Arc<SignalStack>> {
+        if self.config.resource_mode == ResourceMode::Flat {
+            return None;
+        }
+        if let Some(hit) = self.per_origin.read().get(&host.origin) {
+            return Some(Arc::clone(hit));
+        }
+
+        let mut pool = self.per_origin.write();
+        // Re-check: another task may have built it while we waited.
+        if let Some(hit) = pool.get(&host.origin) {
+            return Some(Arc::clone(hit));
+        }
+        if pool.len() >= self.config.max_resources {
+            let mut dropped = self.dropped_resources.write();
+            if *dropped == 0 {
+                warn!(
+                    max = self.config.max_resources,
+                    "max_resources reached; further hosts share the flat resource"
+                );
+            }
+            *dropped += 1;
+            return None;
+        }
+
+        match self.build_stack(host) {
+            Ok(stack) => {
+                let stack = Arc::new(stack);
+                pool.insert(host.origin.clone(), Arc::clone(&stack));
+                debug!(origin = %host.origin, host = %host.host_name, "Built a per-host resource");
+                Some(stack)
+            }
+            Err(e) => {
+                warn!(origin = %host.origin, error = %e, "Could not build per-host providers; using the flat resource");
+                None
+            }
+        }
+    }
+
+    /// Build one host's providers, pinned to its own `Resource`.
+    fn build_stack(&self, host: &ObservedHost) -> anyhow::Result<SignalStack> {
+        let attrs = build_resource_attributes(
+            &self.config.service_name,
+            self.config.service_version.as_deref(),
+            &self.config.resource,
+            Some(host),
+        );
+        let resource = Resource::builder().with_attributes(attrs).build();
+
+        let meter_provider = if self.config.export_metrics {
+            Some(Self::init_meter_provider_sync(
+                &self.config,
+                resource.clone(),
+            )?)
+        } else {
+            None
+        };
+        let logger_provider = if self.config.export_logs || self.config.export_alerts {
+            Some(Self::init_logger_provider_sync(&self.config, resource)?)
+        } else {
+            None
+        };
+
+        let meter = meter_provider.as_ref().map(|mp| mp.meter("zensight"));
+        let logger = self
+            .config
+            .export_logs
+            .then(|| {
+                logger_provider
+                    .as_ref()
+                    .map(|lp| lp.logger("zensight.syslog"))
+            })
+            .flatten();
+        let alert_logger = self
+            .config
+            .export_alerts
+            .then(|| {
+                logger_provider
+                    .as_ref()
+                    .map(|lp| lp.logger("zensight.alerts"))
+            })
+            .flatten();
+
+        Ok(SignalStack {
+            meter_provider,
+            meter,
+            logger_provider,
+            logger,
+            alert_logger,
+        })
     }
 
     /// Register the asynchronous instrument for one metric name.
@@ -725,12 +933,15 @@ impl OtelExporter {
     fn register_instrument(
         &self,
         meter: &Meter,
+        scope: &str,
         metric_name: &str,
         kind: ObsKind,
         unit: Option<&str>,
     ) {
         let store = Arc::clone(&self.observations);
-        let name_for_cb = metric_name.to_string();
+        // The callback observes only ITS host's series. Without the scope in
+        // the key, every per-host resource would report the whole fleet (#755).
+        let name_for_cb = (scope.to_string(), metric_name.to_string());
 
         match kind {
             ObsKind::Counter => {
@@ -768,9 +979,19 @@ impl OtelExporter {
         }
     }
 
-    fn record_log(&self, point: &TelemetryPoint) {
-        let Some(logger) = &self.logger else {
-            return;
+    fn record_log(&self, key: &str, point: &TelemetryPoint) {
+        // Resolve the host from the KEY so the record lands on that host's
+        // logger, and therefore that host's resource.
+        let stack = identify(key, point, &Default::default(), |n: &str| n.to_string())
+            .ok()
+            .and_then(|id| Self::host_of(&id, point))
+            .and_then(|h| self.stack_for(&h));
+        let logger = match stack.as_ref().and_then(|s| s.logger.as_ref()) {
+            Some(l) => l,
+            None => match &self.logger {
+                Some(l) => l,
+                None => return,
+            },
         };
 
         let Some(record) = LogRecord::from_telemetry(point) else {
@@ -852,7 +1073,14 @@ impl OtelExporter {
     /// - **traces** (`traces.enabled`): the firing→resolved pair is folded into
     ///   a single synthesized span whose duration is how long the alert fired
     ///   (see [`crate::traces`]). Only the resolve transition emits a span.
-    pub fn record_alert(&self, alert: &Alert) {
+    ///
+    /// `key` is the alert's own key (`…/state/<producer>/alert/<alert_key>`),
+    /// which is where the origin lives. An `Alert` payload carries `source`
+    /// (a hostname) and a `host.id` label holding the FULL host id — not the
+    /// `h-<12hex>` origin chunk — so routing from the payload would mean
+    /// re-deriving the chunk outside the grammar crate, which is the
+    /// hand-rolling #475 exists to prevent. The key already has it.
+    pub fn record_alert(&self, key: &str, alert: &Alert) {
         // Traces signal: fold the lifecycle into a span (independent of logs).
         if let Some(tracker) = &self.alert_spans {
             let completed = tracker.lock().on_alert(alert);
@@ -861,8 +1089,24 @@ impl OtelExporter {
             }
         }
 
-        let Some(logger) = &self.alert_logger else {
-            return;
+        // Route to the host's own logger, so the record lands on that host's
+        // resource (#755).
+        let stack = zensight_common::keyexpr::parse_key(key)
+            .and_then(|parsed| {
+                let producer = parsed.producer.as_ref()?.name().to_string();
+                Some(ObservedHost {
+                    origin: parsed.origin.to_string(),
+                    host_name: alert.source.clone(),
+                    producer,
+                })
+            })
+            .and_then(|h| self.stack_for(&h));
+        let logger = match stack.as_ref().and_then(|s| s.alert_logger.as_ref()) {
+            Some(l) => l,
+            None => match &self.alert_logger {
+                Some(l) => l,
+                None => return,
+            },
         };
 
         let mut rec = logger.create_log_record();
@@ -965,6 +1209,22 @@ impl OtelExporter {
             && let Err(e) = logger_provider.shutdown()
         {
             error!("Error shutting down logger provider: {:?}", e);
+        }
+
+        // Every PER-HOST provider too (#755). Each owns its own batch queues,
+        // so shutting down only the shared pair would silently drop whatever
+        // the per-host pipelines still held.
+        for (origin, stack) in self.per_origin.read().iter() {
+            if let Some(mp) = &stack.meter_provider
+                && let Err(e) = mp.shutdown()
+            {
+                error!(origin = %origin, "Error shutting down host meter provider: {:?}", e);
+            }
+            if let Some(lp) = &stack.logger_provider
+                && let Err(e) = lp.shutdown()
+            {
+                error!(origin = %origin, "Error shutting down host logger provider: {:?}", e);
+            }
         }
 
         // Flush + stop the span processor so any spans still batched in memory
@@ -1267,7 +1527,10 @@ mod tests {
         );
         p.protocol = Protocol::Logs;
         p.timestamp = EVENT_MS;
-        exporter.record_log(&p);
+        exporter.record_log(
+            &format!("v1/h-0123456789ab/telemetry/logs/{}", p.metric),
+            &p,
+        );
 
         exporter
             .logger_provider
@@ -1290,5 +1553,84 @@ mod tests {
             rec.observed_timestamp().is_some_and(|o| o >= expected),
             "observed_timestamp is when WE saw it, and is distinct from the event time"
         );
+    }
+
+    /// Resource attributes carry the observed host, not just a service name.
+    ///
+    /// Before #755 this emitted only `service.name`, an optional
+    /// `service.version` and hand-written extras — so every host on the bus
+    /// shared one `Resource`: `instance=""` in Prometheus, and one Loki stream
+    /// for the entire fleet.
+    #[test]
+    fn a_resource_names_the_host_it_describes() {
+        let host = ObservedHost {
+            origin: "h-0ead7da13eea".into(),
+            host_name: "vm-dev-01".into(),
+            producer: "netlink-2".into(),
+        };
+        let attrs = build_resource_attributes("zensight", None, &HashMap::new(), Some(&host));
+        let get = |k: &str| {
+            attrs
+                .iter()
+                .find(|kv| kv.key.as_str() == k)
+                .map(|kv| kv.value.to_string())
+        };
+
+        assert_eq!(get("host.id").as_deref(), Some("h-0ead7da13eea"));
+        assert_eq!(get("host.name").as_deref(), Some("vm-dev-01"));
+        assert_eq!(
+            get("service.instance.id").as_deref(),
+            Some("h-0ead7da13eea/netlink-2"),
+            "the producer instance is part of the instance id, so netring-2 is \
+             distinguishable from netring"
+        );
+        assert_eq!(
+            get("service.name").as_deref(),
+            Some("zensight.netlink-2"),
+            "service.name is per-producer, so a service map is meaningful \
+             rather than one node called zensight"
+        );
+    }
+
+    /// Operator config never overrides observed truth.
+    #[test]
+    fn config_attributes_do_not_override_the_observed_host() {
+        let host = ObservedHost {
+            origin: "h-real".into(),
+            host_name: "real-host".into(),
+            producer: "sysinfo".into(),
+        };
+        let mut extra = HashMap::new();
+        extra.insert("host.name".to_string(), "impostor".to_string());
+        extra.insert("deployment".to_string(), "prod".to_string());
+
+        let attrs = build_resource_attributes("zensight", None, &extra, Some(&host));
+        // Later entries win in an OTel Resource, and observed truth is pushed last.
+        let host_names: Vec<String> = attrs
+            .iter()
+            .filter(|kv| kv.key.as_str() == "host.name")
+            .map(|kv| kv.value.to_string())
+            .collect();
+        assert_eq!(
+            host_names.last().map(String::as_str),
+            Some("real-host"),
+            "the wire wins over config"
+        );
+        assert!(
+            attrs.iter().any(|kv| kv.key.as_str() == "deployment"),
+            "unrelated operator attributes still ride along"
+        );
+    }
+
+    /// The flat resource names no host, because there is no single host it
+    /// could honestly name.
+    #[test]
+    fn the_flat_resource_claims_no_host() {
+        let attrs = build_resource_attributes("zensight", None, &HashMap::new(), None);
+        assert!(
+            !attrs.iter().any(|kv| kv.key.as_str().starts_with("host.")),
+            "a shared resource must not claim to be some particular host"
+        );
+        assert!(attrs.iter().any(|kv| kv.key.as_str() == "service.name"));
     }
 }

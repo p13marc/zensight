@@ -123,6 +123,19 @@ pub struct OtelConfig {
     #[serde(default)]
     pub resource: HashMap<String, String>,
 
+    /// How host identity reaches the OTLP `Resource` (#755).
+    #[serde(default)]
+    pub resource_mode: ResourceMode,
+
+    /// Cap on distinct per-origin resources held at once.
+    ///
+    /// Each one owns its own signal providers, so this bounds both memory and
+    /// the number of exporter pipelines. Past it, further origins fall back to
+    /// the shared flat resource and `dropped_resources` counts them — a
+    /// degraded but honest answer, rather than unbounded growth.
+    #[serde(default = "default_max_resources")]
+    pub max_resources: usize,
+
     /// Service name for OTEL resource.
     #[serde(default = "default_service_name")]
     pub service_name: String,
@@ -130,6 +143,31 @@ pub struct OtelConfig {
     /// Service version for OTEL resource.
     #[serde(default)]
     pub service_version: Option<String>,
+}
+
+/// How host identity reaches the OTLP `Resource`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResourceMode {
+    /// One `Resource` per observed host, carrying `host.id`, `host.name` and
+    /// `service.instance.id`.
+    ///
+    /// This is the shape OTel semantic conventions expect, and the only one
+    /// that works for logs: a backend derives stream identity from the
+    /// **resource**, so a single shared resource collapses every host in the
+    /// fleet into one log stream.
+    #[default]
+    PerOrigin,
+    /// One shared `Resource`, with host identity carried as data-point and
+    /// log-record **attributes** instead.
+    ///
+    /// For backends that cope badly with many resources. Metrics stay
+    /// queryable (the attributes are labels), but logs lose per-host streams.
+    Flat,
+}
+
+fn default_max_resources() -> usize {
+    512
 }
 
 fn default_endpoint() -> String {
@@ -172,6 +210,8 @@ impl Default for OtelConfig {
             export_alerts: true,
             traces: TracesConfig::default(),
             resource: HashMap::new(),
+            resource_mode: ResourceMode::default(),
+            max_resources: default_max_resources(),
             service_name: default_service_name(),
             service_version: None,
         }
