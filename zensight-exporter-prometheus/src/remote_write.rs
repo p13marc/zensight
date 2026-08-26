@@ -92,16 +92,25 @@ pub struct Sample {
 /// without any I/O).
 ///
 /// One sample per series, all stamped with `timestamp_ms` (the push time),
-/// mirroring what a scrape at that instant would yield. Info series become
-/// value `1` with the text in a `value` label, matching `/metrics`.
+/// mirroring what a scrape at that instant would yield. Text series become
+/// value `1` under an `<name>_info` family with the text in a label named for
+/// the subject leaf — byte-identical to `/metrics` (#752), because two
+/// spellings of the same series is a bug waiting to be found in production.
 pub fn build_write_request(metrics: &[StoredMetric], timestamp_ms: i64) -> WriteRequest {
     let mut timeseries: Vec<TimeSeries> = metrics
         .iter()
         .filter_map(|m| {
             let (value, extra_label) = match m.metric_type {
-                PrometheusType::Info => {
+                PrometheusType::Text => {
                     let text = m.text_value.as_ref()?;
-                    (1.0, Some(("value".to_string(), text.clone())))
+                    let label_name = m.text_label.clone().unwrap_or_else(|| "value".to_string());
+                    // Same duplicate-name guard as `/metrics`: a structural
+                    // label always wins over the text (#753).
+                    if m.key.labels.iter().any(|(k, _)| k == &label_name) {
+                        (1.0, None)
+                    } else {
+                        (1.0, Some((label_name, text.clone())))
+                    }
                 }
                 _ => (m.value?, None),
             };
@@ -109,7 +118,7 @@ pub fn build_write_request(metrics: &[StoredMetric], timestamp_ms: i64) -> Write
             let mut labels: Vec<Label> = Vec::with_capacity(m.key.labels.len() + 2);
             labels.push(Label {
                 name: "__name__".to_string(),
-                value: m.key.name.clone(),
+                value: m.emitted_name(),
             });
             for (k, v) in &m.key.labels {
                 if !v.is_empty() {
@@ -391,8 +400,14 @@ mod tests {
         assert_eq!(gauge.samples[0].value, 0.75);
     }
 
+    /// A text point rides an `_info` family under a label named for the subject
+    /// leaf — not the old literal `value` label, and not the bare metric name.
+    ///
+    /// The `_info` suffix is what keeps a text family from colliding with a
+    /// numeric family of the same name, and remote-write must spell the series
+    /// exactly as `/metrics` does (#752).
     #[test]
-    fn info_series_becomes_value_one_with_value_label() {
+    fn text_series_becomes_value_one_under_an_info_family() {
         let collector = make_collector();
         record(
             &collector,
@@ -405,7 +420,41 @@ mod tests {
         assert_eq!(req.timeseries.len(), 1);
         let ts = &req.timeseries[0];
         assert_eq!(ts.samples[0].value, 1.0);
-        assert_eq!(label(ts, "value"), Some("Cisco IOS"));
+        assert_eq!(
+            label(ts, "__name__"),
+            Some("zensight_snmp_sysDescr_info"),
+            "a text family must carry the _info suffix"
+        );
+        assert_eq!(
+            label(ts, "sysDescr"),
+            Some("Cisco IOS"),
+            "the text rides under the subject leaf, not a literal `value` label"
+        );
+        assert_eq!(label(ts, "value"), None, "the old literal label is gone");
+    }
+
+    /// A control character in a device-supplied string must never reach the
+    /// wire: a raw newline would terminate the sample line in the exposition
+    /// format and corrupt every byte after it.
+    #[test]
+    fn text_values_are_clamped_and_stripped_of_control_characters() {
+        let collector = make_collector();
+        record(
+            &collector,
+            "router01",
+            "sysDescr",
+            TelemetryValue::Text(format!("bad\nline{}", "x".repeat(400))),
+        );
+
+        let req = build_write_request(&collector.snapshot_metrics(), 1);
+        let ts = &req.timeseries[0];
+        let v = label(ts, "sysDescr").expect("text label present");
+        assert!(!v.contains('\n'), "control characters are stripped: {v:?}");
+        assert!(
+            v.chars().count() <= crate::mapping::MAX_TEXT_LEN,
+            "text is clamped to MAX_TEXT_LEN, got {}",
+            v.chars().count()
+        );
     }
 
     #[test]

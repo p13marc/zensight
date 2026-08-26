@@ -142,11 +142,18 @@ async fn test_full_flow_counter_metrics() {
     assert!(output.contains("1000000"), "Should contain counter value");
 }
 
+/// A text point is exposed as an info-style **gauge**, under an `_info` family,
+/// with the text in a label named for the subject leaf.
+///
+/// This test used to assert `# TYPE ... info`, which was the bug (#752): `info`
+/// is an OpenMetrics type, and emitting it into the `version=0.0.4` body we
+/// serve made Prometheus's parser abort and discard **every sample in the
+/// scrape** while the target still reported healthy. The suite asserted the
+/// broken behaviour, which is why it survived.
 #[tokio::test]
-async fn test_full_flow_text_metrics_as_info() {
+async fn text_points_are_info_style_gauges_not_the_openmetrics_info_type() {
     let collector = create_collector();
 
-    // Record text metric (should become info type)
     let point = make_point(
         "router01",
         Protocol::Snmp,
@@ -156,20 +163,146 @@ async fn test_full_flow_text_metrics_as_info() {
     );
 
     collector.record(&point);
-
     let output = collector.render();
 
-    // Info metrics have value 1 with the text as a label
-    // The full metric name includes prefix_protocol_metric
     assert!(
-        output.contains("# TYPE zensight_snmp_system_sysDescr info"),
-        "Should have info type for info metric. Output: {}",
-        output
+        output.contains("# TYPE zensight_snmp_system_sysDescr_info gauge"),
+        "text families must be a `gauge` under an `_info` name. Output: {output}"
     );
     assert!(
-        output.contains("Cisco IOS XE Software"),
-        "Should contain text value as label"
+        !output.contains(" info\n"),
+        "`info` is not a legal type token in the 0.0.4 text format. Output: {output}"
     );
+    assert!(
+        output.contains(r#"sysDescr="Cisco IOS XE Software""#),
+        "the text rides under the subject leaf, not a literal `value` label. Output: {output}"
+    );
+}
+
+/// The exact shape of #753, end to end through the real collector.
+///
+/// `disk/sda/io/read_bytes` gets `device="sda"` from the semconv table
+/// (`semconv.rs` maps `disk/{dev}/io/{field}` to `system.disk.io{device,direction}`)
+/// and `device="sda"` again from the sysinfo sensor's own point labels. The old
+/// merge de-duplicated only against `source`/`protocol`, so it emitted both —
+/// an invalid series that Prometheus drops and remote-write 400s wholesale.
+#[tokio::test]
+async fn a_semconv_attribute_and_a_point_label_never_duplicate() {
+    let collector = create_collector();
+
+    let mut labels = HashMap::new();
+    labels.insert("device".to_string(), "sda".to_string());
+    labels.insert("unit".to_string(), "bytes".to_string());
+
+    collector.record(&make_point(
+        "host01",
+        Protocol::Sysinfo,
+        "disk/sda/io/read_bytes",
+        TelemetryValue::Counter(12_345),
+        labels,
+    ));
+
+    let output = collector.render();
+    let line = output
+        .lines()
+        .find(|l| l.starts_with("zensight_system_disk_io"))
+        .unwrap_or_else(|| panic!("disk io series missing. Output: {output}"));
+
+    assert_eq!(
+        line.matches("device=").count(),
+        1,
+        "`device` must appear exactly once. Line: {line}"
+    );
+    assert!(
+        line.contains(r#"device="sda""#) && line.contains(r#"direction="read""#),
+        "both the pattern var and the semconv constant survive. Line: {line}"
+    );
+}
+
+/// No rendered series may carry the same label name twice, whatever the sensor
+/// attached. This is the invariant, asserted over every series in the body.
+#[tokio::test]
+async fn no_series_carries_a_duplicate_label_name() {
+    let collector = create_collector();
+
+    // A sensor doing everything wrong at once: shadowing structural labels,
+    // shadowing a semconv attribute, and shadowing a pattern var.
+    let mut hostile = HashMap::new();
+    for (k, v) in [
+        ("device", "not-sda"),
+        ("direction", "sideways"),
+        ("source", "impostor"),
+        ("protocol", "impostor"),
+    ] {
+        hostile.insert(k.to_string(), v.to_string());
+    }
+
+    collector.record(&make_point(
+        "host01",
+        Protocol::Sysinfo,
+        "disk/sda/io/read_bytes",
+        TelemetryValue::Counter(1),
+        hostile,
+    ));
+
+    for line in collector.render().lines() {
+        let Some(open) = line.find('{') else { continue };
+        let Some(close) = line.rfind('}') else {
+            continue;
+        };
+        let mut names = Vec::new();
+        for part in line[open + 1..close].split("\",") {
+            if let Some((k, _)) = part.split_once('=') {
+                names.push(k.trim().to_string());
+            }
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            names.len(),
+            "duplicate label name in series: {line}"
+        );
+    }
+}
+
+/// Every `# TYPE` token in a rendered body must be one the Prometheus 0.0.4
+/// grammar accepts. This is the invariant #752 violated, asserted directly
+/// rather than through a proxy — a full validator lands with the exposition
+/// test suite.
+#[tokio::test]
+async fn every_type_token_is_legal_in_the_text_format() {
+    const LEGAL: [&str; 5] = ["counter", "gauge", "histogram", "summary", "untyped"];
+
+    let collector = create_collector();
+    let cases = [
+        ("system/sysDescr", TelemetryValue::Text("Cisco".into())),
+        ("if/1/ifInOctets", TelemetryValue::Counter(1_000)),
+        ("cpu/load", TelemetryValue::Gauge(0.5)),
+        ("link/up", TelemetryValue::Boolean(true)),
+    ];
+    for (metric, value) in cases {
+        collector.record(&make_point(
+            "router01",
+            Protocol::Snmp,
+            metric,
+            value,
+            HashMap::new(),
+        ));
+    }
+
+    for line in collector.render().lines() {
+        let Some(rest) = line.strip_prefix("# TYPE ") else {
+            continue;
+        };
+        let token = rest.rsplit(' ').next().expect("a TYPE line has a token");
+        assert!(
+            LEGAL.contains(&token),
+            "illegal `# TYPE` token {token:?} in line {line:?} — Prometheus \
+             rejects the entire scrape body on an unknown type"
+        );
+    }
 }
 
 #[tokio::test]

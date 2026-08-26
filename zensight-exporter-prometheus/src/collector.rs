@@ -10,6 +10,8 @@ use tracing::{debug, trace, warn};
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
 use crate::config::{AggregationConfig, FilterConfig, PrometheusConfig};
+use zensight_common::exposition::{LabelMerger, LabelSource};
+
 use crate::mapping::{
     PrometheusType, build_metric_name, extract_numeric_value, is_exportable, sanitize_label_name,
 };
@@ -32,43 +34,31 @@ impl SeriesKey {
     ) -> Self {
         let name = build_metric_name(prefix, point.protocol, &point.metric);
 
-        // Build labels: source + protocol + user labels + default labels
-        let mut labels = Vec::with_capacity(2 + point.labels.len() + default_labels.len());
+        // One merge, one precedence (#753). This used to push each source in
+        // turn and de-duplicate against a hard-coded `source`/`protocol` list,
+        // which let `device` arrive from the semconv table AND the sensor's own
+        // labels and be emitted twice — an invalid series that Prometheus
+        // rejects and remote-write 400s.
+        let mut merger = LabelMerger::new(|n: &str| sanitize_label_name(n));
 
-        // Always include source and protocol
-        labels.push(("source".to_string(), point.source.clone()));
-        labels.push(("protocol".to_string(), point.protocol.as_str().to_string()));
+        merger.offer("source", point.source.clone(), LabelSource::Structural);
+        merger.offer(
+            "protocol",
+            point.protocol.as_str().to_string(),
+            LabelSource::Structural,
+        );
 
         // OTel host-metrics semconv (#100): factored state/direction/device/cpu
         // attributes become Prometheus labels via the shared table.
         if let Some(sc) = zensight_common::semconv::metric_semconv(point.protocol, &point.metric) {
-            for (k, v) in sc.attributes {
-                let key = sanitize_label_name(k);
-                if key != "source" && key != "protocol" {
-                    labels.push((key, v));
-                }
-            }
+            merger.offer_all(sc.attributes, LabelSource::SemconvConstant);
         }
 
-        // Add telemetry labels (sanitized)
-        for (k, v) in &point.labels {
-            let key = sanitize_label_name(k);
-            // Skip if it would conflict with built-in labels
-            if key != "source" && key != "protocol" {
-                labels.push((key, v.clone()));
-            }
-        }
+        merger.offer_all(&point.labels, LabelSource::PointLabel);
+        merger.offer_all(default_labels, LabelSource::ConfigDefault);
 
-        // Add default labels (don't override existing)
-        for (k, v) in default_labels {
-            let key = sanitize_label_name(k);
-            if !labels.iter().any(|(lk, _)| lk == &key) {
-                labels.push((key, v.clone()));
-            }
-        }
-
-        // Sort for consistent hashing
-        labels.sort_by(|a, b| a.0.cmp(&b.0));
+        let merged = merger.finish();
+        let labels = merged.labels;
 
         Self { name, labels }
     }
@@ -98,8 +88,11 @@ pub struct StoredMetric {
     pub metric_type: PrometheusType,
     /// The current value (for numeric metrics).
     pub value: Option<f64>,
-    /// Text value (for info metrics).
+    /// Text value (for text/info metrics).
     pub text_value: Option<String>,
+    /// Label name the text value rides under, derived from the subject leaf
+    /// (#752). `None` for numeric metrics.
+    pub text_label: Option<String>,
     /// When this metric was last updated.
     pub last_updated: Instant,
     /// Original timestamp from the telemetry point.
@@ -128,18 +121,36 @@ impl StoredMetric {
         let metric_type = PrometheusType::from_value(&point.value);
         let value = extract_numeric_value(&point.value);
         let text_value = match &point.value {
-            TelemetryValue::Text(s) => Some(s.clone()),
+            TelemetryValue::Text(s) => Some(crate::mapping::clamp_text(s)),
             _ => None,
         };
+        let text_label = text_value
+            .is_some()
+            .then(|| crate::mapping::text_label_name(&point.metric));
 
         Some(Self {
             key,
             metric_type,
             value,
             text_value,
+            text_label,
             last_updated: Instant::now(),
             timestamp_ms: point.timestamp,
         })
+    }
+
+    /// The family name this metric is exposed under.
+    ///
+    /// Text points get an `_info` suffix (#752) so they can never share a
+    /// `# TYPE` block with a numeric family of the same name. Everything else
+    /// is exposed under its stored name.
+    pub fn emitted_name(&self) -> String {
+        match self.metric_type {
+            PrometheusType::Text => {
+                format!("{}{}", self.key.name, crate::mapping::INFO_SUFFIX)
+            }
+            _ => self.key.name.clone(),
+        }
     }
 
     /// Check if this metric is stale based on the timeout.
@@ -437,17 +448,26 @@ impl MetricCollector {
             };
         }
 
-        // Group metrics by name for TYPE/HELP comments
-        let mut by_name: HashMap<&str, Vec<&StoredMetric>> = HashMap::new();
+        // Group by the name we will actually EMIT, not by the stored name.
+        //
+        // A text point is emitted as `<name>_info` (#752). Grouping by the raw
+        // name would let a text family and a numeric family of the same name
+        // share one `# TYPE` block, whose token is then taken from whichever
+        // series a HashMap iteration happened to yield first — a body that is
+        // valid or invalid depending on hash order.
+        let mut by_name: HashMap<String, Vec<&StoredMetric>> = HashMap::new();
         for metric in metrics.values() {
-            by_name.entry(&metric.key.name).or_default().push(metric);
+            by_name
+                .entry(metric.emitted_name())
+                .or_default()
+                .push(metric);
         }
 
         // Sort by metric name for consistent output
-        let mut names: Vec<_> = by_name.keys().collect();
+        let mut names: Vec<_> = by_name.keys().cloned().collect();
         names.sort();
 
-        for name in names {
+        for name in &names {
             let series = &by_name[name];
             if series.is_empty() {
                 continue;
@@ -462,15 +482,26 @@ impl MetricCollector {
             // Write each series
             for metric in series {
                 match metric.metric_type {
-                    PrometheusType::Info => {
-                        // Info metrics get value=1 with the text as a label
+                    PrometheusType::Text => {
+                        // Text points become an info-style gauge: value 1, with
+                        // the text carried in a label named for the subject leaf.
                         if let Some(text) = &metric.text_value {
+                            let label_name = metric
+                                .text_label
+                                .clone()
+                                .unwrap_or_else(|| "value".to_string());
                             let mut labels = metric.key.labels.clone();
-                            labels.push(("value".to_string(), text.clone()));
+                            // Never emit a duplicate label name: if the merged
+                            // set already carries this name, the structural
+                            // label wins and the text is dropped rather than
+                            // producing an invalid series (#753).
+                            if !labels.iter().any(|(k, _)| k == &label_name) {
+                                labels.push((label_name, text.clone()));
+                            }
                             labels.sort_by(|a, b| a.0.cmp(&b.0));
 
                             let label_str = format_labels(&labels);
-                            write_or_count!(output, "{}{} 1", metric.key.name, label_str);
+                            write_or_count!(output, "{}{} 1", name, label_str);
                         }
                     }
                     _ => {
