@@ -8,7 +8,8 @@
 //! bandwidth; fps counts every published frame, video + preview).
 //!
 //! Telemetry rides `zensight/v1/<origin>/telemetry/parallax/<stream>/stats/<metric>`
-//! (fps / kbps / drops / rc_drops / viewers / encode_ms), so existing charts
+//! (fps / kbps / drops / rc_drops / viewers / encode_ms / encode_p95_ms /
+//! encode_p99_ms), so existing charts
 //! light up for free; `streams/advertised` is published every tick so a
 //! parallax host shows up on the dashboard even before any stream is opened.
 //!
@@ -55,6 +56,23 @@ pub struct StreamStats {
     /// this is the bitrate cap biting. `skip_frames(true)` is set precisely so
     /// the encoder may do this, and until #510 nothing counted it.
     pub rc_drops: AtomicU64,
+    /// 95th / 99th percentile encode latency in nanoseconds, as most recently
+    /// read off the stream's live `EncoderStatsHandle`s (0 = none observed).
+    ///
+    /// **Not derived from [`Self::encode_ns`]** — a sum and a count cannot
+    /// produce a percentile. These come from parallax's own 768-byte lock-free
+    /// histogram inside the encoder, which is why they exist only for a stream
+    /// with an H.264 encoder: a JPEG preview path is timed by `TimedElement`
+    /// (so it has `encode_ms`) but has no `EncoderStatsHandle` to ask.
+    ///
+    /// The histogram is **all-time for that encoder incarnation**, not
+    /// windowed — a tail needs history, and a 5 s window on a 30 fps tier holds
+    /// 150 samples, of which p99 is one. It resets when a tier is torn down and
+    /// rebuilt, which is what bounds how long a bad patch keeps the figure up.
+    /// Percentiles are bucket upper bounds: at most 19% high, never low.
+    pub encode_p95_ns: AtomicU64,
+    /// See [`Self::encode_p95_ns`].
+    pub encode_p99_ns: AtomicU64,
     /// Whether a rate-controlled encoder was ever attached to this stream.
     ///
     /// RTSP passthrough and preview-only streams have none, and publishing `0`
@@ -99,6 +117,26 @@ impl StreamStats {
         self.rc_drops
             .fetch_add(now.saturating_sub(*seen), Ordering::Relaxed);
         *seen = now;
+    }
+
+    /// Publish the tail latencies observed across this stream's live encoders.
+    ///
+    /// A **store**, not an accumulate: several tiers feed one stream and a
+    /// percentile is not summable, so the caller takes the worst live tier and
+    /// writes it whole each tick. Storing rather than max-ing also means a
+    /// torn-down tier's tail stops being reported instead of sticking forever.
+    pub fn set_encode_tail(&self, p95_ns: u64, p99_ns: u64) {
+        self.encode_p95_ns.store(p95_ns, Ordering::Relaxed);
+        self.encode_p99_ns.store(p99_ns, Ordering::Relaxed);
+    }
+
+    /// The stream's p95/p99 encode latency in milliseconds, or `None` when no
+    /// encoder on this stream reports a histogram (preview-only, RTSP
+    /// passthrough, or a tier that has not encoded a frame yet).
+    pub fn encode_tail_ms(&self) -> Option<(f64, f64)> {
+        let p95 = self.encode_p95_ns.load(Ordering::Relaxed);
+        let p99 = self.encode_p99_ns.load(Ordering::Relaxed);
+        (p95 > 0).then(|| (p95 as f64 / 1e6, p99 as f64 / 1e6))
     }
 
     /// The stream's RC drops, or `None` when it has no rate-controlled encoder.
@@ -265,6 +303,28 @@ pub async fn run_ticker(
                 TelemetryValue::Gauge(stats.viewers.load(Ordering::Relaxed) as f64),
             )
             .await;
+            // Tail latencies, from the encoder's own histogram (#729). Kept
+            // beside `encode_ms` rather than replacing it: the mean is an
+            // interval figure the tail cannot give, and it is the only encode
+            // timing the JPEG preview paths have at all.
+            let tail_ms = stats.encode_tail_ms();
+            if let Some((p95_ms, p99_ms)) = tail_ms {
+                publish(
+                    &publisher,
+                    &source,
+                    &format!("{stream}/stats/encode_p95_ms"),
+                    TelemetryValue::Gauge(p95_ms),
+                )
+                .await;
+                publish(
+                    &publisher,
+                    &source,
+                    &format!("{stream}/stats/encode_p99_ms"),
+                    TelemetryValue::Gauge(p99_ms),
+                )
+                .await;
+            }
+
             if let Some(encode_ms) = derived.encode_ms {
                 publish(
                     &publisher,
@@ -274,14 +334,24 @@ pub async fn run_ticker(
                 )
                 .await;
 
-                // Encoder overrun: average encode time above the strictest
-                // per-frame budget means the encoder can't keep up live.
+                // Encoder overrun: judged on the **tail** where one exists
+                // (#729). A mean under budget with a p95 over it is exactly the
+                // stream that stutters, and "overrun" is what the rule is
+                // named for. The interval mean remains the fallback for the
+                // JPEG preview paths, which are timed but have no histogram.
                 if let Some(alerts) = &alerts {
                     let budget_ns = stats.budget_ns.load(Ordering::Relaxed);
                     if budget_ns > 0 {
                         let budget_ms = budget_ns as f64 / 1e6;
+                        let judged = tail_ms.map_or(encode_ms, |(p95, _)| p95);
                         alerts
-                            .encoder_overrun(&stream, encode_ms, budget_ms, encode_ms > budget_ms)
+                            .encoder_overrun(
+                                &stream,
+                                tail_ms.map(|(p95, _)| p95),
+                                encode_ms,
+                                budget_ms,
+                                judged > budget_ms,
+                            )
                             .await;
                     }
                 }
@@ -299,6 +369,26 @@ async fn publish(publisher: &Publisher, source: &str, metric: &str, value: Telem
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_encode_tail_is_reported_only_once_an_encoder_has_one() {
+        let stats = StreamStats::default();
+        assert_eq!(
+            stats.encode_tail_ms(),
+            None,
+            "a preview-only or RTSP-passthrough stream has no histogram to ask"
+        );
+
+        stats.set_encode_tail(4_500_000, 9_000_000);
+        assert_eq!(stats.encode_tail_ms(), Some((4.5, 9.0)));
+
+        // A store, not an accumulate: the worst live tier is written whole
+        // each tick, so a torn-down tier's tail stops being reported.
+        stats.set_encode_tail(1_000_000, 2_000_000);
+        assert_eq!(stats.encode_tail_ms(), Some((1.0, 2.0)));
+        stats.set_encode_tail(0, 0);
+        assert_eq!(stats.encode_tail_ms(), None, "last encoder closed");
+    }
     use super::*;
 
     #[test]

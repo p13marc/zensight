@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parallax::clock::ClockTime;
+use parallax::codec::annexb::{NalCodec, ParamSetCache, is_entry_point};
 use parallax::elements::{AppSinkHandle, Pulled};
 use parallax::metadata::Metadata;
 use parallax::pipeline::EndReason;
@@ -19,7 +20,6 @@ use zensight_common::stream::FrameMeta;
 use zensight_common::{Format, encode};
 use zensight_sensor_core::RawMediaPublisher;
 
-use crate::annexb;
 use crate::stats::StreamStats;
 
 /// How long one pull waits before re-checking for EOS/abort.
@@ -37,16 +37,25 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// `ClockTime::NONE` (the u64::MAX sentinel) maps to `Option::None`; the
 /// preview path overrides `keyframe` to `true` (every JPEG is independently
 /// decodable, whatever the upstream flags say).
+///
+/// `dts_ns` is omitted when it *equals* `pts_ns`, not only when the clock is
+/// absent (#728). `FrameMeta::dts_ns` is documented "if distinct from
+/// `pts_ns`", and parallax's own `FrameMeta::from_metadata` elides it the same
+/// way — the two encoders are byte-compatible twins pinned by a shared
+/// conformance corpus (`zensight-common/tests/framemeta_corpus.rs`), so this is
+/// wire shape, not a saving. It is not a small one either: our encoders emit no
+/// B-frames, so *every* frame carried a redundant copy of its own pts.
 pub fn metadata_to_frame_meta(
     meta: &Metadata,
     width: u32,
     height: u32,
     preview: bool,
 ) -> FrameMeta {
+    let pts_ns = clock_ns(meta.pts);
     FrameMeta {
         keyframe: preview || meta.is_keyframe(),
-        pts_ns: clock_ns(meta.pts),
-        dts_ns: clock_ns(meta.dts),
+        pts_ns,
+        dts_ns: clock_ns(meta.dts).filter(|dts| Some(*dts) != pts_ns),
         duration_ns: clock_ns(meta.duration),
         sequence: meta.sequence,
         width,
@@ -106,8 +115,13 @@ async fn run_with_watchdog(
     // prepending the stream's cached SPS/PPS when the AU arrived without
     // its own (e.g. RTSP cameras announcing parameter sets only
     // out-of-band in the SDP).
+    //
+    // The extract/cache/prepend dance is upstream's `ParamSetCache` since
+    // parallax 0.8 (#730) — codec-aware, and `Cow::Borrowed` on every delta
+    // frame and every keyframe that already carries its sets, so only a
+    // genuinely repaired keyframe copies twice.
     let h264 = !preview && encoding == Encoding::VIDEO_H264;
-    let mut param_sets: Option<Vec<u8>> = None;
+    let mut param_sets = ParamSetCache::new(NalCodec::H264);
     loop {
         // parallax 0.7 replaced `Result<Option<Buffer>>` with `Pulled`, and in
         // doing so made a distinction this loop could not previously draw: a
@@ -148,22 +162,42 @@ async fn run_with_watchdog(
             }
             last_sequence = Some(frame_meta.sequence);
         }
-        let mut payload = buffer.as_bytes().to_vec();
-        if h264 {
-            frame_meta.keyframe = annexb::has_idr(&payload);
-            if let Some(fresh) = annexb::extract_param_sets(&payload) {
-                param_sets = Some(fresh);
-            } else if frame_meta.keyframe
-                && let Some(cached) = &param_sets
-            {
-                payload = annexb::prepend_param_sets(cached, &payload);
-            }
+        // Borrow the encoded bytes rather than copying them up front: on the
+        // h264 path `prepare` hands back the same slice for everything but a
+        // repaired keyframe, so the repair path now copies once (into a Vec
+        // sized for sets + AU) where it used to copy twice. `put` wants an
+        // owned `Vec`, so the borrowed path still materializes one — but that
+        // copy was always there.
+        // A discontinuity re-arms the parameter-set cache (#731): the RTSP
+        // source stamps DISCONT on the first buffer after a reconnect, and the
+        // sets it cached belong to the *previous* session. Replaying stale
+        // SPS/PPS in front of the resumed stream's first keyframe would hand a
+        // decoder a picture geometry the bytes no longer match — worse than
+        // publishing the keyframe unrepaired and letting the camera's own
+        // in-band sets (which arrive within a keyframe on AnnexB) refill the
+        // cache.
+        if buffer.metadata().is_discont() {
+            param_sets.reset();
+            last_sequence = None;
         }
+        let bytes = buffer.as_bytes();
+        let payload: std::borrow::Cow<'_, [u8]> = if h264 {
+            let prepared = param_sets.prepare(bytes);
+            // Read the keyframe verdict off the bytes that actually ship.
+            frame_meta.keyframe = is_entry_point(&prepared, NalCodec::H264);
+            prepared
+        } else {
+            std::borrow::Cow::Borrowed(bytes)
+        };
         let attachment =
             encode(&frame_meta, Format::Cbor).map_err(|e| format!("encode FrameMeta: {e}"))?;
         stats.record_frame(payload.len());
         publisher
-            .put(payload, encoding.clone(), ZBytes::from(attachment))
+            .put(
+                payload.into_owned(),
+                encoding.clone(),
+                ZBytes::from(attachment),
+            )
             .await
             .map_err(|e| format!("media publish failed: {e}"))?;
     }
@@ -196,6 +230,34 @@ mod tests {
         assert!(!metadata_to_frame_meta(&delta, 320, 240, false).keyframe);
         // …but the preview path always flags keyframe (JPEG).
         assert!(metadata_to_frame_meta(&delta, 320, 240, true).keyframe);
+    }
+
+    #[test]
+    fn dts_is_omitted_when_it_equals_pts() {
+        // The common case for us: no B-frames, so the encoder stamps dts == pts
+        // on every single frame. `dts_ns` is "if distinct from pts_ns" (#728).
+        let mut meta = Metadata::default();
+        meta.pts = ClockTime::from_nanos(5_000);
+        meta.dts = ClockTime::from_nanos(5_000);
+
+        let fm = metadata_to_frame_meta(&meta, 320, 240, false);
+        assert_eq!(fm.pts_ns, Some(5_000));
+        assert_eq!(fm.dts_ns, None, "equal to pts_ns, so it is not on the wire");
+
+        // A genuinely distinct dts still travels.
+        meta.dts = ClockTime::from_nanos(4_000);
+        assert_eq!(
+            metadata_to_frame_meta(&meta, 320, 240, false).dts_ns,
+            Some(4_000)
+        );
+
+        // And ZERO is a real timestamp, not an absent one: a producer that
+        // stamps pts and leaves dts at its default publishes `Some(0)`.
+        meta.dts = ClockTime::from_nanos(0);
+        assert_eq!(
+            metadata_to_frame_meta(&meta, 320, 240, false).dts_ns,
+            Some(0)
+        );
     }
 
     /// A profile whose source never delivers a single frame must error out

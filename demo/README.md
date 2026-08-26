@@ -17,7 +17,8 @@ build and a container pull, so give it a few minutes.
 | Grafana | <http://127.0.0.1:3000> (opens on **ZenSight — Host overview**) | <http://127.0.0.1:3000> (Explore) |
 | Prometheus | <http://127.0.0.1:9090> | <http://127.0.0.1:9090> (inside otel-lgtm) |
 | Exporter | <http://127.0.0.1:9464/metrics> | pushes OTLP to `127.0.0.1:4317` |
-| Images | `prom/prometheus:v3.14.0`, `grafana/grafana:13.2.0` | `grafana/otel-lgtm:0.11.14` |
+| Images | `prom/prometheus:v3.14.0`, `grafana/grafana:13.2.0` | `grafana/otel-lgtm:0.11.14` (bundles Grafana **12.2.1**) |
+| Pinning | by digest, tag in a comment beside it | by digest |
 
 **They are mutually exclusive.** Both bind host TCP 3000 and 9090. Run one at a
 time; `just demo-stop` clears either. If you already have your own Grafana on
@@ -59,11 +60,16 @@ exporter's default too, which is why the old README told you to scrape
 
 ### Grafana shows a dashboard with no data
 
-If the target is `up` and `/metrics` has content, the panel is probably one whose
-metric name is not aggregatable yet. See
-[`prometheus/dashboards-blocked/README.md`](prometheus/dashboards-blocked/README.md)
-— netlink, netring and SNMP panels are deliberately **not** provisioned because
-their per-entity subjects are still baked into metric *names*.
+If the target is `up` and `/metrics` has content, the panel may be one whose
+sensor is not running: the provisioned set is **host overview**, **network
+(netlink)** and **alerts & exporter**, and the netlink panels stay empty unless
+`just demo-prometheus` actually started the netlink sensor.
+
+Panels that are *parked* rather than empty live in
+[`prometheus/dashboards-blocked/README.md`](prometheus/dashboards-blocked/README.md),
+with the reason each one is parked. Netring is parked pending a verified scrape
+(it needs `CAP_NET_RAW`); SNMP per-interface names became aggregatable in
+registry 1.8 (#779) but no panel has been verified against a device yet.
 
 ### Verifying without any of this
 
@@ -169,8 +175,13 @@ demo/
     dashboards-blocked/             NOT provisioned, and why
   otel/
     compose.yml                     grafana/otel-lgtm, host network
-    dashboards/                     import through the Grafana UI
 ```
+
+The OTel demo ships **no dashboard**, by the same rule: this repo provisions no
+panel it has not watched render, and the image's own Grafana is 12.2.1 with a
+`uid: prometheus` datasource at `timeInterval: 60s`, so the Prometheus demo's
+JSON cannot simply be reused. Explore is the documented path; `otel/compose.yml`
+records what a future dashboard would have to match.
 
 `dashboards-blocked/` is a **sibling** of `dashboards/`, not a child, because a
 Grafana file provider walks subdirectories — a `blocked/` folder inside the

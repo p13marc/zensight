@@ -90,6 +90,35 @@ The GUI's aliases are a different thing and not a precedent. They are
 `system/sysUpTime`, `cpu/*/load` or `hrProcessorLoad`, and so on). They cost
 nothing on the wire and can be deleted once no pre-0.11 sensor remains.
 
+### The interface table is registered, the rest is still a catch-all (#779)
+
+Since registry **1.8**, `ifTable`/`ifXTable` columns are registered explicitly —
+one subject per column, `{device}/if/{index}/<column>` and
+`{device}/ifx/{index}/<column>`, plus the `.rate` sibling the poller derives for
+every counter. Everything else this sensor publishes still rides the rest-var
+catch-all `{device}/{metric...}`.
+
+That distinction is visible in exported metric names. The catch-all has no
+literal chunks, so the exporters' family rule (#764) names from the rest
+variable's *value* and the table index lands in the metric **name**. A
+registered column is named from its literal chunks instead, and every variable
+becomes a label:
+
+| | Prometheus series |
+|---|---|
+| before 1.8 | `zensight_snmp_if_1_in_octets_total{device="router01",oid="…"}` |
+| since 1.8 | `zensight_snmp_if_in_octets_total{device="router01",index="1",oid="…"}` |
+
+So `sum by (index) (zensight_snmp_if_in_octets_total)` is now writable; #769
+had already attached the index as a label, and this is the other half of it.
+**The wire keys did not change** — the poller publishes the same
+`…/telemetry/snmp/<device>/if/<index>/<column>` bytes it always did. Only the
+exporters' reading of them moved, so a dashboard written against the old names
+needs updating and nothing else does.
+
+`cpu/{index}/…`, `ip/{index}/…` and `storage/{index}/…` have the same shape and
+the same problem, and are deliberately still on the catch-all.
+
 ### `introspect` cannot tell you the old names are gone
 
 Unlike the logs-sensor rename in 0.10.0, which moved registry *subject paths*

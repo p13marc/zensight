@@ -33,28 +33,36 @@ is how a folder of empty graphs starts.
 
 To unpark: `just netring` (which runs `just caps`), scrape, confirm, move the file.
 
-### SNMP per-interface — needs a registry change
+### SNMP per-interface — unblocked, but not verified here
 
-`sum by (ifname)` still cannot be written, and #764 does **not** fix it.
+`sum by (index)` **is now writable**. Registry `snmp` **1.8** (#779) registers
+the `ifTable`/`ifXTable` columns explicitly — one subject per column,
+`{device}/if/{index}/<column>` (plus the `.rate` sibling the poller derives for
+every counter) — so #764's family rule names from the literal chunks and every
+variable becomes a label:
 
-`zensight-common/registry/snmp.toml` registers the catch-all
-`{device}/{metric...}`. The metric tail is defined by the polled device, so the
-pattern has no literal chunks and the family rule has nothing to work from —
-`if/1/in_octets` and `if/2/in_octets` remain two unrelated families.
+| | series |
+|---|---|
+| before | `zensight_snmp_if_1_in_octets_total` and `zensight_snmp_if_2_in_octets_total`, two unrelated families |
+| after | `zensight_snmp_if_in_octets_total{index="1"}` / `{index="2"}`, one family |
 
-**#769 got half of it**: `MibResolver::resolve_indexed` now hands back the table
-index the resolver was already computing and discarding, and the poller attaches
-it as an `index` **label**. So the index is queryable. It is not yet
-aggregatable, because it is still in the name.
+It is registered **column by column** rather than as
+`{device}/if/{index}/{column}`, because a `{column}` variable would be dropped
+from the family name along with the others — collapsing counters, gauges and
+strings into one `zensight_snmp_if` family and emitting two `# TYPE` lines for
+one name, which is the scrape-killer class #752 fixed.
 
-The remaining step is for `snmp.toml` to register `{device}/if/{index}/{column}`
-ahead of the catch-all, at which point #764's generic rule takes over with no
-special case at all. That is a registry change with its own compatibility story
-(`compat = "backward"`, a version bump, the retirement ledger), which is why it
-is filed separately rather than folded into #769.
+**No SNMP dashboard is shipped yet, and the reason is this directory's whole
+rule**: a panel is provisioned only after it has been checked against a real
+scrape, and that needs a real SNMP device (or the simulated agent from
+`zensight-sensor-snmp/tests/e2e.rs`) polled by a running exporter. Nobody has
+done that yet. The naming half is done; the verification half is not.
+
+`cpu/{index}/…`, `ip/{index}/…` and `storage/{index}/…` still ride the catch-all
+and still bake their index into the name — the same change again, not yet made.
 
 Richer still, `zensight-common/src/interfaces.rs` already publishes an
 `InterfaceTable` per device whose own doc-comment says it exists to replace
 "every consumer's stringly-typed reassembly of `if/<index>/<column>` metric
-names" — so `ifname` and `ifalias` are available once the index is a real
-dimension.
+names" — so `ifname` and `ifalias` are the natural next dimension now that the
+index is a real one.

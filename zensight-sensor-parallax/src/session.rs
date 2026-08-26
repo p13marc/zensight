@@ -19,7 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parallax::elements::{AppSrcHandle, MediaType as RtspMediaType, RtspSession, RtspSrc};
+use parallax::elements::{
+    MediaType as RtspMediaType, RtspReconnect, RtspSession, RtspSrc, RtspStreamInfoHandle,
+};
 use parallax::pipeline::UnifiedPipelineHandle as PipelineHandle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -168,9 +170,11 @@ struct PendingOpen {
 /// One running profile pipeline + its egress/matcher tasks.
 struct ProfileSession {
     handle: Option<PipelineHandle>,
-    /// Cooperative source-EOS switch — the only way to end the source's
-    /// blocking task (`abort()` alone leaks a live pipeline).
-    stop: pipeline::StopHandle,
+    /// Cooperative source-EOS switch — the only way to end a *synchronous*
+    /// source's blocking task (`abort()` alone leaks a live pipeline).
+    /// `None` for an RTSP graph, whose source is an `AsyncSource` (#731):
+    /// aborting the task cancels the future at its next await point.
+    stop: Option<pipeline::StopHandle>,
     /// Handles cloned from this profile's elements before the executor moved
     /// them into their tasks. Only `keyframe` is driven at runtime; the rest
     /// are observation (`encoder_stats`, #510) or an unreached retune path —
@@ -178,9 +182,6 @@ struct ProfileSession {
     controls: pipeline::PipelineControls,
     egress: JoinHandle<()>,
     matcher: JoinHandle<()>,
-    /// RTSP feeder task (pushes camera frames into the pipeline's AppSrc);
-    /// `None` for self-driving sources.
-    feeder: Option<JoinHandle<()>>,
     /// Kept so the declared media publisher lives exactly as long as the
     /// profile (undeclared on drop).
     #[allow(dead_code)]
@@ -210,18 +211,20 @@ impl Drop for ProfileSession {
         // actor shutdown, panic unwind, runtime teardown), the source's EOS
         // switch MUST flip — its loop runs on a blocking thread that nothing
         // else can stop, and tokio's shutdown would wait on it forever.
-        self.stop.stop();
+        // An RTSP graph has no switch and needs none (#731).
+        if let Some(stop) = &self.stop {
+            stop.stop();
+        }
     }
 }
 
 impl ProfileSession {
     fn teardown(mut self) {
-        // Order matters: flip the source's EOS switch first (the source loop
-        // runs on a blocking thread that abort() cannot cancel), then abort
-        // the async plumbing.
-        self.stop.stop();
-        if let Some(feeder) = self.feeder.take() {
-            feeder.abort();
+        // Order matters: flip the source's EOS switch first (a synchronous
+        // source's loop runs on a blocking thread that abort() cannot
+        // cancel), then abort the async plumbing.
+        if let Some(stop) = &self.stop {
+            stop.stop();
         }
         self.egress.abort();
         self.matcher.abort();
@@ -630,7 +633,7 @@ impl SessionManager {
                         pipeline::build_preview(&kind, &self.config.preview, &stream_stats)
                     }
                 };
-                self.finish_open(stream, profile, built, None, stream_stats, 1)
+                self.finish_open(stream, profile, built, stream_stats, 1)
                     .await;
             }
         }
@@ -676,22 +679,27 @@ impl SessionManager {
             self.publish_status(stream).await;
             return;
         }
-        let dims = rtsp_video_dimensions(&rtsp);
+        // `add_async_source` MOVES the session into the graph, so anything we
+        // need to *observe* about it must be taken first — the SDP geometry
+        // below reads through this handle, which outlives the move (#731).
+        let info = rtsp.stream_info_handle();
+        let dims = rtsp_video_dimensions(&info);
         let stream_stats = self.stats.handle(stream);
+        let rtsp = *rtsp;
         let built = match profile {
             // RTSP is passthrough — no encoder in the graph, so it offers a
             // single tier regardless of which tier was requested (documented).
-            Profile::Video(_) => pipeline::build_rtsp_video_passthrough(dims),
+            Profile::Video(_) => pipeline::build_rtsp_video_passthrough(rtsp, dims),
             Profile::Preview => match dims {
                 Some((w, h)) => {
-                    pipeline::build_rtsp_preview(w, h, &self.config.preview, &stream_stats)
+                    pipeline::build_rtsp_preview(rtsp, w, h, &self.config.preview, &stream_stats)
                 }
                 None => Err(anyhow::anyhow!(
                     "rtsp stream advertises no dimensions; preview needs the SDP size"
                 )),
             },
         };
-        self.finish_open(stream, profile, built, Some(*rtsp), stream_stats, refcount)
+        self.finish_open(stream, profile, built, stream_stats, refcount)
             .await;
     }
 
@@ -706,7 +714,6 @@ impl SessionManager {
         stream: &str,
         profile: Profile,
         built: anyhow::Result<pipeline::BuiltPipeline>,
-        rtsp: Option<RtspSession>,
         stream_stats: Arc<StreamStats>,
         refcount: u32,
     ) {
@@ -742,7 +749,7 @@ impl SessionManager {
         let media = match self.publisher.raw_media_publisher(key.clone()).await {
             Ok(p) => Arc::new(p),
             Err(e) => {
-                built.stop.stop();
+                built.stop_source();
                 self.fail_open(
                     stream,
                     profile,
@@ -758,7 +765,7 @@ impl SessionManager {
             let listener = match media.matching_listener().await {
                 Ok(l) => l,
                 Err(e) => {
-                    built.stop.stop();
+                    built.stop_source();
                     self.fail_open(
                         stream,
                         profile,
@@ -787,7 +794,7 @@ impl SessionManager {
         let handle = match pipeline::executor().start(&mut built.pipeline) {
             Ok(h) => h,
             Err(e) => {
-                built.stop.stop();
+                built.stop_source();
                 matcher.abort();
                 self.fail_open(stream, profile, &format!("failed to start pipeline: {e}"))
                     .await;
@@ -824,16 +831,6 @@ impl SessionManager {
             })
         };
 
-        // RTSP: pump the camera session into the pipeline's AppSrc.
-        let feeder = rtsp.map(|rtsp_session| {
-            let feed = built
-                .feed
-                .take()
-                .expect("rtsp pipelines always carry a feed handle");
-            let stream = stream.to_string();
-            tokio::spawn(rtsp_feed(rtsp_session, feed, stream))
-        });
-
         // First IDR right away so an already-waiting viewer decodes at once.
         if let Some(k) = &built.controls.keyframe {
             k.request();
@@ -860,7 +857,6 @@ impl SessionManager {
                     controls: built.controls,
                     egress,
                     matcher,
-                    feeder,
                     publisher: media,
                     refcount,
                     epoch,
@@ -1029,6 +1025,20 @@ impl SessionManager {
                 if let Some(health) = &self.health {
                     health.record_device_failure(stream, e);
                 }
+                // For an RTSP source this *is* the sustained-failure signal
+                // (#731): since 0.8 the source retries a dropped stream on its
+                // own, so an error reaching here means the whole reconnect
+                // ladder (RTSP_MAX_RECONNECTS attempts) ran out. Firing on the
+                // first drop would now be noise — a blip that the source healed
+                // by itself never gets here at all.
+                if let Some(alerts) = &self.alerts
+                    && matches!(
+                        self.catalog.get(stream).map(|e| &e.kind),
+                        Some(SourceKind::Rtsp { .. })
+                    )
+                {
+                    alerts.rtsp_connect(stream, Some(e)).await;
+                }
             }
             None => tracing::info!(stream = %stream, profile = profile.as_str(),
                 "stream profile reached end of stream"),
@@ -1037,10 +1047,11 @@ impl SessionManager {
         self.publish_status(stream).await;
     }
 
-    /// Fold every live encoder's rate-control drops into its stream's counter.
+    /// Fold every live encoder's counters into its stream's [`StreamStats`]:
+    /// rate-control drops, and the p95/p99 encode-latency tail (#729).
     ///
     /// Runs on the actor's existing 1 Hz reap tick — finer than the stats
-    /// ticker's interval, so the published counter is at most a second stale.
+    /// ticker's interval, so the published numbers are at most a second stale.
     /// The actor is the right owner: it already holds `PipelineControls` per
     /// profile and already writes the `viewers` gauge into `StreamStats`.
     fn fold_encoder_stats(&mut self) {
@@ -1050,11 +1061,22 @@ impl SessionManager {
             // Iterating `sessions` (not the registry) means `handle`'s
             // create-on-miss can never resurrect a closed stream's entry.
             let stats = registry.handle(stream);
+            // RC drops are summed across tiers (they are counts); the latency
+            // tail is not summable, so the stream reports its **worst live
+            // tier**. Recomputed from scratch each tick rather than folded, so
+            // a torn-down tier's tail stops being reported.
+            let (mut p95_ns, mut p99_ns) = (0u64, 0u64);
             for slot in session.profiles_mut() {
                 if let ProfileSlot::Open(p) = slot {
                     fold_profile_rc(&stats, p);
+                    if let Some(handle) = &p.controls.encoder_stats {
+                        let latency = handle.encode_latency();
+                        p95_ns = p95_ns.max(latency.p95_ns);
+                        p99_ns = p99_ns.max(latency.p99_ns);
+                    }
                 }
             }
+            stats.set_encode_tail(p95_ns, p99_ns);
         }
     }
 
@@ -1220,7 +1242,34 @@ impl SessionManager {
 /// How long an RTSP connect may take before the open fails.
 const RTSP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How many times the source retries a dropped RTSP stream before giving up
+/// and failing the pipeline.
+///
+/// **The bound is what makes `rtsp_connect_failed` mean something** (#731).
+/// Upstream's default policy is `max_retries: None` — retry forever, which is
+/// what a camera wants and what makes a blip invisible. But forever also means
+/// a camera that is *gone* never produces an error, so the alert would never
+/// fire again after the initial connect and the stream would sit silently
+/// "open" with no frames. Bounding the ladder converts sustained failure back
+/// into a pipeline error, which arrives as `EgressEnded { error }` and fires
+/// the alert through the path that already existed.
+///
+/// Eight attempts against upstream's 500 ms initial / 30 s ceiling doubling
+/// ladder (with full jitter) is roughly a minute and a half of trying before
+/// the alert — long enough that a reboot or a switch flap heals silently,
+/// short enough that a dead camera is reported while it still matters.
+const RTSP_MAX_RECONNECTS: u32 = 8;
+
 /// Connect to an RTSP camera (video track only, bounded).
+///
+/// Reconnection is **on**: every source in our catalogue is a live camera
+/// (`configs/parallax.json5` has no notion of a finite RTSP recording), and
+/// upstream retries a clean `Ok(None)` as well as an error under a policy —
+/// deliberately, because RTSP has no in-band end-of-stream for a live stream
+/// and a server whose process dies looks exactly like one that finished. For a
+/// camera that is the right reading. A finite stream — a recording served over
+/// RTSP — would want `.without_reconnect()`, which makes an end an end; add
+/// that per source kind if such a source is ever configurable.
 async fn connect_rtsp(
     url: &str,
     username: Option<&str>,
@@ -1228,7 +1277,11 @@ async fn connect_rtsp(
 ) -> anyhow::Result<RtspSession> {
     let mut src = RtspSrc::new(url)
         .video_only()
-        .with_timeout(RTSP_CONNECT_TIMEOUT);
+        .with_timeout(RTSP_CONNECT_TIMEOUT)
+        .with_reconnect(RtspReconnect {
+            max_retries: Some(RTSP_MAX_RECONNECTS),
+            ..Default::default()
+        });
     if let (Some(user), Some(pass)) = (username, password) {
         src = src.with_credentials(user, pass);
     }
@@ -1239,18 +1292,25 @@ async fn connect_rtsp(
 }
 
 /// The video track's SDP dimensions, if advertised.
-fn rtsp_video_dimensions(session: &RtspSession) -> Option<(u32, u32)> {
-    session
-        .streams()
+///
+/// Read through an [`RtspStreamInfoHandle`] rather than the session itself:
+/// `add_async_source` moves the session into the graph, and this must be
+/// callable on either side of that move (#731).
+///
+/// Still a synchronous, one-shot read of what the SDP carried. Cameras that
+/// announce no `a=framesize` and no usable `sprop-parameter-sets` fill their
+/// geometry in later, from the first in-band SPS, and the awaitable form for
+/// that is `RtspStreamInfoHandle::wait_for_dimensions`. Preview on such a
+/// camera still fails to open, exactly as before — making it *wait* means
+/// building the preview graph after the pipeline is running, which is a
+/// bigger change than this one.
+fn rtsp_video_dimensions(info: &RtspStreamInfoHandle) -> Option<(u32, u32)> {
+    info.streams()
         .iter()
         .find(|s| s.media_type == RtspMediaType::Video)
         .and_then(|s| s.dimensions)
 }
 
-/// Pump RTSP frames into the pipeline's `AppSrc` until the camera ends or
-/// errors, shedding frames when the pipeline is busy (live video must never
-/// back the network reader up). Ends the app stream on exit so the pipeline
-/// unwinds and the egress task reports `EgressEnded`.
 /// Fold one open profile's encoder rate-control drops into its stream's
 /// counter. A profile with no encoder in its graph (preview, RTSP passthrough)
 /// contributes nothing.
@@ -1260,30 +1320,6 @@ fn fold_profile_rc(stats: &StreamStats, p: &mut ProfileSession) {
     };
     let now = handle.frames_dropped_by_rc();
     stats.fold_rc_drops(&mut p.rc_drops_seen, now);
-}
-
-async fn rtsp_feed(mut rtsp: RtspSession, feed: AppSrcHandle, stream: String) {
-    loop {
-        match rtsp.next_buffer().await {
-            Ok(Some(buffer)) => {
-                // Non-blocking push (parallax 0.6): a full queue hands the
-                // buffer back — shed it, never back the network reader up.
-                match feed.try_push_buffer(buffer) {
-                    Ok(_queued_or_shed) => {}
-                    Err(_) => break, // pipeline is EOS/flushing
-                }
-            }
-            Ok(None) => {
-                tracing::info!(stream = %stream, "rtsp source reached end of stream");
-                break;
-            }
-            Err(e) => {
-                tracing::warn!(stream = %stream, error = %e, "rtsp source failed");
-                break;
-            }
-        }
-    }
-    feed.end_stream();
 }
 
 #[cfg(test)]
