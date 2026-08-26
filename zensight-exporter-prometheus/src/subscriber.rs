@@ -157,7 +157,11 @@ impl TelemetrySubscriber {
                                         metric = %point.metric,
                                         "Received telemetry point"
                                     );
-                                    self.collector.record(&point);
+                                    // The KEY is what the registry refines
+                                    // (#764) — the payload cannot supply the
+                                    // origin or the producer instance.
+                                    self.collector
+                                        .record(sample.key_expr().as_str(), &point);
                                 }
                                 None => {
                                     self.stats.decode_failures.fetch_add(1, Ordering::Relaxed);

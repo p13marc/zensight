@@ -1,6 +1,6 @@
 //! Metric collector that stores and manages Prometheus metrics.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,10 +10,10 @@ use tracing::{debug, trace, warn};
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
 use crate::config::{AggregationConfig, FilterConfig, PrometheusConfig};
-use zensight_common::exposition::{LabelMerger, LabelSource};
+use zensight_common::exposition::{MetricIdentity, MetricKind, identify};
 
 use crate::mapping::{
-    PrometheusType, build_metric_name, extract_numeric_value, is_exportable, sanitize_label_name,
+    PrometheusType, extract_numeric_value, sanitize_label_name, sanitize_metric_name,
 };
 
 /// A unique identifier for a metric time series.
@@ -26,41 +26,26 @@ pub struct SeriesKey {
 }
 
 impl SeriesKey {
-    /// Create a new series key from a telemetry point.
-    pub fn from_telemetry(
-        point: &TelemetryPoint,
-        prefix: &str,
-        default_labels: &HashMap<String, String>,
-    ) -> Self {
-        let name = build_metric_name(prefix, point.protocol, &point.metric);
+    /// Build a series key from a registry-derived identity.
+    ///
+    /// The name comes from the *registered pattern*, not from the payload
+    /// (#764). A semconv-mapped identity already carries a complete dotted
+    /// name and takes no producer chunk; everything else is
+    /// `<producer>_<pattern literals>`.
+    pub fn from_identity(identity: &MetricIdentity, prefix: &str) -> Self {
+        let joined = identity.name.join("_");
+        let sanitized = sanitize_metric_name(&joined);
+        let name = if prefix.is_empty() {
+            sanitized
+        } else {
+            format!("{prefix}_{sanitized}")
+        };
 
-        // One merge, one precedence (#753). This used to push each source in
-        // turn and de-duplicate against a hard-coded `source`/`protocol` list,
-        // which let `device` arrive from the semconv table AND the sensor's own
-        // labels and be emitted twice — an invalid series that Prometheus
-        // rejects and remote-write 400s.
-        let mut merger = LabelMerger::new(|n: &str| sanitize_label_name(n));
-
-        merger.offer("source", point.source.clone(), LabelSource::Structural);
-        merger.offer(
-            "protocol",
-            point.protocol.as_str().to_string(),
-            LabelSource::Structural,
-        );
-
-        // OTel host-metrics semconv (#100): factored state/direction/device/cpu
-        // attributes become Prometheus labels via the shared table.
-        if let Some(sc) = zensight_common::semconv::metric_semconv(point.protocol, &point.metric) {
-            merger.offer_all(sc.attributes, LabelSource::SemconvConstant);
+        Self {
+            name,
+            // Already merged, sorted and unique by `exposition::identify`.
+            labels: identity.labels.clone(),
         }
-
-        merger.offer_all(&point.labels, LabelSource::PointLabel);
-        merger.offer_all(default_labels, LabelSource::ConfigDefault);
-
-        let merged = merger.finish();
-        let labels = merged.labels;
-
-        Self { name, labels }
     }
 
     /// Format labels for Prometheus exposition format.
@@ -100,25 +85,30 @@ pub struct StoredMetric {
 }
 
 impl StoredMetric {
-    /// Create a new stored metric from a telemetry point.
-    pub fn from_telemetry(
+    /// Build a stored metric from a registry-derived identity and its point.
+    ///
+    /// `None` for values no exporter can represent (binary), and for the
+    /// per-line log events at `events/<uid>` — one `info` series per log line
+    /// would explode cardinality (#104); logs belong on a logs pipeline.
+    pub fn from_identity(
+        identity: &MetricIdentity,
         point: &TelemetryPoint,
         prefix: &str,
-        default_labels: &HashMap<String, String>,
     ) -> Option<Self> {
-        if !is_exportable(&point.value) {
+        if identity.kind == MetricKind::Unsupported {
             return None;
         }
-
-        // Per-line log events (#104) carry a unique `events/<uid>` metric per line.
-        // Exporting each as an `info` series would explode Prometheus cardinality —
-        // logs belong in a logs pipeline (OTel), not on `/metrics`. Skip them.
         if point.protocol == Protocol::Logs && point.metric.starts_with("events/") {
             return None;
         }
 
-        let key = SeriesKey::from_telemetry(point, prefix, default_labels);
-        let metric_type = PrometheusType::from_value(&point.value);
+        let key = SeriesKey::from_identity(identity, prefix);
+        let metric_type = match identity.kind {
+            MetricKind::Counter => PrometheusType::Counter,
+            MetricKind::Gauge => PrometheusType::Gauge,
+            MetricKind::Text => PrometheusType::Text,
+            MetricKind::Unsupported => return None,
+        };
         let value = extract_numeric_value(&point.value);
         let text_value = match &point.value {
             TelemetryValue::Text(s) => Some(crate::mapping::clamp_text(s)),
@@ -278,6 +268,14 @@ pub struct CollectorStats {
     pub stale_metrics_removed: u64,
     /// Number of render errors (write failures during exposition).
     pub render_errors: u64,
+    /// Points whose key could not be refined through the registry, by reason.
+    ///
+    /// "A subject that is not registered does not exist" is worth nothing if
+    /// the exporter quietly invents a name for it anyway (#764), so this is
+    /// counted and exposed rather than swallowed.
+    pub points_unrefined: BTreeMap<&'static str, u64>,
+    /// Label candidates dropped because a stronger stage held the name (#753).
+    pub labels_shadowed: u64,
 }
 
 impl MetricCollector {
@@ -325,7 +323,14 @@ impl MetricCollector {
     }
 
     /// Record a telemetry point.
-    pub fn record(&self, point: &TelemetryPoint) {
+    /// Record one telemetry sample.
+    ///
+    /// `key` is the sample's own base-relative key expression. The exporters
+    /// used to name metrics from `point.protocol` + `point.metric`, which baked
+    /// per-entity subjects into metric NAMES and made `sum by (iface)`
+    /// impossible for every producer the semconv table did not hand-map. The
+    /// key is what the registry can refine (#475, #764).
+    pub fn record(&self, key: &str, point: &TelemetryPoint) {
         {
             let mut stats = self.stats.write();
             stats.points_received += 1;
@@ -343,24 +348,41 @@ impl MetricCollector {
             return;
         }
 
-        // Try to convert to stored metric
-        let stored = match StoredMetric::from_telemetry(
+        // Resolve the identity through the registry. An unregistered subject is
+        // COUNTED, not silently renamed.
+        let identity = match identify(
+            key,
             point,
-            &self.prometheus_config.prefix,
             &self.prometheus_config.default_labels,
+            sanitize_label_name,
         ) {
-            Some(m) => m,
-            None => {
+            Ok(i) => i,
+            Err(reason) => {
                 let mut stats = self.stats.write();
-                stats.points_not_exportable += 1;
-                trace!(
-                    source = %point.source,
-                    metric = %point.metric,
-                    "Telemetry point not exportable"
-                );
+                *stats.points_unrefined.entry(reason.reason()).or_insert(0) += 1;
+                trace!(key = %key, reason = reason.reason(), "Key not refined by the registry");
                 return;
             }
         };
+        if identity.shadowed > 0 {
+            let mut stats = self.stats.write();
+            stats.labels_shadowed += u64::from(identity.shadowed);
+        }
+
+        let stored =
+            match StoredMetric::from_identity(&identity, point, &self.prometheus_config.prefix) {
+                Some(m) => m,
+                None => {
+                    let mut stats = self.stats.write();
+                    stats.points_not_exportable += 1;
+                    trace!(
+                        source = %point.source,
+                        metric = %point.metric,
+                        "Telemetry point not exportable"
+                    );
+                    return;
+                }
+            };
 
         let key = stored.key.clone();
 
@@ -642,6 +664,38 @@ mod tests {
     use std::collections::HashMap;
     use zensight_common::telemetry::Protocol;
 
+    /// A base-relative telemetry key for a point, as the wire carries it.
+    ///
+    /// Naming now flows from the KEY through the registry (#764), so a test
+    /// that only builds a `TelemetryPoint` is testing nothing the exporter
+    /// does. This mints the matching key.
+    fn key_for(point: &TelemetryPoint) -> String {
+        let producer = point.protocol.as_str();
+        // snmp/modbus/gnmi/netflow register a rest-var catch-all
+        // `<device>/<metric...>`, so their key carries the device chunk that
+        // `point.metric` does not.
+        let rest_var = matches!(producer, "snmp" | "modbus" | "gnmi" | "netflow");
+        if rest_var {
+            format!(
+                "v1/h-0123456789ab/telemetry/{producer}/{}/{}",
+                point.source, point.metric
+            )
+        } else {
+            format!("v1/h-0123456789ab/telemetry/{producer}/{}", point.metric)
+        }
+    }
+
+    /// Resolve a point to its identity exactly as `record` does.
+    fn identity_of(point: &TelemetryPoint) -> MetricIdentity {
+        identify(
+            &key_for(point),
+            point,
+            &HashMap::new(),
+            crate::mapping::sanitize_label_name,
+        )
+        .unwrap_or_else(|e| panic!("{} did not refine: {:?}", point.metric, e.reason()))
+    }
+
     fn make_point(
         source: &str,
         protocol: Protocol,
@@ -659,38 +713,65 @@ mod tests {
         }
     }
 
+    /// #104: `events/<uid>` log lines must never become Prometheus series —
+    /// one info series per log line is a cardinality explosion.
+    ///
+    /// Registry-driven naming now catches this a step earlier and more
+    /// generally: `events/{uid}` is deliberately NOT a registered subject (it
+    /// is never published, it only feeds the bounded `@rpc/logs/events` ring —
+    /// see registry/logs.toml), so the key does not refine at all. The
+    /// hand-rolled guard in `from_identity` is kept as a belt-and-braces
+    /// backstop, but this is the assertion that matters.
     #[test]
-    fn per_line_log_events_are_not_exported() {
-        // #104: `events/<uid>` log lines must not become Prometheus series.
+    fn per_line_log_events_do_not_refine() {
         let event = make_point(
             "host01",
             Protocol::Logs,
             "events/0000000000009000000000042",
             TelemetryValue::Text("login failed".into()),
         );
-        assert!(StoredMetric::from_telemetry(&event, "zensight", &HashMap::new()).is_none());
+        let err = identify(
+            &key_for(&event),
+            &event,
+            &HashMap::new(),
+            crate::mapping::sanitize_label_name,
+        )
+        .expect_err("an unregistered subject must not refine");
+        assert_eq!(err.reason(), "subject_not_registered");
 
-        // A non-event Logs metric (e.g. a derived rollup gauge) still exports.
-        let rollup = make_point(
+        // A registered Logs metric still exports.
+        let real = make_point(
             "host01",
             Protocol::Logs,
-            "rollup/err/rate",
-            TelemetryValue::Gauge(2.0),
+            "errors_total",
+            TelemetryValue::Counter(2),
         );
-        assert!(StoredMetric::from_telemetry(&rollup, "zensight", &HashMap::new()).is_some());
+        assert!(StoredMetric::from_identity(&identity_of(&real), &real, "zensight").is_some());
     }
 
     #[test]
     fn test_series_key_from_telemetry() {
+        // Lowercase because the WIRE is lowercase: a key chunk must be
+        // `[a-z0-9]`-bounded, which is why the SNMP poller slugs at the publish
+        // boundary (#559).
         let point = make_point(
             "router01",
             Protocol::Snmp,
-            "sysUpTime",
+            "sysuptime",
             TelemetryValue::Counter(100),
         );
-        let key = SeriesKey::from_telemetry(&point, "zensight", &HashMap::new());
+        let key = SeriesKey::from_identity(&identity_of(&point), "zensight");
 
-        assert_eq!(key.name, "zensight_snmp_sysUpTime");
+        assert_eq!(key.name, "zensight_snmp_sysuptime");
+        // The device is now a real label, lifted out of the key's `{device}`
+        // chunk — it used to be reachable only as `source` (#764).
+        assert!(
+            key.labels
+                .iter()
+                .any(|(k, v)| k == "device" && v == "router01"),
+            "labels: {:?}",
+            key.labels
+        );
         assert!(
             key.labels
                 .iter()
@@ -717,7 +798,7 @@ mod tests {
         point
             .labels
             .insert("unit".to_string(), "sshd.service".to_string());
-        let key = SeriesKey::from_telemetry(&point, "zensight", &HashMap::new());
+        let key = SeriesKey::from_identity(&identity_of(&point), "zensight");
 
         assert_eq!(key.name, "zensight_systemd_unit_active");
         let unit_labels: Vec<_> = key.labels.iter().filter(|(k, _)| k == "unit").collect();
@@ -736,7 +817,14 @@ mod tests {
         let mut defaults = HashMap::new();
         defaults.insert("env".to_string(), "prod".to_string());
 
-        let key = SeriesKey::from_telemetry(&point, "zensight", &defaults);
+        let identity = identify(
+            &key_for(&point),
+            &point,
+            &defaults,
+            crate::mapping::sanitize_label_name,
+        )
+        .expect("refines");
+        let key = SeriesKey::from_identity(&identity, "zensight");
 
         assert!(key.labels.iter().any(|(k, v)| k == "env" && v == "prod"));
     }
@@ -759,10 +847,10 @@ mod tests {
         let point = make_point(
             "router01",
             Protocol::Snmp,
-            "ifInOctets",
+            "if/1/in_octets",
             TelemetryValue::Counter(1000),
         );
-        let stored = StoredMetric::from_telemetry(&point, "zensight", &HashMap::new());
+        let stored = StoredMetric::from_identity(&identity_of(&point), &point, "zensight");
 
         assert!(stored.is_some());
         let stored = stored.unwrap();
@@ -778,7 +866,7 @@ mod tests {
             "data",
             TelemetryValue::Binary(vec![1, 2, 3]),
         );
-        let stored = StoredMetric::from_telemetry(&point, "zensight", &HashMap::new());
+        let stored = StoredMetric::from_identity(&identity_of(&point), &point, "zensight");
 
         assert!(stored.is_none());
     }
@@ -859,16 +947,16 @@ mod tests {
         let point = make_point(
             "router01",
             Protocol::Snmp,
-            "sysUpTime",
+            "sysuptime",
             TelemetryValue::Counter(12345),
         );
-        collector.record(&point);
+        collector.record(&key_for(&point), &point);
 
         assert_eq!(collector.series_count(), 1);
 
         let output = collector.render();
-        assert!(output.contains("# TYPE zensight_snmp_sysUpTime counter"));
-        assert!(output.contains("zensight_snmp_sysUpTime{"));
+        assert!(output.contains("# TYPE zensight_snmp_sysuptime counter"));
+        assert!(output.contains("zensight_snmp_sysuptime{"));
         assert!(output.contains("source=\"router01\""));
         assert!(output.contains("12345"));
     }
@@ -891,7 +979,7 @@ mod tests {
                 "metric",
                 TelemetryValue::Gauge(i as f64),
             );
-            collector.record(&point);
+            collector.record(&key_for(&point), &point);
         }
 
         assert_eq!(collector.series_count(), 2);

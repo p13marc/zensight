@@ -160,7 +160,9 @@ impl TelemetrySubscriber {
                                         metric = %point.metric,
                                         "Received telemetry point"
                                     );
-                                    self.exporter.record(&point);
+                                    // The KEY is what the registry refines (#764).
+                                    self.exporter
+                                        .record(sample.key_expr().as_str(), &point);
                                 }
                                 None => {
                                     self.stats.decode_failures.fetch_add(1, Ordering::Relaxed);

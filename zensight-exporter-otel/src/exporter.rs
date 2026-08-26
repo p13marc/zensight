@@ -20,13 +20,13 @@ use opentelemetry_sdk::trace::{
 use parking_lot::{Mutex, RwLock};
 use tracing::{error, info, trace, warn};
 use zensight_common::alert::{Alert, AlertSeverity, AlertState};
+use zensight_common::exposition::{MetricKind, identify};
 use zensight_common::telemetry::TelemetryPoint;
 
 use crate::config::{FilterConfig, OtelConfig, OtlpProtocol};
 use crate::logs::LogRecord;
 use crate::metrics::{
-    OtelMetricType, build_metric_attributes, build_metric_name, build_resource_attributes,
-    extract_value, is_log_exportable, is_metric_exportable,
+    build_resource_attributes, extract_value, is_log_exportable, is_metric_exportable,
 };
 use crate::traces::{AlertSpan, AlertSpanTracker};
 
@@ -455,7 +455,11 @@ impl OtelExporter {
     }
 
     /// Record a telemetry point.
-    pub fn record(&self, point: &TelemetryPoint) {
+    /// Record one telemetry sample.
+    ///
+    /// `key` is the sample's own base-relative key expression — the registry
+    /// can refine it, and the payload cannot supply the origin (#764, #475).
+    pub fn record(&self, key: &str, point: &TelemetryPoint) {
         {
             let mut stats = self.stats.write();
             stats.points_received += 1;
@@ -475,7 +479,7 @@ impl OtelExporter {
 
         // Export as metric if applicable
         if self.export_metrics && is_metric_exportable(&point.value) {
-            self.record_metric(point);
+            self.record_metric(key, point);
         }
 
         // Export as log if applicable
@@ -484,18 +488,41 @@ impl OtelExporter {
         }
     }
 
-    fn record_metric(&self, point: &TelemetryPoint) {
+    fn record_metric(&self, key: &str, point: &TelemetryPoint) {
         let Some(meter) = &self.meter else {
             return;
         };
 
-        let metric_name = build_metric_name(point.protocol, &point.metric);
-        let attributes = build_metric_attributes(point);
+        // Naming flows from the KEY through the registry (#764). OTLP attribute
+        // keys are unconstrained, so the sanitizer is identity — the collision
+        // guarantee comes from the merge, not the normalisation.
+        let identity = match identify(key, point, &Default::default(), |n: &str| n.to_string()) {
+            Ok(i) => i,
+            Err(reason) => {
+                let mut stats = self.stats.write();
+                stats.metrics_failed += 1;
+                trace!(key = %key, reason = reason.reason(), "Key not refined by the registry");
+                return;
+            }
+        };
 
-        let kind = match OtelMetricType::from_value(&point.value) {
-            OtelMetricType::Counter => ObsKind::Counter,
-            OtelMetricType::Gauge => ObsKind::Gauge,
-            OtelMetricType::NotExportable => return,
+        // OTel names are dotted; a semconv identity is already a complete
+        // dotted name, everything else is `zensight.<producer>.<family>`.
+        let metric_name = if identity.semconv {
+            identity.name.join(".")
+        } else {
+            format!("zensight.{}", identity.name.join("."))
+        };
+        let attributes: Vec<KeyValue> = identity
+            .labels
+            .iter()
+            .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+            .collect();
+
+        let kind = match identity.kind {
+            MetricKind::Counter => ObsKind::Counter,
+            MetricKind::Gauge => ObsKind::Gauge,
+            MetricKind::Text | MetricKind::Unsupported => return,
         };
 
         let Some(value) = extract_value(&point.value) else {
@@ -578,7 +605,7 @@ impl OtelExporter {
                 return;
             }
             None => {
-                self.register_instrument(meter, &metric_name, kind, point.unit.as_deref());
+                self.register_instrument(meter, &metric_name, kind, identity.unit.as_deref());
                 self.registered.write().insert(metric_name.clone(), kind);
             }
         }
@@ -981,6 +1008,13 @@ mod tests {
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader};
 
+    /// The wire key for a test point. SNMP registers a rest-var catch-all
+    /// `<device>/<metric...>`, so its key carries the device chunk that
+    /// `point.metric` does not — and naming now flows from the key (#764).
+    fn key_of(p: &TelemetryPoint) -> String {
+        format!("v1/h-0123456789ab/telemetry/snmp/{}/{}", p.source, p.metric)
+    }
+
     fn point(source: &str, metric: &str, value: TelemetryValue) -> TelemetryPoint {
         TelemetryPoint {
             timestamp: 1_700_000_000_000,
@@ -1010,7 +1044,10 @@ mod tests {
         let (exporter, sink) = harness();
 
         for v in [100u64, 150, 150] {
-            exporter.record_metric(&point("sw1", "if/1/in_octets", TelemetryValue::Counter(v)));
+            {
+                let p = point("sw1", "if/1/in_octets", TelemetryValue::Counter(v));
+                exporter.record_metric(&key_of(&p), &p);
+            }
         }
         exporter
             .meter_provider
@@ -1050,7 +1087,10 @@ mod tests {
     #[test]
     fn an_evicted_series_stops_being_observed() {
         let (exporter, sink) = harness();
-        exporter.record_metric(&point("sw1", "cpu/load", TelemetryValue::Gauge(0.5)));
+        {
+            let p = point("sw1", "cpu/load", TelemetryValue::Gauge(0.5));
+            exporter.record_metric(&key_of(&p), &p);
+        }
 
         let removed = exporter.cleanup_stale_observations(Duration::from_secs(0));
         assert_eq!(removed, 1, "the series is evicted");
@@ -1083,7 +1123,10 @@ mod tests {
     fn an_instrument_is_registered_once_per_metric_name() {
         let (exporter, _sink) = harness();
         for i in 0..10u64 {
-            exporter.record_metric(&point("sw1", "if/1/in_octets", TelemetryValue::Counter(i)));
+            {
+                let p = point("sw1", "if/1/in_octets", TelemetryValue::Counter(i));
+                exporter.record_metric(&key_of(&p), &p);
+            }
         }
         assert_eq!(exporter.registered.read().len(), 1);
         assert_eq!(exporter._counters.read().len(), 1);

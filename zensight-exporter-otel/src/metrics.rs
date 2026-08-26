@@ -1,8 +1,7 @@
 //! Mapping from ZenSight TelemetryPoint to OpenTelemetry metrics.
 
 use opentelemetry::KeyValue;
-use zensight_common::exposition::{LabelMerger, LabelSource};
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{Protocol, TelemetryValue};
 
 /// Build resource attributes from configuration and telemetry.
 pub fn build_resource_attributes(
@@ -25,43 +24,6 @@ pub fn build_resource_attributes(
     attrs
 }
 
-/// Build metric attributes from a TelemetryPoint.
-///
-/// Goes through the shared merge (#753) so an attribute key can never be
-/// emitted twice. This side had **no** de-duplication at all: it pushed
-/// `source`, `protocol`, every semconv attribute and every point label
-/// unconditionally, so a sysinfo disk-I/O point produced `device` twice — and a
-/// sensor could shadow `source` or `protocol` outright.
-pub fn build_metric_attributes(point: &TelemetryPoint) -> Vec<KeyValue> {
-    // OTLP attribute keys are unconstrained, so the sanitizer is identity — the
-    // collision guarantee comes from the merge, not from the normalisation.
-    let mut merger = LabelMerger::new(|n: &str| n.to_string());
-
-    merger.offer("source", point.source.clone(), LabelSource::Structural);
-    merger.offer(
-        "protocol",
-        point.protocol.as_str().to_string(),
-        LabelSource::Structural,
-    );
-
-    // OTel host-metrics semconv (#100): factor state/direction/device/cpu out of
-    // the metric name into attributes via the shared table.
-    if let Some(sc) = zensight_common::semconv::metric_semconv(point.protocol, &point.metric) {
-        merger.offer_all(sc.attributes, LabelSource::SemconvConstant);
-    }
-
-    merger.offer_all(&point.labels, LabelSource::PointLabel);
-
-    merger
-        .finish()
-        .labels
-        .into_iter()
-        .map(|(k, v)| KeyValue::new(k, v))
-        .collect()
-}
-
-/// Build a metric name from protocol and metric path.
-///
 /// OTel host-metrics semconv (#100): keys with a standard mapping export under
 /// their `system.*` name (e.g. `memory/used` → `system.memory.usage`); everything
 /// else falls back to `zensight.{protocol}.{metric_path}`.
@@ -138,70 +100,14 @@ mod tests {
         assert!(attrs.iter().any(|kv| kv.key.as_str() == "env"));
     }
 
-    #[test]
-    fn test_build_metric_attributes() {
-        let point = TelemetryPoint {
-            timestamp: 1234567890000,
-            source: "router01".to_string(),
-            protocol: Protocol::Snmp,
-            metric: "sysUpTime".to_string(),
-            value: TelemetryValue::Counter(100),
-            labels: {
-                let mut m = HashMap::new();
-                m.insert("oid".to_string(), "1.3.6.1.2.1.1.3.0".to_string());
-                m
-            },
-            unit: None,
-        };
-
-        let attrs = build_metric_attributes(&point);
-
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "source"));
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "protocol"));
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "oid"));
-    }
-
-    #[test]
-    fn test_build_metric_name() {
-        assert_eq!(
-            build_metric_name(Protocol::Snmp, "sysUpTime"),
-            "zensight.snmp.sysUpTime"
-        );
-        // #100: sysinfo keys with a semconv mapping export under their system.* name.
-        assert_eq!(
-            build_metric_name(Protocol::Sysinfo, "cpu/usage"),
-            "system.cpu.utilization"
-        );
-        assert_eq!(
-            build_metric_name(Protocol::Sysinfo, "memory/used"),
-            "system.memory.usage"
-        );
-        // Unmapped sysinfo keys still fall back to the raw dotted name.
-        assert_eq!(
-            build_metric_name(Protocol::Sysinfo, "network/conntrack/count"),
-            "zensight.sysinfo.network.conntrack.count"
-        );
-        assert_eq!(
-            build_metric_name(Protocol::Netflow, "bytes/in"),
-            "zensight.netflow.bytes.in"
-        );
-    }
-
-    #[test]
-    fn test_semconv_attributes_appended() {
-        let point = TelemetryPoint {
-            timestamp: 0,
-            source: "h".to_string(),
-            protocol: Protocol::Sysinfo,
-            metric: "network/eth0/rx_bytes".to_string(),
-            value: TelemetryValue::Counter(1),
-            labels: HashMap::new(),
-            unit: None,
-        };
-        let attrs = build_metric_attributes(&point);
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "direction"));
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "device"));
-    }
+    // `build_metric_attributes` / `build_metric_name` are gone (#764): naming
+    // and attributes now come from `zensight_common::exposition::identify`,
+    // which resolves the KEY through the registry instead of guessing from the
+    // payload. Their coverage moved with them —
+    // `zensight-common/src/exposition.rs` tests the merge precedence and
+    // `zensight-common/tests/exposition_naming.rs` walks every registry
+    // pattern through the family rule. The end-to-end shape is asserted on the
+    // OTLP wire in `exporter.rs`'s tests.
 
     #[test]
     fn test_otel_metric_type() {

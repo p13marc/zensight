@@ -275,3 +275,290 @@ mod tests {
         assert_eq!(names, vec!["a", "m", "z"]);
     }
 }
+
+// ===========================================================================
+// Registry-driven metric identity (#764)
+// ===========================================================================
+
+/// What kind of series a telemetry value becomes, backend-neutral.
+///
+/// Prometheus maps `Text` to an info-style gauge; OTel drops it. Neither
+/// exports `Unsupported`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricKind {
+    /// A cumulative total.
+    Counter,
+    /// A current level.
+    Gauge,
+    /// A string value.
+    Text,
+    /// Nothing an exporter can represent (binary blobs).
+    Unsupported,
+}
+
+impl MetricKind {
+    /// The kind a telemetry value would naturally take, before any
+    /// [`KIND_OVERRIDE`] correction.
+    pub fn of(value: &crate::telemetry::TelemetryValue) -> Self {
+        use crate::telemetry::TelemetryValue as V;
+        match value {
+            V::Counter(_) => MetricKind::Counter,
+            V::Gauge(_) | V::Boolean(_) => MetricKind::Gauge,
+            V::Text(_) => MetricKind::Text,
+            V::Binary(_) => MetricKind::Unsupported,
+        }
+    }
+}
+
+/// Why a key could not be refined through the registry.
+///
+/// Carried rather than swallowed so the caller can count it: "a subject that is
+/// not registered does not exist" is worth nothing if the exporter quietly
+/// invents a name for it anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unrefined {
+    /// Not a v1 key at all.
+    NotAV1Key,
+    /// A v1 key, but not in the telemetry class.
+    NotTelemetryClass,
+    /// A v1 telemetry key whose subject the registry does not know.
+    SubjectNotRegistered,
+}
+
+impl Unrefined {
+    /// A stable token for a `reason` label on the self-metric.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Unrefined::NotAV1Key => "not_a_v1_key",
+            Unrefined::NotTelemetryClass => "not_telemetry_class",
+            Unrefined::SubjectNotRegistered => "subject_not_registered",
+        }
+    }
+}
+
+/// A metric's identity, derived from the key and the registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricIdentity {
+    /// Name chunks. Prometheus joins with `_` under its prefix; OTel with `.`.
+    pub name: Vec<String>,
+    /// True when the name came from the semconv table, in which case it is
+    /// already a complete dotted name and must not gain a producer chunk.
+    pub semconv: bool,
+    /// Merged, sorted, unique by name.
+    pub labels: Vec<(String, String)>,
+    /// Label candidates dropped because a higher-precedence stage held the name.
+    pub shadowed: u32,
+    /// UCUM-ish unit, when the registry or the point supplies one.
+    pub unit: Option<String>,
+    pub kind: MetricKind,
+}
+
+/// Producers whose telemetry tail is defined by the polled device, registered
+/// as a rest-var catch-all (`{device}/{metric...}`).
+///
+/// Their pattern has no literal chunks at all, so the family rule would give an
+/// empty name. The rest variable's **value** becomes the name instead, which
+/// preserves exactly what these producers already exported while promoting the
+/// leading `{device}` chunk from "buried in the name" to a real label.
+///
+/// This is a property of the registry, not a preference — see
+/// `registry_audit::has_catchall_telemetry`. Fixing it properly means changing
+/// what the *producer* publishes (#769 does that for SNMP's interface index),
+/// not adding a rule here.
+const REST_VAR_PRODUCERS: &[&str] = &["snmp", "modbus", "gnmi", "netflow"];
+
+/// Patterns whose family name would lose its discriminator under the plain
+/// rule, because their leading chunk is a variable.
+///
+/// `{cpu}/times/{component}` would become `times`, orphaned from its
+/// `cpu/times/{component}` sibling. The alias reunites them into one family
+/// told apart by the `cpu` label — the same shape as `cpu/usage` versus
+/// `cpu/{core}/usage`, and therefore an *intended* collision (see
+/// `INTENDED_COLLISIONS` in the naming tests).
+const NAME_ALIASES: &[(&str, &str, &str)] = &[
+    ("sysinfo", "{cpu}/times/{component}", "cpu/times"),
+    (
+        "sysinfo",
+        "{cpu}/schedstat/run_delay_ns_total",
+        "cpu/schedstat/run_delay_ns_total",
+    ),
+];
+
+/// The family name for a registered pattern, as chunks, without the producer.
+///
+/// Public so the naming conformance tests can walk every registry pattern
+/// through exactly the code the exporters use.
+pub fn family_chunks(
+    producer: &str,
+    pattern: &str,
+    vars: &[(&'static str, String)],
+) -> Vec<String> {
+    // A rest-var producer's name comes from the rest variable's value.
+    if REST_VAR_PRODUCERS.contains(&producer)
+        && let Some((_, tail)) = vars
+            .iter()
+            .find(|(n, _)| pattern.contains(&format!("{{{n}...}}")))
+    {
+        return tail.split('/').map(str::to_string).collect();
+    }
+
+    let effective = NAME_ALIASES
+        .iter()
+        .find(|(p, pat, _)| *p == producer && *pat == pattern)
+        .map(|(_, _, alias)| *alias)
+        .unwrap_or(pattern);
+
+    effective
+        .split('/')
+        .filter(|c| !c.starts_with('{'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Derive a metric's identity from its **key** and payload.
+///
+/// `key` is base-relative: the Zenoh session namespace already stripped the
+/// deployment base (#466), which is what every sample an exporter receives
+/// looks like.
+///
+/// This is the direction #475 mandates — decode keys through the registry, not
+/// with `split('/')`. The exporters were the last consumers still naming from
+/// the payload, which is why per-entity subjects ended up baked into metric
+/// *names* and `sum by (iface)` was impossible for every producer the semconv
+/// table did not hand-map.
+pub fn identify<F>(
+    key: &str,
+    point: &crate::telemetry::TelemetryPoint,
+    defaults: &std::collections::HashMap<String, String>,
+    sanitize: F,
+) -> Result<MetricIdentity, Unrefined>
+where
+    F: Fn(&str) -> String,
+{
+    use zenkey::grammar::{Class, ClassOrPlane};
+
+    let parsed = crate::keyexpr::parse_key(key).ok_or(Unrefined::NotAV1Key)?;
+    if !matches!(parsed.class, ClassOrPlane::Class(Class::Telemetry)) {
+        return Err(Unrefined::NotTelemetryClass);
+    }
+    let (parsed, producer, subject) =
+        crate::keyexpr::refine_key(key).ok_or(Unrefined::SubjectNotRegistered)?;
+
+    let vars = subject.vars();
+    let pattern = subject.pattern();
+    let sc = crate::semconv::semconv_of(&subject);
+
+    // ---- name -------------------------------------------------------------
+    let (name, is_semconv) = match &sc {
+        Some(sc) => (
+            sc.name.split('.').map(str::to_string).collect::<Vec<_>>(),
+            true,
+        ),
+        None => {
+            let mut chunks = vec![producer.clone()];
+            chunks.extend(family_chunks(&producer, pattern, &vars));
+            (chunks, false)
+        }
+    };
+
+    // ---- labels -----------------------------------------------------------
+    let mut merger = LabelMerger::new(&sanitize);
+
+    // Stage 1: structural, straight off the key. `origin` is the RFC 06 minted
+    // host id — the thing a hostname cannot be trusted to be.
+    merger.offer("origin", parsed.origin.to_string(), LabelSource::Structural);
+    merger.offer("source", point.source.clone(), LabelSource::Structural);
+    merger.offer("protocol", producer.clone(), LabelSource::Structural);
+    // NB: `producer` is a field in zenkey 0.6; it collapses into `Position5`
+    // in 0.7 (#735), at which point this becomes `parsed.producer()`.
+    if let Some(p) = parsed.producer.as_ref()
+        && let Some(instance) = p.instance()
+    {
+        merger.offer(
+            "producer_instance",
+            instance.to_string(),
+            LabelSource::Structural,
+        );
+    }
+
+    // Stage 2/3: the semconv table names an attribute, the registry supplies
+    // its value. When there is no semconv entry the pattern variables ride
+    // under their own registry names.
+    match &sc {
+        Some(sc) => merger.offer_all(
+            sc.attributes.iter().map(|(k, v)| (*k, v.clone())),
+            LabelSource::SemconvConstant,
+        ),
+        None => merger.offer_all(
+            vars.iter()
+                .filter(|(n, _)| !pattern.contains(&format!("{{{n}...}}")))
+                .map(|(n, v)| (*n, v.clone())),
+            LabelSource::PatternVar,
+        ),
+    }
+    // A rest-var producer's leading variables are labels even though the rest
+    // variable itself became the name.
+    if REST_VAR_PRODUCERS.contains(&producer.as_str()) {
+        merger.offer_all(
+            vars.iter()
+                .filter(|(n, _)| !pattern.contains(&format!("{{{n}...}}")))
+                .map(|(n, v)| (*n, v.clone())),
+            LabelSource::PatternVar,
+        );
+    }
+
+    // ---- unit -------------------------------------------------------------
+    //
+    // A label literally named `unit` is a unit-of-measure annotation on every
+    // producer except systemd, where `{unit}` is the systemd unit name and has
+    // already been claimed at a stronger stage. Consume it rather than emitting
+    // a dimension that is not one.
+    let mut unit = subject
+        .unit()
+        .map(str::to_string)
+        .or_else(|| point.unit.clone());
+    for (k, v) in &point.labels {
+        if k == "unit" && !merger.holds("unit") && unit.is_none() {
+            unit = Some(v.clone());
+            continue;
+        }
+        merger.offer(k, v.clone(), LabelSource::PointLabel);
+    }
+
+    merger.offer_all(defaults, LabelSource::ConfigDefault);
+    let merged = merger.finish();
+
+    // ---- kind -------------------------------------------------------------
+    //
+    // A `.rate` sibling (docs/KEYSPACE.md) is a derived per-second gauge that
+    // rides inside its family as a dot-suffix on the leaf. It is recognised —
+    // kind and unit are corrected — but the suffix is deliberately NOT
+    // stripped: `in_octets.rate` and `in_octets` are different series, and
+    // collapsing them would put a gauge and a counter in one family.
+    let leaf_is_rate = point.metric.ends_with(".rate");
+    let mut kind = MetricKind::of(&point.value);
+    if leaf_is_rate {
+        kind = MetricKind::Gauge;
+    }
+    if let Some(over) = kind_override(&producer, pattern) {
+        kind = over;
+    }
+
+    Ok(MetricIdentity {
+        name,
+        semconv: is_semconv,
+        labels: merged.labels,
+        shadowed: merged.shadowed,
+        unit,
+        kind,
+    })
+}
+
+/// Corrections for producers that publish a level under a cumulative value
+/// type.
+///
+/// Populated by #766; the sensor fix is the real one, but an exporter must be
+/// right against any sensor on the bus, including an older build.
+fn kind_override(_producer: &str, _pattern: &str) -> Option<MetricKind> {
+    None
+}

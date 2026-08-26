@@ -194,7 +194,12 @@ mod tests {
         // Record a point to make it ready
         let point =
             TelemetryPoint::new("test", Protocol::Snmp, "metric", TelemetryValue::Gauge(1.0));
-        collector.record(&point);
+        let key = format!(
+            "v1/h-0123456789ab/telemetry/{}/{}",
+            point.protocol.as_str(),
+            point.metric
+        );
+        collector.record(&key, &point);
 
         let router = create_router(collector, "/metrics");
 

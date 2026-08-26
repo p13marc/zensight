@@ -292,16 +292,30 @@ mod tests {
         ))
     }
 
+    /// Record one SNMP point under a wire-legal key.
+    ///
+    /// Naming flows from the key through the registry (#764), and SNMP is a
+    /// rest-var producer: its subject is `<device>/<metric...>`, so the device
+    /// rides in the key and becomes a label while the rest names the family.
+    ///
+    /// Metric names here are lowercase because the WIRE is lowercase — a key
+    /// chunk must be `[a-z0-9]`-bounded, which is why the SNMP poller slugs at
+    /// the publish boundary (#559). A test using `sysDescr` would be testing a
+    /// key no sensor can publish.
     fn record(collector: &MetricCollector, source: &str, metric: &str, value: TelemetryValue) {
-        collector.record(&TelemetryPoint {
-            timestamp: 1_700_000_000_000,
-            source: source.to_string(),
-            protocol: Protocol::Snmp,
-            metric: metric.to_string(),
-            value,
-            labels: HashMap::new(),
-            unit: None,
-        });
+        let key = format!("v1/h-0123456789ab/telemetry/snmp/{source}/{metric}");
+        collector.record(
+            &key,
+            &TelemetryPoint {
+                timestamp: 1_700_000_000_000,
+                source: source.to_string(),
+                protocol: Protocol::Snmp,
+                metric: metric.to_string(),
+                value,
+                labels: HashMap::new(),
+                unit: None,
+            },
+        );
     }
 
     fn label<'a>(ts: &'a TimeSeries, name: &str) -> Option<&'a str> {
@@ -336,7 +350,7 @@ mod tests {
             timeseries: vec![TimeSeries {
                 labels: vec![Label {
                     name: "__name__".into(),
-                    value: "zensight_snmp_sysUpTime".into(),
+                    value: "zensight_snmp_sysuptime".into(),
                 }],
                 samples: vec![Sample {
                     value: 3.5,
@@ -357,7 +371,7 @@ mod tests {
         record(
             &collector,
             "router01",
-            "sysUpTime",
+            "sysuptime",
             TelemetryValue::Counter(12345),
         );
         record(
@@ -388,7 +402,7 @@ mod tests {
         let counter = req
             .timeseries
             .iter()
-            .find(|ts| label(ts, "__name__") == Some("zensight_snmp_sysUpTime"))
+            .find(|ts| label(ts, "__name__") == Some("zensight_snmp_sysuptime"))
             .expect("counter series present");
         assert_eq!(counter.samples[0].value, 12345.0);
 
@@ -412,7 +426,7 @@ mod tests {
         record(
             &collector,
             "router01",
-            "sysDescr",
+            "sysdescr",
             TelemetryValue::Text("Cisco IOS".into()),
         );
 
@@ -422,11 +436,11 @@ mod tests {
         assert_eq!(ts.samples[0].value, 1.0);
         assert_eq!(
             label(ts, "__name__"),
-            Some("zensight_snmp_sysDescr_info"),
+            Some("zensight_snmp_sysdescr_info"),
             "a text family must carry the _info suffix"
         );
         assert_eq!(
-            label(ts, "sysDescr"),
+            label(ts, "sysdescr"),
             Some("Cisco IOS"),
             "the text rides under the subject leaf, not a literal `value` label"
         );
@@ -442,13 +456,13 @@ mod tests {
         record(
             &collector,
             "router01",
-            "sysDescr",
+            "sysdescr",
             TelemetryValue::Text(format!("bad\nline{}", "x".repeat(400))),
         );
 
         let req = build_write_request(&collector.snapshot_metrics(), 1);
         let ts = &req.timeseries[0];
-        let v = label(ts, "sysDescr").expect("text label present");
+        let v = label(ts, "sysdescr").expect("text label present");
         assert!(!v.contains('\n'), "control characters are stripped: {v:?}");
         assert!(
             v.chars().count() <= crate::mapping::MAX_TEXT_LEN,
@@ -508,7 +522,7 @@ mod tests {
         record(
             &collector,
             "router01",
-            "sysUpTime",
+            "sysuptime",
             TelemetryValue::Counter(7),
         );
 
@@ -547,7 +561,7 @@ mod tests {
         let req = WriteRequest::decode(&raw[..]).unwrap();
         assert_eq!(req.timeseries.len(), 1);
         let ts = &req.timeseries[0];
-        assert_eq!(label(ts, "__name__"), Some("zensight_snmp_sysUpTime"));
+        assert_eq!(label(ts, "__name__"), Some("zensight_snmp_sysuptime"));
         assert_eq!(label(ts, "source"), Some("router01"));
         assert_eq!(ts.samples[0].value, 7.0);
         assert!(ts.samples[0].timestamp > 0);
