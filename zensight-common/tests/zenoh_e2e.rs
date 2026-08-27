@@ -3,11 +3,48 @@
 //! These tests verify that telemetry can be published and received through Zenoh.
 //!
 //! Note: Zenoh requires multi-thread tokio runtime.
-//! Each test uses a unique key prefix to avoid interference.
+//!
+//! ## Isolation — two mechanisms, and both are needed (#785)
+//!
+//! Each test uses a unique key prefix. That was the only mechanism until #785,
+//! and it is not sufficient: the sessions opened here were plain
+//! `zenoh::Config::default()`, i.e. peer mode with **multicast scouting and
+//! gossip both on**, so four sessions in one process discovered each other —
+//! along with `publisher_registry.rs`'s, and any live sensor on the host. Under
+//! `cargo test --workspace` on a loaded machine, this file's telemetry test
+//! would occasionally receive the CBOR test's sample and fail with
+//! `left: "cbor-device", right: "test-device"`.
+//!
+//! The prefixes were never the bug — a `test_<nanos>/**` subscription cannot
+//! match a sibling's tree. The session layer was. [`isolated_config`] closes
+//! it, exactly as `publisher_registry.rs` and `router_storage.rs` in this same
+//! directory already did.
+//!
+//! These sessions are deliberately raw — no namespace, no v1 grammar, no forced
+//! timestamping — because what is under test is the transport and the
+//! serialization, not `zensight_common::session`. Nothing here should be read
+//! as evidence about the session this crate hands to production code.
 
 use std::sync::Arc;
 use std::time::Duration;
 use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, decode_auto, encode};
+
+/// A Zenoh config that cannot find another peer: multicast scouting and gossip
+/// both off, and no endpoints (#785).
+///
+/// Local declare/put/subscribe within one session still works, which is all
+/// these tests need. Same helper, same reason, as `publisher_registry.rs:9-19`
+/// and `router_storage.rs`.
+fn isolated_config() -> zenoh::Config {
+    let mut config = zenoh::Config::default();
+    config
+        .insert_json5("scouting/multicast/enabled", "false")
+        .unwrap();
+    config
+        .insert_json5("scouting/gossip/enabled", "false")
+        .unwrap();
+    config
+}
 
 /// Generate a unique test prefix to avoid test interference.
 fn unique_prefix() -> String {
@@ -24,9 +61,8 @@ fn unique_prefix() -> String {
 async fn test_zenoh_pubsub_telemetry() {
     let prefix = unique_prefix();
 
-    // Create a Zenoh session in peer mode
-    let config = zenoh::Config::default();
-    let session = zenoh::open(config)
+    // An isolated session: no peer can reach it, and it can reach no peer.
+    let session = zenoh::open(isolated_config())
         .await
         .expect("Failed to open Zenoh session");
 
@@ -81,8 +117,7 @@ async fn test_zenoh_pubsub_telemetry() {
 async fn test_zenoh_cbor_encoding() {
     let prefix = unique_prefix();
 
-    let config = zenoh::Config::default();
-    let session = zenoh::open(config)
+    let session = zenoh::open(isolated_config())
         .await
         .expect("Failed to open Zenoh session");
 
@@ -135,8 +170,7 @@ async fn test_zenoh_cbor_encoding() {
 async fn test_zenoh_protocol_wildcard() {
     let prefix = unique_prefix();
 
-    let config = zenoh::Config::default();
-    let session = zenoh::open(config)
+    let session = zenoh::open(isolated_config())
         .await
         .expect("Failed to open Zenoh session");
 
@@ -179,8 +213,11 @@ async fn test_zenoh_protocol_wildcard() {
 async fn test_zenoh_multiple_publishers() {
     let prefix = unique_prefix();
 
-    let config = zenoh::Config::default();
-    let session = Arc::new(zenoh::open(config).await.expect("Failed to open session"));
+    let session = Arc::new(
+        zenoh::open(isolated_config())
+            .await
+            .expect("Failed to open session"),
+    );
 
     let key_expr = format!("{}/**", prefix);
     let subscriber = session

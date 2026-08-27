@@ -267,8 +267,32 @@ jobs:
           fi
 
       # #466: the session namespace is set in exactly one place.
-      - name: every production session goes through zensight_common::session (#466)
+      - name: every production session goes through zensight_common::session (#466, #789)
         run: |
+          # This guard is SPELLING-BASED and the list must grow with every new
+          # way to open a session (#789). It used to grep the single literal
+          # `zenoh::open(`, which meant `zenkey_fleet::open()` and
+          # `open_with_config()` — reachable since #745 put zenkey-fleet in the
+          # GUI's dependency tree — walked straight past it. The pattern below
+          # matches any lowercase-module `::open(` / `::open_*(`; `File::open`
+          # and every other type-associated constructor is capitalised and does
+          # not match.
+          #
+          # The rule is not stylistic. session.rs is where `namespace` is
+          # applied and where `timestamping/enabled` is forced on, and the
+          # comment there records what losing the latter costs: every peer-mode
+          # sensor fails to create its cached publishers and the correlator
+          # never receives evidence. A session opened elsewhere misses both.
+          #
+          # SRC deliberately does not reach tests/ or examples/ — an isolated
+          # test session is exactly what a test should be allowed to build.
+          #
+          # The last filter is the ALLOWLIST, and it is the point of the whole
+          # step: `session::{open_session,connect,build_config}` are the
+          # sanctioned entry points, so calling one is the behaviour this guard
+          # exists to produce, not a violation. Any other `::open(` in
+          # application code is a new way to open a session and must be
+          # justified here before it is added.
           cat > /tmp/strip_tests.awk <<'AWK'
           /^#\[cfg\(test\)\]/ { intest=1 }
           { if (!intest) print FILENAME ":" FNR ":" $0 }
@@ -278,10 +302,12 @@ jobs:
                zensight-exporter-*/src zensight-rerun/src"
           hits=$(find $SRC -name '*.rs' -print0 \
             | xargs -0 -I{} awk -f /tmp/strip_tests.awk {} \
-            | grep 'zenoh::open(' \
-            | grep -vE 'zensight-common/src/session.rs|zensight-rerun/src/session.rs' || true)
+            | grep -E '\b[a-z][a-z0-9_]*::open(_[a-z0-9_]+)?\(' \
+            | grep -vE 'zensight-common/src/session.rs|zensight-rerun/src/session.rs' \
+            | grep -vE ':[0-9]+: *//' \
+            | grep -vE 'session::(open_session|connect|build_config)\(' || true)
           if [ -n "$hits" ]; then
-            echo "::error::Raw zenoh::open — open sessions via zensight_common::session::{connect,build_config}. It is the only place the deployment namespace (#466) is set:"
+            echo "::error::A session is opened outside zensight_common::session. Open via zensight_common::session::{connect,build_config} — it is the only place the deployment namespace (#466) and timestamping are set. If this is a false positive (a ::open() that is not a session), extend the allowlist in this step and say why:"
             echo "$hits"
             exit 1
           fi

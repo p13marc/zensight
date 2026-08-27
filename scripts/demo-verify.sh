@@ -33,6 +33,13 @@ BIN="${BINDIR:-target/${PROFILE}}"
 relflag=""
 [[ "$PROFILE" == "release" ]] && relflag="--release"
 
+# The three fixes from #790 — a preflight that names the path it looked at,
+# logs that outlive the exit trap, and a timeout message that can tell a dead
+# child from an undiscovered one. Shared with conformance-verify.sh because
+# both had the same three defects.
+# shellcheck source=lib/verify.sh
+source "$ROOT/scripts/lib/verify.sh"
+
 tmp=""
 # PIDs of the processes we start, so cleanup can be surgical.
 #
@@ -49,7 +56,14 @@ cleanup() {
     for pid in "${pids[@]:-}"; do
         [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
     done
-    [[ -n "$tmp" ]] && rm -rf "$tmp"
+    # Keep the evidence when a failure pointed at it (#790).
+    if [[ -n "$tmp" ]]; then
+        if [[ "$KEEP_TMP" == 1 ]]; then
+            printf '\n(logs kept: %s)\n' "$tmp" >&2
+        else
+            rm -rf "$tmp"
+        fi
+    fi
     exit "$rc"
 }
 trap cleanup EXIT INT TERM
@@ -61,6 +75,9 @@ die() {
 
 echo "==> building"
 cargo build $relflag -p zensight-exporter-prometheus -p zensight-sensor-sysinfo >/dev/null
+
+# `cargo build` says a binary exists somewhere. This says it exists HERE.
+require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-sensor-sysinfo"
 
 tmp="$(mktemp -d)"
 echo "==> generating configs into $tmp"
@@ -86,8 +103,13 @@ for _ in $(seq 30); do
     curl -sf -o /dev/null "http://$SCRAPE/health" && break
     sleep 0.5
 done
-curl -sf -o /dev/null "http://$SCRAPE/health" \
-    || die "the exporter is not serving /health. Log: $(cat "$tmp/exporter.log")"
+if ! curl -sf -o /dev/null "http://$SCRAPE/health"; then
+    keep_logs_on_failure
+    if still_running "${pids[@]:-}"; then
+        die "the exporter is running and not serving /health on $SCRAPE.$(logs_note "$tmp" "$tmp/exporter.log")"
+    fi
+    die "the exporter exited before it could serve /health.$(logs_note "$tmp" "$tmp/exporter.log")"
+fi
 
 # /ready is 503 until the FIRST telemetry point. Asserting that here is not
 # pedantry: it is what makes /ready a meaningful gate below, AND it documents
@@ -107,18 +129,30 @@ pids+=($!)
 echo "==> waiting for telemetry to reach the exporter"
 for _ in $(seq 60); do
     [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$SCRAPE/ready")" == 200 ]] && break
+    # Do not wait out 60s for a process that has already exited (#790).
+    still_running "${pids[@]:-}" || break
     sleep 1
 done
-[[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$SCRAPE/ready")" == 200 ]] || die \
-"no telemetry reached the exporter in 60s.
+if [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$SCRAPE/ready")" != 200 ]]; then
+    keep_logs_on_failure
+    # A dead child and an undiscovered one are different failures and used to
+    # render identically (#790). Ask before diagnosing.
+    dead=$(dead_children "${pids[@]:-}")
+    if [[ -n "$dead" ]]; then
+        die "no telemetry reached the exporter, and $(wc -l <<<"$dead") of the two \
+processes this script started is/are already gone.
 
-This is the demo's #1 failure and it is ALMOST ALWAYS Zenoh discovery: the
+This is NOT a discovery problem — a process that has exited publishes nothing
+and discovers nothing. Its log says why.$(logs_note "$tmp" "$tmp/exporter.log" "$tmp/sysinfo.log")"
+    fi
+    die "no telemetry reached the exporter in 60s, and both processes are still
+alive.
+
+Everything is running and nothing arrived, which is the discovery failure: the
 shipped configs say mode:\"peer\" with \`connect\` commented out, which means
 multicast — and every demo path turns multicast off. Check that
-ZENSIGHT_ZENOH_{LISTEN,CONNECT,SCOUTING} are set on both processes.
-
-  exporter: $tmp/exporter.log
-  sysinfo:  $tmp/sysinfo.log"
+ZENSIGHT_ZENOH_{LISTEN,CONNECT,SCOUTING} are set on both processes.$(logs_note "$tmp" "$tmp/exporter.log" "$tmp/sysinfo.log")"
+fi
 
 echo "==> scraping /metrics"
 metrics=$(curl -sf "http://$SCRAPE/metrics") || die "/metrics did not answer"

@@ -66,9 +66,15 @@ is *"this deployment has findings"*, so "not established" is the good news.
 
 **`zenkey-fleet` must not enter `zensight-common`, or any crate a sensor
 links.** It drags a full tokio, zenoh-ext, arc-swap, base64, ciborium and
-serde_json tree — an engine for a bus *explorer*, not for a participant. It is
-declared in the workspace root and used **here only**, and this crate is
-`publish = false` and depended on by nothing.
+serde_json tree — an engine for a bus *explorer*, not for a participant.
+
+That is the invariant, and it is worth stating in exactly those words: the
+original phrasing was *"used here only"*, which #745 falsified in the same wave
+by rebuilding the fleet view on the same engine. **Two members link it** —
+`zensight` for the fleet view (#745/#746) and this crate for the judges (#744) —
+and both are consumer-side, which is what the rule permits. A sensor linking it
+is what the rule forbids. This crate is additionally `publish = false` and
+depended on by nothing.
 
 Two more things a reader trips on otherwise:
 

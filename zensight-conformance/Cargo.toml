@@ -6,8 +6,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Runs zenkey-fleet's RFC conformance judges against a live ZenSight deployment, and turns the report into an exit code"
-# Never published: this is a CI harness, and it is the one crate in the
-# workspace allowed to link `zenkey-fleet` (see README.md — "The boundary").
+# Never published: this is a CI harness. It links `zenkey-fleet`, and so does
+# `zensight` for the fleet view since #745 — the invariant is not "only this
+# crate", it is that the engine must never enter `zensight-common` or any crate
+# a sensor links (see README.md — "The boundary").
 publish = false
 
 [[bin]]

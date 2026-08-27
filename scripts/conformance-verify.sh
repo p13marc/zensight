@@ -51,6 +51,13 @@ BIN="${BINDIR:-target/${PROFILE}}"
 relflag=""
 [[ "$PROFILE" == "release" ]] && relflag="--release"
 
+# The three fixes from #790 — a preflight that names the path it looked at,
+# logs that outlive the exit trap, and a timeout message that can tell a dead
+# child from an undiscovered one. Shared with demo-verify.sh because both had
+# the same three defects.
+# shellcheck source=lib/verify.sh
+source "$ROOT/scripts/lib/verify.sh"
+
 tmp=""
 # PIDs of the processes we start, so cleanup can be surgical.
 #
@@ -66,7 +73,16 @@ cleanup() {
     for pid in "${pids[@]:-}"; do
         [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
     done
-    [[ -n "$tmp" ]] && rm -rf "$tmp"
+    # Keep the evidence when a failure pointed at it (#790): every failure
+    # message ends with "logs: $tmp/…", and deleting the directory on the way
+    # out made that line a lie.
+    if [[ -n "$tmp" ]]; then
+        if [[ "$KEEP_TMP" == 1 ]]; then
+            printf '\n(logs kept: %s)\n' "$tmp" >&2
+        else
+            rm -rf "$tmp"
+        fi
+    fi
     exit "$rc"
 }
 trap cleanup EXIT INT TERM
@@ -82,6 +98,12 @@ for s in $SENSORS; do pkgs+=(-p "zensight-sensor-$s"); done
 
 echo "==> building ${pkgs[*]}"
 cargo build $relflag "${pkgs[@]}" >/dev/null
+
+# `cargo build` says a binary exists somewhere. This says it exists HERE.
+required=("$BIN/zensight-conformance")
+for s in $SENSORS; do required+=("$BIN/zensight-sensor-$s"); done
+[[ "$CORRELATOR" == "1" ]] && required+=("$BIN/zensight-correlator")
+require_bins "${required[@]}"
 
 tmp="$(mktemp -d)"
 echo "==> generating configs into $tmp"
@@ -153,17 +175,33 @@ for _ in $(seq 40); do
         'import json,sys; print(json.load(sys.stdin)["report"]["live_producers"])' \
         <<<"$probe" 2>/dev/null) || live=0
     [[ "$live" -ge "$expected" ]] && break
+    # Do not wait out 40s for a process that has already exited (#790). The
+    # roster can only grow while something is alive to join it.
+    still_running "${pids[@]:-}" || break
     sleep 1
 done
-[[ "$live" -ge "$expected" ]] || die \
-"only $live of $expected producer(s) reached the roster in 40s.
+if [[ "$live" -lt "$expected" ]]; then
+    keep_logs_on_failure
+    # A dead child and an undiscovered one are different failures and used to
+    # render identically (#790). Ask before diagnosing.
+    dead=$(dead_children "${pids[@]:-}")
+    if [[ -n "$dead" ]]; then
+        die "only $live of $expected producer(s) reached the roster, and \
+$(wc -l <<<"$dead") of the processes this script started is/are already gone.
 
-This is the demo's #1 failure and it is ALMOST ALWAYS Zenoh discovery: the
-shipped configs say mode:\"peer\" with \`connect\` commented out, which means
-multicast — and every isolated run path turns multicast off. Check that
-ZENSIGHT_ZENOH_{LISTEN,CONNECT,SCOUTING} are set on every process.
+This is NOT a discovery problem — a process that has exited cannot be
+discovered. Its log says why.
+$(logs_note "$tmp" "$tmp"/*.log)"
+    fi
+    die "only $live of $expected producer(s) reached the roster in 40s, and \
+every process this script started is still alive.
 
-  logs: $tmp/*.log"
+Everything is running and nothing found anything, which is the discovery
+failure: the shipped configs say mode:\"peer\" with \`connect\` commented out,
+which means multicast — and every isolated run path turns multicast off. Check
+that ZENSIGHT_ZENOH_{LISTEN,CONNECT,SCOUTING} are set on every process.
+$(logs_note "$tmp" "$tmp"/*.log)"
+fi
 
 # ---------------------------------------------------------------------------
 # The real run. Deep checks on, a passive listen window on, and the gate at
@@ -175,10 +213,16 @@ judge --for "$FOR_SECS" | tee "$tmp/report.txt"
 rc=${PIPESTATUS[0]}
 set -e
 
+# A non-conforming deployment's logs and report are evidence too, and the
+# report was being tee'd into the directory the exit trap deletes (#790).
+[[ "$rc" == 0 ]] || keep_logs_on_failure
+
 case "$rc" in
     0) ;;
-    1) die "the deployment does not conform — see the GATED section above." ;;
-    2) die "the run could not carry a verdict (unobservable, or the checks never ran)." ;;
+    1) die "the deployment does not conform — see the GATED section above.
+       The full report and every producer log are in the directory named below." ;;
+    2) die "the run could not carry a verdict (unobservable, or the checks never ran).
+       The full report and every producer log are in the directory named below." ;;
     *) die "zensight-conformance exited $rc." ;;
 esac
 
