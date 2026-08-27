@@ -5194,6 +5194,74 @@ fn test_parallax_catalogue_and_tiles() {
     assert!(ui.find("video0 — stream ended").is_ok());
 }
 
+/// #718: a tile's receiver report reaches the tile it belongs to, and a
+/// report from a replaced incarnation reaches nothing.
+///
+/// The staleness rule is the same one frames obey, and it matters more here:
+/// a forwarded report from a dead subscriber would keep a stale `consumer_id`
+/// alive in the sensor's per-tier map for a whole idle window, and that map is
+/// what `rx/{tier}/consumers` counts.
+#[test]
+fn test_parallax_receiver_report_folds_into_the_tile_it_names() {
+    use zensight_common::stream::MediaReceiverReport;
+
+    let device_id = DeviceId::fixture(Protocol::Parallax, "hostA".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+
+    let generation = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", generation, None, true, Some("high".into()));
+
+    let report = MediaReceiverReport {
+        stream: "video0".into(),
+        codec: Some("h264".into()),
+        tier: Some("high".into()),
+        consumer_id: "zs-4242-1".into(),
+        interval_ms: 3_000,
+        received_frames: 90,
+        lost_frames: 2,
+        dropped_frames: 1,
+        decoded_frames: 87,
+        last_sequence: 92,
+        frame_age_ms: Some(38.5),
+        frame_age_max_ms: Some(140.0),
+        decoder_queue_depth: Some(2),
+        ..Default::default()
+    };
+
+    assert!(
+        state
+            .parallax_detail
+            .apply_receiver_report("video0", generation, report.clone()),
+        "a live tile's own report is kept, and forwarded"
+    );
+    let kept = state.parallax_detail.tiles["video0"]
+        .last_report
+        .as_ref()
+        .expect("the tile keeps what it reported");
+    assert_eq!(kept.lost_frames, 2, "network loss");
+    assert_eq!(
+        kept.dropped_frames, 1,
+        "our own sheds, in a different field"
+    );
+    assert_eq!(kept.decoder_queue_depth, Some(2));
+
+    // Reopening the tile (a tier switch) mints a new generation; the previous
+    // subscriber's last report describes a subscription that no longer exists.
+    let replaced = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", replaced, None, true, Some("medium".into()));
+    assert!(
+        !state
+            .parallax_detail
+            .apply_receiver_report("video0", generation, report),
+        "a replaced incarnation's report must not be kept OR forwarded"
+    );
+    assert!(state.parallax_detail.tiles["video0"].last_report.is_none());
+}
+
 // ===========================================================================
 // Tier-2 conversion regression net (#475).
 //

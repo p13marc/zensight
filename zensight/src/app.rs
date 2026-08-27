@@ -195,6 +195,9 @@ pub struct ZenSight {
     stale_threshold_ms: i64,
     /// Demo mode (use mock data instead of Zenoh).
     demo_mode: bool,
+    /// Whether a producer is currently refusing this GUI's stream reports
+    /// (#718), so the toast is shown once rather than once per cadence.
+    parallax_report_refused: bool,
     /// Current theme.
     theme: AppTheme,
     /// Sensor health snapshots, keyed by sensor name.
@@ -450,6 +453,7 @@ impl ZenSight {
             current_view,
             stale_threshold_ms,
             demo_mode,
+            parallax_report_refused: false,
             theme,
             sensor_health: std::collections::HashMap::new(),
             recent_errors: std::collections::HashMap::new(),
@@ -1778,6 +1782,13 @@ impl ZenSight {
                     device.parallax_detail.end_tile(&stream, generation, error);
                 }
             }
+            Message::ParallaxReceiverReport {
+                stream,
+                generation,
+                report,
+            } => {
+                return ControlFlow::Break(self.send_parallax_report(stream, generation, *report));
+            }
             Message::ParallaxStreamStatus { source, status } => {
                 // A definitive `open: false` transition for a tile still
                 // waiting on its first frame = the open failed on the sensor;
@@ -2849,6 +2860,10 @@ impl ZenSight {
                 self.settings.set_max_alerts(max_alerts);
             }
 
+            Message::SetMaxLiveLatency(deadline) => {
+                self.settings.set_max_live_latency(deadline);
+            }
+
             Message::SaveSettings => {
                 self.save_settings();
             }
@@ -3324,6 +3339,23 @@ impl ZenSight {
                 // Derive real edges from observed flows (#25) and netlink
                 // neighbor adjacency (#49); edges are merged as replies arrive.
                 return self.query_topology_batch();
+            }
+
+            Message::ParallaxReportOutcome { success, message } => {
+                // A tile reports every few seconds for as long as it is open,
+                // so a producer that refuses — an older sensor with no
+                // `stream/report` queryable, say — would otherwise put a red
+                // toast on screen every 3 seconds, per tile, forever. Say it
+                // once, then stay quiet until reports work again.
+                if success {
+                    self.parallax_report_refused = false;
+                } else if !self.parallax_report_refused {
+                    self.parallax_report_refused = true;
+                    self.toasts.push(
+                        ToastSeverity::Error,
+                        format!("Stream reports are not reaching the sensor — {message}"),
+                    );
+                }
             }
 
             Message::CommandFeedback { success, message } => {
@@ -5354,6 +5386,72 @@ impl ZenSight {
         }
     }
 
+    /// The parallax `stream/report` write key for `source`'s host (#718,
+    /// RFC 07 §1.1), or `None` when that host's origin is not known yet.
+    ///
+    /// Deliberately **no fleet fallback**, unlike
+    /// [`Self::parallax_stream_set_key`]. The registry entry for
+    /// `stream/report` omits `fanout` precisely so a fleet-wide spelling is
+    /// unrepresentable: a report is a statement about one key on one host, and
+    /// broadcasting it would be a viewer telling every host in the fleet about
+    /// a stream one of them publishes. A report we cannot address is a report
+    /// we drop.
+    fn parallax_stream_report_key(&self, source: &str) -> Option<String> {
+        let origin = self.origin_for(zensight_common::Protocol::Parallax, source)?;
+        Some(zensight_common::origin_rpc_key(
+            &origin,
+            "parallax",
+            "stream/report",
+        ))
+    }
+
+    /// Forward one tile's receiver report to that tile's own producer (#718).
+    ///
+    /// Reports from a replaced tile incarnation are dropped for the same
+    /// reason its frames are: they describe a subscription that no longer
+    /// exists, and the sensor would age the stale `consumer_id` out anyway —
+    /// but only after counting it as a live viewer for one idle window.
+    fn send_parallax_report(
+        &mut self,
+        stream: String,
+        generation: u64,
+        report: zensight_common::stream::MediaReceiverReport,
+    ) -> Task<Message> {
+        let Some(device) = self
+            .selected_device
+            .as_mut()
+            .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+        else {
+            return Task::none();
+        };
+        if !device
+            .parallax_detail
+            .apply_receiver_report(&stream, generation, report.clone())
+        {
+            return Task::none();
+        }
+        let source = device.device_id.source.clone();
+        if self.demo_mode || self.command_registry.is_none() {
+            return Task::none();
+        }
+        let Some(key) = self.parallax_stream_report_key(&source) else {
+            return Task::none();
+        };
+        // Quiet on success, like the resync keyframe request: a report every
+        // few seconds per open tile would otherwise be a toast every few
+        // seconds. A refusal still surfaces — `error/busy` means this cadence
+        // is over the producer's declared ceiling, which is a bug worth seeing
+        // — but through `ParallaxReportOutcome`, which says it once rather
+        // than once per cadence.
+        self.send_command(key, &report, String::new())
+            .map(|message| match message {
+                Message::CommandFeedback { success, message } => {
+                    Message::ParallaxReportOutcome { success, message }
+                }
+                other => other,
+            })
+    }
+
     /// The v1 origin of the currently-selected device when it belongs to
     /// `proto` — detail-tab fetches target that host's concrete @rpc key;
     /// `None` (no selection, or origin not yet learned) falls back to the
@@ -6488,12 +6586,18 @@ impl ZenSight {
             );
             return Task::none();
         };
+        // The frame-age deadline is a per-deployment setting (#716), not a
+        // constant: a LAN wall display and a satellite operator want different
+        // numbers. It is read at open, so changing it takes effect on the next
+        // tile rather than mutating a running one under its own accounting.
+        let max_live_latency = self.settings.max_live_latency();
         let (frames, handle) = Task::stream(parallax_h264::h264_tile_stream(
             session,
             media_origin,
             stream.clone(),
             tier.clone(),
             generation,
+            max_live_latency,
         ))
         .abortable();
         if let Some(device) = self.selected_device.as_mut() {

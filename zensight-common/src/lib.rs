@@ -25,6 +25,7 @@ pub mod exposition;
 pub mod health;
 pub mod interfaces;
 pub mod keyexpr;
+pub mod media;
 pub mod metric_guard;
 pub mod pipeline_health;
 pub mod publisher_registry;

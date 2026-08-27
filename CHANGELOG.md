@@ -46,6 +46,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The media tiles' receiver half: a frame-age deadline, a bounded decode
+  queue, and a tile that reports** (#716, #717, #718 — epic #712).
+
+  #714/#715 built the surface a consumer feeds back through and nothing spoke
+  into it. This is the consumer. Full contract:
+  [`zensight/docs/media-receiver.md`](zensight/docs/media-receiver.md).
+
+  **Every frame that does not reach the screen now has exactly one cause.**
+  `decode_to_rgba` used to answer `Ok(None)` for *both* "the decoder is
+  buffering" and "the arena had no free slot", so a tile losing a third of its
+  frames to a starved arena looked exactly like one losing them to the network,
+  and nothing counted either. It now returns `Decoded::{Picture, Buffered,
+  ArenaFull}` and `DecodeFailure::{Oversize, Codec}`, and every shed is counted
+  by cause: a deadline miss, a full queue, an undecodable delta, a preview
+  superseded in the latest-wins drain, a starved arena, an oversize access
+  unit, a decode refusal. Sequence gaps stay in `lost_frames` and everything
+  above stays in `dropped_frames` — merging them would tell a producer its link
+  is bad when the truth is that the viewer's box is too slow.
+
+  **A tile that falls behind sheds instead of drifting.** The H.264 path used
+  to decode serially with no backlog drain, so latency grew in the subscriber
+  queue where nothing could see it. Access units now go on a bounded 8-deep
+  channel that a long-lived blocking task drains, which makes the backlog a
+  number readable at any instant — `max_capacity() - capacity()`, the same
+  quantity the browser tile reads from `VideoDecoder.decodeQueueSize`, reported
+  in the same field with the same meaning — and gives the frame-age deadline
+  somewhere honest to be applied. A decoder reset rides that same channel,
+  because a reset is a point in the stream and not a side channel.
+
+  **The frame-age clock, stated once.** `zensight_common::media::observed_frame_age_ms`
+  implements RFC 07 §1.3 for every consumer we ship: the clock is the
+  publisher's HLC sample timestamp, an unstamped sample is *not asked* and
+  **never zero** (a `Some(0.0)` there silently disables every deadline built on
+  it), and negatives are shown unclamped because a negative age *is* the
+  clock-skew evidence. A late **keyframe** is always decoded — shedding those
+  too would leave a tile on a genuinely slow link showing nothing at all, where
+  taking them gives a slideshow that snaps back the moment the link does.
+
+  **Configurable per deployment, not a constant.** `max_live_latency_ms` in
+  `settings.json5` and the Settings view; 1500 ms by default, `0` for off. A
+  LAN wall display and a satellite operator want different numbers, and the
+  wrong one is either a tile seconds behind live or a tile that sheds
+  everything.
+
+  **Both tile kinds report, every 3 s.** Inside the registry's declared ceiling
+  of one per second per `(consumer_id, stream, tier)`, and on the tile's own
+  clock rather than off arriving frames — a tile receiving nothing still
+  reports, and a report saying "nothing is arriving" is the most useful one
+  there is. The write is addressed to the tile's own origin with no fleet
+  fallback (the registry entry omits `fanout` so a broadcast report is
+  unrepresentable); the `consumer_id` is `zs-<pid>-<generation>`, in the
+  payload and never in a key; and a report from a replaced tile incarnation is
+  dropped rather than forwarded, because forwarding it would keep a dead
+  consumer alive in the sensor's per-tier map — which is what
+  `rx/{tier}/consumers` counts.
+
+  **Verified against a live sensor**, not only in unit tests:
+  `zensight/tests/media_receiver_live.rs` (`#[ignore]`d, `h264`-gated, run by
+  hand against `configs/parallax.json5`'s synthetic `test0` stream) drives the
+  real tile stream and asserts the loop closes — the report a tile produces is
+  accepted by the producer and appears in `{stream}/rx/{tier}/consumers` — and
+  that a tile which cannot meet its deadline **still plays**: with a
+  zero-millisecond deadline, 8 frames received, 7 deltas shed, 1 keyframe
+  decoded, `lost_frames` 0, and two keyframe requests rather than seven.
+
+  Also fixed on the way: the access-unit arena slot goes 1 MiB → 2 MiB, because
+  a native-resolution IDR on a high tier could exceed the old one and an
+  oversize AU was a hard error the tile resynced at forever. It is now named,
+  counted, and after three strikes ends the tile with a stated reason.
+
 - **Receiver feedback on `@media`: `MediaReceiverReport` and the
   `stream/report` procedure** (#714, #715 — the keystone of epic #712).
 
