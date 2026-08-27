@@ -115,6 +115,14 @@ pub struct TileState {
     /// where the health surface (#719) reads what the tile measured. `None`
     /// until the first cadence elapses.
     pub last_report: Option<MediaReceiverReport>,
+    /// The report before [`Self::last_report`] (#719).
+    ///
+    /// The wire counters are **cumulative** — that is what makes a resend
+    /// idempotent — so a single report cannot answer "how many frames arrived
+    /// in the last three seconds". Two can: the difference over the newer
+    /// report's `interval_ms` is the rate, and a rate is what the health panel
+    /// compares stage to stage. `None` until the second cadence elapses.
+    pub prev_report: Option<MediaReceiverReport>,
 }
 
 impl TileState {
@@ -135,6 +143,7 @@ impl TileState {
             video,
             selected_tier,
             last_report: None,
+            prev_report: None,
         }
     }
 
@@ -313,7 +322,7 @@ impl ParallaxDetailState {
         if tile.generation != generation {
             return false;
         }
-        tile.last_report = Some(report);
+        tile.prev_report = tile.last_report.replace(report);
         true
     }
 

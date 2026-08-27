@@ -169,6 +169,52 @@ is normative that a producer must not re-tune a shared tier from one consumer's 
 It folds reports into the per-tier `{stream}/rx/{tier}/*` aggregate and publishes that.
 The sanctioned adaptation is this end changing which tier key it subscribes to — #720.
 
+## The health panel (#719)
+
+The numbers above answer "what is happening"; the panel answers the question an operator
+actually has, which is **"which stage is losing it?"**. It is the drill-down on a tile: click
+a tile to expand it, and the panel sits between the caption and the picture.
+
+It is a **chain**, not five gauges, because the verdict is always a comparison between
+adjacent stages and five gauges make the reader do the subtraction:
+
+```
+Source ──▶ Encoder ──▶ Transport ──▶ Decoder        Presentation   Recovery
+30 fps      12 fps       12 fps       12 fps         age 42/150ms   #54, 2.7 s
+offered   −60%         measured     measured         0 sheds        2 requests
+```
+
+| | |
+|---|---|
+| offered 30, encoded 12 | the **encoder** cannot keep up |
+| encoded 30, received 12 | the **transport** is losing frames |
+| received 30, decoded 12 | the **decoder** is behind |
+
+The worst hop is named in one sentence above the chain — that sentence is the feature; the
+numbers are in service of it. A hop must lose ≥ 15 % before it is named: rates jitter by a
+few percent between three-second windows, and a panel that shouts at 3 % teaches an operator
+to ignore it.
+
+Three honesty rules the panel is built around:
+
+- **The first link is an offer, not a measurement.** Capture fps is on no key — the sensor
+  publishes encoded fps (`stats/fps`) and nothing upstream of it. The chain starts at the
+  tier's *applied* fps, labelled `offered` rather than `measured`, because presenting a
+  config value as a measurement is how a panel lies.
+- **A rate needs two reports.** The wire counters are cumulative (that is what makes a resend
+  idempotent), so `TileState` keeps the previous report and the panel diffs it over the newer
+  one's `interval_ms`. A counter that went *backwards* — a reopened tile — yields no rate at
+  all rather than a negative one.
+- **Missing inputs read as `not asked`** — the same vocabulary the fleet view uses (RFC 09
+  §5.1 O4). An unstamped stream shows frame age unavailable, never `0 ms`; a preview tile
+  shows `no queue`, never `0`.
+
+Source columns come from the sensor's own `{stream}/stats/*` and the per-tier status doc;
+`drops` and `rc_drops` stay separate rows because they are disjoint by construction and mean
+different things — a pipeline drop leaves a sequence gap, a rate-control drop does not, and
+folding them would erase the difference between "this box is too slow" and "you asked for
+400 kbps".
+
 ## Verifying it against a live sensor
 
 The pure parts — the frame-age rule, the playout policy, the drop taxonomy — are unit tests
@@ -211,4 +257,5 @@ judged.
 | `zensight/src/view/specialized/parallax_detail.rs` | the preview tile's half; `TileState::last_report` |
 | `zensight/src/app.rs` | `parallax_stream_report_key`, `send_parallax_report` |
 | `zensight/src/view/settings.rs` | `max_live_latency_ms` |
+| `zensight/src/view/specialized/parallax_health.rs` | the chain, the verdict, the panel (#719) |
 | `zensight/tests/media_receiver_live.rs` | the live loop, `#[ignore]`d |

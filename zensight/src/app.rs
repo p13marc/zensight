@@ -7353,8 +7353,7 @@ impl ZenSight {
                 .selected_device
                 .as_ref()
                 .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
-            && let Some(overlay) =
-                crate::view::specialized::parallax::expanded_overlay(&device.parallax_detail)
+            && let Some(overlay) = crate::view::specialized::parallax::expanded_overlay(device)
         {
             layers.push(overlay);
         }

@@ -108,7 +108,7 @@ in this epic is waiting on a decision.
 | #716 | **Done.** Frame-age deadline — shed instead of drifting behind live |
 | #717 | **Done.** Bounded decode queue, real queue depth, and a drop taxonomy |
 | #718 | **Done.** Both tile kinds publish `MediaReceiverReport` every 3 s |
-| #719 | Stream health panel — attribute degradation to a stage |
+| #719 | **Done.** Stream health panel — the chain, and which hop is losing the picture |
 | #720 | Receiver-driven tier selection with hysteresis |
 | #721 | The latency-aware recovery policy (docs) |
 
@@ -134,8 +134,8 @@ zenkey #366 #367 #368            protocol, decided first
         │
         ├── #714 ✔ ─────────────► #715 ✔ ──► #718 ✔
         │
-        └───────────────────────► #716 ✔, #717 ✔ ──► #719
-                                                       │
+        └───────────────────────► #716 ✔, #717 ✔ ──► #719 ✔
+                                                         │
         #713 (measure) ────────────────────────────────┴──► #720
 ```
 
