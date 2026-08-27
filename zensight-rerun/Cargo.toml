@@ -43,11 +43,18 @@ anyhow.workspace = true
 # CLI
 clap.workspace = true
 
-# Rerun SDK — exact-pinned (the whole evaluation is against this version; see
-# docs/plans/rerun/01-capabilities.md). default-features = false keeps the
-# viewer (egui/wgpu), analytics, dataframe, and server stacks out of the build;
-# `sdk` alone provides save() (.rrd) and connect_grpc() (dep-hygiene gate:
-# cargo tree must show no re_viewer/wgpu/egui/re_analytics/re_renderer).
+# Rerun SDK — exact-pinned. default-features = false keeps the viewer
+# (egui/wgpu), analytics, dataframe, and server stacks out of the build; `sdk`
+# alone provides save() (.rrd) and connect_grpc() (dep-hygiene gate: cargo tree
+# must show no re_viewer/wgpu/egui/re_analytics/re_renderer).
+#
+# THE PIN DOES NOT MOVE ON A RENOVATE PR. #430 decided this crate is an
+# optional debugging backend, not a shipped one, and Rerun cuts a breaking
+# minor with its own migration guide roughly every six weeks — two of them
+# (0.35, 0.36) in the seven weeks after we pinned 0.34.1. An evaluation-only
+# crate has no reason to pay that toll on a schedule someone else sets. Move it
+# when a concrete need moves it, and update docs/plans/rerun/ when you do.
+# Decline the rerun / re_log_encoding / re_log_types rows on dashboard #615.
 rerun = { version = "=0.34.1", default-features = false, features = ["sdk"] }
 
 [dev-dependencies]
