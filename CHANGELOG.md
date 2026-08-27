@@ -46,6 +46,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **What `@media` loss actually looks like — measured, and the recovery rule
+  written down** (#713, #721, epic #712).
+
+  Every knob in the adaptive-media epic — the frame-age deadline, the report's
+  loss field, the controller's downgrade point — was a number aimed at a loss
+  distribution nobody had produced. `scripts/media-loss-lab.sh` produces it: two
+  network namespaces joined by one veth, netem or tbf on the sender's egress
+  only, everything torn down by the EXIT trap and no qdisc ever attached to `lo`
+  or a real interface. `zensight-sensor-parallax/examples/media_loss_probe.rs`
+  records one row per sample and never decodes, sheds or asks for a keyframe, so
+  the CSV is the wire rather than the wire plus a policy;
+  `scripts/media-loss-report.py` turns the rows into the tables.
+
+  **Two findings, both in
+  [`docs/plans/adaptive-media/loss-measurement.md`](docs/plans/adaptive-media/loss-measurement.md).**
+
+  Over `tcp/` — every configuration we ship — congestion loses frames and *no
+  counter says so*. At 300 kbit against ~1.7 Mbps offered the receiver missed
+  **83 % of sequence numbers while `stats/drops` stayed at 0**, with frame age at
+  **3.5 s median**; at 100 kbit, 93 % missing and 9.1 s. The frames died in
+  Zenoh's transport queue under `CongestionControl::Drop`, upstream of
+  `stats/drops` (which is derived at egress from AppSink gaps). The epic's
+  standing caveat said best-effort was "a no-op in flight" and implied the
+  resulting drops would at least be *visible*; the first half holds and the
+  second does not. Filed as #801.
+
+  Over `quic/…?mixed_rel=1` best-effort really does ride unreliable datagrams,
+  and loss is amplified by **access-unit size**: at 1 % packet loss, a 842 B unit
+  was lost 1.5 % of the time, a 34 KB unit **20 %**, a 136 KB unit **41 %**. The
+  strict `1-(1-p)^n` fragment product over-predicts (increasingly with size; UDP
+  GSO is the likely reason and is named rather than assumed), so it is an upper
+  bound. Loss is also **bursty in frames** — up to 10 consecutive at 5 %, up to 27
+  under TCP congestion — which is why #720's input must be gap burst length and
+  not a mean rate.
+
+  Two verdicts fall out. `max_slice_len` (#509) changes nothing on this plane,
+  because the sensor publishes a whole access unit as one sample — measured, not
+  merely restated. And `express` (zenkey #304) has nothing left to decide: the
+  damage on the congested leg is queueing, which per-message framing does not
+  touch.
+
+  #721 is the rule those numbers justify, in
+  [`docs/plans/adaptive-media/recovery-policy.md`](docs/plans/adaptive-media/recovery-policy.md)
+  with the durable half in `zensight-sensor-parallax/docs/streams.md`: repair is
+  worth it only while it beats the frame's deadline, which on the RF and
+  satellite links `zenoh-modem` targets it never does. So v1 is drop-stale plus
+  one keyframe request, paced by wall-clock — and the two conditions that would
+  reopen FEC or retransmission are written down so the next proposal can be
+  answered with a link.
+
 - **The stream health panel: which stage is losing the picture** (#719, epic
   #712).
 

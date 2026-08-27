@@ -29,9 +29,9 @@ Four gaps, in dependency order:
 3. ~~**The producer never hears from the consumer.**~~ **Closed by #714/#715.** RFC 04 R6 makes
    the data planes producer→consumer only, so feedback had no home in the grammar; RFC 07 §1.1
    gave it one on `@rpc`, and the sensor serves it and publishes the per-tier aggregate.
-4. **Adaptation is a human clicking a tier.** The clock, the report and now a *reporter* all
-   exist, so this is a controller waiting to be written — #720, gated only on #713's loss
-   measurement.
+4. **Adaptation is a human clicking a tier.** The clock, the report, a *reporter* and now a
+   measured loss model all exist, so this is a controller waiting to be written — #720, and
+   nothing gates it any more.
 
 ## What is already done — do not re-plan it
 
@@ -57,24 +57,31 @@ parallax `plans/bandwidth-control.md:298` ("Deliberately out of scope: Automatic
 repo's #504/#513. zenkey #368 makes it normative. The escape hatch, if a deployment ever needs
 one viewer's private rate, is a **tier of its own** — never mutating a shared one.
 
-**No retransmission and no FEC.** Drop-stale + request-keyframe first; #721 writes down the rule
-for when repair is worth anything, so the next NACK proposal can be answered with a link.
+**No retransmission and no FEC.** Drop-stale + request-keyframe, and nothing else. The rule and
+the two conditions that would reopen it are written down in
+[`recovery-policy.md`](recovery-policy.md) (#721), so the next NACK proposal can be answered
+with a link.
 
-## Two caveats to settle before anyone tunes a threshold
+## Two caveats that have now been settled — by measurement (#713)
 
-**Best-effort is currently a no-op in flight.** `QosClass::LiveVideo` sets
-`Reliability::BestEffort` + `CongestionControl::Drop`, but every config in `configs/` is a
-`tcp/` peer and `mixed_rel` / `rel=0` appear nowhere in the tree. Over TCP, best-effort only
-permits the *sender* to drop under congestion — nothing is lost in flight. So every sequence gap
-the GUI has ever recovered from was a sender-side drop or a pipeline restart. A controller
-tuned on that is tuned on the wrong distribution. Hence #713, which blocks #720.
+**~~Best-effort is currently a no-op in flight.~~ Measured, and half of it was wrong (#713).**
+Over `tcp/` best-effort still cannot lose a sample *in flight* — but the assumption that the
+resulting sender-side drops are therefore *visible* does not survive contact. At 300 kbit
+against ~1.7 Mbps offered, the receiver missed **83 % of sequence numbers while `stats/drops`
+stayed at 0**, and frame age reached **3.5 s median**: the frames died in Zenoh's transport
+queue, upstream of every counter the sensor publishes. A congested `tcp/` link and a lossy one
+are, today, indistinguishable to the GUI. Follow-up:
+[#801](https://git.marcpardo.eu/marcpardo/zensight/issues/801).
 
-There is a second, unmeasured effect. Zenoh fragments to give the illusion of an unlimited MTU
-and defragmentation is all-or-nothing, so on a QUIC link with `mixed_rel=1` a 50 KB IDR is ~45
-datagrams at a 1200 B MTU and one lost fragment loses the whole keyframe — at 1 % packet loss,
-~64 % of keyframes. zenkey #303's "MTU slicing buys nothing on this plane" holds only while one
-sample is one access unit; it stops holding if slices become samples. #509 already added
-`max_slice_len` as a tier knob and nothing has ever exercised it on a lossy link.
+**~~A second, unmeasured effect.~~ Measured too, and the mechanism is real.** On
+`quic/…?mixed_rel=1` best-effort does ride unreliable datagrams, Zenoh fragments across them,
+and defragmentation is all-or-nothing — so loss is amplified by **access-unit size**: at 1 %
+packet loss, a 34 KB access unit was lost 20 % of the time and a 136 KB one 41 %. The strict
+`1-(1-p)^n` product is an upper bound (it over-predicts, increasingly with size; UDP GSO is the
+likely reason and is named for the next person to test). `max_slice_len` (#509) changes nothing
+— this sensor publishes a whole access unit as one sample, so zenkey #303's corollary holds,
+and its stated condition, *while one sample is one access unit*, is the thing to re-check.
+Numbers: [`loss-measurement.md`](loss-measurement.md).
 
 **The `express` disagreement is settled, our way.** RFC 04 §3 M1 (v1.26) takes `express` off the
 `frame` profile: transport batching engages only under back-pressure, which is exactly when
@@ -102,15 +109,16 @@ in this epic is waiting on a decision.
 
 | Issue | Stage |
 |---|---|
-| #713 | Measure — what does `@media` loss actually look like? **Blocks #720** |
+| #713 | **Done.** The measurement — both legs, the recipes, the numbers: [`loss-measurement.md`](loss-measurement.md) |
 | #714 | **Done.** `MediaReceiverReport` + the `stream/report` RPC (type, registry, CBOR corpus) |
 | #715 | **Done.** Sensor serves `stream/report`, keeps bounded per-consumer state, publishes the `{stream}/rx/{tier}/*` aggregate |
 | #716 | **Done.** Frame-age deadline — shed instead of drifting behind live |
 | #717 | **Done.** Bounded decode queue, real queue depth, and a drop taxonomy |
 | #718 | **Done.** Both tile kinds publish `MediaReceiverReport` every 3 s |
 | #719 | **Done.** Stream health panel — the chain, and which hop is losing the picture |
-| #720 | Receiver-driven tier selection with hysteresis |
-| #721 | The latency-aware recovery policy (docs) |
+| #801 | New, from #713: count what the transport dropped — congestion is invisible to every counter we publish |
+| #720 | Receiver-driven tier selection with hysteresis — **unblocked**; the loss model to cite is `loss-measurement.md` verdict 1 |
+| #721 | **Done.** [`recovery-policy.md`](recovery-policy.md); the durable half is in `zensight-sensor-parallax/docs/streams.md` |
 
 ### Browser twins — milestone *Browser frontend for the @media plane* (#704)
 
@@ -136,7 +144,7 @@ zenkey #366 #367 #368            protocol, decided first
         │
         └───────────────────────► #716 ✔, #717 ✔ ──► #719 ✔
                                                          │
-        #713 (measure) ────────────────────────────────┴──► #720
+        #713 ✔ (measure) ──────────────────────────────┴──► #720
 ```
 
 `#722`/`#723` follow their own epic's order (#705 → #706 → #707 → these two).
