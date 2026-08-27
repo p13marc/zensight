@@ -233,6 +233,51 @@ derives it from the first keyframe instead, which is possible precisely because
 of the parameter-set promise above; `annexb::h264_profile_level_id` is the
 three-byte read that does it (#707).
 
+### Recovery: drop stale, ask for one keyframe, and nothing else (#721)
+
+The keyframe request above is the *whole* loss-recovery mechanism. There is no
+retransmission and no FEC, and that is a decision with a measurement behind it
+rather than an omission.
+
+```
+repair is worth it only while  estimated_repair_time < remaining_frame_lifetime
+```
+
+A frame's lifetime on a live surface is the viewer's frame-age deadline (#716,
+default 1500 ms and usually set lower). A repair costs at least one round trip.
+On a LAN that budget holds hundreds of frame lifetimes; on the RF and satellite
+store-and-forward links the sibling `zenoh-modem` carries Zenoh over — a 220-byte
+MTU, RTTs from hundreds of milliseconds to minutes — it holds none, and a
+retransmitted frame arrives long after anything wanted it, having spent
+bandwidth belonging to frames that had not yet expired.
+
+One keyframe, by contrast, repairs *every* outstanding loss at once and costs
+one round trip however many frames were lost. That is the property retransmission
+lacks, and it is why the request is paced by wall-clock backoff
+(`RESYNC_MIN_INTERVAL`) and never by its own success: #435 was a keyframe storm,
+and pacing recovery by decoded keyframes rebuilds it, turning a link that is
+already too slow into an all-intra stream.
+
+What the measurement (#713,
+[`docs/plans/adaptive-media/loss-measurement.md`](../../docs/plans/adaptive-media/loss-measurement.md))
+adds is that on a `tcp/` deployment the thing recovery would repair is
+**congestion**, not loss: at 300 kbit against ~1.7 Mbps offered, 83 % of
+sequence numbers never arrived while `stats/drops` stayed at 0 and frame age
+reached 3.5 s median — the frames died in Zenoh's transport queue, upstream of
+every counter published here (#801). The repair for that is to send less, which
+is what the tier ladder is for. On `quic/…?mixed_rel=1`, where best-effort does
+ride unreliable datagrams, loss scales with **access-unit size**: 20 % of 34 KB
+access units lost at 1 % packet loss, 41 % of 136 KB ones — again pointing at a
+smaller tier rather than at repair.
+
+The two conditions that would reopen it, both stated so they can be tested:
+FEC across an IDR's fragments becomes interesting if in-flight loss turns out to
+be concentrated on keyframes (it tracks size, not frame type, on every source
+measured so far); selective retransmission becomes interesting if a link with a
+genuinely short RTT turns out to be genuinely lossy. Neither is a shared-tier
+decision in any case — RFC 07 §1.2 is normative, and a per-consumer repair
+channel is a tier of its own.
+
 ## Frame metadata
 
 Every media sample carries a CBOR `FrameMeta` attachment
