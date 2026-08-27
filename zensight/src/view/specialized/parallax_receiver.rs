@@ -55,6 +55,21 @@ use super::parallax_detail::SEQ_RESTART_GAP;
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Smoothing divisor for the RFC 3550 inter-arrival jitter estimate.
+/// How many access units may wait for the decoder.
+///
+/// This is the tile's `decodeQueueSize` — the browser tile's field, the same
+/// meaning — and it is deliberately shallow. A deep queue on a live plane buys
+/// nothing: `frame`'s QoS already declares a stale frame worthless, so depth
+/// beyond "cover a scheduling hiccup" only converts a visible drop into
+/// invisible latency, which is the exact failure #716 exists to stop. Eight
+/// frames is a quarter-second at 30 fps.
+///
+/// It lives here, beside the accounting, rather than inside the `h264`-gated
+/// decoder: `decoder_queue_depth` is a *report* field, and the tier controller
+/// (#720) needs the denominator to turn a depth into an occupancy in a default
+/// build too.
+pub const DECODE_QUEUE_CAP: usize = 8;
+
 const JITTER_GAIN: f64 = 16.0;
 
 /// Stamped samples a tile must see before it will call its own deadline

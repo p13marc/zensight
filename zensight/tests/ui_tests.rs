@@ -5262,6 +5262,163 @@ fn test_parallax_receiver_report_folds_into_the_tile_it_names() {
     assert!(state.parallax_detail.tiles["video0"].last_report.is_none());
 }
 
+/// #720: a degraded window walks the tile down the ladder, a recovered one
+/// walks it back, and an operator's own tier choice stops both.
+///
+/// The unit tests in `parallax_tier` pin the policy against synthetic windows;
+/// this drives the *plumbing* — real tiles, a real catalogue, real reports
+/// through `apply_receiver_report`, and the same `tier_decision` the message
+/// handler calls. The two are different failure modes: a correct policy wired
+/// to the wrong tier, or to a controller that forgets its dwell across the
+/// switch it just made, would pass the first set and flap in the field.
+#[test]
+fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
+    use std::time::{Duration, Instant};
+    use zensight_common::stream::{MediaReceiverReport, StreamDescriptor, TierSpec};
+
+    fn tier(name: &str, h: u32, fps: u32, kbps: u32) -> TierSpec {
+        TierSpec {
+            name: name.into(),
+            max_height: Some(h),
+            fps,
+            bitrate_kbps: kbps,
+        }
+    }
+    // Cumulative counters, as the wire carries them (#714).
+    fn report(consumer: &str, received: u64, lost: u64) -> MediaReceiverReport {
+        MediaReceiverReport {
+            stream: "video0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+            consumer_id: consumer.into(),
+            interval_ms: 3_000,
+            received_frames: received,
+            lost_frames: lost,
+            decoded_frames: received,
+            last_sequence: received + lost,
+            frame_age_ms: Some(20.0),
+            decoder_queue_depth: Some(0),
+            ..Default::default()
+        }
+    }
+
+    let device_id = DeviceId::fixture(Protocol::Parallax, "hostA".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+    state.parallax_detail.apply(Ok(vec![StreamDescriptor {
+        stream: "video0".into(),
+        codecs: vec!["h264".into(), "mjpeg".into()],
+        active: true,
+        width: Some(1920),
+        height: Some(1080),
+        fps: Some(30.0),
+        // Deliberately shuffled: the rung order is a property of the tiers, not
+        // of the order the catalogue happens to list them in.
+        tiers: vec![
+            tier("high", 1080, 30, 4000),
+            tier("low", 240, 10, 400),
+            tier("medium", 480, 20, 1200),
+        ],
+        description: None,
+    }]));
+    let generation = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", generation, None, true, Some("high".into()));
+
+    let deadline = Some(Duration::from_millis(1500));
+    let t0 = Instant::now();
+    // A window in which a fifth of the frames never arrived.
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", generation, report("zs-1-1", 100, 0));
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", generation, report("zs-1-1", 180, 20));
+
+    // Inside the minimum dwell the evidence is folded in but not acted on.
+    assert_eq!(
+        state
+            .parallax_detail
+            .tier_decision("video0", deadline, t0 + Duration::from_secs(3)),
+        None,
+        "a tile must not move a rung within seconds of opening"
+    );
+    let after_dwell = t0 + Duration::from_secs(20);
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", generation, report("zs-1-1", 260, 40));
+    assert_eq!(
+        state
+            .parallax_detail
+            .tier_decision("video0", deadline, after_dwell)
+            .map(|(tier, dir)| (tier, format!("{dir:?}"))),
+        Some(("medium".to_string(), "Down".to_string())),
+        "a degraded link drops exactly one rung, by cost and not by array order"
+    );
+
+    // The caller reopens on the new tier: new generation, new consumer id, and
+    // counters that start again from zero.
+    let regen = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", regen, None, true, Some("medium".into()));
+    let mut now = after_dwell;
+    for (received, lost) in [(30u64, 0u64), (60, 0), (90, 0), (120, 0)] {
+        now += Duration::from_secs(3);
+        state.parallax_detail.apply_receiver_report(
+            "video0",
+            regen,
+            report("zs-1-2", received, lost),
+        );
+        assert_eq!(
+            state.parallax_detail.tier_decision("video0", deadline, now),
+            None,
+            "an upgrade must not follow a downgrade within the cooldown+dwell"
+        );
+    }
+    // Health held long enough.
+    now += Duration::from_secs(40);
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", regen, report("zs-1-2", 400, 0));
+    assert_eq!(
+        state
+            .parallax_detail
+            .tier_decision("video0", deadline, now)
+            .map(|(tier, dir)| (tier, format!("{dir:?}"))),
+        Some(("high".to_string(), "Up".to_string())),
+        "sustained recovery climbs one rung back"
+    );
+
+    // And the human wins. Pin, then feed it the worst window it has seen.
+    let pinned_gen = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", pinned_gen, None, true, Some("high".into()));
+    state.parallax_detail.controller("video0", now).pin(now);
+    assert!(state.parallax_detail.is_pinned("video0"));
+    now += Duration::from_secs(60);
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", pinned_gen, report("zs-1-3", 50, 0));
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", pinned_gen, report("zs-1-3", 60, 90));
+    assert_eq!(
+        state.parallax_detail.tier_decision("video0", deadline, now),
+        None,
+        "a pinned stream is never moved, however bad the link"
+    );
+    // Handing control back does not act on what accumulated while pinned.
+    state.parallax_detail.controller("video0", now).unpin(now);
+    assert!(!state.parallax_detail.is_pinned("video0"));
+    assert_eq!(
+        state.parallax_detail.tier_decision("video0", deadline, now),
+        None,
+        "releasing a pin serves a fresh dwell before it decides anything"
+    );
+}
+
 /// #719: the health panel names *which stage* is losing the picture, and the
 /// three cases the issue calls out must not read the same.
 ///

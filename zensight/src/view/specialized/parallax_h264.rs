@@ -65,7 +65,7 @@ mod real {
 
     use crate::message::Message;
     use crate::view::specialized::parallax_receiver::{
-        DecodeLoss, Gap, REPORT_INTERVAL, ReceiverStats, Shed,
+        DECODE_QUEUE_CAP, DecodeLoss, Gap, REPORT_INTERVAL, ReceiverStats, Shed,
     };
 
     /// Minimum spacing between resync `RequestKeyframe` commands (and their
@@ -109,16 +109,6 @@ mod real {
     /// for frames…". Comfortably longer than the sensor's own tier hand-over +
     /// build-retry window.
     const NO_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
-
-    /// How many access units may be waiting for the decoder at once (#717).
-    ///
-    /// This is the tile's `decodeQueueSize`, and it is deliberately shallow. A
-    /// deep queue on a live plane buys nothing: `frame`'s QoS already declares
-    /// a stale frame worthless, so depth beyond "cover a scheduling hiccup"
-    /// only converts a visible drop into invisible latency — which is the
-    /// exact failure #716 exists to stop. Eight frames is a quarter-second at
-    /// 30 fps.
-    const DECODE_QUEUE_CAP: usize = 8;
 
     /// How many oversize access units a tile tolerates before it gives up.
     ///

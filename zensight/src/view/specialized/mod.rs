@@ -18,6 +18,7 @@ pub mod parallax_detail;
 pub mod parallax_h264;
 pub mod parallax_health;
 pub mod parallax_receiver;
+pub mod parallax_tier;
 pub mod snmp;
 pub mod sysinfo;
 pub mod sysinfo_detail;

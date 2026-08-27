@@ -6,13 +6,18 @@ feedback, and receiver-driven adaptation.
 Live plan — corrected against what shipped. Archived rationale graduates to
 [`docs/design/`](../../design/) and to `zensight-sensor-parallax/docs/streams.md`.
 
+**All four gaps are closed.** What remains open under this milestone is
+[#801](https://git.marcpardo.eu/marcpardo/zensight/issues/801), which the measurement found
+rather than planned: nothing counts what Zenoh's transport dropped, so a congested `tcp/` link
+and a lossy one still read the same.
+
 ## Why
 
-The `@media` plane works. What it cannot do is explain itself.
+The `@media` plane works. What it could not do is explain itself.
 
-A tile that goes soft gives an operator no way to tell whether the camera is starved, the
-encoder is dropping, the link is lossy, the decoder is behind, or the UI is. And a viewer whose
-link degrades has exactly one recovery move: a human clicking a lower tier.
+A tile that went soft gave an operator no way to tell whether the camera was starved, the
+encoder was dropping, the link was lossy, the decoder was behind, or the UI was. And a viewer
+whose link degraded had exactly one recovery move: a human clicking a lower tier.
 
 Four gaps, in dependency order:
 
@@ -29,9 +34,12 @@ Four gaps, in dependency order:
 3. ~~**The producer never hears from the consumer.**~~ **Closed by #714/#715.** RFC 04 R6 makes
    the data planes producer→consumer only, so feedback had no home in the grammar; RFC 07 §1.1
    gave it one on `@rpc`, and the sensor serves it and publishes the per-tier aggregate.
-4. **Adaptation is a human clicking a tier.** The clock, the report, a *reporter* and now a
-   measured loss model all exist, so this is a controller waiting to be written — #720, and
-   nothing gates it any more.
+4. ~~**Adaptation is a human clicking a tier.**~~ **Closed by #720.** The tile now moves itself
+   down a rung when its own report says the link degraded, and back up only after sustained
+   recovery — separate thresholds, a minimum dwell, a post-switch cooldown whose reports are
+   discarded rather than averaged, and an operator's click that pins the stream until they
+   hand control back. It changes its own subscription and never asks the sensor to re-tune a
+   shared tier (RFC 07 §1.2).
 
 ## What is already done — do not re-plan it
 
@@ -42,7 +50,7 @@ Four gaps, in dependency order:
 | Keyframe requests, four transports, coalesced | `StreamControl::RequestKeyframe`; parallax `ForceKeyUnit` / `KeyframeHandle` / matching edge |
 | Concurrent quality tiers + per-viewer selector | RFC 07 §1, `TierSpec`, #497, #498, #502, #507 |
 | Sequence-gap detect → resync → keyframe, with backoff | `zensight/src/view/specialized/parallax_h264.rs` |
-| The receiver half: deadline, bounded queue, drop taxonomy, the reporter | `zensight/docs/media-receiver.md` (#716, #717, #718) |
+| The receiver half: deadline, bounded queue, drop taxonomy, the reporter, the tier controller | `zensight/docs/media-receiver.md` (#716, #717, #718, #720) |
 | Sender-side stats | `telemetry/parallax/{stream}/stats/{fps,kbps,drops,rc_drops,viewers,encode_ms}` (#407, #503) |
 | Every runtime encoder handle | `zensight-sensor-parallax/src/pipeline.rs:289` — cloned, reachable, deliberately undriven (#504, #513) |
 | Codec identification for a decoder | parallax `h264_profile_level_id` (#215); zenkey #303 — the codec string is derived from the SPS, deliberately **not** carried on the wire |
@@ -117,7 +125,7 @@ in this epic is waiting on a decision.
 | #718 | **Done.** Both tile kinds publish `MediaReceiverReport` every 3 s |
 | #719 | **Done.** Stream health panel — the chain, and which hop is losing the picture |
 | #801 | New, from #713: count what the transport dropped — congestion is invisible to every counter we publish |
-| #720 | Receiver-driven tier selection with hysteresis — **unblocked**; the loss model to cite is `loss-measurement.md` verdict 1 |
+| #720 | **Done.** Receiver-driven tier selection with hysteresis — the loss model it cites is `loss-measurement.md` verdict 1; the design is in `zensight/docs/media-receiver.md` |
 | #721 | **Done.** [`recovery-policy.md`](recovery-policy.md); the durable half is in `zensight-sensor-parallax/docs/streams.md` |
 
 ### Browser twins — milestone *Browser frontend for the @media plane* (#704)
@@ -144,7 +152,7 @@ zenkey #366 #367 #368            protocol, decided first
         │
         └───────────────────────► #716 ✔, #717 ✔ ──► #719 ✔
                                                          │
-        #713 ✔ (measure) ──────────────────────────────┴──► #720
+        #713 ✔ (measure) ──────────────────────────────┴──► #720 ✔
 ```
 
 `#722`/`#723` follow their own epic's order (#705 → #706 → #707 → these two).

@@ -8,6 +8,7 @@ use iced::{Element, Length, Subscription, Task, Theme};
 // built-in animation support or widget-level animations instead.
 use std::ops::ControlFlow;
 use std::sync::LazyLock;
+use std::time::Instant;
 
 use zensight_common::{
     ErrorReport, HealthSnapshot, HealthStatus, Protocol, SensorInfo, TelemetryPoint,
@@ -1988,7 +1989,29 @@ impl ZenSight {
                 }
             }
             Message::ParallaxOpenVideoTile { stream, tier } => {
-                return ControlFlow::Break(self.open_parallax_video_tile(stream, tier));
+                // A deliberate click pins the stream (#720). The controller
+                // stops deciding until the operator hands control back: a tier
+                // that moved itself back after a chosen click would be
+                // indistinguishable from a bug.
+                if let Some(device) = self
+                    .selected_device
+                    .as_mut()
+                    .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+                {
+                    let now = Instant::now();
+                    device.parallax_detail.controller(&stream, now).pin(now);
+                }
+                return ControlFlow::Break(self.open_parallax_video_tile(stream, tier, true));
+            }
+            Message::ParallaxAutoTier { stream } => {
+                if let Some(device) = self
+                    .selected_device
+                    .as_mut()
+                    .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+                {
+                    let now = Instant::now();
+                    device.parallax_detail.controller(&stream, now).unpin(now);
+                }
             }
             Message::ParallaxRequestKeyframe { stream } => {
                 return ControlFlow::Break(self.request_parallax_keyframe(stream));
@@ -4770,7 +4793,7 @@ impl ZenSight {
             }
         };
         Task::future(async move {
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             // A concrete single-origin key has exactly one queryable, so
             // BestMatching is the honest target here; QueryTarget::All is for
             // fleet fan-in (RFC 05 §2.1).
@@ -5411,6 +5434,33 @@ impl ZenSight {
     /// reason its frames are: they describe a subscription that no longer
     /// exists, and the sensor would age the stale `consumer_id` out anyway —
     /// but only after counting it as a live viewer for one idle window.
+    /// The tier this stream should move to, if any (#720).
+    ///
+    /// Two guards and a lookup; the decision itself belongs to the view state
+    /// that owns the tiles and the controllers — see
+    /// [`ParallaxDetailState::tier_decision`].
+    fn parallax_tier_decision(
+        &mut self,
+        stream: &str,
+    ) -> Option<(String, crate::view::specialized::parallax_tier::Move)> {
+        // Demo mode fabricates telemetry; a tier switch there would be a tile
+        // reopening against a sensor that does not exist. And a build without
+        // the decoder has no video tile to move — belt and braces, since the
+        // stub `open_parallax_video_tile` toasts a build hint, and a controller
+        // that reached it would toast every report cadence.
+        if self.demo_mode || !crate::view::specialized::parallax_h264::AVAILABLE {
+            return None;
+        }
+        let deadline = self.settings.max_live_latency();
+        let device = self.selected_device.as_mut()?;
+        if device.device_id.protocol != zensight_common::Protocol::Parallax {
+            return None;
+        }
+        device
+            .parallax_detail
+            .tier_decision(stream, deadline, Instant::now())
+    }
+
     fn send_parallax_report(
         &mut self,
         stream: String,
@@ -5431,25 +5481,56 @@ impl ZenSight {
             return Task::none();
         }
         let source = device.device_id.source.clone();
-        if self.demo_mode || self.command_registry.is_none() {
-            return Task::none();
-        }
-        let Some(key) = self.parallax_stream_report_key(&source) else {
-            return Task::none();
-        };
+        // The report is also the tier controller's tick (#720), and it is
+        // decided BEFORE the reporting guards below on purpose: choosing a rung
+        // is this viewer's own business (RFC 07 §1.2 — the producer must not do
+        // it for us), so a viewer that cannot *tell* the producer how the
+        // stream is arriving must still be able to act on it. Tying adaptation
+        // to a reachable `stream/report` would disable it exactly where the
+        // link is worst.
+        let switch = self.parallax_tier_decision(&stream);
         // Quiet on success, like the resync keyframe request: a report every
         // few seconds per open tile would otherwise be a toast every few
         // seconds. A refusal still surfaces — `error/busy` means this cadence
         // is over the producer's declared ceiling, which is a bug worth seeing
         // — but through `ParallaxReportOutcome`, which says it once rather
         // than once per cadence.
-        self.send_command(key, &report, String::new())
-            .map(|message| match message {
-                Message::CommandFeedback { success, message } => {
-                    Message::ParallaxReportOutcome { success, message }
+        let send = if self.demo_mode || self.command_registry.is_none() {
+            Task::none()
+        } else {
+            match self.parallax_stream_report_key(&source) {
+                Some(key) => self
+                    .send_command(key, &report, String::new())
+                    .map(|message| match message {
+                        Message::CommandFeedback { success, message } => {
+                            Message::ParallaxReportOutcome { success, message }
+                        }
+                        other => other,
+                    }),
+                None => Task::none(),
+            }
+        };
+        let Some((tier, direction)) = switch else {
+            return send;
+        };
+        // Say it once, in terms of the event rather than the mechanism. A
+        // quality change nobody asked for is exactly the thing an operator
+        // should not have to infer from a button turning grey.
+        self.toasts.push(
+            ToastSeverity::Info,
+            match direction {
+                crate::view::specialized::parallax_tier::Move::Up => {
+                    format!("{stream}: link recovered — video back up to {tier}")
                 }
-                other => other,
-            })
+                _ => format!("{stream}: link degraded — video dropped to {tier}"),
+            },
+        );
+        // Queued after the report so the producer's aggregate still hears from
+        // the consumer id that measured the window being reported: a report
+        // sent from the far side of a reopen names a consumer that no longer
+        // exists, and leaves a phantom in the aggregate until the sensor's idle
+        // timeout reaps it.
+        Task::batch([send, self.open_parallax_video_tile(stream, tier, false)])
     }
 
     /// The v1 origin of the currently-selected device when it belongs to
@@ -6524,7 +6605,12 @@ impl ZenSight {
     /// toast the build hint. The tile is per-stream (one tile); opening a
     /// different tier replaces it and aborts the old subscriber.
     #[cfg(feature = "h264")]
-    fn open_parallax_video_tile(&mut self, stream: String, tier: String) -> Task<Message> {
+    fn open_parallax_video_tile(
+        &mut self,
+        stream: String,
+        tier: String,
+        announce: bool,
+    ) -> Task<Message> {
         use crate::view::specialized::parallax_h264;
         let Some(source) = self
             .selected_device
@@ -6616,13 +6702,25 @@ impl ZenSight {
                 codec: Some("h264".to_string()),
                 tier: Some(tier.clone()),
             });
-        let mut send =
-            self.send_command(cmd_key.clone(), &open, format!("Opened video for {stream}"));
+        // `announce` is false for an automatic tier move (#720): the caller
+        // says once, in its own words, that the link changed and what it did
+        // about it. The manual pair — "Opened video" then "Closed preview" —
+        // would otherwise fire twice every switch and describe the mechanism
+        // rather than the event.
+        let opened = if announce {
+            format!("Opened video for {stream}")
+        } else {
+            String::new()
+        };
+        let mut send = self.send_command(cmd_key.clone(), &open, opened);
         if let Some(close) = old_close {
             let close = zensight_common::command::Command::new(close);
-            send = self
-                .send_command(cmd_key, &close, format!("Closed preview for {stream}"))
-                .chain(send);
+            let closed = if announce {
+                format!("Closed preview for {stream}")
+            } else {
+                String::new()
+            };
+            send = self.send_command(cmd_key, &close, closed).chain(send);
         }
         Task::batch([send, frames])
     }
@@ -6630,7 +6728,12 @@ impl ZenSight {
     /// Without the `h264` feature the video tile is a stub: explain how to
     /// get it instead of failing silently (#409).
     #[cfg(not(feature = "h264"))]
-    fn open_parallax_video_tile(&mut self, _stream: String, _tier: String) -> Task<Message> {
+    fn open_parallax_video_tile(
+        &mut self,
+        _stream: String,
+        _tier: String,
+        _announce: bool,
+    ) -> Task<Message> {
         self.toasts.push(
             ToastSeverity::Info,
             crate::view::specialized::parallax_h264::UNAVAILABLE_HINT.to_string(),
@@ -6708,7 +6811,7 @@ impl ZenSight {
                 .parallax_detail
                 .resolve_tier(&stream)
                 .unwrap_or_else(|| "medium".to_string());
-            return self.open_parallax_video_tile(stream, tier);
+            return self.open_parallax_video_tile(stream, tier, true);
         }
         Task::none()
     }

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use iced::futures::Stream;
 use iced::widget::image;
@@ -27,7 +27,9 @@ use zensight_common::{Format, decode};
 
 use super::fetch::Fetch;
 use super::parallax::preview_handle_from_jpeg;
+use super::parallax_receiver;
 use super::parallax_receiver::{DecodeLoss, REPORT_INTERVAL, ReceiverStats, Shed};
+use super::parallax_tier::{self, TierController};
 use crate::message::Message;
 
 /// Smoothing factor for the tile fps EMA (per frame).
@@ -59,6 +61,13 @@ pub struct ParallaxDetailState {
     /// Lives on this state (not the app) so every existing teardown choke
     /// point that clears the tiles also dismisses the overlay.
     pub expanded: Option<ExpandedTile>,
+    /// Per-stream tier controllers (#720), keyed by stream.
+    ///
+    /// **Not on [`TileState`]**, deliberately: a tier switch replaces the tile,
+    /// and a controller that died with it would forget its dwell and its
+    /// post-switch cooldown at exactly the moment they exist to matter — which
+    /// is a flapping controller by construction.
+    pub controllers: BTreeMap<String, TierController>,
     /// Generation source for [`Self::allocate_generation`].
     next_generation: u64,
 }
@@ -326,6 +335,74 @@ impl ParallaxDetailState {
         true
     }
 
+    /// The tier `stream` should move to, if any (#720).
+    ///
+    /// The receiver report is the controller's tick: the same window of
+    /// evidence the producer is about to be told, read a second time to decide
+    /// whether *this viewer* belongs on a different rung. Nothing new goes on
+    /// the wire — RFC 07 §1.2 forbids asking the producer to re-tune a shared
+    /// tier, and the ladder (#494/#502/#507) exists so the viewer can answer
+    /// for itself.
+    ///
+    /// `deadline` is the viewer's frame-age deadline (#716); `None` means the
+    /// operator asked for no latency policy, and the age input is dropped
+    /// rather than defaulted.
+    ///
+    /// Returns `None` — and leaves the dwell untouched — whenever there is no
+    /// move to make, **including at the ends of the ladder**. Resetting the
+    /// dwell for a switch that never happened is how a controller already on
+    /// the bottom rung starves itself of the recovery window it is waiting for.
+    pub fn tier_decision(
+        &mut self,
+        stream: &str,
+        deadline: Option<Duration>,
+        now: Instant,
+    ) -> Option<(String, parallax_tier::Move)> {
+        let (current, signals) = {
+            let tile = self.tiles.get(stream)?;
+            // A preview tile has no tier, and nothing to move to.
+            let current = tile.video.then(|| tile.selected_tier.clone()).flatten()?;
+            let signals =
+                parallax_tier::signals(tile.prev_report.as_ref()?, tile.last_report.as_ref()?)?;
+            (current, signals)
+        };
+        let tiers = self
+            .catalogue
+            .ready()?
+            .iter()
+            .find(|d| d.stream == stream)?
+            .tiers
+            .clone();
+        let decision = self.controller(stream, now).observe(
+            &signals,
+            deadline,
+            parallax_receiver::DECODE_QUEUE_CAP as u32,
+            now,
+        );
+        let to = parallax_tier::next_tier(&tiers, &current, decision)?;
+        self.controller(stream, now).note_switch(now);
+        // The direction travels with the target so the caller can say *why* the
+        // picture just changed. An operator who did not ask for a quality
+        // change is owed the reason, not just the new number.
+        Some((to, decision))
+    }
+
+    /// Whether an operator's tier choice has pinned this stream (#720).
+    ///
+    /// A read-only view for the catalogue row: a stream with no controller yet
+    /// is not pinned, and asking must not create one — the render pass has no
+    /// business minting state.
+    pub fn is_pinned(&self, stream: &str) -> bool {
+        self.controllers.get(stream).is_some_and(|c| c.pinned())
+    }
+
+    /// This stream's tier controller, created on first use.
+    pub fn controller(&mut self, stream: &str, now: Instant) -> &mut TierController {
+        self.controllers
+            .entry(stream.to_string())
+            .or_insert_with(|| TierController::new(now))
+    }
+
     /// The subscriber task for `stream` finished (error or clean end).
     /// End reports from a replaced tile incarnation are ignored — clearing
     /// the NEW tile's abort handle here would leak (and orphan) its live
@@ -383,6 +460,11 @@ impl ParallaxDetailState {
         {
             self.expanded = None;
         }
+        // The controller goes with the tile. An operator who closes a stream
+        // and opens it again is starting over, including their pin: a pin that
+        // outlived the tile would silently disable adaptation on a tile the
+        // operator never pinned.
+        self.controllers.remove(stream);
         if let Some(tile) = self.tiles.remove(stream)
             && let Some(abort) = tile.abort
         {
@@ -397,6 +479,7 @@ impl ParallaxDetailState {
     /// reap the wrong per-tier refcount).
     pub fn teardown(&mut self) -> Vec<(String, StreamControl)> {
         self.expanded = None;
+        self.controllers.clear();
         let closes: Vec<(String, StreamControl)> = self
             .tiles
             .iter()
