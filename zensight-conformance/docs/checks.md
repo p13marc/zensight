@@ -44,7 +44,7 @@ Per state family with a declared `ttl_s`, a bounded state snapshot
 | check | severity | what it means here |
 |---|---|---|
 | `stale-state` | error | a state key's newest sample is older than its declared `ttl_s`. A sensor that stopped publishing a family it still declares. |
-| `unstamped-state` | warning | a state sample carries no HLC timestamp, so LWW cannot order it and freshness is unjudgeable. See the correlator entry under "Known findings" in the README — this is currently a **real** ZenSight finding, and deliberately not excluded. |
+| `unstamped-state` | warning | a state sample carries no HLC timestamp, so LWW cannot order it and freshness is unjudgeable. It fired against this deployment until #782: zenoh's session HLC stamps a `put` and not a queryable *reply*, so both state-class seeds — the correlator's entities and every sensor's firing alerts — answered unstamped. Deliberately not excluded, and now green. |
 | `storage-coverage` | **info** | declared state families with no storage behind them. Every one of ours, in every run without a storage plugin: volatile seeding rides the advanced pub/sub cache and the seed queryables instead. |
 
 ### 4. The listen window (`--for N`, default 12 s in CI)

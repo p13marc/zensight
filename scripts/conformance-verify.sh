@@ -32,14 +32,21 @@ PROFILE="${PROFILE:-release}"
 # different introspect key — RFC 08 §6's property D4 — so running both covers
 # both halves of the slice diff). Override to judge a bigger one.
 SENSORS="${SENSORS:-sysinfo}"
-# The correlator (the `@catalog` service origin) is OFF by default, and that is
-# a finding rather than a preference — see zensight-conformance/README.md,
-# "Known findings": its entities seed queryable replies untimestamped, which the
-# deep freshness check correctly reports as `unstamped-state`. It is not
-# excluded from the gate, so `CORRELATOR=1` reproduces the finding and the day
-# the correlator stamps its seed replies this becomes the CI default with no
-# change to the gate.
-CORRELATOR="${CORRELATOR:-0}"
+# The correlator (the `@catalog` service origin) is ON, as of #782.
+#
+# It was off, and that was a finding rather than a preference: its entities seed
+# queryable replied untimestamped, which the deep freshness check correctly
+# reported as `unstamped-state`. Both this comment and
+# zensight-conformance/README.md promised that the day the correlator stamped
+# its seed replies it would join the CI deployment with no change to the gate.
+# #782 stamped them, and this is that day — `unstamped-state` was never in
+# `gate::DEFAULT_EXCLUDED`, so nothing needed un-excluding.
+#
+# It earns its place beyond closing that loop: `@catalog` is a **service**
+# origin, whose verbatim `@` chunk makes it a structurally different introspect
+# key (RFC 08 §6, property D4), so running both covers both halves of the slice
+# diff.
+CORRELATOR="${CORRELATOR:-1}"
 # The passive listening window: how long the doctor watches the data planes
 # before judging what rode. Shorter in CI than a human would use — every
 # second here is a second of a 2-lane runner.

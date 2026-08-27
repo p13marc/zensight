@@ -34,7 +34,7 @@ pub async fn serve_entities(
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key = entities_query_key();
-    let queryable = zensight_common::served::serve_queryable(&session, &key)
+    let queryable = zensight_common::served::serve_state_queryable(&session, &key)
         .await
         .map_err(|e| anyhow::anyhow!("declare entities queryable: {e}"))?;
     info!(key = %key, "entities seed queryable ready");
@@ -47,13 +47,29 @@ pub async fn serve_entities(
             query = queryable.recv_async() => {
                 let Ok(query) = query else { break };
                 // Storage-shaped seed (RFC 05 §4): one reply per entity on
-                // its concrete state key.
-                let entities = state.lock().unwrap().current_entities();
+                // its concrete state key, stamped — a producer answering a
+                // plain GET on a state selector IS a storage for the duration
+                // of that reply, and a storage's samples are timestamped
+                // (RFC 04 §3.2, #782).
+                //
+                // The stamp is taken INSIDE the lock, with the snapshot it
+                // describes. Stamping per reply instead would let an entity
+                // the engine updates mid-loop have its live `put` stamped
+                // earlier than this loop's stale copy, and LWW would keep the
+                // stale one. Same session as every entity `put`, so the two
+                // are totally ordered.
+                let (entities, stamp) = {
+                    let guard = state.lock().unwrap();
+                    (
+                        guard.current_entities(),
+                        zensight_common::served::seed_stamp(&session),
+                    )
+                };
                 for entity in entities {
                     let key = zensight_common::entity_key(&entity.entity_id);
                     match serde_json::to_vec(&entity) {
                         Ok(payload) => {
-                            if let Err(e) = query.reply(key, payload).await {
+                            if let Err(e) = query.reply_state(&key, payload, stamp).await {
                                 warn!(error = %e, "entities seed reply failed");
                             }
                         }
