@@ -975,6 +975,14 @@ mod tests {
         use parallax::element::Element;
         use parallax::metadata::Metadata;
 
+        // Sweep the release queue before asking for a slot, exactly as the GUI
+        // does. A released slot is queued, not freed in place, and only the
+        // owner drains that queue — a mirror that skipped the sweep would run
+        // dry after `slot_count` access units. That is the freeze this helper
+        // was supposed to model and did not: it claims to mirror the tile
+        // decoder step for step, so the sweep belongs here or the claim is
+        // false in the one place it mattered.
+        arena.reclaim();
         let mut slot = arena.acquire().expect("arena slot");
         slot.data_mut()[..au.len()].copy_from_slice(au);
         let input = Buffer::new(

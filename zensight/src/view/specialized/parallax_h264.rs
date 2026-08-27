@@ -143,6 +143,18 @@ mod real {
                     nal.len()
                 ));
             }
+            // Sweep the release queue FIRST. A dropped slot is pushed onto the
+            // arena's queue, not freed in place, and only the owner drains it —
+            // `SharedArena::acquire` does not, it just scans for an already-free
+            // slot. Nothing else in either process hits this because everything
+            // else allocates through the engine's `OutputArena`, whose
+            // `try_acquire` reclaims on every call; this is the one hand-rolled
+            // `SharedArena` we own. Without the sweep the tile handed out its
+            // AU_SLOTS slots exactly once and then starved forever: the video
+            // froze on the 8th decoded frame — no error, no resync, no timeout,
+            // GUI still responsive — because a starved `acquire` is reported
+            // below as ordinary decoder buffering.
+            self.arena.reclaim();
             // `None` means every slot is still held by the decoder or by a
             // frame the UI has not dropped yet — transient backpressure, not
             // an error, so the tile waits for the next AU rather than resyncing.
@@ -416,6 +428,54 @@ mod real {
                         .expect("decode next")
                         .is_some(),
                 "decoder must recover after reset + IDR"
+            );
+        }
+
+        /// A tile must keep decoding past its arena's slot count.
+        ///
+        /// The slots come back through the arena's release queue, which only a
+        /// `reclaim()` drains — without one the tile decoded exactly
+        /// [`AU_SLOTS`] frames and then froze on the last picture forever,
+        /// silently: a starved `acquire` is `Ok(None)`, which the stream loop
+        /// reads as "decoder buffered, more data coming", so no error surfaced,
+        /// no resync fired, and the no-decode watchdog stayed disarmed (it only
+        /// covers a tile that never decoded *anything*). The round trip above
+        /// runs five frames and could never see it.
+        #[test]
+        fn decoding_continues_past_the_arena_slot_count() {
+            let (w, h) = (64u32, 48u32);
+            let mut encoder = H264Encoder::new(
+                H264EncoderConfig::new()
+                    .bitrate(200_000)
+                    .frame_rate(10.0)
+                    .keyframe_interval(10),
+            )
+            .expect("create encoder");
+            let mut decoder = H264TileDecoder::new().expect("create decoder");
+
+            let frames = AU_SLOTS * 4;
+            let mut decoded = 0usize;
+            for i in 0..frames {
+                // Vary the luma so every frame carries residual and the encoder
+                // never emits an empty AU.
+                let mut yuv = vec![(64 + (i * 7) % 128) as u8; (w * h) as usize];
+                yuv.extend(std::iter::repeat_n(128u8, (w * h / 2) as usize));
+                let nal = encoder.encode_yuv420_at(&yuv, w, h).expect("encode frame");
+                if nal.is_empty() {
+                    continue;
+                }
+                if decoder
+                    .decode_to_rgba(&nal)
+                    .expect("decode access unit")
+                    .is_some()
+                {
+                    decoded += 1;
+                }
+            }
+            assert!(
+                decoded > AU_SLOTS,
+                "decoded only {decoded} of {frames} frames — the arena starved at its \
+                 {AU_SLOTS}-slot ceiling instead of reclaiming released slots"
             );
         }
     }
