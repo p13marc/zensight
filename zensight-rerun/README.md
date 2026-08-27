@@ -1,9 +1,41 @@
 # zensight-rerun
 
-> **PROTOTYPE — evaluation only (epic #415).** This crate exists to evaluate
-> [Rerun](https://rerun.io) 0.34 as an *optional* visualization/replay backend for ZenSight.
-> It is `publish = false`, nothing depends on it, and it may be deleted wholesale if the
-> evaluation concludes "do not adopt". Design notes and findings: [`docs/plans/rerun/`](../docs/plans/rerun/).
+> **Decided: an optional debugging backend (#430).** The evaluation (epic #415)
+> concluded on 2026-08-26. This crate stays in-tree, `publish = false`, out of
+> the release train, and off unless you run the binary. It is **supported for
+> bounded incident capture and replay** and for nothing else. The reasoning,
+> the costs, and what was never measured:
+> [`docs/plans/rerun/DECISION.md`](../docs/plans/rerun/DECISION.md).
+
+## What this is for, and what it is not
+
+**Supported**: capturing a bounded incident, replaying it offline, handing a
+`.rrd` to a colleague, and scrubbing backwards across metrics, alerts, events
+and topology on one time axis — which the Iced frontend cannot do.
+
+**Not supported**: continuous recording, always-on live monitoring, `.rrd` as an
+archive across Rerun versions, or anything an operator *acts* on (alert
+acknowledgement, configuration, artifacts — all of those are the frontend's).
+
+**This adapter is a visualization, not a system of record.** The frontend and
+its redb store are. If the adapter is down, the viewer has a gap: the bus does
+not buffer for late consumers, so alert *state* can be missed entirely and
+resyncs only at the next transition.
+
+## Three rules, every time
+
+1. **`--bind 127.0.0.1`.** `rerun --serve-web` binds the web viewer **and** the
+   gRPC proxy to `0.0.0.0` by default, and that transport is unauthenticated and
+   unencrypted while the payload is hostnames, IPs, MACs, flow matrices and log
+   lines. Remote viewing is an SSH tunnel, not a bind address.
+2. **`rerun rrd optimize` before you store or share a recording.** Live writes
+   cost ~1.3 KiB per scalar point; compaction takes that to ~100 B — 13x on our
+   own data — and it doubles as the repair tool for a `kill -9`-truncated file.
+3. **`--memory-limit`** on any session that outlives a demo. The viewer keeps
+   its store in RAM.
+
+Treat a `.rrd` as you would treat a packet capture: it is bulk telemetry, and
+nobody has yet audited which fields reach it (see DECISION.md §7).
 
 A standalone adapter that consumes the Zenoh bus exactly like the exporters do — telemetry
 (`zensight/v1/*/telemetry/**`), alerts (`zensight/v1/*/state/*/alert/*`), health
