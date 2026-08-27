@@ -46,6 +46,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A losing Transport hop now says whether the sender is congested or the link
+  is dropping** (#801, epic #712).
+
+  #719 named the hop. Naming Transport turned out to be half an answer: two
+  opposite faults wear that name, and #713 measured both producing *identical*
+  counters — `stats/drops` reads **zero** whether a `tcp/` link is congested
+  (83 % of sequences missing at 300 kbit) or a QUIC link is dropping packets
+  (20 % missing at 1 % loss), because congestion discards frames inside Zenoh's
+  own transport queue, upstream of every counter the sensor has.
+
+  What separates them is **frame age**, by three orders of magnitude: 3 502 ms
+  and 9 085 ms under congestion against 0.77 ms and 0.78 ms under in-flight
+  loss. Above 500 ms a losing Transport hop now reads "the sender is congested.
+  What does arrive is 3.5 s old, so the frames were discarded before the wire
+  and no counter here saw it"; below it, "they were lost in flight … nothing is
+  queueing; the link is dropping."
+
+  Deliberately **not** the new counter the issue was opened for: Zenoh counts
+  transport drops only under its `stats` cargo feature and only per *link*
+  (`zenoh_stats::LinkStats`), never per publisher, so a link-level number under
+  a stream's key would be an unattributable number wearing an attributable
+  name. Frame age is already measured, already reported, and already
+  per-stream.
+
+  The test runs only once the hop is already losing ≥ 15 %, so a fresh stream
+  with a leisurely age is not accused of anything, and an unstamped stream keeps
+  the location without a cause — "not asked" is not "answered no".
+
 - **The viewer moves itself down a rung — receiver-driven tier selection** (#720,
   epic #712).
 

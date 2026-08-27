@@ -1,4 +1,4 @@
-# The media tiles' receiver half (#716, #717, #718, #720)
+# The media tiles' receiver half (#716, #717, #718, #720, #801)
 
 How a parallax tile measures its own stream, what it does about being late, and what it
 tells the producer. The sender's half — capture, encoding, tiers, keyframes — is
@@ -169,7 +169,7 @@ is normative that a producer must not re-tune a shared tier from one consumer's 
 It folds reports into the per-tier `{stream}/rx/{tier}/*` aggregate and publishes that.
 The sanctioned adaptation is this end changing which tier key it subscribes to — #720.
 
-## The health panel (#719)
+## The health panel (#719, #801)
 
 The numbers above answer "what is happening"; the panel answers the question an operator
 actually has, which is **"which stage is losing it?"**. It is the drill-down on a tile: click
@@ -208,6 +208,50 @@ Three honesty rules the panel is built around:
 - **Missing inputs read as `not asked`** — the same vocabulary the fleet view uses (RFC 09
   §5.1 O4). An unstamped stream shows frame age unavailable, never `0 ms`; a preview tile
   shows `no queue`, never `0`.
+
+### A losing Transport hop says *why* (#801)
+
+Naming Transport is only half an answer, because two opposite faults wear that name and no
+counter in this stack tells them apart. #713 measured both:
+
+| | frames missing | `stats/drops` | median frame age |
+|---|---|---|---|
+| `tcp/` congested (300 kbit, 1.7 Mbps offered) | 83 % | **0** | **3 502 ms** |
+| `tcp/` starved (100 kbit) | 93 % | **0** | **9 085 ms** |
+| `quic/…?mixed_rel=1`, 1 % packet loss | 20 % | 0 | **0.77 ms** |
+| same, 5 % packet loss | 57 % | 0 | **0.78 ms** |
+
+`stats/drops` reads **zero in every row**: under congestion the frames die in Zenoh's own
+transport queue under `CongestionControl::Drop`, upstream of every counter the sensor has. So
+the sender cannot tell you, and the receiver's *loss* number cannot either — both rows lose
+frames.
+
+**Frame age can, and by three orders of magnitude.** A losing Transport hop whose frames
+arrive seconds old is a congested sender; one whose frames arrive fresh is a link dropping
+packets. Above `CONGESTED_AGE_MS` (500 ms — far above a healthy WAN path, far below anything
+congestion produced) the panel says so:
+
+> Transport: 83% of the frames offered to it are not coming out — the sender is congested.
+> What does arrive is 3.5 s old, so the frames were discarded before the wire and no counter
+> here saw it.
+
+> Transport: 20% of the frames offered to it are not coming out — they were lost in flight.
+> What does arrive is 0.8 ms old, so nothing is queueing; the link is dropping.
+
+The test only runs once the hop is *already* losing ≥ 15 %, so a fresh stream with a leisurely
+age is not accused of anything, and an unstamped stream keeps the location without a cause —
+"not asked" is not "answered no".
+
+Why this rather than the counter #801 was opened for: Zenoh's transport drops are counted only
+under its `stats` cargo feature, and only per **link** (`zenoh_stats::LinkStats`), never per
+publisher. A sensor has one session and many publishers, so a link-level number under a
+stream's key would be an unattributable number wearing an attributable name. The frame age is
+already measured, already reported, already per-stream, and already right.
+
+It changes nothing for the tier controller (#720): both faults want a smaller tier, one for
+fewer bytes per second and the other for fewer datagrams per access unit. It changes a great
+deal for the person reading the panel, who otherwise cannot tell whether to widen the pipe or
+fix the link.
 
 Source columns come from the sensor's own `{stream}/stats/*` and the per-tier status doc;
 `drops` and `rc_drops` stay separate rows because they are disjoint by construction and mean
@@ -359,5 +403,5 @@ judged.
 | `zensight/src/app.rs` | `parallax_stream_report_key`, `send_parallax_report`, `parallax_tier_decision` |
 | `zensight/src/view/specialized/parallax_tier.rs` | the controller: signals, thresholds, dwell, the ladder (#720) |
 | `zensight/src/view/settings.rs` | `max_live_latency_ms` |
-| `zensight/src/view/specialized/parallax_health.rs` | the chain, the verdict, the panel (#719) |
+| `zensight/src/view/specialized/parallax_health.rs` | the chain, the verdict, the panel (#719); congestion vs in-flight loss (#801) |
 | `zensight/tests/media_receiver_live.rs` | the live loop, `#[ignore]`d |

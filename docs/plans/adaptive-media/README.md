@@ -6,10 +6,10 @@ feedback, and receiver-driven adaptation.
 Live plan — corrected against what shipped. Archived rationale graduates to
 [`docs/design/`](../../design/) and to `zensight-sensor-parallax/docs/streams.md`.
 
-**All four gaps are closed.** What remains open under this milestone is
-[#801](https://git.marcpardo.eu/marcpardo/zensight/issues/801), which the measurement found
-rather than planned: nothing counts what Zenoh's transport dropped, so a congested `tcp/` link
-and a lossy one still read the same.
+**All four gaps are closed, and so is the fifth the measurement found** —
+[#801](https://git.marcpardo.eu/marcpardo/zensight/issues/801): a congested `tcp/` link and a
+lossy one produced identical counters (`stats/drops` at zero in both), and the panel now tells
+them apart by frame age, which differs between them by three orders of magnitude.
 
 ## Why
 
@@ -124,7 +124,7 @@ in this epic is waiting on a decision.
 | #717 | **Done.** Bounded decode queue, real queue depth, and a drop taxonomy |
 | #718 | **Done.** Both tile kinds publish `MediaReceiverReport` every 3 s |
 | #719 | **Done.** Stream health panel — the chain, and which hop is losing the picture |
-| #801 | New, from #713: count what the transport dropped — congestion is invisible to every counter we publish |
+| #801 | **Done.** From #713: congestion was invisible to every counter we publish. Not a new counter — Zenoh counts transport drops per *link*, never per publisher — but a distinction the health panel can already draw, from frame age |
 | #720 | **Done.** Receiver-driven tier selection with hysteresis — the loss model it cites is `loss-measurement.md` verdict 1; the design is in `zensight/docs/media-receiver.md` |
 | #721 | **Done.** [`recovery-policy.md`](recovery-policy.md); the durable half is in `zensight-sensor-parallax/docs/streams.md` |
 
