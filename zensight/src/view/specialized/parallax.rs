@@ -178,6 +178,20 @@ fn catalogue_row<'a>(
             }
             buttons = buttons.push(action_tooltip(b, tier_tooltip(spec)));
         }
+        // Adaptation is on by default and says so only when it is *not*
+        // running (#720): a badge that is always lit is furniture, and the
+        // state worth surfacing is the one the operator created and can undo.
+        if open && detail.is_pinned(&stream.stream) {
+            buttons = buttons.push(action_tooltip(
+                button(text("Auto").size(12)).on_press(Message::ParallaxAutoTier {
+                    stream: stream.stream.clone(),
+                }),
+                "Pinned by your tier choice — hand tier selection back to the \
+                 viewer, which drops a rung when the link degrades and climbs \
+                 back after sustained recovery"
+                    .to_string(),
+            ));
+        }
         if open {
             buttons = buttons.push(button(text("Close").size(12)).on_press(
                 Message::ParallaxCloseTile {

@@ -46,6 +46,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The viewer moves itself down a rung — receiver-driven tier selection** (#720,
+  epic #712).
+
+  #502 gave a viewer a per-tier button; this is the same decision made every
+  three seconds from the tile's own [`MediaReceiverReport`]. The report was
+  already being computed and sent (#718); the controller is a second read of it.
+
+  **The viewer changes its own subscription. It never asks the sensor to
+  re-tune an encoder.** RFC 07 §1.2 is normative — two operators on different
+  links watch the same camera, and one asking for less must not degrade the
+  other — so the only lever is which `<tier>` key the tile subscribes to, and
+  the feature adds no wire surface at all.
+
+  Downgrading is not merely cheaper here, it is *repair*: #713 measured loss
+  being amplified by access-unit size (1.5 % of an 842 B unit, 20 % of a 34 KB
+  one, 41 % of a 136 KB one, all at 1 % packet loss), so halving the bytes per
+  frame roughly halves the chance a frame is lost at all. Frame age is a
+  first-class input for the same reason — on `tcp/` the measured failure mode
+  was 3.5–9 s of age with the sensor's `stats/drops` at zero.
+
+  Three inputs (loss, frame age, decode-queue occupancy), each with **two**
+  thresholds and never one comparison flipped: any one triggers a downgrade,
+  all three must be healthy for an upgrade. Plus a 12 s minimum dwell, a 9 s
+  post-switch cooldown whose reports are **discarded rather than averaged**
+  (they describe the decoder rebuild, and folding them in teaches the
+  controller that switching causes the problem switching just fixed), and 30 s
+  of continuous health before any upgrade. A move at the end of the ladder is
+  not a move: no switch is sent and the dwell is not reset, because resetting
+  it is how a controller already on the bottom rung starves itself of the
+  recovery window it is waiting for.
+
+  Absent inputs stay absent — unstamped samples drop the age test rather than
+  reading as zero, and an unset deadline means the operator asked for no
+  latency policy — and rung order comes from `TierSpec::bitrate_kbps` rather
+  than from the order the catalogue lists tiers in.
+
+  **The human always wins.** An explicit tier click pins the stream; an `Auto`
+  button appears beside the tier buttons while pinned and hands control back.
+  There is no separate off switch: a pin *is* off, for the one stream the
+  operator pinned. Closing the tile drops the pin with it.
+
 - **What `@media` loss actually looks like — measured, and the recovery rule
   written down** (#713, #721, epic #712).
 

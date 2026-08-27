@@ -1,4 +1,4 @@
-# The media tiles' receiver half (#716, #717, #718)
+# The media tiles' receiver half (#716, #717, #718, #720)
 
 How a parallax tile measures its own stream, what it does about being late, and what it
 tells the producer. The sender's half — capture, encoding, tiers, keyframes — is
@@ -215,6 +215,107 @@ different things — a pipeline drop leaves a sequence gap, a rate-control drop 
 folding them would erase the difference between "this box is too slow" and "you asked for
 400 kbps".
 
+## The tier controller (#720)
+
+The report is also a controller tick. Every three seconds the tile has a fresh window of
+evidence about its own link, and the question it answers is the one an operator was
+answering by hand: **is this viewer on the right rung?**
+
+**The viewer changes its own subscription. It never asks the sensor to re-tune an encoder.**
+RFC 07 §1.2 is normative on that — two operators on different links watch the same camera,
+and one of them asking for less must not degrade the other. The escape hatch, if a
+deployment ever needs one viewer's private rate, is a tier of its own. So the controller's
+only lever is which `<tier>` key this tile subscribes to, and it needs no new wire surface
+at all.
+
+### Why a lower tier is the right lever
+
+The #713 measurement
+([`docs/plans/adaptive-media/loss-measurement.md`](../../docs/plans/adaptive-media/loss-measurement.md))
+found that loss is amplified by **access-unit size**: Zenoh fragments an access unit across
+datagrams and defragmentation is all-or-nothing, so at 1 % packet loss an 842 B unit was
+lost 1.5 % of the time, a 34 KB unit 20 %, a 136 KB unit 41 %. Halving the bytes per frame
+roughly halves the chance a frame is lost at all. Downgrading is not merely cheaper; on this
+plane it is *repair*.
+
+The same measurement is why frame age is a first-class input rather than a secondary one: on
+today's `tcp/` deployments congestion showed up as 3.5–9 s of frame age with the sensor's own
+`stats/drops` at zero.
+
+### The three inputs, and the shape of the decision
+
+| input | from | downgrade above | upgrade below |
+|---|---|---|---|
+| loss | `lost_frames` Δ ÷ (received + lost) Δ | 4 % | 0.5 % |
+| frame age | `frame_age_ms` | 0.75 × deadline | 0.30 × deadline |
+| decode queue | `decoder_queue_depth` ÷ `DECODE_QUEUE_CAP` | 0.60 | 0.20 |
+
+Any one of the three triggers a downgrade; **all three** must be healthy for an upgrade. The
+band between the two columns is the hysteresis, and it is why every threshold is two numbers
+and never one comparison flipped.
+
+An input that is absent stays absent. Unstamped samples mean `frame_age_ms: None` — "not
+asked", never zero — and the age test drops out rather than reading as either wonderfully
+fresh or hopelessly late. An unset deadline means the operator asked for no latency policy,
+and the controller does not invent one.
+
+### Why the tile's own sheds are not a fourth input
+
+`dropped_frames` looks like the most direct evidence there is — the tile saying "I threw this
+away". It is deliberately not read, because every shed cause a *downgrade* could fix is
+already one of the three inputs, and the shed is the symptom rather than the cause: a deadline
+shed means frame age was over the limit (**age** says so, from the same report); a queue-full
+shed means the decoder is behind (**queue depth** says so); an unsynced or backlog shed is
+about the tile starting up, and a lower tier does not help.
+
+The live proof is the zero-deadline case in `zensight/tests/media_receiver_live.rs`: 26 of 27
+frames shed with a measured frame age of **0.4 ms**. That is a configuration saying "nothing
+is ever fresh enough", not a link the ladder can rescue — and a controller reading sheds would
+have walked that tile to the bottom rung for nothing.
+
+### Anti-flapping is most of the design
+
+A switch closes a profile, opens another, rebuilds a decoder and costs a keyframe. A
+flapping controller is worse than none:
+
+- **`MIN_DWELL` (12 s)** in a tier before any further move.
+- **`COOLDOWN` (9 s, three report cadences)** after a switch during which reports are
+  *discarded, not merely ignored*. The first reports after a switch describe the decoder
+  rebuild and its resync keyframe; averaging them in teaches the controller that switching
+  causes the problem switching just fixed.
+- **Downgrade on the first degraded window; upgrade only after `UP_SUSTAIN` (30 s)** of
+  continuous health. One middling window restarts that clock.
+- **A move at the end of the ladder is not a move.** `next_tier` returns `None`, no switch is
+  sent, and the dwell is *not* reset — resetting it is how a controller already on the bottom
+  rung starves itself of the recovery window it is waiting for.
+
+The ladder's rung order comes from `TierSpec::bitrate_kbps`, not from the order the catalogue
+lists tiers in: rung order is a property of the tiers, and reading it off an array would make
+a config file's formatting load-bearing.
+
+### The human always wins
+
+An explicit tier click **pins** the stream — the controller stops deciding until the operator
+hands control back with the `Auto` button that appears beside the tier buttons while pinned.
+A tier that moved itself back after a deliberate click would be indistinguishable from a bug.
+There is no separate "adaptation off" switch: a pin *is* off, for the one stream the operator
+pinned, and it is expressed by the thing they already did. Closing a tile drops the pin with
+it, so a pin never outlives the tile it was about.
+
+An automatic move says so, once: `"video0: link degraded — video dropped to medium"`. The
+manual click's own pair of toasts ("Opened video", "Closed preview") is suppressed for an
+automatic switch — they describe the mechanism, fire twice per move, and an operator who did
+not ask for a quality change is owed the *reason*, not the plumbing.
+
+The controller is created on the first measured window rather than at open, so a freshly
+opened tile is effectively immovable for a report cadence longer than `MIN_DWELL`. That is
+the conservative direction and is left as it is.
+
+The decision runs **before** the reporting guards in `send_parallax_report`, deliberately:
+choosing a rung is this viewer's own business, so a viewer that cannot *tell* the producer
+how the stream is arriving must still be able to act on it. Tying adaptation to a reachable
+`stream/report` would disable it exactly where the link is worst.
+
 ## Verifying it against a live sensor
 
 The pure parts — the frame-age rule, the playout policy, the drop taxonomy — are unit tests
@@ -255,7 +356,8 @@ judged.
 | `zensight/src/view/specialized/parallax_receiver.rs` | `ReceiverStats`, the drop taxonomy, the snapshot |
 | `zensight/src/view/specialized/parallax_h264.rs` | the bounded queue, the decode task, the deadline |
 | `zensight/src/view/specialized/parallax_detail.rs` | the preview tile's half; `TileState::last_report` |
-| `zensight/src/app.rs` | `parallax_stream_report_key`, `send_parallax_report` |
+| `zensight/src/app.rs` | `parallax_stream_report_key`, `send_parallax_report`, `parallax_tier_decision` |
+| `zensight/src/view/specialized/parallax_tier.rs` | the controller: signals, thresholds, dwell, the ladder (#720) |
 | `zensight/src/view/settings.rs` | `max_live_latency_ms` |
 | `zensight/src/view/specialized/parallax_health.rs` | the chain, the verdict, the panel (#719) |
 | `zensight/tests/media_receiver_live.rs` | the live loop, `#[ignore]`d |

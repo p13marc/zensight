@@ -343,9 +343,12 @@ pub struct MediaReceiverReport {
     pub frame_age_max_ms: Option<f32>,
     /// Decoder queue depth at the end of the interval.
     ///
-    /// Absent when the consumer has no queue to report — which is the iced
-    /// H.264 tile today, since it decodes serially. `0` would read "queue
-    /// empty" where the truth is "no queue".
+    /// Absent when the consumer has no queue to report — the JPEG preview tile,
+    /// which decodes each frame as it arrives and has nothing to queue. `0`
+    /// would read "queue empty" where the truth is "no queue". The H.264 tile
+    /// does report one (#717): a bounded channel drained by the decode task, so
+    /// the depth is `max_capacity() - capacity()` — the browser tile's
+    /// `decodeQueueSize`, same field and same meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoder_queue_depth: Option<u32>,
 

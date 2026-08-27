@@ -675,6 +675,14 @@ pub enum Message {
         stream: String,
         tier: String,
     },
+    /// Hand tier selection back to the controller (#720).
+    ///
+    /// The counterpart of a manual tier click, which pins the stream. There is
+    /// no "turn adaptation off" — a pin *is* off, for the one stream the
+    /// operator pinned, and it is expressed by the thing they already did.
+    ParallaxAutoTier {
+        stream: String,
+    },
     /// Ask the sensor for a fresh IDR (`request_keyframe`) — fired by the
     /// H.264 tile decoder on a sequence discontinuity (#409).
     ParallaxRequestKeyframe {
