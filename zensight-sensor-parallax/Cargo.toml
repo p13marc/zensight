@@ -41,3 +41,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow.workspace = true
 thiserror.workspace = true
 hostname = { workspace = true }
+
+[dev-dependencies]
+# Reads registry/parallax.toml as data, for the one field zenkey-build does not
+# lint — see tests/registry_conformance.rs.
+toml.workspace = true

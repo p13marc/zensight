@@ -107,11 +107,21 @@ async fn main() -> Result<()> {
     // (`<stream>/stats/{fps,kbps,drops,viewers,encode_ms}` + the always-on
     // `streams/advertised` presence gauge).
     let stats = zensight_sensor_parallax::stats::StatsRegistry::default();
+    // Receiver feedback (#715). Deliberately built here and handed to two
+    // places that cannot reach an encoder: the queryable that accepts reports,
+    // and the stats ticker that publishes their aggregate. Nothing that holds
+    // a `SessionHandle` ever sees it — RFC 07 §1.2 forbids re-tuning a shared
+    // tier from a report, and this is where that becomes structural.
+    let reports = std::sync::Arc::new(
+        zensight_sensor_parallax::reports::ReceiverReports::from_config(&parallax_config),
+    );
+
     {
         let t_publisher = runner.publisher();
         let t_source = source.clone();
         let t_stats = stats.clone();
         let t_alerts = alerts.clone();
+        let t_reports = reports.clone();
         let advertised = catalog.entries().len();
         let interval = std::time::Duration::from_secs(parallax_config.stats_interval_secs);
         runner.spawn(async move {
@@ -122,6 +132,7 @@ async fn main() -> Result<()> {
                 advertised,
                 interval,
                 Some(t_alerts),
+                t_reports,
             )
             .await;
         });
@@ -160,6 +171,18 @@ async fn main() -> Result<()> {
         let c_handle = session_handle.clone();
         runner.spawn(async move {
             command::run(c_session, c_producer, c_handle).await;
+        });
+    }
+
+    // Receiver feedback (`@rpc/parallax/stream/report`). Beside the control
+    // channel and pointedly NOT part of it: `command::run` takes a
+    // `SessionHandle`, this takes only the report store.
+    {
+        let r_session = session.clone();
+        let r_producer = "parallax".to_string();
+        let r_reports = reports.clone();
+        runner.spawn(async move {
+            zensight_sensor_parallax::reports::run(r_session, r_producer, r_reports).await;
         });
     }
 

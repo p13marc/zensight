@@ -245,6 +245,33 @@ jobs:
             exit 1
           fi
 
+      # RFC 07 §1.2 (#715): the report path cannot reach an encoder.
+      - name: receiver feedback informs, it does not command (RFC 07 §1.2)
+        run: |
+          # §1.2 is normative and NEGATIVE: a producer MUST NOT re-tune a
+          # shared tier from one consumer's report. Two viewers share a tier,
+          # one reports loss, the bitrate drops, and the healthy viewer's
+          # picture degrades for a reason it cannot see, caused by a peer it
+          # does not know exists.
+          #
+          # A negative has no natural unit test — you cannot assert that a
+          # function nobody wrote was not called. What you can assert is that
+          # the module holding receiver feedback has no way to reach the knobs,
+          # which is a property of its imports. src/reports.rs takes an
+          # Arc<ReceiverReports> and nothing else, on purpose.
+          #
+          # zensight-sensor-parallax/tests/rfc07_receiver_driven.rs is the same
+          # check; this step exists so a branch that never runs the parallax
+          # suite still fails.
+          hits=$(grep -nE 'PipelineControls|EncoderControl|ScaleControl|ThrottleControl|SessionHandle|SessionMsg|KeyframeHandle|request_keyframe|set_bitrate' \
+            zensight-sensor-parallax/src/reports.rs \
+            | grep -vE '^[0-9]+: *//' || true)   # the module doc names them to explain the rule
+          if [ -n "$hits" ]; then
+            echo "::error::src/reports.rs reaches an encoder control. RFC 07 §1.2 forbids re-tuning a shared tier from a consumer's report (#715). If a control path genuinely belongs there, §1.2 requires a STATED arbitration rule that is not 'the most recent report':"
+            echo "$hits"
+            exit 1
+          fi
+
       # #782: a state-class seed's replies must be stamped.
       - name: state-class seeds are served through the stamping seam (#782)
         run: |

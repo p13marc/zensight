@@ -67,6 +67,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::PdnsRecord>("PdnsRecord")
         .json::<crate::StreamStatus>("StreamStatus")
         .json::<crate::stream::FrameMeta>("FrameMeta")
+        .json::<crate::stream::MediaReceiverReport>("MediaReceiverReport")
         .json::<crate::command::Command<crate::stream::StreamControl>>("Command<StreamControl>")
         // ── service control (this crate, fully derived) ───────────────────
         .json::<crate::action::ActionCapability>("ActionCapability")

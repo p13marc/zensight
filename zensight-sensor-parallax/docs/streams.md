@@ -317,6 +317,63 @@ Per-stream stats ride ordinary telemetry under
 | `viewers` | gauge | open profiles with matching subscribers (0 .. tiers + 1) |
 | `encode_ms` | gauge | average wall time per encoder `process()` call (omitted when no encoder ran) |
 
+## Receiver feedback (#714, #715)
+
+Consumers report how the stream is *arriving* on
+`@rpc/parallax/stream/report` — a `MediaReceiverReport`, `idempotent = true`,
+with the consumer's id **in the payload and never in a key** (RFC 07 §1.1). N
+viewers are N callers of one key, so the whole feedback surface costs no
+keyspace at all.
+
+The sensor keeps the latest report per `(consumer_id, stream, tier)`, bounded
+and aged out on **the tier reaper's own window** (`idle_timeout_secs` — one
+field, two readers, because a browser tab that closes never says goodbye), and
+publishes the fold per tier:
+
+| Metric | Kind | Meaning |
+|--------|------|---------|
+| `rx/{tier}/consumers` | gauge | consumers with a live report. A **lower bound** on viewers: one that never reports is invisible here — which is why this does not replace `stats/viewers` |
+| `rx/{tier}/loss_pct_{max,p50}` | gauge | worst and median `lost/(received+lost)` across live reports |
+| `rx/{tier}/frame_age_ms_{max,p50}` | gauge | worst and median frame age — *observed skewed latency*, negatives published unclamped; **omitted** when no consumer measured one |
+| `rx/{tier}/decode_queue_{max,p50}` | gauge | worst and median decoder queue depth; **omitted** when no consumer has a queue |
+
+Four things about that table are contract rather than preference:
+
+- **`{tier}` is a required chunk.** "Per-tier worst case and median" cannot be
+  spelled without it, and a stream-level average would hide the case the whole
+  adaptive-media epic exists for: one tier healthy, another not.
+- **A max *and* a median, never one number.** A worst-of-medians understates
+  and a median-of-instants is noise, so the report carries both and the
+  aggregate folds each on its own terms.
+- **The timing families are omitted, never zeroed**, exactly like `rc_drops`
+  above and for a stronger reason: RFC 07 §1.3 makes *"unstamped is not asked,
+  never zero"* normative. A `frame_age_ms` of `0` tells a controller the stream
+  is perfectly fresh at the moment nobody knows.
+- **This producer never re-tunes a tier from a report** (RFC 07 §1.2,
+  normative). Feedback informs; it does not command. Two viewers share a tier,
+  one reports loss, and if the bitrate dropped the *healthy* viewer's picture
+  would degrade for a reason it cannot see, caused by a peer it does not know
+  exists. The sanctioned adaptation is the **consumer** changing which tier key
+  it subscribes to; the escape hatch for a viewer that needs its own rate is a
+  tier of its own.
+
+  That is enforced structurally, not by comment: `src/reports.rs` takes an
+  `Arc<ReceiverReports>` and nothing else — no `SessionHandle`, no
+  `PipelineControls` — so it has no path to an encoder knob.
+  `tests/rfc07_receiver_driven.rs` and a CI grep both fail if one appears, and
+  `reports_never_retune_a_shared_tier` in `tests/e2e.rs` proves the deployment
+  behaves that way with a viewer screaming about 95 % loss.
+
+Reports are rate-limited to one per second per `(consumer, stream, tier)` —
+declared as the procedure's `rate` in the registry and pinned against the code
+by `tests/registry_conformance.rs` — and refused with `error/invalid-args` for
+a malformed payload, an empty or oversized `consumer_id`, a zero
+`interval_ms`, or a selector naming no offered profile. That last refusal is
+load-bearing rather than tidy: it is what stops a caller minting tier names and
+growing the map without bound. A well-formed but self-contradictory report
+(`decoded > received`) is **accepted** — that is a consumer lying about itself,
+which the aggregate should show rather than the producer hide.
+
 Three things about that table are easy to get wrong, so they are written down
 here (#510):
 

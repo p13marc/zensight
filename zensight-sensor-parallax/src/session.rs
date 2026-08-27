@@ -75,6 +75,46 @@ impl Profile {
             Profile::Preview => None,
         }
     }
+
+    /// The `{tier}` key chunk for this profile: the ladder rung's name, or the
+    /// literal `preview`.
+    ///
+    /// Used by the receiver-feedback aggregate (#715), which is per tier.
+    pub fn tier_label(self, tier_names: &[&str]) -> Option<String> {
+        match self {
+            Profile::Video(idx) => tier_names.get(idx as usize).map(|n| (*n).to_string()),
+            Profile::Preview => Some("preview".to_string()),
+        }
+    }
+}
+
+/// Resolve a `(codec, tier)` selector against a tier ladder, without a session.
+///
+/// The **one** place that mapping lives, so a `MediaReceiverReport` can never
+/// name a key an `OpenStream` could not (#715). `ProfileSessionActor::resolve_profile`
+/// is a thin wrapper over it; `crate::reports` calls it directly, because the
+/// report path deliberately holds no handle to the session actor — see that
+/// module's header for why that boundary is structural rather than stylistic.
+pub fn resolve_profile_in(
+    codec: Option<&str>,
+    tier: Option<&str>,
+    tier_names: &[&str],
+    default_tier: &str,
+) -> Option<Profile> {
+    let index_of = |name: &str| tier_names.iter().position(|n| *n == name).map(|i| i as u8);
+    match codec {
+        None | Some("h264") => {
+            let idx = match tier {
+                Some(name) => index_of(name)?,
+                // The configured default is validated to exist; 0 is the last
+                // resort, matching the actor's own fallback.
+                None => index_of(default_tier).unwrap_or(0),
+            };
+            Some(Profile::Video(idx))
+        }
+        Some("mjpeg") | Some("jpeg") => Some(Profile::Preview),
+        Some(_) => None,
+    }
 }
 
 /// Messages into the session actor.
@@ -394,17 +434,14 @@ impl SessionManager {
     /// codec → a video tier (named, or the sensor default); `mjpeg`/`jpeg` →
     /// the preview. An unknown codec or an unknown tier name → `None`.
     fn resolve_profile(&self, codec: Option<&str>, tier: Option<&str>) -> Option<Profile> {
-        match codec {
-            None | Some("h264") => {
-                let idx = match tier {
-                    Some(name) => self.tier_index(name)?,
-                    None => self.default_tier_index(),
-                };
-                Some(Profile::Video(idx))
-            }
-            Some("mjpeg") | Some("jpeg") => Some(Profile::Preview),
-            Some(_) => None,
-        }
+        let names: Vec<&str> = self
+            .config
+            .video
+            .tiers
+            .iter()
+            .map(|t| t.spec.name.as_str())
+            .collect();
+        resolve_profile_in(codec, tier, &names, &self.config.video.default_tier)
     }
 
     /// The config ladder index of a tier by name.

@@ -121,6 +121,21 @@ async fn spawn_sensor_with_config(
     zensight_sensor_parallax::session::SessionHandle,
     StatsRegistry,
 ) {
+    spawn_sensor_full(session, source, config).await.0
+}
+
+/// The full wiring, handing back the receiver-report store too (#715).
+async fn spawn_sensor_full(
+    session: Arc<zenoh::Session>,
+    source: &str,
+    config: ParallaxConfig,
+) -> (
+    (
+        zensight_sensor_parallax::session::SessionHandle,
+        StatsRegistry,
+    ),
+    Arc<zensight_sensor_parallax::reports::ReceiverReports>,
+) {
     let catalog = Arc::new(Catalog::build(&config));
     let tiers = config.video.ladder();
     let publisher = Publisher::new(session.clone(), "parallax", Format::Json);
@@ -128,6 +143,16 @@ async fn spawn_sensor_with_config(
     // chunk scopes per host; the source label is payload-only).
     let host_prefix = "parallax".to_string();
     let registry = StatsRegistry::default();
+    let reports =
+        Arc::new(zensight_sensor_parallax::reports::ReceiverReports::from_config(&config));
+    {
+        let r_session = session.clone();
+        let r_reports = reports.clone();
+        tokio::spawn(async move {
+            zensight_sensor_parallax::reports::run(r_session, "parallax".to_string(), r_reports)
+                .await;
+        });
+    }
     tokio::spawn(stats::run_ticker(
         publisher.clone(),
         source.to_string(),
@@ -135,6 +160,7 @@ async fn spawn_sensor_with_config(
         catalog.entries().len(),
         Duration::from_secs(1),
         None,
+        reports.clone(),
     ));
     let handle = SessionManager::spawn(
         catalog.clone(),
@@ -159,7 +185,7 @@ async fn spawn_sensor_with_config(
     ));
     // Let the subscriber + queryables propagate.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    (handle, registry)
+    ((handle, registry), reports)
 }
 
 /// The sensor runs in-process, so the test's v1 context (same global host
@@ -803,6 +829,260 @@ async fn stats_ticker_publishes_fps_telemetry() {
     .await;
     drop(media_sub);
     wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// Send one `MediaReceiverReport` to `@rpc/parallax/stream/report` and hand
+/// back the reply, so a test can assert on both the ack and the refusal.
+async fn send_report(
+    viewer: &zenoh::Session,
+    report: &zensight_common::stream::MediaReceiverReport,
+) -> Result<(), String> {
+    let replies = viewer
+        .get(zensight_common::command::stream_report_key("parallax"))
+        .payload(serde_json::to_vec(report).unwrap())
+        .await
+        .expect("send receiver report");
+    let reply = replies.recv_async().await.expect("report reply");
+    match reply.result() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(String::from_utf8_lossy(&e.payload().to_bytes()).into_owned()),
+    }
+}
+
+fn a_report(consumer: &str) -> zensight_common::stream::MediaReceiverReport {
+    zensight_common::stream::MediaReceiverReport {
+        stream: "test0".into(),
+        codec: Some("mjpeg".into()),
+        tier: None,
+        consumer_id: consumer.into(),
+        interval_ms: 1000,
+        received_frames: 100,
+        lost_frames: 5,
+        dropped_frames: 0,
+        decoded_frames: 95,
+        last_sequence: 105,
+        interarrival_jitter_ms: Some(2.0),
+        frame_age_ms: Some(40.0),
+        frame_age_max_ms: Some(90.0),
+        decoder_queue_depth: Some(1),
+        last_keyframe_sequence: Some(100),
+        since_last_keyframe_ms: Some(200),
+    }
+}
+
+/// The whole feedback loop over the wire: a report is accepted, and its
+/// aggregate reaches `telemetry/parallax/{stream}/rx/{tier}/…` (#714, #715).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn receiver_reports_surface_as_rx_telemetry() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-reports";
+    let _handle = spawn_sensor(sensor.clone(), source).await;
+
+    let rx_sub = viewer
+        .declare_subscriber(format!("{}/test0/rx/**", v1ctx().telemetry_prefix()))
+        .await
+        .expect("declare rx subscriber");
+
+    // No stream needs to be open: a report about a tier says something even
+    // when nothing is publishing on it, and "nothing is arriving" is the most
+    // useful report there is.
+    send_report(&viewer, &a_report("tile-1"))
+        .await
+        .expect("a well-formed report is accepted");
+
+    // Collect one whole tick: the ticker publishes the seven families in one
+    // pass, so stopping at the first one would race the rest.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut seen: Vec<(String, f64)> = Vec::new();
+    while Instant::now() < deadline && !seen.iter().any(|(m, _)| m.ends_with("/decode_queue_p50")) {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(5), rx_sub.recv_async()).await
+        else {
+            break;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode rx point");
+        let value = match point.value {
+            zensight_common::TelemetryValue::Gauge(v) => v,
+            other => panic!("rx telemetry must be a gauge, got {other:?}"),
+        };
+        seen.push((point.metric, value));
+    }
+
+    let find = |leaf: &str| {
+        seen.iter()
+            .find(|(m, _)| m == &format!("test0/rx/preview/{leaf}"))
+            .map(|(_, v)| *v)
+    };
+    assert_eq!(find("consumers"), Some(1.0), "seen: {seen:?}");
+    // 5 lost of 105 offered.
+    let loss = find("loss_pct_max").expect("loss_pct_max");
+    assert!((loss - 4.7619).abs() < 0.01, "loss was {loss}");
+    assert_eq!(find("frame_age_ms_max"), Some(90.0));
+    assert_eq!(find("frame_age_ms_p50"), Some(40.0));
+    assert!(
+        !seen.iter().any(|(m, _)| m.contains("tile-1")),
+        "a consumer_id must never reach a key (RFC 07 §1.1): {seen:?}"
+    );
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// **RFC 07 §1.2, on the wire.** A consumer screaming about loss does not move
+/// a shared tier's encoder.
+///
+/// `tests/rfc07_receiver_driven.rs` proves the report module cannot reach the
+/// knobs by construction; this proves the deployment behaves that way, which is
+/// the claim an operator cares about. The failure it forbids is specific: two
+/// viewers share a tier, one reports loss, the bitrate drops, and the *healthy*
+/// viewer's picture degrades for a reason it cannot see, caused by a peer it
+/// does not know exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reports_never_retune_a_shared_tier() {
+    let (sensor, viewer) = isolated_pair().await;
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor(sensor.clone(), "e2e-no-retune").await;
+
+    let video_key = v1ctx()
+        .media_key(&["test0", "video", "h264", "medium"])
+        .expect("a constant test tier is a legal key");
+    let _video_sub = viewer
+        .declare_subscriber(video_key.as_keyexpr())
+        .await
+        .expect("declare video subscriber");
+    let status_sub = viewer
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
+        ))
+        .await
+        .expect("declare status sub");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: None,
+        },
+    )
+    .await;
+
+    let before = await_status(&status_sub, |s| !s.tiers.is_empty()).await;
+    let applied_before = before.tiers[0].applied;
+
+    // Ten reports at the rate ceiling, each claiming a catastrophic stream:
+    // 95% loss, five-second frame age, a deep decoder queue. If anything in
+    // this producer acted on feedback, this is what would move it.
+    for i in 0..10 {
+        let mut screaming = a_report("angry-viewer");
+        screaming.codec = Some("h264".into());
+        screaming.tier = None;
+        screaming.received_frames = 5;
+        screaming.lost_frames = 95;
+        screaming.frame_age_ms = Some(5000.0);
+        screaming.frame_age_max_ms = Some(9000.0);
+        screaming.decoder_queue_depth = Some(64);
+        // The first is accepted; the rest are refused as over-rate, which is
+        // itself part of the claim — a viewer cannot even shout faster than
+        // the ceiling, let alone be listened to.
+        let _ = send_report(&viewer, &screaming).await;
+        if i == 0 {
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+        }
+    }
+
+    // Give the sensor a couple of ticks to do the wrong thing, if it were
+    // going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // `StreamStatus` is LWW state, republished only when it CHANGES — so the
+    // assertion is over every republication, not over a single later read: a
+    // re-tune would have to show up as a status doc with a different `applied`,
+    // and if none arrives at all that is the strongest form of the same claim.
+    let mut republished = 0;
+    while let Ok(Ok(sample)) =
+        tokio::time::timeout(Duration::from_millis(500), status_sub.recv_async()).await
+    {
+        let Ok(status) = serde_json::from_slice::<StreamStatus>(&sample.payload().to_bytes())
+        else {
+            continue;
+        };
+        let Some(tier) = status.tiers.first() else {
+            continue;
+        };
+        republished += 1;
+        assert_eq!(
+            tier.applied, applied_before,
+            "a receiver report re-tuned a shared tier — RFC 07 §1.2 forbids \
+             exactly this. Feedback informs; it does not command. If a producer \
+             is ever to act on AGGREGATE feedback, §1.2 requires a stated \
+             arbitration rule that is not 'the most recent report', and this \
+             test must be replaced by one that pins that rule."
+        );
+    }
+    eprintln!("status republished {republished} time(s), applied unchanged throughout");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: None,
+        },
+    )
+    .await;
+    drop(_video_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// A malformed report and an over-rate one are refused, distinguishably.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bad_reports_are_refused_with_the_right_error() {
+    let (sensor, viewer) = isolated_pair().await;
+    let _handle = spawn_sensor(sensor.clone(), "e2e-report-refusals").await;
+
+    // Undecodable payload.
+    let replies = viewer
+        .get(zensight_common::command::stream_report_key("parallax"))
+        .payload(b"not a report".to_vec())
+        .await
+        .expect("send garbage");
+    let reply = replies.recv_async().await.expect("reply");
+    let err = reply.result().expect_err("garbage must be refused");
+    let body = String::from_utf8_lossy(&err.payload().to_bytes()).into_owned();
+    assert!(body.contains("error/invalid-args"), "{body}");
+
+    // A tier this producer does not offer.
+    let mut unknown = a_report("tile-2");
+    unknown.codec = Some("h264".into());
+    unknown.tier = Some("ultra".into());
+    let body = send_report(&viewer, &unknown)
+        .await
+        .expect_err("an unoffered tier must be refused");
+    assert!(body.contains("error/invalid-args"), "{body}");
+
+    // Over-rate: a second report about the same tier, immediately.
+    send_report(&viewer, &a_report("tile-3"))
+        .await
+        .expect("first accepted");
+    let body = send_report(&viewer, &a_report("tile-3"))
+        .await
+        .expect_err("the second must be refused");
+    assert!(
+        body.contains("error/busy"),
+        "over-rate must be error/busy, not invalid-args: {body}"
+    );
 
     viewer.close().await.unwrap();
     sensor.close().await.unwrap();
