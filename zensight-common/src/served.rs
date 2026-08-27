@@ -402,9 +402,79 @@ pub async fn await_registry_coverage(producer: &str, grace: std::time::Duration)
     check_registry_coverage(producer);
 }
 
+/// Wait until every key in `keys` has been declared through this module, or
+/// `grace` elapses. Returns whatever is still missing (empty is success).
+///
+/// The origin-agnostic sibling of [`await_registry_coverage`], and it exists
+/// because that one is **sensor-shaped**: it derives the serve-side spelling
+/// from *this host's* origin (`v1/h-…/@rpc/<producer>/<proc>`), which is right
+/// for a sensor and wrong for a producer on a **service** origin. The catalog
+/// serves `v1/@catalog/@rpc/names`, so `unserved_procedures("catalog")` reports
+/// every one of its procedures as missing even while the log says they are
+/// ready — which is exactly what it did the first time the correlator tried to
+/// use it.
+///
+/// So a caller on a service origin passes the concrete keys it declared. Same
+/// bounded wait, same wakeup discipline, no assumption about how the key was
+/// spelled.
+pub async fn await_served(keys: &[String], grace: std::time::Duration) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        // Subscribe to the wakeup BEFORE re-reading the predicate, for the
+        // reason `await_registry_coverage` gives: the other order drops a
+        // `note_served` landing between the two.
+        let changed = served_changed().notified();
+        let missing: Vec<String> = keys.iter().filter(|k| !is_served(k)).cloned().collect();
+        if missing.is_empty() {
+            return missing;
+        }
+        if tokio::time::timeout_at(deadline, changed).await.is_err() {
+            return missing;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `await_served` returns once the keys land, and reports what did not.
+    #[tokio::test]
+    async fn await_served_waits_for_concrete_keys() {
+        let key = "v1/@catalog/@rpc/await-served-test".to_string();
+        let missing = await_served(
+            std::slice::from_ref(&key),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(missing, vec![key.clone()], "not served yet");
+
+        note_served(&key);
+        assert!(
+            await_served(&[key], std::time::Duration::from_millis(50))
+                .await
+                .is_empty(),
+            "served now"
+        );
+    }
+
+    /// The reason `await_served` exists: the coverage helper is sensor-shaped
+    /// and cannot see a service origin's keys.
+    #[test]
+    fn registry_coverage_cannot_see_a_service_origin() {
+        let served_side = serve_spelling("catalog", "names");
+        assert!(
+            served_side.starts_with("v1/h-"),
+            "the coverage helper spells the LOCAL HOST origin: {served_side}"
+        );
+        assert_ne!(
+            served_side,
+            crate::keyexpr::names_query_key(),
+            "…but the catalog serves on the @catalog service origin, so the two \
+             never match — which is why a service-origin producer needs \
+             await_served and not await_registry_coverage"
+        );
+    }
 
     /// The state/`@rpc` split this module's stamping rule turns on (#782).
     ///
