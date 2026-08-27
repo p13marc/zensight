@@ -13,17 +13,21 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use iced::futures::Stream;
 use iced::widget::image;
 use zenoh::Session;
 use zensight_common::keyexpr::{media_preview_key, origin_rpc_key};
-use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus, TierSpec};
+use zensight_common::media::observed_frame_age_ms;
+use zensight_common::stream::{
+    FrameMeta, MediaReceiverReport, StreamControl, StreamDescriptor, StreamStatus, TierSpec,
+};
 use zensight_common::{Format, decode};
 
 use super::fetch::Fetch;
 use super::parallax::preview_handle_from_jpeg;
+use super::parallax_receiver::{DecodeLoss, REPORT_INTERVAL, ReceiverStats, Shed};
 use crate::message::Message;
 
 /// Smoothing factor for the tile fps EMA (per frame).
@@ -36,7 +40,7 @@ const FPS_EMA_ALPHA: f32 = 0.2;
 /// restarted pipeline jumps back by whatever the old pipeline had counted up
 /// to. 300 frames (≥ 10 s of video, ≥ 1 min of previews) is far beyond any
 /// reorder window, so the guard re-anchors instead of freezing the tile.
-const SEQ_RESTART_GAP: u64 = 300;
+pub(crate) const SEQ_RESTART_GAP: u64 = 300;
 
 /// Per-device parallax state: the stream catalogue + open preview tiles.
 #[derive(Debug, Default)]
@@ -104,6 +108,13 @@ pub struct TileState {
     /// no tier). Every close/keyframe for this tile must carry it so the
     /// sensor decrements the *right* per-tier refcount.
     pub selected_tier: Option<String>,
+    /// The most recent report this tile sent its producer (#718).
+    ///
+    /// Kept here and not only on the wire: the tile's counters live inside its
+    /// subscriber task, which nothing on the render side can reach, so this is
+    /// where the health surface (#719) reads what the tile measured. `None`
+    /// until the first cadence elapses.
+    pub last_report: Option<MediaReceiverReport>,
 }
 
 impl TileState {
@@ -123,6 +134,7 @@ impl TileState {
             ended: None,
             video,
             selected_tier,
+            last_report: None,
         }
     }
 
@@ -284,6 +296,27 @@ impl ParallaxDetailState {
         true
     }
 
+    /// Fold one of a tile's own receiver reports in (#718). Returns `false`
+    /// when the tile is gone or the report belongs to a replaced incarnation —
+    /// in which case the caller must not forward it either: it would tell the
+    /// sensor a dead `consumer_id` is still watching, and the aggregate counts
+    /// consumers.
+    pub fn apply_receiver_report(
+        &mut self,
+        stream: &str,
+        generation: u64,
+        report: MediaReceiverReport,
+    ) -> bool {
+        let Some(tile) = self.tiles.get_mut(stream) else {
+            return false;
+        };
+        if tile.generation != generation {
+            return false;
+        }
+        tile.last_report = Some(report);
+        true
+    }
+
     /// The subscriber task for `stream` finished (error or clean end).
     /// End reports from a replaced tile incarnation are ignored — clearing
     /// the NEW tile's abort handle here would leak (and orphan) its live
@@ -386,6 +419,16 @@ pub async fn fetch_streams(
     serde_json::from_slice(&sample.payload().to_bytes()).ok()
 }
 
+/// The `FrameMeta` on a preview sample, or the default when the attachment is
+/// missing or undecodable — a preview with no metadata still renders, it just
+/// carries sequence 0 (the sequence-restart guard already tolerates that).
+fn frame_meta(sample: &zenoh::sample::Sample) -> FrameMeta {
+    sample
+        .attachment()
+        .and_then(|a| decode(&a.to_bytes(), Format::Cbor).ok())
+        .unwrap_or_default()
+}
+
 /// The per-tile subscriber stream: newest JPEG preview frames decoded to
 /// [`image::Handle`]s. Ends with [`Message::ParallaxTileEnded`]; aborting the
 /// wrapping task drops the future and undeclares the subscriber. Every
@@ -416,30 +459,88 @@ pub fn preview_tile_stream(
                 return;
             }
         };
-        loop {
-            let mut sample = match subscriber.recv_async().await {
-                Ok(s) => s,
-                Err(_) => break, // session closed
-            };
-            // Latest frame wins: drain any backlog before decoding.
-            while let Ok(Some(newer)) = subscriber.try_recv() {
-                sample = newer;
+        // A preview tile accounts for itself too (#717/#718). Its numbers are
+        // simpler than a video tile's — every JPEG is a keyframe, so there is
+        // no reference chain to protect and no decode queue to report — but an
+        // operator comparing the two is exactly how you tell "the camera is
+        // fine, H.264 is not".
+        let mut stats = ReceiverStats::new(
+            stream.clone(),
+            Some("mjpeg".to_string()),
+            None,
+            generation,
+            Instant::now(),
+        );
+        let mut reports = tokio::time::interval_at(
+            tokio::time::Instant::now() + REPORT_INTERVAL,
+            REPORT_INTERVAL,
+        );
+        reports.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Collected inside the select arms and yielded after it: `async_stream`
+        // rewrites `yield` syntactically, and nesting it inside another macro's
+        // arm is not worth the risk.
+        let mut outbox: Vec<Message> = Vec::new();
+        let mut ended = false;
+        while !ended {
+            tokio::select! {
+                received = subscriber.recv_async() => {
+                    match received {
+                        Err(_) => ended = true, // session closed
+                        Ok(mut sample) => {
+                            // Latest frame wins: drain any backlog before
+                            // decoding. What the drain throws away used to
+                            // vanish without trace; it is a deliberate shed,
+                            // and the report says so rather than leaving the
+                            // producer to read it as network loss.
+                            let mut age =
+                                observed_frame_age_ms(sample.timestamp(), SystemTime::now());
+                            let mut meta = frame_meta(&sample);
+                            while let Ok(Some(newer)) = subscriber.try_recv() {
+                                stats.on_sample(&meta, age);
+                                stats.on_shed(Shed::Backlog);
+                                sample = newer;
+                                age = observed_frame_age_ms(
+                                    sample.timestamp(),
+                                    SystemTime::now(),
+                                );
+                                meta = frame_meta(&sample);
+                            }
+                            stats.on_sample(&meta, age);
+                            let payload = sample.payload().to_bytes().to_vec();
+                            // JPEG→RGBA decode off the UI thread.
+                            let decoded = tokio::task::spawn_blocking(move || {
+                                preview_handle_from_jpeg(&payload)
+                            })
+                            .await;
+                            match decoded {
+                                Ok(Some(handle)) => {
+                                    // Every JPEG stands alone, so a decoded
+                                    // preview frame is always a keyframe.
+                                    stats.on_decoded(meta.sequence, true, Instant::now());
+                                    outbox.push(Message::ParallaxFrame {
+                                        stream: stream.clone(),
+                                        generation,
+                                        seq: meta.sequence,
+                                        handle,
+                                    });
+                                }
+                                // Undecodable bytes, or a panicked decode task.
+                                // Either way the frame is gone by our doing.
+                                _ => stats.on_decode_loss(DecodeLoss::Failed),
+                            }
+                        }
+                    }
+                }
+                _ = reports.tick() => {
+                    outbox.push(Message::ParallaxReceiverReport {
+                        stream: stream.clone(),
+                        generation,
+                        report: Box::new(stats.snapshot(Instant::now())),
+                    });
+                }
             }
-            let meta: FrameMeta = sample
-                .attachment()
-                .and_then(|a| decode(&a.to_bytes(), Format::Cbor).ok())
-                .unwrap_or_default();
-            let payload = sample.payload().to_bytes().to_vec();
-            // JPEG→RGBA decode off the UI thread.
-            let decoded =
-                tokio::task::spawn_blocking(move || preview_handle_from_jpeg(&payload)).await;
-            if let Ok(Some(handle)) = decoded {
-                yield Message::ParallaxFrame {
-                    stream: stream.clone(),
-                    generation,
-                    seq: meta.sequence,
-                    handle,
-                };
+            for message in outbox.drain(..) {
+                yield message;
             }
         }
         yield Message::ParallaxTileEnded {
@@ -518,6 +619,46 @@ mod tests {
         // The new incarnation's frames apply from its own domain.
         assert!(state.apply_frame("cam0", new, 1, dummy_handle()));
         assert_eq!(state.tiles["cam0"].last_seq, 1);
+    }
+
+    /// #718: a report from a replaced incarnation must be dropped, and the
+    /// caller must be told so — forwarding it would tell the sensor a dead
+    /// `consumer_id` is still watching, and its `rx/{tier}/consumers` gauge
+    /// counts exactly those.
+    #[test]
+    fn a_stale_generations_receiver_report_is_neither_kept_nor_forwarded() {
+        let mut state = ParallaxDetailState::default();
+        let old = state.allocate_generation();
+        state.open_tile("cam0", old, None, true, Some("high".into()));
+        assert!(state.apply_receiver_report("cam0", old, a_report()));
+        assert!(state.tiles["cam0"].last_report.is_some());
+
+        let new = state.allocate_generation();
+        state.open_tile("cam0", new, None, true, Some("high".into()));
+        assert!(
+            !state.apply_receiver_report("cam0", old, a_report()),
+            "the old subscriber's report describes a subscription that is gone"
+        );
+        assert!(state.tiles["cam0"].last_report.is_none());
+        assert!(
+            !state.apply_receiver_report("nosuch", new, a_report()),
+            "a report for a tile that was closed is dropped, not resurrected"
+        );
+        assert!(state.apply_receiver_report("cam0", new, a_report()));
+    }
+
+    fn a_report() -> MediaReceiverReport {
+        MediaReceiverReport {
+            stream: "cam0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+            consumer_id: "zs-1-1".into(),
+            interval_ms: 3_000,
+            received_frames: 90,
+            decoded_frames: 90,
+            last_sequence: 90,
+            ..Default::default()
+        }
     }
 
     #[test]

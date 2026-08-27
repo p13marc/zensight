@@ -570,6 +570,20 @@ pub enum Message {
         generation: u64,
         error: Option<String>,
     },
+    /// A tile's periodic receiver report (#718, RFC 07 §1.1): how the stream
+    /// is arriving, measured by the tile itself. The app forwards it to that
+    /// tile's own producer as an `@rpc/parallax/stream/report` write — never
+    /// to the fleet selector, because a report is about one key on one host.
+    ///
+    /// Carries the tile incarnation for the same reason frames do: a report
+    /// from a replaced subscriber describes a subscription that no longer
+    /// exists. Boxed because the report is the largest thing any `Message`
+    /// carries and every other variant would pay for it.
+    ParallaxReceiverReport {
+        stream: String,
+        generation: u64,
+        report: Box<zensight_common::stream::MediaReceiverReport>,
+    },
     /// A parallax `StreamStatus` transition from `state/parallax/stream/<stream>` (arrives
     /// on the host-scoped control-plane subscriber): a definitive
     /// `open: false` marks a still-waiting tile as failed.
@@ -972,6 +986,8 @@ pub enum Message {
 
     /// Set max alerts to keep.
     SetMaxAlerts(String),
+    /// Set the live-video frame-age deadline in milliseconds (#716); "0" is off.
+    SetMaxLiveLatency(String),
 
     /// Save settings.
     SaveSettings,

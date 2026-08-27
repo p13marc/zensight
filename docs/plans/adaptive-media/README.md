@@ -16,20 +16,22 @@ link degrades has exactly one recovery move: a human clicking a lower tier.
 
 Four gaps, in dependency order:
 
-1. **Nothing measures latency.** `FrameMeta.pts_ns` is a producer-local pipeline clock and the
-   GUI never reads it. The clock is already on the wire — zenoh stamps every sample and
-   `zensight-common/src/session.rs:89` enables timestamping fleet-wide — and nothing reads it.
-   RFC 07 §1.3 now names that clock; #714 puts it in a wire type; #716 is what finally acts
-   on it.
-2. **The H.264 path cannot shed.** It decodes every access unit serially with no backlog drain,
-   unlike the preview's latest-frame-wins loop (`parallax_detail.rs:424`). Latency grows in the
-   subscriber queue, invisibly. Arena exhaustion returns `Ok(None)` uncounted
-   (`parallax_h264.rs:149`).
+1. ~~**Nothing measures latency.**~~ **Closed by #716.** RFC 07 §1.3 named the clock (the
+   publisher's HLC sample timestamp); #714 put it in a wire type; `zensight_common::media`
+   now states the rule once — unstamped is *not asked* and never zero, negatives shown
+   unclamped — and the tiles act on it.
+2. ~~**The H.264 path cannot shed.**~~ **Closed by #716/#717.** The tile enqueues access units
+   on a bounded channel a blocking decode task drains, so the backlog is a number
+   (`max_capacity() - capacity()` — the browser's `decodeQueueSize`, same field, same
+   meaning) and the frame-age deadline is applied where that backlog is visible. Arena
+   exhaustion, an oversize AU and a decode refusal are three named outcomes now, not one
+   `Ok(None)`. See `zensight/docs/media-receiver.md`.
 3. ~~**The producer never hears from the consumer.**~~ **Closed by #714/#715.** RFC 04 R6 makes
    the data planes producer→consumer only, so feedback had no home in the grammar; RFC 07 §1.1
    gave it one on `@rpc`, and the sensor serves it and publishes the per-tier aggregate.
-4. **Adaptation is a human clicking a tier.** The clock and the report both exist now, so this
-   is a controller waiting to be written — #720, gated only on #713's loss measurement.
+4. **Adaptation is a human clicking a tier.** The clock, the report and now a *reporter* all
+   exist, so this is a controller waiting to be written — #720, gated only on #713's loss
+   measurement.
 
 ## What is already done — do not re-plan it
 
@@ -39,7 +41,8 @@ Four gaps, in dependency order:
 | `FrameMeta` on the attachment, byte-compatible twins + CBOR corpus | `zensight-common/src/stream.rs:109`, `parallax/src/wire/frame_meta.rs:45`, #711 |
 | Keyframe requests, four transports, coalesced | `StreamControl::RequestKeyframe`; parallax `ForceKeyUnit` / `KeyframeHandle` / matching edge |
 | Concurrent quality tiers + per-viewer selector | RFC 07 §1, `TierSpec`, #497, #498, #502, #507 |
-| Sequence-gap detect → resync → keyframe, with backoff | `zensight/src/view/specialized/parallax_h264.rs:286-347` |
+| Sequence-gap detect → resync → keyframe, with backoff | `zensight/src/view/specialized/parallax_h264.rs` |
+| The receiver half: deadline, bounded queue, drop taxonomy, the reporter | `zensight/docs/media-receiver.md` (#716, #717, #718) |
 | Sender-side stats | `telemetry/parallax/{stream}/stats/{fps,kbps,drops,rc_drops,viewers,encode_ms}` (#407, #503) |
 | Every runtime encoder handle | `zensight-sensor-parallax/src/pipeline.rs:289` — cloned, reachable, deliberately undriven (#504, #513) |
 | Codec identification for a decoder | parallax `h264_profile_level_id` (#215); zenkey #303 — the codec string is derived from the SPS, deliberately **not** carried on the wire |
@@ -102,9 +105,9 @@ in this epic is waiting on a decision.
 | #713 | Measure — what does `@media` loss actually look like? **Blocks #720** |
 | #714 | **Done.** `MediaReceiverReport` + the `stream/report` RPC (type, registry, CBOR corpus) |
 | #715 | **Done.** Sensor serves `stream/report`, keeps bounded per-consumer state, publishes the `{stream}/rx/{tier}/*` aggregate |
-| #716 | Frame-age deadline — shed instead of drifting behind live |
-| #717 | Bound the decode queue and count the drops |
-| #718 | Publish `MediaReceiverReport` from the parallax tiles |
+| #716 | **Done.** Frame-age deadline — shed instead of drifting behind live |
+| #717 | **Done.** Bounded decode queue, real queue depth, and a drop taxonomy |
+| #718 | **Done.** Both tile kinds publish `MediaReceiverReport` every 3 s |
 | #719 | Stream health panel — attribute degradation to a stage |
 | #720 | Receiver-driven tier selection with hysteresis |
 | #721 | The latency-aware recovery policy (docs) |
@@ -129,11 +132,11 @@ in this epic is waiting on a decision.
 ```
 zenkey #366 #367 #368            protocol, decided first
         │
-        ├── #714 ✔ ─────────────► #715 ✔ ──► #718
+        ├── #714 ✔ ─────────────► #715 ✔ ──► #718 ✔
         │
-        └───────────────────────► #716, #717 ──► #719
-                                                  │
-        #713 (measure) ───────────────────────────┴──► #720
+        └───────────────────────► #716 ✔, #717 ✔ ──► #719
+                                                       │
+        #713 (measure) ────────────────────────────────┴──► #720
 ```
 
 `#722`/`#723` follow their own epic's order (#705 → #706 → #707 → these two).

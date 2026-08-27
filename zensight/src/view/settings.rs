@@ -38,6 +38,17 @@ pub struct PersistentSettings {
     /// Maximum number of alerts to keep.
     #[serde(default = "default_max_alerts")]
     pub max_alerts: usize,
+    /// Frame-age deadline for live video tiles, in milliseconds (#716).
+    ///
+    /// An access unit older than this on arrival is shed rather than decoded,
+    /// so a tile that falls behind returns to live at the next keyframe
+    /// instead of replaying its backlog. `0` disables the deadline.
+    ///
+    /// Per deployment, not one global constant: a LAN wall display and a
+    /// satellite operator want different numbers, and the wrong one is either
+    /// a tile that drifts seconds behind live or a tile that sheds everything.
+    #[serde(default = "default_max_live_latency_ms")]
+    pub max_live_latency_ms: u64,
     /// Device groups configuration.
     #[serde(default)]
     pub groups: GroupsState,
@@ -122,6 +133,17 @@ fn default_max_alerts() -> usize {
     100
 }
 
+/// Default frame-age deadline (#716).
+///
+/// Generous on purpose. Shedding costs a keyframe wait, so a deadline tighter
+/// than one GOP turns a mildly late tile into a slideshow; 1.5 s is well past
+/// any LAN's arrival latency and still far short of the multi-second drift the
+/// unbounded subscriber queue used to accumulate unseen. A deployment that
+/// cares tightens it; one on a satellite link loosens it.
+fn default_max_live_latency_ms() -> u64 {
+    1500
+}
+
 impl Default for PersistentSettings {
     fn default() -> Self {
         Self {
@@ -133,6 +155,7 @@ impl Default for PersistentSettings {
             desktop_notifications: false,
             max_history: default_max_history(),
             max_alerts: default_max_alerts(),
+            max_live_latency_ms: default_max_live_latency_ms(),
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
             alert_filter_presets: Vec::new(),
@@ -233,6 +256,7 @@ impl PersistentSettings {
         );
         state.desktop_notifications = self.desktop_notifications;
         state.group_by_host = self.group_by_host;
+        state.max_live_latency_ms = self.max_live_latency_ms.to_string();
         // #466: scopes are base-relative now. A settings.json5 written before the
         // namespace landed holds full keys (`zensight/v1/…`), which on a
         // namespaced session match NOTHING — the GUI would come up connected,
@@ -274,6 +298,10 @@ impl PersistentSettings {
             desktop_notifications: state.desktop_notifications,
             max_history: state.max_history.parse().unwrap_or(default_max_history()),
             max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
+            max_live_latency_ms: state
+                .max_live_latency_ms
+                .parse()
+                .unwrap_or_else(|_| default_max_live_latency_ms()),
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
             alert_filter_presets: Vec::new(),
@@ -322,6 +350,8 @@ pub struct SettingsState {
     pub max_history: String,
     /// Maximum alerts to keep.
     pub max_alerts: String,
+    /// Frame-age deadline for live video tiles, milliseconds; "0" disables it.
+    pub max_live_latency_ms: String,
     /// Whether settings have been modified.
     pub modified: bool,
     /// Last error message (if any).
@@ -344,6 +374,7 @@ impl Default for SettingsState {
             link_profile: LinkProfile::default(),
             max_history: "500".to_string(),
             max_alerts: "100".to_string(),
+            max_live_latency_ms: default_max_live_latency_ms().to_string(),
             modified: false,
             error: None,
             success: None,
@@ -374,6 +405,7 @@ impl SettingsState {
             link_profile: LinkProfile::default(),
             max_history: max_history.to_string(),
             max_alerts: max_alerts.to_string(),
+            max_live_latency_ms: default_max_live_latency_ms().to_string(),
             modified: false,
             error: None,
             success: None,
@@ -432,6 +464,13 @@ impl SettingsState {
     /// Update max alerts.
     pub fn set_max_alerts(&mut self, max_alerts: String) {
         self.max_alerts = max_alerts;
+        self.modified = true;
+        self.clear_messages();
+    }
+
+    /// Update the live-video frame-age deadline (#716).
+    pub fn set_max_live_latency(&mut self, max_live_latency_ms: String) {
+        self.max_live_latency_ms = max_live_latency_ms;
         self.modified = true;
         self.clear_messages();
     }
@@ -505,6 +544,20 @@ impl SettingsState {
             return Err("Max alerts cannot exceed 1000".to_string());
         }
 
+        // Live-video frame-age deadline (#716). 0 is a valid answer — it means
+        // "do not shed on age" — but anything between 0 and a frame interval
+        // is not: it would shed every frame and show nothing.
+        let max_live_latency_ms: u64 = self
+            .max_live_latency_ms
+            .parse()
+            .map_err(|_| "Live latency deadline must be a number".to_string())?;
+
+        if max_live_latency_ms != 0 && !(100..=30_000).contains(&max_live_latency_ms) {
+            return Err(
+                "Live latency deadline must be 0 (off) or between 100 and 30000 ms".to_string(),
+            );
+        }
+
         Ok(())
     }
 
@@ -545,6 +598,21 @@ impl SettingsState {
     /// Get max alerts value.
     pub fn max_alerts_value(&self) -> usize {
         self.max_alerts.parse().unwrap_or(100)
+    }
+
+    /// The live-video frame-age deadline (#716), or `None` when it is off.
+    ///
+    /// `None` and `Some(0)` would mean the same thing to a caller, so the type
+    /// only has the one spelling — a tile either has a deadline or it does not.
+    pub fn max_live_latency(&self) -> Option<std::time::Duration> {
+        match self
+            .max_live_latency_ms
+            .parse()
+            .unwrap_or_else(|_| default_max_live_latency_ms())
+        {
+            0 => None,
+            ms => Some(std::time::Duration::from_millis(ms)),
+        }
     }
 
     /// Mark settings as saved.
@@ -840,6 +908,24 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         .spacing(10)
         .align_y(Alignment::Center);
 
+    // Live-video frame-age deadline (#716).
+    let latency_label = text("Live video latency deadline (ms):").size(14);
+    let latency_input = text_input("1500", &state.max_live_latency_ms)
+        .on_input(Message::SetMaxLiveLatency)
+        .padding(8)
+        .width(Length::Fixed(100.0));
+
+    let latency_help =
+        text("Shed video frames older than this on arrival, 0 to disable (100-30000)")
+            .size(11)
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).text_dimmed()),
+            });
+
+    let latency_row = row![latency_label, latency_input]
+        .spacing(10)
+        .align_y(Alignment::Center);
+
     // Desktop notifications (#26): opt-in, CRITICAL firing transitions only.
     let notif_toggle = iced::widget::toggler(state.desktop_notifications)
         .on_toggle(|_| Message::ToggleDesktopNotifications)
@@ -861,6 +947,8 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         history_help,
         alerts_row,
         alerts_help,
+        latency_row,
+        latency_help,
         notif_row,
         notif_help,
     ]
@@ -986,6 +1074,7 @@ mod tests {
             desktop_notifications: false,
             max_history: 1000,
             max_alerts: 200,
+            max_live_latency_ms: 2000,
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
             alert_filter_presets: Vec::new(),
@@ -1018,6 +1107,51 @@ mod tests {
         assert_eq!(restored.stale_threshold_secs, 60);
         assert_eq!(restored.max_history, 1000);
         assert_eq!(restored.max_alerts, 200);
+        assert_eq!(restored.max_live_latency_ms, 2000);
+    }
+
+    /// #716: the deadline is per deployment, and a settings.json5 written
+    /// before it existed must not come back with the deadline OFF — an absent
+    /// field is "not configured", which takes the default, not "disabled".
+    #[test]
+    fn a_settings_file_predating_the_latency_deadline_gets_the_default() {
+        let legacy = r#"{
+            "zenoh_mode": "peer",
+            "zenoh_connect": [],
+            "zenoh_listen": [],
+            "stale_threshold_secs": 120
+        }"#;
+        let restored: PersistentSettings = json5::from_str(legacy).expect("parse legacy settings");
+        assert_eq!(
+            restored.max_live_latency_ms,
+            default_max_live_latency_ms(),
+            "an absent field is 'not configured', never 'disabled'"
+        );
+    }
+
+    /// 0 is a valid answer (no deadline); a value below one frame interval is
+    /// not — it would shed every frame and show nothing.
+    #[test]
+    fn the_latency_deadline_accepts_off_but_not_an_impossible_number() {
+        let mut state = SettingsState::default();
+        state.set_max_live_latency("0".to_string());
+        assert!(state.validate().is_ok(), "0 means no deadline");
+        assert_eq!(state.max_live_latency(), None);
+
+        state.set_max_live_latency("1200".to_string());
+        assert!(state.validate().is_ok());
+        assert_eq!(
+            state.max_live_latency(),
+            Some(std::time::Duration::from_millis(1200))
+        );
+
+        state.set_max_live_latency("40".to_string());
+        assert!(
+            state.validate().is_err(),
+            "a deadline under one frame interval sheds everything"
+        );
+        state.set_max_live_latency("nonsense".to_string());
+        assert!(state.validate().is_err());
     }
 
     #[test]
@@ -1031,6 +1165,7 @@ mod tests {
             desktop_notifications: true,
             max_history: 750,
             max_alerts: 150,
+            max_live_latency_ms: 800,
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
             alert_filter_presets: Vec::new(),

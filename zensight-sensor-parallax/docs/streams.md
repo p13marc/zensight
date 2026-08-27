@@ -364,6 +364,12 @@ Four things about that table are contract rather than preference:
   `reports_never_retune_a_shared_tier` in `tests/e2e.rs` proves the deployment
   behaves that way with a viewer screaming about 95 % loss.
 
+The reference consumer is the ZenSight frontend's parallax tiles, which report
+every 3 s — well inside the ceiling below. What it measures, and what it does
+about being late, is
+[`zensight/docs/media-receiver.md`](../../zensight/docs/media-receiver.md)
+(#716, #717, #718).
+
 Reports are rate-limited to one per second per `(consumer, stream, tier)` —
 declared as the procedure's `rate` in the registry and pinned against the code
 by `tests/registry_conformance.rs` — and refused with `error/invalid-args` for
