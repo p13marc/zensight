@@ -131,16 +131,20 @@ async fn a_tile_that_cannot_meet_its_deadline_rides_the_keyframes_and_says_so() 
         Some(Duration::ZERO),
     ));
 
+    // A fixed window, not "until something happens": the property under test
+    // is a *rate* — how often a permanently-late tile asks for a keyframe —
+    // and a rate needs a known span.
+    const WINDOW: Duration = Duration::from_secs(12);
+    /// `RESYNC_MIN_INTERVAL` in the tile (private to the h264 module).
+    const RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(2);
+
     let mut frames = 0usize;
     let mut keyframe_requests = 0usize;
     let mut report: Option<MediaReceiverReport> = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
-    while frames == 0 || report.as_ref().is_none_or(|r| r.dropped_frames == 0) {
-        match tokio::time::timeout_at(deadline, tile.next()).await {
-            Err(_) => panic!(
-                "40 s with a zero deadline: frames = {frames}, report = {report:?}. \
-                 A permanently late tile must ride the keyframes, not go black."
-            ),
+    let until = tokio::time::Instant::now() + WINDOW;
+    loop {
+        match tokio::time::timeout_at(until, tile.next()).await {
+            Err(_) => break,
             Ok(None) => panic!("the tile stream ended early"),
             Ok(Some(Message::ParallaxFrame { .. })) => frames += 1,
             Ok(Some(Message::ParallaxRequestKeyframe { .. })) => keyframe_requests += 1,
@@ -154,8 +158,8 @@ async fn a_tile_that_cannot_meet_its_deadline_rides_the_keyframes_and_says_so() 
 
     let report = report.expect("a report");
     eprintln!(
-        "zero deadline: decoded {frames} keyframes, asked for {keyframe_requests}; \
-         report = {report:#?}"
+        "zero deadline over {WINDOW:?}: decoded {frames} keyframes, asked for \
+         {keyframe_requests}; report = {report:#?}"
     );
     assert!(
         frames > 0,
@@ -166,12 +170,18 @@ async fn a_tile_that_cannot_meet_its_deadline_rides_the_keyframes_and_says_so() 
         report.lost_frames, 0,
         "our own sheds must never be reported to the producer as network loss: {report:?}"
     );
-    // The resync backoff is what keeps a permanent deadline miss from becoming
-    // the keyframe storm #435 was about: one request per 2 s, not one per
-    // shed frame.
+    // THE regression this test exists for. Every path that drops sync asks
+    // through one backoff gate, and that gate is cleared by a *healthy* decode
+    // — not by the keyframe it just asked for. Clearing it on any decode paces
+    // requests by decoded keyframes instead of by time, and the steady state
+    // is an all-intra stream pushed onto a link already too slow to keep up:
+    // #435's keyframe storm rebuilt out of #716's parts.
+    let ceiling = (WINDOW.as_secs() / RESYNC_MIN_INTERVAL.as_secs()) as usize + 1;
     assert!(
-        keyframe_requests <= frames + report.dropped_frames as usize,
-        "keyframe requests must be backed off, not one per shed frame"
+        keyframe_requests <= ceiling,
+        "{keyframe_requests} keyframe requests in {WINDOW:?} exceeds the \
+         {RESYNC_MIN_INTERVAL:?} backoff's ceiling of {ceiling} — the backoff is \
+         being cleared by the very keyframes it asked for"
     );
 }
 

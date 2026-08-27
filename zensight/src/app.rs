@@ -195,6 +195,9 @@ pub struct ZenSight {
     stale_threshold_ms: i64,
     /// Demo mode (use mock data instead of Zenoh).
     demo_mode: bool,
+    /// Whether a producer is currently refusing this GUI's stream reports
+    /// (#718), so the toast is shown once rather than once per cadence.
+    parallax_report_refused: bool,
     /// Current theme.
     theme: AppTheme,
     /// Sensor health snapshots, keyed by sensor name.
@@ -450,6 +453,7 @@ impl ZenSight {
             current_view,
             stale_threshold_ms,
             demo_mode,
+            parallax_report_refused: false,
             theme,
             sensor_health: std::collections::HashMap::new(),
             recent_errors: std::collections::HashMap::new(),
@@ -3337,6 +3341,23 @@ impl ZenSight {
                 return self.query_topology_batch();
             }
 
+            Message::ParallaxReportOutcome { success, message } => {
+                // A tile reports every few seconds for as long as it is open,
+                // so a producer that refuses — an older sensor with no
+                // `stream/report` queryable, say — would otherwise put a red
+                // toast on screen every 3 seconds, per tile, forever. Say it
+                // once, then stay quiet until reports work again.
+                if success {
+                    self.parallax_report_refused = false;
+                } else if !self.parallax_report_refused {
+                    self.parallax_report_refused = true;
+                    self.toasts.push(
+                        ToastSeverity::Error,
+                        format!("Stream reports are not reaching the sensor — {message}"),
+                    );
+                }
+            }
+
             Message::CommandFeedback { success, message } => {
                 // An empty message means "quiet on success" (automatic
                 // commands like resync keyframe requests); errors always
@@ -5419,8 +5440,16 @@ impl ZenSight {
         // Quiet on success, like the resync keyframe request: a report every
         // few seconds per open tile would otherwise be a toast every few
         // seconds. A refusal still surfaces — `error/busy` means this cadence
-        // is over the producer's declared ceiling, which is a bug worth seeing.
+        // is over the producer's declared ceiling, which is a bug worth seeing
+        // — but through `ParallaxReportOutcome`, which says it once rather
+        // than once per cadence.
         self.send_command(key, &report, String::new())
+            .map(|message| match message {
+                Message::CommandFeedback { success, message } => {
+                    Message::ParallaxReportOutcome { success, message }
+                }
+                other => other,
+            })
     }
 
     /// The v1 origin of the currently-selected device when it belongs to

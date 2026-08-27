@@ -144,6 +144,12 @@ fn default_max_live_latency_ms() -> u64 {
     1500
 }
 
+/// Bounds on the frame-age deadline (#716). Below the floor it would shed
+/// every frame of any plausible stream; above the ceiling it is not a live
+/// deadline any more. `0` is separately allowed, and means off.
+const MIN_LIVE_LATENCY_MS: u64 = 100;
+const MAX_LIVE_LATENCY_MS: u64 = 30_000;
+
 impl Default for PersistentSettings {
     fn default() -> Self {
         Self {
@@ -552,10 +558,13 @@ impl SettingsState {
             .parse()
             .map_err(|_| "Live latency deadline must be a number".to_string())?;
 
-        if max_live_latency_ms != 0 && !(100..=30_000).contains(&max_live_latency_ms) {
-            return Err(
-                "Live latency deadline must be 0 (off) or between 100 and 30000 ms".to_string(),
-            );
+        if max_live_latency_ms != 0
+            && !(MIN_LIVE_LATENCY_MS..=MAX_LIVE_LATENCY_MS).contains(&max_live_latency_ms)
+        {
+            return Err(format!(
+                "Live latency deadline must be 0 (off) or between \
+                 {MIN_LIVE_LATENCY_MS} and {MAX_LIVE_LATENCY_MS} ms"
+            ));
         }
 
         Ok(())
@@ -604,14 +613,23 @@ impl SettingsState {
     ///
     /// `None` and `Some(0)` would mean the same thing to a caller, so the type
     /// only has the one spelling — a tile either has a deadline or it does not.
+    ///
+    /// This reads the **live text field**, which [`Self::validate`] has not
+    /// necessarily seen: validation runs on save, and a tile can be opened
+    /// mid-edit. So it applies the same bounds here rather than trusting the
+    /// string — a user halfway through typing "500" leaves a `5` in the box,
+    /// and a 5 ms deadline sheds every delta frame for a tile opened in that
+    /// window, with nothing on screen to explain it.
     pub fn max_live_latency(&self) -> Option<std::time::Duration> {
-        match self
-            .max_live_latency_ms
-            .parse()
-            .unwrap_or_else(|_| default_max_live_latency_ms())
-        {
+        let ms = self.max_live_latency_ms.parse().unwrap_or(u64::MAX);
+        match ms {
             0 => None,
-            ms => Some(std::time::Duration::from_millis(ms)),
+            ms if (MIN_LIVE_LATENCY_MS..=MAX_LIVE_LATENCY_MS).contains(&ms) => {
+                Some(std::time::Duration::from_millis(ms))
+            }
+            _ => Some(std::time::Duration::from_millis(
+                default_max_live_latency_ms(),
+            )),
         }
     }
 
@@ -1152,6 +1170,27 @@ mod tests {
         );
         state.set_max_live_latency("nonsense".to_string());
         assert!(state.validate().is_err());
+    }
+
+    /// `validate()` runs on save; a tile can be opened mid-edit. A half-typed
+    /// number must not reach a decoder as a 5 ms deadline that sheds every
+    /// delta frame with nothing on screen to explain it.
+    #[test]
+    fn a_half_typed_deadline_falls_back_to_the_default_rather_than_shedding_everything() {
+        let mut state = SettingsState::default();
+        for halfway in ["5", "", "nonsense", "999999"] {
+            state.set_max_live_latency(halfway.to_string());
+            assert_eq!(
+                state.max_live_latency(),
+                Some(std::time::Duration::from_millis(
+                    default_max_live_latency_ms()
+                )),
+                "{halfway:?} is not a usable deadline"
+            );
+        }
+        // …but a deliberate 0 is a real answer and must survive.
+        state.set_max_live_latency("0".to_string());
+        assert_eq!(state.max_live_latency(), None);
     }
 
     #[test]

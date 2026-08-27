@@ -464,9 +464,18 @@ mod real {
             // Never feed the decoder before its first IDR.
             let mut synced = false;
             // Backoff for resync keyframe requests (see RESYNC_MIN_INTERVAL);
-            // cleared by a successful decode so a fresh failure after a
-            // healthy stretch asks immediately.
+            // cleared by a HEALTHY decode so a fresh failure after a healthy
+            // stretch asks immediately. `shed_since_decode` is what makes it
+            // "healthy" rather than merely "a picture came out", and it is
+            // load-bearing: under sustained lateness the tile sheds a delta,
+            // asks for an IDR, and the IDR is always admitted (a late keyframe
+            // is never shed) — so clearing the backoff on any decode would let
+            // the very next late delta ask again, pacing requests by decoded
+            // keyframes instead of by time. The steady state of that is an
+            // all-intra stream pushed onto the link that was already too slow,
+            // which is #435's keyframe storm rebuilt out of #716's parts.
             let mut last_resync: Option<Instant> = None;
+            let mut shed_since_decode = false;
             // A reset the queue was too full to accept. It must land BEFORE the
             // next access unit, so it is retried at the next enqueue rather
             // than dropped — a decoder that missed its reset would smear stale
@@ -482,6 +491,7 @@ mod real {
             // publishes (open failed on the sensor) ends with a reason.
             let mut any_sample = false;
             let mut oversize_strikes = 0u32;
+            let mut deadline_disarmed = false;
 
             // The report cadence runs on its own clock, NOT off arriving
             // frames: a tile that is receiving nothing still reports, and a
@@ -516,27 +526,44 @@ mod real {
                             break 'sample;
                         };
                         any_sample = true;
+                        // Frames ARE arriving. If none ever decodes within the
+                        // window, stop showing a silent black tile and say why.
+                        // Armed here rather than after the attachment parses,
+                        // so a producer emitting samples nothing can read still
+                        // trips the watchdog instead of leaving the tile on
+                        // "waiting for frames…" forever.
+                        let arrived = *first_frame_at.get_or_insert_with(Instant::now);
+                        let expired = !ever_decoded && arrived.elapsed() >= NO_DECODE_TIMEOUT;
+                        // The frame-age clock is the publisher's HLC stamp
+                        // (RFC 07 §1.3), read as observed skewed latency:
+                        // `None` means unstamped, which is NOT age zero.
+                        let age_ms =
+                            observed_frame_age_ms(sample.timestamp(), SystemTime::now());
                         let Some(meta) = sample
                             .attachment()
                             .and_then(|a| decode::<FrameMeta>(&a.to_bytes(), Format::Cbor).ok())
                         else {
+                            // No sequence number to anchor to, so it cannot be
+                            // placed in the stream — but it arrived, and the
+                            // module's rule is that every frame that does not
+                            // reach the screen has exactly one cause.
+                            stats.on_unreadable_sample(age_ms);
+                            shed_since_decode = true;
+                            if expired {
+                                ended = Some(Some(
+                                    "receiving samples with no readable frame metadata"
+                                        .to_string(),
+                                ));
+                            }
                             break 'sample;
                         };
-                        // Frames ARE arriving. If none ever decodes within the
-                        // window, stop showing a silent black tile and say why.
-                        let arrived = *first_frame_at.get_or_insert_with(Instant::now);
-                        if !ever_decoded && arrived.elapsed() >= NO_DECODE_TIMEOUT {
+                        if expired {
                             ended = Some(Some(format!(
                                 "receiving {}×{} video but could not decode this tier",
                                 meta.width, meta.height
                             )));
                             break 'sample;
                         }
-                        // The frame-age clock is the publisher's HLC stamp
-                        // (RFC 07 §1.3), read as observed skewed latency:
-                        // `None` means unstamped, which is NOT age zero.
-                        let age_ms =
-                            observed_frame_age_ms(sample.timestamp(), SystemTime::now());
                         let gap = stats.on_sample(&meta, age_ms);
 
                         // Any break in the sequence — a gap (dropped access
@@ -550,9 +577,27 @@ mod real {
                             ask_for_keyframe(&mut last_resync, &mut outbox, &stream);
                         }
 
-                        match admit(&meta, age_ms, synced, max_live_latency) {
+                        // A deadline no frame can ever meet is not a deadline
+                        // (see `deadline_is_reachable`): a producer clock that
+                        // trails ours by more than the limit would otherwise
+                        // shed every delta forever and blame the viewer.
+                        let armed = max_live_latency
+                            .filter(|limit| stats.deadline_is_reachable(*limit));
+                        if armed.is_none() && max_live_latency.is_some() && !deadline_disarmed {
+                            deadline_disarmed = true;
+                            tracing::warn!(
+                                stream = %stream,
+                                floor_ms = stats.min_frame_age_ms(),
+                                deadline_ms = max_live_latency.map(|d| d.as_millis()),
+                                "frame-age deadline disarmed: no frame on this stream has ever \
+                                 been younger than it, which is a clock offset rather than a \
+                                 backlog"
+                            );
+                        }
+                        match admit(&meta, age_ms, synced, armed) {
                             Admit::Shed(why) => {
                                 stats.on_shed(why);
+                                shed_since_decode = true;
                                 if synced {
                                     synced = false;
                                     pending_reset = true;
@@ -576,8 +621,15 @@ mod real {
                         // again next time rather than decoding against stale
                         // references.
                         if pending_reset && jobs.try_send(DecodeJob::Reset).is_err() {
+                            // The AU just shed is the keyframe that would have
+                            // re-anchored us, so ask for another: waiting out
+                            // the producer's next natural IDR would spend a
+                            // whole GOP on a condition the queue clears in a
+                            // few hundred milliseconds.
                             stats.on_shed(Shed::QueueFull);
+                            shed_since_decode = true;
                             synced = false;
+                            ask_for_keyframe(&mut last_resync, &mut outbox, &stream);
                             break 'sample;
                         }
                         pending_reset = false;
@@ -593,6 +645,7 @@ mod real {
                             // backlog used to grow.
                             Err(mpsc::error::TrySendError::Full(_)) => {
                                 stats.on_shed(Shed::QueueFull);
+                                shed_since_decode = true;
                                 synced = false;
                                 pending_reset = true;
                                 ask_for_keyframe(&mut last_resync, &mut outbox, &stream);
@@ -608,7 +661,10 @@ mod real {
                             None => ended = Some(Some("decoder stopped".to_string())),
                             Some(DecodeOut::Picture { sequence, keyframe, width, height, rgba }) => {
                                 ever_decoded = true;
-                                last_resync = None;
+                                if !shed_since_decode {
+                                    last_resync = None;
+                                }
+                                shed_since_decode = false;
                                 stats.on_decoded(sequence, keyframe, Instant::now());
                                 stats.set_queue_depth(Some(queue_depth(&jobs)));
                                 outbox.push(Message::ParallaxFrame {
@@ -623,9 +679,11 @@ mod real {
                             Some(DecodeOut::Buffered) => {}
                             Some(DecodeOut::ArenaFull) => {
                                 stats.on_decode_loss(DecodeLoss::ArenaFull);
+                                shed_since_decode = true;
                             }
                             Some(DecodeOut::Oversize(bytes)) => {
                                 stats.on_decode_loss(DecodeLoss::Oversize);
+                                shed_since_decode = true;
                                 oversize_strikes += 1;
                                 if oversize_strikes >= OVERSIZE_STRIKES {
                                     ended = Some(Some(format!(
@@ -645,6 +703,7 @@ mod real {
                             }
                             Some(DecodeOut::Failed(e)) => {
                                 stats.on_decode_loss(DecodeLoss::Failed);
+                                shed_since_decode = true;
                                 synced = false;
                                 pending_reset = true;
                                 if last_resync.is_none_or(|at| at.elapsed() >= RESYNC_MIN_INTERVAL) {

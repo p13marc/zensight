@@ -62,7 +62,25 @@ slow link showing nothing at all; taking them gives a slideshow that snaps back 
 the moment the link does. The report says the age was high either way.
 
 Every path that drops sync asks for the fresh IDR through one gate, `RESYNC_MIN_INTERVAL`
-(2 s), so no combination of them can add up to the keyframe storm #435 was about.
+(2 s), so no combination of them can add up to the keyframe storm #435 was about. The gate
+is cleared by a **healthy** decode, not by any decode: under sustained lateness the tile
+sheds a delta, asks for an IDR, and that IDR is always admitted — so clearing the backoff on
+the keyframe it just asked for would pace requests by decoded keyframes instead of by time,
+and the steady state of that is an all-intra stream pushed onto the link that was already
+too slow. #435's storm, rebuilt out of #716's parts.
+
+**A deadline no frame can ever meet is disarmed.** Frame age is *observed skewed latency*,
+and a deadline turns an observation into a verdict — fine while the two clocks agree,
+catastrophic when they do not. A fleet host whose clock trails the viewer's by three seconds
+makes every one of its frames read as three seconds old; every delta would be shed, every
+tile would degrade to a slideshow, and `dropped_frames` would blame the viewer for a clock.
+The **smallest age ever observed** separates the cases: under a real backlog some frames
+arrive fresh, so the floor is small; under a systematic offset the floor *is* the offset. A
+deadline below that floor is disarmed (after 30 stamped samples, so it cannot fire on the
+first late frame), logged with the floor it measured, and the tile keeps playing. The
+reported age is **not** corrected — subtracting the floor would launder skew into a latency
+number, which is exactly what RFC 07 §1.3 forbids. An operator reading "frame age 3000 ms"
+on a LAN has been told precisely what is wrong.
 
 **Configuring it.** `max_live_latency_ms` in `~/.config/zensight/settings.json5`, or the
 Settings view's *Live video latency deadline*. Default 1500 ms; `0` disables it; anything
@@ -107,6 +125,7 @@ the log line.
 | queue full | `dropped_frames` | the decoder is behind |
 | unsynced delta | `dropped_frames` | the reference chain is gone; waiting for an IDR |
 | preview backlog | `dropped_frames` | superseded by a newer JPEG in the latest-wins drain |
+| unreadable metadata | `dropped_frames` | the sample carried no readable `FrameMeta` |
 | arena full | `dropped_frames` | no free slot; the frame never reached the decoder |
 | oversize AU | `dropped_frames` | larger than one decoder slot |
 | decode failure | `dropped_frames` | the decoder refused it |
@@ -136,6 +155,10 @@ Every open tile — video **and** preview — sends its producer a `MediaReceive
   subscriber is undeclared. A report from a replaced incarnation is dropped rather than
   forwarded: it would keep a dead `consumer_id` alive in the sensor's per-tier map for a
   whole idle window, and `rx/{tier}/consumers` counts exactly those.
+- **A refusal is said once.** A tile reports every few seconds for as long as it is open, so
+  a producer that refuses — an older sensor with no `stream/report` queryable — would put a
+  red toast on screen every 3 s per tile, forever. `ParallaxReportOutcome` toasts the first
+  refusal and stays quiet until reports work again.
 - **Previews report too.** A preview tile's numbers are simpler — every JPEG is a
   keyframe, so there is no reference chain and no decode queue (`decoder_queue_depth` is
   omitted, not zero) — but an operator comparing them against a video tile's is how you

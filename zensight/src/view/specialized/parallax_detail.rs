@@ -419,14 +419,17 @@ pub async fn fetch_streams(
     serde_json::from_slice(&sample.payload().to_bytes()).ok()
 }
 
-/// The `FrameMeta` on a preview sample, or the default when the attachment is
-/// missing or undecodable — a preview with no metadata still renders, it just
-/// carries sequence 0 (the sequence-restart guard already tolerates that).
-fn frame_meta(sample: &zenoh::sample::Sample) -> FrameMeta {
+/// The `FrameMeta` on a preview sample, or `None` when the attachment is
+/// missing or undecodable.
+///
+/// A preview with no metadata still renders — every JPEG stands alone — but it
+/// is accounted for as what it is rather than silently taking
+/// `FrameMeta::default()`, whose sequence 0 would fabricate a gap the size of
+/// the whole stream on the very next readable frame.
+fn frame_meta(sample: &zenoh::sample::Sample) -> Option<FrameMeta> {
     sample
         .attachment()
         .and_then(|a| decode(&a.to_bytes(), Format::Cbor).ok())
-        .unwrap_or_default()
 }
 
 /// The per-tile subscriber stream: newest JPEG preview frames decoded to
@@ -496,8 +499,13 @@ pub fn preview_tile_stream(
                                 observed_frame_age_ms(sample.timestamp(), SystemTime::now());
                             let mut meta = frame_meta(&sample);
                             while let Ok(Some(newer)) = subscriber.try_recv() {
-                                stats.on_sample(&meta, age);
-                                stats.on_shed(Shed::Backlog);
+                                match &meta {
+                                    Some(meta) => {
+                                        stats.on_sample(meta, age);
+                                        stats.on_shed(Shed::Backlog);
+                                    }
+                                    None => stats.on_unreadable_sample(age),
+                                }
                                 sample = newer;
                                 age = observed_frame_age_ms(
                                     sample.timestamp(),
@@ -505,7 +513,12 @@ pub fn preview_tile_stream(
                                 );
                                 meta = frame_meta(&sample);
                             }
-                            stats.on_sample(&meta, age);
+                            match &meta {
+                                Some(meta) => {
+                                    stats.on_sample(meta, age);
+                                }
+                                None => stats.on_unreadable_sample(age),
+                            }
                             let payload = sample.payload().to_bytes().to_vec();
                             // JPEG→RGBA decode off the UI thread.
                             let decoded = tokio::task::spawn_blocking(move || {
@@ -516,11 +529,12 @@ pub fn preview_tile_stream(
                                 Ok(Some(handle)) => {
                                     // Every JPEG stands alone, so a decoded
                                     // preview frame is always a keyframe.
-                                    stats.on_decoded(meta.sequence, true, Instant::now());
+                                    let seq = meta.map_or(0, |m| m.sequence);
+                                    stats.on_decoded(seq, true, Instant::now());
                                     outbox.push(Message::ParallaxFrame {
                                         stream: stream.clone(),
                                         generation,
-                                        seq: meta.sequence,
+                                        seq,
                                         handle,
                                     });
                                 }

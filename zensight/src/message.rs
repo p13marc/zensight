@@ -138,6 +138,17 @@ pub enum Message {
     /// Zenoh connection lost or failed.
     Disconnected(String),
 
+    /// The outcome of forwarding one tile's receiver report (#718).
+    ///
+    /// Its own variant rather than [`Self::CommandFeedback`] because its
+    /// cadence is different in kind: a report goes out every few seconds per
+    /// open tile, forever, so a producer that refuses them would otherwise
+    /// toast on a 3-second loop for as long as the tile is open. This one
+    /// toasts the first refusal and then goes quiet until reports work again.
+    ParallaxReportOutcome {
+        success: bool,
+        message: String,
+    },
     /// Result of a command sent to a sensor (drives a feedback toast).
     CommandFeedback {
         success: bool,

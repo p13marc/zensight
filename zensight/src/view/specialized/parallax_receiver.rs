@@ -57,6 +57,15 @@ pub const REPORT_INTERVAL: Duration = Duration::from_secs(3);
 /// Smoothing divisor for the RFC 3550 inter-arrival jitter estimate.
 const JITTER_GAIN: f64 = 16.0;
 
+/// Stamped samples a tile must see before it will call its own deadline
+/// unreachable.
+///
+/// The floor below is only meaningful once it has had a chance to fall. A
+/// tile that opens mid-burst sees a few late frames first; at 15–30 fps this
+/// is a second or two of evidence, which is long enough for one fresh frame to
+/// arrive if fresh frames exist at all.
+const MIN_SAMPLES_FOR_SKEW: u64 = 30;
+
 /// A frame this consumer shed on purpose — [`MediaReceiverReport::dropped_frames`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ShedCounts {
@@ -68,6 +77,8 @@ pub struct ShedCounts {
     pub unsynced: u64,
     /// Superseded in the preview tile's latest-frame-wins drain.
     pub backlog: u64,
+    /// Arrived with no readable `FrameMeta`.
+    pub malformed: u64,
     /// The shared access-unit arena had no free slot.
     pub arena_full: u64,
     /// An access unit larger than a decoder slot.
@@ -84,6 +95,7 @@ impl ShedCounts {
             + self.queue_full
             + self.unsynced
             + self.backlog
+            + self.malformed
             + self.arena_full
             + self.oversize
             + self.decode_error
@@ -101,6 +113,11 @@ pub enum Shed {
     Unsynced,
     /// The preview tile's latest-frame-wins drain superseded it.
     Backlog,
+    /// The sample carried no readable `FrameMeta`, so nothing downstream could
+    /// place it in the sequence. Counted rather than skipped: a producer
+    /// emitting malformed attachments would otherwise look, on the wire,
+    /// exactly like a producer emitting nothing at all.
+    Malformed,
 }
 
 /// Why a frame that reached the decoder did not come out of it.
@@ -159,6 +176,10 @@ pub struct ReceiverStats {
 
     jitter_ms: Option<f64>,
     prev_transit_ms: Option<f64>,
+    /// Stamped samples over the tile's life, and the smallest age any of them
+    /// showed. See [`Self::deadline_is_reachable`].
+    stamped: u64,
+    min_age_ms: Option<f64>,
 
     queue_depth: Option<u32>,
 
@@ -203,6 +224,8 @@ impl ReceiverStats {
             unstamped: 0,
             jitter_ms: None,
             prev_transit_ms: None,
+            stamped: 0,
+            min_age_ms: None,
             queue_depth: None,
             last_keyframe_sequence: None,
             last_keyframe_at: None,
@@ -218,22 +241,7 @@ impl ReceiverStats {
     pub fn on_sample(&mut self, meta: &FrameMeta, age_ms: Option<f64>) -> Gap {
         self.received += 1;
 
-        match age_ms {
-            Some(age) => {
-                self.ages_ms.push(age);
-                // RFC 3550 inter-arrival jitter over the transit times: the
-                // smoothed mean deviation of (arrival - publication) between
-                // consecutive samples. It needs both clocks, so an unstamped
-                // stream has no jitter either — and reports none, rather than
-                // a confident zero.
-                if let Some(prev) = self.prev_transit_ms {
-                    let d = (age - prev).abs();
-                    self.jitter_ms = Some(self.jitter_ms.map_or(d, |j| j + (d - j) / JITTER_GAIN));
-                }
-                self.prev_transit_ms = Some(age);
-            }
-            None => self.unstamped += 1,
-        }
+        self.fold_age(age_ms);
 
         let gap = match self.prev_sequence {
             None => Gap::None,
@@ -266,6 +274,27 @@ impl ReceiverStats {
         gap
     }
 
+    /// Fold one sample's observed age into the interval window, the jitter
+    /// estimate and the lifetime floor.
+    fn fold_age(&mut self, age_ms: Option<f64>) {
+        let Some(age) = age_ms else {
+            self.unstamped += 1;
+            return;
+        };
+        self.ages_ms.push(age);
+        self.stamped += 1;
+        self.min_age_ms = Some(self.min_age_ms.map_or(age, |m: f64| m.min(age)));
+        // RFC 3550 inter-arrival jitter over the transit times: the smoothed
+        // mean deviation of (arrival - publication) between consecutive
+        // samples. It needs both clocks, so an unstamped stream has no jitter
+        // either — and reports none, rather than a confident zero.
+        if let Some(prev) = self.prev_transit_ms {
+            let d = (age - prev).abs();
+            self.jitter_ms = Some(self.jitter_ms.map_or(d, |j| j + (d - j) / JITTER_GAIN));
+        }
+        self.prev_transit_ms = Some(age);
+    }
+
     /// A frame this consumer shed on purpose.
     pub fn on_shed(&mut self, why: Shed) {
         match why {
@@ -273,7 +302,21 @@ impl ReceiverStats {
             Shed::QueueFull => self.sheds.queue_full += 1,
             Shed::Unsynced => self.sheds.unsynced += 1,
             Shed::Backlog => self.sheds.backlog += 1,
+            Shed::Malformed => self.sheds.malformed += 1,
         }
+    }
+
+    /// A sample arrived that carries no readable `FrameMeta`.
+    ///
+    /// Counted as received and shed, but deliberately left out of the sequence
+    /// state: there is no sequence number to anchor to, and inventing one
+    /// (`FrameMeta::default()` is sequence 0) would fabricate a gap the size of
+    /// the whole stream. Its **age** is still folded in — the middleware
+    /// stamped the sample whatever the producer put in the attachment.
+    pub fn on_unreadable_sample(&mut self, age_ms: Option<f64>) {
+        self.received += 1;
+        self.fold_age(age_ms);
+        self.sheds.malformed += 1;
     }
 
     /// A frame the decoder could not turn into a picture.
@@ -307,6 +350,50 @@ impl ReceiverStats {
     /// permanently satisfied.
     pub fn frame_age_measured(&self) -> bool {
         !self.ages_ms.is_empty()
+    }
+
+    /// Whether a frame-age deadline of `limit` is one any frame could ever
+    /// meet on this stream.
+    ///
+    /// # Why a deadline needs this guard
+    ///
+    /// Frame age is `arrival − publisher HLC`, and RFC 07 §1.3 is explicit
+    /// that it is *observed skewed latency* — an **observation**, never a
+    /// verdict on the transport. A deadline turns it into a verdict anyway,
+    /// which is fine while the two clocks agree and catastrophic when they do
+    /// not: a fleet host whose clock trails the viewer's by three seconds
+    /// makes every one of its frames read as three seconds old. Every delta
+    /// would be shed, every tile would degrade to a keyframe slideshow, and
+    /// `dropped_frames` would blame the viewer for a clock.
+    ///
+    /// The **smallest age ever observed** separates the two cases. Under a
+    /// real backlog at least some frames arrive fresh, so the floor is small;
+    /// under a systematic offset the floor *is* the offset and never falls
+    /// below it. A deadline under that floor is one no frame can ever meet,
+    /// and a deadline nothing can meet is not a deadline — it is an off
+    /// switch with extra steps. So the tile disarms it and keeps playing.
+    ///
+    /// This deliberately does **not** correct the age it reports. Subtracting
+    /// the floor would launder skew into a latency number, which is precisely
+    /// what §1.3 forbids; the report still carries the raw observation, and an
+    /// operator reading "frame age 3000 ms" on a LAN has been told exactly
+    /// what is wrong.
+    pub fn deadline_is_reachable(&self, limit: Duration) -> bool {
+        match self.min_age_ms {
+            Some(floor) if self.stamped >= MIN_SAMPLES_FOR_SKEW => {
+                floor <= limit.as_millis() as f64
+            }
+            // Not enough evidence yet: the deadline stays armed. A guard that
+            // defaults to "off" would never come on.
+            _ => true,
+        }
+    }
+
+    /// The smallest frame age observed over this tile's life, in milliseconds
+    /// — a lower bound on the clock offset between the two hosts plus the
+    /// path's true minimum latency.
+    pub fn min_frame_age_ms(&self) -> Option<f64> {
+        self.min_age_ms
     }
 
     /// Samples this interval that arrived unstamped.
@@ -347,7 +434,16 @@ impl ReceiverStats {
             dropped_frames: self.sheds.total(),
             decoded_frames: self.decoded,
             last_sequence: self.last_sequence,
-            interarrival_jitter_ms: self.jitter_ms.map(|j| j as f32),
+            // Same omission rule as frame age, and for the same reason: a tile
+            // whose stream stopped must not keep publishing the jitter it
+            // measured minutes ago as though it were current. The estimate
+            // itself survives the reset so a resumed stream does not restart
+            // its smoothing from nothing.
+            interarrival_jitter_ms: if self.ages_ms.is_empty() {
+                None
+            } else {
+                self.jitter_ms.map(|j| j as f32)
+            },
             frame_age_ms: median_of(&self.ages_ms).map(|v| v as f32),
             frame_age_max_ms: max_of(&self.ages_ms).map(|v| v as f32),
             decoder_queue_depth: self.queue_depth,
@@ -552,6 +648,99 @@ mod tests {
             "monotonic elapsed time on ONE host — never negative, unlike frame age"
         );
         assert_eq!(r.decoded_frames, 2);
+    }
+
+    /// A producer whose clock trails ours by more than the deadline makes
+    /// every one of its frames read as older than the deadline. Shedding them
+    /// all would degrade the tile to keyframes forever and blame the viewer.
+    #[test]
+    fn a_deadline_no_frame_can_ever_meet_is_disarmed() {
+        let limit = Duration::from_millis(1_500);
+        let mut skewed = stats();
+        for i in 0..MIN_SAMPLES_FOR_SKEW {
+            // A 3-second clock offset, jittering a little.
+            skewed.on_sample(&frame(i + 1, i == 0), Some(3_000.0 + i as f64));
+        }
+        assert!(
+            !skewed.deadline_is_reachable(limit),
+            "no frame on this stream has EVER been younger than the deadline: \
+             that is a clock offset, not a backlog"
+        );
+        assert!(skewed.min_frame_age_ms().is_some_and(|f| f >= 3_000.0));
+
+        // A genuine backlog looks different: some frames DO arrive fresh, so
+        // the floor falls below the deadline and the deadline stays armed.
+        let mut backlogged = stats();
+        for i in 0..MIN_SAMPLES_FOR_SKEW {
+            let age = if i % 10 == 0 { 40.0 } else { 4_000.0 };
+            backlogged.on_sample(&frame(i + 1, i == 0), Some(age));
+        }
+        assert!(
+            backlogged.deadline_is_reachable(limit),
+            "frames that arrive fresh prove the deadline is meetable"
+        );
+    }
+
+    /// The guard must not fire before it has evidence, or it would disarm the
+    /// deadline on the first late frame of every stream and never come back.
+    #[test]
+    fn the_skew_guard_waits_for_evidence_before_disarming() {
+        let limit = Duration::from_millis(1_500);
+        let mut s = stats();
+        s.on_sample(&frame(1, true), Some(9_000.0));
+        assert!(
+            s.deadline_is_reachable(limit),
+            "one late frame is not proof of a clock offset"
+        );
+        // An unstamped stream never accumulates evidence either, and its
+        // deadline is inactive for a different reason entirely.
+        let mut unstamped = stats();
+        for i in 0..MIN_SAMPLES_FOR_SKEW * 2 {
+            unstamped.on_sample(&frame(i + 1, i == 0), None);
+        }
+        assert!(unstamped.deadline_is_reachable(limit));
+        assert_eq!(unstamped.min_frame_age_ms(), None);
+    }
+
+    /// #718's rule, applied to jitter as well as to frame age: a tile whose
+    /// stream stopped must not keep publishing what it measured minutes ago.
+    #[test]
+    fn a_silent_interval_reports_no_jitter_rather_than_the_last_one() {
+        let start = Instant::now();
+        let mut s = ReceiverStats::new("cam0".into(), None, None, 1, start);
+        for i in 0..4 {
+            s.on_sample(&frame(i + 1, i == 0), Some(10.0 + i as f64 * 3.0));
+        }
+        let live = s.snapshot(start + Duration::from_secs(3));
+        assert!(live.interarrival_jitter_ms.is_some());
+
+        let silent = s.snapshot(start + Duration::from_secs(6));
+        assert_eq!(
+            silent.interarrival_jitter_ms, None,
+            "stale is not current, exactly as absent is not zero"
+        );
+        assert_eq!(silent.frame_age_ms, None);
+    }
+
+    /// A sample nothing can read still arrived. Leaving it out of every
+    /// counter makes a producer emitting malformed attachments look, on the
+    /// wire, exactly like one emitting nothing at all.
+    #[test]
+    fn an_unreadable_sample_is_counted_rather_than_skipped() {
+        let mut s = stats();
+        s.on_sample(&frame(10, true), Some(5.0));
+        s.on_unreadable_sample(Some(6.0));
+        s.on_unreadable_sample(None);
+        // The next readable frame is contiguous with sequence 10: the
+        // unreadable ones carried no sequence to anchor to, and inventing one
+        // would fabricate a gap the size of the whole stream.
+        assert_eq!(s.on_sample(&frame(11, false), Some(5.0)), Gap::None);
+
+        let r = s.snapshot(Instant::now());
+        assert_eq!(r.received_frames, 4);
+        assert_eq!(r.dropped_frames, 2, "counted, and counted as ours");
+        assert_eq!(r.lost_frames, 0, "nothing was lost on the wire");
+        assert_eq!(s.sheds().malformed, 2);
     }
 
     #[test]
