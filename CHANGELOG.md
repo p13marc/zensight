@@ -249,6 +249,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **The SNMP CPU, IP-address and storage tables are registered subject trees, so
+  `sum by (index)` works for them too** (#783, registry `snmp` 1.8 → **1.9**).
+  The finish of what #779 started for `ifTable`/`ifXTable`.
+
+  While a key matched only snmp's rest-var catch-all `{device}/{metric...}`,
+  #764's family rule had no literal chunks to name from and fell back to the
+  rest variable's **value** — so the table index rode in the metric *name*.
+  `zensight_snmp_storage_1_size` and `zensight_snmp_storage_2_size` were two
+  unrelated families; `zensight_snmp_cpu_1_load` and `zensight_snmp_cpu_2_load`
+  likewise. #769 had already attached the index as a **label**; these patterns
+  are the other half, and now the generic rule takes over:
+
+  | | |
+  |---|---|
+  | before | `zensight_snmp_storage_1_size`, `zensight_snmp_cpu_2_load` — one family per row |
+  | after | `zensight_snmp_storage_size{index="1"}`, `zensight_snmp_cpu_load{index="2"}` — one family, aggregatable |
+
+  **Any dashboard or recording rule naming `zensight_snmp_{cpu,ip,storage}_<n>_<column>`
+  breaks.** Nothing in-tree does — `demo/prometheus/dashboards/` ships no SNMP
+  panel, and `dashboards-blocked/README.md` (updated here) explains why: a panel
+  is provisioned only after it has been checked against a real device polled by
+  a running exporter, and nobody has done that yet.
+
+  Registered **column by column**, not as `{device}/<table>/{index}/{column}`,
+  for the reason #779 paid to learn: a single `{column}` variable is dropped
+  from the family name along with every other variable, collapsing a table's
+  columns into one family carrying counters, gauges and strings at once — two
+  `# TYPE` lines for one name, the scrape-killer class #752 fixed.
+  `storage_columns_are_not_collapsed_into_one_family` pins that half.
+
+  **Two deliberate differences from #779**, both worth stating because their
+  absence looks like an oversight:
+
+  - **No `.rate` siblings.** The poller derives a rate from the *wire tag* —
+    `Counter32`/`Counter64`, or a `Gauge32` the MIB declares as a counter — and
+    not one column of these three tables is a counter: hrStorage is INTEGER
+    throughout, hrProcessorLoad is INTEGER, ipAddrTable is IpAddress/INTEGER.
+    ifTable needed them because `in_octets` and friends genuinely are counters.
+    Registering twelve dead `.rate` patterns to look symmetrical would make the
+    registry advertise a surface no build can emit, which is the class of lie
+    RFC 08 §6.1 and #484 exist to prevent.
+  - **The `ip/` group's scalars stay on the catch-all** (`ip/forwarding`,
+    `ip/default_ttl`, `ip/in_receives` and its `.rate`). They are 3-chunk keys,
+    so the new 4-chunk patterns cannot match them, and their rest-var family
+    name already carries no index — there was nothing for a registration to fix.
+    `the_ip_scalars_are_untouched_by_the_indexed_patterns` pins that they do not
+    get swept into an indexed family, and that they carry no `index` label.
+
+  Not a wire change: the poller publishes exactly the same keys with exactly the
+  same labels. Only the exporters' *reading* of them moves. `registry.lock`
+  regenerated (10 additive entries), and
+  `the_catch_all_would_still_bury_the_table_index_in_the_name` pins the
+  before-state so the improvement is demonstrated rather than asserted.
+
 - **Every firing alert re-keys: `alert_key` is now the normative RFC 11 §3.1
   derivation** (#736, #738). ZenSight had its own recipe with the same hash
   (FNV-1a-64) and the same 16-lowercase-hex output, but two byte differences

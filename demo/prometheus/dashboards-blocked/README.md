@@ -35,11 +35,12 @@ To unpark: `just netring` (which runs `just caps`), scrape, confirm, move the fi
 
 ### SNMP per-interface — unblocked, but not verified here
 
-`sum by (index)` **is now writable**. Registry `snmp` **1.8** (#779) registers
-the `ifTable`/`ifXTable` columns explicitly — one subject per column,
-`{device}/if/{index}/<column>` (plus the `.rate` sibling the poller derives for
-every counter) — so #764's family rule names from the literal chunks and every
-variable becomes a label:
+`sum by (index)` **is now writable, for all five indexed tables.** Registry
+`snmp` **1.8** (#779) registered the `ifTable`/`ifXTable` columns explicitly —
+one subject per column, `{device}/if/{index}/<column>`, plus the `.rate` sibling
+the poller derives for every counter — and **1.9** (#783) did the same for
+`hrProcessorTable`, `ipAddrTable` and `hrStorageTable`. #764's family rule names
+from the literal chunks, so every variable becomes a label:
 
 | | series |
 |---|---|
@@ -58,8 +59,24 @@ scrape, and that needs a real SNMP device (or the simulated agent from
 `zensight-sensor-snmp/tests/e2e.rs`) polled by a running exporter. Nobody has
 done that yet. The naming half is done; the verification half is not.
 
-`cpu/{index}/…`, `ip/{index}/…` and `storage/{index}/…` still ride the catch-all
-and still bake their index into the name — the same change again, not yet made.
+The other three landed in registry `snmp` **1.9** (#783), on the same terms:
+`zensight_snmp_cpu_load{index="1"}`, `zensight_snmp_ip_if_index{index="1"}`,
+`zensight_snmp_storage_size{index="1"}`.
+
+Two differences from ifTable worth knowing before writing a panel:
+
+- **No `.rate` siblings**, and that is correct rather than missing. The poller
+  derives a rate from the wire tag (`Counter32`/`Counter64`), and not one column
+  of those three tables is a counter — hrStorage is INTEGER throughout,
+  hrProcessorLoad is INTEGER, ipAddrTable is IpAddress/INTEGER.
+- **The `ip/` group's scalars** (`ip_forwarding`, `ip_default_ttl`,
+  `ip_in_receives_total` and its rate) are 3-chunk keys and stay on the
+  catch-all. Their names already carry no index, so nothing needed fixing, and
+  they carry **no `index` label** — do not write `sum by (index)` over them.
+
+What is still missing for every SNMP panel is the same thing: a real device
+polled by a running exporter. The naming half is done for all five tables; the
+verification half is not.
 
 Richer still, `zensight-common/src/interfaces.rs` already publishes an
 `InterfaceTable` per device whose own doc-comment says it exists to replace
