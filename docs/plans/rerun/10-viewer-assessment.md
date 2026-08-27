@@ -1,9 +1,13 @@
 # 10 — Hands-on viewer assessment (#448)
 
-> Status: **in progress** (started 2026-07-12). Environment: the local development
+> Status: **closed incomplete, 2026-08-26.** Environment: the local development
 > workstation (Fedora 44, Wayland/GNOME) — the machine previously referred to as the
-> pending "GPU box". CLI-verifiable items below are done; viewer-visual items are being
-> worked through interactively.
+> pending "GPU box". Everything CLI-verifiable was done and is below; the
+> viewer-visual checklist at the end was never worked through, and #430 was
+> decided without it. [DECISION.md](DECISION.md) §7 states what that costs: the
+> unticked items bear on event legibility and topology stability, both of which
+> were already the weakest-rated lanes, so they could not have changed outcome 3
+> — only outcome 4, which #426 blocks independently.
 
 ## Install (feeds #427)
 
@@ -89,10 +93,10 @@ first live-mode run against a real viewer succeeded (previously untested headles
 Rerun Viewer"). Deferred to a follow-up session; candidate for automating demo dry-runs
 (#452) and screenshot capture.
 
-## Viewer-visual checklist — pending interactive pass
+## Viewer-visual checklist — never run
 
-The items below need eyes on the viewer (session running as of this writing). Record a
-verdict + screenshot per item:
+These needed eyes on the viewer and did not get them. Left as written rather than
+deleted: if anyone ever argues for outcome 4, this is the list they inherit.
 
 From 04/05 (metrics + events):
 - [ ] TextLog level colors + selection-panel rendering of `AnyValues` attributes

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Decided
+
+- **Rerun: an optional debugging backend, and the evaluation is closed** (#430,
+  epic #415). `docs/plans/rerun/DECISION.md` is the terminal document of a
+  21-issue evaluation. `zensight-rerun` stays in-tree, `publish = false`, out of
+  the release train, and off unless someone runs the binary; it is **supported
+  for bounded incident capture and replay** and for nothing else.
+
+  Outcome 4 — a packaged, released backend — is refused rather than deferred,
+  for four independent reasons: the adapter was never benchmarked at fleet rates
+  (#426, not run), the viewer transport is unauthenticated, unencrypted and
+  binds `0.0.0.0` by default, packaging would make Rerun's ~6-week breaking
+  cadence our obligation, and structured events are modelled *worse* than in a
+  backend we already ship (OTel's `LogRecord` carries body + severity +
+  attributes in one record; Rerun needs `TextLog` **and** `AnyValues` on one
+  path by producer-side convention, with nothing stopping them drifting).
+
+  The maintenance number is not hypothetical: the pin is `=0.34.1` and upstream
+  is 0.36.3 — two breaking minors, each with its own migration guide, in the
+  seven weeks since we pinned. `zensight-rerun/Cargo.toml` now says in place
+  that the pin does not move on a Renovate PR.
+
+  Three operating rules are now written where a user will hit them
+  (`zensight-rerun/README.md`): **`--bind 127.0.0.1` always** — the default
+  exposes the web viewer *and* the gRPC proxy to the network, carrying
+  hostnames, IPs, MACs, flow matrices and log lines; **`rerun rrd optimize`
+  before storing or sharing** — 13x on our own recordings (~1.3 KiB/point live
+  write becomes ~100 B/point, which is what killed the "untenable storage"
+  reject-signal, and it doubles as the repair tool for a `kill -9`-truncated
+  file); and **`--memory-limit`** on anything outliving a demo.
+
+  What the evaluation is actually worth, beyond the verdict: it demonstrated
+  that scrubbing backwards through a correlated incident across metrics, alerts,
+  events and topology on one axis is a thing worth having. ZenSight already
+  stores the samples. DECISION.md §6 records that as a native feature waiting to
+  be specified rather than designing it.
+
 ### Fixed
 
 - **The verify scripts blamed Zenoh discovery when a binary was simply missing**

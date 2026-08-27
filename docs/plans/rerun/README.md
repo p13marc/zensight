@@ -1,12 +1,15 @@
 # Rerun evaluation (epic #415)
 
-Working notes for evaluating [Rerun](https://rerun.io) 0.34 as an **optional** visualization /
+Working notes from evaluating [Rerun](https://rerun.io) 0.34 as an **optional** visualization /
 replay backend for ZenSight, fed by a standalone adapter (`zensight-rerun/`) that consumes the
-Zenoh bus exactly like the exporters do. This is an *evaluation*, not an adoption: every
-document below records reject-signals as diligently as adopt-signals, and "do not adopt" is a
+Zenoh bus exactly like the exporters do. It was an *evaluation*, not an adoption: every
+document below records reject-signals as diligently as adopt-signals, and "do not adopt" was a
 fully acceptable outcome.
 
-Scope guards (kill-switches from the epic):
+**It ended at outcome 3 — an optional debugging backend, in-tree and off by
+default.** [DECISION.md](DECISION.md) is the terminal document; read it first.
+
+Scope guards (kill-switches from the epic — all four held):
 
 - The adapter is **evaluation-only**: `publish = false`, no other crate depends on it, no
   existing crate's source is modified.
@@ -29,7 +32,10 @@ Scope guards (kill-switches from the epic):
 | [07-record-replay.md](07-record-replay.md) | #424 | Record mode, headless `.rrd` verification, storage cost |
 | [08-multi-process.md](08-multi-process.md) | #423 | Multi-process producer evaluation notes |
 | [09-topology.md](09-topology.md) | #425 | Topology → GraphNodes/GraphEdges mapping |
+| [10-viewer-assessment.md](10-viewer-assessment.md) | #448 | Hands-on viewer pass — install route, `rrd optimize`/`merge`/crash-repair, `--serve-web`, the `0.0.0.0` default bind |
+| **[DECISION.md](DECISION.md)** | **#430** | **The decision: outcome 3, an optional debugging backend.** The reasoning, the measured costs, and — §7 — exactly what was never evidenced and how that bounds it |
 
-The final go/no-go write-up (**#430**, `DECISION.md`) is intentionally **out of scope for this
-PR** — it is written after the GPU-box viewer assessment that this headless phase cannot
-perform.
+**The evaluation is closed.** #415 and its children were closed on 2026-08-26
+against [DECISION.md](DECISION.md). Documents 01–10 are the evidence and stay as
+written; where a later document corrected an earlier one it says so in place
+(the clearest case is `rrd optimize` in 10 answering the storage cost in 07).
