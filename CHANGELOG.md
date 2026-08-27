@@ -185,19 +185,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recognised as the behaviour the guard exists to produce. The step now says in
   place that it is spelling-based and must grow.
 
-- **`just test-ui`** (#687). `cargo test -p zensight --test ui_tests` segfaults
-  on a headless Linux box with Mesa installed, about one run in seven, printing
-  nothing at all — the process dies before libtest writes a result line. It is
-  lavapipe: `iced_test::simulator` stands up a real wgpu device, wgpu picks
-  Vulkan, a GPU-less host resolves that to Mesa's software Vulkan, and 169 tests
-  doing it at once crash inside the loader. `WGPU_BACKEND=gl` avoids the path
-  entirely (0 crashes in 40 runs, against 6 in 40 by default).
+- **`just test-ui`, and #687 is broader than #687 said.** `cargo test -p zensight`
+  segfaults on a headless Linux box with Mesa installed, printing nothing at all
+  — the process dies before libtest writes a result line. It is lavapipe:
+  `iced_test::simulator` stands up a real wgpu device, wgpu picks Vulkan, a
+  GPU-less host resolves that to Mesa's software Vulkan, and many tests doing it
+  at once crash inside the loader.
 
-  That was documented in `zensight/docs/testing.md` and nowhere a developer
-  would trip over it. It is now a recipe that carries its own reasoning, and the
-  doc points at the recipe. Still deliberately not `.cargo/config.toml`'s
-  `[env]`, which would downgrade the real GUI's renderer too. CI is unaffected —
-  the runner image ships no Vulkan ICD — so a red `test` job is not this.
+  The issue and `zensight/docs/testing.md` both recorded this as a **`ui_tests`**
+  problem. It is not. The crate's own **lib** tests take the same path and crash
+  *more* often — measured on `master` at `3f8083b`:
+
+  | target | default | `WGPU_BACKEND=gl` |
+  |---|---|---|
+  | `--test ui_tests` | 6 crashes / 40 runs | 0 / 40 |
+  | `--lib` | **3 crashes / 10 runs** | 0 / 10 |
+
+  Which is why the recipe is `-p zensight` and not `--test ui_tests`: one that
+  covered half the affected targets would send the next person chasing a phantom
+  in the other half — as it did here, during this very change.
+
+  Still deliberately not `.cargo/config.toml`'s `[env]`, which would downgrade
+  the real GUI's renderer too. CI is unaffected — the runner image ships no
+  Vulkan ICD — so a red `test` job is not this.
 
 - **The `zenkey-fleet` boundary is stated as an invariant, not as a count**
   (#792). `CLAUDE.md` and `zensight-conformance/{Cargo.toml,README.md}` all said
