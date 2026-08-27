@@ -508,17 +508,25 @@ demo-verify:
 #
 # WHY THIS RECIPE EXISTS (#687)
 #
-# `cargo test -p zensight --test ui_tests` segfaults on a headless Linux box
-# with Mesa installed — about one run in seven under load — and prints NOTHING
-# while doing it: the process dies before libtest writes a result line, so there
-# is no FAILED and no panic to grep for. The only available reading is "my
-# change broke something", and it is wrong.
+# `cargo test -p zensight` segfaults on a headless Linux box with Mesa
+# installed and prints NOTHING while doing it: the process dies before libtest
+# writes a result line, so there is no FAILED and no panic to grep for. The only
+# available reading is "my change broke something", and it is wrong.
+#
+# It is NOT only the ui_tests target, which is what #687 and zensight/docs/
+# testing.md originally recorded. The crate's OWN lib tests take the same path
+# and crash MORE often: measured on master at 3 crashes in 10 runs of
+# `cargo test -p zensight --lib`, against the ~1-in-7 the doc records for
+# ui_tests. Hence `-p zensight` here rather than `--test ui_tests`: a recipe
+# that covered half the affected targets would send someone chasing a phantom
+# in the other half.
 #
 # `iced_test::simulator` stands up a real wgpu device; wgpu picks Vulkan; a
-# GPU-less host resolves that to lavapipe, Mesa's software Vulkan; and 169 tests
-# doing it at once crash inside the Vulkan loader, under
-# `wgpu_core::snatch::SnatchLock`. Measured: 6 crashes in 40 runs by default,
-# 0 in 40 with WGPU_BACKEND=gl, interleaved so machine load was controlled.
+# GPU-less host resolves that to lavapipe, Mesa's software Vulkan; and many
+# tests doing it at once crash inside the Vulkan loader, under
+# `wgpu_core::snatch::SnatchLock`. Measured: ui_tests, 6 crashes in 40 runs by
+# default and 0 in 40 with WGPU_BACKEND=gl; --lib, 3 in 10 by default and 0 in
+# 10 with it.
 #
 # Deliberately NOT in .cargo/config.toml's [env] block: that applies to
 # `cargo run` too, and downgrading the real GUI's renderer on every developer
@@ -528,9 +536,9 @@ demo-verify:
 # this path there. Which also means a red `test` job on CI is NOT this, and
 # should be read as a real failure.
 
-# GUI tests on a renderer that survives 169 concurrent wgpu devices (#687)
+# The zensight crate's tests, on a renderer that survives concurrent wgpu devices (#687)
 test-ui *ARGS:
-    WGPU_BACKEND=gl cargo test -p zensight --test ui_tests {{ARGS}}
+    WGPU_BACKEND=gl cargo test -p zensight {{ARGS}}
 
 # ── Container image ──────────────────────────────────────────────────────────
 
