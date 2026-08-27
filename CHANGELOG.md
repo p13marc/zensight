@@ -46,6 +46,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The stream health panel: which stage is losing the picture** (#719, epic
+  #712).
+
+  #503 put real resolution, bitrate and fps on a tile caption; this is the
+  drill-down that says what they mean. Expand a tile and the panel sits between
+  the caption and the picture.
+
+  It is a **chain**, not five gauges, because the verdict is always a
+  comparison between adjacent stages and five gauges make the reader do the
+  subtraction: offered 30 with encoded 12 is an encoder verdict, encoded 30
+  with received 12 is a transport verdict, received 30 with decoded 12 is a
+  decoder verdict. The worst hop is named in one sentence above the chain —
+  that sentence is the feature, and the numbers are in service of it. A hop
+  must lose ≥ 15 % before it is named: rates jitter by a few percent between
+  three-second windows, and a panel that shouts at 3 % teaches an operator to
+  ignore it.
+
+  Three honesty rules it is built around. **The first link is an offer, not a
+  measurement** — capture fps is on no key, so the chain starts at the tier's
+  applied fps and says `offered` rather than `measured`, because presenting a
+  config value as a measurement is how a panel lies. **A rate needs two
+  reports** — the wire counters are cumulative, so the tile keeps the previous
+  one and the panel diffs it over the newer one's `interval_ms`; a counter that
+  went backwards (a reopened tile) yields no rate rather than a negative one.
+  And **missing inputs read as `not asked`**, the same vocabulary the fleet
+  view uses: an unstamped stream shows frame age unavailable, never `0 ms`, and
+  a preview tile shows `no queue`, never `0`.
+
 - **The media tiles' receiver half: a frame-age deadline, a bounded decode
   queue, and a tile that reports** (#716, #717, #718 — epic #712).
 

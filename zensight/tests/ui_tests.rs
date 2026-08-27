@@ -5262,6 +5262,159 @@ fn test_parallax_receiver_report_folds_into_the_tile_it_names() {
     assert!(state.parallax_detail.tiles["video0"].last_report.is_none());
 }
 
+/// #719: the health panel names *which stage* is losing the picture, and the
+/// three cases the issue calls out must not read the same.
+///
+/// The whole feature is that an operator does not have to subtract two numbers
+/// to work out which box to go and look at — so the assertions are on the
+/// sentence, which is the thing they actually read.
+#[test]
+fn test_parallax_health_panel_names_the_failing_stage() {
+    use zensight::view::specialized::parallax::expanded_overlay;
+    use zensight_common::stream::{MediaReceiverReport, StreamStatus, TierApplied, TierStatus};
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+
+    /// A tile on a 30 fps tier whose sensor says it is encoding at
+    /// `encoded_fps`, receiving `received` frames and decoding `decoded` of
+    /// them over one second.
+    fn tile_with(encoded_fps: f64, received: u64, decoded: u64) -> DeviceDetailState {
+        let mut state =
+            DeviceDetailState::new(DeviceId::fixture(Protocol::Parallax, "hostA".to_string()));
+        state.history.insert(
+            "cam0/stats/fps".to_string(),
+            vec![TelemetryPoint::new(
+                "hostA",
+                Protocol::Parallax,
+                "cam0/stats/fps",
+                TelemetryValue::Gauge(encoded_fps),
+            )]
+            .into(),
+        );
+        state.parallax_detail.apply_stream_status(&StreamStatus {
+            stream: "cam0".into(),
+            open: true,
+            tiers: vec![TierStatus {
+                tier: "high".into(),
+                applied: TierApplied {
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                    bitrate_kbps: 4000,
+                },
+                viewers: 1,
+            }],
+        });
+        let generation = state.parallax_detail.allocate_generation();
+        state
+            .parallax_detail
+            .open_tile("cam0", generation, None, true, Some("high".into()));
+
+        let report = |received: u64, decoded: u64| MediaReceiverReport {
+            stream: "cam0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+            consumer_id: "zs-1-1".into(),
+            interval_ms: 1_000,
+            received_frames: received,
+            decoded_frames: decoded,
+            last_sequence: received,
+            frame_age_ms: Some(42.0),
+            frame_age_max_ms: Some(150.0),
+            decoder_queue_depth: Some(1),
+            ..Default::default()
+        };
+        // Two reports: the counters are cumulative, so a rate needs both.
+        state
+            .parallax_detail
+            .apply_receiver_report("cam0", generation, report(0, 0));
+        state
+            .parallax_detail
+            .apply_receiver_report("cam0", generation, report(received, decoded));
+        state.parallax_detail.expand("cam0");
+        state
+    }
+
+    fn verdict_of(state: &DeviceDetailState) -> String {
+        let overlay = expanded_overlay(state).expect("the expanded tile drill-down");
+        let mut ui = simulator(overlay);
+        for stage in ["Encoder", "Transport", "Decoder"] {
+            if ui
+                .find(format!(
+                    "{stage}: 60% of the frames offered to it are not coming out."
+                ))
+                .is_ok()
+            {
+                return stage.to_string();
+            }
+        }
+        "none".to_string()
+    }
+
+    // Offered 30, encoded 12: the encoder is not keeping up.
+    assert_eq!(verdict_of(&tile_with(12.0, 12, 12)), "Encoder");
+    // Encoded 30, received 12: the link is losing frames.
+    assert_eq!(verdict_of(&tile_with(30.0, 12, 12)), "Transport");
+    // Received 30, decoded 12: this box is behind.
+    assert_eq!(verdict_of(&tile_with(30.0, 30, 12)), "Decoder");
+
+    // A healthy chain names no stage at all.
+    let healthy = tile_with(30.0, 30, 30);
+    assert_eq!(verdict_of(&healthy), "none");
+    let mut ui = simulator(expanded_overlay(&healthy).expect("overlay"));
+    assert!(
+        ui.find("Every stage is passing on what it was given.")
+            .is_ok(),
+        "and says so, rather than leaving the reader to infer it from silence"
+    );
+}
+
+/// #719's second acceptance criterion: missing inputs degrade honestly. An
+/// unstamped stream shows frame age as unavailable, **not** 0 — a `0 ms` there
+/// would read as "perfectly fresh" (RFC 07 §1.3).
+#[test]
+fn test_parallax_health_panel_shows_unmeasured_inputs_as_not_asked() {
+    use zensight::view::specialized::parallax::expanded_overlay;
+    use zensight_common::stream::MediaReceiverReport;
+
+    let mut state =
+        DeviceDetailState::new(DeviceId::fixture(Protocol::Parallax, "hostA".to_string()));
+    let generation = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("cam0", generation, None, true, Some("high".into()));
+    state.parallax_detail.apply_receiver_report(
+        "cam0",
+        generation,
+        MediaReceiverReport {
+            stream: "cam0".into(),
+            consumer_id: "zs-1-1".into(),
+            interval_ms: 3_000,
+            received_frames: 45,
+            decoded_frames: 45,
+            last_sequence: 45,
+            // The producer does not timestamp: no age, no jitter, and a
+            // preview-shaped tile with no queue to report.
+            ..Default::default()
+        },
+    );
+    state.parallax_detail.expand("cam0");
+
+    let mut ui = simulator(expanded_overlay(&state).expect("overlay"));
+    assert!(
+        ui.find("frame age not asked").is_ok(),
+        "an unstamped stream must read as NOT ASKED, never as 0 ms"
+    );
+    assert!(
+        ui.find("queue no queue").is_ok(),
+        "a tile with no decode queue reports nothing, not an empty one"
+    );
+    assert!(
+        ui.find("Nothing to compare yet — this tile is still measuring.")
+            .is_ok(),
+        "a chain with nothing to compare must say why, not read as healthy"
+    );
+}
+
 // ===========================================================================
 // Tier-2 conversion regression net (#475).
 //

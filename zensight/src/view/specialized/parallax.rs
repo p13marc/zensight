@@ -20,6 +20,7 @@ use crate::view::icons::{self, IconSize};
 use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::parallax_detail::{ParallaxDetailState, TileState};
 use crate::view::specialized::parallax_h264;
+use crate::view::specialized::parallax_health;
 use crate::view::theme;
 use crate::view::tokens::space;
 
@@ -274,7 +275,8 @@ fn tile<'a>(
 /// outside to dismiss) around the stream's latest frame scaled up, with a
 /// caption + Close button. `None` while nothing is expanded — and a closed
 /// or torn-down tile dismisses the overlay implicitly (`expanded_tile`).
-pub fn expanded_overlay(detail: &ParallaxDetailState) -> Option<Element<'_, Message>> {
+pub fn expanded_overlay(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let detail = &state.parallax_detail;
     let (name, tile) = detail.expanded_tile()?;
     let picture: Element<'_, Message> = image(tile.frame.clone().unwrap_or_else(placeholder_frame))
         .width(Length::Fill)
@@ -302,11 +304,18 @@ pub fn expanded_overlay(detail: &ParallaxDetailState) -> Option<Element<'_, Mess
     ]
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
+    // The drill-down (#719). #503 put real resolution/bitrate/fps on the grid
+    // caption; this is where those numbers get explained — which stage of the
+    // path is losing the picture, in one line over the chain that shows it.
     let card = container(
-        column![header, picture]
-            .spacing(space::SM)
-            .width(Length::Fill)
-            .height(Length::Fill),
+        column![
+            header,
+            parallax_health::health_panel(state, name, tile),
+            picture
+        ]
+        .spacing(space::SM)
+        .width(Length::Fill)
+        .height(Length::Fill),
     )
     .padding(space::MD)
     .width(Length::Fill)
@@ -488,16 +497,22 @@ mod tests {
     fn expanded_overlay_renders_caption_and_close() {
         use iced_test::simulator;
 
-        let mut detail = ParallaxDetailState::default();
-        let generation = detail.allocate_generation();
-        detail.open_tile("cam0", generation, None, true, Some("high".to_string()));
+        let mut state = DeviceDetailState::new(crate::message::DeviceId {
+            protocol: zensight_common::Protocol::Parallax,
+            origin: "h-000000000000".to_string(),
+            source: "cam-host".to_string(),
+        });
+        let generation = state.parallax_detail.allocate_generation();
+        state
+            .parallax_detail
+            .open_tile("cam0", generation, None, true, Some("high".to_string()));
         assert!(
-            expanded_overlay(&detail).is_none(),
+            expanded_overlay(&state).is_none(),
             "no overlay while nothing is expanded"
         );
 
-        detail.expand("cam0");
-        let overlay = expanded_overlay(&detail).expect("overlay for the expanded tile");
+        state.parallax_detail.expand("cam0");
+        let overlay = expanded_overlay(&state).expect("overlay for the expanded tile");
         let mut ui = simulator(overlay);
         assert!(
             ui.find("cam0 · H.264 · waiting for frames…").is_ok(),
