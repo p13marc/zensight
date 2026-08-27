@@ -65,6 +65,26 @@ pub const NOT_ASKED: &str = "not asked";
 /// than one that says nothing.
 const DEGRADED_PCT: f32 = 15.0;
 
+/// Frame age above which a losing Transport hop is congestion rather than
+/// in-flight loss (#801).
+///
+/// Measured, not guessed. #713 ran both failure modes and they are three orders
+/// of magnitude apart in this one number
+/// ([`loss-measurement.md`](../../../../docs/plans/adaptive-media/loss-measurement.md)):
+///
+/// | | frames missing | median frame age |
+/// |---|---|---|
+/// | `tcp/` at 300 kbit, 1.7 Mbps offered | 83 % | **3 502 ms** |
+/// | `tcp/` at 100 kbit | 93 % | **9 085 ms** |
+/// | `quic/…?mixed_rel=1`, 1 % packet loss | 20 % | **0.77 ms** |
+/// | same, 5 % packet loss | 57 % | **0.78 ms** |
+///
+/// Anywhere between them separates the two. 500 ms is chosen to sit far above
+/// what a healthy WAN path shows and far below what congestion showed, and the
+/// test only runs once the hop is already losing [`DEGRADED_PCT`] — a fresh
+/// stream with a leisurely age is not accused of anything.
+const CONGESTED_AGE_MS: f32 = 500.0;
+
 /// One stage on the path from camera to screen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stage {
@@ -91,9 +111,34 @@ pub enum Verdict {
         /// The stage that *received* less than it was offered.
         stage: &'static str,
         lost_pct: f32,
+        /// For a losing Transport hop only: *why*, when frame age can say
+        /// (#801). `None` when the stage is not Transport, or when the samples
+        /// arrived unstamped and the question was never asked.
+        cause: Option<TransportCause>,
     },
     /// Not enough is measured to name a stage, and why.
     NotMeasured(&'static str),
+}
+
+/// Why a losing Transport hop is losing (#801).
+///
+/// The two look identical in every counter this stack publishes — the sensor's
+/// `stats/drops` reads **0** under congestion, because the frames die in
+/// Zenoh's own transport queue under `CongestionControl::Drop`, upstream of
+/// every counter the sensor has. What separates them is *frame age*, which the
+/// tile already measures and already reports.
+///
+/// The distinction is the difference between two opposite fixes: a congested
+/// sender wants a smaller tier (or a wider pipe), and a lossy link wants a
+/// smaller *access unit* — which is also a smaller tier, but for a different
+/// reason and with a different ceiling. #713 verdict 1 has the arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransportCause {
+    /// Frames are arriving, but old: the sender's queue is deep and Zenoh is
+    /// discarding what it cannot get onto the link.
+    SenderCongested { age_ms: f32 },
+    /// What arrives is fresh, and the rest never arrived at all.
+    InFlightLoss { age_ms: f32 },
 }
 
 impl Verdict {
@@ -101,8 +146,27 @@ impl Verdict {
     pub fn sentence(&self) -> String {
         match self {
             Self::Healthy => "Every stage is passing on what it was given.".to_string(),
-            Self::Degraded { stage, lost_pct } => {
-                format!("{stage}: {lost_pct:.0}% of the frames offered to it are not coming out.")
+            Self::Degraded {
+                stage,
+                lost_pct,
+                cause,
+            } => {
+                let head = format!(
+                    "{stage}: {lost_pct:.0}% of the frames offered to it are not coming out"
+                );
+                match cause {
+                    Some(TransportCause::SenderCongested { age_ms }) => format!(
+                        "{head} — the sender is congested. What does arrive is {} old, so the \
+                         frames were discarded before the wire and no counter here saw it.",
+                        human_age(*age_ms)
+                    ),
+                    Some(TransportCause::InFlightLoss { age_ms }) => format!(
+                        "{head} — they were lost in flight. What does arrive is {} old, so \
+                         nothing is queueing; the link is dropping.",
+                        human_age(*age_ms)
+                    ),
+                    None => format!("{head}."),
+                }
             }
             Self::NotMeasured(why) => format!("Nothing to compare yet — {why}."),
         }
@@ -316,7 +380,7 @@ pub fn stream_health(state: &DeviceDetailState, stream: &str, tile: &TileState) 
     };
 
     let chain = vec![source, encoder, transport, decoder];
-    let verdict = verdict(&chain, prev.is_some());
+    let verdict = verdict(&chain, prev.is_some(), last.and_then(|l| l.frame_age_ms));
     StreamHealth {
         chain,
         presentation,
@@ -336,12 +400,27 @@ fn hop_loss(chain: &[Stage], i: usize) -> Option<f32> {
     Some(((before - after) / before * 100.0).max(0.0))
 }
 
+/// A frame age in the units a reader thinks in.
+fn human_age(ms: f32) -> String {
+    if ms >= 1000.0 {
+        format!("{:.1} s", ms / 1000.0)
+    } else if ms >= 1.0 {
+        format!("{ms:.0} ms")
+    } else {
+        format!("{ms:.1} ms")
+    }
+}
+
 /// Name the worst hop, if any hop is bad enough to be worth naming.
 ///
 /// `have_rates` says whether the tile has reported *twice* — one cumulative
 /// snapshot is not a rate — so that "still measuring" and "the producer is
 /// telling us nothing" do not end up wearing the same sentence.
-fn verdict(chain: &[Stage], have_rates: bool) -> Verdict {
+///
+/// `age_ms` is the tile's median frame age, and it is what turns a losing
+/// Transport hop into a *diagnosis* rather than a location (#801). `None` is
+/// "not asked" — unstamped samples — and leaves the verdict at the location.
+fn verdict(chain: &[Stage], have_rates: bool, age_ms: Option<f32>) -> Verdict {
     let worst = (1..chain.len())
         .filter_map(|i| hop_loss(chain, i).map(|pct| (i, pct)))
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -349,6 +428,16 @@ fn verdict(chain: &[Stage], have_rates: bool) -> Verdict {
         Some((i, pct)) if pct >= DEGRADED_PCT => Verdict::Degraded {
             stage: chain[i].name,
             lost_pct: pct,
+            cause: (chain[i].name == "Transport")
+                .then_some(age_ms)
+                .flatten()
+                .map(|age| {
+                    if age > CONGESTED_AGE_MS {
+                        TransportCause::SenderCongested { age_ms: age }
+                    } else {
+                        TransportCause::InFlightLoss { age_ms: age }
+                    }
+                }),
         },
         Some(_) => Verdict::Healthy,
         None if !have_rates => Verdict::NotMeasured("this tile is still measuring"),
@@ -522,7 +611,9 @@ mod tests {
     /// rather than about which box an operator should go and look at.
     fn named(v: &Verdict) -> (&'static str, i32) {
         match v {
-            Verdict::Degraded { stage, lost_pct } => (stage, lost_pct.round() as i32),
+            Verdict::Degraded {
+                stage, lost_pct, ..
+            } => (stage, lost_pct.round() as i32),
             other => panic!("expected a degraded verdict, got {other:?}"),
         }
     }
@@ -530,17 +621,17 @@ mod tests {
     #[test]
     fn the_three_verdicts_name_three_different_stages() {
         assert_eq!(
-            named(&verdict(&chain_of(30.0, 12.0, 12.0, 12.0), true)),
+            named(&verdict(&chain_of(30.0, 12.0, 12.0, 12.0), true, None)),
             ("Encoder", 60),
             "offered 30, encoded 12 — the encoder is not keeping up"
         );
         assert_eq!(
-            named(&verdict(&chain_of(30.0, 30.0, 12.0, 12.0), true)),
+            named(&verdict(&chain_of(30.0, 30.0, 12.0, 12.0), true, None)),
             ("Transport", 60),
             "encoded 30, received 12 — the link is losing frames"
         );
         assert_eq!(
-            named(&verdict(&chain_of(30.0, 30.0, 30.0, 12.0), true)),
+            named(&verdict(&chain_of(30.0, 30.0, 30.0, 12.0), true, None)),
             ("Decoder", 60),
             "received 30, decoded 12 — this box is behind"
         );
@@ -549,10 +640,77 @@ mod tests {
     #[test]
     fn a_few_percent_of_jitter_is_not_a_verdict() {
         assert_eq!(
-            verdict(&chain_of(30.0, 29.0, 29.0, 28.0), true),
+            verdict(&chain_of(30.0, 29.0, 29.0, 28.0), true, None),
             Verdict::Healthy,
             "rates jitter between three-second windows; a panel that shouts at \
              3% teaches an operator to ignore it"
+        );
+    }
+
+    /// #801: a losing Transport hop is two opposite faults wearing one number,
+    /// and the panel must not make an operator guess which.
+    ///
+    /// The inputs here are the ones #713 actually measured, not invented
+    /// fixtures: a `tcp/` link at 300 kbit against ~1.7 Mbps offered lost 83 %
+    /// of sequences at a median frame age of 3 502 ms, and a QUIC link at 1 %
+    /// packet loss lost 20 % at 0.77 ms. Nothing else in this stack separates
+    /// them — the sensor's own `stats/drops` reads 0 in *both* cases.
+    #[test]
+    fn a_losing_transport_hop_says_whether_the_sender_is_congested_or_the_link_is_dropping() {
+        // The congested case: almost nothing arrives, and what does is seconds old.
+        let congested = verdict(&chain_of(30.0, 30.0, 5.0, 5.0), true, Some(3502.0));
+        let sentence = congested.sentence();
+        assert!(
+            sentence.contains("sender is congested"),
+            "expected a congestion diagnosis, got: {sentence}"
+        );
+        assert!(
+            sentence.contains("3.5 s"),
+            "and the evidence for it, in units a reader thinks in: {sentence}"
+        );
+
+        // The lossy case: the same hop, the same shape of loss, a fresh stream.
+        let lossy = verdict(&chain_of(30.0, 30.0, 24.0, 24.0), true, Some(0.77));
+        let sentence = lossy.sentence();
+        assert!(
+            sentence.contains("lost in flight"),
+            "expected an in-flight-loss diagnosis, got: {sentence}"
+        );
+        assert!(
+            sentence.contains("0.8 ms"),
+            "sub-millisecond ages must not round away to `0 ms`: {sentence}"
+        );
+
+        // Unstamped samples: the question was never asked, so it is not answered.
+        let unasked = verdict(&chain_of(30.0, 30.0, 5.0, 5.0), true, None);
+        assert!(
+            matches!(
+                unasked,
+                Verdict::Degraded {
+                    stage: "Transport",
+                    cause: None,
+                    ..
+                }
+            ),
+            "an absent frame age must leave the verdict at the location, not \
+             guess a cause: {unasked:?}"
+        );
+    }
+
+    /// The cause belongs to Transport alone. A slow decoder is not congestion
+    /// however old the frames are — the age it sees is *its own* backlog.
+    #[test]
+    fn only_the_transport_hop_gets_a_cause() {
+        assert!(
+            matches!(
+                verdict(&chain_of(30.0, 30.0, 30.0, 5.0), true, Some(4000.0)),
+                Verdict::Degraded {
+                    stage: "Decoder",
+                    cause: None,
+                    ..
+                }
+            ),
+            "a decoder verdict must not be dressed up as a transport diagnosis"
         );
     }
 
@@ -561,7 +719,7 @@ mod tests {
     #[test]
     fn the_worst_hop_wins() {
         assert_eq!(
-            named(&verdict(&chain_of(30.0, 24.0, 6.0, 6.0), true)),
+            named(&verdict(&chain_of(30.0, 24.0, 6.0, 6.0), true, None)),
             ("Transport", 75)
         );
     }
@@ -573,18 +731,18 @@ mod tests {
             stage.fps = None;
         }
         assert!(
-            matches!(verdict(&chain, false), Verdict::NotMeasured(_)),
+            matches!(verdict(&chain, false, None), Verdict::NotMeasured(_)),
             "a chain with nothing to compare must not read as healthy"
         );
         assert!(
-            verdict(&chain, false)
+            verdict(&chain, false, None)
                 .sentence()
                 .contains("still measuring"),
             "and it must say WHY — a tile that has reported once has counters, \
              not rates, and that reads differently from a silent producer"
         );
         assert!(
-            verdict(&chain, true)
+            verdict(&chain, true, None)
                 .sentence()
                 .contains("publishing a rate"),
             "a tile with two reports and still nothing to compare is a \

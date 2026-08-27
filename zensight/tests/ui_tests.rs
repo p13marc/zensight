@@ -5262,6 +5262,102 @@ fn test_parallax_receiver_report_folds_into_the_tile_it_names() {
     assert!(state.parallax_detail.tiles["video0"].last_report.is_none());
 }
 
+/// #801: the panel draws *why* Transport is losing, not just that it is.
+///
+/// Both faults lose frames and both leave the sensor's `stats/drops` at zero
+/// (#713 measured that), so the only thing that separates them is frame age —
+/// and the point of the feature is that an operator reads the difference rather
+/// than deducing it. Hence a rendered assertion: a diagnosis computed and not
+/// drawn helps nobody.
+#[test]
+fn test_parallax_health_panel_separates_a_congested_sender_from_a_dropping_link() {
+    use zensight::view::specialized::parallax::expanded_overlay;
+    use zensight_common::stream::{MediaReceiverReport, StreamStatus, TierApplied, TierStatus};
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+
+    // Encoder egressing 30 fps, tile receiving 12: a Transport verdict either
+    // way. Only the frame age differs between the two calls.
+    fn tile_at_age(age_ms: f32) -> DeviceDetailState {
+        let device_id = DeviceId::fixture(Protocol::Parallax, "hostA".to_string());
+        let mut state = DeviceDetailState::new(device_id);
+        state.history.insert(
+            "cam0/stats/fps".to_string(),
+            vec![TelemetryPoint::new(
+                "hostA",
+                Protocol::Parallax,
+                "cam0/stats/fps",
+                TelemetryValue::Gauge(30.0),
+            )]
+            .into(),
+        );
+        state.parallax_detail.apply_stream_status(&StreamStatus {
+            stream: "cam0".into(),
+            open: true,
+            tiers: vec![TierStatus {
+                tier: "high".into(),
+                applied: TierApplied {
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                    bitrate_kbps: 4000,
+                },
+                viewers: 1,
+            }],
+        });
+        let generation = state.parallax_detail.allocate_generation();
+        state
+            .parallax_detail
+            .open_tile("cam0", generation, None, true, Some("high".into()));
+        let report = |received: u64| MediaReceiverReport {
+            stream: "cam0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+            consumer_id: "zs-1-1".into(),
+            interval_ms: 1_000,
+            received_frames: received,
+            decoded_frames: received,
+            last_sequence: received,
+            frame_age_ms: Some(age_ms),
+            frame_age_max_ms: Some(age_ms),
+            decoder_queue_depth: Some(1),
+            ..Default::default()
+        };
+        state
+            .parallax_detail
+            .apply_receiver_report("cam0", generation, report(0));
+        state
+            .parallax_detail
+            .apply_receiver_report("cam0", generation, report(12));
+        state.parallax_detail.expand("cam0");
+        state
+    }
+
+    fn sentence(state: &DeviceDetailState) -> String {
+        use zensight::view::specialized::parallax_health::stream_health;
+        let tile = &state.parallax_detail.tiles["cam0"];
+        let said = stream_health(state, "cam0", tile).verdict.sentence();
+        let mut ui = simulator(expanded_overlay(state).expect("the expanded tile drill-down"));
+        assert!(ui.find(said.clone()).is_ok(), "not drawn: {said}");
+        said
+    }
+
+    // The numbers are the ones #713 measured, not invented ones.
+    let congested = sentence(&tile_at_age(3502.0));
+    assert!(
+        congested.contains("sender is congested") && congested.contains("3.5 s"),
+        "a congested sender must be named, with the evidence: {congested}"
+    );
+    let lossy = sentence(&tile_at_age(0.77));
+    assert!(
+        lossy.contains("lost in flight") && lossy.contains("0.8 ms"),
+        "and a dropping link must read as the opposite fault: {lossy}"
+    );
+    assert_ne!(
+        congested, lossy,
+        "the whole feature is that these two do not read the same"
+    );
+}
+
 /// #720: a degraded window walks the tile down the ladder, a recovered one
 /// walks it back, and an operator's own tier choice stops both.
 ///
@@ -5491,20 +5587,26 @@ fn test_parallax_health_panel_names_the_failing_stage() {
         state
     }
 
+    // The verdict is computed from the state and then looked for *as rendered*:
+    // asserting on the sentence alone would not catch a panel that computes it
+    // and never draws it, and asserting on a hand-written string would break
+    // every time the sentence gains a clause (it gained one in #801).
     fn verdict_of(state: &DeviceDetailState) -> String {
+        use zensight::view::specialized::parallax_health::{Verdict, stream_health};
+
+        let tile = &state.parallax_detail.tiles["cam0"];
+        let verdict = stream_health(state, "cam0", tile).verdict;
         let overlay = expanded_overlay(state).expect("the expanded tile drill-down");
         let mut ui = simulator(overlay);
-        for stage in ["Encoder", "Transport", "Decoder"] {
-            if ui
-                .find(format!(
-                    "{stage}: 60% of the frames offered to it are not coming out."
-                ))
-                .is_ok()
-            {
-                return stage.to_string();
-            }
+        assert!(
+            ui.find(verdict.sentence()).is_ok(),
+            "the panel must draw the verdict it computed: {:?}",
+            verdict.sentence()
+        );
+        match verdict {
+            Verdict::Degraded { stage, .. } => stage.to_string(),
+            _ => "none".to_string(),
         }
-        "none".to_string()
     }
 
     // Offered 30, encoded 12: the encoder is not keeping up.

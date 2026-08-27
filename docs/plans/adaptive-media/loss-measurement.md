@@ -168,12 +168,14 @@ framing does not touch. No verdict to revisit.
   backlog. The measured failure mode of today's shipped configuration is a *transport* backlog
   of 3.5–9 s, which the deadline catches for the same reason and reports as exactly what it is:
   observed frame age.
-- **There is a counter missing.** Nothing in the sensor reports what Zenoh's transport dropped.
-  `stats/drops` cannot see it and the receiver cannot attribute it. Until something does, a
-  congested `tcp/` deployment and a lossy link produce the same numbers, and #719's health panel
-  will name Transport for both — which is right, but it cannot say *why*. Filed as
-  [#801](https://git.marcpardo.eu/marcpardo/zensight/issues/801) rather than smuggled into
-  this measurement.
+- **~~There is a counter missing.~~ There was a *distinction* missing, and the numbers above
+  supply it (#801, closed).** Nothing in the sensor reports what Zenoh's transport dropped, and
+  nothing can: those drops are counted only under Zenoh's `stats` cargo feature and only per
+  **link**, never per publisher, so a link-level number under a stream's key would be
+  unattributable. But the two failure modes are already separable from what the tile reports —
+  frame age is 3 502 / 9 085 ms under congestion and 0.77 / 0.78 ms under in-flight loss, three
+  orders of magnitude apart with `stats/drops` at zero in both. #719's health panel now names
+  the cause, not just the hop.
 
 ## Reproducing
 
