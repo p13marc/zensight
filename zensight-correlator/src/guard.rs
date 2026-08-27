@@ -16,6 +16,21 @@
 //! publishers/queryables. This yields *eventual* single-writer: a partition
 //! can elect two owners, and the catalog's pure-function contract makes the
 //! split convergent after heal (RFC 06 §5.3's stated trade).
+//!
+//! # Election and presence are two steps, on purpose
+//!
+//! [`acquire`] wins the election and returns the claim token. It does **not**
+//! declare `alive` — [`declare_alive`] does, and the caller must not call it
+//! until the catalog's queryables are actually serving.
+//!
+//! RFC 04 §5 is `alive ⇒ callable`: asserting presence is a promise to answer.
+//! The two used to happen together, so the correlator promised to answer before
+//! it had declared a single queryable. On a fast machine that window is
+//! microseconds; on a loaded two-lane CI runner it is wide enough for a judge's
+//! introspect sweep to land inside it, and `zensight-conformance` caught
+//! exactly that. `zensight-sensor-core`'s runner has always done it in this
+//! order for the same reason (`DECLARATION_GRACE`, #648) — the correlator is
+//! not a `SensorRunner`, so it never inherited the discipline.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,9 +41,10 @@ use zensight_common::{catalog_claim_key, catalog_claims_wildcard, correlator_ali
 
 /// Outcome of the ownership election.
 pub enum GuardOutcome {
-    /// We won: holds the claim token AND the owner `alive` token (keep both
-    /// alive for the process lifetime; dropping undeclares).
-    Acquired(LivelinessToken, LivelinessToken),
+    /// We won: holds the claim token (keep it for the process lifetime;
+    /// dropping undeclares). Presence is a separate, later step —
+    /// [`declare_alive`].
+    Acquired(LivelinessToken),
     /// Another catalog instance won the election.
     AlreadyRunning,
 }
@@ -81,13 +97,20 @@ pub async fn acquire(session: &Arc<Session>, timeout: Duration) -> anyhow::Resul
         return Ok(GuardOutcome::AlreadyRunning);
     }
 
-    // 3. Owner-only: the `alive` token (RFC 04 §5) — the roster signal
-    // consumers read; the claim tokens are protocol machinery.
-    let alive = session
+    tracing::info!(claim = %claim_key, "catalog election won — this instance owns @catalog");
+    Ok(GuardOutcome::Acquired(claim_token))
+}
+
+/// Declare the owner `alive` token (RFC 04 §5) — the roster signal consumers
+/// read; the claim tokens are protocol machinery.
+///
+/// **Call this last**, after every queryable is serving. `alive` means
+/// *callable*, and a producer that says so before it can answer is lying for
+/// the width of that window. See the module header.
+pub async fn declare_alive(session: &Arc<Session>) -> anyhow::Result<LivelinessToken> {
+    session
         .liveliness()
         .declare_token(correlator_alive_key().as_str())
         .await
-        .map_err(|e| anyhow::anyhow!("failed to declare catalog alive token: {e}"))?;
-    tracing::info!(claim = %claim_key, "catalog election won — this instance owns @catalog");
-    Ok(GuardOutcome::Acquired(claim_token, alive))
+        .map_err(|e| anyhow::anyhow!("failed to declare catalog alive token: {e}"))
 }

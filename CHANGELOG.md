@@ -218,6 +218,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   introspect key (RFC 08 §6, property D4), so running both halves covers both
   halves of the slice diff.
 
+  **And it found a second defect, which is the gate doing its job.** Putting the
+  correlator into the default conformance deployment made `zensight-conformance`
+  fail on a loaded two-lane CI runner — not on the stamping, but on RFC 04 §5's
+  `alive ⇒ callable`. `guard::acquire` did three things at once: claim, elect,
+  and declare the owner `alive` token; `main` then spawned every queryable
+  *after* it. So between winning the election and declaring
+  `entities`/`names`/`introspect`/`describe`/`link`/`unlink`, the correlator was
+  on the roster and answered nothing. On a developer machine that window is
+  microseconds and nothing had ever observed it.
+
+  `zensight-sensor-core`'s runner has always declared liveliness **last**, after
+  `await_registry_coverage`, with the reasoning written at `DECLARATION_GRACE`
+  (#648). The correlator is not a `SensorRunner`, so it never inherited the
+  discipline. Election and presence are now two steps —
+  `guard::acquire` then `guard::declare_alive` — with the queryables in between.
+
+  That needed a new seam, because the obvious one does not fit:
+  `await_registry_coverage` is **sensor-shaped**, deriving the serve-side
+  spelling from *this host's* origin (`v1/h-…/@rpc/catalog/names`), while the
+  catalog serves on the `@catalog` **service** origin. Pointed at the
+  correlator it reported every procedure as unserved while the log said they
+  were ready, and debug-panicked. `served::await_served` takes the concrete keys
+  a producer declared and makes no assumption about how they were spelled;
+  `registry_coverage_cannot_see_a_service_origin` pins why both exist.
+
+  The effect is visible beyond the absence of a failure: before, the judge
+  reported *"1 producer(s) judged"* or *"2"* from run to run on a constrained
+  machine, because it observed the correlator inconsistently. After, it is 2
+  every time.
+
   Wire-observable on the seed path, and nothing else: the payloads are
   byte-identical, no schema moves, no key moves, no registry entry changes
   (`catalog.toml` and `sysinfo.toml` already declare these families as
