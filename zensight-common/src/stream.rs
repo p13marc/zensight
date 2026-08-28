@@ -222,6 +222,155 @@ pub struct TierStatus {
     pub viewers: u32,
 }
 
+/// Why one tier of a stream stopped, reported inside [`StreamStatus`] (#691).
+///
+/// The tier is **named**, not implied. `StreamStatus::tiers` is a *live set* —
+/// a tier that died is removed from it — so an end reported inside a
+/// [`TierStatus`] would either be unreachable (the last tier's death empties
+/// the vec entirely) or force a non-empty `tiers` onto an `open: false`
+/// document, which every consumer reads as "these tiers are live". That would
+/// be a worse lie than the one this type exists to end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StreamEnd {
+    /// Which tier ended: a ladder rung's name (`low`/`medium`/`high`), or the
+    /// literal `preview` for the JPEG preview profile.
+    ///
+    /// The same one-string tier vocabulary the `rx/{tier}/…` receiver-feedback
+    /// telemetry uses (#715), minted from the producer's own profile, so a
+    /// reported end can never name a tier an `open_stream` could not.
+    pub tier: String,
+    /// What happened.
+    pub reason: StreamEndReason,
+}
+
+/// The producer's own account of why a tier stopped (#691).
+///
+/// **The producer is the only party that knows.** Before this existed a viewer
+/// had to invent a sentence — *"stream ended"*, *"stream failed to open on the
+/// sensor"* — out of an `open: false` and nothing else, and those sentences
+/// were wrong as often as they were right: an idle reap, an operator close and
+/// a dead camera were the same single bit.
+///
+/// Three families, told apart by [`Self::is_failure`]:
+///
+/// - **we ended it** — [`Closed`](Self::Closed), [`Idle`](Self::Idle),
+///   [`Superseded`](Self::Superseded), [`Shutdown`](Self::Shutdown). Nothing is
+///   wrong, and device health must not count these.
+/// - **it ended itself** — [`SourceEnded`](Self::SourceEnded).
+/// - **it failed** — [`Stalled`](Self::Stalled), [`Failed`](Self::Failed),
+///   [`FailedOpen`](Self::FailedOpen). These, and only these, record a device
+///   failure and fire the source's alert.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamEndReason {
+    /// Every opener called `close_stream`, and the idle countdown that follows
+    /// a close ran out.
+    ///
+    /// A close does not stop a pipeline on its own — it releases a refcount,
+    /// and the reaper does the stopping — so this is the *terminal* reason for
+    /// a clean operator close, and it arrives one idle window after the close
+    /// itself.
+    Closed,
+    /// Reaped unwatched while an opener still held a refcount: nobody ever
+    /// subscribed, or the last viewer left and the opener never said goodbye.
+    ///
+    /// The crash backstop for a viewer that died without `close_stream`. Told
+    /// apart from [`Closed`](Self::Closed) by the refcount at reap time, which
+    /// is the honest discriminator: one says *the system did what it was
+    /// told*, the other *the system cleaned up after something that vanished*.
+    Idle,
+    /// Released so another tier of the same stream could open.
+    ///
+    /// One camera serves one capture at a time, so on an exclusive source
+    /// (V4L2/RTSP) a tier switch must hand the device over rather than wait out
+    /// the idle window. With receiver-driven tier selection (#720) this is a
+    /// routine event, and a viewer whose tile blinks through a switch is owed
+    /// the reason.
+    Superseded,
+    /// The producer is stopping.
+    Shutdown,
+    /// The source signalled end-of-stream by itself — a finite source ran out.
+    ///
+    /// A live camera should never do this. If one does, that *is* the finding,
+    /// which is why it is not folded into [`Closed`](Self::Closed).
+    SourceEnded,
+    /// The pipeline built and started but delivered no frame at all within the
+    /// producer's first-frame window.
+    ///
+    /// A wedged source. Deliberately payload-free and deliberately not a
+    /// [`Failed`](Self::Failed): the open succeeded, no element failed, and
+    /// there is no error to quote — so none is invented. The window is a
+    /// producer constant and appears in its logs.
+    Stalled,
+    /// A pipeline element failed mid-stream.
+    Failed {
+        /// The element that failed, when the pipeline named one; `egress` when
+        /// the failure was on the producer's side of the sink (frame-metadata
+        /// encoding, or the media publish itself).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+        /// The failure, **in the failing element's own words**. Never a
+        /// paraphrase: `node` and `message` stay separate on the wire, and only
+        /// [`Display`](std::fmt::Display) ever joins them.
+        message: String,
+    },
+    /// The open never completed: the pipeline could not be built or started, a
+    /// publisher or listener could not be declared, or the camera could not be
+    /// reached.
+    ///
+    /// Distinct from [`Failed`](Self::Failed) because this tier never ran, and
+    /// the two send an operator to different places — *it never started* means
+    /// check the config and whether the camera is reachable; *it stopped* means
+    /// check the element `node` names. A late-joining consumer cannot recover
+    /// that difference from context.
+    FailedOpen {
+        /// Why the open failed, in the failing layer's own words.
+        message: String,
+    },
+}
+
+impl StreamEndReason {
+    /// Whether this end is a failure.
+    ///
+    /// The one predicate a consumer needs, so nobody re-derives the three
+    /// families by hand and drifts. Device health and the source's alert both
+    /// gate on exactly this.
+    pub fn is_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Stalled | Self::Failed { .. } | Self::FailedOpen { .. }
+        )
+    }
+}
+
+/// The operator-facing sentence for an end — **the single source of this
+/// prose**.
+///
+/// The producer's log line, the device-health `last_error` and the viewer's
+/// tile caption all render an end through here, so what an operator reads on
+/// the tile is what the sensor recorded, word for word.
+impl std::fmt::Display for StreamEndReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Closed => f.write_str("closed"),
+            Self::Idle => f.write_str("no viewer — reaped"),
+            Self::Superseded => f.write_str("released for another tier"),
+            Self::Shutdown => f.write_str("the sensor stopped"),
+            Self::SourceEnded => f.write_str("the source ended"),
+            Self::Stalled => f.write_str("no frames from the camera"),
+            Self::Failed {
+                node: Some(node),
+                message,
+            } => write!(f, "{node}: {message}"),
+            Self::Failed {
+                node: None,
+                message,
+            } => f.write_str(message),
+            Self::FailedOpen { message } => write!(f, "failed to open: {message}"),
+        }
+    }
+}
+
 /// Current state of one stream, reported on the `stream/<stream>` status doc.
 ///
 /// **Per-tier** (#497): a stream can have several tiers live at once, each with
@@ -236,6 +385,20 @@ pub struct StreamStatus {
     /// Per-tier state for every tier currently live.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tiers: Vec<TierStatus>,
+    /// Why the most recent tier of this stream stopped, if one has and the
+    /// stream has not since resumed on that tier (#691).
+    ///
+    /// **Absent means no tier has stopped since this stream last opened** — not
+    /// "stopped for an unknown reason". `skip_serializing_if` keeps it out of
+    /// the map entirely rather than present-and-null, the same discipline
+    /// [`FrameMeta`] and [`MediaReceiverReport`] follow.
+    ///
+    /// One end, not a per-tier history. This is an LWW state document (RFC 05
+    /// §5) republished on every transition, so it says what *is*; a consumer
+    /// that wants every end reads every transition, which every live consumer
+    /// already does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_end: Option<StreamEnd>,
 }
 
 /// Receiver feedback for one `@media` key — the payload of
@@ -455,6 +618,7 @@ mod tests {
         let status = StreamStatus {
             stream: "cam0".into(),
             open: true,
+            last_end: None,
             tiers: vec![
                 TierStatus {
                     tier: "low".into(),
@@ -695,6 +859,128 @@ mod tests {
                 codec: None,
                 tier: None,
             }
+        );
+    }
+
+    /// Absent is **missing from the map**, never present-and-null: a consumer
+    /// must be able to tell "nothing has stopped" from "stopped, reason
+    /// unknown", and a `null` reads as the second.
+    #[test]
+    fn a_stream_that_has_not_stopped_carries_no_end() {
+        let status = StreamStatus {
+            stream: "cam0".into(),
+            open: true,
+            tiers: Vec::new(),
+            last_end: None,
+        };
+        let json = String::from_utf8(encode(&status, Format::Json).unwrap()).unwrap();
+        assert!(
+            !json.contains("last_end"),
+            "an absent end must not be on the wire at all: {json}"
+        );
+        let back: StreamStatus = decode(json.as_bytes(), Format::Json).unwrap();
+        assert_eq!(back, status);
+    }
+
+    #[test]
+    fn stream_end_is_tagged_and_keeps_node_separate() {
+        let status = StreamStatus {
+            stream: "cam0".into(),
+            open: false,
+            tiers: Vec::new(),
+            last_end: Some(StreamEnd {
+                tier: "high".into(),
+                reason: StreamEndReason::Failed {
+                    node: Some("h264enc".into()),
+                    message: "encoder submit failed".into(),
+                },
+            }),
+        };
+        let json = String::from_utf8(encode(&status, Format::Json).unwrap()).unwrap();
+        assert!(json.contains(r#""type":"failed""#), "{json}");
+        // node and message stay two fields: only `Display` ever joins them.
+        assert!(json.contains(r#""node":"h264enc""#), "{json}");
+        assert!(
+            json.contains(r#""message":"encoder submit failed""#),
+            "{json}"
+        );
+        assert_eq!(
+            decode::<StreamStatus>(json.as_bytes(), Format::Json).unwrap(),
+            status
+        );
+
+        // A unit variant is the tag alone, and an unattributed failure omits
+        // `node` rather than sending null.
+        let closed = encode(&StreamEndReason::Closed, Format::Json).unwrap();
+        assert_eq!(String::from_utf8(closed).unwrap(), r#"{"type":"closed"}"#);
+        let anon = String::from_utf8(
+            encode(
+                &StreamEndReason::Failed {
+                    node: None,
+                    message: "boom".into(),
+                },
+                Format::Json,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!anon.contains("node"), "{anon}");
+    }
+
+    /// The three families, pinned so nobody re-derives them by hand. Device
+    /// health and the source's alert both gate on exactly this predicate, so a
+    /// variant that drifts into the wrong family silently starts (or stops)
+    /// flipping a camera Offline.
+    #[test]
+    fn only_real_failures_are_failures() {
+        for ok in [
+            StreamEndReason::Closed,
+            StreamEndReason::Idle,
+            StreamEndReason::Superseded,
+            StreamEndReason::Shutdown,
+            StreamEndReason::SourceEnded,
+        ] {
+            assert!(!ok.is_failure(), "{ok} is not a failure");
+        }
+        for bad in [
+            StreamEndReason::Stalled,
+            StreamEndReason::Failed {
+                node: None,
+                message: "boom".into(),
+            },
+            StreamEndReason::FailedOpen {
+                message: "no such device".into(),
+            },
+        ] {
+            assert!(bad.is_failure(), "{bad} is a failure");
+        }
+    }
+
+    #[test]
+    fn an_end_renders_the_elements_own_words() {
+        assert_eq!(
+            StreamEndReason::Failed {
+                node: Some("h264enc".into()),
+                message: "encoder submit failed".into(),
+            }
+            .to_string(),
+            "h264enc: encoder submit failed"
+        );
+        assert_eq!(
+            StreamEndReason::Failed {
+                node: None,
+                message: "encoder submit failed".into(),
+            }
+            .to_string(),
+            "encoder submit failed"
+        );
+        assert_eq!(StreamEndReason::Closed.to_string(), "closed");
+        assert_eq!(
+            StreamEndReason::FailedOpen {
+                message: "connection refused".into(),
+            }
+            .to_string(),
+            "failed to open: connection refused"
         );
     }
 }

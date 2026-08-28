@@ -18,7 +18,7 @@ use crate::message::Message;
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized::fetch::Fetch;
-use crate::view::specialized::parallax_detail::{ParallaxDetailState, TileState};
+use crate::view::specialized::parallax_detail::{ParallaxDetailState, TileEnd, TileState};
 use crate::view::specialized::parallax_h264;
 use crate::view::specialized::parallax_health;
 use crate::view::theme;
@@ -74,6 +74,21 @@ fn muted(t: &Theme) -> text::Style {
     text::Style {
         color: Some(theme::colors(t).text_muted()),
     }
+}
+
+fn danger(t: &Theme) -> text::Style {
+    text::Style {
+        color: Some(theme::colors(t).danger_text()),
+    }
+}
+
+/// Style an end reason by whose fault it is (#691).
+///
+/// A stream the operator closed and a stream whose camera died both used to
+/// read as the same grey aside. Only the second is a fault, and now that the
+/// producer says which, the tile can stop making the reader work it out.
+fn end_style(end: &TileEnd) -> fn(&Theme) -> text::Style {
+    if end.is_failure() { danger } else { muted }
 }
 
 /// Wrap a catalogue action button with a hover tooltip spelling out what a
@@ -238,7 +253,7 @@ fn tile<'a>(
 ) -> Element<'a, Message> {
     let picture: Element<'a, Message> = match (&tile.frame, &tile.ended) {
         (Some(handle), _) => preview_frame(handle.clone()),
-        (None, Some(reason)) => container(text(reason.as_str()).size(12).style(muted))
+        (None, Some(end)) => container(text(end.text()).size(12).style(end_style(end)))
             .width(Length::Fixed(PREVIEW_W as f32))
             .height(Length::Fixed(PREVIEW_H as f32))
             .center(Length::Fill)
@@ -251,8 +266,8 @@ fn tile<'a>(
         })
         .interaction(iced::mouse::Interaction::Pointer)
         .into();
-    let caption = if let Some(reason) = &tile.ended {
-        format!("{name} — {reason}")
+    let caption = if let Some(end) = &tile.ended {
+        format!("{name} — {}", end.text())
     } else if tile.frame.is_some() {
         // For a video tile, prefer the sensor's applied per-tier readout
         // (resolution + bitrate, #503) over the client-side fps EMA alone.
@@ -298,8 +313,8 @@ pub fn expanded_overlay(state: &DeviceDetailState) -> Option<Element<'_, Message
         .content_fit(ContentFit::Contain)
         .into();
     let profile = if tile.video { "H.264" } else { "preview" };
-    let caption = if let Some(reason) = &tile.ended {
-        format!("{name} · {profile} — {reason}")
+    let caption = if let Some(end) = &tile.ended {
+        format!("{name} · {profile} — {}", end.text())
     } else if tile.frame.is_some() {
         match tier_readout(detail, name, tile) {
             Some(readout) => format!("{name} · {readout} · {:.1} fps", tile.fps),

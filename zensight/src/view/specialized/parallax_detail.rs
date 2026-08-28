@@ -21,7 +21,8 @@ use zenoh::Session;
 use zensight_common::keyexpr::{media_preview_key, origin_rpc_key};
 use zensight_common::media::observed_frame_age_ms;
 use zensight_common::stream::{
-    FrameMeta, MediaReceiverReport, StreamControl, StreamDescriptor, StreamStatus, TierSpec,
+    FrameMeta, MediaReceiverReport, StreamControl, StreamDescriptor, StreamEndReason, StreamStatus,
+    TierSpec,
 };
 use zensight_common::{Format, decode};
 
@@ -85,6 +86,46 @@ pub struct ExpandedTile {
     pub was_video: bool,
 }
 
+/// Why a tile stopped showing a picture — and, crucially, **who says so**
+/// (#691).
+///
+/// The two are not interchangeable. This viewer knows when *its own*
+/// subscriber task ended; only the producer knows whether the camera died, the
+/// operator closed the stream, or the tier was swapped underneath it. Before
+/// `StreamStatus::last_end` existed the viewer had to answer the producer's
+/// question anyway, and it answered with `"stream ended"` — a sentence that
+/// was as often wrong as right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TileEnd {
+    /// The producer's own account, from `StreamStatus::last_end`.
+    Sensor(StreamEndReason),
+    /// This viewer's subscriber task ended and the producer has said nothing:
+    /// a local transport or decode failure, or `None` for a clean local end.
+    /// A statement about *this viewer*, kept only until the producer speaks.
+    Viewer(Option<String>),
+}
+
+impl TileEnd {
+    /// What to show the operator.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Sensor(reason) => reason.to_string(),
+            Self::Viewer(Some(error)) => error.clone(),
+            // The old invented sentence, now confined to the one case where it
+            // is true: our subscriber ended and nobody has told us why.
+            Self::Viewer(None) => String::from("stream ended"),
+        }
+    }
+
+    /// Whether this end is a fault, for the caption's colour.
+    pub fn is_failure(&self) -> bool {
+        match self {
+            Self::Sensor(reason) => reason.is_failure(),
+            Self::Viewer(error) => error.is_some(),
+        }
+    }
+}
+
 /// One live preview tile.
 #[derive(Debug)]
 pub struct TileState {
@@ -105,9 +146,9 @@ pub struct TileState {
     /// Abort handle for the subscriber task; aborts on drop as well
     /// (belt-and-braces — dropping the tile always kills the subscriber).
     pub abort: Option<iced::task::Handle>,
-    /// Set when the stream ended (subscriber task finished); the tile shows
-    /// the reason instead of a frame.
-    pub ended: Option<String>,
+    /// Set when the tile stopped showing a picture; the tile shows the reason
+    /// instead of a frame. See [`TileEnd`] for whose account it is.
+    pub ended: Option<TileEnd>,
     /// Whether this tile runs the H.264 video profile (`false` = JPEG
     /// preview). Set at open; the expand overlay uses it to decide whether
     /// to upgrade and what to restore on collapse (#436).
@@ -412,7 +453,13 @@ impl ParallaxDetailState {
             && tile.generation == generation
         {
             tile.abort = None;
-            tile.ended = Some(error.unwrap_or_else(|| "stream ended".to_string()));
+            // The producer's account outranks ours (#691). Our subscriber task
+            // ending is a fact about this viewer; overwriting
+            // "h264enc: encoder submit failed" with "stream ended" would throw
+            // away the only account that knows.
+            if !matches!(tile.ended, Some(TileEnd::Sensor(_))) {
+                tile.ended = Some(TileEnd::Viewer(error));
+            }
         }
     }
 
@@ -425,14 +472,31 @@ impl ParallaxDetailState {
         // Keep the latest per-tier applied params + viewer counts for the
         // tile's bandwidth readout (#503).
         self.status.insert(status.stream.clone(), status.clone());
+        let Some(tile) = self.tiles.get_mut(&status.stream) else {
+            return;
+        };
+        // A video tile always names its tier; a preview tile never does.
+        let mine = tile.selected_tier.as_deref().unwrap_or("preview");
+        if let Some(end) = &status.last_end
+            && end.tier == mine
+        {
+            // The producer said why. That outranks anything we inferred —
+            // including an end we already recorded from our own subscriber.
+            // The tier gate is what keeps a *sibling* tier's death from
+            // ending this tile: per-tier fidelity, carried by the name on
+            // `StreamEnd` rather than by a corpse in `tiers[]`.
+            tile.ended = Some(TileEnd::Sensor(end.reason.clone()));
+            return;
+        }
         if status.open {
             return;
         }
-        if let Some(tile) = self.tiles.get_mut(&status.stream)
-            && tile.frame.is_none()
-            && tile.ended.is_none()
-        {
-            tile.ended = Some("stream failed to open on the sensor".to_string());
+        // A pre-#691 producer publishes no `last_end`. Falling back to the old
+        // guess is the honest degradation; every sensor from 0.11 says why.
+        if tile.frame.is_none() && tile.ended.is_none() {
+            tile.ended = Some(TileEnd::Viewer(Some(String::from(
+                "stream failed to open on the sensor",
+            ))));
         }
     }
 
@@ -800,11 +864,120 @@ mod tests {
 
         // The live incarnation's end report still applies.
         state.end_tile("cam0", new, None);
-        assert_eq!(state.tiles["cam0"].ended.as_deref(), Some("stream ended"));
+        assert_eq!(state.tiles["cam0"].ended, Some(TileEnd::Viewer(None)));
+    }
+
+    /// The whole point of #691: the tile shows what the *sensor* said, and a
+    /// sibling tier's death does not end this tile.
+    #[test]
+    fn the_sensor_says_why_and_names_which_tier() {
+        use zensight_common::stream::{StreamEnd, StreamEndReason, StreamStatus};
+        let mut state = ParallaxDetailState::default();
+        let g = state.allocate_generation();
+        state.open_tile("cam0", g, None, true, Some("high".into()));
+
+        let ended_elsewhere = StreamStatus {
+            stream: "cam0".into(),
+            open: true,
+            tiers: Vec::new(),
+            last_end: Some(StreamEnd {
+                tier: "low".into(),
+                reason: StreamEndReason::Closed,
+            }),
+        };
+        state.apply_stream_status(&ended_elsewhere);
+        assert!(
+            state.tiles["cam0"].ended.is_none(),
+            "another tier's end is not this tile's end"
+        );
+
+        let mine = StreamStatus {
+            stream: "cam0".into(),
+            open: false,
+            tiers: Vec::new(),
+            last_end: Some(StreamEnd {
+                tier: "high".into(),
+                reason: StreamEndReason::Failed {
+                    node: Some("h264enc".into()),
+                    message: "encoder submit failed".into(),
+                },
+            }),
+        };
+        state.apply_stream_status(&mine);
+        let end = state.tiles["cam0"].ended.as_ref().expect("ended");
+        assert_eq!(end.text(), "h264enc: encoder submit failed");
+        assert!(end.is_failure(), "an element failure is a fault");
+    }
+
+    /// A close is not a fault, and must not be coloured as one — the
+    /// distinction the old single `Option<String>` could not carry at all.
+    #[test]
+    fn a_close_is_an_end_but_not_a_failure() {
+        use zensight_common::stream::{StreamEnd, StreamEndReason, StreamStatus};
+        let mut state = ParallaxDetailState::default();
+        let g = state.allocate_generation();
+        state.open_tile("cam0", g, None, false, None);
+
+        state.apply_stream_status(&StreamStatus {
+            stream: "cam0".into(),
+            open: false,
+            tiers: Vec::new(),
+            // A preview tile carries no `selected_tier`, so it answers to the
+            // literal `preview` rung.
+            last_end: Some(StreamEnd {
+                tier: "preview".into(),
+                reason: StreamEndReason::Closed,
+            }),
+        });
+        let end = state.tiles["cam0"].ended.as_ref().expect("ended");
+        assert_eq!(end.text(), "closed");
+        assert!(!end.is_failure());
+    }
+
+    /// Ordering must not decide the answer: whichever arrives second, the
+    /// producer's account is the one on the tile. Our subscriber task ending
+    /// is a fact about this viewer and says nothing about the camera.
+    #[test]
+    fn the_sensors_account_outranks_the_viewers_guess() {
+        use zensight_common::stream::{StreamEnd, StreamEndReason, StreamStatus};
+        let sensor_said = StreamStatus {
+            stream: "cam0".into(),
+            open: false,
+            tiers: Vec::new(),
+            last_end: Some(StreamEnd {
+                tier: "preview".into(),
+                reason: StreamEndReason::Stalled,
+            }),
+        };
+
+        // Sensor first, then our own clean end.
+        let mut state = ParallaxDetailState::default();
+        let g = state.allocate_generation();
+        state.open_tile("cam0", g, None, false, None);
+        state.apply_stream_status(&sensor_said);
+        state.end_tile("cam0", g, None);
+        assert_eq!(
+            state.tiles["cam0"].ended.as_ref().unwrap().text(),
+            "no frames from the camera"
+        );
+
+        // Our end first, then the sensor's.
+        let mut state = ParallaxDetailState::default();
+        let g = state.allocate_generation();
+        state.open_tile("cam0", g, None, false, None);
+        state.end_tile("cam0", g, None);
+        state.apply_stream_status(&sensor_said);
+        assert_eq!(
+            state.tiles["cam0"].ended.as_ref().unwrap().text(),
+            "no frames from the camera"
+        );
     }
 
     #[test]
-    fn stream_status_marks_waiting_tiles_failed() {
+    fn a_producer_that_says_nothing_still_flags_a_waiting_tile() {
+        // The pre-#691 fallback: no `last_end` on the wire, so the viewer is
+        // back to inferring from `open: false` + "never showed a frame". Kept
+        // working, and kept clearly labelled as the guess it is.
         use zensight_common::stream::StreamStatus;
         let mut state = ParallaxDetailState::default();
         let generation = state.allocate_generation();
@@ -815,6 +988,7 @@ mod tests {
             stream: "cam0".into(),
             open: true,
             tiers: Vec::new(),
+            last_end: None,
         });
         assert!(state.tiles["cam0"].ended.is_none());
 
@@ -823,13 +997,15 @@ mod tests {
             stream: "cam0".into(),
             open: false,
             tiers: Vec::new(),
+            last_end: None,
         };
         state.apply_stream_status(&closed);
         assert!(
             state.tiles["cam0"]
                 .ended
-                .as_deref()
+                .as_ref()
                 .unwrap()
+                .text()
                 .contains("failed to open")
         );
 
@@ -853,7 +1029,10 @@ mod tests {
         assert!(state.is_open("cam0"));
 
         state.end_tile("cam0", g0, Some("boom".into()));
-        assert_eq!(state.tiles["cam0"].ended.as_deref(), Some("boom"));
+        assert_eq!(
+            state.tiles["cam0"].ended,
+            Some(TileEnd::Viewer(Some("boom".into())))
+        );
 
         state.close_tile("cam0");
         assert!(!state.is_open("cam0"));

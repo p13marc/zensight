@@ -249,10 +249,15 @@ newest-frame images with a seq/fps caption. Each tile carries a
 **generation** (monotonic per open); frames and end reports from a replaced
 subscriber task (older generation) are ignored, a large in-generation
 sequence regression re-anchors instead of freezing (sensor pipeline restart),
-and a sensor `StreamStatus{open: false}` transition (a per-stream
-`state/parallax/stream/<stream>` document on the state subscriber) flags a
-tile still waiting for its first frame as a
-failed open. Close (and every way of leaving the device view: deselect,
+and a sensor `StreamStatus` naming this tile's tier in `last_end` puts the
+**producer's own reason** on the tile (a per-stream
+`state/parallax/stream/<stream>` document on the state subscriber, #691) —
+`closed`, `no viewer — reaped`, `h264enc: encoder submit failed`. That outranks
+anything the viewer inferred, in either arrival order, because our subscriber
+ending is a fact about *us* and says nothing about the camera; a *sibling*
+tier's end is ignored. Against a pre-#691 producer, which publishes no
+`last_end`, the tile falls back to the old guess and flags one still waiting
+for its first frame as a failed open. Close (and every way of leaving the device view: deselect,
 Escape, dashboard, navigating to any other view, selecting another device,
 disconnect, session replacement) aborts the subscriber tasks and batches
 `close_stream` commands — view changes funnel through one choke point in

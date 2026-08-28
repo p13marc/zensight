@@ -103,7 +103,9 @@ pub use rpc::{
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
 pub use state::ZensightState;
-pub use stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
+pub use stream::{
+    FrameMeta, StreamControl, StreamDescriptor, StreamEnd, StreamEndReason, StreamStatus,
+};
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
 /// The registry's *parse* direction, re-exported so consumers get it without a
 /// direct `zenkey` dependency (RFC 08 §1, issue #475).

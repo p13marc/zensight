@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use parallax::codec::annexb::{NalCodec, has_param_sets, is_entry_point};
 use zensight_common::command::{Command, command_key, query_key};
-use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
+use zensight_common::stream::{
+    FrameMeta, StreamControl, StreamDescriptor, StreamEndReason, StreamStatus,
+};
 use zensight_common::{Format, decode};
 use zensight_sensor_core::Publisher;
 use zensight_sensor_parallax::catalog::Catalog;
@@ -354,6 +356,14 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     // A preview-only open reports `open` but carries no video tier.
     assert!(status.open);
     assert!(status.tiers.is_empty(), "preview is not a video tier");
+    // And a stream that has not stopped carries no end (#691). This is what
+    // pins the clear-on-reopen: absent means "nothing has stopped since this
+    // stream last opened", never "stopped for an unknown reason".
+    assert!(
+        status.last_end.is_none(),
+        "a healthy stream has no current end: {:?}",
+        status.last_end
+    );
 
     // Tear the stream down before the runtime drops: a live pipeline keeps a
     // blocking source task alive, and tokio's shutdown would wait forever.
@@ -1490,6 +1500,15 @@ async fn close_and_idle_reaper_tear_stream_down() {
     let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
+    let status_sub = viewer
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
+        ))
+        .await
+        .expect("declare status sub");
+
     let preview_key = v1ctx()
         .media_key(&["test0", "preview", "jpeg"])
         .expect("a constant test stream/subject is a legal key");
@@ -1521,6 +1540,13 @@ async fn close_and_idle_reaper_tear_stream_down() {
 
     // Close + drop the subscriber (falling viewer edge). The idle reaper
     // (idle_timeout_secs: 1) must tear the profile down shortly after.
+    //
+    // Note the codec-less close: `resolve_profile` maps that to the sensor's
+    // DEFAULT VIDEO TIER, not to the mjpeg preview this test opened — the
+    // footgun `docs/streams.md` warns about. So the preview's refcount is
+    // never decremented and it dies through the viewers-based backstop with a
+    // refcount still held. That is the crash-backstop case, and #691 gives it
+    // its own name.
     send_control(
         &viewer,
         &host_prefix,
@@ -1534,9 +1560,98 @@ async fn close_and_idle_reaper_tear_stream_down() {
     drop(sub);
     wait_until_closed(&handle).await;
 
+    let status = await_status(&status_sub, |s| !s.open).await;
+    let end = status.last_end.expect("a torn-down stream must say why");
+    assert_eq!(end.tier, "preview");
+    assert_eq!(
+        end.reason,
+        StreamEndReason::Idle,
+        "reaped with a refcount still held is the backstop, not a close"
+    );
+    assert!(!end.reason.is_failure(), "our own reap is not a fault");
+
     // And the catalogue is inactive again.
     let got = query_catalogue(&viewer, &host_prefix).await;
     assert!(!got[0].active, "stream must be inactive after teardown");
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// The other half of the reaper's story (#691): a close that actually names
+/// the profile it opened drives the refcount to zero, and the end that follows
+/// says `closed` — not the `idle` its sibling test asserts.
+///
+/// A `close_stream` does not stop a pipeline. It releases a refcount and the
+/// idle countdown does the stopping, so both a clean operator close and the
+/// crash backstop arrive through one reaper. The refcount at reap time is the
+/// only thing that tells them apart, and until #691 an operator could see
+/// neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_that_names_its_profile_reports_closed() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-close-reason";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor(sensor.clone(), source).await;
+
+    let status_sub = viewer
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
+        ))
+        .await
+        .expect("declare status sub");
+
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
+    let sub = viewer
+        .declare_subscriber(preview_key.as_keyexpr())
+        .await
+        .expect("declare preview subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+        .await
+        .expect("first preview frame timed out")
+        .expect("preview subscriber closed");
+
+    // `codec: Some("mjpeg")` — the SAME profile the open named. A codec-less
+    // close would resolve to the default video tier and decrement the wrong
+    // refcount, which is exactly what the sibling test does and why it sees
+    // `Idle` instead.
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+    drop(sub);
+    wait_until_closed(&handle).await;
+
+    let status = await_status(&status_sub, |s| !s.open).await;
+    let end = status.last_end.expect("a closed stream must say so");
+    assert_eq!(end.tier, "preview");
+    assert_eq!(
+        end.reason,
+        StreamEndReason::Closed,
+        "every opener closed, so the reap is the close"
+    );
+    assert!(!end.reason.is_failure(), "a close is not a fault");
 
     viewer.close().await.unwrap();
     sensor.close().await.unwrap();
@@ -1560,11 +1675,12 @@ fn rtsp_parallax_config(url: &str) -> ParallaxConfig {
 }
 
 /// A failed open must (a) publish a definitive `open: false` StreamStatus
-/// transition (the GUI flags the waiting tile with it), and (b) leave no
-/// entry in the stats registry — a leaked entry means phantom zero-valued
-/// stats telemetry forever.
+/// transition carrying **why**, in the failing layer's own words (#691) —
+/// the GUI shows that instead of guessing "stream failed to open on the
+/// sensor" — and (b) leave no entry in the stats registry, since a leaked
+/// entry means phantom zero-valued stats telemetry forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
+async fn failed_open_says_why_and_leaks_no_stats() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-failed-open";
     let host_prefix = "parallax".to_string();
@@ -1612,6 +1728,20 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
             serde_json::from_slice(&sample.payload().to_bytes()).expect("decode StreamStatus");
         assert_eq!(status.stream, "deadcam");
         if !status.open {
+            let end = status
+                .last_end
+                .as_ref()
+                .expect("a failed open must say why it failed");
+            assert_eq!(end.tier, "preview");
+            let StreamEndReason::FailedOpen { message } = &end.reason else {
+                panic!("an open that never ran is FailedOpen, not {:?}", end.reason);
+            };
+            // The camera's own words, carried through rather than paraphrased.
+            assert!(
+                message.to_lowercase().contains("rtsp") || message.contains("connect"),
+                "the failing layer's own message, not ours: {message}"
+            );
+            assert!(end.reason.is_failure(), "a failed open is a fault");
             saw_closed = true;
             break;
         }
