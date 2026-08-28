@@ -17,10 +17,14 @@ TCP "best-effort only permits the *sender* to drop", and that such drops would b
 half. At 300 kbit with ~1.7 Mbps offered, the receiver saw **83 % of sequence numbers missing
 while `stats/drops` stayed at 0** — and frame age reached **3.5 seconds median, 4.4 s max**. At
 100 kbit: 93 % missing, **9.1 s median age**. The frames were discarded inside Zenoh's own
-transport queue by `CongestionControl::Drop`, which is upstream of `stats/drops` (that counter
-is derived at egress from gaps in what the AppSink handed on —
-`zensight-sensor-parallax/src/egress.rs:158`). From the receiver, a congested TCP link is
-indistinguishable from a lossy one.
+transport queue by `CongestionControl::Drop`, which is upstream of `stats/drops`. From the
+receiver, a congested TCP link is indistinguishable from a lossy one.
+
+> **Updated 2026-08-28 (#692).** `stats/drops` no longer comes from sequence gaps observed at
+> egress; it is the `AppSink`'s own `total_dropped`. The finding above is unchanged — that
+> counter still sits downstream of nothing and upstream of Zenoh's transport queue, so
+> congestion loss remains invisible to it. Only the citation moved.
+
 
 That the frames went to congestion and not to the network is not an inference. Received
 fraction tracks the link's share of the offered rate almost exactly:
@@ -115,10 +119,11 @@ worse still — bursts of **9** at 300 kbit and **27** at 100 kbit. A controller
 rate cannot see the difference between 5 % as isolated frames and 5 % as one 10-frame hole, and
 only the second is a visible glitch.
 
-**`rc_drops` is not `drops` and must never be added to it.** `drops` is derived from egress
-sequence gaps, so it is exactly the sender's share of what the receiver misses. `rc_drops` is
-the encoder skipping a frame *before* a sequence number exists: it lowers the frame rate and
-creates no gap. Adding them was this analysis's own first bug, and it turned a clean run into
+**`rc_drops` is not `drops` and must never be added to it.** `drops` is the sender's share of
+what the receiver misses — buffers the `AppSink` shed rather than handed on (since #692 read
+from the sink's own counter; at the time of this measurement, inferred from the sequence gaps
+those sheds leave, which is the same set). `rc_drops` is the encoder skipping a frame *before*
+a sequence number exists: it lowers the frame rate and creates no gap. Adding them was this analysis's own first bug, and it turned a clean run into
 negative wire loss — config B at 0 % loss has `rc_drops = 10` and a perfectly contiguous
 0..259. `scripts/media-loss-report.py` now subtracts only `drops`.
 

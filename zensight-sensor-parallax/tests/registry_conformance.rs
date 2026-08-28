@@ -27,6 +27,11 @@ const EMITTED: &[&str] = &[
     // or an RTSP passthrough has none, and reports nothing rather than zero
     // (#510). Runtime-conditional like `encode_ms` below, not build-conditional.
     "cam0/stats/rc_drops",
+    // Unconditional, unlike every other runtime-conditional metric here:
+    // every profile on every path terminates in an `AppSink`, so an open
+    // stream always has a backlog to report (#692). There is no "no queue to
+    // ask" case, hence no `rc_tracked` analogue.
+    "cam0/stats/sink_queue",
     "cam0/stats/viewers",
     // Emitted only when `derive()` produced an encode time — i.e. when frames
     // were actually encoded this interval. That is a *runtime* condition, not a

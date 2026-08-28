@@ -8,15 +8,16 @@
 //! bandwidth; fps counts every published frame, video + preview).
 //!
 //! Telemetry rides `zensight/v1/<origin>/telemetry/parallax/<stream>/stats/<metric>`
-//! (fps / kbps / drops / rc_drops / viewers / encode_ms / encode_p95_ms /
-//! encode_p99_ms), so existing charts
+//! (fps / kbps / drops / sink_queue / rc_drops / viewers / encode_ms /
+//! encode_p95_ms / encode_p99_ms), so existing charts
 //! light up for free; `streams/advertised` is published every tick so a
 //! parallax host shows up on the dashboard even before any stream is opened.
 //!
 //! `fps` and `kbps` are deliberately **egress**-sourced, not encoder-sourced
 //! (#510): they count what actually crossed Zenoh — injected SPS/PPS included,
 //! sink-shed frames excluded — and RTSP passthrough has no encoder to ask at
-//! all. `rc_drops` is the one number only the encoder knows.
+//! all. `rc_drops` is the one number only the encoder knows, and `drops` and
+//! `sink_queue` are the two only the `AppSink` knows (#692).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -33,9 +34,21 @@ pub struct StreamStats {
     pub frames: AtomicU64,
     /// Payload bytes published (cumulative).
     pub bytes: AtomicU64,
-    /// Frames lost between encoder and egress — sequence gaps observed on
-    /// the video profile (cumulative). Intentional preview throttling is
-    /// never counted.
+    /// Buffers a profile's `AppSink` shed because the egress task did not pull
+    /// in time (cumulative, summed over the stream's open profiles — video
+    /// tiers **and** the preview).
+    ///
+    /// Read from `AppSinkHandle::stats().total_dropped` and folded as a delta
+    /// per profile incarnation; never inferred (#692). It used to be counted
+    /// from `FrameMeta.sequence` gaps observed at egress, which was a *proxy
+    /// for this very number* and a worse one: blinded across every RTSP
+    /// reconnect by the DISCONT reset, absent on the preview path, and
+    /// structurally **zero** on RTSP passthrough, whose source never stamps a
+    /// sequence at all.
+    ///
+    /// **Not transport loss.** Congestion discards frames inside Zenoh's own
+    /// transport queue, upstream of every counter this sensor has — #713
+    /// measured this reading 0 while 83 % of sequence numbers never arrived.
     pub drops: AtomicU64,
     /// Cumulative wall time spent inside encoder `process()` calls.
     pub encode_ns: AtomicU64,
@@ -49,12 +62,12 @@ pub struct StreamStats {
     /// Frames the H.264 rate controller swallowed to hold a tier's bitrate cap
     /// (cumulative, summed over the stream's open video tiers).
     ///
-    /// **Disjoint from [`Self::drops`] by construction.** The encoder stamps
-    /// its output sequence from its own *emitted*-frame count, and a swallowed
-    /// frame produces no buffer at all — so it leaves no gap for egress to see.
-    /// `drops` is therefore the `AppSink` shedding under a slow consumer;
-    /// this is the bitrate cap biting. `skip_frames(true)` is set precisely so
-    /// the encoder may do this, and until #510 nothing counted it.
+    /// **Disjoint from [`Self::drops`] by construction**, and on a stronger
+    /// basis since #692: a swallowed frame produces no buffer at all, so it
+    /// never reaches the sink and cannot be in the sink's shed count. `drops`
+    /// is the `AppSink` shedding under a slow consumer; this is the bitrate cap
+    /// biting. `skip_frames(true)` is set precisely so the encoder may do this,
+    /// and until #510 nothing counted it.
     pub rc_drops: AtomicU64,
     /// 95th / 99th percentile encode latency in nanoseconds, as most recently
     /// read off the stream's live `EncoderStatsHandle`s (0 = none observed).
@@ -80,6 +93,29 @@ pub struct StreamStats {
     /// is no cap". The point is omitted instead — the precedent `encode_ms`
     /// already sets.
     pub rc_tracked: AtomicBool,
+    /// Deepest `AppSink` backlog observed across the stream's open profiles at
+    /// the last fold (0..`SINK_QUEUE`).
+    ///
+    /// A **store**, not an accumulate, and a **max**, not a sum: depth is
+    /// bounded per sink, so summing three profiles would report a queue that
+    /// does not exist, and storing means a torn-down profile's backlog stops
+    /// being reported instead of sticking. Same discipline as
+    /// [`Self::set_encode_tail`].
+    ///
+    /// The evidence it gives is **asymmetric**: a reading at the cap proves a
+    /// backlog that survived a whole second, while a `0` proves nothing — a
+    /// 1 Hz sample of a four-deep queue is mostly 0 even on a stream that is
+    /// shedding. It is a leading indicator, never a duty cycle.
+    pub sink_queue: AtomicU64,
+}
+
+/// Add `now - seen` to `counter` and advance `seen`.
+///
+/// `saturating_sub` absorbs a handle that reset under us, which is what makes
+/// the published `Counter` monotone across a profile incarnation change.
+fn fold_delta(counter: &AtomicU64, seen: &mut u64, now: u64) {
+    counter.fetch_add(now.saturating_sub(*seen), Ordering::Relaxed);
+    *seen = now;
 }
 
 impl StreamStats {
@@ -87,11 +123,6 @@ impl StreamStats {
     pub fn record_frame(&self, bytes: usize) {
         self.frames.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-    }
-
-    /// Record `n` frames lost before egress (sequence gap).
-    pub fn record_drops(&self, n: u64) {
-        self.drops.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Record one encoder `process()` call's wall time.
@@ -114,9 +145,24 @@ impl StreamStats {
     /// absolutes would make a published `Counter` go *backwards* on a tier
     /// switch. `saturating_sub` also absorbs a handle that reset under us.
     pub fn fold_rc_drops(&self, seen: &mut u64, now: u64) {
-        self.rc_drops
-            .fetch_add(now.saturating_sub(*seen), Ordering::Relaxed);
-        *seen = now;
+        fold_delta(&self.rc_drops, seen, now);
+    }
+
+    /// Fold one `AppSink`'s cumulative shed count in as a **delta** against
+    /// what was last observed for that sink, advancing `seen` (#692).
+    ///
+    /// Same delta discipline as [`Self::fold_rc_drops`], for the same reason:
+    /// several profiles feed one stream, and a torn-down tier's replacement
+    /// gets a fresh sink that restarts at zero, so summing absolutes would make
+    /// a published `Counter` walk *backwards* on a tier switch.
+    pub fn fold_sink_drops(&self, seen: &mut u64, now: u64) {
+        fold_delta(&self.drops, seen, now);
+    }
+
+    /// Publish the deepest backlog across this stream's open profiles.
+    /// See [`Self::sink_queue`] for why it stores rather than accumulates.
+    pub fn set_sink_queue(&self, depth: u64) {
+        self.sink_queue.store(depth, Ordering::Relaxed);
     }
 
     /// Publish the tail latencies observed across this stream's live encoders.
@@ -199,6 +245,7 @@ struct PrevCounters {
     bytes: u64,
     encode_ns: u64,
     encoded_frames: u64,
+    drops: u64,
 }
 
 /// One tick's derived numbers for a stream (pure — unit-tested).
@@ -207,17 +254,51 @@ struct TickDerived {
     fps: f64,
     kbps: f64,
     encode_ms: Option<f64>,
+    /// Frames published this interval — parallax's QoS `processed`.
+    published: u64,
+    /// Buffers the sinks shed this interval — parallax's QoS `dropped`.
+    shed: u64,
+    /// `(published + shed) / published`, parallax's own QoS proportion
+    /// (`1.0` keeping up, `2.0` only half made it).
+    ///
+    /// Computed here from the sink's counters rather than received as an
+    /// `Event::Qos`, because **no graph this sensor builds can originate
+    /// one** — see `docs/qos-and-latency.md`.
+    ///
+    /// `None` when nothing was published: a stream producing no frames at all
+    /// is the first-frame watchdog's story and `rtsp_connect_failed`'s, not
+    /// this rule's, and `0/0` is not a degradation.
+    shed_proportion: Option<f64>,
 }
+
+/// Sustained shedding above which `stream_degraded` fires: more than ~9 % of
+/// what the graph produced never left the sink (a proportion of 1.1 is ten
+/// produced for every nine published).
+///
+/// Deliberately not zero. `drop_on_full` is the *designed* behaviour of a live
+/// sink — an isolated shed under a scheduling hiccup is the mechanism working,
+/// and a rule that fired on it would be noise. At the ladder's usual 15-30 fps
+/// a sustained 10 % is 1.5-3 frames a second gone for a whole interval, which
+/// against a 30-frame GOP is visible stutter rather than a blip.
+const SHED_PROPORTION_LIMIT: f64 = 1.1;
 
 fn derive(prev: PrevCounters, now: PrevCounters, interval_secs: f64) -> TickDerived {
     let dframes = now.frames.saturating_sub(prev.frames);
     let dbytes = now.bytes.saturating_sub(prev.bytes);
     let denc_ns = now.encode_ns.saturating_sub(prev.encode_ns);
     let denc_frames = now.encoded_frames.saturating_sub(prev.encoded_frames);
+    let dshed = now.drops.saturating_sub(prev.drops);
     TickDerived {
         fps: dframes as f64 / interval_secs,
         kbps: (dbytes as f64 * 8.0) / 1000.0 / interval_secs,
         encode_ms: (denc_frames > 0).then(|| denc_ns as f64 / denc_frames as f64 / 1e6),
+        published: dframes,
+        shed: dshed,
+        // On a stream's *first* tick the baseline is zero, so `fps`
+        // over-reports (it divides a stream's whole life by one interval) —
+        // but the ratio does not, because both terms cover the same span. It
+        // is honest from the very first point.
+        shed_proportion: (dframes > 0).then(|| (dframes + dshed) as f64 / dframes as f64),
     }
 }
 
@@ -265,6 +346,7 @@ pub async fn run_ticker(
                 bytes: stats.bytes.load(Ordering::Relaxed),
                 encode_ns: stats.encode_ns.load(Ordering::Relaxed),
                 encoded_frames: stats.encoded_frames.load(Ordering::Relaxed),
+                drops: stats.drops.load(Ordering::Relaxed),
             };
             let baseline = prev.insert(stream.clone(), now).unwrap_or_default();
             let derived = derive(baseline, now, interval_secs);
@@ -290,6 +372,33 @@ pub async fn run_ticker(
                 TelemetryValue::Counter(stats.drops.load(Ordering::Relaxed)),
             )
             .await;
+            // Unconditional: every profile on every path ends in an `AppSink`,
+            // so an open stream always has a real backlog to report. `0` means
+            // nothing is backed up (or nothing is open yet) — see the field's
+            // note on why that is a weaker statement than a reading at the cap.
+            publish(
+                &publisher,
+                &source,
+                &format!("{stream}/stats/sink_queue"),
+                TelemetryValue::Gauge(stats.sink_queue.load(Ordering::Relaxed) as f64),
+            )
+            .await;
+            // Evaluated here rather than inside the encoder block below: a
+            // graph can shed on a path that has no encoder at all (RTSP
+            // passthrough), and that is exactly a case worth alerting on.
+            if let Some(alerts) = &alerts
+                && let Some(proportion) = derived.shed_proportion
+            {
+                alerts
+                    .stream_degraded(
+                        &stream,
+                        proportion,
+                        derived.shed,
+                        derived.published,
+                        proportion > SHED_PROPORTION_LIMIT,
+                    )
+                    .await;
+            }
             // Omitted, not zeroed, for a stream with no rate-controlled
             // encoder — see `StreamStats::rc_tracked`.
             if let Some(rc) = stats.rc_drops() {
@@ -447,12 +556,14 @@ mod tests {
             bytes: 1_000_000,
             encode_ns: 1_000_000_000,
             encoded_frames: 100,
+            drops: 0,
         };
         let now = PrevCounters {
             frames: 150,
             bytes: 2_000_000,
             encode_ns: 1_500_000_000,
             encoded_frames: 150,
+            drops: 0,
         };
         let d = derive(prev, now, 5.0);
         assert_eq!(d.fps, 10.0);
@@ -465,6 +576,94 @@ mod tests {
         let d = derive(PrevCounters::default(), PrevCounters::default(), 5.0);
         assert_eq!(d.fps, 0.0);
         assert_eq!(d.encode_ms, None, "no encoder frames → no encode_ms point");
+    }
+
+    /// parallax's own QoS quantity, `(processed + dropped) / processed`,
+    /// computed from the sink's counters because no `AppSink` graph can
+    /// originate an `Event::Qos` (#692).
+    #[test]
+    fn derive_computes_the_shed_proportion() {
+        let healthy = derive(
+            PrevCounters::default(),
+            PrevCounters {
+                frames: 100,
+                ..PrevCounters::default()
+            },
+            5.0,
+        );
+        assert_eq!(healthy.published, 100);
+        assert_eq!(healthy.shed, 0);
+        assert_eq!(healthy.shed_proportion, Some(1.0), "keeping up");
+
+        // 90 published, 10 shed: the graph produced 100 and 10 % never left.
+        let shedding = derive(
+            PrevCounters {
+                frames: 10,
+                drops: 5,
+                ..PrevCounters::default()
+            },
+            PrevCounters {
+                frames: 100,
+                drops: 15,
+                ..PrevCounters::default()
+            },
+            5.0,
+        );
+        assert_eq!(shedding.published, 90, "deltas, not absolutes");
+        assert_eq!(shedding.shed, 10, "deltas, not absolutes");
+        assert_eq!(shedding.shed_proportion, Some(100.0 / 90.0));
+        assert!(
+            shedding.shed_proportion.unwrap() > SHED_PROPORTION_LIMIT,
+            "10 % sustained shedding is what the rule is for"
+        );
+    }
+
+    /// A stream producing nothing at all is the first-frame watchdog's story
+    /// and `rtsp_connect_failed`'s, not `stream_degraded`'s — and `0/0` is not
+    /// a degradation. The tempting "simplification" here is a `0.0`, which
+    /// would make a dead stream look perfectly healthy.
+    #[test]
+    fn no_frames_published_means_no_shed_proportion() {
+        let d = derive(PrevCounters::default(), PrevCounters::default(), 5.0);
+        assert_eq!(d.shed_proportion, None);
+    }
+
+    /// The `Counter` must never walk backwards. Several profiles feed one
+    /// stream and a torn-down tier's replacement gets a fresh sink starting at
+    /// zero, so folding absolutes would make it do exactly that.
+    #[test]
+    fn sink_drops_are_monotonic_across_a_profile_switch() {
+        let stats = StreamStats::default();
+
+        // One incarnation, observed twice.
+        let mut seen = 0;
+        stats.fold_sink_drops(&mut seen, 12);
+        stats.fold_sink_drops(&mut seen, 20);
+        assert_eq!(stats.drops.load(Ordering::Relaxed), 20);
+
+        // Its replacement gets a fresh baseline and starts from zero again.
+        let mut fresh = 0;
+        stats.fold_sink_drops(&mut fresh, 3);
+        assert_eq!(
+            stats.drops.load(Ordering::Relaxed),
+            23,
+            "a new sink adds, it does not reset the stream's counter"
+        );
+
+        // And a handle that reset under us cannot subtract.
+        stats.fold_sink_drops(&mut fresh, 1);
+        assert_eq!(stats.drops.load(Ordering::Relaxed), 23);
+    }
+
+    /// A store, not an accumulate: a closed profile's backlog must stop being
+    /// reported rather than sticking at its last value forever.
+    #[test]
+    fn the_sink_queue_is_a_store_not_an_accumulate() {
+        let stats = StreamStats::default();
+        stats.set_sink_queue(4);
+        assert_eq!(stats.sink_queue.load(Ordering::Relaxed), 4);
+        stats.set_sink_queue(0);
+        assert_eq!(stats.sink_queue.load(Ordering::Relaxed), 0);
     }
 
     #[test]

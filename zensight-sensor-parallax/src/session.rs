@@ -240,6 +240,14 @@ struct ProfileSession {
     /// Last `frames_dropped_by_rc` folded from this incarnation's encoder
     /// handle — the baseline [`StreamStats::fold_rc_drops`] subtracts against.
     rc_drops_seen: u64,
+    /// Pull side of this profile's terminal `AppSink`, kept for its live
+    /// counters (`total_dropped`, `queued_buffers`) — the element itself is
+    /// inside its executor task and unreachable, which is exactly why
+    /// upstream puts `stats()` on the handle (#692).
+    sink: parallax::elements::AppSinkHandle,
+    /// Last `total_dropped` folded from this incarnation's sink — the baseline
+    /// [`StreamStats::fold_sink_drops`] subtracts against.
+    sink_drops_seen: u64,
 }
 
 impl Drop for ProfileSession {
@@ -400,7 +408,7 @@ impl SessionManager {
                     None => break,
                 },
                 _ = reap_tick.tick() => {
-                    self.fold_encoder_stats();
+                    self.fold_pipeline_stats();
                     self.reap_idle().await;
                 }
             }
@@ -918,6 +926,8 @@ impl SessionManager {
                     width: built.width,
                     height: built.height,
                     rc_drops_seen: 0,
+                    sink: built.sink,
+                    sink_drops_seen: 0,
                 })),
             );
         // A tier that is streaming again has no current end — but a *sibling's*
@@ -1137,28 +1147,31 @@ impl SessionManager {
         self.publish_status(stream).await;
     }
 
-    /// Fold every live encoder's counters into its stream's [`StreamStats`]:
-    /// rate-control drops, and the p95/p99 encode-latency tail (#729).
+    /// Fold every live profile's counters into its stream's [`StreamStats`]:
+    /// the sink's shed count and backlog (#692), the encoder's rate-control
+    /// drops, and the p95/p99 encode-latency tail (#729).
     ///
     /// Runs on the actor's existing 1 Hz reap tick — finer than the stats
     /// ticker's interval, so the published numbers are at most a second stale.
     /// The actor is the right owner: it already holds `PipelineControls` per
     /// profile and already writes the `viewers` gauge into `StreamStats`.
-    fn fold_encoder_stats(&mut self) {
+    fn fold_pipeline_stats(&mut self) {
         // Clone the registry handle so the two field borrows stay disjoint.
         let registry = self.stats.clone();
         for (stream, session) in &mut self.sessions {
             // Iterating `sessions` (not the registry) means `handle`'s
             // create-on-miss can never resurrect a closed stream's entry.
             let stats = registry.handle(stream);
-            // RC drops are summed across tiers (they are counts); the latency
-            // tail is not summable, so the stream reports its **worst live
-            // tier**. Recomputed from scratch each tick rather than folded, so
-            // a torn-down tier's tail stops being reported.
-            let (mut p95_ns, mut p99_ns) = (0u64, 0u64);
+            // Sink and RC drops are summed across profiles (they are counts);
+            // the latency tail and the sink backlog are not summable, so the
+            // stream reports its **worst live profile** for each. Depth is
+            // bounded per sink, so summing three profiles would report a queue
+            // that does not exist. Both are recomputed from scratch each tick
+            // rather than folded, so a torn-down profile stops being reported.
+            let (mut p95_ns, mut p99_ns, mut queue) = (0u64, 0u64, 0u64);
             for slot in session.profiles_mut() {
                 if let ProfileSlot::Open(p) = slot {
-                    fold_profile_rc(&stats, p);
+                    queue = queue.max(fold_profile_counters(&stats, p));
                     if let Some(handle) = &p.controls.encoder_stats {
                         let latency = handle.encode_latency();
                         p95_ns = p95_ns.max(latency.p95_ns);
@@ -1167,6 +1180,7 @@ impl SessionManager {
                 }
             }
             stats.set_encode_tail(p95_ns, p99_ns);
+            stats.set_sink_queue(queue);
         }
     }
 
@@ -1267,9 +1281,9 @@ impl SessionManager {
         if let Some(slot) = session.remove_slot(profile) {
             match slot {
                 ProfileSlot::Open(mut p) => {
-                    // One last fold before the encoder handle dies, or a tier
-                    // switch silently loses up to a tick's worth of drops.
-                    fold_profile_rc(&self.stats.handle(stream), &mut p);
+                    // One last fold before the handles die, or a tier switch
+                    // silently loses up to a tick's worth of drops.
+                    fold_profile_counters(&self.stats.handle(stream), &mut p);
                     p.teardown();
                 }
                 // A pending reservation has nothing running; dropping it
@@ -1468,12 +1482,19 @@ fn idle_reason(refcount: u32) -> StreamEndReason {
     }
 }
 
-fn fold_profile_rc(stats: &StreamStats, p: &mut ProfileSession) {
-    let Some(handle) = &p.controls.encoder_stats else {
-        return;
-    };
-    let now = handle.frames_dropped_by_rc();
-    stats.fold_rc_drops(&mut p.rc_drops_seen, now);
+/// Fold one profile's live counters into its stream's stats, returning that
+/// profile's current sink backlog for the caller's max.
+///
+/// One `sink.stats()` per profile per second takes the sink's mutex for a few
+/// field reads — negligible against a 30 fps push path, and the same lock
+/// `pull_buffer_timeout` already takes on every frame.
+fn fold_profile_counters(stats: &StreamStats, p: &mut ProfileSession) -> u64 {
+    let sink = p.sink.stats();
+    stats.fold_sink_drops(&mut p.sink_drops_seen, sink.total_dropped);
+    if let Some(handle) = &p.controls.encoder_stats {
+        stats.fold_rc_drops(&mut p.rc_drops_seen, handle.frames_dropped_by_rc());
+    }
+    sink.queued_buffers as u64
 }
 
 #[cfg(test)]
