@@ -9,6 +9,12 @@
 //! Shapes per source kind are documented in `docs/streams.md`. Frame-rate
 //! limiting uses the drop-based `Throttle` element, never the delay-based
 //! `RateLimiter` (which would backpressure a live source).
+//!
+//! Every link is `LinkPolicy::Block` — the default, and on purpose.
+//! `stats/drops` is the terminal `AppSink`'s own shed counter (#692), so a
+//! lossy link would shed frames that no counter in this sensor can see and the
+//! metric would silently under-report. If a graph here ever needs a leaky
+//! link, `stats/drops` needs a second source first.
 
 use std::sync::Arc;
 
@@ -30,7 +36,13 @@ use crate::catalog::SourceKind;
 use crate::config::{EncoderComplexity, EncoderTuning, EncoderUsage, H264Profile, PreviewConfig};
 use crate::stats::StreamStats;
 
-/// How many encoded frames an AppSink may queue before dropping the oldest.
+/// How many encoded frames an `AppSink` may queue before it starts dropping —
+/// and it drops the **incoming** buffer, not the oldest. parallax's
+/// `drop_on_full` is GStreamer's leaky-*upstream*: the newest goes and the
+/// queued four survive, so a consumer that falls behind keeps the oldest data
+/// rather than the freshest. (`total_dropped` counts exactly those, and is
+/// what `stats/drops` publishes since #692.)
+///
 /// Live media: a slow egress must never block the encoder.
 const SINK_QUEUE: usize = 4;
 
@@ -921,6 +933,73 @@ mod tests {
             .expect("pipeline must shut down cleanly after PipelineHandle::stop()")
             .expect("pipeline tasks must end without error");
         frames
+    }
+
+    /// The counter `stats/drops` now rests on, pinned without Zenoh, without a
+    /// camera and without a race (#692).
+    ///
+    /// Pull *nothing*. `SINK_QUEUE` is 4 and the source is live, so the queue
+    /// fills within half a second and every buffer after that is shed. Three
+    /// assertions, each load-bearing:
+    ///
+    /// - `total_dropped > 0` — the number the whole change rests on exists and
+    ///   is readable on a running pipeline.
+    /// - `queued_buffers == SINK_QUEUE` — `drop_on_full` sheds the *incoming*
+    ///   buffer and keeps the queued four (leaky-upstream). If a parallax bump
+    ///   ever made it leaky-downstream this trips, and so does the reasoning
+    ///   that lets `stats/drops` be the sink's counter alone.
+    /// - `total_received == total_pulled + queued_buffers` — an invariant, not
+    ///   a measurement: a shed buffer never increments `total_received`. It is
+    ///   the proof that there is no *third* view of drops hiding in
+    ///   `AppSinkStats`, which is what justifies deleting the sequence-gap
+    ///   inference rather than publishing two numbers for one thing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unpulled_sink_sheds_and_says_so() {
+        let mut built = build_video(
+            &test_kind(8),
+            &VideoParams {
+                max_height: Some(120),
+                fps: 8,
+                gop_frames: 8,
+                bitrate_kbps: 400,
+                tuning: EncoderTuning::default(),
+            },
+            &Arc::default(),
+        )
+        .expect("build video");
+        let handle = executor()
+            .start(&mut built.pipeline)
+            .expect("start pipeline");
+
+        // Nothing pulls. Shedding does not start until the *whole* chain is
+        // saturated: every link is `Block` with a 4-deep channel, so
+        // source → convert → scale → throttle → encoder → sink must each fill
+        // before the sink itself overflows. At 8 fps that is ~3 s, measured —
+        // which is worth knowing, because it is also how long a real stall
+        // takes to show up in `stats/drops`. Poll rather than sleep a fixed
+        // window so a slow CI box does not turn this into a flake.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline && built.sink.stats().total_dropped == 0 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let stats = built.sink.stats();
+        assert!(
+            stats.total_dropped > 0,
+            "an unpulled live sink must shed: {stats:?}"
+        );
+        assert_eq!(
+            stats.queued_buffers, SINK_QUEUE,
+            "drop_on_full keeps the queued buffers and sheds the incoming one"
+        );
+        assert_eq!(
+            stats.total_received,
+            stats.total_pulled + stats.queued_buffers as u64,
+            "a shed buffer never counts as received — so there is no third \
+             view of drops in AppSinkStats: {stats:?}"
+        );
+
+        handle.stop();
+        let _ = tokio::time::timeout(Duration::from_secs(10), handle.wait()).await;
     }
 
     /// Only an encoder-backed video graph can report rate-control drops. A

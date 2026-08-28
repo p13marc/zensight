@@ -10,7 +10,7 @@
 # gauge.
 
 [registry]
-version = "1.8"
+version = "1.9"
 app = "zensight"
 convention = 1
 
@@ -47,7 +47,7 @@ class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 64
 since = "1.1"
-description = "dropped frames"
+description = "buffers a profile's AppSink shed because the egress task did not pull in time, read from AppSinkHandle::stats().total_dropped and folded as a delta per profile incarnation; covers video tiers AND the preview since 1.9, and is NOT transport loss (congestion dies inside Zenoh's queue, upstream of every counter here)"
 
 [[subject]]
 path = "{stream}/stats/rc_drops"
@@ -55,7 +55,15 @@ class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 64
 since = "1.6"
-description = "frames the encoder's rate control swallowed to hold the tier's bitrate cap; disjoint from drops (a swallowed frame leaves no sequence gap)"
+description = "frames the encoder's rate control swallowed to hold the tier's bitrate cap; disjoint from drops (a swallowed frame produces no buffer at all, so it never reaches the sink)"
+
+[[subject]]
+path = "{stream}/stats/sink_queue"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.9"
+description = "deepest AppSink backlog across the stream's open profiles at tick time (0..SINK_QUEUE); the queue that precedes shedding, so a reading at the cap proves a real backlog while a 0 does not disprove one"
 
 [[subject]]
 path = "{stream}/stats/viewers"

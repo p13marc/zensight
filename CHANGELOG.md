@@ -572,6 +572,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`{stream}/stats/drops` is the sink's own counter, not an inference**
+  (#692). It is read from `AppSinkHandle::stats().total_dropped`, folded as a
+  delta per profile incarnation on the actor's existing 1 Hz tick. The
+  sequence-gap inference at egress is deleted.
+
+  This is not a new definition — it is the one already written down. Three
+  places in the tree (`stats.rs`, `docs/streams.md`,
+  `examples/media_loss_probe.rs`) all described `drops` as *"the `AppSink`
+  shedding under a slow consumer"*, and it was a proxy for that number. A worse
+  one: blinded across every RTSP reconnect by the DISCONT reset, absent on the
+  preview path, and structurally **zero** on RTSP passthrough, whose
+  `RtspSession` never stamps `Metadata::sequence` at all. Existing series may
+  step up; they cannot step down.
+
+  **What the issue asked for could not be built, and that is written down
+  rather than quietly dropped.** #692 wanted the metric sourced from the
+  pipeline bus's `MessageKind::Qos`, plus new `qos_proportion`, `jitter_ms` and
+  `latency_ms` subjects. Checked against the pinned `parallax-pipeline 0.8.0`:
+  QoS reaches the bus only from a sink's `take_upstream_event()`, and the only
+  implementors are `AppVideoSink` and `AutoVideoSink` — every profile here ends
+  in `AppSink`, which does not override it, so there is **no origin**. Only
+  `RtpJitterBuffer` and `AutoVideoSink` declare an `Element::latency()`, and
+  neither is in any graph here, so `query_latency()` is `None` and
+  `LatencyChanged` is never posted. `Throttle::stats()` is unreachable on a
+  running pipeline and link policies expose no counters. The bus is
+  deliberately *not* attached: it would carry `Error` on a different schedule
+  from the `EndReason::Error` #691 already types, which is two orderings for
+  one event. All of it, with file:line evidence and the four conditions that
+  would reopen it, is in the new
+  `zensight-sensor-parallax/docs/qos-and-latency.md`, on the `qos-express.md`
+  precedent.
+
+- **`{stream}/stats/sink_queue`** (#692) — the deepest `AppSink` backlog across
+  a stream's open profiles, sampled each tick (0..`SINK_QUEUE`). The queue that
+  *precedes* shedding, where `drops` only says it already happened. Its evidence
+  is asymmetric and the registry says so: a reading at the cap proves a backlog
+  that survived a whole second, a `0` proves nothing.
+
+  Worth knowing, and now measured rather than assumed: because every link is
+  `LinkPolicy::Block` with a shallow channel, shedding does not begin until the
+  *entire* chain has saturated — source, convert, scale, throttle, encoder,
+  sink. On an 8 fps source that is **~3 seconds**, which is also how long a real
+  stall takes to reach `stats/drops`.
+
+- **`stream_degraded` alert** (#692) — fires when the graph shed more than ~9 %
+  of what it produced over one stats interval. That ratio is `QosEvent`'s own
+  `(processed + dropped) / processed`, computed from the sink's counters at the
+  one place we can compute it. **Windowed**, unlike `encoder_overrun`'s all-time
+  tail: a cumulative ratio could never clear, and one bad thirty seconds at open
+  would hold the alert firing for the life of the stream. It sits beside the
+  overrun rule rather than replacing it — overrun is the encoder missing its
+  budget and fires *before* anything is lost; this is frames produced fine and
+  then thrown away downstream.
+
+  Registry `parallax` 1.8 → **1.9**: one subject, `registry.lock` regenerated,
+  and the `drops` description rewritten because the widening to the preview path
+  is a contract change the compat lock structurally cannot catch (it pins path,
+  class and type name, not payload meaning).
+
 - **`StoppableSource` is gone — the engine grew the switch it worked around**
   (#709). Every synchronous source the parallax sensor built was wrapped in a
   `StoppableSource` whose `StopHandle` flipped the next `produce()` to EOS. The

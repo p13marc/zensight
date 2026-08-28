@@ -1478,6 +1478,110 @@ async fn preview_only_stream_publishes_no_rc_drops() {
     sensor.close().await.unwrap();
 }
 
+/// The two sink-sourced metrics reach the wire with the right shapes (#692):
+/// `sink_queue` as a `Gauge`, `drops` as a `Counter` that never walks
+/// backwards.
+///
+/// Deterministic by construction — it does **not** wait for a drop to happen.
+/// Provoking real shedding end-to-end would need the egress task to lose a
+/// race it normally wins by orders of magnitude (a CBOR encode and a loopback
+/// `put` against an 8 fps source), and the honest deterministic version of
+/// that is the unit test in `pipeline.rs`, where nothing pulls at all. Note
+/// that `starved_parallax_config` is the *wrong* lever here: its 1 kbit/s cap
+/// makes the encoder shed, and an RC-swallowed frame produces no buffer, so it
+/// never reaches the sink.
+///
+/// What this catches is the monotonicity: fold absolutes instead of deltas
+/// across a profile change and the `Counter` steps backwards here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sink_metrics_reach_the_wire_with_the_right_shapes() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-sink-stats";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor(sensor.clone(), source).await;
+
+    let stats_sub = viewer
+        .declare_subscriber(format!("{}/test0/stats/**", v1ctx().telemetry_prefix()))
+        .await
+        .expect("declare stats subscriber");
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
+    let media_sub = viewer
+        .declare_subscriber(preview_key.as_keyexpr())
+        .await
+        .expect("declare preview subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut saw_queue = false;
+    let mut last_drops: Option<u64> = None;
+    let mut saw_drops = false;
+    while Instant::now() < deadline {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(2), stats_sub.recv_async()).await
+        else {
+            continue;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode stats point");
+        match point.metric.as_str() {
+            "test0/stats/sink_queue" => {
+                let zensight_common::TelemetryValue::Gauge(depth) = point.value else {
+                    panic!("sink_queue is a gauge, got {:?}", point.value);
+                };
+                assert!(
+                    (0.0..=4.0).contains(&depth),
+                    "a backlog cannot exceed SINK_QUEUE: {depth}"
+                );
+                saw_queue = true;
+            }
+            "test0/stats/drops" => {
+                let zensight_common::TelemetryValue::Counter(n) = point.value else {
+                    panic!("drops is a counter, got {:?}", point.value);
+                };
+                if let Some(prev) = last_drops {
+                    assert!(
+                        n >= prev,
+                        "a Counter must never walk backwards: {prev} -> {n}"
+                    );
+                }
+                last_drops = Some(n);
+                saw_drops = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_queue, "sink_queue never reached the wire");
+    assert!(saw_drops, "drops never reached the wire — vacuous test");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+    drop(media_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
 /// Poll the actor until no stream is open (bounded).
 async fn wait_until_closed(handle: &zensight_sensor_parallax::session::SessionHandle) {
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -421,10 +421,17 @@ Per-stream stats ride ordinary telemetry under
 |--------|------|---------|
 | `fps` | gauge | frames published per second (all open tiers + preview combined) |
 | `kbps` | gauge | total media bandwidth published for the stream |
-| `drops` | counter | frames lost between encoder and egress (video-tier sequence gaps; intentional preview throttling is never counted) |
+| `drops` | counter | buffers a profile's `AppSink` shed because the egress task did not pull in time — video tiers **and** the preview. Read from the sink's own counter, never inferred (#692). **Not** transport loss |
+| `sink_queue` | gauge | deepest `AppSink` backlog across the stream's open profiles at tick time (0 .. `SINK_QUEUE`). The queue that precedes shedding — a reading at the cap proves a real backlog, a `0` does not disprove one |
 | `rc_drops` | counter | frames the encoder's rate control swallowed to hold the tier's `bitrate_kbps` (omitted for streams with no rate-controlled encoder) |
 | `viewers` | gauge | open profiles with matching subscribers (0 .. tiers + 1) |
 | `encode_ms` | gauge | average wall time per encoder `process()` call (omitted when no encoder ran) |
+| `encode_p95_ms` / `encode_p99_ms` | gauge | encode-latency tail off the encoder's own histogram, worst live tier (omitted where there is no histogram — JPEG previews, RTSP passthrough) |
+
+Three metrics an operator might expect beside these — a QoS proportion, jitter,
+and pipeline latency — are **not** published, and cannot be by any graph this
+sensor builds. See [`qos-and-latency.md`](qos-and-latency.md) for what blocks
+each and what would unblock it.
 
 ## Receiver feedback (#714, #715)
 
@@ -492,14 +499,24 @@ which the aggregate should show rather than the producer hide.
 Three things about that table are easy to get wrong, so they are written down
 here (#510):
 
-- **`drops` and `rc_drops` cannot overlap.** The H.264 element numbers its
-  output from its own *emitted*-frame count, and a frame the rate controller
-  swallows produces no buffer at all — so it leaves no sequence gap for the
-  egress task to notice. `drops` is therefore always the `AppSink` shedding
-  under a slow consumer; `rc_drops` is always the bitrate cap biting. A tier
-  whose `rc_drops` climbs is being held to its `bitrate_kbps`, which is the
-  ladder working, not a fault — but it is also the number to read before
-  concluding a tier "looks soft".
+- **`drops` and `rc_drops` cannot overlap**, and since #692 on a stronger basis
+  than the sequence-gap argument that used to be made here: a frame the rate
+  controller swallows produces no buffer at all, so it never reaches the sink
+  and cannot be in the sink's shed count. `drops` is the `AppSink` shedding
+  under a slow consumer; `rc_drops` is the bitrate cap biting. A tier whose
+  `rc_drops` climbs is being held to its `bitrate_kbps`, which is the ladder
+  working, not a fault — but it is also the number to read before concluding a
+  tier "looks soft".
+- **`drops` is the sink's own counter, not an inference.** It used to be
+  computed from `FrameMeta.sequence` gaps observed at egress, which was a proxy
+  for this very number and a worse one: blinded across every RTSP reconnect by
+  the DISCONT reset, absent on the preview path, and structurally **zero** on
+  RTSP passthrough, whose source never stamps a sequence at all. Existing series
+  may therefore step up after 0.11; they cannot step down.
+- **Shedding takes seconds to appear.** Every link is `Block` with a shallow
+  channel, so the whole chain — source, convert, scale, throttle, encoder,
+  sink — must saturate before the sink itself overflows. Measured at ~3 s on an
+  8 fps source. `sink_queue` is the leading indicator for exactly that window.
 - **`rc_drops` is omitted, not zeroed**, when a stream has no rate-controlled
   encoder — an RTSP passthrough (no encoder at all) or a preview-only stream
   (JPEG has no rate control). A `0` there would read as "the cap is not
@@ -568,6 +585,17 @@ Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
 - `encoder_overrun` — `encode_p95_ms` above the strictest open tier's per-frame
   budget (1000 / fps), falling back to the `encode_ms` mean on a path with no
   encoder histogram (the JPEG previews).
+- `stream_degraded` — the graph shed more than ~9 % of the frames it produced
+  over one stats interval (QoS proportion above 1.1). **Windowed**, unlike
+  `encoder_overrun`'s all-time tail: a rate that could not clear would never
+  resolve, and resolve-on-recovery is this reporter's whole contract — a tail
+  needs history, a rate has a natural window. It sits *beside* the overrun rule
+  because they catch different failures and point at different fixes: overrun is
+  the encoder missing its per-frame budget, and fires *before* anything is lost;
+  this is frames produced fine and then thrown away downstream (a starved host,
+  a stalled publisher, too many profiles on one runtime). Either can fire alone
+  — a slow encoder that is also a slow *source* queues nothing and sheds
+  nothing.
 
 ## Limitations
 

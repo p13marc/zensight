@@ -118,9 +118,13 @@ fn clock_ns(t: ClockTime) -> Option<u64> {
     if t.is_none() { None } else { Some(t.nanos()) }
 }
 
-/// Pump `sink` into `publisher` until it ends, feeding the stream's stats
-/// counters (frames/bytes; on the video path, sequence gaps count as drops —
-/// preview throttling is intentional and never counted).
+/// Pump `sink` into `publisher` until it ends, feeding the stream's
+/// frames/bytes counters.
+///
+/// It does **not** count drops: `stats/drops` is the sink's own
+/// `total_dropped`, read by the session actor on its reap tick (#692). This
+/// loop used to infer it from `FrameMeta.sequence` gaps, which was a proxy for
+/// that very number and a worse one — see [`StreamStats::drops`].
 ///
 /// Says *how* it ended: see [`EgressEnd`].
 pub async fn run(
@@ -157,7 +161,6 @@ async fn run_with_watchdog(
     stats: Arc<StreamStats>,
     first_frame_timeout: Duration,
 ) -> EgressEnd {
-    let mut last_sequence: Option<u64> = None;
     let started = Instant::now();
     let mut produced_any = false;
     // H.264 hardening (#435): the published keyframe flag is derived from
@@ -209,14 +212,6 @@ async fn run_with_watchdog(
         produced_any = true;
 
         let mut frame_meta = metadata_to_frame_meta(buffer.metadata(), width, height, preview);
-        if !preview {
-            if let Some(prev) = last_sequence
-                && frame_meta.sequence > prev + 1
-            {
-                stats.record_drops(frame_meta.sequence - prev - 1);
-            }
-            last_sequence = Some(frame_meta.sequence);
-        }
         // Borrow the encoded bytes rather than copying them up front: on the
         // h264 path `prepare` hands back the same slice for everything but a
         // repaired keyframe, so the repair path now copies once (into a Vec
@@ -233,7 +228,6 @@ async fn run_with_watchdog(
         // cache.
         if buffer.metadata().is_discont() {
             param_sets.reset();
-            last_sequence = None;
         }
         let bytes = buffer.as_bytes();
         let payload: std::borrow::Cow<'_, [u8]> = if h264 {

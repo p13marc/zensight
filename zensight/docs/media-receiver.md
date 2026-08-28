@@ -255,9 +255,9 @@ fix the link.
 
 Source columns come from the sensor's own `{stream}/stats/*` and the per-tier status doc;
 `drops` and `rc_drops` stay separate rows because they are disjoint by construction and mean
-different things — a pipeline drop leaves a sequence gap, a rate-control drop does not, and
-folding them would erase the difference between "this box is too slow" and "you asked for
-400 kbps".
+different things — a pipeline drop is a buffer the sink shed because nothing pulled it in time,
+a rate-control drop is a frame the encoder never emitted at all (#692) — and folding them would
+erase the difference between "this box is too slow" and "you asked for 400 kbps".
 
 ## The tier controller (#720)
 

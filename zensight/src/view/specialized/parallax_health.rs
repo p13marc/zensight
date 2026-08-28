@@ -284,9 +284,10 @@ pub fn stream_health(state: &DeviceDetailState, stream: &str, tile: &TileState) 
         },
     )];
     // `drops` and `rc_drops` are disjoint by construction and mean different
-    // things: a pipeline drop leaves a sequence gap, a rate-control drop does
-    // not. Folding them into one "encoder drops" would erase the distinction
-    // between "this box is too slow" and "you asked for 400 kbps".
+    // things: a pipeline drop is a buffer the sink shed because nothing pulled
+    // it in time, a rate-control drop is a frame the encoder never emitted at
+    // all (#692). Folding them into one "encoder drops" would erase the
+    // distinction between "this box is too slow" and "you asked for 400 kbps".
     if let Some(n) = stat_growth(state, stream, "drops") {
         encoder_detail.push(("pipeline drops", n.to_string()));
     }
