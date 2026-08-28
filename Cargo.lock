@@ -6460,9 +6460,9 @@ dependencies = [
 
 [[package]]
 name = "parallax-pipeline"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1d6b687ee68a3054d62403c0236c3cadbc7fb6fbd3de07bdfb9a6cdd21015ea"
+checksum = "68ef3287a5d1ac8488763e02a73e0e5b35ce5b9aaaba7fca5fda097d6a4d3fad"
 dependencies = [
  "anyhow",
  "bytes",

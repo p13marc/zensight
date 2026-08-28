@@ -1377,6 +1377,21 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
   `annexb::h264_profile_level_id` is re-exported for #707 but deliberately not
   put on the stream catalogue — see below.
 
+- **parallax-pipeline 0.8.0 → 0.9.0**, the release in which the engine grew an
+  application: `parallax-player` and `parallax-iced` are new crates upstream,
+  and the player is what found most of what 0.9.0 fixes — A/V synchronization
+  anchored on two independent guesses, a flushing seek that could deadlock a
+  paced pipeline, a sink reporting what it *offered* as what it *sent*, and a
+  hidden window that dragged a whole pipeline into a low-rate equilibrium it
+  never left. None of the seven upstream breaks reaches us: the plugin ABI
+  (12 → 14) matters only to out-of-tree plugins and we ship none; the renamed
+  `ZenohSinkHandle` counters, the `Mp4SeekPoint` time base, `MkvDemux`'s seek
+  report, the audio sinks' out-of-segment drop and `with_loop` all belong to
+  elements this sensor does not build — it terminates in an `AppSink` and
+  sources from V4L2, RTSP or the test pattern. Verified rather than assumed, on
+  the published 0.9.0: `cargo check --all-targets` on the sensor, the `h264` GUI
+  feature, and the sensor's 87 tests.
+
 - **parallax-pipeline 0.7.0 → 0.8.0** (#727), and the pin is now a single
   `[workspace.dependencies]` entry so the sensor that *encodes* and the `h264`
   GUI feature that *decodes* cannot drift onto two versions of the same

@@ -11,9 +11,11 @@ No behaviour is missing that was ever present — this records four things that
 "why aren't we using this?" gets the answer instead of re-deriving it.
 
 Line numbers below are against **`parallax-pipeline 0.8.0` as published**,
-which is what `Cargo.toml` pins and what the workspace compiles. The checkout
-at `/srv/dev/repos/parallax` carries unreleased work on top and its lines
-drift.
+which is what `Cargo.toml` pinned when this was written. The pin has since
+moved to **0.9.0**, so the line numbers drift; the findings themselves were
+re-checked at that bump and still hold — none of 0.9.0's breaks touches an
+`AppSink`-terminated graph. The checkout at `/srv/dev/repos/parallax` carries
+unreleased work on top and drifts further still.
 
 ## What was asked for
 
