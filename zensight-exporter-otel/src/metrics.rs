@@ -1,58 +1,77 @@
 //! Mapping from ZenSight TelemetryPoint to OpenTelemetry metrics.
 
 use opentelemetry::KeyValue;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{Protocol, TelemetryValue};
 
-/// Build resource attributes from configuration and telemetry.
+/// The host an observed signal came from, for its OTLP `Resource` (#755).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedHost {
+    /// The RFC 06 minted origin chunk, e.g. `h-0ead7da13eea`. Stable across
+    /// hostname changes, which is why it and not `host.name` is the identity.
+    pub origin: String,
+    /// The sensor's self-reported hostname.
+    pub host_name: String,
+    /// The registry producer that emitted this, with its instance suffix when
+    /// it has one (`netring-2`).
+    pub producer: String,
+}
+
+/// Build resource attributes.
+///
+/// # Why the observed host belongs here and not on the data point (#755)
+///
+/// This used to emit `service.name`, an optional `service.version` and whatever
+/// the operator hand-wrote — and nothing else. Every host on the bus therefore
+/// shared ONE `Resource`, despite the keyspace origin being literally
+/// `h-<12hex>`.
+///
+/// For metrics that shows up as `job="zensight", instance=""`. For **logs** it
+/// is worse: a backend derives stream identity from the resource, so the whole
+/// fleet collapsed into a single log stream with the host demoted to structured
+/// metadata. For traces the spans carried no host at all.
+///
+/// `service.name` is per-producer (`zensight.netlink`), because that is what a
+/// service *is* here — the thing emitting the signal — and it is what makes a
+/// service map meaningful rather than one node called "zensight".
+///
+/// Operator-supplied `resource` attributes and `service.version` merge
+/// underneath and never override these: they are configuration, and this is
+/// observed truth off the wire.
 pub fn build_resource_attributes(
     service_name: &str,
     service_version: Option<&str>,
     extra_attrs: &std::collections::HashMap<String, String>,
+    host: Option<&ObservedHost>,
 ) -> Vec<KeyValue> {
-    let mut attrs = Vec::with_capacity(2 + extra_attrs.len());
+    let mut attrs = Vec::with_capacity(5 + extra_attrs.len());
 
-    attrs.push(KeyValue::new("service.name", service_name.to_string()));
-
+    // Weakest first, so the loop below cannot clobber observed truth.
+    for (k, v) in extra_attrs {
+        attrs.push(KeyValue::new(k.clone(), v.clone()));
+    }
     if let Some(version) = service_version {
         attrs.push(KeyValue::new("service.version", version.to_string()));
     }
 
-    for (k, v) in extra_attrs {
-        attrs.push(KeyValue::new(k.clone(), v.clone()));
-    }
-
-    attrs
-}
-
-/// Build metric attributes from a TelemetryPoint.
-pub fn build_metric_attributes(point: &TelemetryPoint) -> Vec<KeyValue> {
-    let mut attrs = Vec::with_capacity(2 + point.labels.len());
-
-    // Always include source and protocol
-    attrs.push(KeyValue::new("source", point.source.clone()));
-    attrs.push(KeyValue::new(
-        "protocol",
-        point.protocol.as_str().to_string(),
-    ));
-
-    // OTel host-metrics semconv (#100): factor state/direction/device/cpu out of
-    // the metric name into attributes via the shared table.
-    if let Some(sc) = zensight_common::semconv::metric_semconv(point.protocol, &point.metric) {
-        for (k, v) in sc.attributes {
-            attrs.push(KeyValue::new(k, v));
+    match host {
+        Some(h) => {
+            attrs.push(KeyValue::new(
+                "service.name",
+                format!("{service_name}.{}", h.producer),
+            ));
+            attrs.push(KeyValue::new("host.id", h.origin.clone()));
+            attrs.push(KeyValue::new("host.name", h.host_name.clone()));
+            attrs.push(KeyValue::new(
+                "service.instance.id",
+                format!("{}/{}", h.origin, h.producer),
+            ));
         }
-    }
-
-    // Add telemetry labels
-    for (k, v) in &point.labels {
-        attrs.push(KeyValue::new(k.clone(), v.clone()));
+        None => attrs.push(KeyValue::new("service.name", service_name.to_string())),
     }
 
     attrs
 }
 
-/// Build a metric name from protocol and metric path.
-///
 /// OTel host-metrics semconv (#100): keys with a standard mapping export under
 /// their `system.*` name (e.g. `memory/used` → `system.memory.usage`); everything
 /// else falls back to `zensight.{protocol}.{metric_path}`.
@@ -122,77 +141,21 @@ mod tests {
         let mut extra = HashMap::new();
         extra.insert("env".to_string(), "prod".to_string());
 
-        let attrs = build_resource_attributes("zensight", Some("1.0.0"), &extra);
+        let attrs = build_resource_attributes("zensight", Some("1.0.0"), &extra, None);
 
         assert!(attrs.iter().any(|kv| kv.key.as_str() == "service.name"));
         assert!(attrs.iter().any(|kv| kv.key.as_str() == "service.version"));
         assert!(attrs.iter().any(|kv| kv.key.as_str() == "env"));
     }
 
-    #[test]
-    fn test_build_metric_attributes() {
-        let point = TelemetryPoint {
-            timestamp: 1234567890000,
-            source: "router01".to_string(),
-            protocol: Protocol::Snmp,
-            metric: "sysUpTime".to_string(),
-            value: TelemetryValue::Counter(100),
-            labels: {
-                let mut m = HashMap::new();
-                m.insert("oid".to_string(), "1.3.6.1.2.1.1.3.0".to_string());
-                m
-            },
-            unit: None,
-        };
-
-        let attrs = build_metric_attributes(&point);
-
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "source"));
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "protocol"));
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "oid"));
-    }
-
-    #[test]
-    fn test_build_metric_name() {
-        assert_eq!(
-            build_metric_name(Protocol::Snmp, "sysUpTime"),
-            "zensight.snmp.sysUpTime"
-        );
-        // #100: sysinfo keys with a semconv mapping export under their system.* name.
-        assert_eq!(
-            build_metric_name(Protocol::Sysinfo, "cpu/usage"),
-            "system.cpu.utilization"
-        );
-        assert_eq!(
-            build_metric_name(Protocol::Sysinfo, "memory/used"),
-            "system.memory.usage"
-        );
-        // Unmapped sysinfo keys still fall back to the raw dotted name.
-        assert_eq!(
-            build_metric_name(Protocol::Sysinfo, "network/conntrack/count"),
-            "zensight.sysinfo.network.conntrack.count"
-        );
-        assert_eq!(
-            build_metric_name(Protocol::Netflow, "bytes/in"),
-            "zensight.netflow.bytes.in"
-        );
-    }
-
-    #[test]
-    fn test_semconv_attributes_appended() {
-        let point = TelemetryPoint {
-            timestamp: 0,
-            source: "h".to_string(),
-            protocol: Protocol::Sysinfo,
-            metric: "network/eth0/rx_bytes".to_string(),
-            value: TelemetryValue::Counter(1),
-            labels: HashMap::new(),
-            unit: None,
-        };
-        let attrs = build_metric_attributes(&point);
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "direction"));
-        assert!(attrs.iter().any(|kv| kv.key.as_str() == "device"));
-    }
+    // `build_metric_attributes` / `build_metric_name` are gone (#764): naming
+    // and attributes now come from `zensight_common::exposition::identify`,
+    // which resolves the KEY through the registry instead of guessing from the
+    // payload. Their coverage moved with them —
+    // `zensight-common/src/exposition.rs` tests the merge precedence and
+    // `zensight-common/tests/exposition_naming.rs` walks every registry
+    // pattern through the family rule. The end-to-end shape is asserted on the
+    // OTLP wire in `exporter.rs`'s tests.
 
     #[test]
     fn test_otel_metric_type() {

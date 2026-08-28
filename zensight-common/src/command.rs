@@ -10,7 +10,26 @@
 //! callers use [`crate::keyexpr::fleet_rpc_key`]/[`crate::keyexpr::origin_rpc_key`].
 
 use serde::{Deserialize, Serialize};
-use zenkey::V1Context;
+
+/// `…/@rpc/<producer>/<procedure…>` on the local host origin — the one place
+/// this module builds a key.
+///
+/// zenkey 0.7 made both halves fallible: `V1Context::for_producer` rejects an
+/// illegal producer name (absorbed once in [`crate::v1::for_producer`]) and
+/// `rpc_key` rejects a reserved token in the procedure path (RFC 03 §3).
+/// Every procedure path spelled in this module is a compile-time constant, so
+/// the only way to reach either failure is a typo in this file — which this
+/// module's own tests catch. Threading a `Result` out through eight builders
+/// that are infallible in practice, and through every one of their call
+/// sites, would buy nothing.
+fn rpc(producer: &str, procedure: &[&str]) -> String {
+    crate::v1::for_producer(producer)
+        .rpc_key(procedure)
+        .unwrap_or_else(|e| {
+            panic!("{producer:?} + {procedure:?} is not a legal @rpc procedure key: {e}")
+        })
+        .into()
+}
 
 /// The write procedure for a control topic: `…/@rpc/<producer>/<topic>/set`.
 ///
@@ -22,17 +41,30 @@ use zenkey::V1Context;
 /// assert!(k.ends_with("/@rpc/logs/filter/set"));
 /// ```
 pub fn command_key(producer: &str, topic: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .rpc_key(&[topic, "set"])
-        .into()
+    rpc(producer, &[topic, "set"])
+}
+
+/// The receiver-feedback write: `…/@rpc/<producer>/stream/report`
+/// (RFC 07 §1.1, #714).
+///
+/// Named rather than spelled through [`nested_query_key`], which would produce
+/// the same string: that helper is named for reads, and this is a write. One
+/// key for every consumer — a report names its sender in the **payload**, never
+/// in the key.
+///
+/// ```
+/// # use zensight_common::command::stream_report_key;
+/// let k = stream_report_key("parallax");
+/// assert!(k.ends_with("/@rpc/parallax/stream/report"));
+/// ```
+pub fn stream_report_key(producer: &str) -> String {
+    rpc(producer, &["stream", "report"])
 }
 
 /// The read procedure for a control topic: `…/@rpc/<producer>/<topic>`
 /// (the reply carries the topic's current configuration/status).
 pub fn status_key(producer: &str, topic: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .rpc_key(&[topic])
-        .into()
+    rpc(producer, &[topic])
 }
 
 /// The capability-probe read for a control topic:
@@ -50,9 +82,7 @@ pub fn status_key(producer: &str, topic: &str) -> String {
 /// assert!(k.ends_with("/@rpc/systemd/action/capability"));
 /// ```
 pub fn capability_key(producer: &str, topic: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .rpc_key(&[topic, "capability"])
-        .into()
+    rpc(producer, &[topic, "capability"])
 }
 
 /// A two-chunk detail read: `…/@rpc/<producer>/<topic>/<sub>`.
@@ -60,9 +90,7 @@ pub fn capability_key(producer: &str, topic: &str) -> String {
 /// For procedures that group under a parent topic (`unit/file` beside `unit`)
 /// rather than adding a top-level name.
 pub fn nested_query_key(producer: &str, topic: &str, sub: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .rpc_key(&[topic, sub])
-        .into()
+    rpc(producer, &[topic, sub])
 }
 
 /// The on-demand detail-read procedure: `…/@rpc/<producer>/<topic>`.
@@ -70,32 +98,24 @@ pub fn nested_query_key(producer: &str, topic: &str, sub: &str) -> String {
 /// request, never streamed onto the telemetry bus (RFC 04 R3). Same key
 /// shape as [`status_key`] — reads are reads (RFC 05 §5).
 pub fn query_key(producer: &str, topic: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .rpc_key(&[topic])
-        .into()
+    rpc(producer, &[topic])
 }
 
 /// The artifact-request write procedure (RFC 05 §3 long-running pattern).
 pub fn artifact_request_key(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .rpc_key(&["artifact", "request"])
-        .into()
+    rpc(producer, &["artifact", "request"])
 }
 
 /// The artifact-status read procedure. (Residual: the RFC's ideal is the
 /// observable `state/<producer>/artifact/<kind>` document; the read
 /// procedure remains for the transition.)
 pub fn artifact_status_key(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .rpc_key(&["artifact", "status"])
-        .into()
+    rpc(producer, &["artifact", "status"])
 }
 
 /// The artifact-cancel write procedure (`?id=<ulid>`).
 pub fn artifact_cancel_key(producer: &str) -> String {
-    V1Context::for_producer(&crate::PROFILE, producer)
-        .rpc_key(&["artifact", "cancel"])
-        .into()
+    rpc(producer, &["artifact", "cancel"])
 }
 
 /// Tier-1 blob prefix: `<base>/v1/<origin>/@blob/artifact` — a produced

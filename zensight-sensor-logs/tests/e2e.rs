@@ -263,7 +263,9 @@ async fn durable_store_serves_paginated_time_range() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let producer = format!("test_{nanos}/logs");
+    // A producer *chunk* (RFC 03 §1.5) — zenkey 0.6 silently slugged the
+    // old `test_{nanos}/logs` spelling; 0.7 refuses it.
+    let producer = format!("test-{nanos}-logs");
     let (ring, _cap) = query::new_ring(100); // empty ring; the store answers
     tokio::spawn(query::run_events(
         session.clone(),
@@ -352,7 +354,9 @@ async fn server_side_search_filters_the_store() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let producer = format!("test_{nanos}/logs");
+    // A producer *chunk* (RFC 03 §1.5) — zenkey 0.6 silently slugged the
+    // old `test_{nanos}/logs` spelling; 0.7 refuses it.
+    let producer = format!("test-{nanos}-logs");
     let (ring, _cap) = query::new_ring(100);
     tokio::spawn(query::run_events(
         session.clone(),

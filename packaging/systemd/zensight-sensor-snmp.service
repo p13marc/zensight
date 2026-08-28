@@ -25,6 +25,18 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
+# Needs no capabilities as shipped: polling is outbound, and the trap
+# listener is `enabled: false` in configs/snmp.json5.
+#
+# NOTE if you enable it: its shipped `bind` is 0.0.0.0:**162**, a privileged
+# port. This unit cannot bind it — not because of the line below, but
+# because it grants no AmbientCapabilities either. Enabling the trap
+# listener on 162 means adding BOTH
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# exactly as zensight-sensor-logs does for syslog on 514 — or moving the
+# listener to a port above 1024.
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

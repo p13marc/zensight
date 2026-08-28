@@ -1,0 +1,73 @@
+# ZenSight OpenTelemetry demo: Grafana's official all-in-one LGTM image
+# (OpenTelemetry Collector + Prometheus + Tempo + Loki + Pyroscope + Grafana in
+# one container). Brought up by `just demo-otel`. See ../README.md.
+#
+# ONE service on purpose. A hand-rolled Collector + Prometheus + Tempo + Loki +
+# Grafana stack is five images, four config files and a datasource-provisioning
+# problem, all to arrive at what this image already is. The exporter's job is to
+# speak OTLP correctly; proving that needs a correct OTLP receiver, not one of
+# ours.
+#
+# Ports it takes on the host network: 3000 (Grafana), 4317 (OTLP gRPC),
+# 4318 (OTLP HTTP), 9090 (its own Prometheus). It therefore CANNOT run alongside
+# `just demo-prometheus`, which wants 3000 and 9090. `just demo-stop` clears
+# either.
+#
+# Host networking: same reason as ../prometheus/compose.yml — the exporter runs
+# on the host so it can reach the loopback Zenoh hub, and pushes OTLP to
+# 127.0.0.1:4317. (A bridged container would work for the OTLP direction alone,
+# since the exporter dials OUT; host networking keeps ONE model across both
+# demos and keeps this image's Prometheus reachable at 127.0.0.1:9090.)
+
+services:
+  lgtm:
+    # Pinned BY DIGEST, tag kept beside it for readability. This image moves
+    # fast and its internal Grafana provisioning paths have changed between
+    # minor versions, so a moving tag is not good enough here.
+    #
+    # docker.io/grafana/otel-lgtm:0.11.14
+    image: docker.io/grafana/otel-lgtm@sha256:95f21ed5744063935a3d8e636d09534bc56f3394ae9d2ec8a38e6d8b711709f1
+    network_mode: host
+    security_opt: [label=disable]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: dark
+    #
+    # DASHBOARD PROVISIONING IS DELIBERATELY NOT MOUNTED, AND NO DASHBOARD IS
+    # SHIPPED. Both halves are deliberate; here is what was actually checked
+    # against the digest pinned above (#773).
+    #
+    # The provisioning path DOES hold:
+    #
+    #   /otel-lgtm/grafana/conf/provisioning/dashboards/   <- file providers
+    #   /otel-lgtm/grafana/conf/provisioning/datasources/  <- prometheus/tempo/loki/pyroscope
+    #
+    # and its existing providers are `type: file` entries pointing at absolute
+    # JSON paths (/otel-lgtm/grafana-dashboard-*.json). So a mount here would
+    # work TODAY — but it is exactly the kind of internal layout that has moved
+    # between minor versions before, and a wrong bind mount fails SILENTLY:
+    # it provisions nothing and says nothing, which is the failure class this
+    # repo's comments exist to prevent. Re-verify against any new digest.
+    #
+    # Two findings that matter more than the mount, and are why the Prometheus
+    # demo's dashboards CANNOT simply be copied in here:
+    #
+    #   * this image bundles Grafana 12.2.1, while ../prometheus/compose.yml
+    #     runs Grafana 13.2.0 — a panel authored against 13 may use schema this
+    #     one does not understand;
+    #   * its Prometheus datasource is `uid: prometheus` with
+    #     `timeInterval: 60s`, where ours is `uid: zensight-prom` at 10s. Every
+    #     dashboard JSON in ../prometheus/dashboards/ references the literal
+    #     `zensight-prom`, and $__rate_interval resolves differently at 60s.
+    #
+    # The image already provisions its own Prometheus, Tempo and Loki
+    # datasources, so the demo is fully usable through Explore without a
+    # dashboard — which is what ../README.md documents.
+    #
+    # To add one: author it against Grafana 12.2.1 and `uid: prometheus`,
+    # verify it against a real scrape (this repo provisions no panel it has not
+    # seen render), then mount both the JSON and a provider YAML into the path
+    # above with the digest recorded next to it.
+    restart: on-failure

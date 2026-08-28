@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     for target in gnmi_config.targets {
         let subscriber = GnmiSubscriber::new(
             target.clone(),
-            zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "gnmi")
+            zensight_sensor_core::v1::for_producer("gnmi")
                 .telemetry_prefix()
                 .into(),
             gnmi_config.serialization,

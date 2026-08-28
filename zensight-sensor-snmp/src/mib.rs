@@ -179,6 +179,41 @@ impl MibResolver {
             || (oid.starts_with(prefix) && oid.as_bytes().get(prefix.len()) == Some(&b'.'))
     }
 
+    /// Resolve an OID to a human-readable name **and its table index**.
+    ///
+    /// A table OID is `<column-prefix>.<index>`, and this walk already computes
+    /// the index in order to substitute it into a `{index}` template — it just
+    /// threw it away. Handing it back lets the poller attach `index` as a
+    /// LABEL, which is what makes `sum by (index)` possible on SNMP interface
+    /// counters: the registry maps snmp as a rest-var catch-all
+    /// (`{device}/{metric...}`), so the index is part of the metric NAME and no
+    /// exporter-side rule can factor it out (#769).
+    ///
+    /// `None` for a scalar OID (an exact match, or no mapping at all).
+    pub fn resolve_indexed(&self, oid: &str) -> (String, Option<String>) {
+        if let Some(entry) = self.exact_mappings.get(oid) {
+            return (entry.name.clone(), None);
+        }
+
+        for (prefix, entry) in &self.prefix_mappings {
+            if Self::matches_prefix(oid, prefix) {
+                let suffix = &oid[prefix.len()..];
+                let index = suffix.trim_start_matches('.');
+
+                if !index.is_empty() {
+                    let name = if entry.name.contains("{index}") {
+                        entry.name.replace("{index}", index)
+                    } else {
+                        format!("{}.{}", entry.name, index)
+                    };
+                    return (name, Some(index.to_string()));
+                }
+            }
+        }
+
+        (oid.to_string(), None)
+    }
+
     /// Resolve an OID to a human-readable name.
     ///
     /// Returns the mapped name if found, otherwise returns the original OID.
@@ -896,5 +931,58 @@ mod tests {
         assert!(modules.contains(&"IF-MIB".to_string()));
         assert!(modules.contains(&"HOST-RESOURCES-MIB".to_string()));
         assert!(modules.contains(&"IP-MIB".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    /// The table index is recoverable, which is what lets the poller attach it
+    /// as a label (#769).
+    ///
+    /// snmp registers a rest-var catch-all, so the index is baked into the
+    /// metric NAME — `if/1/in_octets` and `if/2/in_octets` are two unrelated
+    /// families. No exporter-side naming rule can factor that out; only the
+    /// producer can, and this walk already computed the index and discarded it.
+    #[test]
+    fn a_table_oid_yields_its_index() {
+        let mut r = MibResolver::new();
+        r.load_builtin_mibs().unwrap();
+
+        let (name, index) = r.resolve_indexed("1.3.6.1.2.1.2.2.1.10.1");
+        assert_eq!(name, "if/1/in_octets");
+        assert_eq!(index.as_deref(), Some("1"));
+
+        let (name, index) = r.resolve_indexed("1.3.6.1.2.1.2.2.1.16.5");
+        assert!(name.starts_with("if/5/"), "{name}");
+        assert_eq!(index.as_deref(), Some("5"));
+    }
+
+    /// A scalar OID has no index, and must not invent one.
+    #[test]
+    fn a_scalar_oid_has_no_index() {
+        let mut r = MibResolver::new();
+        r.load_builtin_mibs().unwrap();
+        let (name, index) = r.resolve_indexed("1.3.6.1.2.1.1.3.0");
+        assert_eq!(name, "system/uptime");
+        assert_eq!(index, None);
+    }
+
+    /// `resolve_indexed` must agree with `resolve` on the name, or the two
+    /// walks have drifted and the label would describe a different metric.
+    #[test]
+    fn the_two_resolvers_agree_on_the_name() {
+        let mut r = MibResolver::new();
+        r.load_builtin_mibs().unwrap();
+        for oid in [
+            "1.3.6.1.2.1.1.3.0",
+            "1.3.6.1.2.1.2.2.1.10.1",
+            "1.3.6.1.2.1.2.2.1.16.5",
+            "1.3.6.1.4.1.9.9.999.0",
+            "9.9.9.9",
+        ] {
+            assert_eq!(r.resolve_indexed(oid).0, r.resolve(oid), "oid {oid}");
+        }
     }
 }

@@ -46,7 +46,7 @@
   // Telemetry filtering (optional)
   filters: {
     // Narrow the telemetry subscription
-    // (default "zensight/v1/*/telemetry/**" — the v1 class selector). The
+    // (default "v1/*/telemetry/**" — the v1 class selector, base-relative). The
     // alert/health/entity subscribers are separate and unaffected.
     // key_expr: "v1/*/telemetry/sysinfo/**",
 

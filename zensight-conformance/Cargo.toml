@@ -1,0 +1,29 @@
+[package]
+name = "zensight-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Runs zenkey-fleet's RFC conformance judges against a live ZenSight deployment, and turns the report into an exit code"
+# Never published: this is a CI harness. It links `zenkey-fleet`, and so does
+# `zensight` for the fleet view since #745 — the invariant is not "only this
+# crate", it is that the engine must never enter `zensight-common` or any crate
+# a sensor links (see README.md — "The boundary").
+publish = false
+
+[[bin]]
+name = "zensight-conformance"
+path = "src/main.rs"
+
+[dependencies]
+# `decode` explicitly: the workspace pin turns default features off for the
+# GUI's sake (it does not use the seam), and the payload checks this crate
+# gates on ARE that seam. Opting in here keeps the cost at the crate that
+# incurs it.
+zenkey-fleet = { workspace = true, features = ["decode"] }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

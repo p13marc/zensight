@@ -6,7 +6,7 @@
 //! gauges) and the `@rpc/netlink/{retransmits,connections}` channels.
 //!
 //! Gated on `feature = "ebpf"` — the rest of the crate stays aya-free. Any
-//! load/attach failure (no `CAP_BPF`/`CAP_NET_ADMIN`, unsupported kernel) is
+//! load/attach failure (no `CAP_BPF`/`CAP_PERFMON`, unsupported kernel) is
 //! returned as an `Err`; the caller logs one warning and the unprivileged
 //! baseline is untouched.
 
@@ -21,14 +21,17 @@ use aya::{
     // The userspace handle for a kernel LRU_HASH map is `HashMap` (aya has no
     // separate userspace `LruHashMap`); its TryFrom accepts the LRU variant.
     maps::{HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf},
-    programs::{KProbe, TracePoint},
+    programs::TracePoint,
 };
 use tokio::io::unix::AsyncFd;
 use zensight_sensor_netlink_ebpf_common::{
-    CONN_EVENT_ESTABLISHED, CONNLAT_BUCKETS, ConnRecord, RetransKey,
+    CONN_EVENT_ESTABLISHED, CONNLAT_BUCKETS, ConnRecord, RetransKey, TCP_SOCK_MEMBERS,
+    TcpSockOffsets,
 };
 
-use crate::map::{ConnView, RetransRecord, connlat_percentiles, top_k_retransmits};
+use crate::map::{
+    ConnectionRecord, RetransmitRecord, conn_record_view, connlat_percentiles, top_k_retransmits,
+};
 
 /// TCP 4-tuple key for the recent-close map (#304): (local ip, local port,
 /// remote ip, remote port). Addresses are the `Ipv4Addr`/`Ipv6Addr` `Display`
@@ -78,7 +81,7 @@ impl OwnerMap {
 
     /// Record who owned a just-closed connection, sweeping expired entries and
     /// keeping the map bounded.
-    fn note(&self, v: &ConnView) {
+    fn note(&self, v: &ConnectionRecord) {
         let Ok(mut map) = self.map.lock() else {
             return;
         };
@@ -101,7 +104,7 @@ impl OwnerMap {
     }
 
     /// Forget a connection (its close event arrived — tier 2b live map).
-    fn remove(&self, v: &ConnView) {
+    fn remove(&self, v: &ConnectionRecord) {
         if let Ok(mut map) = self.map.lock() {
             map.remove(&(v.local.clone(), v.lport, v.remote.clone(), v.rport));
         }
@@ -135,7 +138,7 @@ pub struct EbpfState {
 }
 
 struct Inner {
-    conns: Mutex<VecDeque<ConnView>>,
+    conns: Mutex<VecDeque<ConnectionRecord>>,
     conn_cap: usize,
     retrans: Mutex<AyaHashMap<MapData, RetransKey, u64>>,
     connlat: Mutex<PerCpuArray<MapData, u64>>,
@@ -151,8 +154,8 @@ impl EbpfState {
     /// Route one drained kernel record (#304): ESTABLISHED events feed the
     /// live map (tier 2b); close events retire the live entry, feed the
     /// recent-close map (tier 2a) and land in the tcplife ring.
-    fn ingest(&self, rec: &ConnRecord) {
-        let v = ConnView::from_record(rec);
+    fn ingest(&self, rec: &ConnRecord, anchor_ms: i64) {
+        let v = conn_record_view(rec, anchor_ms);
         if rec.event == CONN_EVENT_ESTABLISHED {
             self.inner.live.note(&v);
         } else {
@@ -163,7 +166,7 @@ impl EbpfState {
 
     /// Push a completed-connection record, dropping the oldest past capacity,
     /// and remember its owner in the recent-close map (#304).
-    fn push_conn(&self, v: ConnView) {
+    fn push_conn(&self, v: ConnectionRecord) {
         self.inner.closed.note(&v);
         if let Ok(mut q) = self.inner.conns.lock() {
             if q.len() == self.inner.conn_cap {
@@ -198,7 +201,7 @@ impl EbpfState {
     }
 
     /// Recent completed-connection records (oldest first), for `@rpc/netlink/connections`.
-    pub fn recent_connections(&self) -> Vec<ConnView> {
+    pub fn recent_connections(&self) -> Vec<ConnectionRecord> {
         self.inner
             .conns
             .lock()
@@ -207,7 +210,7 @@ impl EbpfState {
     }
 
     /// Top-K retransmit peers, for `@rpc/netlink/retransmits`.
-    pub fn top_retransmits(&self, k: usize) -> Vec<RetransRecord> {
+    pub fn top_retransmits(&self, k: usize) -> Vec<RetransmitRecord> {
         let snapshot: Vec<(RetransKey, u64)> = match self.inner.retrans.lock() {
             Ok(map) => map.iter().filter_map(|r| r.ok()).collect(),
             Err(_) => Vec::new(),
@@ -242,7 +245,15 @@ impl EbpfState {
 pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapData>)> {
     bump_memlock();
 
-    let mut bpf = EbpfLoader::new()
+    let mut loader = EbpfLoader::new();
+    let offsets = resolve_tcp_sock_offsets();
+    // `must_exist: true` on purpose. If a future bpf-linker stops emitting this
+    // symbol, that must be a loud load failure — the alternative is every byte
+    // counter silently reading 0, which is exactly the state #681 exists to fix
+    // and is indistinguishable from an idle host.
+    let offset_bytes = offsets_to_bytes(&offsets);
+    let mut bpf = loader
+        .set_global("TCP_SOCK_OFFSETS", &offset_bytes[..], true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             // The bin-target name of the kernel crate (differs from its package
@@ -255,13 +266,11 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
         tracing::debug!(error = %e, "eBPF: aya-log init skipped");
     }
 
-    // connlat: entry kprobes + matching return kprobes (the macro marks the
-    // `_ret` programs as kretprobes; both attach to the same kernel function).
-    attach_kprobe(&mut bpf, "tcp_v4_connect", "tcp_v4_connect")?;
-    attach_kprobe(&mut bpf, "tcp_v6_connect", "tcp_v6_connect")?;
-    attach_kprobe(&mut bpf, "tcp_v4_connect_ret", "tcp_v4_connect")?;
-    attach_kprobe(&mut bpf, "tcp_v6_connect_ret", "tcp_v6_connect")?;
-    // retransmit + tcplife tracepoints.
+    // Two tracepoints, and that is the whole attach surface: connlat used to
+    // need four kprobes on tcp_v[46]_connect, and now rides the state machine
+    // inet_sock_set_state already reports (#114). One fewer failure mode too —
+    // a kernel with IPv6 unbuilt has no tcp_v6_connect symbol, which used to
+    // abort the entire load.
     attach_tp(&mut bpf, "tcp_retransmit_skb", "tcp", "tcp_retransmit_skb")?;
     attach_tp(
         &mut bpf,
@@ -293,6 +302,107 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
     Ok((bpf, state, ring))
 }
 
+/// Resolve this kernel's `struct tcp_sock` counter offsets from its own BTF.
+///
+/// CO-RE would normally do this at load time; it is unavailable to us because
+/// its relocations come from clang's `__builtin_preserve_access_index`, which
+/// rustc/bpf-linker do not emit (#681). BTF is the same `offsetof` the kernel
+/// was built with, and `/sys/kernel/btf/vmlinux` is world-readable, so this
+/// needs no privilege beyond what loading already requires.
+///
+/// Any failure yields `valid: 0` and one warning naming what was missing. The
+/// kernel side then leaves the counters at 0, which the wire type defines as
+/// "not measured" — a documented absence rather than a plausible lie.
+#[cfg(feature = "ebpf")]
+fn resolve_tcp_sock_offsets() -> TcpSockOffsets {
+    let Some(blob) = zensight_btf::read_vmlinux() else {
+        tracing::warn!(
+            path = zensight_btf::VMLINUX_PATH,
+            "eBPF: no kernel BTF; tcplife byte/segment counters stay unmeasured (#681)"
+        );
+        return TcpSockOffsets::default();
+    };
+
+    let mut resolved = [0u32; TCP_SOCK_MEMBERS.len()];
+    for (slot, member) in resolved.iter_mut().zip(TCP_SOCK_MEMBERS) {
+        match zensight_btf::member_offset(&blob, "tcp_sock", member) {
+            Some(off) => *slot = off as u32,
+            None => {
+                // Naming the member matters: "tcp_sock changed" is a kernel
+                // bump, and the field that moved is the whole diagnosis.
+                tracing::warn!(
+                    member,
+                    "eBPF: tcp_sock.{member} not in this kernel's BTF; \
+                     tcplife byte/segment counters stay unmeasured (#681)"
+                );
+                return TcpSockOffsets::default();
+            }
+        }
+    }
+
+    let offsets = TcpSockOffsets {
+        valid: 1,
+        bytes_acked: resolved[0],
+        bytes_received: resolved[1],
+        segs_out: resolved[2],
+        segs_in: resolved[3],
+        total_retrans: resolved[4],
+    };
+    // The line a future kernel bump gets diagnosed from.
+    tracing::debug!(
+        bytes_acked = offsets.bytes_acked,
+        bytes_received = offsets.bytes_received,
+        segs_out = offsets.segs_out,
+        segs_in = offsets.segs_in,
+        total_retrans = offsets.total_retrans,
+        "eBPF: resolved tcp_sock offsets from BTF"
+    );
+    offsets
+}
+
+/// `TcpSockOffsets` as the `.rodata` bytes `set_global` patches in.
+///
+/// `aya-obj` requires the byte length to equal the symbol's size exactly, which
+/// is what `tcp_sock_offsets_layout_is_stable` pins on the other side.
+#[cfg(feature = "ebpf")]
+fn offsets_to_bytes(o: &TcpSockOffsets) -> [u8; core::mem::size_of::<TcpSockOffsets>()] {
+    let mut out = [0u8; core::mem::size_of::<TcpSockOffsets>()];
+    for (chunk, value) in out.chunks_exact_mut(4).zip([
+        o.valid,
+        o.bytes_acked,
+        o.bytes_received,
+        o.segs_out,
+        o.segs_in,
+        o.total_retrans,
+    ]) {
+        chunk.copy_from_slice(&value.to_ne_bytes());
+    }
+    out
+}
+
+/// Epoch milliseconds at this host's boot, for converting the kernel's
+/// boot-relative `bpf_ktime_get_ns()` stamps (#685).
+///
+/// `CLOCK_MONOTONIC` deliberately: `bpf_ktime_get_ns` excludes suspended time,
+/// and `CLOCK_BOOTTIME` includes it, so the pair must not be mixed. Recomputed
+/// per drain wakeup rather than cached at load, so a sensor that runs for weeks
+/// does not accumulate the drift between the two clocks.
+///
+/// Falls back to 0 if `clock_gettime` fails, which yields boot-relative
+/// timestamps rather than wrong-but-plausible ones.
+fn monotonic_anchor_ms() -> i64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: CLOCK_MONOTONIC with a valid timespec out-pointer.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    let mono_ms = (ts.tv_sec as i64) * 1_000 + (ts.tv_nsec as i64) / 1_000_000;
+    zensight_common::telemetry::current_timestamp_millis().saturating_sub(mono_ms)
+}
+
 /// Drain the connection ring buffer into the bounded in-memory ring until the
 /// fd closes. Best-effort: malformed/short records are skipped.
 pub async fn drain_ring(ring: RingBuf<MapData>, state: EbpfState) {
@@ -312,29 +422,20 @@ pub async fn drain_ring(ring: RingBuf<MapData>, state: EbpfState) {
                 return;
             }
         };
+        // One `clock_gettime` per wakeup, not per record: every record drained
+        // in this batch is within milliseconds of the others.
+        let anchor_ms = monotonic_anchor_ms();
         let ring = guard.get_inner_mut();
         while let Some(item) = ring.next() {
             if item.len() >= rec_size {
                 // SAFETY: ConnRecord is repr(C) POD; the kernel reserved exactly
                 // this layout. read_unaligned tolerates ring-buffer alignment.
                 let rec = unsafe { std::ptr::read_unaligned(item.as_ptr() as *const ConnRecord) };
-                state.ingest(&rec);
+                state.ingest(&rec, anchor_ms);
             }
         }
         guard.clear_ready();
     }
-}
-
-fn attach_kprobe(bpf: &mut Ebpf, prog: &str, fn_name: &str) -> Result<()> {
-    let p: &mut KProbe = bpf
-        .program_mut(prog)
-        .with_context(|| format!("program {prog} missing"))?
-        .try_into()
-        .with_context(|| format!("program {prog} is not a kprobe"))?;
-    p.load().with_context(|| format!("load {prog}"))?;
-    p.attach(fn_name, 0)
-        .with_context(|| format!("attach kprobe {fn_name}"))?;
-    Ok(())
 }
 
 fn attach_tp(bpf: &mut Ebpf, prog: &str, category: &str, name: &str) -> Result<()> {
@@ -362,10 +463,73 @@ fn bump_memlock() {
 
 #[cfg(test)]
 mod tests {
+
+    /// The symbol `set_global` patches must exist in the built object, at
+    /// exactly the size we hand it.
+    ///
+    /// This test exists because I got this wrong by hand: I concluded
+    /// bpf-linker discarded the static, having grepped a stale object from a
+    /// previous day's build rather than the one `aya-build` emits into
+    /// `OUT_DIR` (#681). A confident negative from the wrong file cost a
+    /// redesign. `patch_map_data` with `must_exist = true` is the same check
+    /// `EbpfLoader::set_global` performs at load — symbol present, section
+    /// mapped, and `data.len() == symbol.size` exactly — so this fails at
+    /// `cargo test` time instead of on a user's host, and needs no privilege.
+    #[test]
+    fn set_global_target_exists_in_the_built_object() {
+        use std::collections::HashMap;
+
+        let bytes =
+            aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/zensight-netlink-ebpf-prog"));
+        let mut obj = aya_obj::Object::parse(bytes).expect("the built object must parse");
+
+        let offsets = TcpSockOffsets {
+            valid: 1,
+            bytes_acked: 1840,
+            bytes_received: 1784,
+            segs_out: 1600,
+            segs_in: 1792,
+            total_retrans: 2216,
+        };
+        let data = offsets_to_bytes(&offsets);
+        let mut globals: HashMap<&str, (&[u8], bool)> = HashMap::new();
+        globals.insert("TCP_SOCK_OFFSETS", (&data[..], true));
+
+        obj.patch_map_data(globals).expect(
+            "TCP_SOCK_OFFSETS must be present in .rodata at exactly \
+             size_of::<TcpSockOffsets>() — if this fails, either bpf-linker \
+             stopped emitting the static or the struct changed size",
+        );
+    }
+
+    /// Whatever this kernel says, the resolver must either produce a complete
+    /// set or none at all — a half-filled `TcpSockOffsets` would read some
+    /// fields from the right place and some from garbage.
+    #[test]
+    fn resolver_is_all_or_nothing() {
+        let offs = resolve_tcp_sock_offsets();
+        if offs.valid == 0 {
+            // No BTF on this host, or the struct moved. Nothing more to check.
+            return;
+        }
+        for (name, value) in TCP_SOCK_MEMBERS.iter().zip([
+            offs.bytes_acked,
+            offs.bytes_received,
+            offs.segs_out,
+            offs.segs_in,
+            offs.total_retrans,
+        ]) {
+            assert!(
+                value > 0,
+                "tcp_sock.{name} resolved to offset 0, which is `sock` itself — \
+                 the resolver reported success on an incomplete set"
+            );
+        }
+    }
     use super::*;
 
-    fn conn(local: &str, lport: u16, pid: u32, comm: &str) -> ConnView {
-        ConnView {
+    fn conn(local: &str, lport: u16, pid: u32, comm: &str) -> ConnectionRecord {
+        ConnectionRecord {
             pid,
             comm: comm.into(),
             family: 4,
@@ -374,11 +538,13 @@ mod tests {
             remote: "1.1.1.1".into(),
             rport: 443,
             duration_ms: 10,
+            ts_unix_ms: 0,
             tx_bytes: 0,
             rx_bytes: 0,
             segs_out: 0,
             segs_in: 0,
             retrans: 0,
+            counters_measured: false,
         }
     }
 

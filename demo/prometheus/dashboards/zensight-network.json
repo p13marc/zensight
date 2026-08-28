@@ -1,0 +1,320 @@
+{
+  "uid": "zensight-network",
+  "title": "ZenSight \u2014 Network (netlink)",
+  "description": "Kernel network telemetry from zensight-sensor-netlink. Every panel here aggregates by interface \u2014 which was impossible before #764: `iface/eth0/rx_bytes` and `iface/eth1/rx_bytes` used to be two unrelated metric families because the interface was baked into the metric NAME. It is now a label lifted from the registered pattern `iface/{iface}/rx_bytes`.",
+  "tags": [
+    "zensight",
+    "netlink"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "source",
+        "label": "Host",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "zensight-prom"
+        },
+        "definition": "label_values(zensight_netlink_iface_up, source)",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(zensight_netlink_iface_up, source)",
+          "refId": "source"
+        },
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Interface throughput",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (iface) (rate(zensight_netlink_iface_rx_bytes_total{source=~\"$source\"}[$__rate_interval]))",
+          "legendFormat": "{{iface}} rx"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (iface) (rate(zensight_netlink_iface_tx_bytes_total{source=~\"$source\"}[$__rate_interval]))",
+          "legendFormat": "{{iface}} tx"
+        }
+      ],
+      "description": "`sum by (iface)` is the query the naming redesign made writable.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Top interfaces by rx",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(5, sum by (iface) (rate(zensight_netlink_iface_rx_bytes_total{source=~\"$source\"}[$__rate_interval])))",
+          "legendFormat": "{{iface}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Interface errors",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (iface) (rate(zensight_netlink_iface_rx_errors_total{source=~\"$source\"}[$__rate_interval]))",
+          "legendFormat": "{{iface}} rx err"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (iface) (rate(zensight_netlink_iface_tx_errors_total{source=~\"$source\"}[$__rate_interval]))",
+          "legendFormat": "{{iface}} tx err"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Interface drops",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (iface) (rate(zensight_netlink_iface_rx_dropped_total{source=~\"$source\"}[$__rate_interval]))",
+          "legendFormat": "{{iface}} rx drop"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (iface) (rate(zensight_netlink_iface_tx_dropped_total{source=~\"$source\"}[$__rate_interval]))",
+          "legendFormat": "{{iface}} tx drop"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Interfaces up",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source) (zensight_netlink_iface_up{source=~\"$source\"})",
+          "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TCP socket states",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_netlink_sockets_tcp_established{source=~\"$source\"}",
+          "legendFormat": "{{source}} established"
+        },
+        {
+          "refId": "B",
+          "expr": "zensight_netlink_sockets_tcp_listen{source=~\"$source\"}",
+          "legendFormat": "{{source}} listen"
+        },
+        {
+          "refId": "C",
+          "expr": "zensight_netlink_sockets_tcp_close_wait{source=~\"$source\"}",
+          "legendFormat": "{{source}} close_wait"
+        },
+        {
+          "refId": "D",
+          "expr": "zensight_netlink_sockets_tcp_syn_sent{source=~\"$source\"}",
+          "legendFormat": "{{source}} syn_sent"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TCP retransmits",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(zensight_netlink_sockets_tcp_retransmits_total{source=~\"$source\"}[$__rate_interval])",
+          "legendFormat": "{{source}} retransmits"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(zensight_netlink_sockets_tcp_lost_total{source=~\"$source\"}[$__rate_interval])",
+          "legendFormat": "{{source}} lost"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "TCP round-trip time",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_netlink_sockets_tcp_rtt_p50_us{source=~\"$source\"}",
+          "legendFormat": "{{source}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "zensight_netlink_sockets_tcp_rtt_p95_us{source=~\"$source\"}",
+          "legendFormat": "{{source}} p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "\u00b5s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Routes / neighbours / addresses",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "zensight-prom"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "zensight_netlink_routes_total{source=~\"$source\"}",
+          "legendFormat": "routes"
+        },
+        {
+          "refId": "B",
+          "expr": "zensight_netlink_neighbors_total{source=~\"$source\"}",
+          "legendFormat": "neighbours"
+        },
+        {
+          "refId": "C",
+          "expr": "zensight_netlink_addresses_total{source=~\"$source\"}",
+          "legendFormat": "addresses"
+        }
+      ]
+    }
+  ]
+}

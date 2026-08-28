@@ -6,8 +6,18 @@ license.workspace = true
 description = "Common types and utilities for ZenSight observability sensors"
 
 [dependencies]
-zenkey = { workspace = true, features = ["schemars"] }
+# `decode` is on unconditionally, and costs nothing: it pulls only `ciborium`,
+# which this crate already depends on directly. It is what makes
+# `zenkey::schema::validate::{Verdict, NotValidated}` exist in *every* build —
+# so a binary without the `validate-json` feature can still answer
+# `NotValidated::FeatureOff` rather than having no way to say "not checked"
+# (#741). `jsonschema` is the weight, and that stays behind the feature.
+zenkey = { workspace = true, features = ["schemars", "decode"] }
 zenoh.workspace = true
+# The exporters' shared subscriber uses an AdvancedSubscriber (history +
+# recovery), matching how sensors publish and how the GUI has always consumed
+# (#763). Already a workspace dep used by sensor-core, the correlator and the GUI.
+zenoh-ext.workspace = true
 tokio.workspace = true
 serde.workspace = true
 schemars.workspace = true
@@ -22,6 +32,30 @@ zblob = { workspace = true }
 # `action::allows` is the one allowlist rule, shared by the systemd sensor's
 # gate and the frontend's pre-click preview — two implementations would drift.
 glob.workspace = true
+# Only for the `validate-json` feature (#741) — draft-2020-12 payload
+# conformance. Never in a default (sensor) build.
+jsonschema = { workspace = true, optional = true }
+
+[features]
+default = []
+# RFC 08 §7 payload conformance: real draft-2020-12 validation of a decoded
+# payload against the `describe` schema for its declared type (#741).
+#
+# OFF by default and deliberately so. `jsonschema` is real weight, and a sensor
+# has no use for it: a producer validating its own payload against its own
+# derived schema is checking `schemars` against `schemars`. The consumer that
+# has a use is a *payload inspector* — something looking at somebody else's
+# bytes and asking whether they conform.
+#
+# NOTHING TURNS IT ON YET, and that is honest rather than an oversight: the GUI
+# has no payload-inspection surface to turn it on for (see the deferral note in
+# `src/schema.rs`). Enabling it there today would link `jsonschema` into every
+# desktop build for a verdict nobody renders. The GUI turns it on in the same
+# change that gives it somewhere to show the answer.
+#
+# Without it, `schema::verdict_for` answers
+# `Verdict::NotValidated(NotValidated::FeatureOff)` — never a fake "valid".
+validate-json = ["zenkey/validate-json", "dep:jsonschema"]
 
 [build-dependencies]
 # Compiles registry/*.toml into the typed subject registry (RFC 08 §5).

@@ -67,12 +67,15 @@ _ebpf_detected := ```
 
 ebpf_on := if ebpf == "auto" { _ebpf_detected } else if ebpf == "1" { "1" } else if ebpf == "0" { "0" } else { error("ebpf must be auto|1|0, got '" + ebpf + "'") }
 
-# Only sysinfo. netlink's `ebpf` feature builds, but its connect-latency probe
-# measures the connect() call path rather than the SYN→SYN-ACK handshake, so it
-# would publish microseconds to any host on earth — a false gauge is worse than
-# an absent one. sysinfo's runqlat/biolatency are self-validating: each joins a
-# key written by one tracepoint against one read by another, so a bad offset
-# yields an empty histogram rather than a wrong one.
+# Only sysinfo, still — but for a smaller reason than before. netlink's
+# connect-latency probe used to measure the connect() call path rather than the
+# SYN→SYN-ACK handshake, publishing microseconds to any host on earth; that is
+# fixed and host-validated (#114). What keeps netlink out of the demo now is
+# that its tcplife byte/segment counters are still hardcoded zero, and a zero
+# that reads as "idle connection" is worse in a demo than an absent panel.
+# sysinfo's runqlat/biolatency are self-validating: each joins a key written by
+# one tracepoint against one read by another, so a bad offset yields an empty
+# histogram rather than a wrong one.
 #
 # Cargo merges every --features flag into ONE global set; `pkg/feature` is what
 # binds a feature to a package. (`-p a --features x -p b --features y` is NOT
@@ -85,6 +88,23 @@ ebpf_features := if ebpf_on == "1" { "--features zensight-sensor-sysinfo/ebpf" }
 # discovery (which is unreliable on hosts with a VPN or extra interfaces, e.g.
 # tailscale/docker). Honored via the ZENSIGHT_ZENOH_* env vars.
 hub := "tcp/127.0.0.1:7447"
+
+# The Prometheus exporter's scrape port. NOT 9090 — that is the Prometheus
+# *server's* own port, and the demo stack runs both on the host network. 9464 is
+# the conventional OpenTelemetry/Prometheus-exporter port and is now the shipped
+# default in configs/prometheus-exporter.json5 too.
+exporter_port := "9464"
+
+# Compose front-end for the demo stacks. `docker compose` is canonical for this
+# repo's compose files (docker/docker-compose.yml documents itself that way);
+# `podman compose` is accepted because `just image` already builds with podman
+# and some hosts have only that. Detected once so the recipes don't each decide.
+_compose := ```
+    if docker compose version >/dev/null 2>&1; then echo "docker compose"
+    elif podman compose version >/dev/null 2>&1; then echo "podman compose"
+    elif command -v podman-compose >/dev/null 2>&1; then echo "podman-compose"
+    else echo ""; fi
+```
 
 _default:
     @just --list
@@ -135,7 +155,7 @@ build:
 #                            skips it. The narrower alternative is chmod 755 on
 #                            /sys/kernel/tracing, which is worse: it exposes
 #                            tracing to every user and resets each boot.
-caps: build
+caps: build _sysinfo-caps
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Granting CAP_NET_RAW,CAP_IPC_LOCK to {{bindir}}/zensight-sensor-netring (sudo)…"
@@ -143,24 +163,61 @@ caps: build
     echo "Granting CAP_NET_ADMIN to {{bindir}}/zensight-sensor-netlink (sudo)…"
     sudo setcap 'cap_net_admin=+ep' {{bindir}}/zensight-sensor-netlink
     if [[ "{{ebpf_on}}" == "1" ]]; then
-        echo "Granting CAP_BPF,CAP_PERFMON,CAP_DAC_READ_SEARCH to {{bindir}}/zensight-sensor-sysinfo (sudo)…"
-        sudo setcap 'cap_bpf,cap_perfmon,cap_dac_read_search=+ep' {{bindir}}/zensight-sensor-sysinfo
-        # A file capability only grants privilege in the user namespace that set
-        # it, but the kernel checks bpf_capable() against the *initial* userns —
-        # so inside a rootless container setcap is void and every load is EPERM.
-        # Say so here rather than let it surface as a mystery in the sensor log.
-        if [[ -e /run/.containerenv || -e /.dockerenv ]]; then
-            echo
-            echo "  WARNING: this is a rootless container. BPF loads are checked against the"
-            echo "  initial user namespace, so the caps above cannot take effect here and"
-            echo "  sysinfo will log 'eBPF latency collector unavailable'. The rest of the"
-            echo "  demo is unaffected. Run from a host terminal for the eBPF panel."
-            echo
-        fi
-        echo "logs + parallax need no capabilities."
+        echo "sysinfo's eBPF caps were granted above; logs + parallax need none."
     else
         echo "sysinfo + logs + parallax need no capabilities."
     fi
+
+# sysinfo's eBPF capabilities, on their own so `just sysinfo` can depend on them
+# without dragging in netring's and netlink's sudo setcaps (#685).
+#
+# `just ebpf=1 sysinfo` used to depend on `build configure` only, while netring
+# and netlink depend on `caps`. So it built an eBPF binary, wrote
+# `collect.ebpf: true` into the generated config, and then ran that binary with
+# no capabilities — the one combination guaranteed to log the warning and serve
+# `available: false`. Depending on `caps` outright would have been worse: a
+# plain `just sysinfo` would then sudo-setcap two binaries it never runs.
+#
+# A no-op unless ebpf_on == "1", so the unprivileged path never prompts for sudo.
+_sysinfo-caps: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "{{ebpf_on}}" != "1" ]]; then exit 0; fi
+    echo "Granting CAP_BPF,CAP_PERFMON,CAP_DAC_READ_SEARCH to {{bindir}}/zensight-sensor-sysinfo (sudo)…"
+    sudo setcap 'cap_bpf,cap_perfmon,cap_dac_read_search=+ep' {{bindir}}/zensight-sensor-sysinfo
+    # A file capability only grants privilege in the user namespace that set
+    # it, but the kernel checks bpf_capable() against the *initial* userns —
+    # so inside a rootless container setcap is void and every load is EPERM.
+    # Say so here rather than let it surface as a mystery in the sensor log.
+    if [[ -e /run/.containerenv || -e /.dockerenv ]]; then
+        echo
+        echo "  WARNING: this is a rootless container. BPF loads are checked against the"
+        echo "  initial user namespace, so the caps above cannot take effect here and"
+        echo "  sysinfo will log 'eBPF latency collector unavailable'. The rest of the"
+        echo "  demo is unaffected. Run from a host terminal for the eBPF panel."
+        echo
+    fi
+    # The caps above are necessary and not sufficient (#683). Debian and
+    # Ubuntu ship perf_event_paranoid=3 — above upstream's maximum of 2 —
+    # which denies perf_event_open beyond what CAP_PERFMON relaxes. The
+    # programs LOAD and every attach then fails EACCES, which reads as a
+    # capability problem and is not one. Report it here, where the caps are
+    # granted, rather than let it surface as one line in the sensor log.
+    paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "?")
+    if [[ "$paranoid" =~ ^[0-9]+$ ]] && (( paranoid > 2 )); then
+        echo
+        echo "  WARNING: kernel.perf_event_paranoid=$paranoid (Debian/Ubuntu default is 3,"
+        echo "  above upstream's maximum of 2). The programs will load and every attach"
+        echo "  will fail with 'Permission denied', whatever the caps above say."
+        echo "    this session: sudo sysctl kernel.perf_event_paranoid=2"
+        echo "    persistent:   echo 'kernel.perf_event_paranoid = 2' | sudo tee /etc/sysctl.d/60-zensight-ebpf.conf"
+        echo "  It relaxes perf_event_open for every unprivileged process on the host, so"
+        echo "  it is your call to make, not something 'just caps' should do for you."
+        echo
+    else
+        echo "kernel.perf_event_paranoid=$paranoid — permits the attach (needs <= 2)."
+    fi
+    echo "logs + parallax need no capabilities."
 
 # Build + grant capabilities.
 setup: build caps
@@ -175,6 +232,7 @@ configure:
         --configs-dir "{{justfile_directory()}}/configs" \
         --snapshot-dir "{{justfile_directory()}}/docs" \
         --pcap-dir "{{justfile_directory()}}/{{rundir}}/pcap" \
+        --exporters \
         {{ if ebpf_on == "1" { "--ebpf" } else { "" } }}
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
@@ -201,7 +259,7 @@ netlink: caps configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5
 
 # Run the sysinfo sensor (CPU/memory/disk/network).
-sysinfo: build configure
+sysinfo: build _sysinfo-caps configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5
 
 # Run the logs sensor (systemd journal via journald + known-event alerts).
@@ -293,6 +351,195 @@ run rerun="": setup configure
     export RUST_LOG="${RUST_LOG:-info}"
     ZENSIGHT_ZENOH_LISTEN="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight 2>&1 | tee {{rundir}}/gui.log
 
+# ── Demo: exporters + a real TSDB / dashboard stack ──────────────────────────
+#
+# `just demo-prometheus` and `just demo-otel` are the two "one command, working
+# demo" entry points for the exporters — which, until these landed, had NO run
+# path at all: zero mentions in this justfile, one service in
+# docker/docker-compose.yml, and not one occurrence of the word "exporter" in
+# docs/DEPLOYMENT.md.
+#
+# THE TOPOLOGY. `just run` makes the GUI the Zenoh rendezvous (it LISTENS on
+# {{hub}}; everything else CONNECTS). These demos are headless, so the EXPORTER
+# plays that role instead: it listens on {{hub}} and scripts/run-sensors.sh
+# points the full sensor set at it. Same shape, one fewer process, and no "start
+# the GUI in another terminal first". If a hub is already up (you ran `just run`
+# elsewhere), the recipe detects it and attaches as a spoke instead of fighting
+# for the port.
+#
+# THE FOOTGUN THESE RECIPES DISARM. configs/{prometheus,otel}-exporter.json5
+# both say `mode: "peer"` with `connect` COMMENTED OUT. Per
+# zensight-common/src/config.rs a peer with no explicit connect gets multicast
+# scouting ON — but every ZenSight demo path turns multicast OFF, deliberately
+# (VPNs and extra interfaces make it unreliable, and on loopback it triggers a
+# CONNECTION_TO_SELF error storm). Run the shipped config naively next to
+# `just run` and the exporter finds nothing, silently, forever. Hence
+# ZENSIGHT_ZENOH_{LISTEN,CONNECT,SCOUTING} on every line below.
+#
+# Both stacks bind host TCP 3000 and 9090, so they are MUTUALLY EXCLUSIVE.
+
+# Deliberately NOT folded into `build`: `just run` does not need them, and they
+# pull the OTLP/tonic stack.
+#
+# Build both exporters.
+build-exporters:
+    cargo build {{relflag}} -p zensight-exporter-prometheus -p zensight-exporter-otel
+
+# Prometheus + Grafana demo: the full `just run` sensor set on the host, the
+# Prometheus exporter on the host as the Zenoh rendezvous, Prometheus + Grafana
+# in containers on the host network.
+#
+#   Grafana   http://127.0.0.1:3000   (anonymous; opens on ZenSight — Host overview)
+#   Prom      http://127.0.0.1:9090   (target zensight-exporter must be UP)
+#   /metrics  http://127.0.0.1:{{exporter_port}}/metrics
+#
+# Ctrl-C stops the exporter, the sensors AND the containers.
+#
+# Demo: sensors + Prometheus exporter on the host, Prometheus + Grafana in containers.
+demo-prometheus: setup configure build-exporters
+    #!/usr/bin/env bash
+    set -euo pipefail
+    compose="{{_compose}}"
+    [[ -n "$compose" ]] || {
+      echo "error: no compose front-end found (docker compose | podman compose | podman-compose)" >&2
+      exit 1
+    }
+    # Is something already listening on the hub? (a `just run` GUI, or a
+    # previous demo that did not tear down). If so, attach as a spoke.
+    if (exec 3<>/dev/tcp/127.0.0.1/7447) 2>/dev/null; then
+        exec 3>&-
+        echo "Hub {{hub}} is already up — attaching the exporter as a spoke (not spawning sensors)."
+        zenoh_env=(ZENSIGHT_ZENOH_CONNECT="{{hub}}")
+        own_hub=0
+    else
+        echo "No hub on {{hub}} — the exporter will BE the rendezvous and spawn the sensors."
+        zenoh_env=(ZENSIGHT_ZENOH_LISTEN="{{hub}}")
+        own_hub=1
+    fi
+    $compose -f demo/prometheus/compose.yml up -d
+    trap 'echo; echo "Stopping…"; '"$compose"' -f demo/prometheus/compose.yml down >/dev/null 2>&1 || true; kill 0' EXIT
+    echo
+    echo "  Grafana   http://127.0.0.1:3000   (ZenSight folder — provisioned)"
+    echo "  Prom      http://127.0.0.1:9090   (target zensight-exporter must be UP)"
+    echo "  /metrics  http://127.0.0.1:{{exporter_port}}/metrics"
+    echo
+    # The exporter first, so the listener exists before the sensors dial it.
+    env "${zenoh_env[@]}" ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-exporter-prometheus \
+            --config {{rundir}}/prometheus-exporter.json5 \
+            --listen 127.0.0.1:{{exporter_port}} 2>&1 | sed -u 's/^/[exporter] /' &
+    sleep 1
+    if [[ "$own_hub" == 1 ]]; then
+        BINDIR="{{bindir}}" CONFDIR="{{rundir}}" LOGDIR="{{rundir}}" \
+        CONNECT="{{hub}}" WITH_CORRELATOR=1 scripts/run-sensors.sh
+    else
+        wait
+    fi
+
+# OpenTelemetry demo: the same sensor set and the same rendezvous trick, with
+# the OTel exporter pushing OTLP/gRPC to grafana/otel-lgtm (Collector +
+# Prometheus + Tempo + Loki + Grafana in one container).
+#
+#   Grafana   http://127.0.0.1:3000   (Explore → Prometheus / Tempo / Loki)
+#   OTLP      127.0.0.1:4317 (gRPC) · 127.0.0.1:4318 (HTTP)
+#
+# The exporter's shipped endpoint (configs/otel-exporter.json5) is already
+# http://localhost:4317 with protocol "grpc" — nothing to override.
+#
+# Demo: sensors + OTel exporter on the host, grafana/otel-lgtm in one container.
+demo-otel: setup configure build-exporters
+    #!/usr/bin/env bash
+    set -euo pipefail
+    compose="{{_compose}}"
+    [[ -n "$compose" ]] || { echo "error: no compose front-end found" >&2; exit 1; }
+    if (exec 3<>/dev/tcp/127.0.0.1/7447) 2>/dev/null; then
+        exec 3>&-
+        echo "Hub {{hub}} is already up — attaching the exporter as a spoke (not spawning sensors)."
+        zenoh_env=(ZENSIGHT_ZENOH_CONNECT="{{hub}}"); own_hub=0
+    else
+        echo "No hub on {{hub}} — the exporter will BE the rendezvous and spawn the sensors."
+        zenoh_env=(ZENSIGHT_ZENOH_LISTEN="{{hub}}"); own_hub=1
+    fi
+    $compose -f demo/otel/compose.yml up -d
+    trap 'echo; echo "Stopping…"; '"$compose"' -f demo/otel/compose.yml down >/dev/null 2>&1 || true; kill 0' EXIT
+    echo
+    echo "  Grafana   http://127.0.0.1:3000   (Explore → Prometheus / Tempo / Loki)"
+    echo "  OTLP      127.0.0.1:4317 gRPC"
+    echo
+    # otel-lgtm needs a few seconds before its OTLP receiver binds. The exporter
+    # retries anyway, but starting into a refused connection makes the log look
+    # broken when it is merely early.
+    sleep 5
+    env "${zenoh_env[@]}" ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-exporter-otel \
+            --config {{rundir}}/otel-exporter.json5 2>&1 | sed -u 's/^/[exporter] /' &
+    sleep 1
+    if [[ "$own_hub" == 1 ]]; then
+        BINDIR="{{bindir}}" CONFDIR="{{rundir}}" LOGDIR="{{rundir}}" \
+        CONNECT="{{hub}}" WITH_CORRELATOR=1 scripts/run-sensors.sh
+    else
+        wait
+    fi
+
+# Safe when nothing is up. `just stop` handles the sensors; this adds the
+# exporters and the containers.
+#
+# Tear down both demo stacks and anything they left running.
+demo-stop: stop
+    #!/usr/bin/env bash
+    set -euo pipefail
+    compose="{{_compose}}"
+    if [[ -n "$compose" ]]; then
+        $compose -f demo/prometheus/compose.yml down >/dev/null 2>&1 || true
+        $compose -f demo/otel/compose.yml down >/dev/null 2>&1 || true
+    fi
+    pkill -f 'zensight-exporter-(prometheus|otel)' 2>/dev/null || true
+    echo "Demo stacks stopped."
+
+# Isolated ports, no containers, no sudo. This is what CI runs.
+#
+# Prove sensor -> Zenoh -> exporter -> /metrics works end to end.
+demo-verify:
+    scripts/demo-verify.sh
+
+# ── Tests that need a flag you would not guess ───────────────────────────────
+
+# The GUI test suite, on a renderer that survives 169 concurrent wgpu devices.
+#
+# WHY THIS RECIPE EXISTS (#687)
+#
+# `cargo test -p zensight` segfaults on a headless Linux box with Mesa
+# installed and prints NOTHING while doing it: the process dies before libtest
+# writes a result line, so there is no FAILED and no panic to grep for. The only
+# available reading is "my change broke something", and it is wrong.
+#
+# It is NOT only the ui_tests target, which is what #687 and zensight/docs/
+# testing.md originally recorded. The crate's OWN lib tests take the same path
+# and crash MORE often: measured on master at 3 crashes in 10 runs of
+# `cargo test -p zensight --lib`, against the ~1-in-7 the doc records for
+# ui_tests. Hence `-p zensight` here rather than `--test ui_tests`: a recipe
+# that covered half the affected targets would send someone chasing a phantom
+# in the other half.
+#
+# `iced_test::simulator` stands up a real wgpu device; wgpu picks Vulkan; a
+# GPU-less host resolves that to lavapipe, Mesa's software Vulkan; and many
+# tests doing it at once crash inside the Vulkan loader, under
+# `wgpu_core::snatch::SnatchLock`. Measured: ui_tests, 6 crashes in 40 runs by
+# default and 0 in 40 with WGPU_BACKEND=gl; --lib, 3 in 10 by default and 0 in
+# 10 with it.
+#
+# Deliberately NOT in .cargo/config.toml's [env] block: that applies to
+# `cargo run` too, and downgrading the real GUI's renderer on every developer
+# machine to fix a test-only problem is the wrong trade.
+#
+# CI is unaffected — the runner image ships no Vulkan ICD, so wgpu never takes
+# this path there. Which also means a red `test` job on CI is NOT this, and
+# should be read as a real failure.
+
+# The zensight crate's tests, on a renderer that survives concurrent wgpu devices (#687)
+test-ui *ARGS:
+    WGPU_BACKEND=gl cargo test -p zensight {{ARGS}}
+
 # ── Container image ──────────────────────────────────────────────────────────
 
 # Build the all-in-one sensors image (see docs/DEPLOYMENT.md for running it).
@@ -317,11 +564,11 @@ clean-run:
 # choosing an `fs` volume over InfluxDB), `*` cannot match @catalog, and a fleet
 # @rpc GET still fans in (no `complete` storage).
 #
-# Needs zenohd AND its plugins, all at the workspace's zenoh version (1.9).
+# Needs zenohd AND its plugins, all at the workspace's zenoh version (1.10).
 # The plugins are cdylibs, not binaries — `cargo install` refuses them, and the
 # volume name `fs` is NOT the crate name (it is zenoh-backend-*filesystem*):
 #
-#   cargo install zenohd --version 1.9.0 --locked
+#   cargo install zenohd --version 1.10.0 --locked
 #   just router-plugins        # builds the two .so files into ~/.zenoh/lib
 #
 # A version-mismatched plugin is the trap: zenohd loads, logs one line, and
@@ -333,7 +580,7 @@ router-verify:
     #!/usr/bin/env bash
     set -euo pipefail
     command -v zenohd >/dev/null || {
-      echo "zenohd not on PATH — cargo install zenohd --version 1.9.0 --locked" >&2
+      echo "zenohd not on PATH — cargo install zenohd --version 1.10.0 --locked" >&2
       exit 1
     }
     for so in libzenoh_plugin_storage_manager.so libzenoh_backend_fs.so; do
@@ -367,7 +614,7 @@ router-verify:
 #  3. The fs backend vendors rocksdb, whose C++ predates GCC 13's stricter header
 #     hygiene — hence CXXFLAGS. Do NOT also set CFLAGS: the `-include` lands on a
 #     zstd .S assembly file and breaks the build.
-router-plugins version="1.9.0":
+router-plugins version="1.10.0":
     #!/usr/bin/env bash
     set -euo pipefail
     # OUTSIDE the repo, and not in /tmp.

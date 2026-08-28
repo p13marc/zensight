@@ -57,7 +57,7 @@
 
 set -euo pipefail
 
-iface="" outdir="" configs_dir="" snapshot_dir="" pcap_dir="" ebpf=0
+iface="" outdir="" configs_dir="" snapshot_dir="" pcap_dir="" ebpf=0 exporters=0
 profile="demo-max"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -68,12 +68,14 @@ while [[ $# -gt 0 ]]; do
         --snapshot-dir) snapshot_dir="$2"; shift 2 ;;
         --pcap-dir)     pcap_dir="$2"; shift 2 ;;
         --ebpf)         ebpf=1; shift ;;
+        --exporters)    exporters=1; shift ;;
         *) echo "gen-configs.sh: unknown argument '$1'" >&2; exit 64 ;;
     esac
 done
 if [[ -z "$iface" || -z "$outdir" || -z "$configs_dir" ]]; then
     echo "Usage: gen-configs.sh --iface IFACE --outdir DIR --configs-dir DIR \
-[--profile demo-max|production] [--snapshot-dir PATH] [--pcap-dir PATH] [--ebpf]" >&2
+[--profile demo-max|production] [--snapshot-dir PATH] [--pcap-dir PATH] [--ebpf] \\
+[--exporters]" >&2
     exit 64
 fi
 case "$profile" in demo-max|production) ;; *)
@@ -217,7 +219,17 @@ sysinfo_seds=(
 if [[ "$ebpf" == 1 ]]; then
     # runqlat + biolatency histograms on @rpc/sysinfo/latency (never streamed).
     # The binary is a no-op for this unless built --features ebpf AND holding
-    # CAP_BPF/CAP_PERFMON — `just configure` only passes --ebpf when both hold.
+    # CAP_BPF/CAP_PERFMON/CAP_DAC_READ_SEARCH, on a host whose
+    # perf_event_paranoid is <= 2 (#683).
+    #
+    # `just configure` passes --ebpf on the strength of *toolchain detection*
+    # alone (justfile's `ebpf_on`) — it knows nothing about whether the caps
+    # were granted, and said otherwise here until #685. Turning the flag on
+    # without them yields `available: false` and one warning, which is the
+    # designed-for outcome and not a lie in the config: `collect.ebpf` is a
+    # request, and the sensor reports honestly when it cannot serve it.
+    # `just sysinfo` now depends on `_sysinfo-caps`, so the two travel together
+    # on the demo path.
     sysinfo_seds+=(-e '/^    collect: \{/,/^    \},/ s/^( *)ebpf: false/\1ebpf: true/')
 fi
 if [[ -n "$snapshot_dir" ]]; then
@@ -237,6 +249,43 @@ sed -E \
 # correlator: fuses the sensors' identity evidence into one HostEntity per
 # host. Machine-agnostic; the example config already has every merge rule on.
 cp -f "$configs_dir/correlator.json5" "$outdir/correlator.json5"
+
+# ── Exporters (--exporters; the `just demo-prometheus` / `demo-otel` stacks) ──
+#
+# Off by default so the sensors container image — which runs neither exporter —
+# keeps generating exactly what it runs.
+#
+# These are generated here rather than read straight out of $configs_dir for one
+# reason worth writing down: the shipped examples say `mode: "peer"` with
+# `connect` COMMENTED OUT, and a peer with no explicit connect gets multicast
+# scouting ON (zensight-common/src/config.rs) — while every demo path turns
+# multicast OFF on purpose. An exporter run naively against a `just run` hub
+# therefore finds nothing, silently, forever. The run config is where that
+# intent gets pinned, next to the sensors' own. (The justfile recipes also set
+# ZENSIGHT_ZENOH_{LISTEN,CONNECT,SCOUTING} explicitly; belt and braces.)
+if [[ "$exporters" == 1 ]]; then
+    # prometheus: nothing to transform. `prometheus.listen` ships as
+    # 127.0.0.1:9464 — it used to be 0.0.0.0:9090, which is Prometheus's OWN
+    # port, and is why the shipped README told you to scrape localhost:9090,
+    # i.e. Prometheus scraping itself. A plain copy says "nothing to flip here"
+    # more honestly than a no-op sed would.
+    cp -f "$configs_dir/prometheus-exporter.json5" "$outdir/prometheus-exporter.json5"
+
+    # otel: demo-max turns ON the synthesized alert-lifecycle spans so the OTel
+    # demo's Tempo pane has content. production leaves them at the shipped
+    # default (off) — they are derived, not observed, and only a RESOLVED alert
+    # ever produces one.
+    #
+    # The `traces` block IS spelled out in the committed example (pinned by
+    # `shipped_config_spells_out_the_traces_flag`), which is what gives this sed
+    # something to flip — see this file's header for why that matters.
+    if [[ "$profile" == "demo-max" ]]; then
+        sed -E '/^    traces: \{/,/^    \},/ s/^( *)enabled: false/\1enabled: true/' \
+            "$configs_dir/otel-exporter.json5" > "$outdir/otel-exporter.json5"
+    else
+        cp -f "$configs_dir/otel-exporter.json5" "$outdir/otel-exporter.json5"
+    fi
+fi
 
 # systemd: generate a demo config with (nearly) everything on. NOTE the
 # watchlist is deliberately a *curated* set, not `*.service` — the Units /
@@ -288,6 +337,7 @@ JSON5
 
 notes=""
 [[ "$ebpf" == 1 ]]              && notes+=" +ebpf(sysinfo)"
+[[ "$exporters" == 1 ]]         && notes+=" +exporters(prometheus,otel)"
 [[ -n "$pcap_dir" ]]            && notes+=" pcap='$pcap_dir'"
 [[ -n "$snapshot_dir" ]]        && notes+=" snapshot='$snapshot_dir'"
 [[ "$exclude_chips" != "[]" ]]  && notes+=" hwmon-exclude=$exclude_chips"

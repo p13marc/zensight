@@ -205,7 +205,42 @@ Per-sensor images (`git.marcpardo.eu/marcpardo/zensight-sensor-<name>`) still ex
 single-sensor deployments — see `docker/docker-compose.yml`. This bundle is
 the "monitor this whole machine" path.
 
-## 5. Verifying
+## 5. Exporting to Prometheus / OpenTelemetry
+
+Two exporters forward the bus to external systems. Both are plain unprivileged
+binaries that join the deployment like any other participant.
+
+| | |
+|---|---|
+| Images | `git.marcpardo.eu/marcpardo/zensight-exporter-prometheus:latest`, `…-otel:latest` (built from `docker/Dockerfile.runtime`; they ship **no** config — mount one into `/etc/zensight` and pass `--config`) |
+| systemd | `packaging/systemd/zensight-exporter-{prometheus,otel}.service` — `DynamicUser`, `ProtectSystem=strict`, no capabilities |
+| Configs | `configs/{prometheus,otel}-exporter.json5` |
+| Prometheus scrape port | **9464** (not 9090 — that is Prometheus's own port) |
+| OTLP endpoint | `http://<collector>:4317` (gRPC) by default |
+
+**The one knob that matters is discovery.** The shipped configs are
+`mode: "peer"` with `connect` commented out, which means multicast — and a
+deployment that pins its endpoints has multicast off. Set the endpoint
+explicitly, exactly as the sensors container does:
+
+```bash
+ZENSIGHT_ZENOH_CONNECT=tcp/<gui-host>:7447 ZENSIGHT_ZENOH_SCOUTING=false \
+  zensight-exporter-prometheus --config /etc/zensight/prometheus-exporter.json5
+```
+
+Get this wrong and the exporter starts, serves a healthy `/health`, exports
+nothing, and logs nothing about it. `curl :9464/ready` returns **503** until the
+first telemetry point arrives — that endpoint exists to tell those two states
+apart.
+
+`zenoh.namespace` must match the rest of the deployment (empty by default), or
+the exporter subscribes to a keyspace nobody publishes to.
+
+**To try it locally first**, see [`demo/README.md`](../demo/README.md):
+`just demo-prometheus` brings up the exporter, the sensors, Prometheus and a
+provisioned Grafana in one command.
+
+## 6. Verifying
 
 On the GUI machine, after starting a container on another host you should see:
 

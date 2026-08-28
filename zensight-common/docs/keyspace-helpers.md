@@ -35,6 +35,33 @@ State is its own late-joiner seed: a plain GET on any of these state selectors i
 answered storage-shaped (one reply per concrete key) by producer-side queryables
 and/or a router latest-value storage.
 
+### Which of these are still hand-spelled, and why (#742)
+
+zenkey 0.7 added `selector::common_family(scope, family)` — the `*`-producer
+complement to the generated per-producer `Family::selector(scope)` — so the
+cross-producer families now come from the grammar crate rather than from string
+literals: `all_health_wildcard`, `all_alerts_wildcard`,
+`all_name_evidence_wildcard`, and the tail of `origin_alerts_wildcard`. Their
+bytes did not change (`common_family_selectors_are_byte_identical_to_the_hand_spelling`
+pins that).
+
+What is **still** hand-spelled is hand-spelled on purpose, and each site says
+so against 0.7 rather than against the version that first justified it:
+
+| Helper | Why it stays a string |
+|--------|-----------------------|
+| `all_evidence_wildcard()` | `evidence/**` is the union of three `CommonFamily` variants; `common_family` names one at a time, and a subscriber wants this as one subscription. |
+| `all_device_liveliness_wildcard()`, `origin_device_liveliness_expr()` | `selector::all_liveliness` covers only the producer-token shape (`state/*/alive`); there is no device rung in `CommonFamily` (`EvidenceDevice` is `evidence/device/{device}`, a different subject). |
+| `catalog_claim_key()`, `catalog_claims_wildcard()` | `claim/{zid}` is deliberately *not registered* — a liveliness token, not a data surface — and a `*` scope cannot reach the verbatim `@catalog` origin anyway (D4). |
+| `all_pdns_wildcard()` | The generated `Family::Pdns.selector()` is the narrower `…/pdns/*`, and `pdns` is a `@catalog` subject rather than a `CommonFamily`. This string configures router-side storage selectors, so narrowing it is a deliberate change, not a refactor. |
+
+The focus-mode builders (`origin_*`) keep a `format!` fallback arm for an
+origin read off the wire that does not parse. That arm is a silent-routing
+hazard — a narrowing of `RemoteOrigin::parse` would quietly send every
+focus-mode subscription down the string path — so
+`the_typed_and_hand_spelled_arms_agree` pins that the two spellings match for a
+legal origin.
+
 ## `@rpc` — runtime control (request/reply, no publications)
 
 Commands do not exist in v1: writes are GETs on `<topic>/set`, reads on
@@ -85,7 +112,7 @@ probing. The generated app-level module is `zensight_common::registry::blob`
 §2.5 probe form that deliberately does not convert into a fetchable key). The
 three prefix helpers above remain the producer-side entry points.
 
-## Producer-side keys — `zensight_keyspace::V1Context`
+## Producer-side keys — `zenkey::V1Context`
 
 Producers (sensors) build their own keys through `V1Context` (re-exported as
 `zensight_sensor_core::v1`): `from_prefix`, `telemetry_prefix()`
@@ -94,6 +121,36 @@ Producers (sensors) build their own keys through `V1Context` (re-exported as
 `device_liveness_key`, `alive_key`, `device_alive_key`, `rpc_key(&[…])`,
 `media_video_key` / `media_key(&[…])`, and `blob_prefix(tier)`. Registry
 violations are build errors (`zensight-common/registry/*.toml`).
+
+### Getting a `V1Context` — `zensight_common::v1::for_producer`
+
+zenkey 0.7 made `V1Context::for_producer` **fallible**: 0.6 slugged an illegal
+producer name and, failing that, fell back to the literal `sensor`, so a
+misconfigured producer published its whole keyspace under a different identity
+— silently, and colliding with every other misconfigured producer.
+
+ZenSight absorbs that in **one** place, `zensight_common::v1::for_producer`
+(re-exported as `zensight_sensor_core::v1::for_producer`), which is what every
+sensor calls. It is infallible because a ZenSight producer name is a
+compile-time constant of the sensor that owns it — one of the names in
+`zensight-common/registry/` — and `v1.rs`'s own test asserts every registered
+name is a legal chunk, so an illegal one fails `cargo test` rather than a
+fleet. A name that genuinely *is* foreign data must cross the boundary
+explicitly, with `Producer::new(Chunk::slug(name).as_str())`.
+
+### The fallible key builders — `V1ContextExt`
+
+`state_key` and `rpc_key` also became `Result` in 0.7, for exactly one reason:
+a chunk that is literally `alive`, the reserved liveliness leaf (RFC 03 §3).
+Every other malformed chunk is slugged, as before. So the error is reachable
+only from a *dynamic* chunk.
+
+`zensight_common::v1::V1ContextExt` names that: `const_state_key` /
+`const_rpc_key` are for subjects that are compile-time constants (`["health"]`,
+`["artifact", "request"]`) or hex digests (`["alert", <16 hex>]`), where the
+refusal is unreachable. A builder whose chunks *are* foreign data — an SNMP
+device name, a parallax stream name — must call `state_key` and handle the
+refusal, because refusing a device called `alive` is the point of the check.
 
 Two producer-side evidence builders live in `keyexpr.rs` because non-sensor code
 uses them too (both mint the **local** origin):

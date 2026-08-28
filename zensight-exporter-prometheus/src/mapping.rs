@@ -130,7 +130,22 @@ pub fn build_metric_name(prefix: &str, protocol: Protocol, metric: &str) -> Stri
 pub enum PrometheusType {
     Counter,
     Gauge,
-    Info,
+    /// A `TelemetryValue::Text` point, rendered as an info-style **gauge**.
+    ///
+    /// This is deliberately NOT called `Info` any more, and [`Self::as_str`]
+    /// deliberately does not return `"info"` (#752). `info` is an *OpenMetrics*
+    /// type; the Prometheus text exposition format we serve
+    /// (`text/plain; version=0.0.4`, see `http.rs`) admits only
+    /// `counter | gauge | histogram | summary | untyped`. On an unknown type
+    /// token Prometheus's parser errors and **rolls the whole scrape back** —
+    /// every sample in the body, not just the offending family — while the
+    /// target still reports healthy. One netlink MAC address or one SNMP
+    /// `sysDescr` was enough to empty the entire endpoint.
+    ///
+    /// The series is emitted as `<name>_info{..., <leaf>="<text>"} 1`. The
+    /// `_info` suffix is load-bearing: it keeps a text family from ever sharing
+    /// a `# TYPE` block with a numeric family of the same name.
+    Text,
     Untyped,
 }
 
@@ -141,20 +156,61 @@ impl PrometheusType {
             TelemetryValue::Counter(_) => PrometheusType::Counter,
             TelemetryValue::Gauge(_) => PrometheusType::Gauge,
             TelemetryValue::Boolean(_) => PrometheusType::Gauge,
-            TelemetryValue::Text(_) => PrometheusType::Info,
+            TelemetryValue::Text(_) => PrometheusType::Text,
             TelemetryValue::Binary(_) => PrometheusType::Untyped,
         }
     }
 
     /// Get the TYPE comment string for Prometheus exposition format.
+    ///
+    /// Every arm must return a token the 0.0.4 grammar accepts — see
+    /// [`PrometheusType::Text`] for what happens when one does not.
     pub fn as_str(&self) -> &'static str {
         match self {
             PrometheusType::Counter => "counter",
             PrometheusType::Gauge => "gauge",
-            PrometheusType::Info => "info",
+            PrometheusType::Text => "gauge",
             PrometheusType::Untyped => "untyped",
         }
     }
+}
+
+/// The suffix appended to a text point's family name (#752).
+pub const INFO_SUFFIX: &str = "_info";
+
+/// Longest text value we will put in a label. A gnmi `Text` value is
+/// device-defined and unbounded; an unbounded label value is a cardinality and
+/// a body-size problem at once.
+pub const MAX_TEXT_LEN: usize = 128;
+
+/// The label name a text point's value rides under.
+///
+/// Derived from the **leaf** of the subject path, so
+/// `iface/{iface}/oper_state` yields `oper_state="up"` rather than the
+/// meaningless `value="up"` this used to emit. Falls back to `value` when the
+/// leaf is itself `info` (or sanitizes away to nothing), which is the only case
+/// where the old spelling was ever the right one.
+pub fn text_label_name(metric: &str) -> String {
+    let leaf = metric.rsplit('/').next().unwrap_or(metric);
+    // A `.rate` style dot-suffix is part of the leaf name, not a path chunk.
+    let sanitized = sanitize_label_name(leaf);
+    if sanitized.is_empty() || sanitized == "info" {
+        "value".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Clamp a text value to something safe to put in a label: no control
+/// characters (a raw newline would terminate the sample line and corrupt every
+/// byte after it), and bounded length.
+pub fn clamp_text(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_TEXT_LEN)
+        .collect();
+    cleaned
 }
 
 /// Extract a numeric value from TelemetryValue for Prometheus.
@@ -175,9 +231,86 @@ pub fn is_exportable(value: &TelemetryValue) -> bool {
     !matches!(value, TelemetryValue::Binary(_))
 }
 
+/// The Prometheus name suffix a UCUM-ish unit implies.
+///
+/// Convention only — the VALUE is never rescaled. A `ms` unit gets no suffix
+/// because renaming it `_seconds` without dividing by 1000 would be a lie, and
+/// dividing would silently change what every existing dashboard reads. When
+/// there is no suffix the unit still reaches the reader, in `# HELP`.
+pub fn unit_suffix(unit: &str) -> Option<&'static str> {
+    match unit {
+        "By" | "bytes" => Some("_bytes"),
+        "s" | "seconds" => Some("_seconds"),
+        "By/s" => Some("_bytes_per_second"),
+        "1/s" => Some("_per_second"),
+        "%" | "percent" => Some("_percent"),
+        "Cel" => Some("_celsius"),
+        _ => None,
+    }
+}
+
+/// Apply the Prometheus naming conventions to a family name.
+///
+/// A counter gains `_total`; a unit with a conventional suffix gains it. Both
+/// are idempotent — a name that already ends the right way is left alone,
+/// because `..._bytes_bytes` helps nobody.
+pub fn apply_conventions(name: &str, kind: PrometheusType, unit: Option<&str>) -> String {
+    let mut out = name.to_string();
+    if let Some(suffix) = unit.and_then(unit_suffix)
+        && !out.ends_with(suffix)
+    {
+        out.push_str(suffix);
+    }
+    if kind == PrometheusType::Counter && !out.ends_with("_total") {
+        out.push_str("_total");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The conventions are idempotent, so a name that already ends the right
+    /// way is left alone — `..._bytes_bytes` helps nobody.
+    #[test]
+    fn conventions_are_idempotent() {
+        assert_eq!(
+            apply_conventions(
+                "zensight_netlink_iface_rx_bytes",
+                PrometheusType::Counter,
+                Some("By")
+            ),
+            "zensight_netlink_iface_rx_bytes_total",
+            "the name already ends _bytes, so only _total is appended"
+        );
+        assert_eq!(
+            apply_conventions("x_total", PrometheusType::Counter, None),
+            "x_total"
+        );
+        assert_eq!(
+            apply_conventions("x", PrometheusType::Counter, Some("By")),
+            "x_bytes_total"
+        );
+        assert_eq!(
+            apply_conventions("x", PrometheusType::Gauge, Some("By")),
+            "x_bytes",
+            "a gauge never gains _total"
+        );
+    }
+
+    /// A unit with no conventional suffix must NOT be renamed. Calling a
+    /// millisecond metric `_seconds` without dividing by 1000 is a lie, and
+    /// dividing would silently change what every dashboard reads — so the unit
+    /// rides in `# HELP` instead.
+    #[test]
+    fn an_unconvertible_unit_gets_no_suffix() {
+        assert_eq!(unit_suffix("ms"), None);
+        assert_eq!(
+            apply_conventions("latency", PrometheusType::Gauge, Some("ms")),
+            "latency"
+        );
+    }
 
     #[test]
     fn test_sanitize_metric_name_simple() {
@@ -286,7 +419,7 @@ mod tests {
         );
         assert_eq!(
             PrometheusType::from_value(&TelemetryValue::Text("hello".into())),
-            PrometheusType::Info
+            PrometheusType::Text
         );
         assert_eq!(
             PrometheusType::from_value(&TelemetryValue::Binary(vec![1, 2, 3])),

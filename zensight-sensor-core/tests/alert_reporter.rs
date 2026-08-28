@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use zensight_common::v1::V1ContextExt;
 use zensight_common::{Alert, AlertKind, AlertSeverity, AlertState, Format, Protocol, decode_auto};
 use zensight_sensor_core::{AlertReporter, Publisher};
 
@@ -171,4 +172,186 @@ async fn reconcile_labeled_scopes_to_the_label() {
         .await
         .expect("reconcile a clear");
     assert_eq!(reporter.active_count(), 0);
+}
+
+/// **The `host.*` stability invariant** (#738).
+///
+/// `AlertReporter.active` is keyed by `Alert::alert_key()`, and the resolve
+/// path re-derives that key from the (possibly re-stamped) alert. So if a
+/// `host.*` annotation changing between fire and resolve changed the key, the
+/// `Firing` would sit on the old key forever while the `Resolved` + tombstone
+/// landed on a new one — a permanent phantom alert, with nothing logged.
+///
+/// This is why ZenSight's `host.*` namespace is *documented host-scoped* and
+/// excluded from the derivation, which RFC 11 §3.1 explicitly provides for
+/// ("the label named `host`, **and any label the producer documents as
+/// host-scoped**, are excluded before sorting"). Adopting
+/// `zenkey::alert::alert_key` without passing that vocabulary through fails
+/// here, which is the point of the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_annotation_change_does_not_orphan_a_firing_alert() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+
+    // Fire, stamped with one identity.
+    let firing = sample_alert(&source).with_label("host.id", "h-aaaaaaaaaaaa");
+    reporter
+        .observe(firing.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    assert_eq!(reporter.active_count(), 1, "the alert fired");
+
+    // The identity envelope refreshes mid-flight — a re-mint, a boot-id
+    // change, a late-arriving `host.id`. Everything that identifies the
+    // *alert* (rule, discriminating labels) is untouched.
+    let restamped = sample_alert(&source).with_label("host.id", "h-bbbbbbbbbbbb");
+    assert_eq!(
+        firing.alert_key(),
+        restamped.alert_key(),
+        "a host.* annotation must not re-key a firing alert"
+    );
+
+    // Resolving the re-stamped alert must clear the entry the first one made.
+    reporter
+        .resolve_matching("ssh-listening", &[("port", "22")])
+        .await
+        .expect("resolve");
+    assert_eq!(
+        reporter.active_count(),
+        0,
+        "the firing alert was orphaned: its Resolved landed on a different key"
+    );
+    assert!(reporter.firing_alerts().is_empty(), "alert list not empty");
+}
+
+/// The alert seed's replies carry an HLC timestamp (#782).
+///
+/// # Why this test exists, and why it is here rather than in a doc
+///
+/// `serve_alerts_query` answers a plain GET on `state/<producer>/alert/*`
+/// storage-shaped — one reply per firing alert on its concrete state key — so
+/// a late-joining consumer can seed without a router storage in the picture.
+/// RFC 04 §3.2 requires that consumer to merge seed replies with live samples
+/// **by HLC timestamp**, and closes with the corollary that an untimestamped
+/// sample cannot be reconciled.
+///
+/// Zenoh's session HLC stamps a `put`. It does **not** stamp a queryable
+/// reply. So every alert this seed ever served was unorderable against its own
+/// successors — silently, because nothing in the workspace read
+/// `Sample::timestamp()`.
+///
+/// It was not silent to `zenctl doctor --deep`, which reported it as
+/// `unstamped-state` at warning severity — and, because
+/// `scripts/conformance-verify.sh` gates on warnings, it turned CI's
+/// `conformance` job into a coin flip: green when the runner tripped no sysinfo
+/// threshold, red when it tripped two. This test is what keeps that from coming
+/// back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_alert_seed_replies_are_stamped() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = Arc::new(AlertReporter::new(
+        publisher,
+        Protocol::Netlink,
+        Format::Json,
+    ));
+
+    let source = unique_source();
+    reporter
+        .observe(sample_alert(&source), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    assert_eq!(reporter.active_count(), 1, "one alert must be firing");
+
+    let selector = format!(
+        "{}/*",
+        reporter.publisher().v1().const_state_key(&["alert"])
+    );
+    let seed = tokio::spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
+    // The queryable is declared inside the task; give it a moment to land
+    // before the GET, or the GET matches nothing and proves nothing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let replies = session
+        .get(&selector)
+        .timeout(Duration::from_secs(5))
+        .await
+        .expect("seed get");
+
+    let mut seen = 0;
+    while let Ok(reply) = replies.recv_async().await {
+        let sample = reply.result().expect("seed reply is a value, not an error");
+        assert!(
+            sample.timestamp().is_some(),
+            "a state-class seed reply on {} carries no HLC timestamp — it cannot be \
+             LWW-ordered against a live sample (RFC 04 §3.2, #782)",
+            sample.key_expr()
+        );
+        let got: Alert = decode_auto(&sample.payload().to_bytes()).expect("decode seed");
+        assert_eq!(got.state, AlertState::Firing);
+        seen += 1;
+    }
+    assert_eq!(seen, 1, "exactly the one firing alert");
+
+    seed.abort();
+}
+
+/// The seed's stamp is drawn with the snapshot, not per reply (#782).
+///
+/// Stated as the observable ordering property, because "the stamp is taken
+/// inside the critical section" is not directly assertable: a seed batch must
+/// not be able to out-stamp a `put` that happened after the snapshot was taken.
+/// If it could, an alert that fires mid-loop would have its live `put` stamped
+/// `T`, the loop would reply the stale snapshot value stamped `T' > T`, and LWW
+/// would keep the stale one — a resurrection bug.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seed_batch_never_out_stamps_a_later_put() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = Arc::new(AlertReporter::new(
+        publisher,
+        Protocol::Netlink,
+        Format::Json,
+    ));
+
+    let source = unique_source();
+    reporter
+        .observe(sample_alert(&source), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+
+    let selector = format!(
+        "{}/*",
+        reporter.publisher().v1().const_state_key(&["alert"])
+    );
+    let seed = tokio::spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let replies = session
+        .get(&selector)
+        .timeout(Duration::from_secs(5))
+        .await
+        .expect("seed get");
+    let mut seed_stamps = Vec::new();
+    while let Ok(reply) = replies.recv_async().await {
+        let sample = reply.result().expect("value reply");
+        seed_stamps.push(*sample.timestamp().expect("stamped"));
+    }
+    assert!(!seed_stamps.is_empty());
+
+    // Anything the same session stamps AFTER the seed batch must sort after
+    // every reply in it. Same HLC, so this is a total order, not a race.
+    let later = zensight_common::served::seed_stamp(&session);
+    for stamp in &seed_stamps {
+        assert!(
+            *stamp < later,
+            "a seed reply stamped {stamp} sorts at or after a later stamp {later}; \
+             a batch that can out-stamp a subsequent put resurrects stale state (#782)"
+        );
+    }
+
+    seed.abort();
 }

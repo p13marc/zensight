@@ -36,6 +36,17 @@ ReadOnlyPaths=/etc/zensight
 # To return to the locked-down baseline, drop the three lines below.
 AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+# The eBPF tier (collect.ebpf, off by default) additionally needs
+# CAP_DAC_READ_SEARCH: aya resolves a tracepoint by reading
+# <tracefs>/events/<cat>/<name>/id, and /sys/kernel/tracing is 0700 root:root.
+# Without it the two tracepoints fail to attach while the kprobes succeed —
+# a half-attached module, which is worse than a clean refusal. It is left
+# COMMENTED because it grants read access to any file on the host; uncomment
+# only for an eBPF build, as zensight-sensor-sysinfo.service does.
+# Note also that Debian/Ubuntu ship perf_event_paranoid=3, which denies the
+# attach regardless of capabilities — see #683.
+# AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
+# CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
 ProtectKernelTunables=no
 
 [Install]

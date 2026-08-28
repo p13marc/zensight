@@ -25,8 +25,12 @@ use std::time::Duration;
 
 use prost::Message;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use std::collections::HashMap;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
+
+use crate::collector::SeriesKey;
+
 use zensight_common::telemetry::current_timestamp_millis;
 
 use crate::collector::{SharedCollector, StoredMetric};
@@ -92,16 +96,55 @@ pub struct Sample {
 /// without any I/O).
 ///
 /// One sample per series, all stamped with `timestamp_ms` (the push time),
-/// mirroring what a scrape at that instant would yield. Info series become
-/// value `1` with the text in a `value` label, matching `/metrics`.
+/// mirroring what a scrape at that instant would yield. Text series become
+/// value `1` under an `<name>_info` family with the text in a label named for
+/// the subject leaf — byte-identical to `/metrics` (#752), because two
+/// spellings of the same series is a bug waiting to be found in production.
 pub fn build_write_request(metrics: &[StoredMetric], timestamp_ms: i64) -> WriteRequest {
+    build_write_request_since(metrics, timestamp_ms, &mut HashMap::new())
+}
+
+/// Build a `WriteRequest`, skipping series whose point timestamp has not
+/// advanced since the last push.
+///
+/// # Why the point's timestamp and not the push time (#759)
+///
+/// Every sample used to be stamped with `current_timestamp_millis()`, so for up
+/// to `stale_timeout_secs` after a sensor died the push path MANUFACTURED a
+/// fresh datapoint from the last known value every interval — up to ten
+/// synthetic samples per dead series at the 30s default. Grafana drew a flat
+/// line where there should have been a gap. A sensor polling slower than the
+/// push interval produced a staircase of values that never happened.
+///
+/// # Why the skip is not optional
+///
+/// Using the point's timestamp alone introduces a *different* bug: an unchanged
+/// series would be re-pushed with an identical `(series, timestamp)` every
+/// interval, which receivers reject as a duplicate sample. Tracking the last
+/// pushed timestamp per series and skipping the ones that have not moved is
+/// what actually makes a dead sensor gap.
+///
+/// `/metrics` deliberately stays UNtimestamped — see this module's note on the
+/// asymmetry.
+pub fn build_write_request_since(
+    metrics: &[StoredMetric],
+    fallback_ms: i64,
+    last_pushed: &mut HashMap<SeriesKey, i64>,
+) -> WriteRequest {
     let mut timeseries: Vec<TimeSeries> = metrics
         .iter()
         .filter_map(|m| {
             let (value, extra_label) = match m.metric_type {
-                PrometheusType::Info => {
+                PrometheusType::Text => {
                     let text = m.text_value.as_ref()?;
-                    (1.0, Some(("value".to_string(), text.clone())))
+                    let label_name = m.text_label.clone().unwrap_or_else(|| "value".to_string());
+                    // Same duplicate-name guard as `/metrics`: a structural
+                    // label always wins over the text (#753).
+                    if m.key.labels.iter().any(|(k, _)| k == &label_name) {
+                        (1.0, None)
+                    } else {
+                        (1.0, Some((label_name, text.clone())))
+                    }
                 }
                 _ => (m.value?, None),
             };
@@ -109,7 +152,7 @@ pub fn build_write_request(metrics: &[StoredMetric], timestamp_ms: i64) -> Write
             let mut labels: Vec<Label> = Vec::with_capacity(m.key.labels.len() + 2);
             labels.push(Label {
                 name: "__name__".to_string(),
-                value: m.key.name.clone(),
+                value: m.emitted_name(),
             });
             for (k, v) in &m.key.labels {
                 if !v.is_empty() {
@@ -125,11 +168,25 @@ pub fn build_write_request(metrics: &[StoredMetric], timestamp_ms: i64) -> Write
             // Spec: labels MUST be sorted lexicographically by name.
             labels.sort_by(|a, b| a.name.cmp(&b.name));
 
+            // The point's own timestamp, falling back to the push time only
+            // when the sensor supplied none.
+            let ts = if m.timestamp_ms > 0 {
+                m.timestamp_ms
+            } else {
+                fallback_ms
+            };
+            match last_pushed.get(&m.key) {
+                Some(&prev) if prev >= ts => return None,
+                _ => {
+                    last_pushed.insert(m.key.clone(), ts);
+                }
+            }
+
             Some(TimeSeries {
                 labels,
                 samples: vec![Sample {
                     value,
-                    timestamp: timestamp_ms,
+                    timestamp: ts,
                 }],
             })
         })
@@ -166,6 +223,13 @@ pub struct RemoteWriteClient {
     interval: Duration,
     headers: HeaderMap,
     client: reqwest::Client,
+    /// Last timestamp pushed per series, so an unchanged series is skipped
+    /// rather than re-sent as a duplicate sample (#759).
+    ///
+    /// Bounded by the collector's own `max_series` in practice, and pruned
+    /// alongside it: a series the collector has aged out stops appearing in
+    /// the snapshot, so its watermark is dropped on the next sweep.
+    last_pushed: parking_lot::Mutex<HashMap<SeriesKey, i64>>,
 }
 
 impl RemoteWriteClient {
@@ -202,6 +266,7 @@ impl RemoteWriteClient {
             interval: Duration::from_secs(config.interval_secs),
             headers,
             client,
+            last_pushed: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
@@ -209,7 +274,10 @@ impl RemoteWriteClient {
     /// of series pushed (0 = nothing to send, no request made).
     pub async fn push_once(&self) -> anyhow::Result<usize> {
         let metrics = self.collector.snapshot_metrics();
-        let request = build_write_request(&metrics, current_timestamp_millis());
+        let request = {
+            let mut seen = self.last_pushed.lock();
+            build_write_request_since(&metrics, current_timestamp_millis(), &mut seen)
+        };
         if request.timeseries.is_empty() {
             debug!("remote-write: no series to push");
             return Ok(0);
@@ -283,16 +351,30 @@ mod tests {
         ))
     }
 
+    /// Record one SNMP point under a wire-legal key.
+    ///
+    /// Naming flows from the key through the registry (#764), and SNMP is a
+    /// rest-var producer: its subject is `<device>/<metric...>`, so the device
+    /// rides in the key and becomes a label while the rest names the family.
+    ///
+    /// Metric names here are lowercase because the WIRE is lowercase — a key
+    /// chunk must be `[a-z0-9]`-bounded, which is why the SNMP poller slugs at
+    /// the publish boundary (#559). A test using `sysDescr` would be testing a
+    /// key no sensor can publish.
     fn record(collector: &MetricCollector, source: &str, metric: &str, value: TelemetryValue) {
-        collector.record(&TelemetryPoint {
-            timestamp: 1_700_000_000_000,
-            source: source.to_string(),
-            protocol: Protocol::Snmp,
-            metric: metric.to_string(),
-            value,
-            labels: HashMap::new(),
-            unit: None,
-        });
+        let key = format!("v1/h-0123456789ab/telemetry/snmp/{source}/{metric}");
+        collector.record(
+            &key,
+            &TelemetryPoint {
+                timestamp: 1_700_000_000_000,
+                source: source.to_string(),
+                protocol: Protocol::Snmp,
+                metric: metric.to_string(),
+                value,
+                labels: HashMap::new(),
+                unit: None,
+            },
+        );
     }
 
     fn label<'a>(ts: &'a TimeSeries, name: &str) -> Option<&'a str> {
@@ -327,7 +409,7 @@ mod tests {
             timeseries: vec![TimeSeries {
                 labels: vec![Label {
                     name: "__name__".into(),
-                    value: "zensight_snmp_sysUpTime".into(),
+                    value: "zensight_snmp_sysuptime_total".into(),
                 }],
                 samples: vec![Sample {
                     value: 3.5,
@@ -342,13 +424,18 @@ mod tests {
         assert_eq!(WriteRequest::decode(&raw[..]).unwrap(), req);
     }
 
+    /// A sample carries the POINT's timestamp, not the push time (#759).
+    ///
+    /// Stamping push time meant that for up to `stale_timeout_secs` after a
+    /// sensor died, every interval manufactured a fresh datapoint from the last
+    /// known value — Grafana drew a flat line where there should have been a gap.
     #[test]
-    fn build_from_collector_state_has_name_label_and_push_timestamp() {
+    fn build_from_collector_state_has_name_label_and_point_timestamp() {
         let collector = make_collector();
         record(
             &collector,
             "router01",
-            "sysUpTime",
+            "sysuptime",
             TelemetryValue::Counter(12345),
         );
         record(
@@ -358,14 +445,18 @@ mod tests {
             TelemetryValue::Gauge(0.75),
         );
 
-        let now_ms = 1_720_000_000_000;
-        let req = build_write_request(&collector.snapshot_metrics(), now_ms);
+        // The `record` helper stamps its points at this instant.
+        const POINT_MS: i64 = 1_700_000_000_000;
+        let push_ms = 1_720_000_000_000;
+        let req = build_write_request(&collector.snapshot_metrics(), push_ms);
         assert_eq!(req.timeseries.len(), 2);
 
         for ts in &req.timeseries {
-            // Exactly one sample per series, stamped with the push time.
+            // Exactly one sample per series, stamped when the SENSOR observed
+            // it — not when we happened to push.
             assert_eq!(ts.samples.len(), 1);
-            assert_eq!(ts.samples[0].timestamp, now_ms);
+            assert_eq!(ts.samples[0].timestamp, POINT_MS);
+            assert_ne!(ts.samples[0].timestamp, push_ms);
             assert!(label(ts, "__name__").is_some());
             assert_eq!(label(ts, "source"), Some("router01"));
             assert_eq!(label(ts, "protocol"), Some("snmp"));
@@ -379,7 +470,7 @@ mod tests {
         let counter = req
             .timeseries
             .iter()
-            .find(|ts| label(ts, "__name__") == Some("zensight_snmp_sysUpTime"))
+            .find(|ts| label(ts, "__name__") == Some("zensight_snmp_sysuptime_total"))
             .expect("counter series present");
         assert_eq!(counter.samples[0].value, 12345.0);
 
@@ -391,13 +482,19 @@ mod tests {
         assert_eq!(gauge.samples[0].value, 0.75);
     }
 
+    /// A text point rides an `_info` family under a label named for the subject
+    /// leaf — not the old literal `value` label, and not the bare metric name.
+    ///
+    /// The `_info` suffix is what keeps a text family from colliding with a
+    /// numeric family of the same name, and remote-write must spell the series
+    /// exactly as `/metrics` does (#752).
     #[test]
-    fn info_series_becomes_value_one_with_value_label() {
+    fn text_series_becomes_value_one_under_an_info_family() {
         let collector = make_collector();
         record(
             &collector,
             "router01",
-            "sysDescr",
+            "sysdescr",
             TelemetryValue::Text("Cisco IOS".into()),
         );
 
@@ -405,7 +502,41 @@ mod tests {
         assert_eq!(req.timeseries.len(), 1);
         let ts = &req.timeseries[0];
         assert_eq!(ts.samples[0].value, 1.0);
-        assert_eq!(label(ts, "value"), Some("Cisco IOS"));
+        assert_eq!(
+            label(ts, "__name__"),
+            Some("zensight_snmp_sysdescr_info"),
+            "a text family must carry the _info suffix"
+        );
+        assert_eq!(
+            label(ts, "sysdescr"),
+            Some("Cisco IOS"),
+            "the text rides under the subject leaf, not a literal `value` label"
+        );
+        assert_eq!(label(ts, "value"), None, "the old literal label is gone");
+    }
+
+    /// A control character in a device-supplied string must never reach the
+    /// wire: a raw newline would terminate the sample line in the exposition
+    /// format and corrupt every byte after it.
+    #[test]
+    fn text_values_are_clamped_and_stripped_of_control_characters() {
+        let collector = make_collector();
+        record(
+            &collector,
+            "router01",
+            "sysdescr",
+            TelemetryValue::Text(format!("bad\nline{}", "x".repeat(400))),
+        );
+
+        let req = build_write_request(&collector.snapshot_metrics(), 1);
+        let ts = &req.timeseries[0];
+        let v = label(ts, "sysdescr").expect("text label present");
+        assert!(!v.contains('\n'), "control characters are stripped: {v:?}");
+        assert!(
+            v.chars().count() <= crate::mapping::MAX_TEXT_LEN,
+            "text is clamped to MAX_TEXT_LEN, got {}",
+            v.chars().count()
+        );
     }
 
     #[test]
@@ -459,7 +590,7 @@ mod tests {
         record(
             &collector,
             "router01",
-            "sysUpTime",
+            "sysuptime",
             TelemetryValue::Counter(7),
         );
 
@@ -498,7 +629,7 @@ mod tests {
         let req = WriteRequest::decode(&raw[..]).unwrap();
         assert_eq!(req.timeseries.len(), 1);
         let ts = &req.timeseries[0];
-        assert_eq!(label(ts, "__name__"), Some("zensight_snmp_sysUpTime"));
+        assert_eq!(label(ts, "__name__"), Some("zensight_snmp_sysuptime_total"));
         assert_eq!(label(ts, "source"), Some("router01"));
         assert_eq!(ts.samples[0].value, 7.0);
         assert!(ts.samples[0].timestamp > 0);
@@ -517,5 +648,41 @@ mod tests {
         };
         let client = RemoteWriteClient::new(make_collector(), &cfg).unwrap();
         assert_eq!(client.push_once().await.unwrap(), 0);
+    }
+
+    /// A series whose timestamp has not advanced is SKIPPED on the next push.
+    ///
+    /// This is the second half of #759, and the reason the fix is not simply
+    /// "use the point's timestamp": re-pushing an unchanged series would send
+    /// an identical `(series, timestamp)` every interval, which receivers
+    /// reject as a duplicate sample. Skipping is what actually makes a dead
+    /// sensor gap.
+    #[test]
+    fn an_unchanged_series_is_not_pushed_twice() {
+        let collector = make_collector();
+        record(
+            &collector,
+            "router01",
+            "cpu/load",
+            TelemetryValue::Gauge(0.5),
+        );
+
+        let mut seen = HashMap::new();
+        let first = build_write_request_since(&collector.snapshot_metrics(), 1, &mut seen);
+        assert_eq!(first.timeseries.len(), 1, "first push sends the series");
+
+        let second = build_write_request_since(&collector.snapshot_metrics(), 2, &mut seen);
+        assert!(
+            second.timeseries.is_empty(),
+            "an unchanged series must not be re-pushed as a duplicate sample"
+        );
+
+        // A newer observation moves the watermark and is pushed again.
+        let mut newer = collector.snapshot_metrics();
+        for m in &mut newer {
+            m.timestamp_ms += 1_000;
+        }
+        let third = build_write_request_since(&newer, 3, &mut seen);
+        assert_eq!(third.timeseries.len(), 1, "a fresh observation is pushed");
     }
 }

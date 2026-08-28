@@ -1,0 +1,19 @@
+[package]
+name = "zensight-btf"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Minimal read-only BTF parser: resolve a kernel struct member's byte offset from /sys/kernel/btf/vmlinux"
+license.workspace = true
+
+# Deliberately dependency-free. This crate is consumed by `-ebpf-common` crates
+# that also feed the `bpfel-unknown-none` program build, so anything it pulled
+# in would be a liability. It is `core`-only except for the `std` feature, which
+# adds nothing but the file read.
+[dependencies]
+
+[features]
+default = ["std"]
+# `read_vmlinux()` — the only part that needs an allocator and a filesystem.
+# Off, the parser still works on a `&[u8]` the caller obtained some other way.
+std = []

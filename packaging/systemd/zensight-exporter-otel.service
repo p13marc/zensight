@@ -19,6 +19,9 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
+# Needs no capabilities: a bus client with outbound OTLP egress. Outbound
+# connections are unprivileged.
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

@@ -10,7 +10,7 @@
 # gauge.
 
 [registry]
-version = "1.5"
+version = "1.9"
 app = "zensight"
 convention = 1
 
@@ -47,7 +47,23 @@ class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 64
 since = "1.1"
-description = "dropped frames"
+description = "buffers a profile's AppSink shed because the egress task did not pull in time, read from AppSinkHandle::stats().total_dropped and folded as a delta per profile incarnation; covers video tiers AND the preview since 1.9, and is NOT transport loss (congestion dies inside Zenoh's queue, upstream of every counter here)"
+
+[[subject]]
+path = "{stream}/stats/rc_drops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.6"
+description = "frames the encoder's rate control swallowed to hold the tier's bitrate cap; disjoint from drops (a swallowed frame produces no buffer at all, so it never reaches the sink)"
+
+[[subject]]
+path = "{stream}/stats/sink_queue"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.9"
+description = "deepest AppSink backlog across the stream's open profiles at tick time (0..SINK_QUEUE); the queue that precedes shedding, so a reading at the cap proves a real backlog while a 0 does not disprove one"
 
 [[subject]]
 path = "{stream}/stats/viewers"
@@ -66,13 +82,104 @@ since = "1.1"
 description = "encode time per frame"
 
 [[subject]]
+path = "{stream}/stats/encode_p95_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.7"
+description = "95th-percentile encode time per frame, from the encoder's own histogram; all-time for the tier's encoder incarnation, not an interval figure like encode_ms"
+
+[[subject]]
+path = "{stream}/stats/encode_p99_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.7"
+description = "99th-percentile encode time per frame; see encode_p95_ms"
+
+# The receiver-feedback aggregate (#715, RFC 07 §1.1/§1.2).
+#
+# What consumers report on `@rpc/parallax/stream/report`, folded per tier and
+# published so it is observable rather than only queryable. Four things about
+# this family are contract, not preference:
+#
+#   * `{tier}` is a required chunk. "Per-tier worst case and median" cannot be
+#     spelled without it, and a stream-level average would hide the case the
+#     whole epic exists for — one tier healthy, another not.
+#   * A max AND a median, never one number. A worst-of-medians understates and
+#     a median-of-instants is noise; the report carries both so the aggregate
+#     can too.
+#   * The timing families are OMITTED, never zero, when no live report measured
+#     one (RFC 07 §1.3: unstamped is "not asked"). Same discipline as
+#     `stats/rc_drops`.
+#   * The producer publishes these and MUST NOT act on them to re-tune a shared
+#     tier (RFC 07 §1.2, normative). They inform an operator and a receiver-side
+#     controller; they do not drive an encoder.
+
+[[subject]]
+path = "{stream}/rx/{tier}/consumers"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.8"
+description = "consumers with a live report on this tier. A LOWER BOUND on viewers, not a viewer count: a viewer that never reports is invisible here. See stats/viewers for the publisher-side count"
+
+[[subject]]
+path = "{stream}/rx/{tier}/loss_pct_max"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.8"
+description = "worst lost/(received+lost) across live reports on this tier"
+
+[[subject]]
+path = "{stream}/rx/{tier}/loss_pct_p50"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.8"
+description = "median lost/(received+lost) across live reports on this tier"
+
+[[subject]]
+path = "{stream}/rx/{tier}/frame_age_ms_max"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.8"
+description = "max reported frame age; observed skewed latency (RFC 07 Section 1.3), negatives published unclamped, omitted entirely when no consumer measured one"
+
+[[subject]]
+path = "{stream}/rx/{tier}/frame_age_ms_p50"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.8"
+description = "median reported frame age; same clock and same omission rule as frame_age_ms_max"
+
+[[subject]]
+path = "{stream}/rx/{tier}/decode_queue_max"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.8"
+description = "max reported decoder queue depth; omitted when no consumer has a queue to report"
+
+[[subject]]
+path = "{stream}/rx/{tier}/decode_queue_p50"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.8"
+description = "median reported decoder queue depth; same omission rule"
+
+[[subject]]
 path = "stream/{stream}"
 class = "state"
 type = "StreamStatus"
 cardinality = 16
 ttl_s = 900
 since = "1.0"
-description = "stream catalogue + status doc (open?, viewers, profile); tombstone on removal from config, NOT on close (RFC 05 §5)"
+description = "stream catalogue + status doc (open?, per-tier applied params + viewers, and why the last tier stopped); tombstone on removal from config, NOT on close (RFC 05 §5)"
 [[subject]]
 path = "health"
 common = "health"
@@ -184,6 +291,32 @@ reply = "Ack"
 idempotent = false
 since = "1.0"
 description = "stream control: open_stream / close_stream / request_keyframe"
+[[procedure]]
+path = "stream/report"
+kind = "write"
+# NO `fanout`. The write default is "forbidden" (RFC 08 §2 G2), which is what we
+# want here rather than a default we tolerate: a report is about one key on one
+# host, and a fleet-wide spelling of it would be a viewer telling every host in
+# the fleet about a stream one of them publishes. Leaving it off makes that
+# unrepresentable rather than merely discouraged.
+request = "MediaReceiverReport"
+reply = "Ack"
+# A report is a SNAPSHOT with cumulative counters, so a retry repeats a
+# statement rather than adding to one (RFC 05 retry semantics).
+idempotent = true
+# The rate CEILING this producer enforces, per (consumer_id, stream, tier) --
+# not the cadence a consumer should choose, which RFC 07 Section 1.1 puts at one
+# per few seconds. Over-rate is refused with error/busy.
+#
+# NOTE: RFC 08 Section 2 scopes `rate` to `events` subjects and zenkey-build 0.7
+# does not lint it on a procedure, so this field is unchecked here. It is not
+# decoration: `introspect` serves this file verbatim, so the fleet can read it
+# today, and a test pins it against the interval the sensor actually enforces.
+# RFC 07 Section 1.1 asks for a procedure's rate to live in its registry entry;
+# RFC 08 Section 2's field table has not caught up. Filed upstream.
+rate = "burst(3600/h)"
+since = "1.8"
+description = "receiver feedback for one @media key (RFC 07 Section 1.1). INFORMS ONLY: this producer never re-tunes a tier from a report (RFC 07 Section 1.2) -- it keeps the latest per (consumer_id, stream, tier), ages entries out on idle_timeout_secs, and publishes {stream}/rx/{tier}/* aggregates"
 # `{tier}` is a named bandwidth rung (low/medium/high) the viewer subscribes to
 # exactly (RFC 07 §1, keyspace v1.3). It replaced the undefined `{profile}` chunk.
 # cardinality: ~streams(16) × codecs(2) × tiers(3), rounded up.

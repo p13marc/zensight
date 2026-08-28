@@ -161,10 +161,39 @@ biolatency) and nothing else — they are never streamed onto the bus. It is a
 | `CAP_BPF` + `CAP_PERFMON` | loading a tracing program (kernel ≥ 5.8). **Not** `CAP_NET_ADMIN` — that gates *networking* program types, which this does not use |
 | `CAP_DAC_READ_SEARCH` | aya resolves a tracepoint by reading `<tracefs>/events/<cat>/<name>/id` from userspace, and `/sys/kernel/tracing` is mode `0700 root:root`. Without it every attach fails `EACCES` **even with `CAP_BPF`**. It is a broad grant (read any file on the host) |
 | not a rootless container | `bpf_capable()` is checked against the **initial** user namespace, so a file capability set inside a rootless userns is void and every load returns `EPERM`, whatever `setcap` says |
+| `kernel.perf_event_paranoid` ≤ 2 | Debian and Ubuntu ship **3**, a patched level above upstream's maximum of 2, which restricts `perf_event_open` beyond what `CAP_PERFMON` relaxes. Root is unaffected only because `CAP_SYS_ADMIN` bypasses the check (#683) |
 
 Any of these missing → one warning, `available: false`, unprivileged baseline
 unchanged. The queryable is declared **regardless** of feature or config, so the
 GUI can tell "not built with eBPF" from "no sensor answered".
+
+**Where the failure shows up matters.** The capability rows above are load-time:
+without them the programs never enter the kernel. `perf_event_paranoid` is
+**attach**-time — the programs load fine and then every `attach` returns
+`EACCES`, which sends you looking at the wrong half of the process. On a stock
+Debian 13 host with all three capabilities granted:
+
+```
+$ /sbin/getcap ./zensight-sensor-sysinfo
+./zensight-sensor-sysinfo cap_dac_read_search,cap_perfmon,cap_bpf=ep
+$ ./zensight-sensor-sysinfo --config …
+WARN eBPF latency collector unavailable …
+  error="attach sched/sched_wakeup: `perf_event_open_trace_point` failed:
+         Permission denied (os error 13)"
+```
+
+Confirmed by changing nothing but the sysctl:
+
+| `perf_event_paranoid` | result (same binary, same caps, unprivileged) |
+|---|---|
+| 3 (Debian/Ubuntu default) | `attach … Permission denied` |
+| 2 | `eBPF saturation histograms enabled` |
+
+`sudo sysctl kernel.perf_event_paranoid=2` for the session;
+`kernel.perf_event_paranoid = 2` in `/etc/sysctl.d/` to persist it. Lowering it
+relaxes `perf_event_open` for *every* unprivileged process on the host, so it is
+a deliberate posture change, not a shrug — which is why this is documented rather
+than done for you by `just caps`.
 
 Build:
 

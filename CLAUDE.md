@@ -33,6 +33,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline) |
 | `zensight-correlator/` | fuses identity evidence → one `HostEntity` per host |
 | `zensight-exporter-{prometheus,otel}/` | forward telemetry/alerts to external systems |
+| `zensight-conformance/` | CI harness (#744): stands a deployment up and runs `zenkey-fleet`'s RFC judges against it. `publish = false`. It links `zenkey-fleet`, as does `zensight` for the fleet view (#745); the invariant is that **no crate a sensor links may** — see `Cargo.toml`'s note on the dependency |
 | [`zblob`](https://github.com/p13marc/zblob) | resumable content-addressed large-data transfer (external repo, was in-tree `zenoh-blob/`) |
 | `zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/` | opt-in eBPF programs (compile to host stubs) |
 
@@ -43,8 +44,11 @@ cargo build --release --workspace                       # everything
 cargo run -p zensight --release                         # frontend
 cargo run -p zensight-sensor-snmp --release -- --config configs/snmp.json5
 cargo run -p zensight-exporter-prometheus --release -- --config configs/prometheus-exporter.json5
+cargo run -p zensight-exporter-otel --release -- --config configs/otel-exporter.json5
 cargo run -p zensight-correlator --release -- --config configs/correlator.json5 [--demo]
 just run                                                # GUI + local sensors (see README)
+just demo-prometheus                                    # sensors + exporter + Prometheus + Grafana (demo/)
+just demo-otel                                          # sensors + exporter + grafana/otel-lgtm (demo/)
 ```
 
 ## Testing
@@ -61,16 +65,39 @@ workspace there; otherwise `--exclude` those crates and say so.
 
 ## Linting and Formatting
 
-CI (`.github/workflows/rust.yml`) enforces, as a merge gate:
-`cargo test --workspace --locked`, `cargo fmt --check`, `cargo clippy -D warnings`, **a
-design-system color guard** (no ad-hoc `Color::from_rgb`/`from_rgba` outside
-`zensight/src/view/{theme.rs,tokens.rs,components/}` — see
-[`zensight/docs/design-system.md`](zensight/docs/design-system.md)), and **a `session.put`/
-`session.delete` ban** (control-plane must publish through declared publishers, not ad-hoc puts).
+CI is **Forgejo Actions** (`.forgejo/workflows/`) — there is no `.github/` in this repo;
+GitHub is a passive push mirror. `ci.yml` enforces, as a merge gate, in four jobs:
+
+- **test** — `cargo test --workspace --locked`
+- **demo-smoke** — `PROFILE=debug scripts/demo-verify.sh`: one real sensor, one real
+  exporter, one real scrape. Nothing in CI had ever *executed* an exporter before it.
+- **features** — `cargo check` per optional feature (`zensight` `tester`/`h264`, netring's
+  six detectors). A default workspace build never type-checks these; `h264` shipped broken
+  for a week under exactly that blind spot. The `ebpf` legs are out-of-band in
+  `features-ebpf.yml` (nightly + `bpf-linker`).
+- **lint** — `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, plus five grep guards: a **design-system color guard** (no ad-hoc
+  `Color::from_rgb`/`from_rgba` outside `zensight/src/view/{theme.rs,tokens.rs,components/}`
+  — see [`zensight/docs/design-system.md`](zensight/docs/design-system.md)), a
+  **`session.put`/`session.delete` ban** (publish through declared publishers), a ban on
+  exporters hand-rolling `declare_subscriber` (history/recovery, #763), a ban on raw
+  `declare_queryable` (serve through `served::serve_queryable`, #484), and the two #466
+  checks — no `"zensight/` literal in application source, and only
+  `zensight_common::session` may call `zenoh::open`.
+
+Two CI jobs execute rather than compile, because the suite could not see what they
+cover: **demo-smoke** (`scripts/demo-verify.sh` — one real sensor, one real exporter,
+one real scrape; nothing in CI had ever *executed* an exporter) and **conformance**
+(`scripts/conformance-verify.sh` — one real sensor and `zenkey-fleet`'s RFC judges
+against the live bus; nothing had ever asked a running fleet whether it *conforms*:
+slice sync, `alive ⇒ callable`, schema drift, QoS, freshness, cardinality). What the
+conformance gate fails on, and the one check it excludes with the condition that lifts
+it, are in [`zensight-conformance/README.md`](zensight-conformance/README.md).
 
 ```bash
 cargo fmt --all
 cargo clippy --workspace -- -D warnings
+scripts/conformance-verify.sh            # judge a live deployment (isolated port)
 ```
 
 ## Architecture (one screen)
@@ -136,7 +163,7 @@ participants of one deployment must agree on it.
 
 ## Development Notes
 
-- Rust edition 2024; Iced 0.14 (tokio, canvas, svg); Zenoh 1.9 (`unstable`); tokio async runtime.
+- Rust edition 2024; Iced 0.14 (tokio, canvas, svg); Zenoh 1.10 (`unstable`); tokio async runtime.
 - Conventional commits (`feat:`/`fix:`/`chore:`/`docs:`). Key expressions: v1 grammar via
   `zenkey`/`zensight-common` builders (never ad-hoc `format!`). Each view uses a
   per-view state struct; UI tests use `iced_test::simulator` (see `zensight/docs/testing.md`).

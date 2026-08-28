@@ -11,15 +11,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parallax::codec::annexb::{NalCodec, has_param_sets, is_entry_point};
 use zensight_common::command::{Command, command_key, query_key};
-use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
+use zensight_common::stream::{
+    FrameMeta, StreamControl, StreamDescriptor, StreamEndReason, StreamStatus,
+};
 use zensight_common::{Format, decode};
 use zensight_sensor_core::Publisher;
 use zensight_sensor_parallax::catalog::Catalog;
 use zensight_sensor_parallax::config::ParallaxConfig;
 use zensight_sensor_parallax::session::SessionManager;
 use zensight_sensor_parallax::stats::StatsRegistry;
-use zensight_sensor_parallax::{annexb, command, query, stats};
+use zensight_sensor_parallax::{command, query, stats};
 
 /// Scouting off so concurrent tests (and live sensors on the host) can't
 /// cross-contaminate; the two peers are wired together with an explicit
@@ -120,13 +123,38 @@ async fn spawn_sensor_with_config(
     zensight_sensor_parallax::session::SessionHandle,
     StatsRegistry,
 ) {
+    spawn_sensor_full(session, source, config).await.0
+}
+
+/// The full wiring, handing back the receiver-report store too (#715).
+async fn spawn_sensor_full(
+    session: Arc<zenoh::Session>,
+    source: &str,
+    config: ParallaxConfig,
+) -> (
+    (
+        zensight_sensor_parallax::session::SessionHandle,
+        StatsRegistry,
+    ),
+    Arc<zensight_sensor_parallax::reports::ReceiverReports>,
+) {
     let catalog = Arc::new(Catalog::build(&config));
-    let tiers = config.video.tiers.clone();
+    let tiers = config.video.ladder();
     let publisher = Publisher::new(session.clone(), "parallax", Format::Json);
     // v1: control/query surfaces key off the producer name (the origin
     // chunk scopes per host; the source label is payload-only).
     let host_prefix = "parallax".to_string();
     let registry = StatsRegistry::default();
+    let reports =
+        Arc::new(zensight_sensor_parallax::reports::ReceiverReports::from_config(&config));
+    {
+        let r_session = session.clone();
+        let r_reports = reports.clone();
+        tokio::spawn(async move {
+            zensight_sensor_parallax::reports::run(r_session, "parallax".to_string(), r_reports)
+                .await;
+        });
+    }
     tokio::spawn(stats::run_ticker(
         publisher.clone(),
         source.to_string(),
@@ -134,6 +162,7 @@ async fn spawn_sensor_with_config(
         catalog.entries().len(),
         Duration::from_secs(1),
         None,
+        reports.clone(),
     ));
     let handle = SessionManager::spawn(
         catalog.clone(),
@@ -158,13 +187,13 @@ async fn spawn_sensor_with_config(
     ));
     // Let the subscriber + queryables propagate.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    (handle, registry)
+    ((handle, registry), reports)
 }
 
 /// The sensor runs in-process, so the test's v1 context (same global host
 /// origin) yields exactly the keys the sensor publishes on (epic #453).
 fn v1ctx() -> zensight_sensor_core::v1::V1Context {
-    zensight_sensor_core::v1::V1Context::for_producer(&zensight_common::PROFILE, "parallax")
+    zensight_sensor_core::v1::for_producer("parallax")
 }
 
 async fn query_catalogue(viewer: &zenoh::Session, _host_prefix: &str) -> Vec<StreamDescriptor> {
@@ -246,7 +275,9 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     let handle = spawn_sensor(sensor.clone(), source).await;
 
     // Subscribe FIRST so the very first published frame is observed.
-    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
     let sub = viewer
         .declare_subscriber(preview_key.as_keyexpr())
         .await
@@ -255,7 +286,9 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     // storage in this harness; LWW without a seed means catch-the-transition).
     let status_sub = viewer
         .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
-            v1ctx().state_key(&["stream", "test0"]),
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
         ))
         .await
         .expect("declare status sub");
@@ -323,6 +356,14 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     // A preview-only open reports `open` but carries no video tier.
     assert!(status.open);
     assert!(status.tiers.is_empty(), "preview is not a video tier");
+    // And a stream that has not stopped carries no end (#691). This is what
+    // pins the clear-on-reopen: absent means "nothing has stopped since this
+    // stream last opened", never "stopped for an unknown reason".
+    assert!(
+        status.last_end.is_none(),
+        "a healthy stream has no current end: {:?}",
+        status.last_end
+    );
 
     // Tear the stream down before the runtime drops: a live pipeline keeps a
     // blocking source task alive, and tokio's shutdown would wait forever.
@@ -356,14 +397,18 @@ async fn open_h264_video_streams_with_keyframe_control() {
     // The open below uses `tier: None`, which resolves to the sensor default
     // (`medium`); the matching listener must see this subscriber as a viewer
     // (asserted below via the status doc).
-    let video_key = v1ctx().media_video_key("test0", "h264", "medium");
+    let video_key = v1ctx()
+        .media_video_key("test0", "h264", "medium")
+        .expect("a constant test stream/subject is a legal key");
     let sub = viewer
         .declare_subscriber(video_key.as_keyexpr())
         .await
         .expect("declare video subscriber");
     let status_sub = viewer
         .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
-            v1ctx().state_key(&["stream", "test0"]),
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
         ))
         .await
         .expect("declare status sub");
@@ -399,7 +444,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
         // into a dsNoParamSets loop.
         assert_eq!(
             meta.keyframe,
-            annexb::has_idr(&payload),
+            is_entry_point(&payload, NalCodec::H264),
             "FrameMeta.keyframe must match IDR presence (seq {})",
             meta.sequence
         );
@@ -407,7 +452,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
         // point — SPS/PPS ride in the same access unit.
         if meta.keyframe {
             assert!(
-                annexb::has_param_sets(&payload),
+                has_param_sets(&payload, NalCodec::H264),
                 "keyframe AU without SPS/PPS (seq {})",
                 meta.sequence
             );
@@ -465,7 +510,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
             // The forced IDR is exactly what a resyncing viewer decodes
             // from — next_frame already asserted SPS/PPS are aboard, and a
             // fresh decoder gate opens here.
-            assert!(annexb::has_idr(&payload));
+            assert!(is_entry_point(&payload, NalCodec::H264));
             forced = true;
             break;
         }
@@ -561,8 +606,12 @@ async fn two_viewers_on_distinct_tiers_stream_independently() {
 
     // Subscribe to each tier's EXACT key (v1.3 revoked the `video/h264/*`
     // wildcard) BEFORE opening, so each first IDR is observed.
-    let low_key = v1ctx().media_video_key("test0", "h264", "low");
-    let high_key = v1ctx().media_video_key("test0", "h264", "high");
+    let low_key = v1ctx()
+        .media_video_key("test0", "h264", "low")
+        .expect("a constant test stream/subject is a legal key");
+    let high_key = v1ctx()
+        .media_video_key("test0", "h264", "high")
+        .expect("a constant test stream/subject is a legal key");
     let low_sub = viewer
         .declare_subscriber(low_key.as_keyexpr())
         .await
@@ -573,7 +622,9 @@ async fn two_viewers_on_distinct_tiers_stream_independently() {
         .expect("declare high-tier subscriber");
     let status_sub = viewer
         .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
-            v1ctx().state_key(&["stream", "test0"]),
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
         ))
         .await
         .expect("declare status sub");
@@ -620,7 +671,8 @@ async fn two_viewers_on_distinct_tiers_stream_independently() {
             let (meta, payload) = next_h264(sub).await;
             if meta.keyframe {
                 assert!(
-                    annexb::has_idr(&payload) && annexb::has_param_sets(&payload),
+                    is_entry_point(&payload, NalCodec::H264)
+                        && has_param_sets(&payload, NalCodec::H264),
                     "keyframe AU must carry an IDR + SPS/PPS (seq {})",
                     meta.sequence
                 );
@@ -734,7 +786,9 @@ async fn stats_ticker_publishes_fps_telemetry() {
         .expect("declare stats subscriber");
 
     // Keep a media viewer subscribed so the 1 s idle reaper never fires.
-    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
     let media_sub = viewer
         .declare_subscriber(preview_key.as_keyexpr())
         .await
@@ -790,6 +844,744 @@ async fn stats_ticker_publishes_fps_telemetry() {
     sensor.close().await.unwrap();
 }
 
+/// Send one `MediaReceiverReport` to `@rpc/parallax/stream/report` and hand
+/// back the reply, so a test can assert on both the ack and the refusal.
+async fn send_report(
+    viewer: &zenoh::Session,
+    report: &zensight_common::stream::MediaReceiverReport,
+) -> Result<(), String> {
+    let replies = viewer
+        .get(zensight_common::command::stream_report_key("parallax"))
+        .payload(serde_json::to_vec(report).unwrap())
+        .await
+        .expect("send receiver report");
+    let reply = replies.recv_async().await.expect("report reply");
+    match reply.result() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(String::from_utf8_lossy(&e.payload().to_bytes()).into_owned()),
+    }
+}
+
+fn a_report(consumer: &str) -> zensight_common::stream::MediaReceiverReport {
+    zensight_common::stream::MediaReceiverReport {
+        stream: "test0".into(),
+        codec: Some("mjpeg".into()),
+        tier: None,
+        consumer_id: consumer.into(),
+        interval_ms: 1000,
+        received_frames: 100,
+        lost_frames: 5,
+        dropped_frames: 0,
+        decoded_frames: 95,
+        last_sequence: 105,
+        interarrival_jitter_ms: Some(2.0),
+        frame_age_ms: Some(40.0),
+        frame_age_max_ms: Some(90.0),
+        decoder_queue_depth: Some(1),
+        last_keyframe_sequence: Some(100),
+        since_last_keyframe_ms: Some(200),
+    }
+}
+
+/// The whole feedback loop over the wire: a report is accepted, and its
+/// aggregate reaches `telemetry/parallax/{stream}/rx/{tier}/…` (#714, #715).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn receiver_reports_surface_as_rx_telemetry() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-reports";
+    let _handle = spawn_sensor(sensor.clone(), source).await;
+
+    let rx_sub = viewer
+        .declare_subscriber(format!("{}/test0/rx/**", v1ctx().telemetry_prefix()))
+        .await
+        .expect("declare rx subscriber");
+
+    // No stream needs to be open: a report about a tier says something even
+    // when nothing is publishing on it, and "nothing is arriving" is the most
+    // useful report there is.
+    send_report(&viewer, &a_report("tile-1"))
+        .await
+        .expect("a well-formed report is accepted");
+
+    // Collect one whole tick: the ticker publishes the seven families in one
+    // pass, so stopping at the first one would race the rest.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut seen: Vec<(String, f64)> = Vec::new();
+    while Instant::now() < deadline && !seen.iter().any(|(m, _)| m.ends_with("/decode_queue_p50")) {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(5), rx_sub.recv_async()).await
+        else {
+            break;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode rx point");
+        let value = match point.value {
+            zensight_common::TelemetryValue::Gauge(v) => v,
+            other => panic!("rx telemetry must be a gauge, got {other:?}"),
+        };
+        seen.push((point.metric, value));
+    }
+
+    let find = |leaf: &str| {
+        seen.iter()
+            .find(|(m, _)| m == &format!("test0/rx/preview/{leaf}"))
+            .map(|(_, v)| *v)
+    };
+    assert_eq!(find("consumers"), Some(1.0), "seen: {seen:?}");
+    // 5 lost of 105 offered.
+    let loss = find("loss_pct_max").expect("loss_pct_max");
+    assert!((loss - 4.7619).abs() < 0.01, "loss was {loss}");
+    assert_eq!(find("frame_age_ms_max"), Some(90.0));
+    assert_eq!(find("frame_age_ms_p50"), Some(40.0));
+    assert!(
+        !seen.iter().any(|(m, _)| m.contains("tile-1")),
+        "a consumer_id must never reach a key (RFC 07 §1.1): {seen:?}"
+    );
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// **RFC 07 §1.2, on the wire.** A consumer screaming about loss does not move
+/// a shared tier's encoder.
+///
+/// `tests/rfc07_receiver_driven.rs` proves the report module cannot reach the
+/// knobs by construction; this proves the deployment behaves that way, which is
+/// the claim an operator cares about. The failure it forbids is specific: two
+/// viewers share a tier, one reports loss, the bitrate drops, and the *healthy*
+/// viewer's picture degrades for a reason it cannot see, caused by a peer it
+/// does not know exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reports_never_retune_a_shared_tier() {
+    let (sensor, viewer) = isolated_pair().await;
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor(sensor.clone(), "e2e-no-retune").await;
+
+    let video_key = v1ctx()
+        .media_key(&["test0", "video", "h264", "medium"])
+        .expect("a constant test tier is a legal key");
+    let _video_sub = viewer
+        .declare_subscriber(video_key.as_keyexpr())
+        .await
+        .expect("declare video subscriber");
+    let status_sub = viewer
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
+        ))
+        .await
+        .expect("declare status sub");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: None,
+        },
+    )
+    .await;
+
+    let before = await_status(&status_sub, |s| !s.tiers.is_empty()).await;
+    let applied_before = before.tiers[0].applied;
+
+    // Ten reports at the rate ceiling, each claiming a catastrophic stream:
+    // 95% loss, five-second frame age, a deep decoder queue. If anything in
+    // this producer acted on feedback, this is what would move it.
+    for i in 0..10 {
+        let mut screaming = a_report("angry-viewer");
+        screaming.codec = Some("h264".into());
+        screaming.tier = None;
+        screaming.received_frames = 5;
+        screaming.lost_frames = 95;
+        screaming.frame_age_ms = Some(5000.0);
+        screaming.frame_age_max_ms = Some(9000.0);
+        screaming.decoder_queue_depth = Some(64);
+        // The first is accepted; the rest are refused as over-rate, which is
+        // itself part of the claim — a viewer cannot even shout faster than
+        // the ceiling, let alone be listened to.
+        let _ = send_report(&viewer, &screaming).await;
+        if i == 0 {
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+        }
+    }
+
+    // Give the sensor a couple of ticks to do the wrong thing, if it were
+    // going to.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // `StreamStatus` is LWW state, republished only when it CHANGES — so the
+    // assertion is over every republication, not over a single later read: a
+    // re-tune would have to show up as a status doc with a different `applied`,
+    // and if none arrives at all that is the strongest form of the same claim.
+    let mut republished = 0;
+    while let Ok(Ok(sample)) =
+        tokio::time::timeout(Duration::from_millis(500), status_sub.recv_async()).await
+    {
+        let Ok(status) = serde_json::from_slice::<StreamStatus>(&sample.payload().to_bytes())
+        else {
+            continue;
+        };
+        let Some(tier) = status.tiers.first() else {
+            continue;
+        };
+        republished += 1;
+        assert_eq!(
+            tier.applied, applied_before,
+            "a receiver report re-tuned a shared tier — RFC 07 §1.2 forbids \
+             exactly this. Feedback informs; it does not command. If a producer \
+             is ever to act on AGGREGATE feedback, §1.2 requires a stated \
+             arbitration rule that is not 'the most recent report', and this \
+             test must be replaced by one that pins that rule."
+        );
+    }
+    eprintln!("status republished {republished} time(s), applied unchanged throughout");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: None,
+        },
+    )
+    .await;
+    drop(_video_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// A malformed report and an over-rate one are refused, distinguishably.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bad_reports_are_refused_with_the_right_error() {
+    let (sensor, viewer) = isolated_pair().await;
+    let _handle = spawn_sensor(sensor.clone(), "e2e-report-refusals").await;
+
+    // Undecodable payload.
+    let replies = viewer
+        .get(zensight_common::command::stream_report_key("parallax"))
+        .payload(b"not a report".to_vec())
+        .await
+        .expect("send garbage");
+    let reply = replies.recv_async().await.expect("reply");
+    let err = reply.result().expect_err("garbage must be refused");
+    let body = String::from_utf8_lossy(&err.payload().to_bytes()).into_owned();
+    assert!(body.contains("error/invalid-args"), "{body}");
+
+    // A tier this producer does not offer.
+    let mut unknown = a_report("tile-2");
+    unknown.codec = Some("h264".into());
+    unknown.tier = Some("ultra".into());
+    let body = send_report(&viewer, &unknown)
+        .await
+        .expect_err("an unoffered tier must be refused");
+    assert!(body.contains("error/invalid-args"), "{body}");
+
+    // Over-rate: a second report about the same tier, immediately.
+    send_report(&viewer, &a_report("tile-3"))
+        .await
+        .expect("first accepted");
+    let body = send_report(&viewer, &a_report("tile-3"))
+        .await
+        .expect_err("the second must be refused");
+    assert!(
+        body.contains("error/busy"),
+        "over-rate must be error/busy, not invalid-args: {body}"
+    );
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// Two rungs of one ladder, identical in geometry and framerate, far apart in
+/// `bitrate_kbps` alone, on a source no encoder can compress its way out of.
+///
+/// Both caps equal the source's native height, so `offered_tiers` offers both
+/// and the scaler is passthrough on each — the geometry is provably identical
+/// rather than merely configured identical, which the test asserts from
+/// `FrameMeta`. `snow` is per-pixel uniform noise: on the SMPTE bars the other
+/// tests use, *neither* cap binds (static bars encode at a fraction of 400
+/// kbps) and the comparison would assert nothing at all.
+fn bitrate_ladder_config() -> ParallaxConfig {
+    json5::from_str(
+        r#"{
+            enumerate_v4l2: false,
+            test_sources: [
+                { name: "noise", pattern: "snow", width: 320, height: 240, fps: 10 },
+            ],
+            preview: { fps: 1, quality: 70 },
+            video: {
+                gop_frames: 20,
+                default_tier: "thin",
+                tiers: [
+                    { name: "thin", max_height: 240, fps: 10, bitrate_kbps: 300  },
+                    { name: "fat",  max_height: 240, fps: 10, bitrate_kbps: 8000 },
+                ],
+            },
+            idle_timeout_secs: 5,
+        }"#,
+    )
+    .unwrap()
+}
+
+/// The ladder's other axis. `two_viewers_on_distinct_tiers_stream_independently`
+/// proves two tiers encode at different *geometry*; nothing proved the bitrate
+/// cap does anything, and no test asserted a value on `kbps` anywhere.
+///
+/// **What the cap actually moves is throughput, not frame size.** On
+/// incompressible input the encoder cannot shrink a frame below its QP band's
+/// floor — measured here, both rungs emit ~46 kB per access unit, which at 10
+/// fps would be ~3.7 Mbit/s from either. `RateControlMode::Bitrate` holds the
+/// target by *shedding frames* instead (which is exactly why the sensor pairs
+/// it with `skip_frames(true)`), so the cap shows up as bytes per second on the
+/// wire. Asserting bytes-per-frame would compare the one quantity the cap
+/// leaves alone.
+///
+/// Measured at the **subscriber**, on each tier's exact `<tier>` key, and the
+/// two tiers **concurrently** over equal windows. Subscriber-side because the
+/// telemetry plane structurally cannot answer this — `StatsRegistry` is keyed by
+/// stream, one handle shared across every open tier and the preview, and the
+/// registry declares `{stream}/stats/kbps` with no tier chunk — and because it
+/// asserts what a viewer receives rather than what the sensor says about itself.
+/// Concurrently because measuring one tier and then the other lets the second
+/// drain a queue that filled during the first, which reads as an absurd rate.
+///
+/// Deliberately NOT asserted: that measured throughput lands within X% of the
+/// configured target (OpenH264's rate control is a controller with a QP band,
+/// not a limiter); absolute byte figures for a resolution (they move with the
+/// vendored OpenH264); anything about which frames were shed — that is what
+/// `{stream}/stats/rc_drops` is for (#510).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_ladders_bitrate_cap_bites_on_the_wire() {
+    /// Long enough to average over several GOPs, short enough to keep the
+    /// suite quick.
+    const WINDOW: Duration = Duration::from_secs(6);
+
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-ladder";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor_with_config(sensor.clone(), source, bitrate_ladder_config())
+        .await
+        .0;
+
+    // Subscribe to both exact tier keys BEFORE opening, so no frames are lost.
+    let thin_sub = viewer
+        .declare_subscriber(
+            v1ctx()
+                .media_video_key("noise", "h264", "thin")
+                .expect("a constant test stream/subject is a legal key")
+                .as_keyexpr(),
+        )
+        .await
+        .expect("declare thin subscriber");
+    let fat_sub = viewer
+        .declare_subscriber(
+            v1ctx()
+                .media_video_key("noise", "h264", "fat")
+                .expect("a constant test stream/subject is a legal key")
+                .as_keyexpr(),
+        )
+        .await
+        .expect("declare fat subscriber");
+
+    for tier in ["thin", "fat"] {
+        send_control(
+            &viewer,
+            &host_prefix,
+            StreamControl::OpenStream {
+                stream: "noise".into(),
+                codec: Some("h264".into()),
+                tier: Some(tier.into()),
+            },
+        )
+        .await;
+    }
+
+    /// One tier's throughput: skip to the first keyframe (the startup IDR would
+    /// distort a short window), then drain for `window`, returning
+    /// (kbit/s, access units, mean bytes per AU, encoded geometry).
+    async fn measure(
+        sub: &zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+        window: Duration,
+    ) -> (f64, usize, f64, (u32, u32)) {
+        let mut started: Option<Instant> = None;
+        let (mut bytes, mut frames) = (0usize, 0usize);
+        let mut geometry = (0, 0);
+        loop {
+            if let Some(t0) = started
+                && t0.elapsed() >= window
+            {
+                break;
+            }
+            let Ok(Ok(sample)) =
+                tokio::time::timeout(Duration::from_secs(15), sub.recv_async()).await
+            else {
+                break;
+            };
+            let att = sample.attachment().expect("FrameMeta attachment");
+            let meta: FrameMeta = decode(&att.to_bytes(), Format::Cbor).expect("decode FrameMeta");
+            if started.is_none() {
+                if !meta.keyframe {
+                    continue; // wait for a clean entry point
+                }
+                started = Some(Instant::now());
+                geometry = (meta.width, meta.height);
+            }
+            bytes += sample.payload().len();
+            frames += 1;
+        }
+        let secs = started
+            .expect("no keyframe arrived on this tier")
+            .elapsed()
+            .as_secs_f64()
+            .max(1e-6);
+        let mean = if frames > 0 {
+            bytes as f64 / frames as f64
+        } else {
+            0.0
+        };
+        ((bytes as f64 * 8.0) / 1000.0 / secs, frames, mean, geometry)
+    }
+
+    // Concurrently — see the doc comment.
+    let (thin, fat) = tokio::join!(measure(&thin_sub, WINDOW), measure(&fat_sub, WINDOW));
+    let (thin_kbps, thin_frames, thin_mean, thin_geom) = thin;
+    let (fat_kbps, fat_frames, fat_mean, fat_geom) = fat;
+
+    // Always logged: a CI failure has to be diagnosable from the log alone.
+    eprintln!(
+        "ladder: thin {thin_kbps:.0} kbps ({thin_frames} AUs, {thin_mean:.0} B/AU, \
+         {}×{}) vs fat {fat_kbps:.0} kbps ({fat_frames} AUs, {fat_mean:.0} B/AU, {}×{})",
+        thin_geom.0, thin_geom.1, fat_geom.0, fat_geom.1
+    );
+
+    assert_eq!(
+        thin_geom, fat_geom,
+        "both rungs cap at the source's native height, so any throughput \
+         difference is the bitrate cap and nothing else"
+    );
+    assert!(
+        thin_kbps * 2.0 <= fat_kbps,
+        "the 300 kbps rung must carry materially less than the 8000 kbps rung \
+         (expected an order of magnitude, asserting 2×): thin {thin_kbps:.0} kbps, \
+         fat {fat_kbps:.0} kbps"
+    );
+    // The cap is a controller, not a limiter, so this is a smoke bound rather
+    // than a conformance claim: 4× the target catches "the cap is ignored",
+    // which is the failure worth catching.
+    assert!(
+        thin_kbps < 4.0 * 300.0,
+        "the thin rung overshot its 300 kbps cap wildly: {thin_kbps:.0} kbps"
+    );
+
+    for tier in ["thin", "fat"] {
+        send_control(
+            &viewer,
+            &host_prefix,
+            StreamControl::CloseStream {
+                stream: "noise".into(),
+                codec: Some("h264".into()),
+                tier: Some(tier.into()),
+            },
+        )
+        .await;
+    }
+    drop(thin_sub);
+    drop(fat_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// A starved single-tier ladder on per-pixel noise: `RateControlMode::Bitrate`
+/// with `skip_frames(true)` leaves OpenH264 no way to hold 1 kbit/s except by
+/// swallowing frames, so `rc_drops` has something real to report.
+fn starved_parallax_config() -> ParallaxConfig {
+    json5::from_str(
+        r#"{
+            enumerate_v4l2: false,
+            test_sources: [
+                { name: "test0", pattern: "snow", width: 160, height: 120, fps: 8 },
+            ],
+            preview: { fps: 2, quality: 70 },
+            video: {
+                default_tier: "low",
+                tiers: [ { name: "low", fps: 8, bitrate_kbps: 1 } ],
+            },
+            idle_timeout_secs: 5,
+        }"#,
+    )
+    .unwrap()
+}
+
+/// The whole #510 path in one assertion: the encoder's `EncoderStatsHandle`,
+/// cloned before the executor started, through `PipelineControls` and the
+/// session actor's 1 Hz fold into `StreamStats`, out through the ticker and the
+/// registry guard, onto the wire as a `Counter`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stats_ticker_publishes_rc_drops_for_a_video_tier() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-rc-drops";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor_with_config(sensor.clone(), source, starved_parallax_config())
+        .await
+        .0;
+
+    let stats_sub = viewer
+        .declare_subscriber(format!("{}/test0/stats/**", v1ctx().telemetry_prefix()))
+        .await
+        .expect("declare stats subscriber");
+    // Hold a media viewer so the idle reaper never tears the tier down.
+    let video_key = v1ctx()
+        .media_video_key("test0", "h264", "low")
+        .expect("a constant test stream/subject is a legal key");
+    let media_sub = viewer
+        .declare_subscriber(video_key.as_keyexpr())
+        .await
+        .expect("declare video subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: Some("low".into()),
+        },
+    )
+    .await;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut seen: Option<u64> = None;
+    while Instant::now() < deadline {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(5), stats_sub.recv_async()).await
+        else {
+            break;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode stats point");
+        if point.metric != "test0/stats/rc_drops" {
+            continue;
+        }
+        let zensight_common::TelemetryValue::Counter(n) = point.value else {
+            panic!("rc_drops must be a Counter, got {:?}", point.value);
+        };
+        // Monotonic: the actor folds deltas precisely so a tier switch cannot
+        // walk a published counter backwards.
+        if let Some(prev) = seen {
+            assert!(n >= prev, "rc_drops went backwards: {prev} -> {n}");
+            if n > 0 {
+                seen = Some(n);
+                break;
+            }
+        }
+        seen = Some(n);
+    }
+    let observed = seen.expect("no rc_drops point within the deadline");
+    eprintln!("rc_drops observed: {observed}");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: Some("low".into()),
+        },
+    )
+    .await;
+    drop(media_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// The negative, and fully deterministic: a JPEG preview has no rate control,
+/// so the stream must report *nothing* rather than a zero that would read as
+/// "the cap is not biting". This pins the `rc_tracked` gate, which is the part
+/// of #510 most likely to be "simplified" away later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preview_only_stream_publishes_no_rc_drops() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-no-rc";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor(sensor.clone(), source).await;
+
+    let stats_sub = viewer
+        .declare_subscriber(format!("{}/test0/stats/**", v1ctx().telemetry_prefix()))
+        .await
+        .expect("declare stats subscriber");
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
+    let media_sub = viewer
+        .declare_subscriber(preview_key.as_keyexpr())
+        .await
+        .expect("declare preview subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+
+    // Three ticker intervals (1 s each in the test harness) is ample for the
+    // stream's other five metrics to arrive several times over.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut saw_fps = false;
+    while Instant::now() < deadline {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(2), stats_sub.recv_async()).await
+        else {
+            continue;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode stats point");
+        assert_ne!(
+            point.metric, "test0/stats/rc_drops",
+            "a preview-only stream has no rate control to report on"
+        );
+        saw_fps |= point.metric == "test0/stats/fps";
+    }
+    assert!(
+        saw_fps,
+        "the ticker published nothing at all — vacuous test"
+    );
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+    drop(media_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// The two sink-sourced metrics reach the wire with the right shapes (#692):
+/// `sink_queue` as a `Gauge`, `drops` as a `Counter` that never walks
+/// backwards.
+///
+/// Deterministic by construction — it does **not** wait for a drop to happen.
+/// Provoking real shedding end-to-end would need the egress task to lose a
+/// race it normally wins by orders of magnitude (a CBOR encode and a loopback
+/// `put` against an 8 fps source), and the honest deterministic version of
+/// that is the unit test in `pipeline.rs`, where nothing pulls at all. Note
+/// that `starved_parallax_config` is the *wrong* lever here: its 1 kbit/s cap
+/// makes the encoder shed, and an RC-swallowed frame produces no buffer, so it
+/// never reaches the sink.
+///
+/// What this catches is the monotonicity: fold absolutes instead of deltas
+/// across a profile change and the `Counter` steps backwards here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sink_metrics_reach_the_wire_with_the_right_shapes() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-sink-stats";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor(sensor.clone(), source).await;
+
+    let stats_sub = viewer
+        .declare_subscriber(format!("{}/test0/stats/**", v1ctx().telemetry_prefix()))
+        .await
+        .expect("declare stats subscriber");
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
+    let media_sub = viewer
+        .declare_subscriber(preview_key.as_keyexpr())
+        .await
+        .expect("declare preview subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut saw_queue = false;
+    let mut last_drops: Option<u64> = None;
+    let mut saw_drops = false;
+    while Instant::now() < deadline {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(2), stats_sub.recv_async()).await
+        else {
+            continue;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode stats point");
+        match point.metric.as_str() {
+            "test0/stats/sink_queue" => {
+                let zensight_common::TelemetryValue::Gauge(depth) = point.value else {
+                    panic!("sink_queue is a gauge, got {:?}", point.value);
+                };
+                assert!(
+                    (0.0..=4.0).contains(&depth),
+                    "a backlog cannot exceed SINK_QUEUE: {depth}"
+                );
+                saw_queue = true;
+            }
+            "test0/stats/drops" => {
+                let zensight_common::TelemetryValue::Counter(n) = point.value else {
+                    panic!("drops is a counter, got {:?}", point.value);
+                };
+                if let Some(prev) = last_drops {
+                    assert!(
+                        n >= prev,
+                        "a Counter must never walk backwards: {prev} -> {n}"
+                    );
+                }
+                last_drops = Some(n);
+                saw_drops = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_queue, "sink_queue never reached the wire");
+    assert!(saw_drops, "drops never reached the wire — vacuous test");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+    drop(media_sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
 /// Poll the actor until no stream is open (bounded).
 async fn wait_until_closed(handle: &zensight_sensor_parallax::session::SessionHandle) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -812,7 +1604,18 @@ async fn close_and_idle_reaper_tear_stream_down() {
     let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
-    let preview_key = v1ctx().media_key(&["test0", "preview", "jpeg"]);
+    let status_sub = viewer
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
+        ))
+        .await
+        .expect("declare status sub");
+
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
     let sub = viewer
         .declare_subscriber(preview_key.as_keyexpr())
         .await
@@ -841,6 +1644,13 @@ async fn close_and_idle_reaper_tear_stream_down() {
 
     // Close + drop the subscriber (falling viewer edge). The idle reaper
     // (idle_timeout_secs: 1) must tear the profile down shortly after.
+    //
+    // Note the codec-less close: `resolve_profile` maps that to the sensor's
+    // DEFAULT VIDEO TIER, not to the mjpeg preview this test opened — the
+    // footgun `docs/streams.md` warns about. So the preview's refcount is
+    // never decremented and it dies through the viewers-based backstop with a
+    // refcount still held. That is the crash-backstop case, and #691 gives it
+    // its own name.
     send_control(
         &viewer,
         &host_prefix,
@@ -854,9 +1664,98 @@ async fn close_and_idle_reaper_tear_stream_down() {
     drop(sub);
     wait_until_closed(&handle).await;
 
+    let status = await_status(&status_sub, |s| !s.open).await;
+    let end = status.last_end.expect("a torn-down stream must say why");
+    assert_eq!(end.tier, "preview");
+    assert_eq!(
+        end.reason,
+        StreamEndReason::Idle,
+        "reaped with a refcount still held is the backstop, not a close"
+    );
+    assert!(!end.reason.is_failure(), "our own reap is not a fault");
+
     // And the catalogue is inactive again.
     let got = query_catalogue(&viewer, &host_prefix).await;
     assert!(!got[0].active, "stream must be inactive after teardown");
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// The other half of the reaper's story (#691): a close that actually names
+/// the profile it opened drives the refcount to zero, and the end that follows
+/// says `closed` — not the `idle` its sibling test asserts.
+///
+/// A `close_stream` does not stop a pipeline. It releases a refcount and the
+/// idle countdown does the stopping, so both a clean operator close and the
+/// crash backstop arrive through one reaper. The refcount at reap time is the
+/// only thing that tells them apart, and until #691 an operator could see
+/// neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_that_names_its_profile_reports_closed() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-close-reason";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor(sensor.clone(), source).await;
+
+    let status_sub = viewer
+        .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
+            v1ctx()
+                .state_key(&["stream", "test0"])
+                .expect("a constant test stream/subject is a legal key"),
+        ))
+        .await
+        .expect("declare status sub");
+
+    let preview_key = v1ctx()
+        .media_key(&["test0", "preview", "jpeg"])
+        .expect("a constant test stream/subject is a legal key");
+    let sub = viewer
+        .declare_subscriber(preview_key.as_keyexpr())
+        .await
+        .expect("declare preview subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+        .await
+        .expect("first preview frame timed out")
+        .expect("preview subscriber closed");
+
+    // `codec: Some("mjpeg")` — the SAME profile the open named. A codec-less
+    // close would resolve to the default video tier and decrement the wrong
+    // refcount, which is exactly what the sibling test does and why it sees
+    // `Idle` instead.
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            tier: None,
+        },
+    )
+    .await;
+    drop(sub);
+    wait_until_closed(&handle).await;
+
+    let status = await_status(&status_sub, |s| !s.open).await;
+    let end = status.last_end.expect("a closed stream must say so");
+    assert_eq!(end.tier, "preview");
+    assert_eq!(
+        end.reason,
+        StreamEndReason::Closed,
+        "every opener closed, so the reap is the close"
+    );
+    assert!(!end.reason.is_failure(), "a close is not a fault");
 
     viewer.close().await.unwrap();
     sensor.close().await.unwrap();
@@ -880,11 +1779,12 @@ fn rtsp_parallax_config(url: &str) -> ParallaxConfig {
 }
 
 /// A failed open must (a) publish a definitive `open: false` StreamStatus
-/// transition (the GUI flags the waiting tile with it), and (b) leave no
-/// entry in the stats registry — a leaked entry means phantom zero-valued
-/// stats telemetry forever.
+/// transition carrying **why**, in the failing layer's own words (#691) —
+/// the GUI shows that instead of guessing "stream failed to open on the
+/// sensor" — and (b) leave no entry in the stats registry, since a leaked
+/// entry means phantom zero-valued stats telemetry forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
+async fn failed_open_says_why_and_leaks_no_stats() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-failed-open";
     let host_prefix = "parallax".to_string();
@@ -899,7 +1799,9 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
     // Watch the status transitions BEFORE opening.
     let status_sub = viewer
         .declare_subscriber(zenoh::key_expr::OwnedKeyExpr::from(
-            v1ctx().state_key(&["stream", "deadcam"]),
+            v1ctx()
+                .state_key(&["stream", "deadcam"])
+                .expect("a constant test stream/subject is a legal key"),
         ))
         .await
         .expect("declare status subscriber");
@@ -930,6 +1832,20 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
             serde_json::from_slice(&sample.payload().to_bytes()).expect("decode StreamStatus");
         assert_eq!(status.stream, "deadcam");
         if !status.open {
+            let end = status
+                .last_end
+                .as_ref()
+                .expect("a failed open must say why it failed");
+            assert_eq!(end.tier, "preview");
+            let StreamEndReason::FailedOpen { message } = &end.reason else {
+                panic!("an open that never ran is FailedOpen, not {:?}", end.reason);
+            };
+            // The camera's own words, carried through rather than paraphrased.
+            assert!(
+                message.to_lowercase().contains("rtsp") || message.contains("connect"),
+                "the failing layer's own message, not ours: {message}"
+            );
+            assert!(end.reason.is_failure(), "a failed open is a fault");
             saw_closed = true;
             break;
         }

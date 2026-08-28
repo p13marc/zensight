@@ -17,7 +17,6 @@
 //! name — keep the `alert_key` bucketed so a 1000-port scan is one alert.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use crate::Protocol;
@@ -166,67 +165,250 @@ impl Alert {
         self.state == AlertState::Firing
     }
 
-    /// Stable key for this logical alert: derived from `rule` + sorted
-    /// labels (v1: `source` is NOT hashed — the origin/producer key chunks
-    /// scope the alert to its host).
+    /// Stable identity for this alert: 16 lowercase hex, the **normative**
+    /// RFC 11 §3.1 derivation, computed by [`zenkey::alert::alert_key`].
     ///
-    /// Two alerts that describe the same underlying condition on the same host
-    /// (same rule, labels) share a key, so a `Put` replaces the prior state
-    /// in place and a later `Resolved`/`Delete` clears exactly that alert.
-    /// The producing **source is not hashed** (v1, RFC 04 §1.2): the origin
-    /// and producer chunks already scope the key per host — that is what
-    /// makes it origin-scoped. The key is stable under label reordering
-    /// (labels are sorted before hashing) and renders as 16 lowercase hex
-    /// (the rule-name prefix is gone: rule names are CamelCase, and chunks
-    /// are lowercase-only per RFC 03 §2).
+    /// ```text
+    /// input     = rule ++ ( "\n" ++ name ++ "=" ++ value )*   ascending by
+    ///                                                         name, byte order
+    /// alert_key = lowercase_hex(fnv1a_64(utf8(input)))        16 chars
+    /// ```
     ///
-    /// Labels prefixed **`host.`** are the *annotation namespace* — identity
-    /// metadata (`host.id`, `host.boot_id`, ...) stamped onto alerts for
-    /// correlation. They are **excluded** from the key: `source` already
-    /// distinguishes hosts, and keying on annotations would orphan a firing
-    /// alert whenever the identity envelope refreshes or a publisher stamps
-    /// inconsistently (a pre-stamp `Firing` could never be `Resolved` post-stamp).
+    /// The origin never enters the input — origin and producer are already in
+    /// the key (`…/state/<producer>/alert/<alert_key>`), which is exactly what
+    /// makes the same alert on two hosts the same key under two origins. Two
+    /// alerts describing the same condition on the same host share a key, so a
+    /// `Put` replaces the prior state in place and a later `Resolved`/`Delete`
+    /// clears precisely that alert. The key is stable under label reordering
+    /// (labels sort by name before hashing) and carries no rule-name prefix
+    /// (rule names are CamelCase; chunks are lowercase-only, RFC 03 §2).
+    ///
+    /// **`host.*` is ZenSight's host-scoped label vocabulary** and is excluded
+    /// before hashing, alongside the RFC's own `host`. That is not a deviation:
+    /// RFC 11 §3.1 excludes "the label named `host`, *and any label the
+    /// producer documents as host-scoped*", precisely because only the producer
+    /// knows its vocabulary. `host.id`, `host.boot_id` and friends are identity
+    /// *annotations* stamped onto an alert for correlation, not part of what
+    /// the alert is about — and keying on them would orphan a firing alert
+    /// every time the identity envelope refreshed: the `Firing` would sit on
+    /// the old key forever while the `Resolved` landed on a new one. See
+    /// [`HOST_SCOPED_PREFIX`] and the round-trip test in
+    /// `zensight-sensor-core/tests/alert_reporter.rs` (#738).
     pub fn alert_key(&self) -> String {
-        let mut hasher = Fnv1a::new();
-        hasher.update(self.rule.as_bytes());
-        hasher.update(b"\0");
-        // BTreeMap iterates in sorted key order → deterministic.
-        let sorted: BTreeMap<&String, &String> = self.labels.iter().collect();
-        for (k, v) in sorted {
-            if k.starts_with("host.") {
-                continue; // annotation namespace — never part of alert identity
+        let discriminating: Vec<(&str, &str)> = self
+            .labels
+            .iter()
+            .filter(|(k, _)| !is_host_scoped(k))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        match zenkey::alert::alert_key(&self.rule, &discriminating) {
+            Ok(key) => key,
+            Err(e) => {
+                // RFC 11 §3.1 refuses these inputs because the framing would
+                // stop being injective: a `\n` in a rule forges a label, an
+                // `=` in a name forges a value. `alert_key` is infallible at
+                // all ~35 of its call sites, so returning a `Result` here
+                // would churn the tree for an input no ZenSight rule produces.
+                //
+                // Instead the offending bytes become `_` and the normative
+                // derivation runs on *that* — deterministic, so a `Firing` and
+                // its `Resolved` still agree, which is the one property a key
+                // must never lose. The WARN is how an operator learns the rule
+                // name needs fixing.
+                tracing::warn!(
+                    rule = %self.rule,
+                    error = %e,
+                    "alert rule/labels violate RFC 11 §3.1 framing; keying on a sanitized \
+                     rendering — fix the rule name"
+                );
+                let rule = sanitize_value(&self.rule);
+                let rule = if rule.is_empty() {
+                    "unnamed".to_string()
+                } else {
+                    rule
+                };
+                let pairs: Vec<(String, String)> = discriminating
+                    .iter()
+                    .map(|(k, v)| {
+                        let name = sanitize_name(k);
+                        (
+                            if name.is_empty() {
+                                "_".to_string()
+                            } else {
+                                name
+                            },
+                            sanitize_value(v),
+                        )
+                    })
+                    .collect();
+                let borrowed: Vec<(&str, &str)> = pairs
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                zenkey::alert::alert_key(&rule, &borrowed)
+                    .expect("a sanitized rule and labels satisfy RFC 11 §3.1's framing rules")
             }
-            hasher.update(k.as_bytes());
-            hasher.update(b"=");
-            hasher.update(v.as_bytes());
-            hasher.update(b"\0");
         }
-        format!("{:016x}", hasher.finish())
     }
 }
 
-/// Tiny FNV-1a 64-bit hasher — stable across runs/platforms (unlike
-/// `DefaultHasher`), so the same alert always yields the same `alert_key`.
-struct Fnv1a(u64);
+/// The prefix of ZenSight's **host-scoped label vocabulary** — the identity
+/// annotations (`host.id`, `host.boot_id`, …) a producer stamps onto an alert
+/// for correlation.
+///
+/// RFC 11 §3.1 excludes the label named `host` itself and leaves the rest of
+/// the host-scoped vocabulary to the producer to declare, because only the
+/// producer knows it. This constant is ZenSight's declaration. Excluding these
+/// is what keeps a firing alert's key stable across an identity refresh (#738).
+pub const HOST_SCOPED_PREFIX: &str = "host.";
 
-impl Fnv1a {
-    fn new() -> Self {
-        Fnv1a(0xcbf2_9ce4_8422_2325)
-    }
-    fn update(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 ^= b as u64;
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    fn finish(&self) -> u64 {
-        self.0
-    }
+/// Whether `name` is a host-scoped label (RFC 11 §3.1) under ZenSight's
+/// vocabulary: the RFC's own `host`, or anything in the [`HOST_SCOPED_PREFIX`]
+/// annotation namespace.
+///
+/// `zenkey::alert::alert_key` drops the bare `host` itself; naming it here too
+/// keeps the whole rule readable in one place, and the double exclusion is
+/// harmless.
+#[must_use]
+pub fn is_host_scoped(name: &str) -> bool {
+    name == "host" || name.starts_with(HOST_SCOPED_PREFIX)
+}
+
+/// RFC 11 §3.1 forbids `\n` in a label value and in a rule name.
+fn sanitize_value(s: &str) -> String {
+    s.replace('\n', "_")
+}
+
+/// RFC 11 §3.1 forbids `\n` and `=` in a label name.
+fn sanitize_name(s: &str) -> String {
+    s.replace(['\n', '='], "_")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The RFC 11 §3.1 test vector**, which every implementation MUST
+    /// reproduce: rule `link_down`, labels `{peer: r2, port: eth0, host: …}`.
+    /// `host` is host-scoped and drops out, `peer` sorts before `port`, and
+    /// the hashed input is the 27 bytes `link_down\npeer=r2\nport=eth0`.
+    ///
+    /// This is the pin that says ZenSight is on the normative derivation
+    /// rather than merely on *a* stable one. Before #736 this same alert
+    /// keyed as `c25da085d5c5b7e7`: same hash function, same 16-hex width,
+    /// two differences — the framing put `\0` *after* the rule and after each
+    /// pair rather than `\n` *before* each pair, and the exclusion matched
+    /// only the `host.` prefix, so the RFC's own bare `host` label was hashed
+    /// in. That is why adopting this re-keys every firing alert (#737).
+    #[test]
+    fn the_rfc_11_3_1_test_vector() {
+        let a = Alert::new(
+            "h",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "link_down",
+            AlertSeverity::Critical,
+            "link down",
+        )
+        .with_label("port", "eth0")
+        .with_label("host", "h-3fa9c2d41b7e")
+        .with_label("peer", "r2");
+        assert_eq!(a.alert_key(), "a659f813308ad1da");
+        // And it is the zenkey function's own answer, not a copy of it.
+        assert_eq!(
+            a.alert_key(),
+            zenkey::alert::alert_key("link_down", &[("peer", "r2"), ("port", "eth0")]).unwrap()
+        );
+    }
+
+    /// A rule with no discriminating labels hashes the bare rule name — the
+    /// degenerate case of the framing, and the one an off-by-one separator
+    /// would get wrong.
+    #[test]
+    fn a_rule_with_no_labels_hashes_the_bare_rule_name() {
+        let a = Alert::new(
+            "h",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "link_down",
+            AlertSeverity::Critical,
+            "link down",
+        );
+        assert_eq!(
+            a.alert_key(),
+            zenkey::alert::alert_key("link_down", &[]).unwrap()
+        );
+    }
+
+    /// The `host.*` annotation namespace is ZenSight's declared host-scoped
+    /// vocabulary under RFC 11 §3.1 ("any label the producer documents as
+    /// host-scoped"), so a stamped alert hashes exactly like an unstamped one.
+    #[test]
+    fn host_scoped_labels_are_excluded_from_the_normative_input() {
+        assert!(is_host_scoped("host"));
+        assert!(is_host_scoped("host.id"));
+        assert!(is_host_scoped("host.boot_id"));
+        assert!(!is_host_scoped("hostname"));
+        assert!(!is_host_scoped("port"));
+
+        let a = Alert::new(
+            "h",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "link_down",
+            AlertSeverity::Critical,
+            "link down",
+        )
+        .with_label("port", "eth0")
+        .with_label("host.id", "h-3fa9c2d41b7e")
+        .with_label("host.boot_id", "bbbb");
+        assert_eq!(
+            a.alert_key(),
+            zenkey::alert::alert_key("link_down", &[("port", "eth0")]).unwrap()
+        );
+    }
+
+    /// A rule name that RFC 11 §3.1 refuses (a `\n` forges a label) still
+    /// yields a key, deterministically — the wrapper is infallible because
+    /// ~35 call sites are, and a `Firing` and its `Resolved` must agree even
+    /// for a malformed rule.
+    #[test]
+    fn a_framing_violating_rule_still_keys_deterministically() {
+        let bad = |rule: &str| {
+            Alert::new(
+                "h",
+                Protocol::Netlink,
+                AlertKind::Expectation,
+                rule,
+                AlertSeverity::Warning,
+                "s",
+            )
+            .with_label("port", "22")
+        };
+        let a = bad("link\ndown");
+        assert_eq!(
+            a.alert_key(),
+            bad("link\ndown").alert_key(),
+            "deterministic"
+        );
+        assert_eq!(a.alert_key().len(), 16);
+        assert!(a.alert_key().chars().all(|c| c.is_ascii_hexdigit()));
+        // The sanitized rendering is what was hashed.
+        assert_eq!(
+            a.alert_key(),
+            zenkey::alert::alert_key("link_down", &[("port", "22")]).unwrap()
+        );
+        // An empty rule is the other refusal, and it also survives.
+        let empty = Alert::new(
+            "h",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "",
+            AlertSeverity::Warning,
+            "s",
+        );
+        assert_eq!(empty.alert_key().len(), 16);
+    }
 
     #[test]
     fn alert_key_stable_under_label_reordering() {

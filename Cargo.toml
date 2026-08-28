@@ -16,6 +16,10 @@ members = [
     "zensight-sensor-netlink",
     "zensight-sensor-netring",
     "zensight-sensor-parallax",
+    # Dependency-free BTF reader shared by the eBPF crates (#682, #681):
+    # a dev-dependency of the -ebpf-common crates (so it can never reach the
+    # bpfel-unknown-none object) and a real one of the userspace sensors.
+    "zensight-btf",
     "zensight-sensor-systemd",
     # EVALUATION ONLY (epic #415): Rerun visualization adapter prototype.
     # publish = false, nothing depends on it; may be removed wholesale if the
@@ -32,6 +36,10 @@ members = [
     "zensight-sensor-sysinfo-ebpf",
     "zensight-sensor-netlink-ebpf-common",
     "zensight-sensor-netlink-ebpf",
+    # CI conformance harness (#744): stands a deployment up and runs
+    # zenkey-fleet's RFC judges against it. publish = false, and the ONLY
+    # crate here that may link zenkey-fleet — see its README, "The boundary".
+    "zensight-conformance",
 ]
 
 [workspace.package]
@@ -43,8 +51,8 @@ authors = ["Marc Pardo <p13marc@gmail.com>"]
 
 [workspace.dependencies]
 # Zenoh
-zenoh = { version = "1.9", features = ["unstable"] }
-zenoh-ext = { version = "1.9", features = ["unstable"] }
+zenoh = { version = "1.10", features = ["unstable"] }
+zenoh-ext = { version = "1.10", features = ["unstable"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -80,6 +88,11 @@ glob = "0.3"
 
 # Configuration
 json5 = "1.0"
+# TOML, for the two places that read a registry file as data rather than
+# through zenkey-build's generated surface: the SNMP MIB loader, and the
+# parallax test that pins the declared rate ceiling against the interval the
+# sensor enforces (#715) — a field zenkey-build 0.7 does not lint.
+toml = "1.1.3"
 
 # Logging
 tracing = "0.1"
@@ -113,14 +126,43 @@ aya = "0.13"
 aya-log = "0.2"
 aya-build = "0.1"
 
+# The video pipeline engine (lib name `parallax`) — the parallax sensor's
+# encoder/source graph and the frontend's opt-in `h264` decoder. Promoted to a
+# workspace dep (#727) so the sensor that *encodes* and the GUI that *decodes*
+# can never drift onto two versions of the same bitstream contract. Default
+# features are empty on purpose; each member opts into exactly what it needs.
+parallax-pipeline = { version = "0.8.0", default-features = false }
+
 # Internal crates
 zensight-common = { path = "zensight-common" }
 # The keyspace convention crate — external since the zenkey extraction (RFC set
 # + zenctl live there too). crates.io dep (#517); registry TOMLs live in-repo
 # (zensight-common/registry/), compiled at build time by zenkey-build.
-zenkey = "0.6"
-zenkey-build = "0.6"
+zenkey = "0.7"
+zenkey-build = "0.7"
+# The upstream fleet engine: the RFC 05 §2.1 fan-in discipline, bounded and
+# elision-reporting fan-out, declared queriers, registry-slice sets, RFC 13's
+# `Judgement`, and the conformance judges `run_doctor` exposes.
+#
+# Two members link it and NOTHING ELSE MAY: `zensight` for the fleet view
+# (#745/#746) and `zensight-conformance` for the CI judges (#744). It drags a
+# full tokio + zenoh-ext + arc-swap + base64 + ciborium + serde_json tree, so it
+# must never enter `zensight-common` or any crate a sensor links.
+#
+# `default-features = false` drops the `decode` seam (schema-aware payload
+# decode) here, because the fleet view does not use it. `zensight-conformance`
+# opts back in explicitly — its payload checks are exactly that seam — so the
+# cost is declared at the crate that incurs it rather than paid fleet-wide by
+# default.
+#
+# NOTE the package license is **Apache-2.0**, not the MIT of the zenkey
+# workspace root it lives in. Nothing here is published, so the only
+# obligation is attribution wherever a built binary ships.
+zenkey-fleet = { version = "0.10", default-features = false }
 schemars = "1"
+# Draft-2020-12 payload conformance, behind zensight-common's `validate-json`
+# feature (#741). `default-features = false` keeps the format/regex extras out.
+jsonschema = { version = "0.49", default-features = false }
 zensight-sensor-core = { path = "zensight-sensor-core" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # graduated from in-tree `zenoh-blob/` — epic #193; renamed on extraction).

@@ -59,18 +59,37 @@ pub fn start(report: Arc<Mutex<LatencyReport>>, poll_interval_secs: u64) -> Resu
     let bio: PerCpuArray<MapData, u64> =
         PerCpuArray::try_from(bpf.take_map("BIO_HIST").context("BIO_HIST map missing")?)?;
 
+    let interval = poll_interval_secs.max(1);
+
+    // `available` means "the programs loaded and attached", NOT "a sample has
+    // arrived" — it is what lets the GUI tell an eBPF-less build or a missing
+    // capability from a sensor that simply did not answer. Delaying it until
+    // the first window would make the GUI show its "not built with --features
+    // ebpf / check CAP_BPF" copy for the first `interval` seconds of every
+    // healthy run, which is a worse lie than the one it fixes. What was wrong
+    // is the *window* underneath it (below) and the GUI's rendering of an
+    // all-empty report (#685).
     if let Ok(mut r) = report.lock() {
         r.available = true;
-        r.window_secs = poll_interval_secs;
+        r.window_secs = interval;
     }
 
-    let interval = poll_interval_secs.max(1);
     let handle = tokio::spawn(async move {
         // Keep the loaded programs attached for the lifetime of the poller.
         let _bpf = bpf;
-        let mut prev_runq = [0u64; MAX_SLOTS];
-        let mut prev_bio = [0u64; MAX_SLOTS];
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval));
+
+        // `tokio::time::interval` fires its first tick immediately. Consume it
+        // here as a priming read rather than inside the loop: it is separated
+        // from program load by microseconds, so publishing it would announce a
+        // `window_secs`-long window covering almost no time at all — a report
+        // that reads as "idle host" when it means "we only just started
+        // counting". Seeding `prev_*` from a real read instead makes the first
+        // published window a true `interval` (#685).
+        tick.tick().await;
+        let mut prev_runq = read_hist(&runq);
+        let mut prev_bio = read_hist(&bio);
+
         loop {
             tick.tick().await;
             let cur_runq = read_hist(&runq);

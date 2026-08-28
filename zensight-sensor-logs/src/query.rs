@@ -244,7 +244,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let prefix = format!("test_{nanos}/logs");
+        // A *producer chunk*, not a key prefix: lowercase alnum + `-` (RFC 03
+        // §1.5). It used to read `test_{nanos}/logs`, which zenkey 0.6
+        // silently slugged into something else entirely — 0.7 refuses it,
+        // which is how this was found.
+        let prefix = format!("test-{nanos}-logs");
 
         // Multicast scouting OFF. A default-config session joins whatever mesh
         // it can reach — including a live fleet on the same host — so a test

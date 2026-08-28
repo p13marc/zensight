@@ -18,8 +18,9 @@ use crate::message::Message;
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized::fetch::Fetch;
-use crate::view::specialized::parallax_detail::{ParallaxDetailState, TileState};
+use crate::view::specialized::parallax_detail::{ParallaxDetailState, TileEnd, TileState};
 use crate::view::specialized::parallax_h264;
+use crate::view::specialized::parallax_health;
 use crate::view::theme;
 use crate::view::tokens::space;
 
@@ -75,6 +76,21 @@ fn muted(t: &Theme) -> text::Style {
     }
 }
 
+fn danger(t: &Theme) -> text::Style {
+    text::Style {
+        color: Some(theme::colors(t).danger_text()),
+    }
+}
+
+/// Style an end reason by whose fault it is (#691).
+///
+/// A stream the operator closed and a stream whose camera died both used to
+/// read as the same grey aside. Only the second is a fault, and now that the
+/// producer says which, the tile can stop making the reader work it out.
+fn end_style(end: &TileEnd) -> fn(&Theme) -> text::Style {
+    if end.is_failure() { danger } else { muted }
+}
+
 /// Wrap a catalogue action button with a hover tooltip spelling out what a
 /// click opens (a bare tier name like `high` isn't self-explanatory).
 fn action_tooltip<'a>(
@@ -101,6 +117,30 @@ fn tier_readout(detail: &ParallaxDetailState, name: &str, tile: &TileState) -> O
         "{tier} · {}×{} · {} kbps",
         applied.applied.width, applied.applied.height, applied.applied.bitrate_kbps
     ))
+}
+
+/// Is this stream's bitrate cap biting *right now*?
+///
+/// `{stream}/stats/rc_drops` counts frames the encoder's rate control swallowed
+/// to hold the tier's `bitrate_kbps` (#510). It is cumulative, so a non-zero
+/// value only says the cap bit at *some* point; growth between the two most
+/// recent samples is what says it is biting now.
+///
+/// The counter is per stream, summed over its open tiers — but the GUI opens
+/// one tier per stream, so it is that tier's.
+fn rc_capped(state: &DeviceDetailState, stream: &str) -> bool {
+    let history = match state.history.get(&format!("{stream}/stats/rc_drops")) {
+        Some(h) => h,
+        None => return false,
+    };
+    let mut counters = history.iter().rev().filter_map(|p| match p.value {
+        zensight_common::TelemetryValue::Counter(n) => Some(n),
+        _ => None,
+    });
+    match (counters.next(), counters.next()) {
+        (Some(latest), Some(previous)) => latest > previous,
+        _ => false,
+    }
 }
 
 /// A tier button's short label: `<name> ≤<cap>p` (or `<name> native` when the
@@ -153,6 +193,20 @@ fn catalogue_row<'a>(
             }
             buttons = buttons.push(action_tooltip(b, tier_tooltip(spec)));
         }
+        // Adaptation is on by default and says so only when it is *not*
+        // running (#720): a badge that is always lit is furniture, and the
+        // state worth surfacing is the one the operator created and can undo.
+        if open && detail.is_pinned(&stream.stream) {
+            buttons = buttons.push(action_tooltip(
+                button(text("Auto").size(12)).on_press(Message::ParallaxAutoTier {
+                    stream: stream.stream.clone(),
+                }),
+                "Pinned by your tier choice — hand tier selection back to the \
+                 viewer, which drops a rung when the link degrades and climbs \
+                 back after sustained recovery"
+                    .to_string(),
+            ));
+        }
         if open {
             buttons = buttons.push(button(text("Close").size(12)).on_press(
                 Message::ParallaxCloseTile {
@@ -195,10 +249,11 @@ fn tile<'a>(
     detail: &'a ParallaxDetailState,
     name: &'a str,
     tile: &'a TileState,
+    capped: bool,
 ) -> Element<'a, Message> {
     let picture: Element<'a, Message> = match (&tile.frame, &tile.ended) {
         (Some(handle), _) => preview_frame(handle.clone()),
-        (None, Some(reason)) => container(text(reason.as_str()).size(12).style(muted))
+        (None, Some(end)) => container(text(end.text()).size(12).style(end_style(end)))
             .width(Length::Fixed(PREVIEW_W as f32))
             .height(Length::Fixed(PREVIEW_H as f32))
             .center(Length::Fill)
@@ -211,14 +266,19 @@ fn tile<'a>(
         })
         .interaction(iced::mouse::Interaction::Pointer)
         .into();
-    let caption = if let Some(reason) = &tile.ended {
-        format!("{name} — {reason}")
+    let caption = if let Some(end) = &tile.ended {
+        format!("{name} — {}", end.text())
     } else if tile.frame.is_some() {
         // For a video tile, prefer the sensor's applied per-tier readout
         // (resolution + bitrate, #503) over the client-side fps EMA alone.
+        // `· capped` says the encoder is shedding frames to hold the tier's
+        // bitrate — the difference between "this tier looks soft" and "this
+        // tier is soft *because you asked for 400 kbps*". Grid captions only:
+        // this is the surface where several streams are compared at once.
+        let cap = if capped { " · capped" } else { "" };
         match tier_readout(detail, name, tile) {
-            Some(readout) => format!("{name} · {readout} · {:.1} fps", tile.fps),
-            None => format!("{name} · seq {} · {:.1} fps", tile.last_seq, tile.fps),
+            Some(readout) => format!("{name} · {readout} · {:.1} fps{cap}", tile.fps),
+            None => format!("{name} · seq {} · {:.1} fps{cap}", tile.last_seq, tile.fps),
         }
     } else {
         format!("{name} · waiting for frames…")
@@ -244,7 +304,8 @@ fn tile<'a>(
 /// outside to dismiss) around the stream's latest frame scaled up, with a
 /// caption + Close button. `None` while nothing is expanded — and a closed
 /// or torn-down tile dismisses the overlay implicitly (`expanded_tile`).
-pub fn expanded_overlay(detail: &ParallaxDetailState) -> Option<Element<'_, Message>> {
+pub fn expanded_overlay(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let detail = &state.parallax_detail;
     let (name, tile) = detail.expanded_tile()?;
     let picture: Element<'_, Message> = image(tile.frame.clone().unwrap_or_else(placeholder_frame))
         .width(Length::Fill)
@@ -252,8 +313,8 @@ pub fn expanded_overlay(detail: &ParallaxDetailState) -> Option<Element<'_, Mess
         .content_fit(ContentFit::Contain)
         .into();
     let profile = if tile.video { "H.264" } else { "preview" };
-    let caption = if let Some(reason) = &tile.ended {
-        format!("{name} · {profile} — {reason}")
+    let caption = if let Some(end) = &tile.ended {
+        format!("{name} · {profile} — {}", end.text())
     } else if tile.frame.is_some() {
         match tier_readout(detail, name, tile) {
             Some(readout) => format!("{name} · {readout} · {:.1} fps", tile.fps),
@@ -272,11 +333,18 @@ pub fn expanded_overlay(detail: &ParallaxDetailState) -> Option<Element<'_, Mess
     ]
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
+    // The drill-down (#719). #503 put real resolution/bitrate/fps on the grid
+    // caption; this is where those numbers get explained — which stage of the
+    // path is losing the picture, in one line over the chain that shows it.
     let card = container(
-        column![header, picture]
-            .spacing(space::SM)
-            .width(Length::Fill)
-            .height(Length::Fill),
+        column![
+            header,
+            parallax_health::health_panel(state, name, tile),
+            picture
+        ]
+        .spacing(space::SM)
+        .width(Length::Fill)
+        .height(Length::Fill),
     )
     .padding(space::MD)
     .width(Length::Fill)
@@ -381,7 +449,7 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
         for chunk in tiles.chunks(TILES_PER_ROW) {
             let mut grid_row = row![].spacing(space::MD);
             for (name, tile_state) in chunk {
-                grid_row = grid_row.push(tile(detail, name, tile_state));
+                grid_row = grid_row.push(tile(detail, name, tile_state, rc_capped(state, name)));
             }
             content = content.push(grid_row);
         }
@@ -405,20 +473,75 @@ mod tests {
         assert!(preview_handle_from_jpeg(b"definitely not a jpeg").is_none());
     }
 
+    /// `rc_drops` is cumulative, so a non-zero value alone only says the cap
+    /// bit at *some* point in this stream's life. The caption marker is about
+    /// now, so it keys off growth between the two most recent samples.
+    #[test]
+    fn rc_capped_reads_growth_not_the_absolute_counter() {
+        use crate::view::device::DeviceDetailState;
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+        fn state_with(samples: &[u64]) -> DeviceDetailState {
+            let mut state = DeviceDetailState::new(crate::message::DeviceId {
+                protocol: Protocol::Parallax,
+                origin: "h-000000000000".to_string(),
+                source: "cam-host".to_string(),
+            });
+            state.history.insert(
+                "cam0/stats/rc_drops".to_string(),
+                samples
+                    .iter()
+                    .map(|n| {
+                        TelemetryPoint::new(
+                            "cam-host",
+                            Protocol::Parallax,
+                            "cam0/stats/rc_drops",
+                            TelemetryValue::Counter(*n),
+                        )
+                    })
+                    .collect(),
+            );
+            state
+        }
+
+        assert!(
+            rc_capped(&state_with(&[7, 11]), "cam0"),
+            "the counter grew between the last two ticks — the cap is biting now"
+        );
+        assert!(
+            !rc_capped(&state_with(&[11, 11]), "cam0"),
+            "a large but static counter means the cap bit earlier, not now"
+        );
+        assert!(
+            !rc_capped(&state_with(&[4]), "cam0"),
+            "one sample cannot show growth"
+        );
+        assert!(
+            !rc_capped(&state_with(&[]), "cam0"),
+            "a stream with no rate control publishes nothing to read"
+        );
+    }
+
     #[test]
     fn expanded_overlay_renders_caption_and_close() {
         use iced_test::simulator;
 
-        let mut detail = ParallaxDetailState::default();
-        let generation = detail.allocate_generation();
-        detail.open_tile("cam0", generation, None, true, Some("high".to_string()));
+        let mut state = DeviceDetailState::new(crate::message::DeviceId {
+            protocol: zensight_common::Protocol::Parallax,
+            origin: "h-000000000000".to_string(),
+            source: "cam-host".to_string(),
+        });
+        let generation = state.parallax_detail.allocate_generation();
+        state
+            .parallax_detail
+            .open_tile("cam0", generation, None, true, Some("high".to_string()));
         assert!(
-            expanded_overlay(&detail).is_none(),
+            expanded_overlay(&state).is_none(),
             "no overlay while nothing is expanded"
         );
 
-        detail.expand("cam0");
-        let overlay = expanded_overlay(&detail).expect("overlay for the expanded tile");
+        state.parallax_detail.expand("cam0");
+        let overlay = expanded_overlay(&state).expect("overlay for the expanded tile");
         let mut ui = simulator(overlay);
         assert!(
             ui.find("cam0 · H.264 · waiting for frames…").is_ok(),

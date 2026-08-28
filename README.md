@@ -78,6 +78,10 @@ just gui listen=tcp/0.0.0.0:7447     # just the GUI (non-loopback for remote sen
 just sensors                         # just the local sensors (Ctrl-C stops them)
 just sensors connect=tcp/<gui-host>:7447   # …feeding a GUI on another machine
 
+# Or export the bus into real dashboards, one command each (see demo/README.md):
+just demo-prometheus   # sensors + exporter + Prometheus + Grafana, provisioned
+just demo-otel         # sensors + exporter + grafana/otel-lgtm (Prometheus/Tempo/Loki)
+
 # One sensor at a time
 just netring   # | netlink | sysinfo | logs | systemd | parallax
 ```

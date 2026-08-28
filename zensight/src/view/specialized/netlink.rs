@@ -569,6 +569,7 @@ fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>
                 cell("comm", 120),
                 cell("local", 170),
                 cell("remote", 170),
+                cell("closed", 80),
                 cell("dur_ms", 80),
                 cell("tx", 80),
                 cell("rx", 80),
@@ -582,10 +583,15 @@ fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>
                     cell(&c.comm, 120),
                     cell(&format!("{}:{}", c.local, c.lport), 170),
                     cell(&format!("{}:{}", c.remote, c.rport), 170),
+                    // 0 means a producer older than #685, not 1970.
+                    cell(&conn_age(c.ts_unix_ms), 80),
                     cell(&c.duration_ms.to_string(), 80),
-                    cell(&c.tx_bytes.to_string(), 80),
-                    cell(&c.rx_bytes.to_string(), 80),
-                    cell(&c.retrans.to_string(), 55),
+                    // A dash, not a 0, when the sensor could not resolve this
+                    // kernel's tcp_sock offsets (#681) — "not measured" and
+                    // "moved nothing" are different facts.
+                    cell(&counter(c.counters_measured, c.tx_bytes), 80),
+                    cell(&counter(c.counters_measured, c.rx_bytes), 80),
+                    cell(&counter(c.counters_measured, c.retrans as u64), 55),
                 ]
                 .spacing(8),
             );
@@ -602,11 +608,39 @@ fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>
     Some(card(col))
 }
 
-/// Address-family label for the eBPF records' numeric `family` (AF_INET/AF_INET6).
+/// A tcplife byte/segment counter, or a dash when nothing measured it (#681).
+fn counter(measured: bool, value: u64) -> String {
+    if measured {
+        value.to_string()
+    } else {
+        "—".to_string()
+    }
+}
+
+/// When a tcplife record closed, relative to now.
+///
+/// `ts_unix_ms == 0` is a producer that predates the field (#685), not the
+/// epoch — rendering "56y ago" there would be worse than saying nothing.
+fn conn_age(ts_unix_ms: i64) -> String {
+    if ts_unix_ms == 0 {
+        "—".to_string()
+    } else {
+        crate::view::formatting::format_timestamp(ts_unix_ms)
+    }
+}
+
+/// Address-family label for the eBPF records' `family`.
+///
+/// The wire carries a **digit** — 4 or 6 — not a raw `AF_*` constant: the
+/// sensor converts through `fam_digit` before publishing, and
+/// `RetransmitRecord`/`ConnectionRecord` both document the field as "a digit:
+/// 4 or 6". This matched 2/10 until #685, so every retransmit row rendered
+/// "?"; the fixture that should have caught it used `family: 2`, a value the
+/// sensor cannot emit.
 fn fam_label(family: u8) -> &'static str {
     match family {
-        2 => "IPv4",
-        10 => "IPv6",
+        4 => "IPv4",
+        6 => "IPv6",
         _ => "?",
     }
 }
@@ -2067,5 +2101,34 @@ fn num(v: Option<&TelemetryValue>) -> String {
         Some(TelemetryValue::Text(s)) => s.clone(),
         Some(TelemetryValue::Boolean(b)) => b.to_string(),
         _ => "-".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The producer and this label must agree on what `family` means. They did
+    /// not: `fam_digit` emits 4/6 and this matched 2/10, so every retransmit
+    /// row rendered "?" (#685). Neither side had a test, which is exactly how
+    /// a two-line disagreement survived.
+    #[test]
+    fn fam_label_reads_the_digits_the_wire_carries() {
+        assert_eq!(fam_label(4), "IPv4");
+        assert_eq!(fam_label(6), "IPv6");
+        // The raw AF_* constants are what this used to match. They must NOT
+        // work now, or the bug could come back the other way round.
+        assert_eq!(fam_label(2), "?", "AF_INET never reaches the wire");
+        assert_eq!(fam_label(10), "?", "AF_INET6 never reaches the wire");
+        // `fam_digit` yields 0 for anything it does not recognise.
+        assert_eq!(fam_label(0), "?");
+    }
+
+    /// A tcplife record from a producer older than #685 carries no timestamp;
+    /// rendering it as an age would claim the connection closed in 1970.
+    #[test]
+    fn conn_age_declines_to_date_a_missing_timestamp() {
+        assert_eq!(conn_age(0), "—");
+        assert_ne!(conn_age(1_787_313_600_000), "—");
     }
 }

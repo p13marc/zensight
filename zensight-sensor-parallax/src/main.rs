@@ -107,11 +107,21 @@ async fn main() -> Result<()> {
     // (`<stream>/stats/{fps,kbps,drops,viewers,encode_ms}` + the always-on
     // `streams/advertised` presence gauge).
     let stats = zensight_sensor_parallax::stats::StatsRegistry::default();
+    // Receiver feedback (#715). Deliberately built here and handed to two
+    // places that cannot reach an encoder: the queryable that accepts reports,
+    // and the stats ticker that publishes their aggregate. Nothing that holds
+    // a `SessionHandle` ever sees it — RFC 07 §1.2 forbids re-tuning a shared
+    // tier from a report, and this is where that becomes structural.
+    let reports = std::sync::Arc::new(
+        zensight_sensor_parallax::reports::ReceiverReports::from_config(&parallax_config),
+    );
+
     {
         let t_publisher = runner.publisher();
         let t_source = source.clone();
         let t_stats = stats.clone();
         let t_alerts = alerts.clone();
+        let t_reports = reports.clone();
         let advertised = catalog.entries().len();
         let interval = std::time::Duration::from_secs(parallax_config.stats_interval_secs);
         runner.spawn(async move {
@@ -122,6 +132,7 @@ async fn main() -> Result<()> {
                 advertised,
                 interval,
                 Some(t_alerts),
+                t_reports,
             )
             .await;
         });
@@ -163,12 +174,26 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Receiver feedback (`@rpc/parallax/stream/report`). Beside the control
+    // channel and pointedly NOT part of it: `command::run` takes a
+    // `SessionHandle`, this takes only the report store.
+    {
+        let r_session = session.clone();
+        let r_producer = "parallax".to_string();
+        let r_reports = reports.clone();
+        runner.spawn(async move {
+            zensight_sensor_parallax::reports::run(r_session, r_producer, r_reports).await;
+        });
+    }
+
     // Serve the stream catalogue on `@rpc/parallax/streams`.
     {
         let q_session = session.clone();
         let q_producer = "parallax".to_string();
         let q_catalog = catalog.clone();
-        let q_tiers = parallax_config.video.tiers.clone();
+        // The catalogue advertises the wire ladder; the per-tier encoder
+        // shaping (#509) stays on this host.
+        let q_tiers = parallax_config.video.ladder();
         let q_handle = session_handle.clone();
         runner.spawn(async move {
             query::run(q_session, q_producer, q_catalog, q_tiers, q_handle).await;
@@ -180,7 +205,7 @@ async fn main() -> Result<()> {
         "source": source,
         "streams": catalog.stream_names().collect::<Vec<_>>(),
         "preview_fps": parallax_config.preview.fps,
-        "tiers": parallax_config.video.tiers.iter().map(|t| &t.name).collect::<Vec<_>>(),
+        "tiers": parallax_config.video.tiers.iter().map(|t| &t.spec.name).collect::<Vec<_>>(),
         "default_tier": parallax_config.video.default_tier,
         "idle_timeout_secs": parallax_config.idle_timeout_secs,
     });

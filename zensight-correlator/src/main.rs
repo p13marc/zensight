@@ -7,6 +7,7 @@ use clap::Parser;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info};
 use zensight_common::config::LoggingConfig;
+use zensight_common::{catalog_rpc_key, entities_query_key, names_query_key};
 
 use zensight_correlator::config::CorrelatorConfig;
 use zensight_correlator::engine::{CorrelatorState, Engine};
@@ -27,6 +28,14 @@ struct Args {
     #[arg(long)]
     demo: bool,
 }
+
+/// How long to wait for the spawned tasks to declare their queryables before
+/// asserting `alive` (RFC 04 §5: alive ⇒ callable).
+///
+/// Mirrors `zensight_sensor_core`'s `DECLARATION_GRACE` and for the same
+/// reason: far beyond any local `declare_queryable`, short enough not to delay
+/// presence noticeably.
+const DECLARATION_GRACE: Duration = Duration::from_secs(2);
 
 /// Bound on the single-instance liveliness probe.
 const GUARD_TIMEOUT: Duration = Duration::from_secs(3);
@@ -53,9 +62,12 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to connect to Zenoh: {e}"))?,
     );
 
-    // Single-writer guard.
-    let _tokens = match guard::acquire(&session, GUARD_TIMEOUT).await? {
-        GuardOutcome::Acquired(claim, alive) => (claim, alive),
+    // Single-writer guard. This wins the election and takes the claim token;
+    // it deliberately does NOT declare `alive` — that happens below, once the
+    // queryables are serving. See guard.rs, "Election and presence are two
+    // steps, on purpose".
+    let _claim = match guard::acquire(&session, GUARD_TIMEOUT).await? {
+        GuardOutcome::Acquired(claim) => claim,
         GuardOutcome::AlreadyRunning => {
             error!("another correlator instance is already running; exiting");
             std::process::exit(1);
@@ -175,6 +187,54 @@ async fn main() -> anyhow::Result<()> {
                 error!(error = %e, "subscriber error");
             }
         })
+    };
+
+    // Presence, last (RFC 04 §5: `alive` ⇒ callable).
+    //
+    // Every queryable above is declared inside a spawned task, so reading the
+    // served set once here would race them — the same problem, and the same
+    // bounded wait, as `SensorRunner`'s `await_registry_coverage`
+    // (`DECLARATION_GRACE`, #648). The correlator is not a `SensorRunner`, so
+    // it never inherited that discipline: it used to assert `alive` inside the
+    // election, before a single queryable existed. On a loaded two-lane CI
+    // runner that window is wide enough for a judge's introspect sweep to land
+    // inside it, and `zensight-conformance` caught exactly that — which is the
+    // gate doing its job.
+    // The catalog's callable surface, by the exact keys it declares.
+    //
+    // NOT `await_registry_coverage`: that helper derives the serve-side
+    // spelling from *this host's* origin (`v1/h-…/@rpc/catalog/names`), which
+    // is right for a sensor and wrong here — the catalog serves on the
+    // `@catalog` SERVICE origin. Point it at this producer and it reports every
+    // procedure as unserved while the log says they are ready, then
+    // debug-panics. `await_served` takes concrete keys and makes no assumption
+    // about how they were spelled.
+    let callable = [
+        entities_query_key(),
+        names_query_key(),
+        catalog_rpc_key("introspect"),
+        catalog_rpc_key("describe"),
+        catalog_rpc_key("link"),
+        catalog_rpc_key("unlink"),
+    ];
+    let missing = zensight_common::served::await_served(&callable, DECLARATION_GRACE).await;
+    if !missing.is_empty() {
+        // Not fatal: presence with a partial surface is still better than a
+        // catalog the fleet cannot see at all, and the conformance judge will
+        // say so plainly if it matters. But it must not pass silently.
+        error!(
+            missing = ?missing,
+            "declaring `alive` with queryables still undeclared after {DECLARATION_GRACE:?} —              RFC 04 §5 says alive means callable, so this window is a promise this              process cannot yet keep"
+        );
+    }
+    let _alive = match guard::declare_alive(&session).await {
+        Ok(token) => Some(token),
+        // A broken liveliness path must not stop the catalog, exactly as it
+        // must not stop a sensor's telemetry.
+        Err(e) => {
+            error!(error = %e, "failed to declare the catalog alive token");
+            None
+        }
     };
 
     // Wait for a termination signal.

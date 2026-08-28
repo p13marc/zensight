@@ -19,6 +19,9 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
+# Needs no capabilities: a pure bus client — it subscribes to evidence and
+# publishes entities, binds nothing, and makes no privileged syscall.
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

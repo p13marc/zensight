@@ -5,7 +5,9 @@ on:
     # run the full suite on release tags too — otherwise tagging executes
     # zero tests (release.yml only builds). Parallel signal, not a gate.
     tags: ['[0-9]+.[0-9]+.[0-9]+']
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -19,6 +21,9 @@ env:
   # on vm-runner-01; S3 endpoint+credentials come from the runner's env_file
   RUSTC_WRAPPER: /srv/cache/bin/sccache
   CARGO_INCREMENTAL: "0"
+  # Cap build parallelism: cargo otherwise defaults to nproc (6 on
+  # vm-runner-01) per job, against a lane capacity of 2.
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   test:
@@ -32,6 +37,71 @@ jobs:
         with:
           cache-targets: false
       - run: cargo test --workspace --locked
+
+  # Nothing in CI had ever EXECUTED an exporter.
+  #
+  # release.yml builds and pushes twelve component images, both exporters
+  # included, and smoke-runs `--help` on exactly two of them (sysinfo,
+  # correlator). And while `cargo test --workspace` covers the exporters' unit
+  # tests, nothing anywhere started a hub, a sensor and an exporter and scraped
+  # /metrics. That gap is how two scrape-killers shipped: a `# TYPE ... info`
+  # token that made Prometheus discard every sample in the body (#752), and a
+  # duplicate `device` label that made it reject the sample outright (#753).
+  # Both were invisible to the whole suite, which only ever asserted substrings
+  # of a body it never validated.
+  #
+  # This closes it: one real sensor, one real exporter, one real scrape, on
+  # isolated ports with no containers and no privileges.
+  demo-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+      # Debug profile: this asserts behaviour, not speed, and a release build of
+      # the sensor costs minutes for no extra signal.
+      - run: PROFILE=debug scripts/demo-verify.sh
+
+  # Nothing in CI had ever asked a running FLEET whether it obeys its own
+  # contract.
+  #
+  # `cargo test --workspace` proves the code agrees with itself, and
+  # demo-smoke proves the exporter path carries data. Neither can say whether
+  # what a running sensor PUTS ON THE WIRE agrees with the keyspace-v2 RFCs and
+  # with the registry TOMLs that same binary serves on `@rpc/…/introspect`:
+  # the served-vs-declared slice diff, `alive => callable` (RFC 04 §5), schema
+  # drift, declared-vs-observed QoS, freshness against declared ttl_s,
+  # cardinality budgets. Those are properties of a deployment, and only a
+  # deployment can be asked.
+  #
+  # This asks: one real sensor, the real registry, the real judges
+  # (zenkey-fleet's `run_doctor` — the same entry point `zenctl doctor` calls),
+  # on an isolated port with no containers and no privileges.
+  #
+  # What it gates on, and the one check it excludes (upstream zenkey#384 — the
+  # schema-drift walker does not descend `oneOf`, so every adjacently-tagged
+  # TelemetryValue reports two phantom `field-new` warnings), is documented in
+  # zensight-conformance/README.md. The exclusion is in code, named, and lifts
+  # when #384 lands.
+  #
+  # Debug profile and a 12s listen window: this asserts behaviour, not speed,
+  # and the runner has two build lanes.
+  conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: conformance
+          cache-targets: false
+      - run: PROFILE=debug scripts/conformance-verify.sh
 
   # Optional features gate real code that a default build never type-checks:
   # `#[cfg(feature = ...)]` blocks in `main.rs`/`query.rs` and, in netring's
@@ -50,8 +120,10 @@ jobs:
   #
   # NOT covered here: `zensight-sensor-{netlink,sysinfo}` `--features ebpf`.
   # Their build scripts invoke `aya-build` through `rustup run nightly`, so the
-  # leg needs a nightly toolchain, `rust-src`, and a `bpf-linker` install (an
-  # LLVM build) on top of everything above — too much for every push. Both were
+  # leg needs a nightly toolchain, `rust-src`, and a `bpf-linker` install (a
+  # 100 MB prebuilt binary with LLVM baked in — building it from source needs a
+  # matching system LLVM the runner image has not got, #674) on top of
+  # everything above — too much for every push. Both were
   # verified to compile by hand at the commit that added this job; see #662 for
   # the standing plan to cover them out-of-band.
   features:
@@ -140,6 +212,26 @@ jobs:
 
       # #484: every queryable goes through zensight_common::served, so the
       # registry-vs-served check knows what this build actually serves.
+      - name: The exporters must not hand-roll a plain telemetry subscriber
+        run: |
+          # Sensors publish telemetry through an AdvancedPublisher, and the GUI
+          # has always consumed with history + recovery. Both exporters used a
+          # plain `declare_subscriber`, so one started after the sensors got no
+          # backfill and a sample dropped in flight was simply lost (#763).
+          #
+          # The alert, liveliness and events subscribers are deliberately plain:
+          # they carry LWW state or append-only records, not a recoverable
+          # stream, so they are matched out by name below.
+          hits=$(grep -rn '\.declare_subscriber(' \
+            zensight-exporter-*/src \
+            --include='*.rs' \
+            | grep -vE 'alerts_key|alive_key|events_key|/tests/|mod tests' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Raw declare_subscriber in an exporter — use zensight_common::subscribe::declare_telemetry_subscriber so history/recovery cannot silently regress (#763):"
+            echo "$hits"
+            exit 1
+          fi
+
       - name: queryables are declared through served::serve_queryable (#484)
         run: |
           hits=$(grep -rn '\.declare_queryable(' \
@@ -149,6 +241,59 @@ jobs:
             | grep -vE 'served\.rs|/tests/|_test\.rs|mod tests' || true)
           if [ -n "$hits" ]; then
             echo "::error::Raw declare_queryable — serve through zensight_common::served::serve_queryable so registry coverage (RFC 08 §6.1, #484) can see it:"
+            echo "$hits"
+            exit 1
+          fi
+
+      # RFC 07 §1.2 (#715): the report path cannot reach an encoder.
+      - name: receiver feedback informs, it does not command (RFC 07 §1.2)
+        run: |
+          # §1.2 is normative and NEGATIVE: a producer MUST NOT re-tune a
+          # shared tier from one consumer's report. Two viewers share a tier,
+          # one reports loss, the bitrate drops, and the healthy viewer's
+          # picture degrades for a reason it cannot see, caused by a peer it
+          # does not know exists.
+          #
+          # A negative has no natural unit test — you cannot assert that a
+          # function nobody wrote was not called. What you can assert is that
+          # the module holding receiver feedback has no way to reach the knobs,
+          # which is a property of its imports. src/reports.rs takes an
+          # Arc<ReceiverReports> and nothing else, on purpose.
+          #
+          # zensight-sensor-parallax/tests/rfc07_receiver_driven.rs is the same
+          # check; this step exists so a branch that never runs the parallax
+          # suite still fails.
+          hits=$(grep -nE 'PipelineControls|EncoderControl|ScaleControl|ThrottleControl|SessionHandle|SessionMsg|KeyframeHandle|request_keyframe|set_bitrate' \
+            zensight-sensor-parallax/src/reports.rs \
+            | grep -vE '^[0-9]+: *//' || true)   # the module doc names them to explain the rule
+          if [ -n "$hits" ]; then
+            echo "::error::src/reports.rs reaches an encoder control. RFC 07 §1.2 forbids re-tuning a shared tier from a consumer's report (#715). If a control path genuinely belongs there, §1.2 requires a STATED arbitration rule that is not 'the most recent report':"
+            echo "$hits"
+            exit 1
+          fi
+
+      # #782: a state-class seed's replies must be stamped.
+      - name: state-class seeds are served through the stamping seam (#782)
+        run: |
+          # A queryable on a STATE selector answers RFC 04 §3.2's plain-GET
+          # seed path storage-shaped, and a storage's samples are timestamped —
+          # "an untimestamped sample cannot be reconciled". Zenoh's session HLC
+          # stamps a `put` and does NOT stamp a queryable reply, so the seed
+          # path needs `served::serve_state_queryable`, whose `StateQuery`
+          # exposes no unstamped `reply()` at all.
+          #
+          # The real check is structural: `serve_queryable` debug-panics on a
+          # state selector, so a producer's own test suite fails. This step is
+          # the tripwire for the case that never runs a test — matched on the
+          # key-builder names the two seed call sites actually use. A grep
+          # cannot classify a key; it can only notice the shapes we know about.
+          hits=$(grep -rnE 'serve_queryable\([^)]*(entities_query_key|state_key)' \
+            zensight-common/src zensight-correlator/src \
+            zensight-sensor-core/src zensight-sensor-*/src \
+            --include='*.rs' \
+            | grep -vE 'served\.rs|/tests/|mod tests' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::A state-class queryable declared through the unstamped seam — use served::serve_state_queryable, whose replies carry the seed's HLC stamp (RFC 04 §3.2, #782):"
             echo "$hits"
             exit 1
           fi
@@ -175,8 +320,32 @@ jobs:
           fi
 
       # #466: the session namespace is set in exactly one place.
-      - name: every production session goes through zensight_common::session (#466)
+      - name: every production session goes through zensight_common::session (#466, #789)
         run: |
+          # This guard is SPELLING-BASED and the list must grow with every new
+          # way to open a session (#789). It used to grep the single literal
+          # `zenoh::open(`, which meant `zenkey_fleet::open()` and
+          # `open_with_config()` — reachable since #745 put zenkey-fleet in the
+          # GUI's dependency tree — walked straight past it. The pattern below
+          # matches any lowercase-module `::open(` / `::open_*(`; `File::open`
+          # and every other type-associated constructor is capitalised and does
+          # not match.
+          #
+          # The rule is not stylistic. session.rs is where `namespace` is
+          # applied and where `timestamping/enabled` is forced on, and the
+          # comment there records what losing the latter costs: every peer-mode
+          # sensor fails to create its cached publishers and the correlator
+          # never receives evidence. A session opened elsewhere misses both.
+          #
+          # SRC deliberately does not reach tests/ or examples/ — an isolated
+          # test session is exactly what a test should be allowed to build.
+          #
+          # The last filter is the ALLOWLIST, and it is the point of the whole
+          # step: `session::{open_session,connect,build_config}` are the
+          # sanctioned entry points, so calling one is the behaviour this guard
+          # exists to produce, not a violation. Any other `::open(` in
+          # application code is a new way to open a session and must be
+          # justified here before it is added.
           cat > /tmp/strip_tests.awk <<'AWK'
           /^#\[cfg\(test\)\]/ { intest=1 }
           { if (!intest) print FILENAME ":" FNR ":" $0 }
@@ -186,10 +355,12 @@ jobs:
                zensight-exporter-*/src zensight-rerun/src"
           hits=$(find $SRC -name '*.rs' -print0 \
             | xargs -0 -I{} awk -f /tmp/strip_tests.awk {} \
-            | grep 'zenoh::open(' \
-            | grep -vE 'zensight-common/src/session.rs|zensight-rerun/src/session.rs' || true)
+            | grep -E '\b[a-z][a-z0-9_]*::open(_[a-z0-9_]+)?\(' \
+            | grep -vE 'zensight-common/src/session.rs|zensight-rerun/src/session.rs' \
+            | grep -vE ':[0-9]+: *//' \
+            | grep -vE 'session::(open_session|connect|build_config)\(' || true)
           if [ -n "$hits" ]; then
-            echo "::error::Raw zenoh::open — open sessions via zensight_common::session::{connect,build_config}. It is the only place the deployment namespace (#466) is set:"
+            echo "::error::A session is opened outside zensight_common::session. Open via zensight_common::session::{connect,build_config} — it is the only place the deployment namespace (#466) and timestamping are set. If this is a false positive (a ::open() that is not a session), extend the allowlist in this step and say why:"
             echo "$hits"
             exit 1
           fi

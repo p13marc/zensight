@@ -102,6 +102,9 @@ kind = "json-schema"
 [types.StreamStatus]
 kind = "json-schema"
 
+[types.MediaReceiverReport]
+kind = "json-schema"
+
 [types.LogRulesConfig]
 kind = "json-schema"
 

@@ -3232,7 +3232,7 @@ fn test_netlink_sockets_ebpf_section() {
     use zensight::view::specialized::SpecializedTab;
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight::view::specialized::netlink_detail::{
-        ConnRecord, NetlinkDetailData, NetlinkDetailTopic, RetransRecord,
+        ConnectionRecord, NetlinkDetailData, NetlinkDetailTopic, RetransmitRecord,
     };
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
@@ -3262,28 +3262,33 @@ fn test_netlink_sockets_ebpf_section() {
     }
     state.netlink_detail.apply(
         NetlinkDetailTopic::Retransmits,
-        Ok(NetlinkDetailData::Retransmits(vec![RetransRecord {
+        Ok(NetlinkDetailData::Retransmits(vec![RetransmitRecord {
             peer: "203.0.113.9".into(),
-            family: 2,
+            // 4, not AF_INET's 2: `fam_digit` is the only thing that puts a
+            // family on this wire and it emits digits (#685).
+            family: 4,
             count: 42,
         }])),
     );
     state.netlink_detail.apply(
         NetlinkDetailTopic::Connections,
-        Ok(NetlinkDetailData::Connections(vec![ConnRecord {
+        Ok(NetlinkDetailData::Connections(vec![ConnectionRecord {
             pid: 1234,
             comm: "curl".into(),
-            family: 2,
+            family: 4,
             local: "10.0.0.1".into(),
             lport: 5555,
             remote: "1.1.1.1".into(),
             rport: 443,
             duration_ms: 3200,
+            // 2026-08-20T12:00:00Z — the table renders an age from this.
+            ts_unix_ms: 1_787_313_600_000,
             tx_bytes: 8000,
             rx_bytes: 90000,
             segs_out: 60,
             segs_in: 80,
             retrans: 1,
+            counters_measured: true,
         }])),
     );
 
@@ -3293,6 +3298,15 @@ fn test_netlink_sockets_ebpf_section() {
     assert!(ui.find("203.0.113.9").is_ok());
     assert!(ui.find("Recent connections (tcplife)").is_ok());
     assert!(ui.find("curl").is_ok());
+
+    // The family column must resolve. This test used to pass with the fixture
+    // set to AF_INET's 2 and no assertion on the label at all, which is how
+    // every real retransmit row rendered "?" unnoticed (#685).
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(
+        ui.find("IPv4").is_ok(),
+        "a family of 4 must render as IPv4, not as the unknown-family dash"
+    );
 }
 
 /// The netring view shows the TLS section (with a fetched inventory) and the
@@ -5180,6 +5194,488 @@ fn test_parallax_catalogue_and_tiles() {
     assert!(ui.find("video0 — stream ended").is_ok());
 }
 
+/// #718: a tile's receiver report reaches the tile it belongs to, and a
+/// report from a replaced incarnation reaches nothing.
+///
+/// The staleness rule is the same one frames obey, and it matters more here:
+/// a forwarded report from a dead subscriber would keep a stale `consumer_id`
+/// alive in the sensor's per-tier map for a whole idle window, and that map is
+/// what `rx/{tier}/consumers` counts.
+#[test]
+fn test_parallax_receiver_report_folds_into_the_tile_it_names() {
+    use zensight_common::stream::MediaReceiverReport;
+
+    let device_id = DeviceId::fixture(Protocol::Parallax, "hostA".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+
+    let generation = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", generation, None, true, Some("high".into()));
+
+    let report = MediaReceiverReport {
+        stream: "video0".into(),
+        codec: Some("h264".into()),
+        tier: Some("high".into()),
+        consumer_id: "zs-4242-1".into(),
+        interval_ms: 3_000,
+        received_frames: 90,
+        lost_frames: 2,
+        dropped_frames: 1,
+        decoded_frames: 87,
+        last_sequence: 92,
+        frame_age_ms: Some(38.5),
+        frame_age_max_ms: Some(140.0),
+        decoder_queue_depth: Some(2),
+        ..Default::default()
+    };
+
+    assert!(
+        state
+            .parallax_detail
+            .apply_receiver_report("video0", generation, report.clone()),
+        "a live tile's own report is kept, and forwarded"
+    );
+    let kept = state.parallax_detail.tiles["video0"]
+        .last_report
+        .as_ref()
+        .expect("the tile keeps what it reported");
+    assert_eq!(kept.lost_frames, 2, "network loss");
+    assert_eq!(
+        kept.dropped_frames, 1,
+        "our own sheds, in a different field"
+    );
+    assert_eq!(kept.decoder_queue_depth, Some(2));
+
+    // Reopening the tile (a tier switch) mints a new generation; the previous
+    // subscriber's last report describes a subscription that no longer exists.
+    let replaced = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", replaced, None, true, Some("medium".into()));
+    assert!(
+        !state
+            .parallax_detail
+            .apply_receiver_report("video0", generation, report),
+        "a replaced incarnation's report must not be kept OR forwarded"
+    );
+    assert!(state.parallax_detail.tiles["video0"].last_report.is_none());
+}
+
+/// #801: the panel draws *why* Transport is losing, not just that it is.
+///
+/// Both faults lose frames and both leave the sensor's `stats/drops` at zero
+/// (#713 measured that), so the only thing that separates them is frame age —
+/// and the point of the feature is that an operator reads the difference rather
+/// than deducing it. Hence a rendered assertion: a diagnosis computed and not
+/// drawn helps nobody.
+#[test]
+fn test_parallax_health_panel_separates_a_congested_sender_from_a_dropping_link() {
+    use zensight::view::specialized::parallax::expanded_overlay;
+    use zensight_common::stream::{MediaReceiverReport, StreamStatus, TierApplied, TierStatus};
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+
+    // Encoder egressing 30 fps, tile receiving 12: a Transport verdict either
+    // way. Only the frame age differs between the two calls.
+    fn tile_at_age(age_ms: f32) -> DeviceDetailState {
+        let device_id = DeviceId::fixture(Protocol::Parallax, "hostA".to_string());
+        let mut state = DeviceDetailState::new(device_id);
+        state.history.insert(
+            "cam0/stats/fps".to_string(),
+            vec![TelemetryPoint::new(
+                "hostA",
+                Protocol::Parallax,
+                "cam0/stats/fps",
+                TelemetryValue::Gauge(30.0),
+            )]
+            .into(),
+        );
+        state.parallax_detail.apply_stream_status(&StreamStatus {
+            stream: "cam0".into(),
+            open: true,
+            last_end: None,
+            tiers: vec![TierStatus {
+                tier: "high".into(),
+                applied: TierApplied {
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                    bitrate_kbps: 4000,
+                },
+                viewers: 1,
+            }],
+        });
+        let generation = state.parallax_detail.allocate_generation();
+        state
+            .parallax_detail
+            .open_tile("cam0", generation, None, true, Some("high".into()));
+        let report = |received: u64| MediaReceiverReport {
+            stream: "cam0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+            consumer_id: "zs-1-1".into(),
+            interval_ms: 1_000,
+            received_frames: received,
+            decoded_frames: received,
+            last_sequence: received,
+            frame_age_ms: Some(age_ms),
+            frame_age_max_ms: Some(age_ms),
+            decoder_queue_depth: Some(1),
+            ..Default::default()
+        };
+        state
+            .parallax_detail
+            .apply_receiver_report("cam0", generation, report(0));
+        state
+            .parallax_detail
+            .apply_receiver_report("cam0", generation, report(12));
+        state.parallax_detail.expand("cam0");
+        state
+    }
+
+    fn sentence(state: &DeviceDetailState) -> String {
+        use zensight::view::specialized::parallax_health::stream_health;
+        let tile = &state.parallax_detail.tiles["cam0"];
+        let said = stream_health(state, "cam0", tile).verdict.sentence();
+        let mut ui = simulator(expanded_overlay(state).expect("the expanded tile drill-down"));
+        assert!(ui.find(said.clone()).is_ok(), "not drawn: {said}");
+        said
+    }
+
+    // The numbers are the ones #713 measured, not invented ones.
+    let congested = sentence(&tile_at_age(3502.0));
+    assert!(
+        congested.contains("sender is congested") && congested.contains("3.5 s"),
+        "a congested sender must be named, with the evidence: {congested}"
+    );
+    let lossy = sentence(&tile_at_age(0.77));
+    assert!(
+        lossy.contains("lost in flight") && lossy.contains("0.8 ms"),
+        "and a dropping link must read as the opposite fault: {lossy}"
+    );
+    assert_ne!(
+        congested, lossy,
+        "the whole feature is that these two do not read the same"
+    );
+}
+
+/// #720: a degraded window walks the tile down the ladder, a recovered one
+/// walks it back, and an operator's own tier choice stops both.
+///
+/// The unit tests in `parallax_tier` pin the policy against synthetic windows;
+/// this drives the *plumbing* — real tiles, a real catalogue, real reports
+/// through `apply_receiver_report`, and the same `tier_decision` the message
+/// handler calls. The two are different failure modes: a correct policy wired
+/// to the wrong tier, or to a controller that forgets its dwell across the
+/// switch it just made, would pass the first set and flap in the field.
+#[test]
+fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
+    use std::time::{Duration, Instant};
+    use zensight_common::stream::{MediaReceiverReport, StreamDescriptor, TierSpec};
+
+    fn tier(name: &str, h: u32, fps: u32, kbps: u32) -> TierSpec {
+        TierSpec {
+            name: name.into(),
+            max_height: Some(h),
+            fps,
+            bitrate_kbps: kbps,
+        }
+    }
+    // Cumulative counters, as the wire carries them (#714).
+    fn report(consumer: &str, received: u64, lost: u64) -> MediaReceiverReport {
+        MediaReceiverReport {
+            stream: "video0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+            consumer_id: consumer.into(),
+            interval_ms: 3_000,
+            received_frames: received,
+            lost_frames: lost,
+            decoded_frames: received,
+            last_sequence: received + lost,
+            frame_age_ms: Some(20.0),
+            decoder_queue_depth: Some(0),
+            ..Default::default()
+        }
+    }
+
+    let device_id = DeviceId::fixture(Protocol::Parallax, "hostA".to_string());
+    let mut state = DeviceDetailState::new(device_id);
+    state.parallax_detail.apply(Ok(vec![StreamDescriptor {
+        stream: "video0".into(),
+        codecs: vec!["h264".into(), "mjpeg".into()],
+        active: true,
+        width: Some(1920),
+        height: Some(1080),
+        fps: Some(30.0),
+        // Deliberately shuffled: the rung order is a property of the tiers, not
+        // of the order the catalogue happens to list them in.
+        tiers: vec![
+            tier("high", 1080, 30, 4000),
+            tier("low", 240, 10, 400),
+            tier("medium", 480, 20, 1200),
+        ],
+        description: None,
+    }]));
+    let generation = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", generation, None, true, Some("high".into()));
+
+    let deadline = Some(Duration::from_millis(1500));
+    let t0 = Instant::now();
+    // A window in which a fifth of the frames never arrived.
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", generation, report("zs-1-1", 100, 0));
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", generation, report("zs-1-1", 180, 20));
+
+    // Inside the minimum dwell the evidence is folded in but not acted on.
+    assert_eq!(
+        state
+            .parallax_detail
+            .tier_decision("video0", deadline, t0 + Duration::from_secs(3)),
+        None,
+        "a tile must not move a rung within seconds of opening"
+    );
+    let after_dwell = t0 + Duration::from_secs(20);
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", generation, report("zs-1-1", 260, 40));
+    assert_eq!(
+        state
+            .parallax_detail
+            .tier_decision("video0", deadline, after_dwell)
+            .map(|(tier, dir)| (tier, format!("{dir:?}"))),
+        Some(("medium".to_string(), "Down".to_string())),
+        "a degraded link drops exactly one rung, by cost and not by array order"
+    );
+
+    // The caller reopens on the new tier: new generation, new consumer id, and
+    // counters that start again from zero.
+    let regen = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", regen, None, true, Some("medium".into()));
+    let mut now = after_dwell;
+    for (received, lost) in [(30u64, 0u64), (60, 0), (90, 0), (120, 0)] {
+        now += Duration::from_secs(3);
+        state.parallax_detail.apply_receiver_report(
+            "video0",
+            regen,
+            report("zs-1-2", received, lost),
+        );
+        assert_eq!(
+            state.parallax_detail.tier_decision("video0", deadline, now),
+            None,
+            "an upgrade must not follow a downgrade within the cooldown+dwell"
+        );
+    }
+    // Health held long enough.
+    now += Duration::from_secs(40);
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", regen, report("zs-1-2", 400, 0));
+    assert_eq!(
+        state
+            .parallax_detail
+            .tier_decision("video0", deadline, now)
+            .map(|(tier, dir)| (tier, format!("{dir:?}"))),
+        Some(("high".to_string(), "Up".to_string())),
+        "sustained recovery climbs one rung back"
+    );
+
+    // And the human wins. Pin, then feed it the worst window it has seen.
+    let pinned_gen = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("video0", pinned_gen, None, true, Some("high".into()));
+    state.parallax_detail.controller("video0", now).pin(now);
+    assert!(state.parallax_detail.is_pinned("video0"));
+    now += Duration::from_secs(60);
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", pinned_gen, report("zs-1-3", 50, 0));
+    state
+        .parallax_detail
+        .apply_receiver_report("video0", pinned_gen, report("zs-1-3", 60, 90));
+    assert_eq!(
+        state.parallax_detail.tier_decision("video0", deadline, now),
+        None,
+        "a pinned stream is never moved, however bad the link"
+    );
+    // Handing control back does not act on what accumulated while pinned.
+    state.parallax_detail.controller("video0", now).unpin(now);
+    assert!(!state.parallax_detail.is_pinned("video0"));
+    assert_eq!(
+        state.parallax_detail.tier_decision("video0", deadline, now),
+        None,
+        "releasing a pin serves a fresh dwell before it decides anything"
+    );
+}
+
+/// #719: the health panel names *which stage* is losing the picture, and the
+/// three cases the issue calls out must not read the same.
+///
+/// The whole feature is that an operator does not have to subtract two numbers
+/// to work out which box to go and look at — so the assertions are on the
+/// sentence, which is the thing they actually read.
+#[test]
+fn test_parallax_health_panel_names_the_failing_stage() {
+    use zensight::view::specialized::parallax::expanded_overlay;
+    use zensight_common::stream::{MediaReceiverReport, StreamStatus, TierApplied, TierStatus};
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+
+    /// A tile on a 30 fps tier whose sensor says it is encoding at
+    /// `encoded_fps`, receiving `received` frames and decoding `decoded` of
+    /// them over one second.
+    fn tile_with(encoded_fps: f64, received: u64, decoded: u64) -> DeviceDetailState {
+        let mut state =
+            DeviceDetailState::new(DeviceId::fixture(Protocol::Parallax, "hostA".to_string()));
+        state.history.insert(
+            "cam0/stats/fps".to_string(),
+            vec![TelemetryPoint::new(
+                "hostA",
+                Protocol::Parallax,
+                "cam0/stats/fps",
+                TelemetryValue::Gauge(encoded_fps),
+            )]
+            .into(),
+        );
+        state.parallax_detail.apply_stream_status(&StreamStatus {
+            stream: "cam0".into(),
+            open: true,
+            last_end: None,
+            tiers: vec![TierStatus {
+                tier: "high".into(),
+                applied: TierApplied {
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                    bitrate_kbps: 4000,
+                },
+                viewers: 1,
+            }],
+        });
+        let generation = state.parallax_detail.allocate_generation();
+        state
+            .parallax_detail
+            .open_tile("cam0", generation, None, true, Some("high".into()));
+
+        let report = |received: u64, decoded: u64| MediaReceiverReport {
+            stream: "cam0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+            consumer_id: "zs-1-1".into(),
+            interval_ms: 1_000,
+            received_frames: received,
+            decoded_frames: decoded,
+            last_sequence: received,
+            frame_age_ms: Some(42.0),
+            frame_age_max_ms: Some(150.0),
+            decoder_queue_depth: Some(1),
+            ..Default::default()
+        };
+        // Two reports: the counters are cumulative, so a rate needs both.
+        state
+            .parallax_detail
+            .apply_receiver_report("cam0", generation, report(0, 0));
+        state
+            .parallax_detail
+            .apply_receiver_report("cam0", generation, report(received, decoded));
+        state.parallax_detail.expand("cam0");
+        state
+    }
+
+    // The verdict is computed from the state and then looked for *as rendered*:
+    // asserting on the sentence alone would not catch a panel that computes it
+    // and never draws it, and asserting on a hand-written string would break
+    // every time the sentence gains a clause (it gained one in #801).
+    fn verdict_of(state: &DeviceDetailState) -> String {
+        use zensight::view::specialized::parallax_health::{Verdict, stream_health};
+
+        let tile = &state.parallax_detail.tiles["cam0"];
+        let verdict = stream_health(state, "cam0", tile).verdict;
+        let overlay = expanded_overlay(state).expect("the expanded tile drill-down");
+        let mut ui = simulator(overlay);
+        assert!(
+            ui.find(verdict.sentence()).is_ok(),
+            "the panel must draw the verdict it computed: {:?}",
+            verdict.sentence()
+        );
+        match verdict {
+            Verdict::Degraded { stage, .. } => stage.to_string(),
+            _ => "none".to_string(),
+        }
+    }
+
+    // Offered 30, encoded 12: the encoder is not keeping up.
+    assert_eq!(verdict_of(&tile_with(12.0, 12, 12)), "Encoder");
+    // Encoded 30, received 12: the link is losing frames.
+    assert_eq!(verdict_of(&tile_with(30.0, 12, 12)), "Transport");
+    // Received 30, decoded 12: this box is behind.
+    assert_eq!(verdict_of(&tile_with(30.0, 30, 12)), "Decoder");
+
+    // A healthy chain names no stage at all.
+    let healthy = tile_with(30.0, 30, 30);
+    assert_eq!(verdict_of(&healthy), "none");
+    let mut ui = simulator(expanded_overlay(&healthy).expect("overlay"));
+    assert!(
+        ui.find("Every stage is passing on what it was given.")
+            .is_ok(),
+        "and says so, rather than leaving the reader to infer it from silence"
+    );
+}
+
+/// #719's second acceptance criterion: missing inputs degrade honestly. An
+/// unstamped stream shows frame age as unavailable, **not** 0 — a `0 ms` there
+/// would read as "perfectly fresh" (RFC 07 §1.3).
+#[test]
+fn test_parallax_health_panel_shows_unmeasured_inputs_as_not_asked() {
+    use zensight::view::specialized::parallax::expanded_overlay;
+    use zensight_common::stream::MediaReceiverReport;
+
+    let mut state =
+        DeviceDetailState::new(DeviceId::fixture(Protocol::Parallax, "hostA".to_string()));
+    let generation = state.parallax_detail.allocate_generation();
+    state
+        .parallax_detail
+        .open_tile("cam0", generation, None, true, Some("high".into()));
+    state.parallax_detail.apply_receiver_report(
+        "cam0",
+        generation,
+        MediaReceiverReport {
+            stream: "cam0".into(),
+            consumer_id: "zs-1-1".into(),
+            interval_ms: 3_000,
+            received_frames: 45,
+            decoded_frames: 45,
+            last_sequence: 45,
+            // The producer does not timestamp: no age, no jitter, and a
+            // preview-shaped tile with no queue to report.
+            ..Default::default()
+        },
+    );
+    state.parallax_detail.expand("cam0");
+
+    let mut ui = simulator(expanded_overlay(&state).expect("overlay"));
+    assert!(
+        ui.find("frame age not asked").is_ok(),
+        "an unstamped stream must read as NOT ASKED, never as 0 ms"
+    );
+    assert!(
+        ui.find("queue no queue").is_ok(),
+        "a tile with no decode queue reports nothing, not an empty one"
+    );
+    assert!(
+        ui.find("Nothing to compare yet — this tile is still measuring.")
+            .is_ok(),
+        "a chain with nothing to compare must say why, not read as healthy"
+    );
+}
+
 // ===========================================================================
 // Tier-2 conversion regression net (#475).
 //
@@ -5981,6 +6477,45 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
     assert!(ui.find("Fetch failed: No sysinfo sensor responded").is_ok());
 }
 
+/// An attached collector on an idle host reports `available: true` with two
+/// empty histograms. The panel used to render its title and a Refresh button
+/// with nothing in between — a blank gap that reads as a broken view rather
+/// than a quiet host (#685).
+#[test]
+fn sysinfo_latency_panel_says_when_a_window_had_no_samples() {
+    use zensight_common::LatencyReport;
+
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+    state.sysinfo_detail.apply_latency(Ok(LatencyReport {
+        available: true,
+        window_secs: 5,
+        ..Default::default()
+    }));
+
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find(
+            "No samples in this window. The collector is attached and measuring — \
+                 the host was simply idle enough that nothing was scheduled off-CPU or \
+                 waiting on disk long enough to record."
+        )
+        .is_ok(),
+        "an empty window must be stated, not left as a blank panel"
+    );
+
+    // And it must NOT borrow the unavailable-collector copy: "attached but
+    // quiet" and "cannot measure at all" are different problems.
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("The sensor is not collecting these").is_err(),
+        "an idle host must not be reported as a collector that cannot run"
+    );
+}
+
 /// The encrypted-DNS destination inventory: an unrecognised resolver is what a
 /// DNS tunnel looks like from the wire, so it is called out, not left as a
 /// `false` in a cell.
@@ -6036,7 +6571,7 @@ fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
 /// skew row is the case worth pinning — and it must sort above the healthy hosts.
 #[test]
 fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
-    use zensight::view::fleet::{FleetReply, FleetState, fleet_view};
+    use zensight::view::fleet::{FleetReply, FleetState, FleetSweep, fleet_view};
 
     let sysinfo_slice = zensight_common::registry::REGISTRIES
         .iter()
@@ -6050,18 +6585,21 @@ fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
 
     let mut state = FleetState::default();
     state.apply(
-        Ok(vec![
-            FleetReply {
-                origin: "h-aaaaaaaaaaaa".into(),
-                producer: "sysinfo".into(),
-                toml: sysinfo_slice,
-            },
-            FleetReply {
-                origin: "h-bbbbbbbbbbbb".into(),
-                producer: "sysinfo".into(),
-                toml: skewed,
-            },
-        ]),
+        Ok(FleetSweep {
+            replies: vec![
+                FleetReply {
+                    origin: "h-aaaaaaaaaaaa".into(),
+                    producer: "sysinfo".into(),
+                    toml: sysinfo_slice,
+                },
+                FleetReply {
+                    origin: "h-bbbbbbbbbbbb".into(),
+                    producer: "sysinfo".into(),
+                    toml: skewed,
+                },
+            ],
+            ..FleetSweep::default()
+        }),
         &[
             ("h-aaaaaaaaaaaa".into(), "sysinfo".into(), "server01".into()),
             ("h-bbbbbbbbbbbb".into(), "sysinfo".into(), "edge01".into()),
@@ -6081,26 +6619,80 @@ fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
     assert!(ui.find("in sync").is_ok(), "server01 agrees with us");
 }
 
-/// A producer that is alive on the bus but answers no `introspect` must appear as
-/// `silent`, not vanish. Fanning out alone cannot tell "not deployed" from
-/// "deployed and not answering", and the second is the row you need to see.
+/// A producer that is alive on the bus but answers no `introspect` must appear,
+/// not vanish. Fanning out alone cannot tell "not deployed" from "deployed and
+/// not answering", and the second is the row you need to see.
+///
+/// The sweep here was **whole**, so the question really was put and really got
+/// nothing back: RFC 13's `Unobservable`, rendered `no answer`.
 #[test]
-fn fleet_view_shows_an_alive_but_silent_producer() {
-    use zensight::view::fleet::{FleetState, fleet_view};
+fn fleet_view_shows_an_alive_but_unanswering_producer() {
+    use zensight::view::fleet::{FleetState, FleetSweep, fleet_view};
 
     let mut state = FleetState::default();
     state.apply(
-        Ok(Vec::new()),
+        Ok(FleetSweep::default()),
         &[("h-cccccccccccc".into(), "netring".into(), "edge01".into())],
     );
 
     let mut ui = simulator(fleet_view(&state));
     assert!(
         ui.find("edge01").is_ok(),
-        "the silent host must still be listed"
+        "the unanswering host must still be listed"
     );
     let mut ui = simulator(fleet_view(&state));
-    assert!(ui.find("silent").is_ok());
+    assert!(ui.find("no answer").is_ok());
+}
+
+/// #746's whole point, at the view: a host missing because the sweep's reply
+/// bound cut the fan-in short renders as `not asked`, and **not** as any of the
+/// three answers — not as `drift` or `version skew` (asked, and the answer was
+/// no), not as `no answer` (asked, and nothing came back), and not as `in sync`.
+///
+/// Truncation gets more likely the larger the fleet grows, so without this the
+/// worst-truncated fleet is the one that looks most confidently broken. The
+/// banner has to say the inventory is a sample, too.
+#[test]
+fn fleet_view_renders_not_asked_distinguishably_from_a_host_that_answered_nothing() {
+    use zensight::view::fleet::{FleetState, FleetSweep, elision_summary, fleet_view};
+
+    let alive = [("h-cccccccccccc".into(), "netring".into(), "edge01".into())];
+
+    let mut truncated = FleetState::default();
+    truncated.apply(
+        Ok(FleetSweep {
+            replies: Vec::new(),
+            elided: 9,
+            bound: 2,
+        }),
+        &alive,
+    );
+
+    let mut ui = simulator(fleet_view(&truncated));
+    assert!(
+        ui.find("not asked").is_ok(),
+        "a producer beyond the reply bound was never reached, and says so"
+    );
+    for answer in ["no answer", "drift", "version skew", "in sync"] {
+        let mut ui = simulator(fleet_view(&truncated));
+        assert!(
+            ui.find(answer).is_err(),
+            "a truncated sweep must not render as {answer:?} — not asked is not answered no"
+        );
+    }
+
+    // ...and the table says out loud that it is a sample, not the fleet.
+    let note = elision_summary(9, 2).expect("a sweep that dropped replies has a note");
+    let mut ui = simulator(fleet_view(&truncated));
+    assert!(ui.find(note.as_str()).is_ok(), "the note reads: {note}");
+
+    // The same producer, under a whole sweep, lands on the other pole.
+    let mut whole = FleetState::default();
+    whole.apply(Ok(FleetSweep::default()), &alive);
+    let mut ui = simulator(fleet_view(&whole));
+    assert!(ui.find("no answer").is_ok());
+    let mut ui = simulator(fleet_view(&whole));
+    assert!(ui.find("not asked").is_err());
 }
 
 /// SNMP fleet overview (#533): rate-based top talkers, down hotlist, error

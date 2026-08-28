@@ -1,0 +1,20 @@
+apiVersion: 1
+datasources:
+  - name: ZenSight-Prometheus
+    # Pinned uid: every dashboard JSON in ../../dashboards/ references this
+    # literal string. Change it here and you change it in every dashboard.
+    uid: zensight-prom
+    type: prometheus
+    access: proxy
+    # Grafana is on the host network too, so this is the host's loopback.
+    url: http://127.0.0.1:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      # MUST match global.scrape_interval in prometheus.yml. This is what makes
+      # $__rate_interval resolve to >= 4x the scrape interval instead of
+      # Grafana's 15s guess — get it wrong and every rate() panel is jagged.
+      timeInterval: 10s
+      prometheusType: Prometheus
+      prometheusVersion: 3.14.0
+    editable: false

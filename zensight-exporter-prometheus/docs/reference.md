@@ -67,7 +67,8 @@ The collector stores one `StoredMetric` per unique series key.
   reached (counted in `points_dropped_max_series`), bounding memory against a
   cardinality explosion.
 
-`render()` groups series by name and emits `# HELP` / `# TYPE` comments per group
+`render()` groups series by name and emits a `# TYPE` comment per group (`# HELP` is currently emitted only for
+alerts — see #768)
 in the standard `text/plain; version=0.0.4` exposition format.
 
 ## Endpoints
@@ -119,3 +120,25 @@ Labels carry the alert's `source`, `rule`, `severity`, and its own labels (reser
 names are not overridden). The series disappears when the alert resolves or its
 sensor tombstones it, so Alertmanager treats absence as resolved. Alerts are also
 staleness-swept like metrics.
+
+## Why `/metrics` is untimestamped and remote-write is not
+
+The two paths deliberately disagree about timestamps, and the asymmetry is not
+an oversight.
+
+**Remote-write stamps each sample with the point's own timestamp** and skips a
+series whose timestamp has not advanced since the last push (#759). Stamping
+push time instead meant that for up to `stale_timeout_secs` after a sensor died,
+every interval manufactured a fresh datapoint from the last known value — up to
+ten synthetic samples per dead series at the 30 s default — so Grafana drew a
+flat line where there should have been a gap. Using the point's timestamp
+without the skip introduces the opposite bug: an unchanged series is re-pushed
+with an identical `(series, timestamp)` every interval, which receivers reject
+as a duplicate sample.
+
+**The scrape endpoint emits no per-sample timestamps at all**, and must not.
+Prometheus does not synthesise staleness markers for explicitly-timestamped
+samples, and rejects samples outside its lookback window — so timestamping the
+pull path would *remove* the very gap the push path had to work for. On a scrape
+the series simply stops being exposed once `cleanup_stale` ages it out, which is
+already the correct signal.

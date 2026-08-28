@@ -55,6 +55,16 @@ impl RpcError {
         Self::new(ERR_GATED, message)
     }
 
+    /// The caller asked too often, or asked for something already in flight.
+    ///
+    /// `ERR_BUSY` has been in the RFC 05 vocabulary since the start and had no
+    /// constructor until a rate-limited procedure needed one (#715). A refusal
+    /// carrying the limit lets a caller back off machine-readably instead of
+    /// guessing.
+    pub fn busy(message: impl Into<String>) -> Self {
+        Self::new(ERR_BUSY, message)
+    }
+
     /// A producer-specific failure: `error/<producer>/<slug>`.
     pub fn producer(producer: &str, slug: &str, message: impl Into<String>) -> Self {
         Self::new(format!("error/{producer}/{slug}"), message)

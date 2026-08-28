@@ -15,7 +15,8 @@
 //! The tracepoint field offsets below were validated against
 //! `/sys/kernel/btf/vmlinux` on 7.1.3-200.fc44 (2026-07-16) and all four were
 //! already correct. They remain **kernel-version dependent**, so the
-//! `btf_offsets` test in `zensight-sensor-sysinfo-ebpf-common` re-checks them
+//! `btf_offsets_match_this_kernel` test in `zensight-sensor-sysinfo-ebpf-common`
+//! re-checks them
 //! against the running kernel's BTF. ("Switch to CO-RE", as an earlier note here
 //! suggested, is not available: CO-RE field relocations come from clang's
 //! `__builtin_preserve_access_index`, which rustc/bpf-linker do not emit. The

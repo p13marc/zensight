@@ -9,8 +9,7 @@ use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 use zensight_exporter_otel::config::FilterConfig;
 use zensight_exporter_otel::logs::{LogRecord, SyslogSeverity, parse_severity, to_otel_severity};
 use zensight_exporter_otel::metrics::{
-    OtelMetricType, build_metric_attributes, build_metric_name, extract_value, is_log_exportable,
-    is_metric_exportable,
+    OtelMetricType, extract_value, is_log_exportable, is_metric_exportable,
 };
 
 /// Helper to create a telemetry point with labels.
@@ -127,61 +126,20 @@ fn test_binary_not_metric_exportable() {
     );
 }
 
-#[test]
-fn test_metric_name_building() {
-    // Metric names include zensight prefix and use dots as separators
-    assert_eq!(
-        build_metric_name(Protocol::Snmp, "sysUpTime"),
-        "zensight.snmp.sysUpTime"
-    );
-    // #100: sysinfo keys with a semconv mapping export under their system.* name.
-    assert_eq!(
-        build_metric_name(Protocol::Sysinfo, "cpu/usage"),
-        "system.cpu.utilization"
-    );
-    assert_eq!(
-        build_metric_name(Protocol::Modbus, "holding/temperature"),
-        "zensight.modbus.holding.temperature"
-    );
-}
-
-#[test]
-fn test_metric_attributes() {
-    let mut labels = HashMap::new();
-    labels.insert("interface".to_string(), "eth0".to_string());
-
-    let point = make_point(
-        "router01",
-        Protocol::Snmp,
-        "if/1/ifInOctets",
-        TelemetryValue::Counter(1000),
-        labels,
-    );
-
-    let attrs = build_metric_attributes(&point);
-
-    // Should have source, protocol, and custom labels
-    assert!(
-        attrs
-            .iter()
-            .any(|kv| kv.key.as_str() == "source" && kv.value.as_str() == "router01")
-    );
-    assert!(
-        attrs
-            .iter()
-            .any(|kv| kv.key.as_str() == "protocol" && kv.value.as_str() == "snmp")
-    );
-    assert!(
-        attrs
-            .iter()
-            .any(|kv| kv.key.as_str() == "interface" && kv.value.as_str() == "eth0")
-    );
-}
-
-// =============================================================================
-// Log Conversion Tests
-// =============================================================================
-
+// `build_metric_name` / `build_metric_attributes` are gone (#764).
+//
+// Naming and attributes now come from `zensight_common::exposition::identify`,
+// which resolves the sample's KEY through the registry rather than guessing
+// from `point.protocol` + `point.metric`. That is what moved per-entity
+// subjects out of metric NAMES and into labels, so `sum by (iface)` became
+// writable for every producer instead of only the two the semconv table
+// hand-mapped.
+//
+// The coverage moved with the code:
+//   * merge precedence            -> zensight-common/src/exposition.rs
+//   * the family rule, over EVERY registry pattern
+//                                 -> zensight-common/tests/exposition_naming.rs
+//   * what actually reaches OTLP  -> exporter.rs's InMemoryMetricExporter tests
 #[test]
 fn test_syslog_to_otel_log() {
     let point = make_point(

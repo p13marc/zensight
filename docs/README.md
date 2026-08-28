@@ -15,7 +15,7 @@ that crate's own `README.md` + `docs/` directory (linked below).
 | [KEYSPACE.md](KEYSPACE.md) | **The canonical Zenoh keyspace contract** — telemetry, control-plane (`@/…`), metadata (`_meta/…`), media (`@media/…`, `@pdns/…`), wildcards, and the key-building helpers |
 | [zenkey rfcs/](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md) | **The normative spec behind that contract** — the ratified Zenoh Semantic Convention (v1.3): grammar, classes/planes, `@rpc`, identity, the subject registry, operations, prior art. Written application-neutrally; ZenSight is the reference application (ch. 11). Enforced by `zenkey` |
 | [design/](design/) | Archived design rationale (historical — implemented in 0.7.0): [correlation](design/correlation.md), [large-data-transfer](design/large-data-transfer.md), [zenoh-efficiency](design/zenoh-efficiency.md) |
-| [plans/](plans/) | **Plans & evaluations** (live working notes for in-flight epics — unlike `design/`, nothing here is implemented-and-archived): [rerun](plans/rerun/README.md) (epic #415 — Rerun as an optional viz/replay backend) |
+| [plans/](plans/) | **Plans & evaluations** (live working notes for in-flight epics — unlike `design/`, nothing here is implemented-and-archived): [rerun](plans/rerun/README.md) (epic #415 — **closed**, [DECISION.md](plans/rerun/DECISION.md): an optional debugging backend, off by default), [adaptive-media](plans/adaptive-media/README.md) (epic #712 — measurement, receiver feedback and tier adaptation on `@media`) |
 
 ## Per-crate documentation
 
@@ -47,6 +47,10 @@ reference pages are under `<crate>/docs/`.
 cargo build --release --workspace
 just run          # GUI + local sensors (netring, netlink, sysinfo, logs/journald)
 just netring      # one sensor: netring | netlink | sysinfo | logs
+
+just demo-prometheus   # sensors + exporter + Prometheus + Grafana  (demo/README.md)
+just demo-otel         # sensors + exporter + grafana/otel-lgtm     (demo/README.md)
+just demo-verify       # prove sensor -> exporter -> /metrics, no containers
 ```
 
 See the top-level [`README.md`](../README.md) and [`CLAUDE.md`](../CLAUDE.md) for the project

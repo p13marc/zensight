@@ -7,8 +7,7 @@ use tracing::{info, trace, warn};
 use zenoh::sample::{Sample, SampleKind};
 use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
-use zensight_common::keyexpr::all_alerts_wildcard;
-use zensight_common::telemetry::TelemetryPoint;
+use zensight_common::keyexpr::{all_alerts_wildcard, all_events_wildcard};
 
 use crate::exporter::SharedExporter;
 
@@ -24,6 +23,7 @@ pub const DEFAULT_KEY_EXPR: &str = "v1/*/telemetry/**";
 ///
 /// This was a hand-rolled 4-chunk positional gate, copy-pasted byte-for-byte
 /// from the Prometheus exporter. It is now one registry-backed helper (#475).
+#[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use zensight_common::keyexpr::is_telemetry_key;
 
 /// Statistics for the subscriber.
@@ -78,10 +78,16 @@ impl TelemetrySubscriber {
 
         // Subscribe to telemetry
         info!(key_expr = %self.key_expr, "Subscribing to telemetry");
-        let subscriber = session
-            .declare_subscriber(&self.key_expr)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create subscriber: {}", e))?;
+        // An ADVANCED subscriber, not a plain one (#763). Sensors publish
+        // telemetry through an `AdvancedPublisher` and the GUI has always
+        // consumed with history + recovery; both exporters used a plain
+        // subscriber, so one started after the sensors got no backfill and a
+        // sample dropped in flight was simply lost. For a metrics pipeline that
+        // is the wrong trade — a gap in a dashboard is a claim about the world.
+        let subscriber =
+            zensight_common::subscribe::declare_telemetry_subscriber(&session, &self.key_expr)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create subscriber: {}", e))?;
 
         // Firing alerts are state, not telemetry (`…/state/<producer>/alert/*`),
         // so the telemetry class selector never sees them — they need their
@@ -94,6 +100,24 @@ impl TelemetrySubscriber {
                     .declare_subscriber(&alerts_key)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to create alert subscriber: {}", e))?,
+            )
+        } else {
+            None
+        };
+
+        // The `events` class (#534) — append-only records on
+        // `v1/<origin>/events/<producer>/<subject…>/<ulid>`. Its own class, so
+        // neither the telemetry selector nor the alerts selector can reach it,
+        // which is why SNMP traps and systemd unit failures never reached OTLP
+        // at all (#762).
+        let event_subscriber = if self.exporter.export_events() {
+            let events_key = all_events_wildcard();
+            info!(key_expr = %events_key, "Subscribing to the events class");
+            Some(
+                session
+                    .declare_subscriber(&events_key)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create event subscriber: {}", e))?,
             )
         } else {
             None
@@ -127,6 +151,16 @@ impl TelemetrySubscriber {
                     }
                 }
 
+                // Receive events-class records (only polled when enabled).
+                sample = async { event_subscriber.as_ref().unwrap().recv_async().await },
+                    if event_subscriber.is_some() =>
+                {
+                    match sample {
+                        Ok(sample) => self.handle_event_sample(&sample),
+                        Err(e) => warn!("Error receiving event sample: {}", e),
+                    }
+                }
+
                 sample = subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
@@ -137,19 +171,20 @@ impl TelemetrySubscriber {
 
                             // Skip non-telemetry channels (health/liveness/errors/
                             // alerts/_meta) so they don't count as decode failures.
-                            if !is_telemetry_key(sample.key_expr().as_str()) {
-                                trace!(key = %sample.key_expr(), "Ignoring non-telemetry key");
-                                continue;
-                            }
-
-                            let payload = sample.payload().to_bytes();
+                            // Shared with the Prometheus exporter (#763): the
+                            // class guard and the JSON-then-CBOR sniff were
+                            // byte-identical in both, and a non-telemetry
+                            // channel must NOT count as a decode failure.
                             self.stats.samples_received.fetch_add(1, Ordering::Relaxed);
-
-                            // Try JSON first, then CBOR
-                            let point: Option<TelemetryPoint> =
-                                serde_json::from_slice(&payload).ok().or_else(|| {
-                                    ciborium::from_reader(&payload[..]).ok()
-                                });
+                            let point = match zensight_common::subscribe::decode_telemetry(&sample)
+                            {
+                                Ok(p) => Some(p),
+                                Err(zensight_common::subscribe::DecodeReject::NotTelemetry) => {
+                                    trace!(key = %sample.key_expr(), "Ignoring non-telemetry key");
+                                    continue;
+                                }
+                                Err(zensight_common::subscribe::DecodeReject::Undecodable) => None,
+                            };
 
                             match point {
                                 Some(point) => {
@@ -160,13 +195,15 @@ impl TelemetrySubscriber {
                                         metric = %point.metric,
                                         "Received telemetry point"
                                     );
-                                    self.exporter.record(&point);
+                                    // The KEY is what the registry refines (#764).
+                                    self.exporter
+                                        .record(sample.key_expr().as_str(), &point);
                                 }
                                 None => {
                                     self.stats.decode_failures.fetch_add(1, Ordering::Relaxed);
                                     warn!(
                                         key = %sample.key_expr(),
-                                        payload_len = payload.len(),
+                                        payload_len = sample.payload().len(),
                                         "Failed to decode telemetry point as JSON or CBOR"
                                     );
                                 }
@@ -185,6 +222,12 @@ impl TelemetrySubscriber {
             .undeclare()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to undeclare subscriber: {}", e))?;
+        if let Some(event_subscriber) = event_subscriber {
+            event_subscriber
+                .undeclare()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to undeclare event subscriber: {}", e))?;
+        }
         if let Some(alert_subscriber) = alert_subscriber {
             alert_subscriber
                 .undeclare()
@@ -202,6 +245,28 @@ impl TelemetrySubscriber {
 
     /// Decode an alert sample (a firing/resolved Put) and emit it as an OTLP
     /// log event.
+    /// Decode an events-class record and hand it to the exporter.
+    ///
+    /// Records are append-only and ULID-keyed — one key per record, nothing
+    /// overwrites — so there is no tombstone to handle here, unlike alerts.
+    fn handle_event_sample(&self, sample: &Sample) {
+        if sample.kind() == SampleKind::Delete {
+            return;
+        }
+        let payload = sample.payload().to_bytes();
+        match zensight_common::decode_auto::<zensight_common::event::EventRecord>(&payload) {
+            Ok(event) => self
+                .exporter
+                .record_event(sample.key_expr().as_str(), &event),
+            Err(e) => warn!(
+                key = %sample.key_expr(),
+                payload_len = payload.len(),
+                error = %e,
+                "Failed to decode events-class record"
+            ),
+        }
+    }
+
     fn handle_alert_sample(&self, sample: &Sample) {
         let payload = sample.payload().to_bytes();
         let alert: Option<Alert> = serde_json::from_slice(&payload)
@@ -209,7 +274,9 @@ impl TelemetrySubscriber {
             .or_else(|| ciborium::from_reader(&payload[..]).ok());
 
         match alert {
-            Some(alert) => self.exporter.record_alert(&alert),
+            Some(alert) => self
+                .exporter
+                .record_alert(sample.key_expr().as_str(), &alert),
             None => warn!(
                 key = %sample.key_expr(),
                 payload_len = payload.len(),
@@ -286,6 +353,37 @@ mod tests {
         assert!(
             alerts_sub.intersects(&alert),
             "the alerts selector must match alert state keys"
+        );
+    }
+
+    /// The events class needs its own subscription too (#762).
+    ///
+    /// `events` is a third class, disjoint from both `telemetry` and `state` by
+    /// construction — which is exactly why SNMP traps and systemd unit failures
+    /// reached the GUI and a Zenoh storage while never reaching OTLP at all.
+    /// Neither existing selector could ever have seen them.
+    #[test]
+    fn the_events_class_needs_its_own_subscription() {
+        use zenoh::key_expr::KeyExpr;
+
+        let event =
+            KeyExpr::new("v1/h-3fa9c2d41b7e/events/snmp/trap/01hqzz000000000000000000ab").unwrap();
+        let telemetry = KeyExpr::new(DEFAULT_KEY_EXPR).unwrap();
+        let alerts_sub = KeyExpr::new(all_alerts_wildcard()).unwrap();
+        let events_sub = KeyExpr::new(all_events_wildcard()).unwrap();
+
+        assert!(
+            !telemetry.intersects(&event),
+            "the telemetry selector cannot reach the events class"
+        );
+        assert!(
+            !alerts_sub.intersects(&event),
+            "the alerts selector cannot reach the events class either — which is \
+             why a third subscriber is required, not optional"
+        );
+        assert!(
+            events_sub.intersects(&event),
+            "the events selector must match events-class keys"
         );
     }
 }

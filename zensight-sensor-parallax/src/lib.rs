@@ -22,6 +22,7 @@ pub mod config;
 pub mod egress;
 pub mod pipeline;
 pub mod query;
+pub mod reports;
 pub mod session;
 pub mod stats;
 pub(crate) mod telemetry_guard;

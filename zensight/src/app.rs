@@ -8,6 +8,7 @@ use iced::{Element, Length, Subscription, Task, Theme};
 // built-in animation support or widget-level animations instead.
 use std::ops::ControlFlow;
 use std::sync::LazyLock;
+use std::time::Instant;
 
 use zensight_common::{
     ErrorReport, HealthSnapshot, HealthStatus, Protocol, SensorInfo, TelemetryPoint,
@@ -195,6 +196,9 @@ pub struct ZenSight {
     stale_threshold_ms: i64,
     /// Demo mode (use mock data instead of Zenoh).
     demo_mode: bool,
+    /// Whether a producer is currently refusing this GUI's stream reports
+    /// (#718), so the toast is shown once rather than once per cadence.
+    parallax_report_refused: bool,
     /// Current theme.
     theme: AppTheme,
     /// Sensor health snapshots, keyed by sensor name.
@@ -213,6 +217,12 @@ pub struct ZenSight {
     /// cache per key) — set on connect, so command sends never use a one-shot
     /// `session.put`. `None` while disconnected or in demo mode.
     command_registry: Option<std::sync::Arc<zensight_common::PublisherRegistry>>,
+    /// The Fleet view's declared `introspect` queriers (#745), declared on the
+    /// first sweep and reused by every refresh — a fresh `session.get` per
+    /// refresh rebuilds the network's routing state each time. Replaced
+    /// wholesale on (dis)connect: a querier belongs to the session it was
+    /// declared on.
+    fleet_queriers: std::sync::Arc<tokio::sync::OnceCell<FleetQueriers>>,
     /// In-flight artifact download state (report / snapshot / capture).
     artifact_fetch: crate::view::artifact_fetch::ArtifactFetch,
     /// The in-flight download's identity (key prefix, kind, id, delivery, dest).
@@ -444,6 +454,7 @@ impl ZenSight {
             current_view,
             stale_threshold_ms,
             demo_mode,
+            parallax_report_refused: false,
             theme,
             sensor_health: std::collections::HashMap::new(),
             recent_errors: std::collections::HashMap::new(),
@@ -451,6 +462,7 @@ impl ZenSight {
             toasts: ToastState::default(),
             session: None,
             command_registry: None,
+            fleet_queriers: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             artifact_fetch: crate::view::artifact_fetch::ArtifactFetch::default(),
             artifact_job: None,
             blob_tags: if demo_mode {
@@ -1771,6 +1783,13 @@ impl ZenSight {
                     device.parallax_detail.end_tile(&stream, generation, error);
                 }
             }
+            Message::ParallaxReceiverReport {
+                stream,
+                generation,
+                report,
+            } => {
+                return ControlFlow::Break(self.send_parallax_report(stream, generation, *report));
+            }
             Message::ParallaxStreamStatus { source, status } => {
                 // A definitive `open: false` transition for a tile still
                 // waiting on its first frame = the open failed on the sensor;
@@ -1970,7 +1989,29 @@ impl ZenSight {
                 }
             }
             Message::ParallaxOpenVideoTile { stream, tier } => {
-                return ControlFlow::Break(self.open_parallax_video_tile(stream, tier));
+                // A deliberate click pins the stream (#720). The controller
+                // stops deciding until the operator hands control back: a tier
+                // that moved itself back after a chosen click would be
+                // indistinguishable from a bug.
+                if let Some(device) = self
+                    .selected_device
+                    .as_mut()
+                    .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+                {
+                    let now = Instant::now();
+                    device.parallax_detail.controller(&stream, now).pin(now);
+                }
+                return ControlFlow::Break(self.open_parallax_video_tile(stream, tier, true));
+            }
+            Message::ParallaxAutoTier { stream } => {
+                if let Some(device) = self
+                    .selected_device
+                    .as_mut()
+                    .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+                {
+                    let now = Instant::now();
+                    device.parallax_detail.controller(&stream, now).unpin(now);
+                }
             }
             Message::ParallaxRequestKeyframe { stream } => {
                 return ControlFlow::Break(self.request_parallax_keyframe(stream));
@@ -2193,6 +2234,9 @@ impl ZenSight {
                     std::sync::Arc::new(zensight_common::PublisherRegistry::new(s.clone()))
                 });
                 self.session = session;
+                // A declared querier belongs to the session it was declared on
+                // (#745): a reconnect must not fetch through a dead one.
+                self.fleet_queriers = std::sync::Arc::new(tokio::sync::OnceCell::new());
                 self.dashboard.connected = true;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Connected;
@@ -2226,6 +2270,7 @@ impl ZenSight {
                 let _ = self.teardown_parallax_tiles();
                 self.session = None;
                 self.command_registry = None;
+                self.fleet_queriers = std::sync::Arc::new(tokio::sync::OnceCell::new());
                 self.dashboard.connected = false;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
@@ -2838,6 +2883,10 @@ impl ZenSight {
                 self.settings.set_max_alerts(max_alerts);
             }
 
+            Message::SetMaxLiveLatency(deadline) => {
+                self.settings.set_max_live_latency(deadline);
+            }
+
             Message::SaveSettings => {
                 self.save_settings();
             }
@@ -3313,6 +3362,23 @@ impl ZenSight {
                 // Derive real edges from observed flows (#25) and netlink
                 // neighbor adjacency (#49); edges are merged as replies arrive.
                 return self.query_topology_batch();
+            }
+
+            Message::ParallaxReportOutcome { success, message } => {
+                // A tile reports every few seconds for as long as it is open,
+                // so a producer that refuses — an older sensor with no
+                // `stream/report` queryable, say — would otherwise put a red
+                // toast on screen every 3 seconds, per tile, forever. Say it
+                // once, then stay quiet until reports work again.
+                if success {
+                    self.parallax_report_refused = false;
+                } else if !self.parallax_report_refused {
+                    self.parallax_report_refused = true;
+                    self.toasts.push(
+                        ToastSeverity::Error,
+                        format!("Stream reports are not reaching the sensor — {message}"),
+                    );
+                }
             }
 
             Message::CommandFeedback { success, message } => {
@@ -4727,7 +4793,7 @@ impl ZenSight {
             }
         };
         Task::future(async move {
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             // A concrete single-origin key has exactly one queryable, so
             // BestMatching is the honest target here; QueryTarget::All is for
             // fleet fan-in (RFC 05 §2.1).
@@ -5341,6 +5407,130 @@ impl ZenSight {
             Some(origin) => zensight_common::origin_rpc_key(&origin, "parallax", "stream/set"),
             None => zensight_common::fleet_command_key("parallax", "stream"),
         }
+    }
+
+    /// The parallax `stream/report` write key for `source`'s host (#718,
+    /// RFC 07 §1.1), or `None` when that host's origin is not known yet.
+    ///
+    /// Deliberately **no fleet fallback**, unlike
+    /// [`Self::parallax_stream_set_key`]. The registry entry for
+    /// `stream/report` omits `fanout` precisely so a fleet-wide spelling is
+    /// unrepresentable: a report is a statement about one key on one host, and
+    /// broadcasting it would be a viewer telling every host in the fleet about
+    /// a stream one of them publishes. A report we cannot address is a report
+    /// we drop.
+    fn parallax_stream_report_key(&self, source: &str) -> Option<String> {
+        let origin = self.origin_for(zensight_common::Protocol::Parallax, source)?;
+        Some(zensight_common::origin_rpc_key(
+            &origin,
+            "parallax",
+            "stream/report",
+        ))
+    }
+
+    /// Forward one tile's receiver report to that tile's own producer (#718).
+    ///
+    /// Reports from a replaced tile incarnation are dropped for the same
+    /// reason its frames are: they describe a subscription that no longer
+    /// exists, and the sensor would age the stale `consumer_id` out anyway —
+    /// but only after counting it as a live viewer for one idle window.
+    /// The tier this stream should move to, if any (#720).
+    ///
+    /// Two guards and a lookup; the decision itself belongs to the view state
+    /// that owns the tiles and the controllers — see
+    /// [`ParallaxDetailState::tier_decision`].
+    fn parallax_tier_decision(
+        &mut self,
+        stream: &str,
+    ) -> Option<(String, crate::view::specialized::parallax_tier::Move)> {
+        // Demo mode fabricates telemetry; a tier switch there would be a tile
+        // reopening against a sensor that does not exist. And a build without
+        // the decoder has no video tile to move — belt and braces, since the
+        // stub `open_parallax_video_tile` toasts a build hint, and a controller
+        // that reached it would toast every report cadence.
+        if self.demo_mode || !crate::view::specialized::parallax_h264::AVAILABLE {
+            return None;
+        }
+        let deadline = self.settings.max_live_latency();
+        let device = self.selected_device.as_mut()?;
+        if device.device_id.protocol != zensight_common::Protocol::Parallax {
+            return None;
+        }
+        device
+            .parallax_detail
+            .tier_decision(stream, deadline, Instant::now())
+    }
+
+    fn send_parallax_report(
+        &mut self,
+        stream: String,
+        generation: u64,
+        report: zensight_common::stream::MediaReceiverReport,
+    ) -> Task<Message> {
+        let Some(device) = self
+            .selected_device
+            .as_mut()
+            .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+        else {
+            return Task::none();
+        };
+        if !device
+            .parallax_detail
+            .apply_receiver_report(&stream, generation, report.clone())
+        {
+            return Task::none();
+        }
+        let source = device.device_id.source.clone();
+        // The report is also the tier controller's tick (#720), and it is
+        // decided BEFORE the reporting guards below on purpose: choosing a rung
+        // is this viewer's own business (RFC 07 §1.2 — the producer must not do
+        // it for us), so a viewer that cannot *tell* the producer how the
+        // stream is arriving must still be able to act on it. Tying adaptation
+        // to a reachable `stream/report` would disable it exactly where the
+        // link is worst.
+        let switch = self.parallax_tier_decision(&stream);
+        // Quiet on success, like the resync keyframe request: a report every
+        // few seconds per open tile would otherwise be a toast every few
+        // seconds. A refusal still surfaces — `error/busy` means this cadence
+        // is over the producer's declared ceiling, which is a bug worth seeing
+        // — but through `ParallaxReportOutcome`, which says it once rather
+        // than once per cadence.
+        let send = if self.demo_mode || self.command_registry.is_none() {
+            Task::none()
+        } else {
+            match self.parallax_stream_report_key(&source) {
+                Some(key) => self
+                    .send_command(key, &report, String::new())
+                    .map(|message| match message {
+                        Message::CommandFeedback { success, message } => {
+                            Message::ParallaxReportOutcome { success, message }
+                        }
+                        other => other,
+                    }),
+                None => Task::none(),
+            }
+        };
+        let Some((tier, direction)) = switch else {
+            return send;
+        };
+        // Say it once, in terms of the event rather than the mechanism. A
+        // quality change nobody asked for is exactly the thing an operator
+        // should not have to infer from a button turning grey.
+        self.toasts.push(
+            ToastSeverity::Info,
+            match direction {
+                crate::view::specialized::parallax_tier::Move::Up => {
+                    format!("{stream}: link recovered — video back up to {tier}")
+                }
+                _ => format!("{stream}: link degraded — video dropped to {tier}"),
+            },
+        );
+        // Queued after the report so the producer's aggregate still hears from
+        // the consumer id that measured the window being reported: a report
+        // sent from the far side of a reopen names a consumer that no longer
+        // exists, and leaves a phantom in the aggregate until the sensor's idle
+        // timeout reaps it.
+        Task::batch([send, self.open_parallax_video_tile(stream, tier, false)])
     }
 
     /// The v1 origin of the currently-selected device when it belongs to
@@ -6415,7 +6605,12 @@ impl ZenSight {
     /// toast the build hint. The tile is per-stream (one tile); opening a
     /// different tier replaces it and aborts the old subscriber.
     #[cfg(feature = "h264")]
-    fn open_parallax_video_tile(&mut self, stream: String, tier: String) -> Task<Message> {
+    fn open_parallax_video_tile(
+        &mut self,
+        stream: String,
+        tier: String,
+        announce: bool,
+    ) -> Task<Message> {
         use crate::view::specialized::parallax_h264;
         let Some(source) = self
             .selected_device
@@ -6477,12 +6672,18 @@ impl ZenSight {
             );
             return Task::none();
         };
+        // The frame-age deadline is a per-deployment setting (#716), not a
+        // constant: a LAN wall display and a satellite operator want different
+        // numbers. It is read at open, so changing it takes effect on the next
+        // tile rather than mutating a running one under its own accounting.
+        let max_live_latency = self.settings.max_live_latency();
         let (frames, handle) = Task::stream(parallax_h264::h264_tile_stream(
             session,
             media_origin,
             stream.clone(),
             tier.clone(),
             generation,
+            max_live_latency,
         ))
         .abortable();
         if let Some(device) = self.selected_device.as_mut() {
@@ -6501,13 +6702,25 @@ impl ZenSight {
                 codec: Some("h264".to_string()),
                 tier: Some(tier.clone()),
             });
-        let mut send =
-            self.send_command(cmd_key.clone(), &open, format!("Opened video for {stream}"));
+        // `announce` is false for an automatic tier move (#720): the caller
+        // says once, in its own words, that the link changed and what it did
+        // about it. The manual pair — "Opened video" then "Closed preview" —
+        // would otherwise fire twice every switch and describe the mechanism
+        // rather than the event.
+        let opened = if announce {
+            format!("Opened video for {stream}")
+        } else {
+            String::new()
+        };
+        let mut send = self.send_command(cmd_key.clone(), &open, opened);
         if let Some(close) = old_close {
             let close = zensight_common::command::Command::new(close);
-            send = self
-                .send_command(cmd_key, &close, format!("Closed preview for {stream}"))
-                .chain(send);
+            let closed = if announce {
+                format!("Closed preview for {stream}")
+            } else {
+                String::new()
+            };
+            send = self.send_command(cmd_key, &close, closed).chain(send);
         }
         Task::batch([send, frames])
     }
@@ -6515,7 +6728,12 @@ impl ZenSight {
     /// Without the `h264` feature the video tile is a stub: explain how to
     /// get it instead of failing silently (#409).
     #[cfg(not(feature = "h264"))]
-    fn open_parallax_video_tile(&mut self, _stream: String, _tier: String) -> Task<Message> {
+    fn open_parallax_video_tile(
+        &mut self,
+        _stream: String,
+        _tier: String,
+        _announce: bool,
+    ) -> Task<Message> {
         self.toasts.push(
             ToastSeverity::Info,
             crate::view::specialized::parallax_h264::UNAVAILABLE_HINT.to_string(),
@@ -6593,7 +6811,7 @@ impl ZenSight {
                 .parallax_detail
                 .resolve_tier(&stream)
                 .unwrap_or_else(|| "medium".to_string());
-            return self.open_parallax_video_tile(stream, tier);
+            return self.open_parallax_video_tile(stream, tier, true);
         }
         Task::none()
     }
@@ -6731,76 +6949,58 @@ impl ZenSight {
         out
     }
 
-    /// Fan `introspect` out across the fleet (#469, RFC 08 §6).
+    /// Fan `introspect` out across the fleet (#469, RFC 08 §6, #745).
     ///
-    /// One GET per registered producer, `QueryTarget::All` so a `complete`
-    /// queryable on one host cannot short-circuit the multi-host consolidation
-    /// (RFC 05 §2.1). The origin comes from the *answering key* — a registry
-    /// slice describes a build, not a deployment, so it does not name its host.
+    /// The fan-in discipline is **upstream's**, not ours: `zenkey-fleet`'s
+    /// declared querier applies the RFC 05 §2.1 triple — target `All` (so a
+    /// `complete` queryable on one host cannot short-circuit the multi-host
+    /// consolidation), consolidation `None`, and attribution by the reply's own
+    /// key. The origin comes from the answering key because a registry slice
+    /// describes a build, not a deployment, so it does not name its host.
     ///
-    /// `@catalog` is a service origin, and a verbatim `@` chunk is structurally
-    /// unmatchable by the `*` in a fleet selector (design property D2). So it
-    /// takes its own key rather than riding the fan-out — which is the grammar
-    /// working, not an exception to it.
+    /// Bounded, and the bound reports its cost: `RepeatingQuery` keeps at most
+    /// [`zenkey_fleet::DEFAULT_MAX_REPLIES`] replies per fetch and counts what
+    /// it refused, which rides back on [`FleetSweep::elided`]. The sweep this
+    /// replaced was unbounded and truncated silently at whatever the timeout
+    /// caught.
     fn query_fleet(&self) -> Task<Message> {
-        use crate::view::fleet::FleetReply;
-
         if self.demo_mode {
-            return Task::done(Message::FleetLoaded(Ok(crate::mock::fleet::replies())));
+            return Task::done(Message::FleetLoaded(Ok(crate::mock::fleet::sweep())));
         }
         let Some(session) = self.session.clone() else {
             return Task::done(Message::FleetLoaded(Err(
                 "Not connected to Zenoh".to_string()
             )));
         };
-
-        let keys: Vec<(String, String)> = zensight_common::registry::REGISTRIES
-            .iter()
-            .map(|(name, _)| {
-                let key = if *name == "catalog" {
-                    zensight_common::catalog_rpc_key("introspect")
-                } else {
-                    zensight_common::fleet_rpc_key(name, "introspect")
-                };
-                (name.to_string(), key)
-            })
-            .collect();
+        let queriers = self.fleet_queriers.clone();
 
         Task::future(async move {
-            let mut replies: Vec<FleetReply> = Vec::new();
-            let mut errors = 0usize;
-            for (producer, key) in keys {
-                let Ok(stream) = session
-                    .get(&key)
-                    .target(zenoh::query::QueryTarget::All)
-                    .timeout(std::time::Duration::from_secs(3))
-                    .await
-                else {
-                    errors += 1;
-                    continue;
-                };
-                while let Ok(reply) = stream.recv_async().await {
-                    let Ok(sample) = reply.result() else { continue };
-                    // The concrete key that answered carries the origin.
-                    let Some(parsed) =
-                        zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
-                    else {
-                        continue;
-                    };
-                    let Ok(toml) = String::from_utf8(sample.payload().to_bytes().to_vec()) else {
-                        continue;
-                    };
-                    replies.push(FleetReply {
-                        origin: parsed.origin.chunk().to_string(),
-                        producer: producer.clone(),
-                        toml,
-                    });
+            // Base `""`: this session is the application's own, so it is
+            // namespaced by `zenoh.namespace` (empty by default) and zenoh has
+            // already stripped the base from every key it hands us. A `Fleet`
+            // over it therefore carries no base of its own — see
+            // `zensight_common::keyexpr`'s note on the two parsers.
+            //
+            // This is also why the GUI never calls `zenkey_fleet::open`: that
+            // opens an un-namespaced explorer session (RFC 09 §5) and *refuses*
+            // a config carrying a namespace, and the frontend's session must
+            // come from `zensight_common::session` regardless.
+            let fleet = zenkey_fleet::Fleet::new(&session, "");
+            let queriers = match queriers
+                .get_or_try_init(|| FleetQueriers::declare(&fleet))
+                .await
+            {
+                Ok(q) => q,
+                Err(e) => {
+                    return Message::FleetLoaded(Err(format!(
+                        "could not declare the introspect queriers: {e}"
+                    )));
                 }
+            };
+            match queriers.sweep().await {
+                Ok(sweep) => Message::FleetLoaded(Ok(sweep)),
+                Err(e) => Message::FleetLoaded(Err(format!("introspect sweep failed: {e}"))),
             }
-            if replies.is_empty() && errors > 0 {
-                return Message::FleetLoaded(Err(format!("{errors} introspect queries failed")));
-            }
-            Message::FleetLoaded(Ok(replies))
         })
     }
 
@@ -7256,8 +7456,7 @@ impl ZenSight {
                 .selected_device
                 .as_ref()
                 .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
-            && let Some(overlay) =
-                crate::view::specialized::parallax::expanded_overlay(&device.parallax_detail)
+            && let Some(overlay) = crate::view::specialized::parallax::expanded_overlay(device)
         {
             layers.push(overlay);
         }
@@ -8155,6 +8354,100 @@ fn now_ms() -> i64 {
 fn point_is_log_line(point: &TelemetryPoint) -> bool {
     point.protocol == zensight_common::Protocol::Logs
         && matches!(point.value, TelemetryValue::Text(_))
+}
+
+/// The Fleet view's declared `introspect` queriers (#745).
+///
+/// Two, not one: the wildcard-producer fan-out (`v1/*/@rpc/*/introspect`) plus
+/// `@catalog` **by name**. A `*` in the origin position never matches a
+/// verbatim service origin (grammar property D4), so the wildcard sweep cannot
+/// enumerate services and the identity service has to be asked for itself. The
+/// two therefore cannot double-count.
+///
+/// That is exactly [`zenkey_fleet::RepeatingRegistry`]'s shape, and this is not
+/// an accident: it is spelled out here because `RepeatingRegistry::fetch`
+/// returns `Vec<(RegistrySlice, String)>` and **drops the origin**, which is
+/// right for a decoder that needs *a* slice per producer and wrong for an
+/// inventory whose entire subject is which host disagrees. What is reused is
+/// the part that matters — [`zenkey_fleet::RepeatingQuery`], which carries the
+/// RFC 05 §2.1 discipline, the reply bound, and the elision ledger.
+struct FleetQueriers {
+    wildcard: zenkey_fleet::RepeatingQuery,
+    catalog: zenkey_fleet::RepeatingQuery,
+}
+
+impl FleetQueriers {
+    async fn declare(fleet: &zenkey_fleet::Fleet<'_>) -> zenkey_fleet::Result<FleetQueriers> {
+        // A GUI refresh is interactive: three seconds is the wait a person will
+        // sit through, and the same bound the undeclared sweep used.
+        let timeout = std::time::Duration::from_secs(3);
+        let wildcard = fleet.wire(zenkey::selector::rpc(
+            zenkey::selector::Scope::fleet(),
+            zenkey::selector::Producers::all(),
+            &["introspect"],
+        ));
+        let catalog = fleet.wire(zenkey::selector::service_rpc(
+            &zenkey::ServiceOrigin::catalog(),
+            &["introspect"],
+        ));
+        Ok(FleetQueriers {
+            wildcard: zenkey_fleet::declare_repeating(fleet, &wildcard, timeout).await?,
+            catalog: zenkey_fleet::declare_repeating(fleet, &catalog, timeout).await?,
+        })
+    }
+
+    /// One sweep. Every reply is attributed by its **own** key, and what the
+    /// reply bound refused rides back as [`FleetSweep::elided`] — the queriers'
+    /// ledgers are cumulative, so the sweep reports the delta.
+    async fn sweep(&self) -> zenkey_fleet::Result<crate::view::fleet::FleetSweep> {
+        use crate::view::fleet::{FleetReply, FleetSweep};
+
+        let before = self.wildcard.elided() + self.catalog.elided();
+        let mut replies: Vec<FleetReply> = Vec::new();
+        for querier in [&self.wildcard, &self.catalog] {
+            for answer in querier.fetch().await? {
+                let zenkey_fleet::Answer::Value(payload) = answer.answer else {
+                    // An error reply is an answer, and RFC 05 §3 says it means
+                    // failure — but it carries no slice, so there is nothing to
+                    // diff. The producer stays in the inventory through the
+                    // liveliness join, which is where "alive and told us
+                    // nothing usable" belongs.
+                    continue;
+                };
+                // The producer chunk comes from the answering key too — the
+                // wildcard sweep asks `@rpc/*/introspect`, so the key is the
+                // only place that says which producer replied.
+                let Some(parsed) = zensight_common::keyexpr::parse_key(&answer.key) else {
+                    continue;
+                };
+                let producer = match parsed.producer() {
+                    Some(p) => p.name().to_string(),
+                    // A service origin carries no producer chunk (RFC 03 §1.5);
+                    // its own name is the producer name (`@catalog` → catalog).
+                    None => match &parsed.origin {
+                        zenkey::Origin::Service(svc) => {
+                            svc.as_str().trim_start_matches('@').to_string()
+                        }
+                        zenkey::Origin::Host(_) => continue,
+                    },
+                };
+                let Ok(toml) = String::from_utf8(payload.to_bytes().to_vec()) else {
+                    continue;
+                };
+                replies.push(FleetReply {
+                    origin: answer.origin,
+                    producer,
+                    toml,
+                });
+            }
+        }
+        let elided = (self.wildcard.elided() + self.catalog.elided()).saturating_sub(before);
+        Ok(FleetSweep {
+            replies,
+            elided,
+            bound: self.wildcard.reply_bound(),
+        })
+    }
 }
 
 /// The primary on-demand detail channels to prefetch when a device of this

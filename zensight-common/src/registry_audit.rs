@@ -29,7 +29,8 @@
 //! whatever the polled device exposes, so there is no finite set of families to
 //! cover. Passing them silently would be its own small lie.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Every telemetry subject pattern `producer`'s registry slice declares, in
 /// file order (`"iface/{iface}/rx_bytes"`, …).
@@ -47,9 +48,66 @@ pub fn registered_telemetry_patterns(producer: &str) -> Vec<String> {
     slice
         .subjects
         .iter()
-        .filter(|s| s.class == "telemetry")
+        .filter(|s| s.class.is(&zenkey::grammar::Class::Telemetry))
         .map(|s| s.path.clone())
         .collect()
+}
+
+/// One telemetry subject's `description` and `unit`, from the compiled registry.
+///
+/// The registry already carries a human sentence per subject — written for
+/// exactly this purpose — and a UCUM-ish unit where the producer declared one.
+/// Both were unreachable at runtime, which is why `# HELP` was emitted only for
+/// alerts (#768) and why `TelemetryPoint.unit` was the exporters' only unit
+/// source (#767).
+///
+/// Built once per producer on first use. Empty for an unknown producer or an
+/// unparseable slice, matching the silent-pass posture above.
+pub fn telemetry_subject_docs(producer: &str, pattern: &str) -> Option<SubjectDocs> {
+    /// One producer's `pattern -> docs` table, shared by every lookup.
+    type ProducerDocs = Arc<HashMap<String, SubjectDocs>>;
+
+    static CACHE: OnceLock<Mutex<HashMap<String, ProducerDocs>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+
+    let per_producer = {
+        let mut guard = cache.lock().ok()?;
+        if let Some(hit) = guard.get(producer) {
+            Arc::clone(hit)
+        } else {
+            let mut map = HashMap::new();
+            if let Some(toml) = crate::registry::registry_toml(producer)
+                && let Ok(slice) = zenkey::parse_slice(toml)
+            {
+                for s in slice
+                    .subjects
+                    .iter()
+                    .filter(|s| s.class.is(&zenkey::grammar::Class::Telemetry))
+                {
+                    map.insert(
+                        s.path.clone(),
+                        SubjectDocs {
+                            description: s.description.clone(),
+                            unit: s.unit.clone(),
+                        },
+                    );
+                }
+            }
+            let arc: ProducerDocs = Arc::new(map);
+            guard.insert(producer.to_string(), Arc::clone(&arc));
+            arc
+        }
+    };
+    per_producer.get(pattern).cloned()
+}
+
+/// What the registry says about one subject, beyond its shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubjectDocs {
+    /// The registry's own sentence for this subject.
+    pub description: Option<String>,
+    /// A UCUM-ish unit, when the producer declared one.
+    pub unit: Option<String>,
 }
 
 /// Whether `producer`'s telemetry tree is a rest-var catch-all
@@ -82,6 +140,41 @@ pub fn uncovered_families<S: AsRef<str>>(
     registered_telemetry_patterns(producer)
         .into_iter()
         .filter(|p| !covered.contains(p.as_str()))
+        .collect()
+}
+
+/// The RFC 08 §6.1 conditional-subject ledger for `producer`, as
+/// `(subject path, why this build may never emit it)` pairs in file order.
+///
+/// The ledger is `zensight-common/registry/conditional.lock`, compiled in with
+/// `include_str!`. It used to be a `CONDITIONAL_FAMILIES` const in each
+/// sensor's `tests/registry_conformance.rs`, because the registry TOML has no
+/// `feature`/`when` field to say so in the slice itself — zenkey 0.7 added the
+/// ledger for exactly that, and it is now the single source of truth.
+///
+/// **`zenkey-build` validates it at build time**, in the direction it can see:
+/// a line naming no live registry subject fails the build, so an excuse cannot
+/// outlive the entry it excuses. That is strictly better than the test-time
+/// staleness check it replaces — a build error rather than a test failure, and
+/// it fires even for a producer with no conformance test.
+///
+/// Read the lock file's header for why it is only two lines long; the short
+/// version is that a gated *procedure* is declared unconditionally and answers
+/// `error/gated` or `error/unsupported`, so it needs no exemption. Only a
+/// gauge with no honest reading does.
+#[must_use]
+pub fn conditional_families(producer: &str) -> Vec<(&'static str, &'static str)> {
+    const LEDGER: &str = include_str!("../registry/conditional.lock");
+    LEDGER
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            match (f.next(), f.next(), f.next()) {
+                (Some(p), Some(path), Some(condition)) if p == producer => Some((path, condition)),
+                _ => None,
+            }
+        })
         .collect()
 }
 

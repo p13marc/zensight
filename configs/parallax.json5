@@ -64,8 +64,38 @@
     // links never fight over one encoder. The sensor owns the numbers; the
     // wire and the key carry the name.
     video: {
-      gop_frames: 60,          // keyframe (IDR) interval in frames (shared)
+      gop_frames: 60,          // keyframe (IDR) interval in frames (shared default)
       default_tier: "medium",  // the tier an open with no explicit tier gets
+
+      // Encoder shaping shared by every tier (#509); a tier's own `encoder`
+      // block overrides any field. Every knob below is COMMENTED OUT on
+      // purpose: unset means the corresponding parallax builder is never
+      // called, so the encoder keeps OpenH264's own default rather than a
+      // number this file guessed. Sensor-local — none of it is on the wire.
+      encoder: {
+        // profile: "baseline",   // baseline / main / high. All three are
+        //                        // verified to decode through the GUI's own
+        //                        // OpenH264 decoder; unset lets the codec pick.
+        // complexity: "medium",  // low / medium / high — CPU per frame. Reach
+        //                        // for "low" when `encoder_overrun` fires:
+        //                        // cheaper than dropping resolution, and
+        //                        // invisible to the receiver.
+        // usage_type: "camera_realtime",  // camera_/screen_ × realtime or not.
+        //                        // A property of the SOURCE, so set it here
+        //                        // rather than per tier.
+        // qp: 26,                // 0..=51; under Bitrate rate control with
+        //                        // frame skipping on, the controller works in
+        //                        // a ±4 band around it.
+        // gop_frames: 30,        // per-tier override of the shared GOP above.
+        // max_slice_len: 1200,   // cap each NAL near the path MTU. OFF, and
+        //                        // note it buys nothing *here*: this sensor
+        //                        // publishes a whole access unit as ONE
+        //                        // best-effort Zenoh sample, so losing a
+        //                        // sample loses the whole AU whether it was
+        //                        // one slice or twenty. Set it when an RTP or
+        //                        // WebRTC payloader is downstream.
+      },
+
       tiers: [
         { name: "low",    max_height: 240,  fps: 10, bitrate_kbps: 400  },
         { name: "medium", max_height: 480,  fps: 20, bitrate_kbps: 1200 },
@@ -77,7 +107,8 @@
     // no explicit opens (crash backstop for GUIs that die without CloseStream).
     idle_timeout_secs: 30,
 
-    // Interval between per-stream stats telemetry points (fps/kbps/drops/viewers).
+    // Interval between per-stream stats telemetry points
+    // (fps/kbps/drops/rc_drops/viewers/encode_ms).
     stats_interval_secs: 5,
   },
 

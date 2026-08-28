@@ -15,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 zenkey = { workspace = true }
+# The fleet engine behind the Fleet view (#745) — GUI only, never a sensor dep.
+zenkey-fleet = { workspace = true }
 zensight-common.workspace = true
 zenoh.workspace = true
 zenoh-ext.workspace = true
@@ -62,9 +64,7 @@ chrono = "0.4"
 redb = "4"
 
 # H.264 decode for the opt-in live view (#409); `h264` feature only.
-parallax-pipeline = { version = "0.6.0", default-features = false, features = [
-    "h264",
-], optional = true }
+parallax-pipeline = { workspace = true, features = ["h264"], optional = true }
 regex = "1.13.1"
 
 [features]

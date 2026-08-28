@@ -594,7 +594,7 @@ fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     if parsed.subject != ["alive"] {
         return None;
     }
-    let protocol = parsed.producer?.name().to_string();
+    let protocol = parsed.producer()?.name().to_string();
     let source = Some(parsed.origin.chunk().to_string());
     if is_alive {
         tracing::info!(protocol = %protocol, source = ?source, "Sensor came online");
@@ -619,7 +619,7 @@ fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     if *device_head != "device" || *alive != "alive" {
         return None;
     }
-    let protocol = parsed.producer?.name().to_string();
+    let protocol = parsed.producer()?.name().to_string();
     let origin = parsed.origin.chunk().to_string();
     let device = device_id.to_string();
     if is_alive {

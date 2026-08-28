@@ -19,7 +19,8 @@ Minimal:
 | `preview.fps` | `2` | JPEG preview frame rate (thumbnails, not video). |
 | `preview.quality` | `75` | JPEG quality 1–100. |
 | `preview.max_height` | `360` | Aspect-preserving cap on the thumbnail height; `null` = source size. A 1080p camera's thumbnail is otherwise a 1080p JPEG. Applies to every preview that re-encodes; the V4L2 MJPG passthrough forwards the camera's JPEG verbatim, uncapped. |
-| `video.gop_frames` | `60` | Keyframe (IDR) interval in frames, shared by every tier. |
+| `video.gop_frames` | `60` | Keyframe (IDR) interval in frames, shared by every tier (a tier's `encoder.gop_frames` overrides it). |
+| `video.encoder` | all unset | Encoder shaping shared by every tier; each tier may override any field (see below). |
 | `video.default_tier` | `"medium"` | The tier an `open_stream` with no explicit `tier` resolves to. |
 | `video.tiers` | low/medium/high (see below) | The bandwidth-tier ladder — the heart of demand-driven simulcast (#494). |
 | `idle_timeout_secs` | `30` | Tear an open profile down after this long with no viewers and no explicit opens. |
@@ -50,6 +51,44 @@ video: {
   scaler never upscales, so a tier whose cap exceeds a camera's native height is
   simply not *offered* for that camera in the catalogue (it would upscale).
 - `fps` / `bitrate_kbps` — the tier's target framerate and encoded bitrate cap.
+- `encoder` — optional per-tier encoder shaping (below).
+
+### `video.encoder` — encoder shaping (#509)
+
+The ladder says *what* a tier delivers; this says *how* the encoder gets there.
+Set it once under `video.encoder` and/or per tier in that tier's own `encoder`
+block — **the tier wins, field by field**, and a field neither sets is never
+passed to the encoder at all, so it keeps OpenH264's own default rather than a
+number this project guessed.
+
+**Everything ships unset**, and a default build behaves exactly as it did
+before these knobs existed.
+
+```json5
+video: {
+  encoder: { complexity: "low" },          // shared by every tier
+  tiers: [
+    { name: "low",  max_height: 240, fps: 10, bitrate_kbps: 400,
+      encoder: { profile: "baseline", gop_frames: 20 } },   // this rung only
+    { name: "high", max_height: null, fps: 30, bitrate_kbps: 4000 },
+  ],
+}
+```
+
+| Key | Values | Meaning |
+|-----|--------|---------|
+| `profile` | `baseline` / `main` / `high` | H.264 profile. All three are verified to decode through the GUI's own OpenH264 decoder (`every_profile_the_ladder_can_name_decodes_like_the_gui`); unset lets the codec choose. |
+| `complexity` | `low` / `medium` / `high` | CPU spent per frame. **`low` is the answer to a firing `encoder_overrun`** — cheaper than dropping resolution, and invisible to the receiver. |
+| `usage_type` | `camera_realtime` / `screen_realtime` / `camera_non_realtime` / `screen_non_realtime` | What is being encoded. A property of the *source*, so set it on `video.encoder`, not per tier. Only camera/RTSP/test sources exist today. |
+| `qp` | `0`–`51` | Target quantiser. Under `RateControlMode::Bitrate` with frame skipping on (what this sensor uses), the rate controller works in a ±4 band around it. |
+| `gop_frames` | `> 0` | Per-tier keyframe interval, overriding `video.gop_frames`. A lossy low tier wants a short GOP (fast recovery and late-join); a high tier wants a long one (efficiency). |
+| `max_slice_len` | `200`–`65535` bytes | Cap on each emitted NAL. **Off, and it buys nothing on today's egress** — see [`streams.md`](streams.md). |
+
+Rejected at load: `qp > 51` (parallax clamps it silently, which would mean
+something other than what the config says), `max_slice_len` outside
+`200..=65535`, `gop_frames: 0`, and an `encoder` key naming no tier. An
+unrecognised `profile`/`complexity`/`usage_type` spelling fails at *parse*, with
+the offending field named.
 
 ### `rtsp` entries
 

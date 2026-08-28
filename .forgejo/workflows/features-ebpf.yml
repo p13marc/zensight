@@ -18,11 +18,26 @@ on:
     # 04:17 UTC daily, well clear of the working day.
     - cron: '17 4 * * *'
   workflow_dispatch:
+  # #674 landed a job that had never once run to completion, because nothing
+  # but a manual dispatch can reach this file and a manual dispatch is easy not
+  # to do. A path-filtered pull_request buys exactly one real run per edit of
+  # this workflow and fires for nothing else — the per-push cost #662 declined
+  # stays declined.
+  pull_request:
+    paths:
+      - '.forgejo/workflows/features-ebpf.yml'
 
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: /srv/cache/bin/sccache
   CARGO_INCREMENTAL: "0"
+  # Cap build parallelism, same as ci.yml: cargo otherwise defaults to nproc
+  # (6 on vm-runner-01) per job, against a lane capacity of 2. This job was a
+  # first-class casualty of the 2026-08-19 balloon, not a bystander — run #135
+  # installed the prebuilt linker successfully and then died with exitcode 137
+  # inside `cargo check --features ebpf`. ci.yml got this cap; this file is
+  # the other workflow that builds Rust, and it was left without one.
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   ebpf:
@@ -43,8 +58,60 @@ jobs:
         with:
           key: ebpf
           cache-targets: false
+      # `cargo install bpf-linker` builds an LLVM frontend, and llvm-sys wants a
+      # *system* LLVM of the major version it was written against. The runner
+      # image (ghcr.io/catthehacker/ubuntu:act-24.04) ships none, so the only
+      # run this workflow ever had spent 70 s compiling and then died in that
+      # build script: "could not find llvm-config in directories specified by
+      # environment variable `PATH`" (#674). Installing an LLVM to satisfy it
+      # would be the wrong fix — upstream says so itself, right before it dies:
+      # a source build "is NOT recommended for regular users due to dependency
+      # on specific LLVM version, system libraries and overall complexity of
+      # getting the setup right".
+      #
+      # Take the published binary instead. The musl asset is a single
+      # statically linked ~104 MB executable with LLVM baked in, 27 MB over the
+      # wire. It is the same artifact `cargo binstall bpf-linker` would fetch,
+      # minus having to install binstall first — and bpf-linker publishes no
+      # [package.metadata.binstall], so binstall would be guessing the asset
+      # URL from its default templates rather than reading it.
+      #
+      # It lands in /usr/local/bin, NOT $CARGO_HOME/bin: rust-cache caches
+      # $CARGO_HOME/bin by default and deliberately keeps what a job installed,
+      # so the old step was quietly a 104 MB cache entry — one keyed on a
+      # lockfile hash that knows nothing about BPF_LINKER_VERSION, so it would
+      # restore a stale binary on a bump and be overwritten anyway. There is no
+      # sense pushing this through a cache to save a sub-second download.
+      # /usr/local/bin is already on the runner's PATH, so no $GITHUB_PATH edit.
+      #
+      # curl and zstd are both in the act image's own package list, so the apt
+      # line above is left alone. The archive holds a bare `bpf-linker` at its
+      # root today, but that is a packaging detail upstream is free to change —
+      # hence find(1) rather than an assumed path.
       - name: Install bpf-linker
-        run: cargo install bpf-linker --locked
+        env:
+          # renovate: datasource=github-releases depName=aya-rs/bpf-linker
+          BPF_LINKER_VERSION: 0.11.0
+        run: |
+          set -euo pipefail
+          url="https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          curl --proto '=https' --tlsv1.2 --retry 5 --retry-connrefused \
+               --location --fail --silent --show-error \
+               --output "$tmp/bpf-linker.tar.zst" "$url"
+          tar --zstd -xf "$tmp/bpf-linker.tar.zst" -C "$tmp"
+          bin="$(find "$tmp" -type f -name bpf-linker -print -quit)"
+          if [ -z "$bin" ]; then
+            echo "::error::no bpf-linker executable in $url — the archive layout changed"
+            find "$tmp" -type f -printf '%M %10s %P\n'
+            exit 1
+          fi
+          sudo install -m 0755 "$bin" /usr/local/bin/bpf-linker
+          # The release build does not stamp its version (it self-reports
+          # 0.0.0), so record the pin and prove the musl binary actually runs
+          # on this image — which is the half that can fail.
+          echo "bpf-linker ${BPF_LINKER_VERSION} installed: $(bpf-linker --version)"
 
       - name: netlink --features ebpf
         run: cargo check -p zensight-sensor-netlink --features ebpf --locked
