@@ -59,11 +59,25 @@ trap cleanup EXIT
 ZENCTL="${ZENCTL:-zenctl}"
 command -v "${ZENCTL%% *}" >/dev/null 2>&1 \
   || die "zenctl not found — cargo install --git https://github.com/p13marc/zenkey zenctl (or set ZENCTL)"
-zenctl() { $ZENCTL "$@" --connect "$HUB"; }
+# `command` is load-bearing: without it `$ZENCTL` (default: "zenctl") resolves
+# back to THIS function rather than the binary, and every call recurses until
+# bash dies — each level appending one more `--connect`. Nothing had ever run
+# this script, so nothing had ever hit it (#472).
+zenctl() { command $ZENCTL "$@" --connect "$HUB"; }
 
-# The origins holding a liveliness token. `node list` prints each origin on its
-# own line with its producers indented beneath.
-origins_on_bus() { zenctl node list 2>/dev/null | grep -E '^h-[0-9a-f]{12}$' || true; }
+# The origins holding a liveliness token. `node list` emits ONE JSON object per
+# line — a `{"report":"node-list",...}` header, then `{"origin":...,"producer":
+# ...,"row":"node"}` per producer — so an origin appears once per producer it
+# runs and has to be de-duplicated. It was written against a zenctl that printed
+# bare origins, one per line; that spelling is gone, and grepping for it found
+# nothing and reported it as "the container published nothing" (#472).
+origins_on_bus() {
+  zenctl node list 2>/dev/null \
+    | grep -o '"origin":"h-[0-9a-f]\{12\}"' \
+    | cut -d'"' -f4 \
+    | sort -u \
+    || true
+}
 
 start_container() {
   $PODMAN run -d --name zensight-verify \
