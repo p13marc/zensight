@@ -7,44 +7,456 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Decided
+## [0.11.0] - 2026-08-28
 
-- **Rerun: an optional debugging backend, and the evaluation is closed** (#430,
-  epic #415). `docs/plans/rerun/DECISION.md` is the terminal document of a
-  21-issue evaluation. `zensight-rerun` stays in-tree, `publish = false`, out of
-  the release train, and off unless someone runs the binary; it is **supported
-  for bounded incident capture and replay** and for nothing else.
+A month of unreleased work, and the release an operator has to read before
+upgrading. Seventeen entries below alter a wire contract, an exported series
+name or a deployment default; three of them break a *deployment* rather than an
+API.
+Start with **Changed — BREAKING**, and with the alert re-key in particular:
+alerts are LWW state keyed by the thing that changed, so every alert firing at
+the moment of upgrade strands a phantom at its old key that nothing will ever
+clear. [`RELEASING.md`](RELEASING.md) carries the sweep, and which deployments
+need it.
 
-  Outcome 4 — a packaged, released backend — is refused rather than deferred,
-  for four independent reasons: the adapter was never benchmarked at fleet rates
-  (#426, not run), the viewer transport is unauthenticated, unencrypted and
-  binds `0.0.0.0` by default, packaging would make Rerun's ~6-week breaking
-  cadence our obligation, and structured events are modelled *worse* than in a
-  backend we already ship (OTel's `LogRecord` carries body + severity +
-  attributes in one record; Rerun needs `TextLog` **and** `AnyValues` on one
-  path by producer-side convention, with nothing stopping them drifting).
+The headline features are the adaptive `@media` plane — a viewer that moves
+itself down a rung, a stream health panel that names the stage losing the
+picture, and drop accounting sourced from the sink instead of inferred — and
+`zensight-conformance`, which now asks a *running* fleet in CI whether it obeys
+its own contract.
 
-  The maintenance number is not hypothetical: the pin is `=0.34.1` and upstream
-  is 0.36.3 — two breaking minors, each with its own migration guide, in the
-  seven weeks since we pinned. `zensight-rerun/Cargo.toml` now says in place
-  that the pin does not move on a Renovate PR.
+#### Upgrading to 0.11.0
 
-  Three operating rules are now written where a user will hit them
-  (`zensight-rerun/README.md`): **`--bind 127.0.0.1` always** — the default
-  exposes the web viewer *and* the gRPC proxy to the network, carrying
-  hostnames, IPs, MACs, flow matrices and log lines; **`rerun rrd optimize`
-  before storing or sharing** — 13x on our own recordings (~1.3 KiB/point live
-  write becomes ~100 B/point, which is what killed the "untenable storage"
-  reject-signal, and it doubles as the repair tool for a `kill -9`-truncated
-  file); and **`--memory-limit`** on anything outliving a demo.
+In this order:
 
-  What the evaluation is actually worth, beyond the verdict: it demonstrated
-  that scrubbing backwards through a correlated incident across metrics, alerts,
-  events and topology on one axis is a thing worth having. ZenSight already
-  stores the samples. DECISION.md §6 records that as a native feature waiting to
-  be specified rather than designing it.
+1. **Upgrade the whole fleet together.** zblob's wire went v1 → v2 → v3 in this
+   cycle and the versions deliberately do not interoperate, so **sensors and
+   frontend must move together** — a mixed fleet fails closed on artifact
+   transfer rather than half-decoding it.
+2. **Then sweep the stranded alerts** — only where a Zenoh storage is pointed at
+   `v1/*/state/**`, and only once no old-version producer remains. `alert_key`
+   moved to the normative RFC 11 §3.1 derivation (#736, #738), so every alert
+   firing at the moment of upgrade leaves a phantom at its old key that nothing
+   will ever write again. The procedure, the who-needs-it table and the reason
+   it is a GET-then-delete of concrete keys rather than a wildcard delete are in
+   [`RELEASING.md`](RELEASING.md) § *Migration: re-keying the alert state on
+   upgrade*. Doing it now is cheap: nothing consumes alerts yet.
+3. **Re-point every Prometheus scrape config and firewall rule** that named
+   `0.0.0.0:9090` at `127.0.0.1:9464` (#771).
+4. **Expect dashboards and recording rules to break, and fix them from the
+   entries below.** Every exported series for the SNMP sensor is renamed
+   (#764, #765, #779, #783, and the 49-name table under the SNMP rename entry);
+   text telemetry becomes an `_info` family (#752); OTel counters become
+   asynchronous instruments (#754); and thirteen sysinfo levels change type from
+   counter to gauge (#766), which is a payload change every consumer sees.
+5. **OTel operators**: each host now has its own `Resource` (#755), so queries
+   keyed on the single fleet-wide resource must be re-pointed — and if an OTLP
+   endpoint was configured with headers, TLS or HTTP multi-signal, re-read
+   #756; that configuration did not previously work.
+
+Configs referencing `snmp.mib.files` no longer load (#580), and anything
+building from `docker/Dockerfile.exporter` needs a new path (#778).
+
+### Changed — BREAKING
+
+- **The SNMP CPU, IP-address and storage tables are registered subject trees, so
+  `sum by (index)` works for them too** (#783, registry `snmp` 1.8 → **1.9**).
+  The finish of what #779 started for `ifTable`/`ifXTable`.
+
+  While a key matched only snmp's rest-var catch-all `{device}/{metric...}`,
+  #764's family rule had no literal chunks to name from and fell back to the
+  rest variable's **value** — so the table index rode in the metric *name*.
+  `zensight_snmp_storage_1_size` and `zensight_snmp_storage_2_size` were two
+  unrelated families; `zensight_snmp_cpu_1_load` and `zensight_snmp_cpu_2_load`
+  likewise. #769 had already attached the index as a **label**; these patterns
+  are the other half, and now the generic rule takes over:
+
+  | | |
+  |---|---|
+  | before | `zensight_snmp_storage_1_size`, `zensight_snmp_cpu_2_load` — one family per row |
+  | after | `zensight_snmp_storage_size{index="1"}`, `zensight_snmp_cpu_load{index="2"}` — one family, aggregatable |
+
+  **Any dashboard or recording rule naming `zensight_snmp_{cpu,ip,storage}_<n>_<column>`
+  breaks.** Nothing in-tree does — `demo/prometheus/dashboards/` ships no SNMP
+  panel, and `dashboards-blocked/README.md` (updated here) explains why: a panel
+  is provisioned only after it has been checked against a real device polled by
+  a running exporter, and nobody has done that yet.
+
+  Registered **column by column**, not as `{device}/<table>/{index}/{column}`,
+  for the reason #779 paid to learn: a single `{column}` variable is dropped
+  from the family name along with every other variable, collapsing a table's
+  columns into one family carrying counters, gauges and strings at once — two
+  `# TYPE` lines for one name, the scrape-killer class #752 fixed.
+  `storage_columns_are_not_collapsed_into_one_family` pins that half.
+
+  **Two deliberate differences from #779**, both worth stating because their
+  absence looks like an oversight:
+
+  - **No `.rate` siblings.** The poller derives a rate from the *wire tag* —
+    `Counter32`/`Counter64`, or a `Gauge32` the MIB declares as a counter — and
+    not one column of these three tables is a counter: hrStorage is INTEGER
+    throughout, hrProcessorLoad is INTEGER, ipAddrTable is IpAddress/INTEGER.
+    ifTable needed them because `in_octets` and friends genuinely are counters.
+    Registering twelve dead `.rate` patterns to look symmetrical would make the
+    registry advertise a surface no build can emit, which is the class of lie
+    RFC 08 §6.1 and #484 exist to prevent.
+  - **The `ip/` group's scalars stay on the catch-all** (`ip/forwarding`,
+    `ip/default_ttl`, `ip/in_receives` and its `.rate`). They are 3-chunk keys,
+    so the new 4-chunk patterns cannot match them, and their rest-var family
+    name already carries no index — there was nothing for a registration to fix.
+    `the_ip_scalars_are_untouched_by_the_indexed_patterns` pins that they do not
+    get swept into an indexed family, and that they carry no `index` label.
+
+  Not a wire change: the poller publishes exactly the same keys with exactly the
+  same labels. Only the exporters' *reading* of them moves. `registry.lock`
+  regenerated (10 additive entries), and
+  `the_catch_all_would_still_bury_the_table_index_in_the_name` pins the
+  before-state so the improvement is demonstrated rather than asserted.
+
+- **Every firing alert re-keys: `alert_key` is now the normative RFC 11 §3.1
+  derivation** (#736, #738). ZenSight had its own recipe with the same hash
+  (FNV-1a-64) and the same 16-lowercase-hex output, but two byte differences
+  from the spec: the framing put `\0` *after* the rule and after each `k=v`
+  rather than `\n` *before* each label with none trailing, and the exclusion
+  matched only the `host.` prefix, so the RFC's own bare `host` label was
+  hashed in. `Alert::alert_key()` is now a thin wrapper over
+  `zenkey::alert::alert_key`, so two independent implementations mint the same
+  key for the same alert. The RFC's test vector — rule `link_down`, labels
+  `{peer: r2, port: eth0, host: h-3fa9c2d41b7e}` → `a659f813308ad1da` — is
+  pinned in `alert.rs`; that same alert used to key as `c25da085d5c5b7e7`.
+
+  **Alerts are LWW state keyed by the thing that changed**, so every alert
+  firing at the moment of the upgrade leaves a permanent phantom at its old key
+  that nothing will ever clear. See [`RELEASING.md`](RELEASING.md), "Re-keying
+  the alert state on upgrade" (#737), for the sweep — it is a
+  GET-then-delete-per-concrete-key enumeration, run **after** every publisher
+  is upgraded, and it is needed only where a Zenoh storage is pointed at
+  `v1/*/state/**`. `just run` and the e2e suites carry no persistent state and
+  need nothing.
+
+  **`host.*` stays excluded, and that is byte-normative, not a deviation.**
+  RFC 11 §3.1 excludes "the label named `host`, *and any label the producer
+  documents as host-scoped*", because only the producer knows its vocabulary.
+  ZenSight's is the `host.` annotation namespace, now declared in code as
+  `zensight_common::alert::{HOST_SCOPED_PREFIX, is_host_scoped}` and in
+  `docs/KEYSPACE.md`. Excluding it is load-bearing: `AlertReporter.active` is
+  keyed by `alert_key()` and the resolve path re-derives it, so an identity
+  refresh between fire and resolve would leave the `Firing` on the old key
+  forever while the `Resolved` and its tombstone landed on a new one — a
+  permanent phantom, with nothing logged.
+  `a_host_annotation_change_does_not_orphan_a_firing_alert` in
+  `zensight-sensor-core/tests/alert_reporter.rs` is that invariant; it fails if
+  the host-scoped vocabulary is ever dropped from the wrapper.
+
+  `Alert::alert_key()` stays **infallible**: it is called from ~35 places, and
+  the errors `zenkey::alert::alert_key` returns are framing-injectivity
+  violations (a `\n` in a rule forges a label) that no ZenSight rule produces.
+  On refusal the offending bytes become `_`, a WARN names the rule, and the
+  normative derivation runs on that — deterministic, so a `Firing` and its
+  `Resolved` still agree.
+
+- **`zenkey` and `zenkey-build` 0.6 → 0.7** (#735). The wire is unchanged —
+  the `identity.rs` golden host-id vector (`h-` + first 12 hex of
+  `sha256(machine_id + salt)`) still passes, so no origin re-keys — but three
+  API surfaces moved, and one of them was silently wrong before.
+  - `V1Context::for_producer` is now `Result<Self, KeyError>`. 0.6 slugged an
+    illegal producer name and, failing that, fell back to the literal
+    `sensor`: a misconfigured producer published its **entire keyspace under a
+    different identity**, with no `Err`, no panic and no log, colliding with
+    every other misconfigured producer in the fleet. ZenSight absorbs the new
+    `Result` **once**, in `zensight_common::v1::for_producer` (re-exported as
+    `zensight_sensor_core::v1::for_producer`), rather than threading `?`
+    through 47 call sites: a ZenSight producer name is a compile-time constant
+    from `zensight-common/registry/`, and a new test asserts every registered
+    name is chunk-legal, so an illegal one now fails `cargo test`. That change
+    found four real cases — the logs and systemd test harnesses were passing
+    `test_<nanos>/logs` as a *producer chunk*, which 0.6 had been quietly
+    renaming into something else.
+  - `V1Context::state_key` / `rpc_key` are now `Result` too, for one reason: a
+    chunk that is literally `alive`, the reserved liveliness leaf (RFC 03 §3).
+    `zensight_common::v1::V1ContextExt::{const_state_key, const_rpc_key}`
+    carries the constant-subject case; the two builders whose chunks really
+    are foreign data — an SNMP device name, a parallax stream name — now
+    *refuse* a device or stream called `alive` and log it, instead of minting
+    a key that collides with that producer's liveliness token.
+  - `AppProfile::new` takes `AppName` / `OriginSalt` newtypes, because
+    `AppProfile::new("zensight-host-id-v1", "zensight")` used to compile and
+    re-key the whole fleet. Both constructors stayed `const fn`, so
+    `zensight_common::PROFILE` is still a plain `static`.
+  - `StructuralKey::producer` became a method (`Position5` now holds
+    producer-or-blob-tier-or-chunk), `ServiceOrigin` is a newtype rather than
+    a `String`, and `SubjectDecl::class` is a typed `Declared<Class>` — the
+    last of which broke `registry_audit.rs` at **compile time** rather than
+    silently returning an empty `Vec`, which was the risk.
+
+- **The Prometheus exporter's scrape port default moves `0.0.0.0:9090` →
+  `127.0.0.1:9464`** (#771). 9090 is the Prometheus *server's* own port, and the
+  shipped `README.md` told you to scrape `localhost:9090` — i.e. Prometheus
+  scraping itself. Any stack running both on one host collided. It also now binds
+  loopback rather than every interface; the container and systemd deployments set
+  `listen` explicitly and are unaffected. 9464 is the conventional
+  OpenTelemetry/Prometheus-exporter port.
+- **Text telemetry is exposed under an `_info` family with a named label**
+  (#752). A `TelemetryValue::Text` point used to render `# TYPE <name> info` —
+  and `info` is an **OpenMetrics** type that the `version=0.0.4` text format we
+  serve does not admit. Prometheus's parser aborted on the unknown token and
+  **rolled back every sample in the scrape**, while the target still reported
+  healthy. One netlink MAC address, one SNMP `sysDescr` or any gnmi string was
+  enough to empty the whole endpoint. Text now renders as
+  `<name>_info{…,<leaf>="<text>"} 1` with type `gauge`, the text rides under a
+  label named for the subject leaf instead of a literal `value`, and the value is
+  stripped of control characters and clamped to 128 bytes. `/metrics` and
+  remote-write spell the series identically. Opt out with
+  `prometheus.export_text_metrics: false`.
+- **OTel counters are exported through asynchronous instruments** (#754).
+  `counter.add()` was being fed the **absolute** device reading, so under
+  cumulative temporality the exported Sum became a running total of absolute
+  readings — an interface at 1 000 000 octets reported 1e6, 2e6, 3e6, forever.
+  Every `rate()` was meaningless and the series never decreased across a counter
+  reset. `TelemetryValue::Counter` is already the cumulative total, so it is now
+  reported by an `ObservableCounter` rather than added to. This also gives stale
+  series a real **gap** instead of a flat line: `cleanup_stale_observations`
+  (previously dead code with zero callers) is now wired to a sweep task, and an
+  evicted series stops being observed.
+- **Filesystem, memory and TCP levels are published as gauges, not counters**
+  (#766). Thirteen `publish` sites typed a *level* as `TelemetryValue::Counter`
+  — memory total/used/available and their swap siblings, the per-mount
+  filesystem levels, per-process memory, the TCP per-state connection counts,
+  uptime and boot_time. All of them go down. On Prometheus that emitted
+  `# TYPE … counter` for a decreasing value, so every `rate()`/`increase()` over
+  them was nonsense and the counter-reset heuristic fired on every deletion; on
+  OTel, once #754 made counters honest, a monotonic Sum that decreases is a
+  contract violation rather than a bad panel.
+
+  **This is a wire payload change**: the serde tag flips from `"counter"` to
+  `"gauge"` and every consumer sees it (GUI, correlator, rerun, both exporters).
+  Genuine counters are untouched — network rx/tx bytes/packets/errors and the
+  disk I/O byte/op/time totals stay `Counter` and still render `_bytes_total`.
+  `exposition::KIND_OVERRIDE` corrects the same keys arriving from a sensor that
+  has not been upgraded yet, because an exporter has to be right against
+  whatever is actually on the bus. The tell was a doubled suffix once #767
+  landed the conventions — `zensight_system_memory_usage_bytes_total` — which is
+  how the full set was found rather than guessed at.
+
+- **Every host gets its own OTel `Resource`** (#755). `build_resource_attributes`
+  emitted `service.name`, an optional `service.version` and whatever the
+  operator hand-wrote, so the entire fleet shared **one** Resource despite every
+  origin being literally `h-<12hex>`. For metrics that reads as
+  `job="zensight", instance=""`. For logs it is worse: a backend derives stream
+  identity from the resource, so the fleet collapsed into a single Loki stream
+  with the host demoted to structured metadata, and spans carried no host at
+  all.
+
+  OTel binds a Resource to a *provider*, not to a record, so one resource per
+  host necessarily means one provider set per host. `SignalStack` is that set,
+  built lazily on the first sample from an origin and capped by `max_resources`
+  (512); past the cap a host falls back to the shared resource and is counted —
+  degraded but honest rather than unbounded. The resource carries `host.id` (the
+  RFC 06 minted origin, stable across hostname changes, which is why it and not
+  `host.name` is the identity), `host.name`, a `service.instance.id` that
+  includes the producer instance so `netring-2` is distinguishable from
+  `netring`, and a per-producer `service.name` so a service map means something
+  rather than showing one node called "zensight". Operator `resource` attributes
+  merge *underneath* and cannot override observed truth. **A dashboard or log
+  query keyed on the old single resource must be re-pointed.**
+
+- **The OTLP connection was unusable as configured** (#756). Three defects that
+  between them meant the exporter worked only against a local, plaintext,
+  single-signal collector — while the README advertised Grafana Cloud,
+  Honeycomb, Datadog, New Relic and Azure Monitor.
+
+  - `protocol: "http"` **could not export more than one signal**.
+    opentelemetry-otlp takes a *programmatic* endpoint verbatim and appends
+    `/v1/<signal>` only when falling back to the environment, so all three
+    signals POSTed to `/` and the collector 404'd everything — and because one
+    config field served three signals, appending `/v1/metrics` by hand fixed
+    metrics and broke logs and traces. `endpoint` is now a base with optional
+    per-signal overrides, and the path is appended under HTTP only (gRPC routes
+    by service name, not path). A base that already carries the path is left
+    alone, so an existing config keeps working.
+  - `headers` **was dead config** — defined, parse-tested, and applied nowhere,
+    so an authenticated backend answered 401 with no hint why. Wired for both
+    transports now, names lower-cased, an unrepresentable name or value failing
+    at startup rather than silently.
+  - **gRPC + TLS killed the process at startup**, and the usual diagnosis was
+    wrong: TLS is not missing upstream. This crate simply never enabled a TLS
+    feature, so an `https://` endpoint hard-errored out of `OtelExporter::new`.
+
+- **`docker/Dockerfile.exporter` is deleted** (#778). Referenced by nothing —
+  not compose, not CI, not the justfile — with a dead `EXPORTER_NAME` arg, a
+  `CMD ["--help"]` and no config baked in, and an `EXPOSE 9090` encoding the port
+  collision above. The images that ship are built from `Dockerfile.runtime`.
+
+- **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire
+  tag is re-spelled and the wire version moves to 3, so a mixed deployment
+  fails closed rather than half-decoding — **sensors and frontend upgrade
+  together** (again). Unlike the sha256→blake3 cut below, **chunk addresses
+  do not change**: the GUI's redb chunk store and any router-hosted storages
+  stay warm across the upgrade. Also picked up from 0.3: typed
+  serve/query prefixes replace string hygiene (a wildcard fetch prefix is
+  now unrepresentable, not just guarded), tier-2 materialization hardening
+  (a hostile snapshot index can no longer delete pre-existing directories,
+  apply setuid/setgid bits, or escape via a symlink chain), batched tier-2
+  chunk fetches, and snapshot chunking derives its CDC min/max from the
+  configured average (previously `avg == max` degenerated FastCDC into
+  fixed-size chunking, and a `chunk_size` above 256 KiB failed validation).
+- **zblob 0.2 (wire v2).** Artifact transfer moves to BLAKE3 + bao verified
+  streaming, postcard control messages and chunk-range resume. v1 and v2
+  peers deliberately do not interoperate — v2 renamed the reply keys so a
+  mixed fleet fails closed instead of corrupting — so **sensors and frontend
+  upgrade together**. Every reply is verified against the blob's content root
+  *before* it touches disk, so a wrong or tampered slice is discarded rather
+  than assembled and detected at the end.
+  - `Delivery::Blob`'s manifest changes shape: `filename` is optional and
+    advisory, and `chunk_count`/`hash_algo`/`hash` give way to `root` (the
+    BLAKE3 bao root). The caller now names the destination *file*; the crate
+    never joins a remote-supplied filename to a path.
+  - The GUI's redb chunk store re-keys from `sha256/<hex>` to
+    `blake3/<hex>`. Dedup is per-algorithm, so pre-0.11 chunks are inert
+    rather than wrong — the store refills on the next fetch. It also gained
+    the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
+
+
+
+- **Metric names come from the registry, not the payload** (#764). Neither
+  exporter parsed the key: both named from `point.protocol` + `point.metric`, so
+  a per-entity subject landed in the metric **name** — `disk/root/inodes_total`
+  and `disk/srv_dev/inodes_total` were two unrelated metric families, and
+  `sum by (mount)` could not be written at all. Only sysinfo and systemd
+  escaped, through the hand-written semconv table.
+
+  The primitive already existed and everyone else already used it:
+  `keyexpr::refine_key` does registry-backed refinement and is called by the GUI
+  and the correlator, and #475 established "decode keys through the registry,
+  not `split('/')`". The exporters were the last consumers that never migrated.
+  `exposition::identify` now derives the **name** (a semconv hit wins;
+  otherwise the registered pattern with its `{var}` chunks dropped, prefixed by
+  the producer — a rest-var producer like snmp/modbus/gnmi/netflow is named from
+  the rest variable's value, which preserves exactly what those producers
+  already exported while promoting `{device}` from buried-in-the-name to a
+  label), the **labels** (`origin`, `source`, `protocol` and the producer
+  instance as structural truth, then semconv constants, then pattern vars) and
+  the **unit** (registry `unit()` → `point.unit` → a consumed `unit` label).
+  This is the mechanism behind the SNMP renames below.
+
+- **Semantic-convention entries are keyed on (producer, registry pattern)**
+  (#765). Each arm used to re-split the metric string to compute its attribute
+  *values*, so `disk/sda/io/read_bytes` produced `device="sda"` here while the
+  sysinfo sensor produced `device="sda"` as a point label — two producers of one
+  value, and the exporters emitted both, which is an invalid series (#753). The
+  systemd half already carried a workaround for exactly this, leaving its
+  attributes empty with a comment that the point "already carries the `unit`
+  label"; that patched one symptom by omission and left the sysinfo one live.
+
+  An entry now only ever **names** an attribute — `constants` for what the
+  pattern cannot supply (state, direction, type) and `var_renames` for
+  registry-variable → semconv-attribute — with values coming from
+  `AnySubject::vars()`, the registry's own parse. One producer per value, so the
+  duplicate is unrepresentable at the source rather than caught downstream. The
+  renames are the substance: filesystem's semconv `device` comes from
+  `{mount}`, network's from `{iface}`, and per-core CPU's `cpu` from `{core}` —
+  a table assuming identity would have had to compute those itself, which is the
+  original bug. systemd units now name their `unit` attribute honestly instead
+  of omitting it.
+
+- **Every exported Prometheus/OTel series for the SNMP sensor is renamed**
+  (#559, #647). The built-in MIB tables published raw MIB object names straight
+  onto the telemetry key (`sysUpTime.0`, `ifInOctets`) — names the key chunk
+  grammar forbids, so every debug poll cycle panicked in the metric guard and
+  `refine_key` could not classify SNMP telemetry at all. All 49 built-in names
+  now follow the lowercase, profile-style convention the shipped profiles
+  already used.
+
+  | | before | after |
+  |---|---|---|
+  | Prometheus | `zensight_snmp_sysUpTime_0` | `zensight_snmp_system_uptime` |
+  | Prometheus | `zensight_snmp_ifInOctets_3` | `zensight_snmp_if_3_in_octets` |
+  | OTel | `zensight.snmp.sysUpTime.0` | `zensight.snmp.system.uptime` |
+  | OTel | `zensight.snmp.ifInOctets.3` | `zensight.snmp.if.3.in_octets` |
+
+  **This hits stock deployments, not just exotic ones.** Profiles have been on
+  by default since #531 and already used lowercase names — but before #559
+  built-ins *won* over profiles (`add_profile_mappings` inserted with
+  `.entry().or_insert()`), so for any OID both tables covered, the mixed-case
+  built-in name is what got published.
+
+  **Dashboards, recording rules and alerting rules built on the old names will
+  stop matching** — silently, not with an error. The full 49-row table is in
+  [`zensight-sensor-snmp/docs/reference.md`](zensight-sensor-snmp/docs/reference.md).
+  Table columns also move the index into its own key chunk (`ifInOctets.3` →
+  `if/3/in_octets`), so a per-interface series that was one flat name is now
+  structured.
+
+  **No compatibility aliases are published, deliberately.** SNMP is the
+  highest-cardinality producer in the fleet (per-column × per-interface ×
+  per-device); emitting both spellings would double that on the wire and in
+  every scrape, permanently, to save a one-time dashboard edit. The GUI keeps
+  *read-side* aliases so a fleet part-way through the upgrade still renders —
+  those cost nothing on the wire and go away once no pre-0.11 sensor remains.
+
+  **Unlike the logs rename in 0.10.0, `introspect` cannot tell you the old names
+  are gone.** That one moved registry *subject paths*, leaving `deprecated.lock`
+  entries a consumer can query. The SNMP registry subject is the rest-var
+  `{device}/{metric...}` and the rename happened *inside* it, so no subject was
+  retired and there is nothing in the ledger to find. This entry and the crate
+  reference are the only record.
+
+  The *keyspace* change is not breaking: consumers subscribe by class wildcard
+  (`v1/*/telemetry/**`), so no subscription changes.
+
+  Custom `oid_names` violating the grammar are no longer a panic — they are
+  escaped losslessly at the publish boundary and warned about at startup — so a
+  stale config now yields a **third** spelling matching neither scheme
+  (`system/sysUpTime` publishes as `system/sys_x55_p_x54_ime`).
+  `docker/configs/snmp.json5` was shipping exactly that, and is fixed here —
+  though see the Removed entry below: that file turned out to ship nowhere.
+
+- **The deprecated JSON pseudo-MIB support is removed** (#580). `snmp.mib.files`
+  is now a hard startup error pointing at `snmp.mib.dirs`, rather than a
+  warning. Deprecated in #532 and warned through 0.10.x.
+
+- **The `@media` origin is a type, and there is no wildcard** (#649).
+  `media_video_key`/`media_preview_key` take a parsed `zenkey::RemoteOrigin`,
+  drop their `protocol` parameter, and have no `format!` fallback. Both stated
+  reasons for that fallback were already dead: the `*` origin covered "a viewer
+  subscribing before the origin map fills", a window that has not existed since
+  #474, and `parallax.toml` is the registry's only `[[media]]` declarer, so
+  `protocol` had exactly one legal production value.
+
+  Deleting the `*` arm is the point rather than tidying. RFC 07 §3: a consumer
+  that cannot name an origin still MUST NOT fan out across origins on `@media`
+  or `@blob`, because every matching holder ships the full payload and Zenoh
+  cannot cancel remote replies in flight — one camera named `cam0` per host
+  meant N× the video arriving at one viewer. A typed origin makes the wildcard
+  unrepresentable rather than discouraged.
 
 ### Added
+
+- **The SNMP event feed persists, filters and cross-links** (#578). Trap records
+  land in a new redb `events` table keyed by their ULID — chronologically
+  sorted, so "most recent N" is a bounded reverse walk and re-delivery is
+  idempotent. No sampler, unlike logs: an event is already a rare, deliberate
+  record. Facets + free-text search, and rows link to the device.
+- **Logs history is backfilled from the sensors' durable stores** (#603).
+  Opening Logs seeded only from the local redb cache and whatever the sensors'
+  500-line hot rings still held — the authoritative unsampled store from #544
+  was never asked, because a sensor reads it only when the query carries
+  `from=`/`to=`/`after_uid=` and the GUI sent none on open.
+- **Deep log-history pagination** (#601). The feed did a silent
+  `truncate(100)`: an operator on a busy feed could not tell rows were withheld,
+  nor reach them. The cap is now a window with a footer that says so, and a
+  "load older" cursor walk against the history the sensor has served since #544.
+- **Log export gains a format choice, and artifacts can carry a producer
+  caveat** (#602). The export request hardcoded JSONL; the format is now picked
+  next to the button. `ArtifactState::Ready` gained an optional `note` a
+  producer sets via `ctx.note()`, so a bundle that had to truncate or skip
+  something can say so instead of arriving silently incomplete.
+- **A firing-alert headline tile on every protocol overview** (#582), plus a
+  `firing_by_protocol` rollup beside `firing_by_source` and a protocol filter on
+  the Alerts view.
+- **SNMP subnet-discovery proposals on the fleet overview** (#579). The opt-in
+  sweep from #541 published its report to `state/snmp/discovery` where only
+  `zenctl` could see it. Proposals only — nothing auto-adds.
 
 - **`StreamStatus` says why a stream stopped, and the GUI stops inventing
   sentences** (#691). A stream the operator closed and a stream whose camera
@@ -191,7 +603,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **83 % of sequence numbers while `stats/drops` stayed at 0**, with frame age at
   **3.5 s median**; at 100 kbit, 93 % missing and 9.1 s. The frames died in
   Zenoh's transport queue under `CongestionControl::Drop`, upstream of
-  `stats/drops` (which is derived at egress from AppSink gaps). The epic's
+  `stats/drops` (at the time inferred at egress from AppSink sequence gaps;
+  #692 has since sourced it from the sink's own counter, which does not change
+  this finding — these frames die *downstream* of the sink either way). The epic's
   standing caveat said best-effort was "a no-op in flight" and implied the
   resulting drops would at least be *visible*; the first half holds and the
   second does not. Filed as #801.
@@ -417,471 +831,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`RpcError::busy`** — `ERR_BUSY` has been in the RFC 05 vocabulary since the
   start and had no constructor until a rate-limited procedure needed one (#715).
 
-### Fixed
-
-- **No queryable reply carried an HLC timestamp, so no state-class seed could
-  be LWW-ordered** (#782). Zenoh's session HLC stamps a `put`. It does **not**
-  stamp a queryable *reply*. `zensight-common/src/session.rs` forces
-  `timestamping/enabled = true` on every session and a test pins it, so the
-  reflex reading — "some path missed the setting" — was wrong; the setting was
-  never the mechanism.
-
-  RFC 04 §3.2 makes a producer answering a plain GET on a state selector a
-  *storage* for the duration of that reply — the reply-key discipline is
-  storage-shaped on purpose, so seeding works with or without a real one — and
-  closes with the corollary that **an untimestamped sample cannot be
-  reconciled**. Every seeded state sample this workspace ever served was
-  therefore unorderable against its own successors, silently, because nothing
-  in the tree reads `Sample::timestamp()`.
-
-  It was not silent to `zenctl doctor --deep`, which reported `unstamped-state`
-  at warning severity. The originally-reported instance was the correlator's
-  entity seed, which is why `scripts/conformance-verify.sh` held the correlator
-  back behind `CORRELATOR=1`. Chasing it found a **second, worse** one: the
-  firing-alert seed in `zensight-sensor-core` has the identical defect and *is*
-  in the default CI deployment. It only looked clean because a sensor that
-  raises no alert inside the listen window replies zero samples — on a host with
-  two disks over 90 % full it replies two, and the `conformance` job goes red.
-  The gate was a coin flip on the runner's free space rather than on the branch
-  under test.
-
-  **The rule, and it is the deliverable rather than the patch:** *a queryable
-  reply whose key is in the `state` class MUST carry a timestamp; a reply on an
-  `@rpc` key MUST NOT.* An `@rpc` reply is a computed answer to a parameterised
-  question, never the value at a key — no storage selector reaches it, nothing
-  merges it into an LWW store, and stamping it would assert a reconcilability
-  that does not exist. Only **two** of the ~35 `query.reply` sites in the
-  workspace are state-class; the other 33 are unchanged, which is the point of
-  stating a rule instead of shipping a list.
-
-  Enforced as a type, not a convention. `served::serve_state_queryable` returns
-  a `StateQueryable` whose `StateQuery` exposes **no** `reply()` — only
-  `reply_state`, which takes a stamp — so an unstamped state seed is not
-  something a caller can write through the seam. `serve_queryable` debug-panics
-  (release-warns) on a state selector, the same policy as
-  `check_registry_coverage`, so a producer's own tests fail on it; a CI grep
-  tripwire covers the case that runs no test.
-
-  The stamp is `seed_stamp(&session)` — the session HLC, **taken inside the same
-  critical section as the snapshot it describes**. Stamping per reply instead is
-  a resurrection bug: a seed loop snapshots and *then* replies, so a value
-  updated mid-loop has its live `put` stamped `T` while the loop replies the
-  stale snapshot value stamped `T' > T`, and LWW keeps the stale one.
-  `a_seed_batch_never_out_stamps_a_later_put` is that invariant in its
-  observable form. Deliberately **not** the payload's own write time:
-  `HostEntity.last_updated` is wall-clock epoch millis, minting a `Timestamp`
-  from it under the session's own id forges HLC state for that id, and it would
-  turn `unstamped-state` (warning) into `stale-state` (**error**) for any
-  entity older than its `ttl_s`.
-
-  Costs nothing at the manifest: `.timestamp()` is `TimestampBuilderTrait`,
-  which zenoh marks `#[zenoh_macros::internal_trait]` — a macro whose documented
-  job is to *also* emit an inherent method — so neither the import nor zenoh's
-  `internal` cargo feature is needed. `state_reply_builder_still_takes_a_timestamp`
-  is a compile-level pin on that shim, so a future zenoh upgrade that drops it
-  becomes a named build failure rather than a silent return to unstamped seeds.
-
-  **The correlator now runs in the default conformance deployment.** Both
-  `scripts/conformance-verify.sh` and `zensight-conformance/README.md` promised
-  that would happen "the day the correlator stamps its seed replies", with no
-  change to the gate — `unstamped-state` was never in `DEFAULT_EXCLUDED`, so
-  nothing needed un-excluding. It also buys real coverage: `@catalog` is a
-  *service* origin whose verbatim `@` chunk is a structurally different
-  introspect key (RFC 08 §6, property D4), so running both halves covers both
-  halves of the slice diff.
-
-  **And it found a second defect, which is the gate doing its job.** Putting the
-  correlator into the default conformance deployment made `zensight-conformance`
-  fail on a loaded two-lane CI runner — not on the stamping, but on RFC 04 §5's
-  `alive ⇒ callable`. `guard::acquire` did three things at once: claim, elect,
-  and declare the owner `alive` token; `main` then spawned every queryable
-  *after* it. So between winning the election and declaring
-  `entities`/`names`/`introspect`/`describe`/`link`/`unlink`, the correlator was
-  on the roster and answered nothing. On a developer machine that window is
-  microseconds and nothing had ever observed it.
-
-  `zensight-sensor-core`'s runner has always declared liveliness **last**, after
-  `await_registry_coverage`, with the reasoning written at `DECLARATION_GRACE`
-  (#648). The correlator is not a `SensorRunner`, so it never inherited the
-  discipline. Election and presence are now two steps —
-  `guard::acquire` then `guard::declare_alive` — with the queryables in between.
-
-  That needed a new seam, because the obvious one does not fit:
-  `await_registry_coverage` is **sensor-shaped**, deriving the serve-side
-  spelling from *this host's* origin (`v1/h-…/@rpc/catalog/names`), while the
-  catalog serves on the `@catalog` **service** origin. Pointed at the
-  correlator it reported every procedure as unserved while the log said they
-  were ready, and debug-panicked. `served::await_served` takes the concrete keys
-  a producer declared and makes no assumption about how they were spelled;
-  `registry_coverage_cannot_see_a_service_origin` pins why both exist.
-
-  The effect is visible beyond the absence of a failure: before, the judge
-  reported *"1 producer(s) judged"* or *"2"* from run to run on a constrained
-  machine, because it observed the correlator inconsistently. After, it is 2
-  every time.
-
-  Wire-observable on the seed path, and nothing else: the payloads are
-  byte-identical, no schema moves, no key moves, no registry entry changes
-  (`catalog.toml` and `sysinfo.toml` already declare these families as
-  `class = "state"` with a `ttl_s`, which is *why* the stamp is a MUST — the
-  code caught up with the registry, not the other way round). All three in-tree
-  consumers ignore `Sample::timestamp()` today, so nothing in ZenSight changes
-  behaviour. An external consumer that implemented §3.2's merge honestly, and
-  therefore had to special-case the unstamped seed, will now see it participate
-  properly. No re-keying, no phantom state, no operator sweep.
-
-- **The verify scripts blamed Zenoh discovery when a binary was simply missing**
-  (#790). `BIN="${BINDIR:-target/${PROFILE}}"` is repo-relative, so anyone with
-  `CARGO_TARGET_DIR` set — a shared build dir, a worktree that builds elsewhere,
-  sccache — built to one place and was launched from another. `cargo build`
-  reports success, so the script's own build step gave no hint; the run then
-  waited 40 s for a roster that could never populate and failed with a paragraph
-  about multicast that was true in general and irrelevant to what happened. It
-  cost a wrong diagnosis before the cause was found.
-
-  Three fixes, in a new `scripts/lib/verify.sh` shared by
-  `conformance-verify.sh` and `demo-verify.sh`, because both had all three:
-
-  - **`require_bins`** fails before starting anything, naming each missing path,
-    the `BIN`/`BINDIR`/`PROFILE` it derived it from, and the `BINDIR=…` command
-    that fixes it.
-  - **The failure message can tell a dead child from an undiscovered one.** The
-    discovery paragraph is the right diagnosis when the processes are alive and
-    cannot find each other, and the wrong one when a process has already exited
-    — which the preflight cannot catch, because a binary can exist and still die
-    on a bad config or a busy port. Both scripts now ask `kill -0` first and
-    print the dead child's log tail instead of the discovery text.
-  - **The evidence outlives the exit trap.** Every failure message ended with
-    `logs: $tmp/*.log`, pointing into a `mktemp -d` the `EXIT` trap had just
-    deleted. Failures now keep the directory *and* inline the last 20 lines of
-    each log, so the message is self-contained even if the directory is not.
-
-- **`zenoh_e2e` saw a sibling test's sample under parallel load** (#785). Its
-  four sessions were plain `zenoh::Config::default()` — peer mode with multicast
-  scouting **and** gossip on — so they discovered each other, plus
-  `publisher_registry.rs`'s, plus any live sensor on the host. Under
-  `cargo test --workspace` the telemetry test would occasionally receive the
-  CBOR test's sample and fail with `left: "cbor-device"`.
-
-  The per-test key prefixes were never the bug: a `test_<nanos>/**` subscription
-  cannot match a sibling's tree. The session layer was, and the fix was already
-  written twice in the same directory — `publisher_registry.rs` and
-  `router_storage.rs` both define an `isolated_config()` for exactly this
-  reason, and `zenoh_e2e.rs` is the one file that never got it. Deliberately not
-  `--test-threads=1`, which hides the coupling rather than removing it.
-
-### Changed
-
-- **`{stream}/stats/drops` is the sink's own counter, not an inference**
-  (#692). It is read from `AppSinkHandle::stats().total_dropped`, folded as a
-  delta per profile incarnation on the actor's existing 1 Hz tick. The
-  sequence-gap inference at egress is deleted.
-
-  This is not a new definition — it is the one already written down. Three
-  places in the tree (`stats.rs`, `docs/streams.md`,
-  `examples/media_loss_probe.rs`) all described `drops` as *"the `AppSink`
-  shedding under a slow consumer"*, and it was a proxy for that number. A worse
-  one: blinded across every RTSP reconnect by the DISCONT reset, absent on the
-  preview path, and structurally **zero** on RTSP passthrough, whose
-  `RtspSession` never stamps `Metadata::sequence` at all. Existing series may
-  step up; they cannot step down.
-
-  **What the issue asked for could not be built, and that is written down
-  rather than quietly dropped.** #692 wanted the metric sourced from the
-  pipeline bus's `MessageKind::Qos`, plus new `qos_proportion`, `jitter_ms` and
-  `latency_ms` subjects. Checked against the pinned `parallax-pipeline 0.8.0`:
-  QoS reaches the bus only from a sink's `take_upstream_event()`, and the only
-  implementors are `AppVideoSink` and `AutoVideoSink` — every profile here ends
-  in `AppSink`, which does not override it, so there is **no origin**. Only
-  `RtpJitterBuffer` and `AutoVideoSink` declare an `Element::latency()`, and
-  neither is in any graph here, so `query_latency()` is `None` and
-  `LatencyChanged` is never posted. `Throttle::stats()` is unreachable on a
-  running pipeline and link policies expose no counters. The bus is
-  deliberately *not* attached: it would carry `Error` on a different schedule
-  from the `EndReason::Error` #691 already types, which is two orderings for
-  one event. All of it, with file:line evidence and the four conditions that
-  would reopen it, is in the new
-  `zensight-sensor-parallax/docs/qos-and-latency.md`, on the `qos-express.md`
-  precedent.
-
-- **`{stream}/stats/sink_queue`** (#692) — the deepest `AppSink` backlog across
-  a stream's open profiles, sampled each tick (0..`SINK_QUEUE`). The queue that
-  *precedes* shedding, where `drops` only says it already happened. Its evidence
-  is asymmetric and the registry says so: a reading at the cap proves a backlog
-  that survived a whole second, a `0` proves nothing.
-
-  Worth knowing, and now measured rather than assumed: because every link is
-  `LinkPolicy::Block` with a shallow channel, shedding does not begin until the
-  *entire* chain has saturated — source, convert, scale, throttle, encoder,
-  sink. On an 8 fps source that is **~3 seconds**, which is also how long a real
-  stall takes to reach `stats/drops`.
-
-- **`stream_degraded` alert** (#692) — fires when the graph shed more than ~9 %
-  of what it produced over one stats interval. That ratio is `QosEvent`'s own
-  `(processed + dropped) / processed`, computed from the sink's counters at the
-  one place we can compute it. **Windowed**, unlike `encoder_overrun`'s all-time
-  tail: a cumulative ratio could never clear, and one bad thirty seconds at open
-  would hold the alert firing for the life of the stream. It sits beside the
-  overrun rule rather than replacing it — overrun is the encoder missing its
-  budget and fires *before* anything is lost; this is frames produced fine and
-  then thrown away downstream.
-
-  Registry `parallax` 1.8 → **1.9**: one subject, `registry.lock` regenerated,
-  and the `drops` description rewritten because the widening to the preview path
-  is a contract change the compat lock structurally cannot catch (it pins path,
-  class and type name, not payload meaning).
-
-- **`StoppableSource` is gone — the engine grew the switch it worked around**
-  (#709). Every synchronous source the parallax sensor built was wrapped in a
-  `StoppableSource` whose `StopHandle` flipped the next `produce()` to EOS. The
-  wrapper existed for three stated reasons, and re-checked against the pinned
-  `parallax-pipeline 0.8.0` **all three are false**: the executor does not run
-  source loops on blocking threads (a synchronous `Source` is driven inline
-  inside an ordinary tokio task, `element/traits.rs:2671`), it does not ignore
-  downstream channel closure, and `abort()` alone *can* stop a live source — it
-  raises the cooperative flag itself (`unified_executor.rs:974`), which the
-  executor's own source loop polls at the top of every iteration
-  (`:3861-3871`), broadcasting EOS and draining downstream with exactly the
-  one-frame-period bound the wrapper claimed for itself.
-
-  So the wrapper reimplemented, in eleven forwarding methods, a check the engine
-  performs one layer down. That forwarding was never free: it is a standing
-  hazard whose own comment says so, because a method upstream adds and we forget
-  to forward is silently answered by the wrapper *instead of* the source. That
-  has already cost us once — `set_output_budget` in #689, which is how an
-  encoder sizes its output arena.
-
-  Teardown now calls `PipelineHandle::stop()` on the handle the profile already
-  owns. `stop()` borrows, so `Drop` can call it too, and **no `Stopper` is
-  needed**: `stopper()` exists for callers whose handle `wait()` has consumed,
-  which this one never is. The `stop()`-then-`abort()` order is kept and is not
-  ceremony — `stop()` lets a source loop end and drop its device, and the
-  exclusive-source tier switch depends on the outgoing tier releasing a V4L2
-  device before the incoming tier opens it, which asynchronous cancellation
-  cannot promise.
-
-  The three `stop_source()` calls on the failed-open paths are deleted rather
-  than translated: all three run *before* `executor().start()` has returned a
-  handle, so no source task exists and the elements are simply dropped. The one
-  post-spawn failure inside `start()` (`pipeline.activate()`) already raises the
-  flag itself, through `TerminalOutcome::fail` → `record` → `shutdown.begin()`.
-
-- **The `zenoh::open` CI guard greps more than one spelling** (#789). It matched
-  the literal `zenoh::open(`, so `zenkey_fleet::open()` / `open_with_config()` —
-  reachable since #745 put `zenkey-fleet` in the GUI's dependency tree — walked
-  straight past it. Neither crate does it today (`Fleet::new(&session, base)`
-  only *borrows* a session, which is how upstream's own `zengui` works), so this
-  was never a live violation; it was a guard that no longer covered the ways a
-  session can be opened, which is worse than it sounds, because the guard's
-  value is making the rule unbreakable by accident.
-
-  It now matches any lowercase-module `::open(` / `::open_*(` — `File::open` and
-  every other type-associated constructor is capitalised and does not match —
-  minus an explicit allowlist of the sanctioned entry points
-  (`session::{open_session,connect,build_config}`), so *calling* the wrapper is
-  recognised as the behaviour the guard exists to produce. The step now says in
-  place that it is spelling-based and must grow.
-
-- **`just test-ui`, and #687 is broader than #687 said.** `cargo test -p zensight`
-  segfaults on a headless Linux box with Mesa installed, printing nothing at all
-  — the process dies before libtest writes a result line. It is lavapipe:
-  `iced_test::simulator` stands up a real wgpu device, wgpu picks Vulkan, a
-  GPU-less host resolves that to Mesa's software Vulkan, and many tests doing it
-  at once crash inside the loader.
-
-  The issue and `zensight/docs/testing.md` both recorded this as a **`ui_tests`**
-  problem. It is not. The crate's own **lib** tests take the same path and crash
-  *more* often — measured on `master` at `3f8083b`:
-
-  | target | default | `WGPU_BACKEND=gl` |
-  |---|---|---|
-  | `--test ui_tests` | 6 crashes / 40 runs | 0 / 40 |
-  | `--lib` | **3 crashes / 10 runs** | 0 / 10 |
-
-  Which is why the recipe is `-p zensight` and not `--test ui_tests`: one that
-  covered half the affected targets would send the next person chasing a phantom
-  in the other half — as it did here, during this very change.
-
-  Still deliberately not `.cargo/config.toml`'s `[env]`, which would downgrade
-  the real GUI's renderer too. CI is unaffected — the runner image ships no
-  Vulkan ICD — so a red `test` job is not this.
-
-- **The `zenkey-fleet` boundary is stated as an invariant, not as a count**
-  (#792). `CLAUDE.md` and `zensight-conformance/{Cargo.toml,README.md}` all said
-  `zensight-conformance` was the **only** crate that may link `zenkey-fleet`.
-  #745 falsified that in the same wave by rebuilding the fleet view on the same
-  engine. The rule that matters is unchanged and is now what all three say: the
-  engine must never enter `zensight-common` **or any crate a sensor links**. Two
-  consumer-side members link it, which is what the rule permits.
-
-### Breaking
-
-- **The SNMP CPU, IP-address and storage tables are registered subject trees, so
-  `sum by (index)` works for them too** (#783, registry `snmp` 1.8 → **1.9**).
-  The finish of what #779 started for `ifTable`/`ifXTable`.
-
-  While a key matched only snmp's rest-var catch-all `{device}/{metric...}`,
-  #764's family rule had no literal chunks to name from and fell back to the
-  rest variable's **value** — so the table index rode in the metric *name*.
-  `zensight_snmp_storage_1_size` and `zensight_snmp_storage_2_size` were two
-  unrelated families; `zensight_snmp_cpu_1_load` and `zensight_snmp_cpu_2_load`
-  likewise. #769 had already attached the index as a **label**; these patterns
-  are the other half, and now the generic rule takes over:
-
-  | | |
-  |---|---|
-  | before | `zensight_snmp_storage_1_size`, `zensight_snmp_cpu_2_load` — one family per row |
-  | after | `zensight_snmp_storage_size{index="1"}`, `zensight_snmp_cpu_load{index="2"}` — one family, aggregatable |
-
-  **Any dashboard or recording rule naming `zensight_snmp_{cpu,ip,storage}_<n>_<column>`
-  breaks.** Nothing in-tree does — `demo/prometheus/dashboards/` ships no SNMP
-  panel, and `dashboards-blocked/README.md` (updated here) explains why: a panel
-  is provisioned only after it has been checked against a real device polled by
-  a running exporter, and nobody has done that yet.
-
-  Registered **column by column**, not as `{device}/<table>/{index}/{column}`,
-  for the reason #779 paid to learn: a single `{column}` variable is dropped
-  from the family name along with every other variable, collapsing a table's
-  columns into one family carrying counters, gauges and strings at once — two
-  `# TYPE` lines for one name, the scrape-killer class #752 fixed.
-  `storage_columns_are_not_collapsed_into_one_family` pins that half.
-
-  **Two deliberate differences from #779**, both worth stating because their
-  absence looks like an oversight:
-
-  - **No `.rate` siblings.** The poller derives a rate from the *wire tag* —
-    `Counter32`/`Counter64`, or a `Gauge32` the MIB declares as a counter — and
-    not one column of these three tables is a counter: hrStorage is INTEGER
-    throughout, hrProcessorLoad is INTEGER, ipAddrTable is IpAddress/INTEGER.
-    ifTable needed them because `in_octets` and friends genuinely are counters.
-    Registering twelve dead `.rate` patterns to look symmetrical would make the
-    registry advertise a surface no build can emit, which is the class of lie
-    RFC 08 §6.1 and #484 exist to prevent.
-  - **The `ip/` group's scalars stay on the catch-all** (`ip/forwarding`,
-    `ip/default_ttl`, `ip/in_receives` and its `.rate`). They are 3-chunk keys,
-    so the new 4-chunk patterns cannot match them, and their rest-var family
-    name already carries no index — there was nothing for a registration to fix.
-    `the_ip_scalars_are_untouched_by_the_indexed_patterns` pins that they do not
-    get swept into an indexed family, and that they carry no `index` label.
-
-  Not a wire change: the poller publishes exactly the same keys with exactly the
-  same labels. Only the exporters' *reading* of them moves. `registry.lock`
-  regenerated (10 additive entries), and
-  `the_catch_all_would_still_bury_the_table_index_in_the_name` pins the
-  before-state so the improvement is demonstrated rather than asserted.
-
-- **Every firing alert re-keys: `alert_key` is now the normative RFC 11 §3.1
-  derivation** (#736, #738). ZenSight had its own recipe with the same hash
-  (FNV-1a-64) and the same 16-lowercase-hex output, but two byte differences
-  from the spec: the framing put `\0` *after* the rule and after each `k=v`
-  rather than `\n` *before* each label with none trailing, and the exclusion
-  matched only the `host.` prefix, so the RFC's own bare `host` label was
-  hashed in. `Alert::alert_key()` is now a thin wrapper over
-  `zenkey::alert::alert_key`, so two independent implementations mint the same
-  key for the same alert. The RFC's test vector — rule `link_down`, labels
-  `{peer: r2, port: eth0, host: h-3fa9c2d41b7e}` → `a659f813308ad1da` — is
-  pinned in `alert.rs`; that same alert used to key as `c25da085d5c5b7e7`.
-
-  **Alerts are LWW state keyed by the thing that changed**, so every alert
-  firing at the moment of the upgrade leaves a permanent phantom at its old key
-  that nothing will ever clear. See [`RELEASING.md`](RELEASING.md), "Re-keying
-  the alert state on upgrade" (#737), for the sweep — it is a
-  GET-then-delete-per-concrete-key enumeration, run **after** every publisher
-  is upgraded, and it is needed only where a Zenoh storage is pointed at
-  `v1/*/state/**`. `just run` and the e2e suites carry no persistent state and
-  need nothing.
-
-  **`host.*` stays excluded, and that is byte-normative, not a deviation.**
-  RFC 11 §3.1 excludes "the label named `host`, *and any label the producer
-  documents as host-scoped*", because only the producer knows its vocabulary.
-  ZenSight's is the `host.` annotation namespace, now declared in code as
-  `zensight_common::alert::{HOST_SCOPED_PREFIX, is_host_scoped}` and in
-  `docs/KEYSPACE.md`. Excluding it is load-bearing: `AlertReporter.active` is
-  keyed by `alert_key()` and the resolve path re-derives it, so an identity
-  refresh between fire and resolve would leave the `Firing` on the old key
-  forever while the `Resolved` and its tombstone landed on a new one — a
-  permanent phantom, with nothing logged.
-  `a_host_annotation_change_does_not_orphan_a_firing_alert` in
-  `zensight-sensor-core/tests/alert_reporter.rs` is that invariant; it fails if
-  the host-scoped vocabulary is ever dropped from the wrapper.
-
-  `Alert::alert_key()` stays **infallible**: it is called from ~35 places, and
-  the errors `zenkey::alert::alert_key` returns are framing-injectivity
-  violations (a `\n` in a rule forges a label) that no ZenSight rule produces.
-  On refusal the offending bytes become `_`, a WARN names the rule, and the
-  normative derivation runs on that — deterministic, so a `Firing` and its
-  `Resolved` still agree.
-
-- **`zenkey` and `zenkey-build` 0.6 → 0.7** (#735). The wire is unchanged —
-  the `identity.rs` golden host-id vector (`h-` + first 12 hex of
-  `sha256(machine_id + salt)`) still passes, so no origin re-keys — but three
-  API surfaces moved, and one of them was silently wrong before.
-  - `V1Context::for_producer` is now `Result<Self, KeyError>`. 0.6 slugged an
-    illegal producer name and, failing that, fell back to the literal
-    `sensor`: a misconfigured producer published its **entire keyspace under a
-    different identity**, with no `Err`, no panic and no log, colliding with
-    every other misconfigured producer in the fleet. ZenSight absorbs the new
-    `Result` **once**, in `zensight_common::v1::for_producer` (re-exported as
-    `zensight_sensor_core::v1::for_producer`), rather than threading `?`
-    through 47 call sites: a ZenSight producer name is a compile-time constant
-    from `zensight-common/registry/`, and a new test asserts every registered
-    name is chunk-legal, so an illegal one now fails `cargo test`. That change
-    found four real cases — the logs and systemd test harnesses were passing
-    `test_<nanos>/logs` as a *producer chunk*, which 0.6 had been quietly
-    renaming into something else.
-  - `V1Context::state_key` / `rpc_key` are now `Result` too, for one reason: a
-    chunk that is literally `alive`, the reserved liveliness leaf (RFC 03 §3).
-    `zensight_common::v1::V1ContextExt::{const_state_key, const_rpc_key}`
-    carries the constant-subject case; the two builders whose chunks really
-    are foreign data — an SNMP device name, a parallax stream name — now
-    *refuse* a device or stream called `alive` and log it, instead of minting
-    a key that collides with that producer's liveliness token.
-  - `AppProfile::new` takes `AppName` / `OriginSalt` newtypes, because
-    `AppProfile::new("zensight-host-id-v1", "zensight")` used to compile and
-    re-key the whole fleet. Both constructors stayed `const fn`, so
-    `zensight_common::PROFILE` is still a plain `static`.
-  - `StructuralKey::producer` became a method (`Position5` now holds
-    producer-or-blob-tier-or-chunk), `ServiceOrigin` is a newtype rather than
-    a `String`, and `SubjectDecl::class` is a typed `Declared<Class>` — the
-    last of which broke `registry_audit.rs` at **compile time** rather than
-    silently returning an empty `Vec`, which was the risk.
-
-- **The Prometheus exporter's scrape port default moves `0.0.0.0:9090` →
-  `127.0.0.1:9464`** (#771). 9090 is the Prometheus *server's* own port, and the
-  shipped `README.md` told you to scrape `localhost:9090` — i.e. Prometheus
-  scraping itself. Any stack running both on one host collided. It also now binds
-  loopback rather than every interface; the container and systemd deployments set
-  `listen` explicitly and are unaffected. 9464 is the conventional
-  OpenTelemetry/Prometheus-exporter port.
-- **Text telemetry is exposed under an `_info` family with a named label**
-  (#752). A `TelemetryValue::Text` point used to render `# TYPE <name> info` —
-  and `info` is an **OpenMetrics** type that the `version=0.0.4` text format we
-  serve does not admit. Prometheus's parser aborted on the unknown token and
-  **rolled back every sample in the scrape**, while the target still reported
-  healthy. One netlink MAC address, one SNMP `sysDescr` or any gnmi string was
-  enough to empty the whole endpoint. Text now renders as
-  `<name>_info{…,<leaf>="<text>"} 1` with type `gauge`, the text rides under a
-  label named for the subject leaf instead of a literal `value`, and the value is
-  stripped of control characters and clamped to 128 bytes. `/metrics` and
-  remote-write spell the series identically. Opt out with
-  `prometheus.export_text_metrics: false`.
-- **OTel counters are exported through asynchronous instruments** (#754).
-  `counter.add()` was being fed the **absolute** device reading, so under
-  cumulative temporality the exported Sum became a running total of absolute
-  readings — an interface at 1 000 000 octets reported 1e6, 2e6, 3e6, forever.
-  Every `rate()` was meaningless and the series never decreased across a counter
-  reset. `TelemetryValue::Counter` is already the cumulative total, so it is now
-  reported by an `ObservableCounter` rather than added to. This also gives stale
-  series a real **gap** instead of a flat line: `cleanup_stale_observations`
-  (previously dead code with zero callers) is now wired to a sweep task, and an
-  evicted series stops being observed.
-- **`docker/Dockerfile.exporter` is deleted** (#778). Referenced by nothing —
-  not compose, not CI, not the justfile — with a dead `EXPORTER_NAME` arg, a
-  `CMD ["--help"]` and no config baked in, and an `EXPOSE 9090` encoding the port
-  collision above. The images that ship are built from `Dockerfile.runtime`.
-
-### Added
-
 - **Encode-latency percentiles in stream telemetry** (#729):
   `{stream}/stats/encode_p95_ms` and `{stream}/stats/encode_p99_ms`, read off
   the lock-free histogram parallax 0.8 keeps inside the H.264 encoder. The
@@ -915,7 +864,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   did; only the exporters' reading of them moved. A Grafana panel or recording
   rule written against the old `zensight_snmp_if_<n>_<column>` names needs
   updating. `cpu/{index}/…`, `ip/{index}/…` and `storage/{index}/…` have the
-  same shape and are deliberately still on the catch-all.
+  same shape and were deliberately left on the catch-all here; #783, below,
+  finished the job in this same release and registered all three.
 
 - **`zensight-conformance`: CI now asks a running fleet whether it obeys its
   own contract** (#744). A new `publish = false` workspace member that opens an
@@ -1091,214 +1041,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `shipped_config_spells_out_the_traces_flag` test, per that script's rule that
   a sed may only flip a key that really exists.
 
-### Fixed
-
-- **RTSP streams reconnect instead of dying** (#731, delivers most of #410). A
-  dropped RTSP stream — a camera rebooting, a switch flapping, a Wi-Fi bridge
-  dropping a packet — used to end the pipeline and close the stream, leaving the
-  viewer to re-open by hand. parallax 0.8 makes `RtspSession` an `AsyncSource`
-  whose `produce()` carries the retry loop, so the hand-written feeder task and
-  its `AppSrc` are gone and the reconnect is the source's own: exponential
-  backoff from 500 ms to a 30 s ceiling with full jitter, so a rack of cameras
-  behind one switch does not retry in lockstep.
-
-  `rtsp_connect_failed` changes meaning with it, and had to: it now fires on
-  *sustained* failure — the initial connect, or a drop that outlasted the whole
-  reconnect ladder — rather than on the first hiccup. That is what the rule was
-  always named for. The ladder is deliberately **bounded** (8 attempts, ≈ 90 s)
-  where upstream defaults to retrying forever, because forever would mean a
-  camera that is gone never produces an error and the alert could never fire
-  again.
-
-  The first buffer after a reconnect carries `DISCONT`, and the egress re-arms
-  on it: the cached SPS/PPS belong to the previous session, so it clears them
-  and refills from the camera's own in-band sets rather than prepending stale
-  geometry to the resumed stream's first keyframe.
-
-- **`FrameMeta.dts_ns` is omitted when it equals `pts_ns`** (#728), as its own
-  documentation always said ("if distinct from `pts_ns`") and as parallax's
-  byte-compatible twin has always done. The producer wrote it unconditionally
-  whenever the clock was set, so — our encoders emitting no B-frames — *every*
-  frame on the `@media` plane carried a redundant copy of its own pts. Consumers
-  that read `dts_ns.or(pts_ns)` (the documented shape) are unaffected. The
-  attachment is pinned from now on against parallax's three canonical CBOR
-  vectors, checked into `zensight-common/tests/fixtures/framemeta/` and
-  round-tripped byte for byte — which settles #711 as **two types, one corpus**:
-  `zensight-common` cannot depend on the video engine and parallax cannot depend
-  on Zenoh, so the shared artifact is the bytes, not the type.
-
-- **Duplicate label names are now structurally impossible** (#753). Both
-  exporters assembled labels by pushing sources in order and de-duplicating
-  against a hard-coded `source`/`protocol` list — so `disk/<dev>/io/*` emitted
-  `device` twice, once from the semconv table and once from the sysinfo sensor's
-  own labels, producing `zensight_system_disk_io{device="sda",device="sda",…}`.
-  Prometheus rejects such a sample and a remote-write receiver rejects the whole
-  batch; the OTel side had no de-duplication at all. There is now one merge in
-  `zensight-common::exposition` with a stated precedence — structural, semconv,
-  pattern vars, point labels, config defaults — where later never overwrites
-  earlier and a shadowed candidate is dropped and counted rather than appended.
-  A sensor can no longer forge `origin`, `source` or `protocol`.
-- **Exporter documentation that produced an empty dashboard** (#761). Both
-  READMEs recommended `key_expr: "zensight/v1/*/telemetry/**"`; since #466 the
-  deployment base is the session *namespace*, not a key chunk, so that selector
-  matches **nothing** — with a perfectly healthy session. The OTel README's
-  `include_protocols: [… "syslog"]` matched nothing either (the token is
-  `"logs"`), silently dropping every log record while `export_logs: true`. The
-  `configs/*.json5` comments stating the default were wrong in the same way.
-
-### Changed
-
-- **Decision recorded: the `@media` plane keeps `express` off** (#733). parallax
-  0.8's `ZenohSink::media` applies express *on* to the `frame` profile
-  ("a stale frame is worthless"), while zenkey RFC v1.26 M1 removed it from that
-  profile ("batching engages only under back-pressure, so express is a no-op on
-  an unsaturated link and spends per-message overhead exactly when a `drop`
-  profile should be shedding"). We were already on the newer rule —
-  `QosClass::express` returns `false` for every class — so nothing changes; the
-  parallax sensor keeps publishing through `RawMediaPublisher` and does not
-  adopt `ZenohSink::media`. The reasoning is written down in
-  `zensight-sensor-parallax/docs/qos-express.md` and the behaviour is pinned by
-  a named `express_is_off_for_every_class` test rather than by an assertion
-  buried inside two others, so it does not get "fixed" toward parallax's table.
-
-- **The executor preset comes from parallax** (#732, closes #693). `executor()`
-  built a `UnifiedExecutorConfig` around a local `CHANNEL_CAPACITY = 4` whose
-  own comment admitted "the reason for this is probably gone; the cap is kept
-  until measured" — it was a workaround for a `JpegEncoder` arena-vs-channel
-  collision that parallax 0.7 fixed with `set_output_budget`. 0.8 ships the
-  number *and* the reasoning as `ExecutorConfig::live_video()`
-  (`SchedulingMode::Async`, `channel_capacity: 4`, `shed_fatal_after: None`), so
-  the constant and the stale rationale are replaced by the preset. Same values,
-  same behaviour; the engine that owns both the queue and the arenas now owns
-  the number too.
-
-- **The hand-rolled Annex-B helpers are parallax's now** (#730, closes #708).
-  `zensight-sensor-parallax/src/annexb.rs` was 230 lines of start-code scanning
-  and an extract/cache/prepend dance the egress drove by hand; parallax 0.8
-  ships all of it in `parallax::codec::annexb`, compiled unconditionally (that
-  module deliberately links no codec, so "is this a keyframe" needs no encoder)
-  and **codec-aware** — `is_entry_point`/`has_param_sets` take a `NalCodec` and
-  answer correctly for H.265, where our `& 0x1F` on a two-byte NAL header
-  returned nonsense. `ParamSetCache::prepare` replaces the whole loop and
-  borrows rather than copies for every delta frame and every keyframe that
-  already carries its sets, so a *repaired* keyframe now copies once where it
-  used to copy twice. Our module keeps one helper with no upstream equivalent,
-  `coded_slice_count`, reimplemented over upstream's scanner. No wire change.
-  `annexb::h264_profile_level_id` is re-exported for #707 but deliberately not
-  put on the stream catalogue — see below.
-
-- **parallax-pipeline 0.7.0 → 0.8.0** (#727), and the pin is now a single
-  `[workspace.dependencies]` entry so the sensor that *encodes* and the `h264`
-  GUI feature that *decodes* cannot drift onto two versions of the same
-  bitstream contract. No source change was required: `Source`, `AsyncSource`
-  and `Element` are method-for-method identical to 0.7, so the hand-written
-  `StoppableSource`/`TimedElement` forwarding wrappers — the silent-breakage
-  hazard that bit the 0.6 → 0.7 bump — still cover every method. 0.8's new
-  defaulted method (`finish`, the terminal goodbye) landed on `Sink`/`AsyncSink`
-  only, and we wrap neither. The three upstream breaks all miss us: we never
-  construct `Metadata` literally (so its new public `coded` field is
-  irrelevant), we never compare an `EncoderStats` (so its lost `Eq` is), and
-  `RtspSrc` reconnecting by default is what #731 wants anyway.
-
-- **The conditional-subject ledger is a real file now** (#739). RFC 08 §6.1
-  requires every registered subject to be served by the build that ships it,
-  and the exemption for a genuinely gated subject used to live as a
-  `CONDITIONAL_FAMILIES` const in each sensor's `tests/registry_conformance.rs`
-  — because the registry TOML has no `feature`/`when` field to say so in the
-  slice itself. zenkey-build 0.7 adds that field's stand-in, so the fact now
-  lives in `zensight-common/registry/conditional.lock`, and **zenkey-build
-  fails the build** if a line names no live registry subject — a build error
-  rather than a test failure, firing even for a producer with no conformance
-  test. The ledger is two lines (netlink's eBPF-gated connect-latency
-  percentiles) for the whole workspace, and the file's header explains why that
-  is correct rather than an oversight: a gated *procedure* is declared
-  unconditionally and answers `error/gated` / `error/unsupported`, so it needs
-  no exemption, and netring's detector features widen the value space of
-  `anomaly/{kind}/total` rather than adding subjects. Only a gauge with no
-  honest reading needs excusing.
-- **`deprecated.lock` documents `kind = "procedure"`** (#740). zenkey 0.7 /
-  RFC 08 v1.26 extended `[[deprecated]]` from subjects to procedures, with a
-  three-field ledger line `<kind>\t<producer>\t<path>`. Purely additive:
-  the 18 shipped two-field lines still parse as `kind = subject` and nothing
-  migrated. The ledger's header and `docs/KEYSPACE.md` now record that **kind
-  is part of identity** — retiring a subject never releases a procedure of the
-  same name — which matters concretely, because `parallax` has a `streams`
-  procedure beside stream-shaped subjects and `@catalog` has
-  `names`/`describe`/`introspect` beside `entity`/`alias`.
-
-- **The cross-producer key expressions come from zenkey now, not from string
-  literals** (#742). zenkey 0.7 added `selector::common_family(scope, family)`
-  — the `*`-producer complement to the generated per-producer
-  `Family::selector(scope)` — which retires the hand-spelled
-  `all_health_wildcard`, `all_alerts_wildcard`, `all_name_evidence_wildcard`
-  and the tail of `origin_alerts_wildcard`. The bytes are unchanged and a test
-  pins that. Every expression still hand-spelled in `keyexpr.rs` now carries a
-  rationale written **against 0.7** rather than against the version that first
-  justified it — a stale rationale is worse than none — and
-  `zensight-common/docs/keyspace-helpers.md` carries the same table. The
-  focus-mode builders' `format!` fallback arms are a silent-routing hazard (a
-  narrowing of `RemoteOrigin::parse` would quietly send every focus-mode
-  subscription down the string path), so a new test pins that the typed and
-  hand-spelled arms agree for a legal origin.
-- **A non-ULID event id is now a publish error** (#742). RFC 04 §1.3 requires
-  the trailing chunk of `events/<producer>/<subject…>/<id>` to be a
-  time-sortable ULID, key-encoded lowercase, and that is the events class's
-  only ordering guarantee. A non-ULID id can still be a perfectly legal
-  *chunk*, so it used to mint a key the grammar accepts and the guarantee
-  silently does not hold for. `EventPublisher` routes the id through zenkey
-  0.7's `slug::ulid_slug`, so a producer bug surfaces as an error naming the
-  RFC. Uppercase ULIDs (the `ulid` crate's own rendering) are key-encoded, not
-  refused.
-
-- **`zenoh` and `zenoh-ext` 1.9 → 1.10, workspace-wide** (#734). 17 crates take
-  `zenoh`, four take `zenoh-ext`; 27 lockfile packages moved together. **The
-  wire is compatible in both directions** — `zenoh-protocol`'s `VERSION` stays
-  `0x09`, so a 1.9 sensor and a 1.10 frontend (or the reverse) open a session
-  and exchange data normally, and a fleet may be rolled forward node by node.
-  The two wire-format changes 1.10 makes are both to *non-mandatory*
-  extensions, which a peer that does not recognise them skips rather than
-  rejecting: the new timestamp-instrumentation stack (`0x7`, off by default)
-  and the SHM handshake probe, which moved from a `Z64` to a `ZBuf` encoding
-  (`shared-memory` is not enabled in this workspace, so it does not arise
-  here — a mixed-version fleet that *does* enable SHM loses the SHM
-  optimisation across a version boundary, not the session).
-  No ZenSight source changed: all nine zenoh config-key paths
-  `zensight-common/src/session.rs` writes still exist under the same names
-  (`mode`, `namespace`, `connect/endpoints`, `listen/endpoints`,
-  `timestamping/enabled`, `scouting/{multicast,gossip}/enabled`, and the three
-  `transport/link/tls/*` keys), `timestamping/enabled` still defaults to
-  router-only (`{router: true, peer: false, client: false}`) so the
-  unconditional insert stays load-bearing for every peer-mode sensor, and both
-  scouting switches still default *on*, which is what the unset case relies on.
-  In `zenoh-ext`, `RecoveryConfig` gained a `retention_period` (default 1h) for
-  publisher last-sample state and `CacheConfig::max_samples` became
-  `NonZeroUsize`-checked — every call site here passes `1`, so the new
-  zero-is-an-error path is unreachable. `just router-verify` /
-  `just router-plugins` now pin `zenohd` and its plugins at 1.10.0: a
-  version-mismatched storage plugin loads, logs one line and serves no storage.
-
-- **parallax-pipeline 0.6.0 → 0.7.0** (#689). 175 upstream commits, and the
-  `h264` GUI feature did not compile against it at all: `H264Decoder::decode`
-  became private and `DecodedFrame` crate-internal when decoders became plain
-  `Element`s, so the GUI's tile decoder now drives `Element::process` with its
-  own `SharedArena` and takes geometry from `Metadata::video_dims()`. Pulls
-  return a `Pulled { Buffer, Empty, Flushing, Ended(EndReason) }` instead of
-  `Result<Option<Buffer>>`, which lets the egress loop tell a clean end from a
-  failed one using the pipeline's own reason rather than inferring it from
-  `Ok(None)` plus `is_eos()`. `AppSink` became async-only (`add_async_sink`),
-  and `Source::handle_flow_signal`/`flow_policy` went away with the `Queue`
-  element. Two upstream changes are not in its changelog's breaking list and
-  were found by reading the source: `VideoConvert::convert` gained a
-  `PlaneLayout` argument, and — invisible to the compiler — `Element` and
-  `Source` grew defaulted methods that our `TimedElement`/`StoppableSource`
-  wrappers silently swallowed, including `set_output_budget`, which is how the
-  encoders size their output arenas; both wrappers now forward them. The
-  `channel_capacity: 4` workaround is kept but its rationale is marked stale:
-  0.7 fixes the arena-vs-channel collision it exists for, and re-deriving the
-  number is #693's, since the cap also bounds latency.
-
-### Added
-
 - **The ladder's bitrate cap is pinned end to end** (#504). A headless e2e test
   runs two rungs identical in geometry and framerate and far apart in
   `bitrate_kbps` alone, on per-pixel noise, and measures what a subscriber
@@ -1351,8 +1093,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absolute: a tier switch hands the stream a fresh handle that restarts at zero,
   and a published counter must not walk backwards.
   - It is **disjoint from `drops` by construction**: the encoder numbers its
-    output from its own emitted-frame count, so a swallowed frame leaves no
-    sequence gap for egress to see. `drops` remains the sink shedding under a
+    output from its own emitted-frame count, so a frame it swallows never
+    reaches the sink to be counted there at all — a split #692 only sharpens,
+    by making `drops` the sink's own counter rather than an egress inference.
+    `drops` remains the sink shedding under a
     slow consumer; `rc_drops` is the cap. The point is **omitted, not zeroed**,
     for RTSP passthrough and preview-only streams, which have no rate control —
     a `0` there would read as "the cap is not biting" when the truth is "there
@@ -1452,6 +1196,315 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`{stream}/stats/drops` is the sink's own counter, not an inference**
+  (#692). It is read from `AppSinkHandle::stats().total_dropped`, folded as a
+  delta per profile incarnation on the actor's existing 1 Hz tick. The
+  sequence-gap inference at egress is deleted.
+
+  This is not a new definition — it is the one already written down. Three
+  places in the tree (`stats.rs`, `docs/streams.md`,
+  `examples/media_loss_probe.rs`) all described `drops` as *"the `AppSink`
+  shedding under a slow consumer"*, and it was a proxy for that number. A worse
+  one: blinded across every RTSP reconnect by the DISCONT reset, absent on the
+  preview path, and structurally **zero** on RTSP passthrough, whose
+  `RtspSession` never stamps `Metadata::sequence` at all. Existing series may
+  step up; they cannot step down.
+
+  **What the issue asked for could not be built, and that is written down
+  rather than quietly dropped.** #692 wanted the metric sourced from the
+  pipeline bus's `MessageKind::Qos`, plus new `qos_proportion`, `jitter_ms` and
+  `latency_ms` subjects. Checked against the pinned `parallax-pipeline 0.8.0`:
+  QoS reaches the bus only from a sink's `take_upstream_event()`, and the only
+  implementors are `AppVideoSink` and `AutoVideoSink` — every profile here ends
+  in `AppSink`, which does not override it, so there is **no origin**. Only
+  `RtpJitterBuffer` and `AutoVideoSink` declare an `Element::latency()`, and
+  neither is in any graph here, so `query_latency()` is `None` and
+  `LatencyChanged` is never posted. `Throttle::stats()` is unreachable on a
+  running pipeline and link policies expose no counters. The bus is
+  deliberately *not* attached: it would carry `Error` on a different schedule
+  from the `EndReason::Error` #691 already types, which is two orderings for
+  one event. All of it, with file:line evidence and the four conditions that
+  would reopen it, is in the new
+  `zensight-sensor-parallax/docs/qos-and-latency.md`, on the `qos-express.md`
+  precedent.
+
+- **`{stream}/stats/sink_queue`** (#692) — the deepest `AppSink` backlog across
+  a stream's open profiles, sampled each tick (0..`SINK_QUEUE`). The queue that
+  *precedes* shedding, where `drops` only says it already happened. Its evidence
+  is asymmetric and the registry says so: a reading at the cap proves a backlog
+  that survived a whole second, a `0` proves nothing.
+
+  Worth knowing, and now measured rather than assumed: because every link is
+  `LinkPolicy::Block` with a shallow channel, shedding does not begin until the
+  *entire* chain has saturated — source, convert, scale, throttle, encoder,
+  sink. On an 8 fps source that is **~3 seconds**, which is also how long a real
+  stall takes to reach `stats/drops`.
+
+- **`stream_degraded` alert** (#692) — fires when the graph shed more than ~9 %
+  of what it produced over one stats interval. That ratio is `QosEvent`'s own
+  `(processed + dropped) / processed`, computed from the sink's counters at the
+  one place we can compute it. **Windowed**, unlike `encoder_overrun`'s all-time
+  tail: a cumulative ratio could never clear, and one bad thirty seconds at open
+  would hold the alert firing for the life of the stream. It sits beside the
+  overrun rule rather than replacing it — overrun is the encoder missing its
+  budget and fires *before* anything is lost; this is frames produced fine and
+  then thrown away downstream.
+
+  Registry `parallax` 1.8 → **1.9**: one subject, `registry.lock` regenerated,
+  and the `drops` description rewritten because the widening to the preview path
+  is a contract change the compat lock structurally cannot catch (it pins path,
+  class and type name, not payload meaning).
+
+- **`StoppableSource` is gone — the engine grew the switch it worked around**
+  (#709). Every synchronous source the parallax sensor built was wrapped in a
+  `StoppableSource` whose `StopHandle` flipped the next `produce()` to EOS. The
+  wrapper existed for three stated reasons, and re-checked against the pinned
+  `parallax-pipeline 0.8.0` **all three are false**: the executor does not run
+  source loops on blocking threads (a synchronous `Source` is driven inline
+  inside an ordinary tokio task, `element/traits.rs:2671`), it does not ignore
+  downstream channel closure, and `abort()` alone *can* stop a live source — it
+  raises the cooperative flag itself (`unified_executor.rs:974`), which the
+  executor's own source loop polls at the top of every iteration
+  (`:3861-3871`), broadcasting EOS and draining downstream with exactly the
+  one-frame-period bound the wrapper claimed for itself.
+
+  So the wrapper reimplemented, in eleven forwarding methods, a check the engine
+  performs one layer down. That forwarding was never free: it is a standing
+  hazard whose own comment says so, because a method upstream adds and we forget
+  to forward is silently answered by the wrapper *instead of* the source. That
+  has already cost us once — `set_output_budget` in #689, which is how an
+  encoder sizes its output arena.
+
+  Teardown now calls `PipelineHandle::stop()` on the handle the profile already
+  owns. `stop()` borrows, so `Drop` can call it too, and **no `Stopper` is
+  needed**: `stopper()` exists for callers whose handle `wait()` has consumed,
+  which this one never is. The `stop()`-then-`abort()` order is kept and is not
+  ceremony — `stop()` lets a source loop end and drop its device, and the
+  exclusive-source tier switch depends on the outgoing tier releasing a V4L2
+  device before the incoming tier opens it, which asynchronous cancellation
+  cannot promise.
+
+  The three `stop_source()` calls on the failed-open paths are deleted rather
+  than translated: all three run *before* `executor().start()` has returned a
+  handle, so no source task exists and the elements are simply dropped. The one
+  post-spawn failure inside `start()` (`pipeline.activate()`) already raises the
+  flag itself, through `TerminalOutcome::fail` → `record` → `shutdown.begin()`.
+
+- **The `zenoh::open` CI guard greps more than one spelling** (#789). It matched
+  the literal `zenoh::open(`, so `zenkey_fleet::open()` / `open_with_config()` —
+  reachable since #745 put `zenkey-fleet` in the GUI's dependency tree — walked
+  straight past it. Neither crate does it today (`Fleet::new(&session, base)`
+  only *borrows* a session, which is how upstream's own `zengui` works), so this
+  was never a live violation; it was a guard that no longer covered the ways a
+  session can be opened, which is worse than it sounds, because the guard's
+  value is making the rule unbreakable by accident.
+
+  It now matches any lowercase-module `::open(` / `::open_*(` — `File::open` and
+  every other type-associated constructor is capitalised and does not match —
+  minus an explicit allowlist of the sanctioned entry points
+  (`session::{open_session,connect,build_config}`), so *calling* the wrapper is
+  recognised as the behaviour the guard exists to produce. The step now says in
+  place that it is spelling-based and must grow.
+
+- **`just test-ui`, and #687 is broader than #687 said.** `cargo test -p zensight`
+  segfaults on a headless Linux box with Mesa installed, printing nothing at all
+  — the process dies before libtest writes a result line. It is lavapipe:
+  `iced_test::simulator` stands up a real wgpu device, wgpu picks Vulkan, a
+  GPU-less host resolves that to Mesa's software Vulkan, and many tests doing it
+  at once crash inside the loader.
+
+  The issue and `zensight/docs/testing.md` both recorded this as a **`ui_tests`**
+  problem. It is not. The crate's own **lib** tests take the same path and crash
+  *more* often — measured on `master` at `3f8083b`:
+
+  | target | default | `WGPU_BACKEND=gl` |
+  |---|---|---|
+  | `--test ui_tests` | 6 crashes / 40 runs | 0 / 40 |
+  | `--lib` | **3 crashes / 10 runs** | 0 / 10 |
+
+  Which is why the recipe is `-p zensight` and not `--test ui_tests`: one that
+  covered half the affected targets would send the next person chasing a phantom
+  in the other half — as it did here, during this very change.
+
+  Still deliberately not `.cargo/config.toml`'s `[env]`, which would downgrade
+  the real GUI's renderer too. CI is unaffected — the runner image ships no
+  Vulkan ICD — so a red `test` job is not this.
+
+- **The `zenkey-fleet` boundary is stated as an invariant, not as a count**
+  (#792). `CLAUDE.md` and `zensight-conformance/{Cargo.toml,README.md}` all said
+  `zensight-conformance` was the **only** crate that may link `zenkey-fleet`.
+  #745 falsified that in the same wave by rebuilding the fleet view on the same
+  engine. The rule that matters is unchanged and is now what all three say: the
+  engine must never enter `zensight-common` **or any crate a sensor links**. Two
+  consumer-side members link it, which is what the rule permits.
+
+- **Decision recorded: the `@media` plane keeps `express` off** (#733). parallax
+  0.8's `ZenohSink::media` applies express *on* to the `frame` profile
+  ("a stale frame is worthless"), while zenkey RFC v1.26 M1 removed it from that
+  profile ("batching engages only under back-pressure, so express is a no-op on
+  an unsaturated link and spends per-message overhead exactly when a `drop`
+  profile should be shedding"). We were already on the newer rule —
+  `QosClass::express` returns `false` for every class — so nothing changes; the
+  parallax sensor keeps publishing through `RawMediaPublisher` and does not
+  adopt `ZenohSink::media`. The reasoning is written down in
+  `zensight-sensor-parallax/docs/qos-express.md` and the behaviour is pinned by
+  a named `express_is_off_for_every_class` test rather than by an assertion
+  buried inside two others, so it does not get "fixed" toward parallax's table.
+
+- **The executor preset comes from parallax** (#732, closes #693). `executor()`
+  built a `UnifiedExecutorConfig` around a local `CHANNEL_CAPACITY = 4` whose
+  own comment admitted "the reason for this is probably gone; the cap is kept
+  until measured" — it was a workaround for a `JpegEncoder` arena-vs-channel
+  collision that parallax 0.7 fixed with `set_output_budget`. 0.8 ships the
+  number *and* the reasoning as `ExecutorConfig::live_video()`
+  (`SchedulingMode::Async`, `channel_capacity: 4`, `shed_fatal_after: None`), so
+  the constant and the stale rationale are replaced by the preset. Same values,
+  same behaviour; the engine that owns both the queue and the arenas now owns
+  the number too.
+
+- **The hand-rolled Annex-B helpers are parallax's now** (#730, closes #708).
+  `zensight-sensor-parallax/src/annexb.rs` was 230 lines of start-code scanning
+  and an extract/cache/prepend dance the egress drove by hand; parallax 0.8
+  ships all of it in `parallax::codec::annexb`, compiled unconditionally (that
+  module deliberately links no codec, so "is this a keyframe" needs no encoder)
+  and **codec-aware** — `is_entry_point`/`has_param_sets` take a `NalCodec` and
+  answer correctly for H.265, where our `& 0x1F` on a two-byte NAL header
+  returned nonsense. `ParamSetCache::prepare` replaces the whole loop and
+  borrows rather than copies for every delta frame and every keyframe that
+  already carries its sets, so a *repaired* keyframe now copies once where it
+  used to copy twice. Our module keeps one helper with no upstream equivalent,
+  `coded_slice_count`, reimplemented over upstream's scanner. No wire change.
+  `annexb::h264_profile_level_id` is re-exported for #707 but deliberately not
+  put on the stream catalogue — see below.
+
+- **parallax-pipeline 0.8.0 → 0.9.0**, the release in which the engine grew an
+  application: `parallax-player` and `parallax-iced` are new crates upstream,
+  and the player is what found most of what 0.9.0 fixes — A/V synchronization
+  anchored on two independent guesses, a flushing seek that could deadlock a
+  paced pipeline, a sink reporting what it *offered* as what it *sent*, and a
+  hidden window that dragged a whole pipeline into a low-rate equilibrium it
+  never left. None of the seven upstream breaks reaches us: the plugin ABI
+  (12 → 14) matters only to out-of-tree plugins and we ship none; the renamed
+  `ZenohSinkHandle` counters, the `Mp4SeekPoint` time base, `MkvDemux`'s seek
+  report, the audio sinks' out-of-segment drop and `with_loop` all belong to
+  elements this sensor does not build — it terminates in an `AppSink` and
+  sources from V4L2, RTSP or the test pattern. Verified rather than assumed, on
+  the published 0.9.0: `cargo check --all-targets` on the sensor, the `h264` GUI
+  feature, and the sensor's 87 tests.
+
+- **parallax-pipeline 0.7.0 → 0.8.0** (#727), and the pin is now a single
+  `[workspace.dependencies]` entry so the sensor that *encodes* and the `h264`
+  GUI feature that *decodes* cannot drift onto two versions of the same
+  bitstream contract. No source change was required: `Source`, `AsyncSource`
+  and `Element` are method-for-method identical to 0.7, so the hand-written
+  `StoppableSource`/`TimedElement` forwarding wrappers — the silent-breakage
+  hazard that bit the 0.6 → 0.7 bump — still cover every method. (`StoppableSource`
+  did not survive the release: #709, below, deleted it once the pinned 0.8.0 was
+  checked rather than assumed.) 0.8's new
+  defaulted method (`finish`, the terminal goodbye) landed on `Sink`/`AsyncSink`
+  only, and we wrap neither. The three upstream breaks all miss us: we never
+  construct `Metadata` literally (so its new public `coded` field is
+  irrelevant), we never compare an `EncoderStats` (so its lost `Eq` is), and
+  `RtspSrc` reconnecting by default is what #731 wants anyway.
+
+- **The conditional-subject ledger is a real file now** (#739). RFC 08 §6.1
+  requires every registered subject to be served by the build that ships it,
+  and the exemption for a genuinely gated subject used to live as a
+  `CONDITIONAL_FAMILIES` const in each sensor's `tests/registry_conformance.rs`
+  — because the registry TOML has no `feature`/`when` field to say so in the
+  slice itself. zenkey-build 0.7 adds that field's stand-in, so the fact now
+  lives in `zensight-common/registry/conditional.lock`, and **zenkey-build
+  fails the build** if a line names no live registry subject — a build error
+  rather than a test failure, firing even for a producer with no conformance
+  test. The ledger is two lines (netlink's eBPF-gated connect-latency
+  percentiles) for the whole workspace, and the file's header explains why that
+  is correct rather than an oversight: a gated *procedure* is declared
+  unconditionally and answers `error/gated` / `error/unsupported`, so it needs
+  no exemption, and netring's detector features widen the value space of
+  `anomaly/{kind}/total` rather than adding subjects. Only a gauge with no
+  honest reading needs excusing.
+- **`deprecated.lock` documents `kind = "procedure"`** (#740). zenkey 0.7 /
+  RFC 08 v1.26 extended `[[deprecated]]` from subjects to procedures, with a
+  three-field ledger line `<kind>\t<producer>\t<path>`. Purely additive:
+  the 18 shipped two-field lines still parse as `kind = subject` and nothing
+  migrated. The ledger's header and `docs/KEYSPACE.md` now record that **kind
+  is part of identity** — retiring a subject never releases a procedure of the
+  same name — which matters concretely, because `parallax` has a `streams`
+  procedure beside stream-shaped subjects and `@catalog` has
+  `names`/`describe`/`introspect` beside `entity`/`alias`.
+
+- **The cross-producer key expressions come from zenkey now, not from string
+  literals** (#742). zenkey 0.7 added `selector::common_family(scope, family)`
+  — the `*`-producer complement to the generated per-producer
+  `Family::selector(scope)` — which retires the hand-spelled
+  `all_health_wildcard`, `all_alerts_wildcard`, `all_name_evidence_wildcard`
+  and the tail of `origin_alerts_wildcard`. The bytes are unchanged and a test
+  pins that. Every expression still hand-spelled in `keyexpr.rs` now carries a
+  rationale written **against 0.7** rather than against the version that first
+  justified it — a stale rationale is worse than none — and
+  `zensight-common/docs/keyspace-helpers.md` carries the same table. The
+  focus-mode builders' `format!` fallback arms are a silent-routing hazard (a
+  narrowing of `RemoteOrigin::parse` would quietly send every focus-mode
+  subscription down the string path), so a new test pins that the typed and
+  hand-spelled arms agree for a legal origin.
+- **A non-ULID event id is now a publish error** (#742). RFC 04 §1.3 requires
+  the trailing chunk of `events/<producer>/<subject…>/<id>` to be a
+  time-sortable ULID, key-encoded lowercase, and that is the events class's
+  only ordering guarantee. A non-ULID id can still be a perfectly legal
+  *chunk*, so it used to mint a key the grammar accepts and the guarantee
+  silently does not hold for. `EventPublisher` routes the id through zenkey
+  0.7's `slug::ulid_slug`, so a producer bug surfaces as an error naming the
+  RFC. Uppercase ULIDs (the `ulid` crate's own rendering) are key-encoded, not
+  refused.
+
+- **`zenoh` and `zenoh-ext` 1.9 → 1.10, workspace-wide** (#734). 17 crates take
+  `zenoh`, four take `zenoh-ext`; 27 lockfile packages moved together. **The
+  wire is compatible in both directions** — `zenoh-protocol`'s `VERSION` stays
+  `0x09`, so a 1.9 sensor and a 1.10 frontend (or the reverse) open a session
+  and exchange data normally, and a fleet may be rolled forward node by node.
+  The two wire-format changes 1.10 makes are both to *non-mandatory*
+  extensions, which a peer that does not recognise them skips rather than
+  rejecting: the new timestamp-instrumentation stack (`0x7`, off by default)
+  and the SHM handshake probe, which moved from a `Z64` to a `ZBuf` encoding
+  (`shared-memory` is not enabled in this workspace, so it does not arise
+  here — a mixed-version fleet that *does* enable SHM loses the SHM
+  optimisation across a version boundary, not the session).
+  No ZenSight source changed: all nine zenoh config-key paths
+  `zensight-common/src/session.rs` writes still exist under the same names
+  (`mode`, `namespace`, `connect/endpoints`, `listen/endpoints`,
+  `timestamping/enabled`, `scouting/{multicast,gossip}/enabled`, and the three
+  `transport/link/tls/*` keys), `timestamping/enabled` still defaults to
+  router-only (`{router: true, peer: false, client: false}`) so the
+  unconditional insert stays load-bearing for every peer-mode sensor, and both
+  scouting switches still default *on*, which is what the unset case relies on.
+  In `zenoh-ext`, `RecoveryConfig` gained a `retention_period` (default 1h) for
+  publisher last-sample state and `CacheConfig::max_samples` became
+  `NonZeroUsize`-checked — every call site here passes `1`, so the new
+  zero-is-an-error path is unreachable. `just router-verify` /
+  `just router-plugins` now pin `zenohd` and its plugins at 1.10.0: a
+  version-mismatched storage plugin loads, logs one line and serves no storage.
+
+- **parallax-pipeline 0.6.0 → 0.7.0** (#689). 175 upstream commits, and the
+  `h264` GUI feature did not compile against it at all: `H264Decoder::decode`
+  became private and `DecodedFrame` crate-internal when decoders became plain
+  `Element`s, so the GUI's tile decoder now drives `Element::process` with its
+  own `SharedArena` and takes geometry from `Metadata::video_dims()`. Pulls
+  return a `Pulled { Buffer, Empty, Flushing, Ended(EndReason) }` instead of
+  `Result<Option<Buffer>>`, which lets the egress loop tell a clean end from a
+  failed one using the pipeline's own reason rather than inferring it from
+  `Ok(None)` plus `is_eos()`. `AppSink` became async-only (`add_async_sink`),
+  and `Source::handle_flow_signal`/`flow_policy` went away with the `Queue`
+  element. Two upstream changes are not in its changelog's breaking list and
+  were found by reading the source: `VideoConvert::convert` gained a
+  `PlaneLayout` argument, and — invisible to the compiler — `Element` and
+  `Source` grew defaulted methods that our `TimedElement`/`StoppableSource`
+  wrappers silently swallowed, including `set_output_budget`, which is how the
+  encoders size their output arenas; both wrappers now forward them (of the two,
+  only `TimedElement` is still here — see #709). The
+  `channel_capacity: 4` workaround is kept but its rationale is marked stale:
+  0.7 fixes the arena-vs-channel collision it exists for, and re-deriving the
+  number is #693's, since the cap also bounds latency.
+
 - **The parallax docs no longer promise live re-tuning that no build serves**
   (#504). `README.md` and a whole `docs/streams.md` section described
   bitrate/GOP/framerate/preview-quality control running "on the pipeline's
@@ -1502,163 +1555,225 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anything panics, or if any producer reports the RFC 08 §6.1 coverage warning.
   The correlator image keeps the `--help` check; it has no entrypoint to drive.
 
-### Changed — BREAKING
-
-- **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire
-  tag is re-spelled and the wire version moves to 3, so a mixed deployment
-  fails closed rather than half-decoding — **sensors and frontend upgrade
-  together** (again). Unlike the sha256→blake3 cut below, **chunk addresses
-  do not change**: the GUI's redb chunk store and any router-hosted storages
-  stay warm across the upgrade. Also picked up from 0.3: typed
-  serve/query prefixes replace string hygiene (a wildcard fetch prefix is
-  now unrepresentable, not just guarded), tier-2 materialization hardening
-  (a hostile snapshot index can no longer delete pre-existing directories,
-  apply setuid/setgid bits, or escape via a symlink chain), batched tier-2
-  chunk fetches, and snapshot chunking derives its CDC min/max from the
-  configured average (previously `avg == max` degenerated FastCDC into
-  fixed-size chunking, and a `chunk_size` above 256 KiB failed validation).
-- **zblob 0.2 (wire v2).** Artifact transfer moves to BLAKE3 + bao verified
-  streaming, postcard control messages and chunk-range resume. v1 and v2
-  peers deliberately do not interoperate — v2 renamed the reply keys so a
-  mixed fleet fails closed instead of corrupting — so **sensors and frontend
-  upgrade together**. Every reply is verified against the blob's content root
-  *before* it touches disk, so a wrong or tampered slice is discarded rather
-  than assembled and detected at the end.
-  - `Delivery::Blob`'s manifest changes shape: `filename` is optional and
-    advisory, and `chunk_count`/`hash_algo`/`hash` give way to `root` (the
-    BLAKE3 bao root). The caller now names the destination *file*; the crate
-    never joins a remote-supplied filename to a path.
-  - The GUI's redb chunk store re-keys from `sha256/<hex>` to
-    `blake3/<hex>`. Dedup is per-algorithm, so pre-0.11 chunks are inert
-    rather than wrong — the store refills on the next fetch. It also gained
-    the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
-
-
-- **The SNMP event feed persists, filters and cross-links** (#578). Trap records
-  land in a new redb `events` table keyed by their ULID — chronologically
-  sorted, so "most recent N" is a bounded reverse walk and re-delivery is
-  idempotent. No sampler, unlike logs: an event is already a rare, deliberate
-  record. Facets + free-text search, and rows link to the device.
-- **Logs history is backfilled from the sensors' durable stores** (#603).
-  Opening Logs seeded only from the local redb cache and whatever the sensors'
-  500-line hot rings still held — the authoritative unsampled store from #544
-  was never asked, because a sensor reads it only when the query carries
-  `from=`/`to=`/`after_uid=` and the GUI sent none on open.
-- **Deep log-history pagination** (#601). The feed did a silent
-  `truncate(100)`: an operator on a busy feed could not tell rows were withheld,
-  nor reach them. The cap is now a window with a footer that says so, and a
-  "load older" cursor walk against the history the sensor has served since #544.
-- **Log export gains a format choice, and artifacts can carry a producer
-  caveat** (#602). The export request hardcoded JSONL; the format is now picked
-  next to the button. `ArtifactState::Ready` gained an optional `note` a
-  producer sets via `ctx.note()`, so a bundle that had to truncate or skip
-  something can say so instead of arriving silently incomplete.
-- **A firing-alert headline tile on every protocol overview** (#582), plus a
-  `firing_by_protocol` rollup beside `firing_by_source` and a protocol filter on
-  the Alerts view.
-- **SNMP subnet-discovery proposals on the fleet overview** (#579). The opt-in
-  sweep from #541 published its report to `state/snmp/discovery` where only
-  `zenctl` could see it. Proposals only — nothing auto-adds.
-
-
-- **Every exported Prometheus/OTel series for the SNMP sensor is renamed**
-  (#559, #647). The built-in MIB tables published raw MIB object names straight
-  onto the telemetry key (`sysUpTime.0`, `ifInOctets`) — names the key chunk
-  grammar forbids, so every debug poll cycle panicked in the metric guard and
-  `refine_key` could not classify SNMP telemetry at all. All 49 built-in names
-  now follow the lowercase, profile-style convention the shipped profiles
-  already used.
-
-  | | before | after |
-  |---|---|---|
-  | Prometheus | `zensight_snmp_sysUpTime_0` | `zensight_snmp_system_uptime` |
-  | Prometheus | `zensight_snmp_ifInOctets_3` | `zensight_snmp_if_3_in_octets` |
-  | OTel | `zensight.snmp.sysUpTime.0` | `zensight.snmp.system.uptime` |
-  | OTel | `zensight.snmp.ifInOctets.3` | `zensight.snmp.if.3.in_octets` |
-
-  **This hits stock deployments, not just exotic ones.** Profiles have been on
-  by default since #531 and already used lowercase names — but before #559
-  built-ins *won* over profiles (`add_profile_mappings` inserted with
-  `.entry().or_insert()`), so for any OID both tables covered, the mixed-case
-  built-in name is what got published.
-
-  **Dashboards, recording rules and alerting rules built on the old names will
-  stop matching** — silently, not with an error. The full 49-row table is in
-  [`zensight-sensor-snmp/docs/reference.md`](zensight-sensor-snmp/docs/reference.md).
-  Table columns also move the index into its own key chunk (`ifInOctets.3` →
-  `if/3/in_octets`), so a per-interface series that was one flat name is now
-  structured.
-
-  **No compatibility aliases are published, deliberately.** SNMP is the
-  highest-cardinality producer in the fleet (per-column × per-interface ×
-  per-device); emitting both spellings would double that on the wire and in
-  every scrape, permanently, to save a one-time dashboard edit. The GUI keeps
-  *read-side* aliases so a fleet part-way through the upgrade still renders —
-  those cost nothing on the wire and go away once no pre-0.11 sensor remains.
-
-  **Unlike the logs rename in 0.10.0, `introspect` cannot tell you the old names
-  are gone.** That one moved registry *subject paths*, leaving `deprecated.lock`
-  entries a consumer can query. The SNMP registry subject is the rest-var
-  `{device}/{metric...}` and the rename happened *inside* it, so no subject was
-  retired and there is nothing in the ledger to find. This entry and the crate
-  reference are the only record.
-
-  The *keyspace* change is not breaking: consumers subscribe by class wildcard
-  (`v1/*/telemetry/**`), so no subscription changes.
-
-  Custom `oid_names` violating the grammar are no longer a panic — they are
-  escaped losslessly at the publish boundary and warned about at startup — so a
-  stale config now yields a **third** spelling matching neither scheme
-  (`system/sysUpTime` publishes as `system/sys_x55_p_x54_ime`).
-  `docker/configs/snmp.json5` was shipping exactly that, and is fixed here —
-  though see the Removed entry below: that file turned out to ship nowhere.
-
-- **The deprecated JSON pseudo-MIB support is removed** (#580). `snmp.mib.files`
-  is now a hard startup error pointing at `snmp.mib.dirs`, rather than a
-  warning. Deprecated in #532 and warned through 0.10.x.
-
-- **zblob 0.3 (wire v3).** v2 and v3 peers do not interoperate: every wire
-  tag is re-spelled and the wire version moves to 3, so a mixed deployment
-  fails closed rather than half-decoding — **sensors and frontend upgrade
-  together** (again). Unlike the sha256→blake3 cut below, **chunk addresses
-  do not change**: the GUI's redb chunk store and any router-hosted storages
-  stay warm across the upgrade. Also picked up from 0.3: typed
-  serve/query prefixes replace string hygiene (a wildcard fetch prefix is
-  now unrepresentable, not just guarded), tier-2 materialization hardening
-  (a hostile snapshot index can no longer delete pre-existing directories,
-  apply setuid/setgid bits, or escape via a symlink chain), batched tier-2
-  chunk fetches, and snapshot chunking derives its CDC min/max from the
-  configured average (previously `avg == max` degenerated FastCDC into
-  fixed-size chunking, and a `chunk_size` above 256 KiB failed validation).
-- **zblob 0.2 (wire v2).** Artifact transfer moves to BLAKE3 + bao verified
-  streaming, postcard control messages and chunk-range resume. v1 and v2
-  peers deliberately do not interoperate — v2 renamed the reply keys so a
-  mixed fleet fails closed instead of corrupting — so **sensors and frontend
-  upgrade together**. Every reply is verified against the blob's content root
-  *before* it touches disk, so a wrong or tampered slice is discarded rather
-  than assembled and detected at the end.
-  - `Delivery::Blob`'s manifest changes shape: `filename` is optional and
-    advisory, and `chunk_count`/`hash_algo`/`hash` give way to `root` (the
-    BLAKE3 bao root). The caller now names the destination *file*; the crate
-    never joins a remote-supplied filename to a path.
-  - The GUI's redb chunk store re-keys from `sha256/<hex>` to
-    `blake3/<hex>`. Dedup is per-algorithm, so pre-0.11 chunks are inert
-    rather than wrong — the store refills on the next fetch. It also gained
-    the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
-
-### Removed
-
-- **`docker/configs/` — three config files that shipped nowhere** (#472). They
-  were referenced by no Dockerfile, no compose file and no script: the sensors
-  image copies the root `configs/*.json5`, and the per-component images expect a
-  mounted `/etc/zensight`. Their only live consumer was a "shipped configs load
-  strict" test in the logs crate, which now covers the two that really ship.
-  They were not harmless: the SNMP one still carried pre-#559 `oid_names`, so
-  #647 was written — and its changelog entry and crate reference worded — as a
-  fix to a *shipped* config. `configs/snmp.json5`, the one the image actually
-  carries, was already correct. Both references are corrected here.
-
 ### Fixed
+
+- **The catalog announced presence before it could answer** (#782). RFC 04 §5 is
+  `alive ⇒ callable`, and the correlator broke it. `guard::acquire` claimed,
+  elected **and** declared the owner `alive` token in one step, while `main`
+  spawned every queryable after it — so between winning the election and
+  declaring entities/names/introspect/describe/link/unlink, the catalog was on
+  the roster and answered nothing. On a developer machine that window is
+  microseconds and nothing had ever observed it; on a loaded runner it is wide
+  enough for a conformance judge's `introspect` sweep to land inside, which is
+  how it was finally seen. Election and presence are now two steps —
+  `guard::acquire`, then `guard::declare_alive` — with the queryables in
+  between, which is the discipline `zensight-sensor-core`'s runner has always
+  had. Its `await_registry_coverage` helper does **not** fit here: it derives
+  the serve-side spelling from *this host's* origin, which is right for a sensor
+  and wrong for a producer on a service origin.
+- **No queryable reply carried an HLC timestamp, so no state-class seed could
+  be LWW-ordered** (#782). Zenoh's session HLC stamps a `put`. It does **not**
+  stamp a queryable *reply*. `zensight-common/src/session.rs` forces
+  `timestamping/enabled = true` on every session and a test pins it, so the
+  reflex reading — "some path missed the setting" — was wrong; the setting was
+  never the mechanism.
+
+  RFC 04 §3.2 makes a producer answering a plain GET on a state selector a
+  *storage* for the duration of that reply — the reply-key discipline is
+  storage-shaped on purpose, so seeding works with or without a real one — and
+  closes with the corollary that **an untimestamped sample cannot be
+  reconciled**. Every seeded state sample this workspace ever served was
+  therefore unorderable against its own successors, silently, because nothing
+  in the tree reads `Sample::timestamp()`.
+
+  It was not silent to `zenctl doctor --deep`, which reported `unstamped-state`
+  at warning severity. The originally-reported instance was the correlator's
+  entity seed, which is why `scripts/conformance-verify.sh` held the correlator
+  back behind `CORRELATOR=1`. Chasing it found a **second, worse** one: the
+  firing-alert seed in `zensight-sensor-core` has the identical defect and *is*
+  in the default CI deployment. It only looked clean because a sensor that
+  raises no alert inside the listen window replies zero samples — on a host with
+  two disks over 90 % full it replies two, and the `conformance` job goes red.
+  The gate was a coin flip on the runner's free space rather than on the branch
+  under test.
+
+  **The rule, and it is the deliverable rather than the patch:** *a queryable
+  reply whose key is in the `state` class MUST carry a timestamp; a reply on an
+  `@rpc` key MUST NOT.* An `@rpc` reply is a computed answer to a parameterised
+  question, never the value at a key — no storage selector reaches it, nothing
+  merges it into an LWW store, and stamping it would assert a reconcilability
+  that does not exist. Only **two** of the ~35 `query.reply` sites in the
+  workspace are state-class; the other 33 are unchanged, which is the point of
+  stating a rule instead of shipping a list.
+
+  Enforced as a type, not a convention. `served::serve_state_queryable` returns
+  a `StateQueryable` whose `StateQuery` exposes **no** `reply()` — only
+  `reply_state`, which takes a stamp — so an unstamped state seed is not
+  something a caller can write through the seam. `serve_queryable` debug-panics
+  (release-warns) on a state selector, the same policy as
+  `check_registry_coverage`, so a producer's own tests fail on it; a CI grep
+  tripwire covers the case that runs no test.
+
+  The stamp is `seed_stamp(&session)` — the session HLC, **taken inside the same
+  critical section as the snapshot it describes**. Stamping per reply instead is
+  a resurrection bug: a seed loop snapshots and *then* replies, so a value
+  updated mid-loop has its live `put` stamped `T` while the loop replies the
+  stale snapshot value stamped `T' > T`, and LWW keeps the stale one.
+  `a_seed_batch_never_out_stamps_a_later_put` is that invariant in its
+  observable form. Deliberately **not** the payload's own write time:
+  `HostEntity.last_updated` is wall-clock epoch millis, minting a `Timestamp`
+  from it under the session's own id forges HLC state for that id, and it would
+  turn `unstamped-state` (warning) into `stale-state` (**error**) for any
+  entity older than its `ttl_s`.
+
+  Costs nothing at the manifest: `.timestamp()` is `TimestampBuilderTrait`,
+  which zenoh marks `#[zenoh_macros::internal_trait]` — a macro whose documented
+  job is to *also* emit an inherent method — so neither the import nor zenoh's
+  `internal` cargo feature is needed. `state_reply_builder_still_takes_a_timestamp`
+  is a compile-level pin on that shim, so a future zenoh upgrade that drops it
+  becomes a named build failure rather than a silent return to unstamped seeds.
+
+  **The correlator now runs in the default conformance deployment.** Both
+  `scripts/conformance-verify.sh` and `zensight-conformance/README.md` promised
+  that would happen "the day the correlator stamps its seed replies", with no
+  change to the gate — `unstamped-state` was never in `DEFAULT_EXCLUDED`, so
+  nothing needed un-excluding. It also buys real coverage: `@catalog` is a
+  *service* origin whose verbatim `@` chunk is a structurally different
+  introspect key (RFC 08 §6, property D4), so running both halves covers both
+  halves of the slice diff.
+
+  **And it found a second defect, which is the gate doing its job.** Putting the
+  correlator into the default conformance deployment made `zensight-conformance`
+  fail on a loaded two-lane CI runner — not on the stamping, but on RFC 04 §5's
+  `alive ⇒ callable`. `guard::acquire` did three things at once: claim, elect,
+  and declare the owner `alive` token; `main` then spawned every queryable
+  *after* it. So between winning the election and declaring
+  `entities`/`names`/`introspect`/`describe`/`link`/`unlink`, the correlator was
+  on the roster and answered nothing. On a developer machine that window is
+  microseconds and nothing had ever observed it.
+
+  `zensight-sensor-core`'s runner has always declared liveliness **last**, after
+  `await_registry_coverage`, with the reasoning written at `DECLARATION_GRACE`
+  (#648). The correlator is not a `SensorRunner`, so it never inherited the
+  discipline. Election and presence are now two steps —
+  `guard::acquire` then `guard::declare_alive` — with the queryables in between.
+
+  That needed a new seam, because the obvious one does not fit:
+  `await_registry_coverage` is **sensor-shaped**, deriving the serve-side
+  spelling from *this host's* origin (`v1/h-…/@rpc/catalog/names`), while the
+  catalog serves on the `@catalog` **service** origin. Pointed at the
+  correlator it reported every procedure as unserved while the log said they
+  were ready, and debug-panicked. `served::await_served` takes the concrete keys
+  a producer declared and makes no assumption about how they were spelled;
+  `registry_coverage_cannot_see_a_service_origin` pins why both exist.
+
+  The effect is visible beyond the absence of a failure: before, the judge
+  reported *"1 producer(s) judged"* or *"2"* from run to run on a constrained
+  machine, because it observed the correlator inconsistently. After, it is 2
+  every time.
+
+  Wire-observable on the seed path, and nothing else: the payloads are
+  byte-identical, no schema moves, no key moves, no registry entry changes
+  (`catalog.toml` and `sysinfo.toml` already declare these families as
+  `class = "state"` with a `ttl_s`, which is *why* the stamp is a MUST — the
+  code caught up with the registry, not the other way round). All three in-tree
+  consumers ignore `Sample::timestamp()` today, so nothing in ZenSight changes
+  behaviour. An external consumer that implemented §3.2's merge honestly, and
+  therefore had to special-case the unstamped seed, will now see it participate
+  properly. No re-keying, no phantom state, no operator sweep.
+
+- **The verify scripts blamed Zenoh discovery when a binary was simply missing**
+  (#790). `BIN="${BINDIR:-target/${PROFILE}}"` is repo-relative, so anyone with
+  `CARGO_TARGET_DIR` set — a shared build dir, a worktree that builds elsewhere,
+  sccache — built to one place and was launched from another. `cargo build`
+  reports success, so the script's own build step gave no hint; the run then
+  waited 40 s for a roster that could never populate and failed with a paragraph
+  about multicast that was true in general and irrelevant to what happened. It
+  cost a wrong diagnosis before the cause was found.
+
+  Three fixes, in a new `scripts/lib/verify.sh` shared by
+  `conformance-verify.sh` and `demo-verify.sh`, because both had all three:
+
+  - **`require_bins`** fails before starting anything, naming each missing path,
+    the `BIN`/`BINDIR`/`PROFILE` it derived it from, and the `BINDIR=…` command
+    that fixes it.
+  - **The failure message can tell a dead child from an undiscovered one.** The
+    discovery paragraph is the right diagnosis when the processes are alive and
+    cannot find each other, and the wrong one when a process has already exited
+    — which the preflight cannot catch, because a binary can exist and still die
+    on a bad config or a busy port. Both scripts now ask `kill -0` first and
+    print the dead child's log tail instead of the discovery text.
+  - **The evidence outlives the exit trap.** Every failure message ended with
+    `logs: $tmp/*.log`, pointing into a `mktemp -d` the `EXIT` trap had just
+    deleted. Failures now keep the directory *and* inline the last 20 lines of
+    each log, so the message is self-contained even if the directory is not.
+
+- **`zenoh_e2e` saw a sibling test's sample under parallel load** (#785). Its
+  four sessions were plain `zenoh::Config::default()` — peer mode with multicast
+  scouting **and** gossip on — so they discovered each other, plus
+  `publisher_registry.rs`'s, plus any live sensor on the host. Under
+  `cargo test --workspace` the telemetry test would occasionally receive the
+  CBOR test's sample and fail with `left: "cbor-device"`.
+
+  The per-test key prefixes were never the bug: a `test_<nanos>/**` subscription
+  cannot match a sibling's tree. The session layer was, and the fix was already
+  written twice in the same directory — `publisher_registry.rs` and
+  `router_storage.rs` both define an `isolated_config()` for exactly this
+  reason, and `zenoh_e2e.rs` is the one file that never got it. Deliberately not
+  `--test-threads=1`, which hides the coupling rather than removing it.
+
+- **RTSP streams reconnect instead of dying** (#731, delivers most of #410). A
+  dropped RTSP stream — a camera rebooting, a switch flapping, a Wi-Fi bridge
+  dropping a packet — used to end the pipeline and close the stream, leaving the
+  viewer to re-open by hand. parallax 0.8 makes `RtspSession` an `AsyncSource`
+  whose `produce()` carries the retry loop, so the hand-written feeder task and
+  its `AppSrc` are gone and the reconnect is the source's own: exponential
+  backoff from 500 ms to a 30 s ceiling with full jitter, so a rack of cameras
+  behind one switch does not retry in lockstep.
+
+  `rtsp_connect_failed` changes meaning with it, and had to: it now fires on
+  *sustained* failure — the initial connect, or a drop that outlasted the whole
+  reconnect ladder — rather than on the first hiccup. That is what the rule was
+  always named for. The ladder is deliberately **bounded** (8 attempts, ≈ 90 s)
+  where upstream defaults to retrying forever, because forever would mean a
+  camera that is gone never produces an error and the alert could never fire
+  again.
+
+  The first buffer after a reconnect carries `DISCONT`, and the egress re-arms
+  on it: the cached SPS/PPS belong to the previous session, so it clears them
+  and refills from the camera's own in-band sets rather than prepending stale
+  geometry to the resumed stream's first keyframe.
+
+- **`FrameMeta.dts_ns` is omitted when it equals `pts_ns`** (#728), as its own
+  documentation always said ("if distinct from `pts_ns`") and as parallax's
+  byte-compatible twin has always done. The producer wrote it unconditionally
+  whenever the clock was set, so — our encoders emitting no B-frames — *every*
+  frame on the `@media` plane carried a redundant copy of its own pts. Consumers
+  that read `dts_ns.or(pts_ns)` (the documented shape) are unaffected. The
+  attachment is pinned from now on against parallax's three canonical CBOR
+  vectors, checked into `zensight-common/tests/fixtures/framemeta/` and
+  round-tripped byte for byte — which settles #711 as **two types, one corpus**:
+  `zensight-common` cannot depend on the video engine and parallax cannot depend
+  on Zenoh, so the shared artifact is the bytes, not the type.
+
+- **Duplicate label names are now structurally impossible** (#753). Both
+  exporters assembled labels by pushing sources in order and de-duplicating
+  against a hard-coded `source`/`protocol` list — so `disk/<dev>/io/*` emitted
+  `device` twice, once from the semconv table and once from the sysinfo sensor's
+  own labels, producing `zensight_system_disk_io{device="sda",device="sda",…}`.
+  Prometheus rejects such a sample and a remote-write receiver rejects the whole
+  batch; the OTel side had no de-duplication at all. There is now one merge in
+  `zensight-common::exposition` with a stated precedence — structural, semconv,
+  pattern vars, point labels, config defaults — where later never overwrites
+  earlier and a shadowed candidate is dropped and counted rather than appended.
+  A sensor can no longer forge `origin`, `source` or `protocol`.
+- **Exporter documentation that produced an empty dashboard** (#761). Both
+  READMEs recommended `key_expr: "zensight/v1/*/telemetry/**"`; since #466 the
+  deployment base is the session *namespace*, not a key chunk, so that selector
+  matches **nothing** — with a perfectly healthy session. The OTel README's
+  `include_protocols: [… "syslog"]` matched nothing either (the token is
+  `"logs"`), silently dropping every log record while `export_logs: true`. The
+  `configs/*.json5` comments stating the default were wrong in the same way.
 
 - **tcplife's byte and segment counters are real** (#681). They were hardcoded
   `0` in the kernel program — 0 of 196 records carried a non-zero counter on a
@@ -1950,6 +2065,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Artifact blob/tree servers are declared before the channel starts answering
   requests (zblob 0.2's `spawn()`), closing a window where a request could
   race ahead of the server meant to serve its bytes.
+
+### Removed
+
+- **`docker/configs/` — three config files that shipped nowhere** (#472). They
+  were referenced by no Dockerfile, no compose file and no script: the sensors
+  image copies the root `configs/*.json5`, and the per-component images expect a
+  mounted `/etc/zensight`. Their only live consumer was a "shipped configs load
+  strict" test in the logs crate, which now covers the two that really ship.
+  They were not harmless: the SNMP one still carried pre-#559 `oid_names`, so
+  #647 was written — and its changelog entry and crate reference worded — as a
+  fix to a *shipped* config. `configs/snmp.json5`, the one the image actually
+  carries, was already correct. Both references are corrected here.
+
+### Decided
+
+- **Rerun: an optional debugging backend, and the evaluation is closed** (#430,
+  epic #415). `docs/plans/rerun/DECISION.md` is the terminal document of a
+  21-issue evaluation. `zensight-rerun` stays in-tree, `publish = false`, out of
+  the release train, and off unless someone runs the binary; it is **supported
+  for bounded incident capture and replay** and for nothing else.
+
+  Outcome 4 — a packaged, released backend — is refused rather than deferred,
+  for four independent reasons: the adapter was never benchmarked at fleet rates
+  (#426, not run), the viewer transport is unauthenticated, unencrypted and
+  binds `0.0.0.0` by default, packaging would make Rerun's ~6-week breaking
+  cadence our obligation, and structured events are modelled *worse* than in a
+  backend we already ship (OTel's `LogRecord` carries body + severity +
+  attributes in one record; Rerun needs `TextLog` **and** `AnyValues` on one
+  path by producer-side convention, with nothing stopping them drifting).
+
+  The maintenance number is not hypothetical: the pin is `=0.34.1` and upstream
+  is 0.36.3 — two breaking minors, each with its own migration guide, in the
+  seven weeks since we pinned. `zensight-rerun/Cargo.toml` now says in place
+  that the pin does not move on a Renovate PR.
+
+  Three operating rules are now written where a user will hit them
+  (`zensight-rerun/README.md`): **`--bind 127.0.0.1` always** — the default
+  exposes the web viewer *and* the gRPC proxy to the network, carrying
+  hostnames, IPs, MACs, flow matrices and log lines; **`rerun rrd optimize`
+  before storing or sharing** — 13x on our own recordings (~1.3 KiB/point live
+  write becomes ~100 B/point, which is what killed the "untenable storage"
+  reject-signal, and it doubles as the repair tool for a `kill -9`-truncated
+  file); and **`--memory-limit`** on anything outliving a demo.
+
+  What the evaluation is actually worth, beyond the verdict: it demonstrated
+  that scrubbing backwards through a correlated incident across metrics, alerts,
+  events and topology on one axis is a thing worth having. ZenSight already
+  stores the samples. DECISION.md §6 records that as a native feature waiting to
+  be specified rather than designing it.
 
 ## [0.10.1] - 2026-07-27
 

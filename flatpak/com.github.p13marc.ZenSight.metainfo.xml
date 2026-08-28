@@ -55,6 +55,20 @@
     <keyword>modbus</keyword>
   </keywords>
   <releases>
+    <release version="0.11.0" date="2026-08-28">
+      <description>
+        <p>A month of accumulated work, and a release to read before upgrading:
+        seventeen breaking entries, three of which break a deployment rather
+        than an API. Every firing alert re-keys, the Prometheus scrape port
+        moves to 127.0.0.1:9464, every exported SNMP series is renamed, and
+        sensors and frontend must upgrade together. The features are the
+        adaptive media plane — receiver-driven tier selection, a stream health
+        panel, sink-sourced drop accounting — and a conformance harness that
+        asks a running fleet in CI whether it obeys its own contract.</p>
+        <p>See the CHANGELOG in the repository for the full list, including
+        breaking changes and migration notes.</p>
+      </description>
+    </release>
     <release version="0.10.1" date="2026-07-27">
       <description>
         <p>Production profile hardening: the default-on TRW port-scan

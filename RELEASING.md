@@ -57,11 +57,11 @@ Also update `flatpak/com.github.p13marc.ZenSight.metainfo.xml`: its `<releases>`
 
 | File | Note |
 |---|---|
-| `Cargo.toml` (`[workspace.package] version`) | the 22 normal crates inherit this |
+| `Cargo.toml` (`[workspace.package] version`) | the 21 normal crates inherit this |
 | `zensight-sensor-netlink-ebpf/Cargo.toml` | **hardcodes its version — does not inherit** |
 | `zensight-sensor-sysinfo-ebpf/Cargo.toml` | **hardcodes its version — does not inherit** |
 
-> **Trap 1.** The two eBPF crates are the only 2 of 24 that do not use
+> **Trap 1.** The two eBPF crates are the only 2 of the 23 member manifests that do not use
 > `version.workspace = true`. They are `publish = false`, but every prior release moved them
 > and a mismatch is confusing. Verify with:
 > ```bash
