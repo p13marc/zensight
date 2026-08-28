@@ -10,9 +10,11 @@
 //! which tiers a stream offers, and each viewer subscribes to exactly the one
 //! its link chose. A `*` here would pull *every* tier at once — the opposite
 //! of demand-driven simulcast. The stream then decodes access units directly
-//! (no parallax pipeline/executor — a leaked live-source blocking task in
-//! the GUI process would hang shutdown, see the sensor's `StoppableSource`
-//! notes): gate on the first `FrameMeta.keyframe`, decode → I420 → RGBA →
+//! (no parallax pipeline/executor at all — the GUI has no source to run and
+//! nothing to schedule, so an executor here would be a lifecycle to get wrong
+//! for no gain; the sensor's `docs/streams.md` teardown section is where that
+//! lifecycle actually lives): gate on the first `FrameMeta.keyframe`,
+//! decode → I420 → RGBA →
 //! [`iced::widget::image::Handle`], and on any sequence discontinuity drop
 //! sync, rebuild the decoder, and ask the sensor for a fresh IDR via
 //! [`Message::ParallaxRequestKeyframe`].

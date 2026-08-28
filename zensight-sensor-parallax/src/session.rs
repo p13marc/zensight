@@ -210,11 +210,6 @@ struct PendingOpen {
 /// One running profile pipeline + its egress/matcher tasks.
 struct ProfileSession {
     handle: Option<PipelineHandle>,
-    /// Cooperative source-EOS switch — the only way to end a *synchronous*
-    /// source's blocking task (`abort()` alone leaks a live pipeline).
-    /// `None` for an RTSP graph, whose source is an `AsyncSource` (#731):
-    /// aborting the task cancels the future at its next await point.
-    stop: Option<pipeline::StopHandle>,
     /// Handles cloned from this profile's elements before the executor moved
     /// them into their tasks. Only `keyframe` is driven at runtime; the rest
     /// are observation (`encoder_stats`, #510) or an unreached retune path —
@@ -248,23 +243,28 @@ struct ProfileSession {
 impl Drop for ProfileSession {
     fn drop(&mut self) {
         // Belt-and-braces: however this session dies (explicit teardown,
-        // actor shutdown, panic unwind, runtime teardown), the source's EOS
-        // switch MUST flip — its loop runs on a blocking thread that nothing
-        // else can stop, and tokio's shutdown would wait on it forever.
-        // An RTSP graph has no switch and needs none (#731).
-        if let Some(stop) = &self.stop {
-            stop.stop();
+        // actor shutdown, panic unwind, runtime teardown), ask the sources to
+        // stop. A live source that nobody asked keeps its task — and its
+        // device — alive, and tokio's shutdown would wait on it forever.
+        // `stop` borrows, which is the whole reason `Drop` can call it.
+        if let Some(handle) = &self.handle {
+            handle.stop();
         }
     }
 }
 
 impl ProfileSession {
     fn teardown(mut self) {
-        // Order matters: flip the source's EOS switch first (a synchronous
-        // source's loop runs on a blocking thread that abort() cannot
-        // cancel), then abort the async plumbing.
-        if let Some(stop) = &self.stop {
-            stop.stop();
+        // Ask before cutting (#709). `stop()` raises the executor's
+        // cooperative flag, which every source loop checks at the top of its
+        // next iteration: the loop ends, EOS travels downstream, and the
+        // source drops its device on the way out. `abort()` also raises that
+        // flag, but it cancels the tasks in the same breath, so a source
+        // holding an exclusive V4L2 device may still be holding it when the
+        // replacement tier tries to open — which is `EBUSY`, and which is why
+        // `release_conflicting_video_tiers` exists at all.
+        if let Some(handle) = &self.handle {
+            handle.stop();
         }
         self.egress.abort();
         self.matcher.abort();
@@ -786,7 +786,6 @@ impl SessionManager {
         let media = match self.publisher.raw_media_publisher(key.clone()).await {
             Ok(p) => Arc::new(p),
             Err(e) => {
-                built.stop_source();
                 self.fail_open(
                     stream,
                     profile,
@@ -802,7 +801,6 @@ impl SessionManager {
             let listener = match media.matching_listener().await {
                 Ok(l) => l,
                 Err(e) => {
-                    built.stop_source();
                     self.fail_open(
                         stream,
                         profile,
@@ -831,7 +829,6 @@ impl SessionManager {
         let handle = match pipeline::executor().start(&mut built.pipeline) {
             Ok(h) => h,
             Err(e) => {
-                built.stop_source();
                 matcher.abort();
                 self.fail_open(stream, profile, &format!("failed to start pipeline: {e}"))
                     .await;
@@ -890,7 +887,6 @@ impl SessionManager {
                 profile,
                 ProfileSlot::Open(Box::new(ProfileSession {
                     handle: Some(handle),
-                    stop: built.stop,
                     controls: built.controls,
                     egress,
                     matcher,

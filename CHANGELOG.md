@@ -517,6 +517,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`StoppableSource` is gone — the engine grew the switch it worked around**
+  (#709). Every synchronous source the parallax sensor built was wrapped in a
+  `StoppableSource` whose `StopHandle` flipped the next `produce()` to EOS. The
+  wrapper existed for three stated reasons, and re-checked against the pinned
+  `parallax-pipeline 0.8.0` **all three are false**: the executor does not run
+  source loops on blocking threads (a synchronous `Source` is driven inline
+  inside an ordinary tokio task, `element/traits.rs:2671`), it does not ignore
+  downstream channel closure, and `abort()` alone *can* stop a live source — it
+  raises the cooperative flag itself (`unified_executor.rs:974`), which the
+  executor's own source loop polls at the top of every iteration
+  (`:3861-3871`), broadcasting EOS and draining downstream with exactly the
+  one-frame-period bound the wrapper claimed for itself.
+
+  So the wrapper reimplemented, in eleven forwarding methods, a check the engine
+  performs one layer down. That forwarding was never free: it is a standing
+  hazard whose own comment says so, because a method upstream adds and we forget
+  to forward is silently answered by the wrapper *instead of* the source. That
+  has already cost us once — `set_output_budget` in #689, which is how an
+  encoder sizes its output arena.
+
+  Teardown now calls `PipelineHandle::stop()` on the handle the profile already
+  owns. `stop()` borrows, so `Drop` can call it too, and **no `Stopper` is
+  needed**: `stopper()` exists for callers whose handle `wait()` has consumed,
+  which this one never is. The `stop()`-then-`abort()` order is kept and is not
+  ceremony — `stop()` lets a source loop end and drop its device, and the
+  exclusive-source tier switch depends on the outgoing tier releasing a V4L2
+  device before the incoming tier opens it, which asynchronous cancellation
+  cannot promise.
+
+  The three `stop_source()` calls on the failed-open paths are deleted rather
+  than translated: all three run *before* `executor().start()` has returned a
+  handle, so no source task exists and the elements are simply dropped. The one
+  post-spawn failure inside `start()` (`pipeline.activate()`) already raises the
+  flag itself, through `TerminalOutcome::fail` → `record` → `shutdown.begin()`.
+
 - **The `zenoh::open` CI guard greps more than one spelling** (#789). It matched
   the literal `zenoh::open(`, so `zenkey_fleet::open()` / `open_with_config()` —
   reachable since #745 put `zenkey-fleet` in the GUI's dependency tree — walked
