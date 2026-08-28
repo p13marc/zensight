@@ -546,6 +546,29 @@ test-ui *ARGS:
 image:
     podman build -t zensight-sensors -f docker/Dockerfile.sensors .
 
+# Verify the sensors image against a REAL bus (#472): the container joins an
+# isolated hub under ONE `h-<12hex>` origin, answers `introspect` on every
+# procedure it advertises (alive => callable, RFC 04 §5), and — the claim
+# multi-machine deployment actually rests on — comes back under the SAME origin
+# after `podman rm -f` + restart.
+#
+# That last one is why the `/etc/machine-id` mount in docs/DEPLOYMENT.md and
+# docker-compose.yml is not optional: without it every start mints a fresh
+# random origin and the catalog silently fills with ghost hosts.
+#
+# Needs rootful podman (the script defaults to `sudo podman` — host namespaces,
+# CAP_NET_RAW and the journal mounts all need it) and zenohd at the workspace's
+# zenoh version:
+#
+#   cargo install zenohd --version 1.10.0 --locked
+#
+# No storage plugins here, unlike `router-verify` — this hub only routes. The
+# script builds the image itself from docker/Dockerfile.sensors (a full release
+# build of five sensors inside the container: budget tens of minutes cold), and
+# stands its own zenohd up on loopback:17447 — it never touches 7447.
+image-verify:
+    scripts/image-verify.sh
+
 # Stop any running sensors + correlator started by `just run`.
 stop:
     -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs|systemd|parallax)' || true
