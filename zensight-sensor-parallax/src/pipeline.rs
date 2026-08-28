@@ -11,13 +11,12 @@
 //! `RateLimiter` (which would backpressure a live source).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use parallax::buffer::Buffer;
 use parallax::control::{Controllable, EncoderControl, EncoderStatsHandle, RateControlMode};
 use parallax::converters::PixelFormat as ConvFormat;
-use parallax::element::{AsyncSource, Element, ProduceContext, ProduceResult, Source};
+use parallax::element::{AsyncSource, Element};
 use parallax::elements::codec::{Complexity, KeyframeHandle, Profile, UsageType};
 use parallax::elements::transform::VideoConvertElement;
 use parallax::elements::{
@@ -52,114 +51,6 @@ const SINK_QUEUE: usize = 4;
 /// willing to state the number itself. This is that.
 pub fn executor() -> Executor {
     Executor::with_config(UnifiedExecutorConfig::live_video())
-}
-
-/// Cooperative stop signal for a pipeline's source.
-///
-/// The unified executor runs source loops on blocking threads and ignores
-/// downstream channel closure, so `PipelineHandle::abort()` alone cannot stop
-/// a live (infinite) source — the blocking task would keep the runtime (and
-/// the pipeline) alive forever. Every **synchronous** source we build is
-/// wrapped in a [`StoppableSource`]; flipping this flag makes its next
-/// `produce()` return EOS, which unwinds the whole pipeline cleanly. Teardown
-/// latency is at most one frame period (the live source's internal pacing).
-///
-/// Not every graph has one any more (#709 is the ticket for retiring it): the
-/// RTSP paths became `AsyncSource`-driven in #731 and need no switch, because
-/// an async source is a future and aborting its task cancels it at the next
-/// await point. `V4l2Src` and `VideoTestSrc` are still synchronous `Source`s,
-/// so the wrapper stays until they are not.
-#[derive(Clone, Debug)]
-pub struct StopHandle(Arc<AtomicBool>);
-
-impl StopHandle {
-    fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
-    }
-
-    /// Request the source to end its stream at the next produce call.
-    pub fn stop(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-}
-
-/// Wraps any [`Source`] with the [`StopHandle`] EOS switch.
-struct StoppableSource<S: Source> {
-    inner: S,
-    stop: Arc<AtomicBool>,
-}
-
-impl<S: Source> StoppableSource<S> {
-    fn new(inner: S) -> (Self, StopHandle) {
-        let handle = StopHandle::new();
-        (
-            Self {
-                inner,
-                stop: handle.0.clone(),
-            },
-            handle,
-        )
-    }
-}
-
-impl<S: Source> Source for StoppableSource<S> {
-    fn produce(&mut self, ctx: &mut ProduceContext) -> parallax::error::Result<ProduceResult> {
-        if self.stop.load(Ordering::Relaxed) {
-            return Ok(ProduceResult::Eos);
-        }
-        self.inner.produce(ctx)
-    }
-
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn output_caps(&self) -> parallax::format::Caps {
-        self.inner.output_caps()
-    }
-
-    fn output_media_caps(&self) -> parallax::format::ElementMediaCaps {
-        self.inner.output_media_caps()
-    }
-
-    fn preferred_buffer_size(&self) -> Option<usize> {
-        self.inner.preferred_buffer_size()
-    }
-
-    // 0.7 added these to `Source`, and a wrapper that does not forward them
-    // silently answers for its inner source (#689). `set_output_budget` is the
-    // load-bearing one: the executor uses it to size an element's output arena,
-    // so swallowing it leaves the wrapped source on defaults.
-    fn set_output_budget(&mut self, budget: parallax::memory::OutputBudget) {
-        self.inner.set_output_budget(budget);
-    }
-
-    fn set_negotiated_memory(&mut self, memory: parallax::memory::MemoryType) {
-        self.inner.set_negotiated_memory(memory);
-    }
-
-    fn handle_upstream_event(
-        &mut self,
-        event: &parallax::event::Event,
-    ) -> parallax::event::EventResult {
-        self.inner.handle_upstream_event(event)
-    }
-
-    fn is_seekable(&self) -> bool {
-        self.inner.is_seekable()
-    }
-
-    fn query_position(&self) -> Option<parallax::pipeline::seek::PositionQuery> {
-        self.inner.query_position()
-    }
-
-    fn query_duration(&self) -> Option<parallax::pipeline::seek::DurationQuery> {
-        self.inner.query_duration()
-    }
-
-    fn execution_hints(&self) -> parallax::element::ExecutionHints {
-        self.inner.execution_hints()
-    }
 }
 
 /// Wraps an encoder [`Element`] to time each `process()` call into the
@@ -225,9 +116,9 @@ impl<E: Element> Element for TimedElement<E> {
         self.inner.execution_hints()
     }
 
-    // Same reasoning as `StoppableSource` above: 0.7 added defaulted methods to
-    // `Element`, and this wrapper sits between the executor and every encoder we
-    // build. `set_output_budget` in particular is how `H264Encoder` and
+    // 0.7 added defaulted methods to `Element`, and this wrapper sits between
+    // the executor and every encoder we build: one it does not forward is one
+    // the executor silently asks the wrapper instead of the encoder. `set_output_budget` in particular is how `H264Encoder` and
     // `JpegEncoder` size their output arenas (#689).
     fn set_bus(&mut self, bus: parallax::pipeline::bus::BusHandle) {
         self.inner.set_bus(bus);
@@ -316,31 +207,10 @@ pub struct BuiltPipeline {
     /// Live control handles (keyframe, bitrate, scale, framerate, …), all
     /// cloned before the pipeline starts.
     pub controls: PipelineControls,
-    /// Cooperative source stop — MUST be triggered at teardown (see
-    /// [`StopHandle`]); `PipelineHandle::abort()` alone leaks the source.
-    ///
-    /// `None` for a graph whose source is an [`AsyncSource`] (RTSP, #731):
-    /// there is nothing to leak. The switch exists because a *synchronous*
-    /// `Source` is pumped on a blocking thread that `abort()` cannot cancel;
-    /// an async source is a future, and aborting the task cancels it at its
-    /// next await point. Use [`Self::stop_source`] rather than the field.
-    pub stop: Option<StopHandle>,
     /// Encoded frame dimensions (stamped into every `FrameMeta`;
     /// `0` = unknown, e.g. RTSP passthrough without SDP dimensions).
     pub width: u32,
     pub height: u32,
-}
-
-impl BuiltPipeline {
-    /// Flip the source's cooperative EOS switch, if this graph has one.
-    ///
-    /// A no-op for an [`AsyncSource`]-driven graph, where aborting the
-    /// pipeline is enough.
-    pub fn stop_source(&self) {
-        if let Some(stop) = &self.stop {
-            stop.stop();
-        }
-    }
 }
 
 /// The H.264 encoder config for a video graph (parallax 0.6).
@@ -487,7 +357,6 @@ pub fn build_video(
             stats.tighten_budget(1_000_000_000 / params.fps.max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
-            let (src, stop) = StoppableSource::new(src);
 
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("test-src", src);
@@ -523,7 +392,6 @@ pub fn build_video(
                     encoder_stats: Some(enc_stats),
                     ..Default::default()
                 },
-                stop: Some(stop),
                 width: w,
                 height: h,
             })
@@ -547,7 +415,6 @@ pub fn build_video(
             stats.tighten_budget(1_000_000_000 / params.fps.max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
-            let (src, stop) = StoppableSource::new(src);
 
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("v4l2-src", src);
@@ -616,7 +483,6 @@ pub fn build_video(
                     encoder_stats: Some(enc_stats),
                     ..Default::default()
                 },
-                stop: Some(stop),
                 width: out_w,
                 height: out_h,
             })
@@ -658,7 +524,6 @@ pub fn build_rtsp_video_passthrough<S: AsyncSource + 'static>(
         sink: sink_handle,
         // Passthrough: no encoder in the graph, so no live controls at all.
         controls: PipelineControls::default(),
-        stop: None,
         width,
         height,
     })
@@ -729,7 +594,6 @@ pub fn build_rtsp_preview<S: AsyncSource + 'static>(
             preview_scale: Some(preview_scale),
             ..Default::default()
         },
-        stop: None,
         width: out_w,
         height: out_h,
     })
@@ -765,7 +629,6 @@ pub fn build_preview(
 
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
-            let (src, stop) = StoppableSource::new(src);
 
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("test-src", src);
@@ -790,7 +653,6 @@ pub fn build_preview(
                     preview_scale: Some(preview_scale),
                     ..Default::default()
                 },
-                stop: Some(stop),
                 width: out_w,
                 height: out_h,
             })
@@ -811,7 +673,6 @@ pub fn build_preview(
 
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
-            let (src, stop) = StoppableSource::new(src);
 
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("v4l2-src", src);
@@ -875,7 +736,6 @@ pub fn build_preview(
                     preview_scale,
                     ..Default::default()
                 },
-                stop: Some(stop),
                 width: out_w,
                 height: out_h,
             })
@@ -935,7 +795,9 @@ fn parse_pattern(name: &str) -> VideoPattern {
 mod tests {
     use super::*;
     // 0.7: pulls are a `Pulled`, not a `Result<Option<Buffer>>` (#689).
+    use parallax::element::ProduceResult;
     use parallax::elements::Pulled;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     fn test_kind(fps: u32) -> SourceKind {
@@ -1016,9 +878,14 @@ mod tests {
     }
 
     /// Start a built (live, unbounded) pipeline, collect `count` frames, then
-    /// stop it via the [`StopHandle`] and require a CLEAN shutdown — this
-    /// pins the stoppable-source contract (`abort()` alone cannot end a live
-    /// source's blocking task; only the EOS switch can).
+    /// stop it and require a CLEAN shutdown.
+    ///
+    /// `PipelineHandle::stop` is the cooperative path: the executor's source
+    /// loop sees the flag at the top of its next iteration, broadcasts EOS and
+    /// lets the graph drain, so `wait()` returns `Ok` and the outcome is
+    /// `Eos` — not the `Aborted` that `abort()` would record. That distinction
+    /// is what this helper pins (#709); it is why teardown asks first and
+    /// aborts second.
     async fn pull_frames(built: BuiltPipeline, count: usize) -> Vec<PulledFrame> {
         let mut built = built;
         let handle = executor()
@@ -1045,10 +912,13 @@ mod tests {
             }
         }
 
-        built.stop_source();
+        // `stop()` borrows; `wait()` consumes. In that order no `Stopper` is
+        // needed — it exists for callers that must still reach a handle
+        // `wait()` has already taken.
+        handle.stop();
         tokio::time::timeout(Duration::from_secs(10), handle.wait())
             .await
-            .expect("pipeline must shut down cleanly after StopHandle::stop()")
+            .expect("pipeline must shut down cleanly after PipelineHandle::stop()")
             .expect("pipeline tasks must end without error");
         frames
     }
@@ -1149,7 +1019,7 @@ mod tests {
         }
         let (encoded, shed) = (handle.frames_encoded(), handle.frames_dropped_by_rc());
 
-        built.stop_source();
+        pipeline.stop();
         tokio::time::timeout(Duration::from_secs(10), pipeline.wait())
             .await
             .expect("pipeline must shut down cleanly")
@@ -1322,7 +1192,6 @@ mod tests {
         assert!(seqs.windows(2).all(|w| w[1] > w[0]), "sequence {seqs:?}");
 
         // The timed encoder fed the stats counters and set a frame budget.
-        use std::sync::atomic::Ordering;
         assert!(stats.encoded_frames.load(Ordering::Relaxed) >= 3);
         assert!(stats.encode_ns.load(Ordering::Relaxed) > 0);
         assert_eq!(
@@ -1353,7 +1222,7 @@ mod tests {
                 Pulled::Empty | Pulled::Flushing => {}
             }
         }
-        built.stop_source();
+        handle.stop();
         let _ = tokio::time::timeout(Duration::from_secs(10), handle.wait()).await;
         aus
     }
@@ -1573,10 +1442,6 @@ mod tests {
             v.controls.keyframe.is_none(),
             "passthrough cannot force keyframes"
         );
-        assert!(
-            v.stop.is_none(),
-            "an AsyncSource needs no cooperative EOS switch (#731)"
-        );
         assert_eq!((v.width, v.height), (1280, 720));
 
         let unknown =
@@ -1592,7 +1457,6 @@ mod tests {
         )
         .expect("preview");
         assert!(p.controls.keyframe.is_none());
-        assert!(p.stop.is_none());
         assert_eq!((p.width, p.height), (640, 360));
     }
 
@@ -1629,8 +1493,8 @@ mod tests {
             vec![0, 1, 2]
         );
 
-        // Source EOS → the whole pipeline unwinds cleanly, with no
-        // cooperative stop switch involved.
+        // Source EOS → the whole pipeline unwinds cleanly, with nobody
+        // having asked it to stop.
         tokio::time::timeout(Duration::from_secs(10), handle.wait())
             .await
             .expect("pipeline must end after end_stream")

@@ -339,13 +339,26 @@ pipeline down and builds a fresh one instead of refcounting a corpse; the
 queued stale `EgressEnded` is recognized by its epoch stamp and ignored, so
 it cannot kill the replacement.
 
-**Stopping a live pipeline** (parallax gotcha): the unified executor
-runs source loops on blocking threads and ignores downstream channel closure,
-so `PipelineHandle::abort()` alone cannot end a live source — the blocking
-task would run forever. Every source the sensor builds is wrapped in a
-`StoppableSource` whose `StopHandle` flips the next source pull to EOS; the
-whole pipeline then unwinds cleanly within one frame period. Teardown always
-triggers the stop handle first.
+**Stopping a live pipeline**: teardown calls `PipelineHandle::stop()` before
+`abort()`, and the order is the point. `stop()` raises the executor's
+cooperative wind-down flag; every source loop checks it at the top of its next
+iteration, ends like a natural EOS, and drops its device on the way out — so
+the whole graph unwinds within one frame period, and `wait()` would report
+`Eos`. `abort()` raises the same flag but cancels the tasks in the same breath,
+which is fine for the async plumbing and not fine for a source still holding an
+exclusive V4L2 device that the incoming tier is about to open (see
+*exclusive-source tier switch* above). `Drop` on the profile asks too, however
+the session dies.
+
+> This used to be a `StoppableSource` wrapper around every synchronous source,
+> because parallax once ran source loops on blocking threads that `abort()`
+> could not cancel. None of that has been true since 0.8: sources run as
+> ordinary tokio tasks with `produce()` called inline, the loop polls the
+> shutdown flag itself, and `abort()` raises that flag before it cancels
+> anything. The wrapper was retired in #709 — a forwarding `Source` impl is a
+> standing hazard, since every method upstream adds and we forget to forward is
+> answered by the wrapper instead of the source (which is exactly how
+> `set_output_budget` was swallowed in #689).
 
 ## Stats, health, alerts
 
