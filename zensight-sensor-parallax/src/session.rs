@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zenoh::bytes::Encoding;
 use zensight_common::QosClass;
-use zensight_common::stream::{StreamControl, StreamStatus};
+use zensight_common::stream::{StreamControl, StreamEnd, StreamEndReason, StreamStatus};
 use zensight_sensor_core::{Publisher, RawMediaPublisher, SensorHealth};
 
 use crate::alerts::ParallaxAlerts;
@@ -135,7 +135,9 @@ pub enum SessionMsg {
         stream: String,
         profile: Profile,
         epoch: u64,
-        error: Option<String>,
+        /// How it ended — the sink's own account, not a flattened
+        /// `Option<String>` (#691).
+        end: crate::egress::EgressEnd,
     },
     /// An off-actor RTSP connect finished; `Ok` carries the live camera
     /// session for the pending profile slot.
@@ -343,6 +345,18 @@ pub struct SessionManager {
     alerts: Option<Arc<ParallaxAlerts>>,
     /// Next `ProfileSession::epoch` (monotonic across all profiles).
     next_epoch: u64,
+    /// Why each stream's most recent tier stopped, kept **alive across the
+    /// teardown that removed the slot** (#691).
+    ///
+    /// `teardown_profile` deletes the `StreamSession` before `publish_status`
+    /// runs, and `status_for` reads nothing but `self.sessions` — so without
+    /// this the actor destroys the evidence one line before it publishes, and
+    /// `publish_status`'s no-session arm can see nothing at all.
+    ///
+    /// Keyed by stream, which bounds it to the catalogue: one entry per
+    /// configured stream, overwritten by each newer end, cleared when that
+    /// tier streams again.
+    last_end: HashMap<String, StreamEnd>,
 }
 
 impl SessionManager {
@@ -370,6 +384,7 @@ impl SessionManager {
             health,
             alerts,
             next_epoch: 0,
+            last_end: HashMap::new(),
         };
         tokio::spawn(manager.run(rx));
         SessionHandle(tx)
@@ -414,11 +429,8 @@ impl SessionManager {
                 stream,
                 profile,
                 epoch,
-                error,
-            } => {
-                self.handle_egress_ended(&stream, profile, epoch, error)
-                    .await
-            }
+                end,
+            } => self.handle_egress_ended(&stream, profile, epoch, end).await,
             SessionMsg::RtspConnected {
                 stream,
                 profile,
@@ -596,7 +608,12 @@ impl SessionManager {
             Existing::Dead => {
                 tracing::info!(stream = %stream, profile = profile.as_str(),
                     "open_stream: replacing a dead profile (egress already ended)");
-                self.teardown_profile(stream, profile);
+                // The corpse is being replaced, not stopped. `finish_open`
+                // clears this entry moments later when the replacement is
+                // installed on the same tier, so it is only ever visible if
+                // the rebuild itself then fails — in which case `FailedOpen`
+                // overwrites it with the truth.
+                self.teardown_profile(stream, profile, StreamEndReason::Superseded);
             }
             Existing::None => {}
         }
@@ -852,14 +869,14 @@ impl SessionManager {
             };
             let egress_stats = stream_stats.clone();
             tokio::spawn(async move {
-                let result =
+                let end =
                     egress::run(sink, media, encoding, width, height, preview, egress_stats).await;
                 let _ = tx
                     .send(SessionMsg::EgressEnded {
                         stream,
                         profile,
                         epoch,
-                        error: result.err(),
+                        end,
                     })
                     .await;
             })
@@ -903,6 +920,18 @@ impl SessionManager {
                     rc_drops_seen: 0,
                 })),
             );
+        // A tier that is streaming again has no current end — but a *sibling's*
+        // does, and this open must not erase it. Preview healthy, `high`
+        // failed, operator opens `low`: the `high` failure is still the truth
+        // about `high` and stays until `high` itself comes back (#691).
+        let opened = profile.tier_label(&self.tier_names());
+        if self
+            .last_end
+            .get(stream)
+            .is_some_and(|e| Some(&e.tier) == opened.as_ref())
+        {
+            self.last_end.remove(stream);
+        }
         self.publish_status(stream).await;
     }
 
@@ -917,6 +946,19 @@ impl SessionManager {
         if let Some(health) = &self.health {
             health.record_device_failure(stream, error);
         }
+        // Distinct from a mid-stream `Failed` because this tier never ran, and
+        // the two send an operator to different places: *it never started*
+        // means check the config and whether the camera is reachable; *it
+        // stopped* means check the element that failed. Nothing here is
+        // `Open`, so this records the end directly rather than through
+        // `teardown_profile`.
+        self.note_end(
+            stream,
+            profile,
+            StreamEndReason::FailedOpen {
+                message: error.to_string(),
+            },
+        );
         self.clear_pending_slot(stream, profile);
         self.remove_stats_if_closed(stream);
         self.publish_status(stream).await;
@@ -1037,7 +1079,7 @@ impl SessionManager {
         stream: &str,
         profile: Profile,
         epoch: u64,
-        error: Option<String>,
+        end: crate::egress::EgressEnd,
     ) {
         // Stale end report: `open()` already tore this incarnation down (and
         // possibly installed a replacement) — acting on it would kill the
@@ -1051,32 +1093,47 @@ impl SessionManager {
                 "stale egress-ended for a replaced profile; ignored");
             return;
         }
-        match &error {
-            Some(e) => {
-                tracing::warn!(stream = %stream, profile = profile.as_str(), error = %e,
-                    "stream profile ended with error");
-                if let Some(health) = &self.health {
-                    health.record_device_failure(stream, e);
-                }
-                // For an RTSP source this *is* the sustained-failure signal
-                // (#731): since 0.8 the source retries a dropped stream on its
-                // own, so an error reaching here means the whole reconnect
-                // ladder (RTSP_MAX_RECONNECTS attempts) ran out. Firing on the
-                // first drop would now be noise — a blip that the source healed
-                // by itself never gets here at all.
-                if let Some(alerts) = &self.alerts
-                    && matches!(
-                        self.catalog.get(stream).map(|e| &e.kind),
-                        Some(SourceKind::Rtsp { .. })
-                    )
-                {
-                    alerts.rtsp_connect(stream, Some(e)).await;
-                }
-            }
-            None => tracing::info!(stream = %stream, profile = profile.as_str(),
-                "stream profile reached end of stream"),
+        // The stall window is the one thing that does not reach the wire, so
+        // log it here or it is lost.
+        if let crate::egress::EgressEnd::Stalled { window } = &end {
+            tracing::warn!(stream = %stream, profile = profile.as_str(),
+                window_s = window.as_secs_f64(),
+                "no frames within the first-frame window");
         }
-        self.teardown_profile(stream, profile);
+        let reason = StreamEndReason::from(end);
+        if reason.is_failure() {
+            // `Display` is the single source of this prose (#691), so the log
+            // line, health's `last_error` and the viewer's tile caption are
+            // now literally the same sentence.
+            let summary = reason.to_string();
+            tracing::warn!(stream = %stream, profile = profile.as_str(), error = %summary,
+                "stream profile ended with error");
+            if let Some(health) = &self.health {
+                health.record_device_failure(stream, &summary);
+            }
+            // For an RTSP source this *is* the sustained-failure signal
+            // (#731): since 0.8 the source retries a dropped stream on its
+            // own, so an error reaching here means the whole reconnect
+            // ladder (RTSP_MAX_RECONNECTS attempts) ran out. Firing on the
+            // first drop would now be noise — a blip that the source healed
+            // by itself never gets here at all.
+            //
+            // The gate is `is_failure()`, not `Failed` alone, and that is what
+            // preserves the behaviour: a first-frame stall on an RTSP source
+            // already fired this rule when it arrived as an `Err` string.
+            if let Some(alerts) = &self.alerts
+                && matches!(
+                    self.catalog.get(stream).map(|e| &e.kind),
+                    Some(SourceKind::Rtsp { .. })
+                )
+            {
+                alerts.rtsp_connect(stream, Some(&summary)).await;
+            }
+        } else {
+            tracing::info!(stream = %stream, profile = profile.as_str(), %reason,
+                "stream profile ended");
+        }
+        self.teardown_profile(stream, profile, reason);
         self.publish_status(stream).await;
     }
 
@@ -1115,7 +1172,10 @@ impl SessionManager {
 
     async fn reap_idle(&mut self) {
         let timeout = Duration::from_secs(self.config.idle_timeout_secs);
-        let mut reap: Vec<(String, Profile)> = Vec::new();
+        // The refcount travels with the profile: it is the only thing that
+        // distinguishes the two ends this one loop produces (#691), and it is
+        // gone by the time `teardown_profile` has run.
+        let mut reap: Vec<(String, Profile, u32)> = Vec::new();
         for (stream, session) in &self.sessions {
             for (profile, slot) in session.profiles() {
                 // Pending slots never idle out here: the bounded RTSP
@@ -1124,14 +1184,15 @@ impl SessionManager {
                     && !p.viewers
                     && p.idle_since.is_some_and(|t| t.elapsed() >= timeout)
                 {
-                    reap.push((stream.clone(), profile));
+                    reap.push((stream.clone(), profile, p.refcount));
                 }
             }
         }
-        for (stream, profile) in reap {
-            tracing::info!(stream = %stream, profile = profile.as_str(),
+        for (stream, profile, refcount) in reap {
+            let reason = idle_reason(refcount);
+            tracing::info!(stream = %stream, profile = profile.as_str(), %reason,
                 "idle timeout: tearing stream profile down");
-            self.teardown_profile(&stream, profile);
+            self.teardown_profile(&stream, profile, reason);
             self.publish_status(&stream).await;
         }
     }
@@ -1161,12 +1222,45 @@ impl SessionManager {
         for profile in siblings {
             tracing::info!(stream = %stream, profile = profile.as_str(),
                 "releasing sibling video tier for an exclusive-source tier switch");
-            self.teardown_profile(stream, profile);
+            self.teardown_profile(stream, profile, StreamEndReason::Superseded);
         }
         self.publish_status(stream).await;
     }
 
-    fn teardown_profile(&mut self, stream: &str, profile: Profile) {
+    /// The configured tier ladder's names, for [`Profile::tier_label`].
+    fn tier_names(&self) -> Vec<&str> {
+        self.config
+            .video
+            .tiers
+            .iter()
+            .map(|t| t.spec.name.as_str())
+            .collect()
+    }
+
+    /// Record why a tier stopped, so the status published *after* the slot is
+    /// gone can still say it.
+    ///
+    /// Must be called while the profile is still resolvable — the tier name
+    /// comes from the profile, and a `Video(idx)` whose ladder entry has been
+    /// reconfigured out from under us would otherwise be unnameable.
+    fn note_end(&mut self, stream: &str, profile: Profile, reason: StreamEndReason) {
+        let tier = profile
+            .tier_label(&self.tier_names())
+            .unwrap_or_else(|| String::from("unknown"));
+        self.last_end
+            .insert(stream.to_string(), StreamEnd { tier, reason });
+    }
+
+    /// Tear one profile down, recording **why** before the slot that names it
+    /// is removed (#691).
+    ///
+    /// The reason is an argument rather than something inferred here on
+    /// purpose: every caller knows what it is doing — reaping, switching
+    /// tiers, reacting to a dead pipeline — and only the caller can tell those
+    /// apart. Making it an argument is what makes the compiler enumerate the
+    /// death paths.
+    fn teardown_profile(&mut self, stream: &str, profile: Profile, reason: StreamEndReason) {
+        self.note_end(stream, profile, reason);
         let Some(session) = self.sessions.get_mut(stream) else {
             return;
         };
@@ -1234,6 +1328,7 @@ impl SessionManager {
             .collect();
         tiers.sort_by(|a, b| a.tier.cmp(&b.tier));
         StreamStatus {
+            last_end: self.last_end.get(stream).cloned(),
             stream: stream.to_string(),
             open: !session.is_empty(),
             tiers,
@@ -1249,6 +1344,9 @@ impl SessionManager {
                 stream: stream.to_string(),
                 open: false,
                 tiers: Vec::new(),
+                // The whole reason `last_end` outlives the session: by the
+                // time the last profile is gone there is nothing left to ask.
+                last_end: self.last_end.get(stream).cloned(),
             },
         };
         // A stream name is operator-configured, i.e. foreign data, so this
@@ -1347,6 +1445,29 @@ fn rtsp_video_dimensions(info: &RtspStreamInfoHandle) -> Option<(u32, u32)> {
 /// Fold one open profile's encoder rate-control drops into its stream's
 /// counter. A profile with no encoder in its graph (preview, RTSP passthrough)
 /// contributes nothing.
+/// Why an idle reap ended a profile (#691).
+///
+/// A `close_stream` does not stop anything on its own — it releases a
+/// refcount, and this countdown does the stopping — so both a clean operator
+/// close and the crash backstop arrive through the same reaper. The refcount
+/// at reap time is the honest discriminator:
+///
+/// - **0** — every opener called `close_stream`. The system did what it was
+///   told, and the idle window is just how long that takes.
+/// - **> 0** — an opener still holds a reference but nothing is watching:
+///   nobody ever subscribed, or a viewer died without saying goodbye. The
+///   system is cleaning up after something that vanished.
+///
+/// Those are different events with different follow-ups, and until #691 an
+/// operator could see neither.
+fn idle_reason(refcount: u32) -> StreamEndReason {
+    if refcount == 0 {
+        StreamEndReason::Closed
+    } else {
+        StreamEndReason::Idle
+    }
+}
+
 fn fold_profile_rc(stats: &StreamStats, p: &mut ProfileSession) {
     let Some(handle) = &p.controls.encoder_stats else {
         return;
@@ -1358,6 +1479,37 @@ fn fold_profile_rc(stats: &StreamStats, p: &mut ProfileSession) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A close and the crash backstop arrive through the same reaper; the
+    /// refcount is what tells them apart (#691). Getting this backwards would
+    /// report every operator close as an abandoned stream.
+    #[test]
+    fn the_reaper_tells_a_close_from_an_abandoned_stream() {
+        assert_eq!(idle_reason(0), StreamEndReason::Closed);
+        assert_eq!(idle_reason(1), StreamEndReason::Idle);
+        assert_eq!(idle_reason(7), StreamEndReason::Idle);
+        // Neither is a failure: the producer ended these, and device health
+        // must not count its own teardowns.
+        assert!(!idle_reason(0).is_failure());
+        assert!(!idle_reason(1).is_failure());
+    }
+
+    /// Every profile must be nameable, or `StreamEnd::tier` falls back to
+    /// `unknown` and the per-tier fidelity of the whole field is lost.
+    #[test]
+    fn every_profile_can_name_its_tier() {
+        let ladder = ["low", "medium", "high"];
+        assert_eq!(
+            Profile::Video(2).tier_label(&ladder).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            Profile::Preview.tier_label(&ladder).as_deref(),
+            Some("preview")
+        );
+        // The preview needs no ladder at all — it is not a rung.
+        assert_eq!(Profile::Preview.tier_label(&[]).as_deref(), Some("preview"));
+    }
 
     #[test]
     fn profile_tier_index() {

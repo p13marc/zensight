@@ -2,10 +2,10 @@
 //! them on a [`RawMediaPublisher`] with a CBOR [`FrameMeta`] attachment.
 //!
 //! Pulls are native async since parallax 0.6 (`pull_buffer_timeout` awaits
-//! instead of parking a thread), so pull and publish share the task. The
-//! loop ends on pipeline EOS (clean) or on the first pull/publish error —
-//! the caller reports the outcome to the session actor as an `EgressEnded`
-//! message.
+//! instead of parking a thread), so pull and publish share the task. The loop
+//! ends on pipeline EOS, on a first-frame timeout, or on the first
+//! pull/publish error, and says which as an [`EgressEnd`] — the caller passes
+//! it to the session actor as an `EgressEnded` message.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +16,7 @@ use parallax::elements::{AppSinkHandle, Pulled};
 use parallax::metadata::Metadata;
 use parallax::pipeline::EndReason;
 use zenoh::bytes::{Encoding, ZBytes};
-use zensight_common::stream::FrameMeta;
+use zensight_common::stream::{FrameMeta, StreamEndReason};
 use zensight_common::{Format, encode};
 use zensight_sensor_core::RawMediaPublisher;
 
@@ -31,6 +31,57 @@ const PULL_TIMEOUT: Duration = Duration::from_millis(100);
 /// "waiting for frames…" forever — erroring out lets the session actor
 /// publish a definitive `open: false` the GUI can surface.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The `node` an egress-side failure is attributed to. Not a parallax element
+/// name — this pump lives outside the graph — but it is the thing that failed,
+/// and naming it beats an unattributed message.
+const EGRESS_NODE: &str = "egress";
+
+/// How an egress pump ended (#691).
+///
+/// Total, rather than the `Result<(), String>` this used to be. parallax 0.7
+/// gave the pull loop a *typed* [`EndReason`] (#689) and the old signature
+/// threw it straight back away: a clean end and a torn-down one both became
+/// `Ok(())`, and a failure became a sentence with the element's name baked
+/// into it. Three ends the pipeline distinguishes arrived at the session actor
+/// as two, and reached the wire as one bit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EgressEnd {
+    /// The pipeline signalled clean end-of-stream.
+    EndOfStream,
+    /// The pipeline was torn down mid-stream. Only `PipelineHandle::ended`
+    /// produces this — an `AppSink` never sees it, because an aborted task
+    /// cannot deliver — but the match must be total.
+    Aborted,
+    /// An element failed, in its own words.
+    Failed {
+        /// The element parallax attributed the failure to, when it named one.
+        node: Option<String>,
+        /// The failure message, verbatim.
+        message: String,
+    },
+    /// No buffer at all within the first-frame window.
+    Stalled {
+        /// The window that expired — for the caller's log line. It does not
+        /// reach the wire: the window is a producer constant, and
+        /// `StreamStatus` is `Eq`, which an `f64` would break.
+        window: Duration,
+    },
+}
+
+impl From<EgressEnd> for StreamEndReason {
+    fn from(end: EgressEnd) -> Self {
+        match end {
+            EgressEnd::EndOfStream => Self::SourceEnded,
+            // The producer ended it, not the camera — the same statement the
+            // shutdown drain makes. Unreachable through an `AppSink` (parallax
+            // says so in terms), kept because the match is total.
+            EgressEnd::Aborted => Self::Shutdown,
+            EgressEnd::Failed { node, message } => Self::Failed { node, message },
+            EgressEnd::Stalled { .. } => Self::Stalled,
+        }
+    }
+}
 
 /// Map a pipeline buffer's [`Metadata`] to the wire [`FrameMeta`].
 ///
@@ -67,11 +118,11 @@ fn clock_ns(t: ClockTime) -> Option<u64> {
     if t.is_none() { None } else { Some(t.nanos()) }
 }
 
-/// Pump `sink` into `publisher` until EOS or error, feeding the stream's
-/// stats counters (frames/bytes; on the video path, sequence gaps count as
-/// drops — preview throttling is intentional and never counted).
+/// Pump `sink` into `publisher` until it ends, feeding the stream's stats
+/// counters (frames/bytes; on the video path, sequence gaps count as drops —
+/// preview throttling is intentional and never counted).
 ///
-/// Returns `Ok(())` on clean end-of-stream, `Err(reason)` otherwise.
+/// Says *how* it ended: see [`EgressEnd`].
 pub async fn run(
     sink: AppSinkHandle,
     publisher: Arc<RawMediaPublisher>,
@@ -80,7 +131,7 @@ pub async fn run(
     height: u32,
     preview: bool,
     stats: Arc<StreamStats>,
-) -> Result<(), String> {
+) -> EgressEnd {
     run_with_watchdog(
         sink,
         publisher,
@@ -105,7 +156,7 @@ async fn run_with_watchdog(
     preview: bool,
     stats: Arc<StreamStats>,
     first_frame_timeout: Duration,
-) -> Result<(), String> {
+) -> EgressEnd {
     let mut last_sequence: Option<u64> = None;
     let started = Instant::now();
     let mut produced_any = false;
@@ -131,22 +182,26 @@ async fn run_with_watchdog(
         // told apart by the pipeline rather than inferred here (#689).
         let buffer = match sink.pull_buffer_timeout(PULL_TIMEOUT).await {
             Pulled::Buffer(buffer) => buffer,
-            Pulled::Ended(EndReason::Eos) => return Ok(()),
+            Pulled::Ended(EndReason::Eos) => return EgressEnd::EndOfStream,
+            // The accessors, not `Display`: parallax's `StreamError` renders
+            // as `element '<node>': <message>`, and joining the two here would
+            // make it impossible to keep them apart on the wire.
             Pulled::Ended(EndReason::Error(e)) => {
-                return Err(format!("pipeline sink error: {e}"));
+                return EgressEnd::Failed {
+                    node: e.node().map(str::to_owned),
+                    message: e.message().to_owned(),
+                };
             }
             // Only `PipelineHandle::ended` produces this — an aborted task
-            // cannot deliver to a sink — but the match must be total, and
-            // "we tore it down" is a clean end from the egress task's side.
-            Pulled::Ended(EndReason::Aborted) => return Ok(()),
+            // cannot deliver to a sink — but the match must be total.
+            Pulled::Ended(EndReason::Aborted) => return EgressEnd::Aborted,
             // Not terminal: nothing here ever sets the handle flushing, so
             // this is the same "nothing yet" case as a timeout.
             Pulled::Empty | Pulled::Flushing => {
                 if !produced_any && started.elapsed() >= first_frame_timeout {
-                    return Err(format!(
-                        "no frames from source within {:.1}s of open",
-                        first_frame_timeout.as_secs_f64()
-                    ));
+                    return EgressEnd::Stalled {
+                        window: first_frame_timeout,
+                    };
                 }
                 continue;
             }
@@ -189,17 +244,32 @@ async fn run_with_watchdog(
         } else {
             std::borrow::Cow::Borrowed(bytes)
         };
-        let attachment =
-            encode(&frame_meta, Format::Cbor).map_err(|e| format!("encode FrameMeta: {e}"))?;
+        // The two failures on the producer's own side of the sink. `egress`
+        // is a real element name here — it is the pump that failed, and `node`
+        // is exactly the field for saying which.
+        let attachment = match encode(&frame_meta, Format::Cbor) {
+            Ok(a) => a,
+            Err(e) => {
+                return EgressEnd::Failed {
+                    node: Some(String::from(EGRESS_NODE)),
+                    message: format!("encode FrameMeta: {e}"),
+                };
+            }
+        };
         stats.record_frame(payload.len());
-        publisher
+        if let Err(e) = publisher
             .put(
                 payload.into_owned(),
                 encoding.clone(),
                 ZBytes::from(attachment),
             )
             .await
-            .map_err(|e| format!("media publish failed: {e}"))?;
+        {
+            return EgressEnd::Failed {
+                node: Some(String::from(EGRESS_NODE)),
+                message: format!("media publish failed: {e}"),
+            };
+        }
     }
 }
 
@@ -260,11 +330,12 @@ mod tests {
         );
     }
 
-    /// A profile whose source never delivers a single frame must error out
+    /// A profile whose source never delivers a single frame must end
     /// (→ `EgressEnded` → `open: false`) instead of leaving the viewer on
-    /// "waiting for frames…" forever.
+    /// "waiting for frames…" forever — and must say `Stalled`, not invent a
+    /// failure. Nothing failed: the open succeeded and no element errored.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn watchdog_errors_when_source_never_produces() {
+    async fn watchdog_reports_stalled_when_source_never_produces() {
         // Lone session: scouting off, no endpoints — cannot join any mesh.
         let mut cfg = zenoh::Config::default();
         cfg.insert_json5("scouting/multicast/enabled", "false")
@@ -287,7 +358,7 @@ mod tests {
         let sink = parallax::elements::AppSink::new();
         let handle = sink.handle();
 
-        let err = run_with_watchdog(
+        let end = run_with_watchdog(
             handle,
             Arc::new(media),
             Encoding::IMAGE_JPEG,
@@ -297,11 +368,44 @@ mod tests {
             Arc::new(StreamStats::default()),
             Duration::from_millis(300),
         )
-        .await
-        .unwrap_err();
-        assert!(
-            err.contains("no frames from source"),
-            "unexpected error: {err}"
+        .await;
+        assert_eq!(
+            end,
+            EgressEnd::Stalled {
+                window: Duration::from_millis(300)
+            }
+        );
+    }
+
+    /// The whole point of the typed outcome: what the pipeline distinguished
+    /// still differs on the wire. Pins `StreamError`'s two fields staying two
+    /// fields, which is the fidelity the old `format!` destroyed — and needs
+    /// no camera, no runtime and no bus.
+    #[test]
+    fn egress_end_maps_to_the_wire_reason() {
+        use zensight_common::stream::StreamEndReason as R;
+
+        assert_eq!(R::from(EgressEnd::EndOfStream), R::SourceEnded);
+        // We tore it down; the camera did not stop.
+        assert_eq!(R::from(EgressEnd::Aborted), R::Shutdown);
+        // A stall is not a failure with an invented message — it has no
+        // payload at all, and the window stays on the producer's side.
+        assert_eq!(
+            R::from(EgressEnd::Stalled {
+                window: Duration::from_secs(10)
+            }),
+            R::Stalled
+        );
+        assert_eq!(
+            R::from(EgressEnd::Failed {
+                node: Some("h264enc".into()),
+                message: "encoder submit failed".into(),
+            }),
+            R::Failed {
+                node: Some("h264enc".into()),
+                message: "encoder submit failed".into(),
+            },
+            "node and message must survive as two fields, not one sentence"
         );
     }
 }

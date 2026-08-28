@@ -46,6 +46,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`StreamStatus` says why a stream stopped, and the GUI stops inventing
+  sentences** (#691). A stream the operator closed and a stream whose camera
+  was unplugged both published `StreamStatus { open: false, tiers: [] }` — one
+  bit — and the viewer filled the silence with `"stream ended"` or `"stream
+  failed to open on the sensor"`, guesses that were wrong as often as right.
+
+  The information existed the whole way down and was destroyed twice. parallax
+  0.7 gave the egress loop a typed `EndReason::{Eos, Error(StreamError{node,
+  message}), Aborted}` (#689); `egress::run` flattened it to
+  `Result<(), String>`, merging `Eos` with `Aborted` and stringifying the
+  element's name into its own message. `handle_egress_ended` then consumed the
+  string into device health and — the structural part — called
+  `teardown_profile`, which removes the slot, **before** `publish_status`,
+  which reads nothing but the slot map. The actor deleted the evidence one line
+  before it published.
+
+  `StreamStatus` now carries `last_end: Option<StreamEnd>` — `{ tier, reason }`
+  with the tier **named**, and eight reasons in three families: we ended it
+  (`closed`, `idle`, `superseded`, `shutdown`), it ended itself
+  (`source_ended`), or it failed (`stalled`, `failed { node, message }`,
+  `failed_open { message }`). `is_failure()` is the one predicate health and the
+  RTSP alert gate on, so the families cannot drift apart.
+
+  Three of those distinctions are new information, not relabelling. **`closed`
+  vs `idle`**: a `close_stream` does not stop a pipeline — it releases a
+  refcount and the idle countdown does the stopping — so a clean close and the
+  crash backstop for a viewer that died without saying goodbye arrive through
+  one reaper. The refcount at reap time tells them apart, and an operator could
+  previously see neither. **`stalled` vs `failed`**: the first-frame watchdog is
+  precisely the case where nothing failed and there is no error to quote, so
+  none is invented and it carries no payload. **`failed_open` vs `failed`**: one
+  says check the config and whether the camera is reachable, the other says
+  check the element `node` names, and a late-joining consumer cannot recover
+  that difference from context.
+
+  `StreamEndReason: Display` is the single source of this prose, so the
+  producer's log line, device health's `last_error` and the viewer's tile
+  caption are now literally the same sentence. On the GUI side `TileState.ended`
+  becomes a `TileEnd` that records *whose account it is*: the producer's beats
+  the viewer's in either arrival order, and a failure is coloured `danger_text`
+  rather than sharing the muted grey a clean close gets.
+
+  Additive and `skip_serializing_if`'d, so old and new peers decode each other
+  either way — and **absent means no tier has stopped since this stream last
+  opened**, never "stopped for an unknown reason". No registry version bump and
+  no `zenctl registry lock` run: the compat lock pins path, class and type
+  *name*, not payload shape (`zenctl registry lock` reports `added: 0`). The
+  subject's `description` is refreshed regardless, since the contract moved.
+
+  Health was checked rather than changed: the producer's own teardowns already
+  could not count as device failures, because `teardown_profile` removes the
+  slot and aborts the egress task before an end can be reported, and a late one
+  dies on the epoch guard. That invariant is now pinned by tests instead of
+  being a property nobody had written down.
+
 - **A losing Transport hop now says whether the sender is congested or the link
   is dropping** (#801, epic #712).
 

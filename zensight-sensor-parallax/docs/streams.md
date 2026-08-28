@@ -326,8 +326,58 @@ the same countdown even if its refcount is non-zero — the matching listener
 is the crash backstop for GUIs that die without `close_stream`, and an opener
 that never subscribes is a zombie.
 
+### Why it stopped (#691)
+
+`StreamStatus.last_end` carries the producer's own account of the most recent
+tier to stop: `{ tier, reason }`, where `tier` is a ladder rung's name or the
+literal `preview`. **The producer is the only party that knows.** A viewer sees
+`open: false` and its own subscriber ending, and from those two facts it used
+to invent a sentence — *"stream ended"* — that was wrong as often as it was
+right, because an idle reap, an operator close and a dead camera were the same
+single bit.
+
+Eight reasons in three families:
+
+| Family | Reason | What happened |
+|---|---|---|
+| we ended it | `closed` | every opener called `close_stream` |
+| | `idle` | reaped unwatched while an opener still held a reference |
+| | `superseded` | released so another tier could open |
+| | `shutdown` | the producer is stopping |
+| it ended itself | `source_ended` | the source signalled EOS. A live camera should never do this — if one does, that *is* the finding |
+| it failed | `stalled` | started, but delivered no frame within the first-frame window |
+| | `failed` | an element failed, carrying `node` and the element's own `message` |
+| | `failed_open` | the open never completed |
+
+Two rules the field lives or dies by:
+
+- **Absent means nothing has stopped since this stream last opened**, never
+  "stopped for an unknown reason". It is `skip_serializing_if`'d out of the map
+  entirely rather than sent as null, the same discipline `FrameMeta` and
+  `MediaReceiverReport` follow. A reopen on the same tier clears it; a
+  *sibling's* end survives, because that is still the truth about the sibling.
+- **A `failed` message is the element's own words.** `node` and `message` stay
+  two fields on the wire and only `Display` ever joins them, so a consumer can
+  show the message and act on the element separately.
+
+`closed` and `idle` deserve a note, because they are the same code path. A
+`close_stream` does not stop a pipeline — it releases a refcount, and the idle
+countdown does the stopping — so a clean close and the crash backstop both
+arrive through the reaper, one idle window later. The refcount *at reap time*
+is the honest discriminator: zero means every opener closed and the system did
+what it was told; non-zero means nobody ever subscribed or a viewer died
+without saying goodbye, and the system is cleaning up after something that
+vanished. Those are different events with different follow-ups.
+
+`aborted` is deliberately **not** in the table. `PipelineHandle::stop()`
+produces `Eos` and `abort()` produces `Aborted`, and an `AppSink` never sees
+`Aborted` at all — so our own teardowns are named by *us*, from the path that
+initiated them, never inferred from the pipeline's report.
+
 **Failed opens** publish a definitive `StreamStatus{open: false}` transition
-(the GUI flags a still-waiting tile with it), record a device failure, and
+carrying `last_end.reason = failed_open` with the failing layer's own message
+(the GUI shows that on a still-waiting tile instead of guessing), record a
+device failure, and
 drop the stream's stats entry — a leaked entry would publish phantom
 zero-valued stats forever. All open-failure paths (pipeline build, media
 publisher declare, matching listener declare, pipeline start, RTSP connect)
@@ -337,7 +387,8 @@ funnel through the same cleanup exit.
 ended (its `EgressEnded` still queued behind the command) tears the dead
 pipeline down and builds a fresh one instead of refcounting a corpse; the
 queued stale `EgressEnded` is recognized by its epoch stamp and ignored, so
-it cannot kill the replacement.
+it cannot kill the replacement. The successful rebuild clears that tier's
+`last_end` and leaves a sibling's alone.
 
 **Stopping a live pipeline**: teardown calls `PipelineHandle::stop()` before
 `abort()`, and the order is the point. `stop()` raises the executor's
@@ -480,7 +531,9 @@ here (#510):
   frames dilute it or the tier is rebuilt.
 
 For per-tier **applied** resolution/viewers, read the `StreamStatus` doc's
-`tiers[]` — that is what the GUI's per-tile bandwidth readout shows. Note that
+`tiers[]` — that is what the GUI's per-tile bandwidth readout shows. `tiers[]`
+is a strict **live set**: a tier that stopped is removed from it, and its end is
+reported in `last_end` rather than by retaining a corpse in the vector. Note that
 `TierApplied`'s `fps` and `bitrate_kbps` are the tier's configured *targets*
 read back, not measurements; only `width`/`height` come from the built
 pipeline.
@@ -489,9 +542,17 @@ pipeline.
 open streams, so a parallax host appears on the dashboard before anything is
 opened.
 
-Health: each successful profile open records a device success for the
-stream; pipeline build failures and egress errors record failures (3
-consecutive → the stream's device flips Offline).
+Health: each successful profile open records a device success for the stream.
+Failures — and **only** failures — record one: `stalled`, `failed` and
+`failed_open`, i.e. exactly `StreamEndReason::is_failure()`. Three consecutive
+flips the stream's device Offline, and the `last_error` it records is the same
+sentence the tile shows, because both render the reason through one `Display`.
+
+The producer's **own** teardowns never count. That is structural rather than a
+check: `teardown_profile` removes the slot before the profile is torn down, and
+the teardown aborts the egress task — so a deliberately stopped profile never
+reports an end at all, and a late one is discarded by the epoch guard before it
+reaches health.
 
 Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
 
@@ -501,7 +562,9 @@ Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
   `open_stream` connect failed, or a stream that had opened dropped and the
   source's reconnect ladder ran out. Since #731 the source retries a dropped
   stream itself, so a single blip no longer fires this — only sustained failure
-  does, which is what the rule is named for.
+  does, which is what the rule is named for. It fires on **any** failure end on
+  an RTSP source, `stalled` included, and carries the same sentence health
+  records.
 - `encoder_overrun` — `encode_p95_ms` above the strictest open tier's per-frame
   budget (1000 / fps), falling back to the `encode_ms` mean on a path with no
   encoder histogram (the JPEG previews).

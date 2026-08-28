@@ -5293,6 +5293,7 @@ fn test_parallax_health_panel_separates_a_congested_sender_from_a_dropping_link(
         state.parallax_detail.apply_stream_status(&StreamStatus {
             stream: "cam0".into(),
             open: true,
+            last_end: None,
             tiers: vec![TierStatus {
                 tier: "high".into(),
                 applied: TierApplied {
@@ -5546,6 +5547,7 @@ fn test_parallax_health_panel_names_the_failing_stage() {
         state.parallax_detail.apply_stream_status(&StreamStatus {
             stream: "cam0".into(),
             open: true,
+            last_end: None,
             tiers: vec![TierStatus {
                 tier: "high".into(),
                 applied: TierApplied {
