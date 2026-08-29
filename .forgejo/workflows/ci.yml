@@ -8,6 +8,8 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
+  # manual re-run path (flaky job, runner was offline, cache experiments)
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -163,6 +165,19 @@ jobs:
       # near the default path — the default build stays OSI-clean.
       - name: netring --features ja4plus
         run: cargo check -p zensight-sensor-netring --features ja4plus --locked
+
+  # cargo-deny is the fleet's single supply-chain lint (myserver#33):
+  # advisories, licenses, bans, sources — config in deny.toml.
+  deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      # the docker cargo-deny action cannot see deny.toml -> install directly
+      - uses: https://github.com/taiki-e/install-action@v2.85.11
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
 
   lint:
     runs-on: ubuntu-24.04

@@ -2,6 +2,7 @@
 name = "zensight-sensor-systemd"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Zenoh sensor for systemd unit/service state and boot performance (D-Bus)"
 license = "Apache-2.0"

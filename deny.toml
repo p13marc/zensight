@@ -1,0 +1,83 @@
+# cargo-deny configuration (fleet standard, myserver#33: cargo-deny is the
+# single supply-chain lint). See https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# Transitive and unactionable here — dated, with the pin that traps each one.
+# Re-check on every zenoh / iced / netring bump (2026-08-29).
+ignore = [
+    "RUSTSEC-2023-0071", # rsa: Marvin timing sidechannel — no fixed release exists (zenoh tree)
+    "RUSTSEC-2023-0089", # atomic-polyfill unmaintained (via heapless, zenoh tree)
+    "RUSTSEC-2024-0370", # proc-macro-error unmaintained (zenoh tree)
+    "RUSTSEC-2024-0436", # paste unmaintained (zenoh tree)
+    "RUSTSEC-2025-0134", # rustls-pemfile unmaintained (zenoh tree)
+    "RUSTSEC-2025-0141", # bincode 1.x unmaintained (zenoh tree)
+    "RUSTSEC-2026-0041", # lz4_flex decompress leak — zenoh pins 0.10, fix is in a later minor
+    # quick-xml < 0.41 DoS pair: locked to 0.39 by wayland-scanner (a
+    # proc-macro parsing the wayland protocol XML at build time, via
+    # iced/winit) — build-time only, input is not attacker-controlled.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0192", # ttf-parser unmaintained (via resvg/usvg, iced tree)
+    "RUSTSEC-2026-0206", # rustybuzz unmaintained (via resvg/usvg, iced tree)
+    # wasmtime 43.x type-index mixup: via yara-x behind the opt-in
+    # netring/yara feature; no fixed release on the 43 line — re-check on
+    # the next netring/yara-x bump.
+    "RUSTSEC-2026-0222",
+]
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    # Community Data License Agreement – Permissive 2.0. Used by
+    # `webpki-roots` (the Mozilla CA bundle) in zenoh's TLS stack.
+    "CDLA-Permissive-2.0",
+    # Independent JPEG Group license (permissive) — `jpeg-encoder` in the
+    # parallax sensor's image path.
+    "IJG",
+]
+confidence-threshold = 0.8
+
+# LGPL stays out of the general allowlist: it is accepted only for the two
+# crates that dynamically link the system libsystemd (journald access in
+# zensight-sensor-logs / -systemd).
+[[licenses.exceptions]]
+name = "libsystemd-sys"
+allow = ["LGPL-2.1-or-later WITH GCC-exception-2.0"]
+
+[[licenses.exceptions]]
+name = "systemd"
+allow = ["LGPL-2.1-or-later WITH GCC-exception-2.0"]
+
+[bans]
+multiple-versions = "warn"
+# The fleet skeleton says "deny", but this workspace wires its 25 members
+# together with version-less path dependencies, and `allow-wildcard-paths`
+# only exempts those in `publish = false` crates (most members do not set
+# it). No external dependency uses a wildcard — checked 2026-08-29. Revisit
+# if the members ever gain `publish = false` or explicit versions.
+wildcards = "warn"
+allow-wildcard-paths = true
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

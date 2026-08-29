@@ -2,6 +2,7 @@
 name = "zensight-sensor-parallax"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Zenoh sensor for live video: cameras / RTSP / test patterns encoded to H.264 + JPEG previews on the @media plane"
 license.workspace = true

@@ -2,6 +2,7 @@
 name = "zensight-btf"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Minimal read-only BTF parser: resolve a kernel struct member's byte offset from /sys/kernel/btf/vmlinux"
 license.workspace = true

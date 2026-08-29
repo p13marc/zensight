@@ -3,6 +3,7 @@ name = "zensight-sensor-core"
 description = "Common framework for ZenSight protocol sensors"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

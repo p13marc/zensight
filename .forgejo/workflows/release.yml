@@ -2,10 +2,15 @@ name: Release
 on:
   push:
     tags: ['[0-9]+.[0-9]+.[0-9]+']
-  # Dry run on a branch: builds everything (binaries, images, smoke, tarball,
-  # flatpak) but publishes nothing — every push/upload step is gated on the
-  # ref being a tag. Run this once before tagging a release.
+  # re-run a failed release without deleting/re-pushing the tag (fleet shape,
+  # myserver#29). On dispatch the run executes on a BRANCH ref
+  # (GITHUB_REF_NAME is e.g. "master"), so every step must use the resolved
+  # RELEASE_TAG/RELEASE_SHA env instead.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: existing bare-semver tag to re-release
+        required: true
 
 env:
   # shared compiler cache: sccache (mounted from the runner VM) -> garage S3
@@ -18,23 +23,30 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Resolve release tag
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_SHA=$(git rev-parse "$tag^{commit}")" >> "$GITHUB_ENV"
       - name: Build release artifacts
         run: |
           mkdir -p dist/release
           name="${GITHUB_REPOSITORY#*/}"
-          git archive --format=tar.gz --prefix="${name}-${GITHUB_REF_NAME}/" \
-            -o "dist/release/${name}-${GITHUB_REF_NAME}.tar.gz" "${GITHUB_REF_NAME}"
-          (cd dist/release && sha256sum * > SHA256SUMS)
+          git archive --format=tar.gz --prefix="${name}-${RELEASE_TAG}/" \
+            -o "dist/release/${name}-${RELEASE_TAG}.tar.gz" "${RELEASE_TAG}"
+      # no override: it recreates the release object and wipes every asset
+      # already attached (lost the 0.9.0 bundle that way)
       - uses: https://data.forgejo.org/actions/forgejo-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           direction: upload
-          override: true
           # internal URL: the runner zone cannot hairpin to the public vhost
           url: http://10.10.0.30:3000
           repo: ${{ github.repository }}
-          tag: ${{ github.ref_name }}
-          sha: ${{ github.sha }}
+          tag: ${{ env.RELEASE_TAG }}
+          sha: ${{ env.RELEASE_SHA }}
           release-dir: dist/release
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -47,7 +59,9 @@ jobs:
   # ubuntu-24.04 image (glibc 2.39) produces binaries that can fail to load in
   # the runtime image. This also pins rustc to the cluster-wide 1.97. No node
   # inside the container -> no JS actions in this job (manual clone, curl API
-  # for the release asset).
+  # for the release asset). The apt-installed-buildah variant is an accepted
+  # divergence from the fleet template (myserver#33): binaries are built
+  # in-job and the image only COPYs, so layer caching buys nothing.
   #
   # `needs: release` only because the tarball attach at the end requires the
   # release object (created by the release job's upload) to exist.
@@ -61,23 +75,19 @@ jobs:
       BUILDAH_ISOLATION: chroot
       STORAGE_DRIVER: vfs
     steps:
-      - name: Clone
+      - name: Clone release tag
+        # no checkout action in this job -> resolve the tag inline
         run: |
-          git clone --depth 1 --branch "$GITHUB_REF_NAME" \
+          tag="${{ inputs.tag || github.ref_name }}"
+          git clone --depth 1 --branch "$tag" \
             "http://forgejo:${GITHUB_TOKEN}@10.10.0.30:3000/${GITHUB_REPOSITORY}.git" src
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install build deps + buildah
         run: |
           apt-get update
           apt-get install -y buildah protobuf-compiler libsystemd-dev libpcap-dev libssl-dev pkg-config jq
-      - name: Set version
-        run: |
-          cd src
-          case "$GITHUB_REF" in
-            refs/tags/*) echo "VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV" ;;
-            *)           echo "VERSION=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV" ;;
-          esac
       - name: Build release binaries
         run: |
           cd src
@@ -100,20 +110,20 @@ jobs:
       - name: Assemble linux-amd64 tarball
         run: |
           cd src
-          name="zensight-${VERSION}-linux-amd64"
+          name="zensight-${RELEASE_TAG}-linux-amd64"
           mkdir -p dist/release "stage/$name/configs"
           cp docker-bins/docker-binaries-amd64/* "stage/$name/"
           cp -r packaging/systemd "stage/$name/systemd"
           cp configs/*.json5 "stage/$name/configs/"
           (cd "stage/$name" && sha256sum zensight-* > SHA256SUMS)
           tar -C stage -czf "dist/release/$name.tar.gz" "$name"
-          # outer checksum named <name>.tar.gz.sha256 — the release job already
-          # uploads an asset called SHA256SUMS; the names must not collide
-          (cd dist/release && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
       - name: Build component images and smoke-test
         run: |
           cd src
-          labels="--label org.opencontainers.image.source=https://git.marcpardo.eu/${GITHUB_REPOSITORY} --label org.opencontainers.image.revision=${GITHUB_SHA}"
+          # revision label from the clone's HEAD: GITHUB_SHA is the branch
+          # head on a workflow_dispatch re-run, not the tag commit
+          revision="$(git rev-parse HEAD)"
+          labels="--label org.opencontainers.image.source=https://git.marcpardo.eu/${GITHUB_REPOSITORY} --label org.opencontainers.image.revision=${revision}"
           for c in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
                    zensight-sensor-gnmi zensight-sensor-modbus zensight-sensor-netflow \
                    zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
@@ -121,16 +131,16 @@ jobs:
             image="$REGISTRY/marcpardo/$c"
             buildah --storage-driver vfs build $labels \
               --build-arg "BINARY_PACKAGE=$c" --build-arg TARGETARCH=amd64 \
-              -t "$image:${VERSION}" -t "$image:latest" -f docker/Dockerfile.runtime .
+              -t "$image:${RELEASE_TAG}" -t "$image:latest" -f docker/Dockerfile.runtime .
           done
           image="$REGISTRY/marcpardo/zensight-sensors"
           buildah --storage-driver vfs build $labels --build-arg TARGETARCH=amd64 \
-            -t "$image:${VERSION}" -t "$image:latest" -f docker/Dockerfile.sensors-runtime .
+            -t "$image:${RELEASE_TAG}" -t "$image:latest" -f docker/Dockerfile.sensors-runtime .
           # smoke, part 1: run one binary inside a runtime base — catches glibc
           # or shared-library skew at build time instead of on the fleet. The
           # correlator image has no entrypoint script to drive, so this is all
           # it gets.
-          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-correlator:${VERSION}")
+          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-correlator:${RELEASE_TAG}")
           buildah --storage-driver vfs run "$ctr" -- /usr/local/bin/zensight-correlator --help >/dev/null
           buildah --storage-driver vfs rm "$ctr"
 
@@ -158,7 +168,7 @@ jobs:
           # privilege and keeps running, and the systemd sensor without a
           # system bus answers `error/systemd/no-system-bus` — both are #648's
           # rule working, and both are the normal state inside this step.
-          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-sensors:${VERSION}")
+          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-sensors:${RELEASE_TAG}")
           buildah --storage-driver vfs run "$ctr" -- bash -c '
             ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17447 \
               timeout -s TERM 25 /usr/local/bin/entrypoint-sensors.sh >/tmp/smoke.log 2>&1
@@ -189,12 +199,11 @@ jobs:
           # shared-library skew in those two images is caught here rather than
           # by whoever pulls them.
           for c in zensight-exporter-prometheus zensight-exporter-otel; do
-            ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/$c:${VERSION}")
+            ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/$c:${RELEASE_TAG}")
             buildah --storage-driver vfs run "$ctr" -- "/usr/local/bin/$c" --help >/dev/null
             buildah --storage-driver vfs rm "$ctr"
           done
       - name: Push images
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           buildah --storage-driver vfs login --tls-verify=false -u marcpardo -p "${{ secrets.REGISTRY_TOKEN }}" "$REGISTRY"
           for c in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
@@ -203,24 +212,22 @@ jobs:
                    zensight-exporter-prometheus zensight-exporter-otel zensight-correlator \
                    zensight-sensors; do
             image="$REGISTRY/marcpardo/$c"
-            buildah --storage-driver vfs push --tls-verify=false "$image:${VERSION}"
+            buildah --storage-driver vfs push --tls-verify=false "$image:${RELEASE_TAG}"
             buildah --storage-driver vfs push --tls-verify=false "$image:latest"
           done
       - name: Attach tarball to the release
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           cd src
-          name="zensight-${VERSION}-linux-amd64"
+          name="zensight-${RELEASE_TAG}-linux-amd64"
           api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
           auth="Authorization: token ${GITHUB_TOKEN}"
-          rid=$(curl -sf -H "$auth" "$api/releases/tags/${GITHUB_REF_NAME}" | jq .id)
-          for f in "$name.tar.gz" "$name.tar.gz.sha256"; do
-            # idempotent on re-runs: drop a stale same-name asset first
-            aid=$(curl -sf -H "$auth" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
-            [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
-            curl -sf -H "$auth" -F "attachment=@dist/release/$f" \
-              "$api/releases/$rid/assets?name=$f" >/dev/null
-          done
+          rid=$(curl -sf -H "$auth" "$api/releases/tags/${RELEASE_TAG}" | jq .id)
+          f="$name.tar.gz"
+          # idempotent on re-runs: drop a stale same-name asset first
+          aid=$(curl -sf -H "$auth" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
+          [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
+          curl -sf -H "$auth" -F "attachment=@dist/release/$f" \
+            "$api/releases/$rid/assets?name=$f" >/dev/null
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -235,6 +242,14 @@ jobs:
       FLATPAK_USER_DIR: /srv/cache/flatpak/inst
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Resolve release tag
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_SHA=$(git rev-parse "$tag^{commit}")" >> "$GITHUB_ENV"
       - name: Build flatpak (unsigned; vm-edge signs on publish)
         run: |
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
@@ -251,28 +266,59 @@ jobs:
             --repo=export-repo builddir flatpak/com.github.p13marc.ZenSight.yml
           mkdir -p "$GITHUB_WORKSPACE/dist/release"
           flatpak build-bundle export-repo \
-            "$GITHUB_WORKSPACE/dist/release/zensight-${GITHUB_REF_NAME}.flatpak" com.github.p13marc.ZenSight
+            "$GITHUB_WORKSPACE/dist/release/zensight-${RELEASE_TAG}.flatpak" com.github.p13marc.ZenSight
       - name: Publish export branch for vm-edge
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           cd /srv/cache/flatpak/zensight/work/src/export-repo
           git init -q -b flatpak-export
           git add -A
-          git -c user.name=ci -c user.email=ci@marcpardo.eu commit -q -m "flatpak export ${GITHUB_REF_NAME}"
+          git -c user.name=ci -c user.email=ci@marcpardo.eu commit -q -m "flatpak export ${RELEASE_TAG}"
           git push --force "http://forgejo:${{ secrets.GITHUB_TOKEN }}@10.10.0.30:3000/${GITHUB_REPOSITORY}.git" HEAD:flatpak-export
       # curl attach, not forgejo-release: by this point the release job has
       # already created the release object, and a second forgejo-release
       # upload against the same tag 409s (seen on the 0.9.0 maiden run).
       - name: Attach flatpak bundle to the release
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          f="zensight-${GITHUB_REF_NAME}.flatpak"
+          f="zensight-${RELEASE_TAG}.flatpak"
           api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
           auth="Authorization: token ${GITHUB_TOKEN}"
-          rid=$(curl -sf -H "$auth" "$api/releases/tags/${GITHUB_REF_NAME}" | jq .id)
+          rid=$(curl -sf -H "$auth" "$api/releases/tags/${RELEASE_TAG}" | jq .id)
           aid=$(curl -sf -H "$auth" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
           [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
           curl -sf -H "$auth" -F "attachment=@dist/release/$f" \
             "$api/releases/$rid/assets?name=$f" >/dev/null
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # One SHA256SUMS covering every asset, uploaded exactly once (fleet
+  # standard, myserver#29). The assets are produced by three different jobs
+  # and artifact passing is unavailable on this instance, so the last job
+  # downloads what the release actually holds and hashes that — the sums are
+  # of the published bytes, not of what a job thinks it uploaded.
+  checksums:
+    needs: [images, flatpak]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish SHA256SUMS over all release assets
+        run: |
+          set -eu
+          command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
+          tag="${{ inputs.tag || github.ref_name }}"
+          api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
+          auth="Authorization: token ${GITHUB_TOKEN}"
+          rid=$(curl -sf -H "$auth" "$api/releases/tags/$tag" | jq .id)
+          mkdir -p sums && cd sums
+          curl -sf -H "$auth" "$api/releases/$rid/assets" > .assets.json
+          # every asset except a stale SHA256SUMS itself (dispatch re-run)
+          jq -r '.[] | select(.name != "SHA256SUMS") | "\(.uuid) \(.name)"' .assets.json \
+            | while read -r uuid name; do
+                curl -sf -H "$auth" -o "$name" "http://10.10.0.30:3000/attachments/$uuid"
+              done
+          sha256sum * > SHA256SUMS
+          # idempotent on re-runs: drop the stale SHA256SUMS first
+          aid=$(jq '.[] | select(.name=="SHA256SUMS") | .id' .assets.json | head -1)
+          [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
+          curl -sf -H "$auth" -F "attachment=@SHA256SUMS" \
+            "$api/releases/$rid/assets?name=SHA256SUMS" >/dev/null
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

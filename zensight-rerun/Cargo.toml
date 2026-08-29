@@ -2,6 +2,7 @@
 name = "zensight-rerun"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -9,10 +10,10 @@ description = "EVALUATION-ONLY Rerun visualization adapter for ZenSight telemetr
 # Never published: this crate exists to evaluate Rerun as an optional viz/replay
 # backend (docs/plans/rerun/). No other crate may depend on it.
 publish = false
-# rerun 0.34.1 requires rust 1.92 (crates.io metadata, 2026-07-11). This is the
-# only crate in the workspace with an MSRV pin — a deliberate reject-signal
-# tracker for the evaluation (see docs/plans/rerun/01-capabilities.md §1).
-rust-version = "1.97"
+# rerun 0.34.1 requires rust 1.92 (crates.io metadata, 2026-07-11). The MSRV
+# pin used to live here as a deliberate reject-signal tracker for the
+# evaluation (see docs/plans/rerun/01-capabilities.md §1); since myserver#33
+# it is the workspace-inherited rust-version above (1.97), which satisfies it.
 
 [dependencies]
 # Internal crates

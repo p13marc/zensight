@@ -2,6 +2,7 @@
 name = "zensight-sensor-logs"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Zenoh sensor for logs telemetry (network syslog + systemd-journald)"
 

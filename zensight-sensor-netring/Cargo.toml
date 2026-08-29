@@ -2,6 +2,7 @@
 name = "zensight-sensor-netring"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Zenoh sensor for wire-level flow/L7/anomaly telemetry via netring (AF_PACKET/AF_XDP)"
 license = "Apache-2.0"
