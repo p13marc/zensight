@@ -357,7 +357,6 @@ impl Default for EvidenceConfig {
     }
 }
 
-/// Passive-DNS name-cache tuning (issue #308). Maps onto flowscope's
 /// Byte budgets for the L7 inventories (#814). Five knobs, not nineteen:
 /// each named inventory gets its own, and the four fingerprint inventories
 /// (QUIC / SSH / encrypted-DNS / JA4H) share `fp_max_bytes` in quarters —
@@ -413,6 +412,7 @@ impl Default for TablesConfig {
     }
 }
 
+/// Passive-DNS name-cache tuning (issue #308). Maps onto flowscope's
 /// `NameMapConfig`; every cap is bounded so a CDN-heavy network can't grow the
 /// map without limit. Enabled by default but inert unless `collect.dns` is on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1035,6 +1035,21 @@ mod tests {
         // `dir` must be a real key, not a comment: gen-configs.sh seds it to the
         // demo's pcap path, and validation rejects `mode != off` without it.
         assert!(at("netring.capture.to_disk.dir").is_null());
+
+        // #814: production is also a sizing profile — gen-configs.sh seds the
+        // RSS budget and every table byte-budget down, and a sed can only flip
+        // a key that is physically present.
+        assert_eq!(at("resources.budget_rss_mb"), 128);
+        let defaults = TablesConfig::default();
+        for (key, want) in [
+            ("netring.tables.tls_max_bytes", defaults.tls_max_bytes),
+            ("netring.tables.dns_max_bytes", defaults.dns_max_bytes),
+            ("netring.tables.http_max_bytes", defaults.http_max_bytes),
+            ("netring.tables.assets_max_bytes", defaults.assets_max_bytes),
+            ("netring.tables.fp_max_bytes", defaults.fp_max_bytes),
+        ] {
+            assert_eq!(at(key), want, "{key} must spell out its default");
+        }
     }
 
     #[test]
@@ -1069,6 +1084,30 @@ mod tests {
         assert_eq!(a.rita_beacon_threshold, 0.9);
         assert_eq!(a.dns_tunnel_distinct, 50);
         assert_eq!(a.dns_tunnel_qname_len, 100);
+    }
+
+    /// #814: a partial `tables` block overrides only the named budget — the
+    /// other four keep their serde field defaults (and present-but-empty must
+    /// agree with omitted, i.e. the derived `Default`).
+    #[test]
+    fn partial_tables_block_keeps_the_other_defaults() {
+        let cfg: NetringSensorConfig = json5::from_str(
+            r#"{ netring: { interfaces: ["eth0"], tables: { dns_max_bytes: 123 } } }"#,
+        )
+        .unwrap();
+        let t = &cfg.netring.tables;
+        assert_eq!(t.dns_max_bytes, 123);
+        let d = TablesConfig::default();
+        assert_eq!(t.tls_max_bytes, d.tls_max_bytes);
+        assert_eq!(t.http_max_bytes, d.http_max_bytes);
+        assert_eq!(t.assets_max_bytes, d.assets_max_bytes);
+        assert_eq!(t.fp_max_bytes, d.fp_max_bytes);
+        let omitted: NetringSensorConfig =
+            json5::from_str(r#"{ netring: { interfaces: ["eth0"] } }"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&omitted.netring.tables).unwrap(),
+            serde_json::to_value(&d).unwrap()
+        );
     }
 
     #[test]

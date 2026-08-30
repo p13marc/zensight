@@ -20,6 +20,10 @@
 #     hardware thermal alert, and the actionable systemd ops alerts remain on,
 #     as do the on-demand debug reports. Chosen for real deployments where the
 #     detector suite's false positives are noise (2026-07 fleet experience).
+#     Since #814 production is also a SIZING profile: netring's RSS budget
+#     drops to 64 MiB, its inventory byte-budgets are halved, and the
+#     passive-DNS cache shrinks to 2048 IPs (with the beacon detectors off it
+#     only feeds flow/talker name enrichment).
 #
 # A sed can only flip a key that is really in configs/*.json5 — a key that is
 # merely absent takes the Rust `#[serde(default)]` silently, and nothing here
@@ -105,6 +109,19 @@ if [[ "$profile" == "production" ]]; then
     # scan-shaped) — production turns it off with the rest of the suite.
     netring_seds+=(
     -e 's/port_scan: true/port_scan: false/'
+    # Sizing (#814): a production fleet host gives netring half the demo's
+    # envelope. Every value below matches a key physically present in
+    # configs/netring.json5 (pinned by shipped_config_spells_out_the_opt_in_
+    # detectors); each sed carries its key name so they cannot cross-match.
+    -e 's/budget_rss_mb: 128/budget_rss_mb: 64/'
+    # Passive-DNS cache: with the beacon detectors off it only feeds
+    # flow/talker name enrichment, which a hot working set of 2048 IPs covers.
+    -e 's/max_ips: 16384/max_ips: 2048/'
+    -e 's/tls_max_bytes: 2097152/tls_max_bytes: 1048576/'
+    -e 's/dns_max_bytes: 4194304/dns_max_bytes: 1048576/'
+    -e 's/http_max_bytes: 1048576/http_max_bytes: 524288/'
+    -e 's/assets_max_bytes: 2097152/assets_max_bytes: 1048576/'
+    -e 's/fp_max_bytes: 2097152/fp_max_bytes: 1048576/'
     )
 fi
 if [[ "$profile" == "demo-max" ]]; then
@@ -342,5 +359,5 @@ notes=""
 [[ -n "$snapshot_dir" ]]        && notes+=" snapshot='$snapshot_dir'"
 [[ "$exclude_chips" != "[]" ]]  && notes+=" hwmon-exclude=$exclude_chips"
 detectors="detectors on"
-[[ "$profile" == "production" ]] && detectors="detectors OFF"
+[[ "$profile" == "production" ]] && detectors="detectors OFF, sized down (64 MiB budget, halved tables)"
 echo "Configured ($profile): netring iface='$iface' (L7 on, $detectors), netlink, logs=journald, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator$notes  (configs in $outdir/)"

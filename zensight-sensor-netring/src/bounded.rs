@@ -138,11 +138,7 @@ impl<K: Eq + Hash + Clone, V> BoundedTable<K, V> {
         if target == 0 || self.map.is_empty() {
             return (0, 0);
         }
-        let mut order: Vec<(u64, K)> = self
-            .map
-            .iter()
-            .map(|(k, s)| (s.seq, k.clone()))
-            .collect();
+        let mut order: Vec<(u64, K)> = self.map.iter().map(|(k, s)| (s.seq, k.clone())).collect();
         order.sort_unstable_by_key(|(seq, _)| *seq);
         let (mut entries, mut freed) = (0u64, 0u64);
         for (_, k) in order {

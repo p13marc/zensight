@@ -75,7 +75,7 @@ pub async fn run_tls(session: Arc<zenoh::Session>, producer: String, inventory: 
 
     while let Ok(query) = queryable.recv_async().await {
         let mut records: Vec<_> = match inventory.lock() {
-            Ok(inv) => inv.values().cloned().collect(),
+            Ok(inv) => inv.iter().map(|(_, r)| r.clone()).collect(),
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
@@ -106,7 +106,7 @@ pub async fn run_quic(session: Arc<zenoh::Session>, producer: String, inventory:
 
     while let Ok(query) = queryable.recv_async().await {
         let mut records: Vec<_> = match inventory.lock() {
-            Ok(inv) => inv.values().cloned().collect(),
+            Ok(inv) => inv.iter().map(|(_, r)| r.clone()).collect(),
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
@@ -130,7 +130,7 @@ pub async fn run_ssh(session: Arc<zenoh::Session>, producer: String, inventory: 
 
     while let Ok(query) = queryable.recv_async().await {
         let mut records: Vec<_> = match inventory.lock() {
-            Ok(inv) => inv.values().cloned().collect(),
+            Ok(inv) => inv.iter().map(|(_, r)| r.clone()).collect(),
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
@@ -158,7 +158,7 @@ pub async fn run_encrypted_dns(
 
     while let Ok(query) = queryable.recv_async().await {
         let mut records: Vec<_> = match state.inventory.lock() {
-            Ok(inv) => inv.values().cloned().collect(),
+            Ok(inv) => inv.iter().map(|(_, r)| r.clone()).collect(),
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
@@ -182,7 +182,7 @@ pub async fn run_assets(session: Arc<zenoh::Session>, producer: String, inventor
 
     while let Ok(query) = queryable.recv_async().await {
         let mut records: Vec<_> = match inventory.lock() {
-            Ok(inv) => inv.values().cloned().collect(),
+            Ok(inv) => inv.iter().map(|(_, r)| r.clone()).collect(),
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.last_seen));
@@ -315,7 +315,7 @@ pub async fn run_dns(session: Arc<zenoh::Session>, producer: String, inventory: 
     while let Ok(query) = queryable.recv_async().await {
         let top = top_n(&query);
         let records = match inventory.lock() {
-            Ok(inv) => map::top_dns_records(&inv, top),
+            Ok(inv) => map::top_dns_records(inv.iter(), top),
             Err(_) => Vec::new(),
         };
         reply(&query, &key, &records, "dns").await;
@@ -338,7 +338,7 @@ pub async fn run_http(session: Arc<zenoh::Session>, producer: String, inventory:
     while let Ok(query) = queryable.recv_async().await {
         let top = top_n(&query);
         let records = match inventory.lock() {
-            Ok(inv) => map::top_http_hosts(&inv, top),
+            Ok(inv) => map::top_http_hosts(inv.iter(), top),
             Err(_) => Vec::new(),
         };
         reply(&query, &key, &records, "http").await;
@@ -363,7 +363,7 @@ pub async fn run_ja4h(session: Arc<zenoh::Session>, producer: String, inventory:
     while let Ok(query) = queryable.recv_async().await {
         let top = top_n(&query);
         let records = match inventory.lock() {
-            Ok(inv) => map::top_ja4h(&inv, top),
+            Ok(inv) => map::top_ja4h(inv.iter(), top),
             Err(_) => Vec::new(),
         };
         reply(&query, &key, &records, "ja4h").await;

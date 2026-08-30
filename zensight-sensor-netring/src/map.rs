@@ -1268,12 +1268,12 @@ pub fn dns_points(
 
 /// Rank a DNS SLD inventory newest-volume-first into the on-demand `@rpc/netring/dns`
 /// reply (top-N by query count). Pure so the ranking is unit-testable.
-pub fn top_dns_records(
-    inv: &std::collections::HashMap<String, (u64, u64)>,
+pub fn top_dns_records<'a>(
+    inv: impl IntoIterator<Item = (&'a String, &'a (u64, u64))>,
     top: usize,
 ) -> Vec<DnsRecord> {
     let mut v: Vec<DnsRecord> = inv
-        .iter()
+        .into_iter()
         .map(|(domain, &(queries, nxdomain))| DnsRecord {
             domain: domain.clone(),
             queries,
@@ -1341,12 +1341,12 @@ pub fn http_points(
 }
 
 /// Rank an HTTP host inventory request-volume-first into the `@rpc/netring/http` reply.
-pub fn top_http_hosts(
-    inv: &std::collections::HashMap<String, (u64, u64)>,
+pub fn top_http_hosts<'a>(
+    inv: impl IntoIterator<Item = (&'a String, &'a (u64, u64))>,
     top: usize,
 ) -> Vec<HttpHostRecord> {
     let mut v: Vec<HttpHostRecord> = inv
-        .iter()
+        .into_iter()
         .map(|(host, &(requests, errors))| HttpHostRecord {
             host: host.clone(),
             requests,
@@ -1364,11 +1364,11 @@ pub fn top_http_hosts(
 
 /// Rank a JA4H fingerprint inventory hit-count-first into the `@rpc/netring/ja4h`
 /// reply (#124). Pure so the ranking is unit-testable.
-pub fn top_ja4h(
-    inv: &std::collections::HashMap<String, Ja4hRecord>,
+pub fn top_ja4h<'a>(
+    inv: impl IntoIterator<Item = (&'a String, &'a Ja4hRecord)>,
     top: usize,
 ) -> Vec<Ja4hRecord> {
-    let mut v: Vec<Ja4hRecord> = inv.values().cloned().collect();
+    let mut v: Vec<Ja4hRecord> = inv.into_iter().map(|(_, r)| r.clone()).collect();
     v.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.ja4h.cmp(&b.ja4h)));
     v.truncate(top);
     v
