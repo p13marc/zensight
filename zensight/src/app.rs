@@ -9622,3 +9622,117 @@ mod alias_tests {
         );
     }
 }
+
+/// Fold a real captured deployment through `update` (#747). The corpus in
+/// `tests/fixtures/zrec/` is what the sensors actually put on the wire; these
+/// tests prove the whole app-state fold consumes it — and consumes it
+/// deterministically, because a replay folds no live time.
+///
+/// RULES for this module (`docs/testing.md`, "Replay fixtures"): assert only
+/// facts derived from the capture itself (never a hostname, value, or
+/// timestamp — regeneration must pass unchanged), and never feed
+/// `Message::Tick` or assert staleness — those read the wall clock.
+#[cfg(test)]
+mod zrec_replay_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> crate::replay::Replay {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/zrec")
+            .join(name);
+        crate::replay::load(path).expect("fixture loads")
+    }
+
+    /// A demo boot with the demo's own state cleared: the store is in-memory
+    /// (no disk), and what remains is an empty app the capture then fills.
+    fn app() -> ZenSight {
+        let mut a = ZenSight::boot(true).0;
+        a.demo_mode = false;
+        a.dashboard.devices.clear();
+        a.sensor_health.clear();
+        a.known_sensors.clear();
+        a.entities = Default::default();
+        a
+    }
+
+    /// The facts a fold is expected to reproduce, derived from the app —
+    /// comparing these across two folds is the determinism pin.
+    fn derived(a: &ZenSight) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let mut devices: Vec<String> = a
+            .dashboard
+            .devices
+            .keys()
+            .map(|d| format!("{:?}/{}/{}", d.protocol, d.origin, d.source))
+            .collect();
+        devices.sort();
+        let mut health: Vec<String> = a.sensor_health.keys().cloned().collect();
+        health.sort();
+        let mut sensors: Vec<String> = a.known_sensors.keys().cloned().collect();
+        sensors.sort();
+        (devices, health, sensors)
+    }
+
+    /// Every device the capture's telemetry names exists after the fold —
+    /// exactly one per distinct `(protocol, origin, source)`, computed from
+    /// the capture itself so a recapture with a different host id still
+    /// passes.
+    #[test]
+    fn telemetry_capture_populates_the_dashboard() {
+        let replay = fixture("sysinfo-telemetry.zrec");
+        let expected: std::collections::HashSet<DeviceId> = replay
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::TelemetryReceived(r) => Some(r.device_id()),
+                _ => None,
+            })
+            .collect();
+        assert!(!expected.is_empty(), "the capture names no devices");
+
+        let mut a = app();
+        for msg in replay.messages() {
+            let _ = a.update(msg);
+        }
+        let got: std::collections::HashSet<DeviceId> =
+            a.dashboard.devices.keys().cloned().collect();
+        assert_eq!(got, expected);
+    }
+
+    /// The state capture teaches the app its sensors: health cards and
+    /// registration docs both keyed per instance.
+    #[test]
+    fn state_capture_populates_sensor_state() {
+        let mut a = app();
+        for msg in fixture("state-plane.zrec").messages() {
+            let _ = a.update(msg);
+        }
+        assert!(
+            !a.sensor_health.is_empty(),
+            "no health cards after the fold"
+        );
+        assert!(!a.known_sensors.is_empty(), "no sensor docs after the fold");
+        // The catalog capture then gives the fleet its entity.
+        assert!(a.entities.is_empty());
+        for msg in fixture("catalog-entities.zrec").messages() {
+            let _ = a.update(msg);
+        }
+        assert!(!a.entities.is_empty(), "no entity after the catalog fold");
+    }
+
+    /// Two folds of the same file from two fresh boots agree — the "folds no
+    /// live time" property that makes a capture a fixture rather than a
+    /// flake.
+    #[test]
+    fn a_replay_folds_no_live_time() {
+        let replay = fixture("state-plane.zrec");
+        let telemetry = fixture("sysinfo-telemetry.zrec");
+        let run = || {
+            let mut a = app();
+            for msg in replay.messages().into_iter().chain(telemetry.messages()) {
+                let _ = a.update(msg);
+            }
+            derived(&a)
+        };
+        assert_eq!(run(), run());
+    }
+}

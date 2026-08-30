@@ -7,6 +7,7 @@ pub mod demo;
 pub mod entity;
 pub mod message;
 pub mod mock;
+pub mod replay;
 pub mod store;
 pub mod subscription;
 pub mod view;

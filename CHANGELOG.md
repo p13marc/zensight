@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`.zrec` captures as GUI decode fixtures** (#747, the fifth of six #726
+  children). `zensight::replay` loads a zenkey-fleet tape capture and feeds
+  it to the real decode path with no bus and no live time: `decode_row`
+  (tombstones routed, the header's base stripped the way a session namespace
+  would), `messages()` for an `App::update` fold, and `sample_view()` to
+  lift rows into `MonitorCore::ingest_at`-shaped consumers (the #748 seam).
+  The checked-in corpus in `zensight/tests/fixtures/zrec/` — sysinfo
+  telemetry, the state plane, and the `@catalog` entity a `v1/*` selector
+  can never see (grammar D4) — was recorded from a real isolated deployment
+  by the new `scripts/record-fixtures.sh`, via the new (non-judging)
+  `zensight-conformance --record-zrec` mode. Tests assert capture-stable
+  facts only, so the regeneration contract is: re-run the script, the suite
+  passes unchanged. `"bytes"`-is-the-payload is pinned by a lossless
+  writer→reader round trip; determinism by folding a capture twice from two
+  fresh boots. Synth/fault injection deliberately deferred (it sits behind
+  the fleet `decode` feature the GUI keeps off).
+
 - **Every state family's served schema is now a gated contract** (#815,
   unblocks zenkey#388's zenwatch). The audit found the invariant already
   holds — all 14 state-family types serve real schemars-derived schemas —

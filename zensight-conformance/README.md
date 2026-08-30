@@ -62,6 +62,21 @@ The polarity reads backwards for exactly one second and then stops: the claim
 is *"this deployment has findings"*, so "not established" is the good news.
 `zenctl why` has the same shape for the same reason.
 
+## Recording fixtures (`--record-zrec`, #747)
+
+The binary has one non-judging mode: `--record-zrec <path>` watches the
+repeatable `--record-selector`s for `--for` seconds (and/or `--record-max`
+samples) and writes a `.zrec` capture — zenkey-fleet's tape dialect, the
+GUI's decode-fixture format. It lives here rather than growing a third
+harness because this crate is the sanctioned place to drive `zenkey-fleet`
+against a live deployment. `scripts/record-fixtures.sh` is the caller: it
+stands up the same isolated deployment as `conformance-verify.sh` and
+regenerates `zensight/tests/fixtures/zrec/`. Manual only, never CI — the
+corpus is a pinned regression input; the assertion policy that keeps
+regeneration safe is in `zensight/docs/testing.md`, "Replay fixtures". An
+empty capture exits nonzero: a broken regeneration must not silently empty
+the corpus.
+
 ## The boundary
 
 **`zenkey-fleet` must not enter `zensight-common`, or any crate a sensor
