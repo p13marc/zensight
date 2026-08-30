@@ -74,7 +74,7 @@ for s in $SENSORS; do pkgs+=(-p "zensight-sensor-$s"); done
 [[ "$CORRELATOR" == "1" ]] && pkgs+=(-p zensight-correlator)
 
 echo "==> building ${pkgs[*]}"
-cargo build $relflag "${pkgs[@]}" >/dev/null
+cargo build $relflag --locked "${pkgs[@]}" >/dev/null
 
 required=("$BIN/zensight-conformance")
 for s in $SENSORS; do required+=("$BIN/zensight-sensor-$s"); done

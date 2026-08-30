@@ -30,15 +30,24 @@ env:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+        with:
+          toolchain: "1.97"
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           cache-targets: false
       - run: cargo test --workspace --locked
+      # zensight-common ALONE (#845): the workspace build unifies features, so
+      # `zensight`'s default `validate` turns `validate-json` on for the whole
+      # graph and the feature-OFF tests — the #791 "FeatureOff renders as not
+      # checked, never as a pass" contract — never compile above. Built alone,
+      # the crate gets its real default feature set (empty) and they run.
+      - run: cargo test -p zensight-common --locked
 
   # Nothing in CI had ever EXECUTED an exporter.
   #
@@ -56,12 +65,15 @@ jobs:
   # isolated ports with no containers and no privileges.
   demo-smoke:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+        with:
+          toolchain: "1.97"
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           cache-targets: false
       # Debug profile: this asserts behaviour, not speed, and a release build of
@@ -84,22 +96,26 @@ jobs:
   # (zenkey-fleet's `run_doctor` — the same entry point `zenctl doctor` calls),
   # on an isolated port with no containers and no privileges.
   #
-  # What it gates on, and the one check it excludes (upstream zenkey#384 — the
-  # schema-drift walker does not descend `oneOf`, so every adjacently-tagged
-  # TelemetryValue reports two phantom `field-new` warnings), is documented in
-  # zensight-conformance/README.md. The exclusion is in code, named, and lifts
-  # when #384 lands.
+  # What it gates on is documented in zensight-conformance/README.md. Nothing
+  # is excluded by default any more: the one historical exclusion (`field-new`,
+  # upstream zenkey#384) lifted with zenkey-fleet 0.11.1 and #845 removed it —
+  # after it had sat stale for a release, which is why the README now requires
+  # any future exclusion to carry a re-check for its own lift-condition.
   #
-  # Debug profile and a 12s listen window: this asserts behaviour, not speed,
-  # and the runner has two build lanes.
+  # Debug profile and a 12s listen window (now --strict-window, #845: a window
+  # that shed samples is unobservable, not quietly clean): this asserts
+  # behaviour, not speed, and the runner has two build lanes.
   conformance:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+        with:
+          toolchain: "1.97"
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: conformance
           cache-targets: false
@@ -130,71 +146,96 @@ jobs:
   # the standing plan to cover them out-of-band.
   features:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+        with:
+          toolchain: "1.97"
+          components: clippy
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: features
           cache-targets: false
+
+      # Every step here is `cargo clippy -- -D warnings`, not `cargo check`
+      # (#845): check exits 0 on warnings while every other job denies them,
+      # so feature-gated code was the one place a warning — or any clippy
+      # lint — could land silently. Same build cost, strictly more signal.
 
       # zensight: default features OFF (#791). `validate` is default-ON, so a
       # workspace build never type-checks the FeatureOff path — the exact
       # blind spot this job exists for, in the other direction: the build
       # where verdicts must degrade to "not checked" rather than vanish.
       - name: zensight --no-default-features
-        run: cargo check -p zensight --no-default-features --locked
+        run: cargo clippy -p zensight --no-default-features --all-targets --locked -- -D warnings
       # zensight: the F12 UI recorder.
       - name: zensight --features tester
-        run: cargo check -p zensight --features tester --locked
+        run: cargo clippy -p zensight --features tester --all-targets --locked -- -D warnings
       # zensight: the opt-in H.264 live view. The expensive one — it pulls
       # openh264, a C++ build from source. This is the #649 step, moved here.
       - name: zensight --features h264
-        run: cargo check -p zensight --features h264 --locked
+        run: cargo clippy -p zensight --features h264 --all-targets --locked -- -D warnings
+
+      # Crates whose DEFAULT features hide a real alternate build (#845):
+      # logs without journald is the documented "platforms without libsystemd"
+      # build; zensight-btf without std is the no_std path the eBPF crates
+      # depend on. Neither had a leg, so both could rot invisibly.
+      - name: logs --no-default-features
+        run: cargo clippy -p zensight-sensor-logs --no-default-features --all-targets --locked -- -D warnings
+      # Lib only, deliberately no --all-targets: the no_std claim is the
+      # LIBRARY's; the crate's tests and examples require std and always will.
+      - name: btf --no-default-features
+        run: cargo clippy -p zensight-btf --no-default-features --locked -- -D warnings
 
       # netring detectors, each off by default and each pulling its own
       # upstream parser through the netring facade.
       - name: netring --features sigma
-        run: cargo check -p zensight-sensor-netring --features sigma --locked
+        run: cargo clippy -p zensight-sensor-netring --features sigma --all-targets --locked -- -D warnings
       - name: netring --features yara
-        run: cargo check -p zensight-sensor-netring --features yara --locked
+        run: cargo clippy -p zensight-sensor-netring --features yara --all-targets --locked -- -D warnings
       - name: netring --features snmp
-        run: cargo check -p zensight-sensor-netring --features snmp --locked
+        run: cargo clippy -p zensight-sensor-netring --features snmp --all-targets --locked -- -D warnings
       - name: netring --features lateral
-        run: cargo check -p zensight-sensor-netring --features lateral --locked
+        run: cargo clippy -p zensight-sensor-netring --features lateral --all-targets --locked -- -D warnings
       - name: netring --features ipfix
-        run: cargo check -p zensight-sensor-netring --features ipfix --locked
+        run: cargo clippy -p zensight-sensor-netring --features ipfix --all-targets --locked -- -D warnings
       # ja4plus carries the FoxIO License 1.1, which is NOT OSI. Compiling it in
       # its own opt-in step keeps it type-checked without putting it anywhere
       # near the default path — the default build stays OSI-clean.
       - name: netring --features ja4plus
-        run: cargo check -p zensight-sensor-netring --features ja4plus --locked
+        run: cargo clippy -p zensight-sensor-netring --features ja4plus --all-targets --locked -- -D warnings
 
   # cargo-deny is the fleet's single supply-chain lint (myserver#33):
   # advisories, licenses, bans, sources — config in deny.toml.
   deny:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+        with:
+          toolchain: "1.97"
       # the docker cargo-deny action cannot see deny.toml -> install directly
-      - uses: https://github.com/taiki-e/install-action@v2.85.11
+      - uses: https://github.com/taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-deny
       - run: cargo deny check
 
   lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
+          toolchain: "1.97"
           components: rustfmt, clippy
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: lint
           cache-targets: false
@@ -205,10 +246,50 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # D2 (#28): all colors must come from the design-system modules.
+      # Shared guard plumbing (#845): ONE computed source list — every crate's
+      # src/, so a new crate is covered the day it is added instead of when
+      # someone remembers to extend five hand-kept lists (they had drifted:
+      # the queryable and state-seed guards missed zensight/, the exporters
+      # and rerun entirely) — and ONE test-stripping awk that suppresses a
+      # #[cfg(test)]-gated item to its brace-balanced end instead of to end
+      # of file (the old sentinel never reset, so any file with an inline
+      # test module went blind for the rest of the file — ~580 production
+      # lines of zensight-common/src/config.rs included).
+      - name: prepare guard helpers
+        run: |
+          ls -d zensight*/src | sort > /tmp/guard-src-all
+          # EXCLUDE (named, with the reason — the session guard only):
+          #   zensight-conformance/src opens deliberately un-namespaced
+          #   observer sessions via zenkey_fleet::open (RFC 09 §5): it judges
+          #   the wire as it really is and must not ride the production seam.
+          #   Every other guard still covers it.
+          grep -v '^zensight-conformance/src$' /tmp/guard-src-all > /tmp/guard-src-sessions
+          cat > /tmp/strip_tests.awk <<'AWK'
+          FNR == 1 { intest = 0 }
+          /^#\[cfg\(test\)\]/ { intest = 1; depth = 0; opened = 0; next }
+          intest {
+            for (i = 1; i <= length($0); i++) {
+              c = substr($0, i, 1)
+              if (c == "{") { depth++; opened = 1 } else if (c == "}") depth--
+            }
+            if (opened && depth <= 0) intest = 0
+            else if (!opened && $0 ~ /;[[:space:]]*$/) intest = 0
+            next
+          }
+          { print FILENAME ":" FNR ":" $0 }
+          AWK
+          # every *.rs under the list, test-stripped, ready to grep
+          strip() { find $(cat "$1") -name '*.rs' -print0 | xargs -0 awk -f /tmp/strip_tests.awk; }
+          strip /tmp/guard-src-all      > /tmp/guard-stripped-all
+          strip /tmp/guard-src-sessions > /tmp/guard-stripped-sessions
+
+      # D2 (#28): all colors must come from the design-system modules. Widened
+      # in #845: the old pattern matched only `Color::from_rgb*`, so the
+      # associated constants (`Color::BLACK` — one was live in chart.rs), the
+      # struct literal and the `color!` macro all walked past it.
       - name: no ad-hoc colors (D2 guard)
         run: |
-          hits=$(grep -rn "Color::from_rgb" zensight/src --include='*.rs' \
+          hits=$(grep -rnE "Color::(from_rgb|new|BLACK|WHITE|TRANSPARENT)\b|iced::color!|Color \{ *r *:" zensight/src --include='*.rs' \
             | grep -vE "view/theme\.rs|view/tokens\.rs|view/components/" || true)
           if [ -n "$hits" ]; then
             echo "::error::Ad-hoc Color::from_rgb outside the design-system modules:"
@@ -219,12 +300,8 @@ jobs:
       # R5 (#356): every publication must go through a declared publisher.
       - name: declared-publishers only (R5 guard)
         run: |
-          hits=$(grep -rnE '(session[a-z_]*|zenoh)\.(put|delete)\(' \
-            zensight/src zensight-common/src zensight-correlator/src \
-            zensight-sensor-core/src zensight-sensor-*/src zensight-exporter-*/src \
-            zensight-rerun/src \
-            --include='*.rs' \
-            | grep -vE 'publisher_registry\.rs|/tests/|_test\.rs|mod tests' || true)
+          hits=$(grep -E '(session[a-z_]*|zenoh)\.(put|delete)\(' /tmp/guard-stripped-all \
+            | grep -vE 'publisher_registry\.rs' || true)
           if [ -n "$hits" ]; then
             echo "::error::Raw session.put/delete — publish through a declared publisher (PublisherRegistry / AdvancedPublisherRegistry / declare_publisher):"
             echo "$hits"
@@ -255,11 +332,8 @@ jobs:
 
       - name: queryables are declared through served::serve_queryable (#484)
         run: |
-          hits=$(grep -rn '\.declare_queryable(' \
-            zensight-common/src zensight-correlator/src \
-            zensight-sensor-core/src zensight-sensor-*/src \
-            --include='*.rs' \
-            | grep -vE 'served\.rs|/tests/|_test\.rs|mod tests' || true)
+          hits=$(grep -n '\.declare_queryable(' /tmp/guard-stripped-all \
+            | grep -vE 'served\.rs' || true)
           if [ -n "$hits" ]; then
             echo "::error::Raw declare_queryable — serve through zensight_common::served::serve_queryable so registry coverage (RFC 08 §6.1, #484) can see it:"
             echo "$hits"
@@ -308,11 +382,8 @@ jobs:
           # the tripwire for the case that never runs a test — matched on the
           # key-builder names the two seed call sites actually use. A grep
           # cannot classify a key; it can only notice the shapes we know about.
-          hits=$(grep -rnE 'serve_queryable\([^)]*(entities_query_key|state_key)' \
-            zensight-common/src zensight-correlator/src \
-            zensight-sensor-core/src zensight-sensor-*/src \
-            --include='*.rs' \
-            | grep -vE 'served\.rs|/tests/|mod tests' || true)
+          hits=$(grep -E 'serve_queryable\([^)]*(entities_query_key|state_key)' /tmp/guard-stripped-all \
+            | grep -vE 'served\.rs' || true)
           if [ -n "$hits" ]; then
             echo "::error::A state-class queryable declared through the unstamped seam — use served::serve_state_queryable, whose replies carry the seed's HLC stamp (RFC 04 §3.2, #782):"
             echo "$hits"
@@ -322,16 +393,7 @@ jobs:
       # #466: keys are base-relative; the deployment base is never spelled.
       - name: application code never spells the deployment base (#466)
         run: |
-          cat > /tmp/strip_tests.awk <<'AWK'
-          /^#\[cfg\(test\)\]/ { intest=1 }
-          { if (!intest) print FILENAME ":" FNR ":" $0 }
-          AWK
-          SRC="zensight/src zensight-common/src zensight-correlator/src
-               zensight-sensor-core/src zensight-sensor-*/src
-               zensight-exporter-*/src zensight-rerun/src"
-          hits=$(find $SRC -name '*.rs' -print0 \
-            | xargs -0 -I{} awk -f /tmp/strip_tests.awk {} \
-            | grep -E '"zensight/' \
+          hits=$(grep -E '"zensight/' /tmp/guard-stripped-all \
             | grep -vE 'journald\.cursor|zensight/host-id' \
             | grep -vE ':[0-9]+: *//' || true)
           if [ -n "$hits" ]; then
@@ -367,16 +429,14 @@ jobs:
           # exists to produce, not a violation. Any other `::open(` in
           # application code is a new way to open a session and must be
           # justified here before it is added.
-          cat > /tmp/strip_tests.awk <<'AWK'
-          /^#\[cfg\(test\)\]/ { intest=1 }
-          { if (!intest) print FILENAME ":" FNR ":" $0 }
-          AWK
-          SRC="zensight/src zensight-common/src zensight-correlator/src
-               zensight-sensor-core/src zensight-sensor-*/src
-               zensight-exporter-*/src zensight-rerun/src"
-          hits=$(find $SRC -name '*.rs' -print0 \
-            | xargs -0 -I{} awk -f /tmp/strip_tests.awk {} \
-            | grep -E '\b[a-z][a-z0-9_]*::open(_[a-z0-9_]+)?\(' \
+          # Two spellings are matched (#845): the call-site path form, and a
+          # `use` that imports `open`/`open_*` (bare or braced, aliased or
+          # not) — the import form made the call site a bare `open(...)`
+          # that the first pattern could never see.
+          hits=$(grep -E -e '\b[a-z][a-z0-9_]*::open(_[a-z0-9_]+)?\(' \
+                        -e ':(pub )?use [^;]*::(open|open_[a-z0-9_]+)( as [a-z0-9_]+)? *;' \
+                        -e ':(pub )?use [^;]*::\{[^}]*\b(open|open_[a-z0-9_]+)\b[^}]*\} *;' \
+                        /tmp/guard-stripped-sessions \
             | grep -vE 'zensight-common/src/session.rs|zensight-rerun/src/session.rs' \
             | grep -vE ':[0-9]+: *//' \
             | grep -vE 'session::(open_session|connect|build_config)\(' || true)

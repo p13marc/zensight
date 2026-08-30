@@ -39,22 +39,30 @@ env:
   # the other workflow that builds Rust, and it was left without one.
   CARGO_BUILD_JOBS: "2"
 
+concurrency:
+  group: features-ebpf-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ebpf:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
       # The workspace toolchain builds the userspace half...
-      - uses: https://github.com/dtolnay/rust-toolchain@1.97
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845)
+        with:
+          toolchain: "1.97"
       # ...and nightly + rust-src builds the BPF object (bpfel-unknown-none is a
       # build-std target, hence rust-src). `aya-build` invokes it by name via
       # `rustup run nightly`, so it must be installed, not merely selected.
-      - uses: https://github.com/dtolnay/rust-toolchain@nightly
+      - uses: https://github.com/dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly branch head; SHA-pinned (#845)
         with:
+          toolchain: nightly
           components: rust-src
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: ebpf
           cache-targets: false
@@ -92,6 +100,10 @@ jobs:
         env:
           # renovate: datasource=github-releases depName=aya-rs/bpf-linker
           BPF_LINKER_VERSION: 0.11.0
+          # sha256 of the release tarball above, recorded when the pin was set
+          # (#845). A version bump recomputes it; a mismatch is a supply-chain
+          # alarm, not an inconvenience.
+          BPF_LINKER_SHA256: 10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
         run: |
           set -euo pipefail
           url="https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
@@ -100,6 +112,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 --retry 5 --retry-connrefused \
                --location --fail --silent --show-error \
                --output "$tmp/bpf-linker.tar.zst" "$url"
+          echo "${BPF_LINKER_SHA256}  $tmp/bpf-linker.tar.zst" | sha256sum -c -
           tar --zstd -xf "$tmp/bpf-linker.tar.zst" -C "$tmp"
           bin="$(find "$tmp" -type f -name bpf-linker -print -quit)"
           if [ -z "$bin" ]; then

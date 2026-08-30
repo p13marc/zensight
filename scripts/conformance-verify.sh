@@ -115,7 +115,7 @@ for s in $SENSORS; do pkgs+=(-p "zensight-sensor-$s"); done
 [[ "$CORRELATOR" == "1" ]] && pkgs+=(-p zensight-correlator)
 
 echo "==> building ${pkgs[*]}"
-cargo build $relflag "${pkgs[@]}" >/dev/null
+cargo build $relflag --locked "${pkgs[@]}" >/dev/null
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
 required=("$BIN/zensight-conformance")
@@ -222,12 +222,13 @@ $(logs_note "$tmp" "$tmp"/*.log)"
 fi
 
 # ---------------------------------------------------------------------------
-# The real run. Deep checks on, a passive listen window on, and the gate at
-# its default floor (`warning`, minus the exclusions the crate documents).
+# The real run. Deep checks on, a passive listen window on, --strict-window
+# so a window that shed samples is unobservable rather than quietly clean
+# (#845), and the gate at its default floor (`warning`).
 # ---------------------------------------------------------------------------
 echo "==> judging the deployment (deep, ${FOR_SECS}s listen window)"
 set +e
-judge --for "$FOR_SECS" | tee "$tmp/report.txt"
+judge --for "$FOR_SECS" --strict-window | tee "$tmp/report.txt"
 rc=${PIPESTATUS[0]}
 set -e
 

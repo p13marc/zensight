@@ -1062,3 +1062,18 @@ mod tests {
         assert_eq!(security.priv_protocol, PrivProtocol::None);
     }
 }
+
+/// The shipped example config must load (#845): it ships in the release
+/// tarball and the container image, and nothing else in CI ever parsed it —
+/// so a renamed field silently reverted to its serde default in production
+/// (`gen-configs.sh` documents the identical hazard for the demo profile).
+/// Precedent: parallax/logs guard their shipped configs the same way.
+#[cfg(test)]
+mod shipped_config {
+    #[test]
+    fn shipped_config_parses() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/snmp.json5");
+        let _config =
+            crate::config::SnmpSensorConfig::load(path).expect("configs/snmp.json5 must load");
+    }
+}

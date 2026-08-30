@@ -128,33 +128,15 @@ storage) and `describe-missing` (not every producer is running) all fire at
 exemptions for `{var...}` families. A gate that reddens on those is a gate
 nobody keeps.
 
-**`field-new` is excluded — zenkey#384.** This is the one exclusion, and it is
-an upstream bug, not a ZenSight one:
-
-> `schema_drift`'s declared-field-path walker descends `properties` and does
-> **not** descend `oneOf`/`anyOf`. Every ZenSight telemetry payload carries a
-> `TelemetryValue`, an adjacently-tagged enum
-> (`#[serde(tag = "type", content = "value")]`), which schemars renders as a
-> `oneOf` whose branches each declare `type` and `value` as `required`. The
-> walker never reaches those branches, concludes the paths were never declared,
-> and emits `field-new` at **warning** severity for `<key> · value.type` and
-> `<key> · value.value` on every telemetry key it observes.
-
-Confirmed both ways: 141 such warnings on a four-producer deployment, 21 on the
-one-sensor CI deployment — and the served schema really does declare both
-(`zenctl interface show TelemetryPoint --schema --full` renders the `oneOf`
-branches with `"required": ["type", "value"]`). Without the exclusion
-`--fail-on warning` is unusable, and a gate nobody can turn on protects
-nothing.
-
-**The exclusion lifts when zenkey#384 lands.** Delete the entry from
-`gate::DEFAULT_EXCLUDED`, flip
-`gate::tests::field_new_is_excluded_until_zenkey_384_lands`, done. To check
-whether it has landed without touching code:
-
-```bash
-zensight-conformance --connect … --registry … --deny field-new
-```
+**Nothing is excluded by default (since #845).** The list held exactly one
+entry for one release: `field-new`, excluded while upstream's declared-path
+walker could not descend `oneOf`/`anyOf` (zenkey#384) and therefore emitted
+two false warnings per observed telemetry key. The fix shipped in zenkey-fleet
+0.11.1 — the walker now unions `oneOf`/`anyOf`/`allOf` and resolves `$ref` —
+and the exclusion then sat stale for a release because nothing re-checked its
+lift-condition. #845 lifted it and left this rule behind: **an exclusion may
+only enter `gate::DEFAULT_EXCLUDED` naming the upstream issue AND paired with
+a re-check that can notice the lift.**
 
 Nothing else is excluded. `--allow <check-id>` adds an exclusion for one run;
 `--list-checks` prints the vocabulary.

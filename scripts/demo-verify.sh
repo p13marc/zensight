@@ -74,7 +74,7 @@ die() {
 }
 
 echo "==> building"
-cargo build $relflag -p zensight-exporter-prometheus -p zensight-sensor-sysinfo >/dev/null
+cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-sensor-sysinfo >/dev/null
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
 require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-sensor-sysinfo"

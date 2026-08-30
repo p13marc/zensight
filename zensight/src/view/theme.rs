@@ -217,6 +217,14 @@ impl<'a> ThemeColors<'a> {
         Color::from_rgba(1.0, 0.6, 0.0, 0.8)
     }
 
+    /// Ink for text ON the [`chart_feedback`](Self::chart_feedback) badge —
+    /// theme-independent like its background (dark ink on amber reads in
+    /// both themes). Was a bare `Color::BLACK` at the call site, the one
+    /// live violation the widened D2 guard caught (#845).
+    pub fn chart_feedback_text(&self) -> Color {
+        Color::BLACK
+    }
+
     // ========================================================================
     // Topology Graph Colors (canvas — categorical node/ring palette + chrome)
     // ========================================================================

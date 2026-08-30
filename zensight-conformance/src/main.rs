@@ -106,8 +106,9 @@ struct Args {
     #[arg(long = "allow", value_name = "CHECK-ID")]
     allow: Vec<String>,
 
-    /// Put a built-in exclusion back under the gate (repeatable). `--deny
-    /// field-new` is how you find out whether zenkey#384 has landed.
+    /// Put a built-in exclusion back under the gate (repeatable). The
+    /// built-in list is empty since #845; this stays as the lever for
+    /// whenever an exclusion returns.
     #[arg(long = "deny", value_name = "CHECK-ID")]
     deny: Vec<String>,
 
@@ -418,9 +419,9 @@ fn print_summary(report: &DoctorReport, verdict: &Verdict, gate: &Gate) {
             verdict.excluded.len(),
             ids.join(", ")
         );
-        println!("   Not clean, just not gated. `field-new` is upstream zenkey#384 (the");
-        println!("   schema-drift walker does not descend `oneOf`); the exclusion lifts when");
-        println!("   that lands. Re-check with --deny field-new.");
+        println!("   Not clean, just not gated. Every id here came from --allow (the");
+        println!("   built-in exclusion list is empty since #845); drop the flag to");
+        println!("   put a check back under the gate.");
         summarize(&verdict.excluded);
     }
 

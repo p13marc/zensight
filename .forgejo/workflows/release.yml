@@ -18,11 +18,17 @@ env:
   RUSTC_WRAPPER: /srv/cache/bin/sccache
   CARGO_INCREMENTAL: "0"
 
+concurrency:
+  # a re-dispatched release must queue behind the running one, not race it
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
       - name: Resolve release tag
@@ -87,6 +93,7 @@ jobs:
   images:
     needs: release
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     container:
       image: rust:1.97-bookworm
     env:
@@ -256,11 +263,12 @@ jobs:
     # that is silently wiped (lost the 0.9.0 bundle that way).
     needs: release
     runs-on: flatpak
+    timeout-minutes: 120
     env:
       # SDK/runtime installs persist on the runner cache disk
       FLATPAK_USER_DIR: /srv/cache/flatpak/inst
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
       - name: Resolve release tag
@@ -317,6 +325,7 @@ jobs:
   checksums:
     needs: [images, flatpak]
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - name: Publish SHA256SUMS over all release assets
         run: |
