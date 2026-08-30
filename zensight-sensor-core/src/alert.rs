@@ -326,7 +326,12 @@ impl AlertReporter {
         let payload = encode(alert, self.format)
             .map_err(|e| crate::error::SensorError::Serialization(e.to_string()))?;
         self.publisher
-            .publish_raw(&key, payload, zensight_common::QosClass::Alert)
+            .publish_raw(
+                &key,
+                payload,
+                zensight_common::QosClass::Alert,
+                self.format.encoding(),
+            )
             .await
     }
 }
@@ -364,7 +369,10 @@ pub async fn serve_alerts_query(reporter: std::sync::Arc<AlertReporter>) {
         );
         for alert in firing {
             let key = reporter.alert_key_expr(&alert.alert_key());
-            match serde_json::to_vec(&alert) {
+            // The seed must ride the same format as the live samples on the
+            // key — a JSON seed under CBOR puts (or vice versa) is schema
+            // drift a consumer can only see as a decode failure (#830).
+            match encode(&alert, reporter.format) {
                 Ok(payload) => {
                     // One reply per firing alert on its concrete state key —
                     // storage-shaped (RFC 05 §2.1 reply-key discipline), and
