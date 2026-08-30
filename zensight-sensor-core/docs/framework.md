@@ -277,6 +277,51 @@ Every `self_stats` field is optional and serde-defaulted: an older sensor's
 health doc simply has no `self_stats`, and absent always reads as *not
 measured*.
 
+### The memory governor and its shed ladder (#812)
+
+#811 taught a sensor to see itself; the governor (`governor.rs`) teaches it
+to act. A sensor over its budget **sheds instead of dying** — an agent that
+exits under resource pressure removes the evidence at the exact moment it
+becomes interesting. The runner drives one ladder step per health tick, on
+the same measurement it publishes:
+
+| Step | Meaning |
+|---|---|
+| 0 | nominal |
+| 1 | **Evict** — LRU from the largest registered table first, down to 75 % of budget, then `malloc_trim` so RSS actually returns to the kernel |
+| 2 | **Degrade** — registered optional work stopped (`apply(true)`), entered at ≥ 95 % or after 3 stuck ticks of eviction |
+| 3 | **Saturated** — everything shed, still over: the loudest possible report |
+
+There is no step 4. Thresholds agree with `budget_level` (80/95/75), so the
+`sensor-budget` alert and the ladder describe one condition. Recovery walks
+down with hysteresis (< 75 % for 6 ticks per step, restore fanned on leaving
+step 2), with a 2-tick cool-down between transitions.
+
+**Sensor wiring** (netring is the exemplar):
+
+- `runner.governor().register_table(TableHandle { name, stats, evict })` —
+  `stats` is a cheap occupancy read (joins the health doc's `tables`);
+  `evict` frees ~N bytes LRU-first and returns what was *actually* freed.
+  A table registers here **or** via `register_table_stats`, never both:
+  governor handles may take hot-path mutexes, which the health-lock
+  providers' contract forbids.
+- `runner.governor().register_degradable(name, apply)` — idempotent
+  stop/restore of optional work.
+- `runner.with_alert_reporter(reporter)` — hand the runner the sensor's own
+  reporter so `sensor-budget` alerts land in the `serve_alerts_query` seed.
+
+**Budget**: config (`SensorConfig::budget_bytes()`) always wins; with none
+declared, the first tick discovers `cgroup memory.max ×
+CGROUP_BUDGET_FRACTION` (0.75) — the container default, so the ladder cannot
+disagree with the operator's drop-in. No budget and no cgroup limit = the
+ladder never arms and nothing changes.
+
+**Reporting**: the ladder's state (`self_stats.ladder`: step, cumulative
+per-table evictions, degraded list, a human `reason`) publishes every tick —
+a silently degraded sensor is a lying sensor. From step 2 the health
+`status` itself upgrades to `Degraded` (`ladder_status`; step 1 is normal
+operation and deliberately does not recolor the fleet card).
+
 ## Alert reporting
 
 `alert.rs` — `AlertReporter` is the sensor-side counterpart to

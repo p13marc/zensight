@@ -14,6 +14,7 @@ use zensight_common::{
     NameObservation, QuicRecord, SshRecord, TelemetryPoint, TlsRecord,
 };
 
+use crate::bounded::{self, BoundedTable};
 use crate::command::DetectorHandle;
 use crate::config::AnomalyConfig;
 
@@ -36,11 +37,6 @@ pub const FLOW_RING_CAP: usize = 512;
 
 /// Max recent elephant flows retained for `@rpc/netring/elephant_flows`.
 pub const ELEPHANT_RING_CAP: usize = 128;
-
-/// Cardinality guards for the on-demand inventories (DNS / HTTP). Talkers now
-/// come from netring's bounded `aggregate()` state (#369), not a local histogram.
-const DNS_INV_CAP: usize = 8192;
-const HTTP_INV_CAP: usize = 4096;
 
 use flowscope::correlate::DdSketch;
 // The FQDN-pivoted beacon (#308) still keys a RITA detector on the resolved DNS
@@ -74,13 +70,17 @@ const OWNER_BW_TOP: usize = 100;
 /// Bounded ring of recent elephant (large) flows.
 pub type ElephantRing = Arc<Mutex<VecDeque<ElephantRecord>>>;
 /// Passive TLS fingerprint inventory: (sni, ja4) → record with a hit count.
-pub type TlsInventory = Arc<Mutex<HashMap<(String, String), TlsRecord>>>;
+/// Byte-bounded LRU (#814): budget `tables.tls_max_bytes`.
+pub type TlsInventory = Arc<Mutex<BoundedTable<(String, String), TlsRecord>>>;
 /// DNS SLD inventory: `sld -> (queries, nxdomain)` for `@rpc/netring/dns`.
-pub type DnsInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
+/// Byte-bounded LRU (#814): budget `tables.dns_max_bytes`.
+pub type DnsInventory = Arc<Mutex<BoundedTable<String, (u64, u64)>>>;
 /// HTTP host inventory: `host -> (requests, errors)` for `@rpc/netring/http`.
-pub type HttpInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
+/// Byte-bounded LRU (#814): budget `tables.http_max_bytes`.
+pub type HttpInventory = Arc<Mutex<BoundedTable<String, (u64, u64)>>>;
 /// Passive asset inventory: `mac -> AssetRecord` for `@rpc/netring/assets` (issue #70).
-pub type AssetInventory = Arc<Mutex<HashMap<String, AssetRecord>>>;
+/// Byte-bounded LRU (#814): budget `tables.assets_max_bytes`.
+pub type AssetInventory = Arc<Mutex<BoundedTable<String, AssetRecord>>>;
 
 /// Wire-level owner-bandwidth shared state (#318, opt-in). The
 /// [`with_flow_attribution`](netring::monitor::MonitorBuilder::with_flow_attribution)
@@ -102,34 +102,144 @@ pub struct OwnerBandwidth {
 /// task swaps it out each tick to publish only what moved.
 pub type AssetDirty = Arc<Mutex<std::collections::HashSet<String>>>;
 /// Per-flow in-flight HTTP request state: `flow -> (request_start_ms, host)`,
-/// used to derive request→response latency and attribute response status.
-type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
+/// used to derive request→response latency and attribute response status. The
+/// stored start is *event* time (ms), which doubles as the TTL clock: a flow
+/// whose response never arrives is swept once it ages past
+/// [`HTTP_PENDING_TTL_MS`] (#814 — before that, unmatched flows leaked forever).
+pub type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
 /// Passive QUIC SNI/ALPN inventory: (sni, version) → record for `@rpc/netring/quic` (#72).
-pub type QuicInventory = Arc<Mutex<HashMap<(String, String), QuicRecord>>>;
+/// Byte-bounded LRU (#814): budget `tables.fp_max_bytes / 4`.
+pub type QuicInventory = Arc<Mutex<BoundedTable<(String, String), QuicRecord>>>;
 /// Passive SSH/HASSH inventory: hassh → record for `@rpc/netring/ssh` (#72).
-pub type SshInventory = Arc<Mutex<HashMap<String, SshRecord>>>;
+/// Byte-bounded LRU (#814): budget `tables.fp_max_bytes / 4`.
+pub type SshInventory = Arc<Mutex<BoundedTable<String, SshRecord>>>;
 /// Passive JA4H HTTP-fingerprint inventory: ja4h → record for `@rpc/netring/ja4h`
 /// (#124, only populated with `--features ja4plus`).
-pub type Ja4hInventory = Arc<Mutex<HashMap<String, Ja4hRecord>>>;
+/// Byte-bounded LRU (#814): budget `tables.fp_max_bytes / 4`.
+pub type Ja4hInventory = Arc<Mutex<BoundedTable<String, Ja4hRecord>>>;
 /// Shared passive-DNS name cache (issue #308): IP → provenance-tagged name
 /// claims, fed by the DNS answer handler and read at flow end / talker query
 /// time. `None` when `names.enabled` is off or `collect.dns` is off.
 pub type SharedNameMap = Arc<Mutex<NameMap>>;
 
-/// Max distinct TLS fingerprints retained (cardinality guard).
-const TLS_INVENTORY_CAP: usize = 4096;
-
-/// Cardinality guards for the QUIC (sni,version) and SSH (hassh) inventories.
-const QUIC_INVENTORY_CAP: usize = 4096;
-const SSH_INVENTORY_CAP: usize = 4096;
-const ENC_DNS_INVENTORY_CAP: usize = 4096;
-/// Cardinality guard for the JA4H HTTP-fingerprint inventory (#124). Only the
-/// `ja4plus`-gated capture path consults it; unused in the default build.
-#[cfg(feature = "ja4plus")]
-const JA4H_INVENTORY_CAP: usize = 4096;
-/// LRU capacity of the passive asset inventory (MAC-keyed) — matches the bound
-/// on the served `@rpc/netring/assets` map (issue #70).
+/// Entry cap handed to **netring's own** MAC-keyed discovery inventory
+/// (`MonitorBuilder::asset_inventory`, issue #70). Our served mirror is
+/// byte-bounded (`tables.assets_max_bytes`, #814); netring's internal map only
+/// takes an entry count, so this stays.
 const ASSET_INVENTORY_CAP: usize = 8192;
+
+/// In-flight HTTP request cap (#814): pending entries above this are refused.
+/// The TTL sweep below keeps a live capture far under it; the cap is the
+/// backstop for a response-less flood inside one TTL window.
+const HTTP_PENDING_CAP: usize = 8192;
+/// Event-time TTL for an unmatched HTTP request (#814): past this, the response
+/// is never coming (or arrived unparsable) and the entry is leak, not state.
+const HTTP_PENDING_TTL_MS: u64 = 30_000;
+/// Occupancy above which the insert path sweeps expired pending entries. Below
+/// it the map is small enough that expired stragglers are noise, and the O(n)
+/// `retain` never runs on a healthy request/response mix.
+const HTTP_PENDING_SWEEP_LEN: usize = 4096;
+/// Floor between two pending sweeps (event-time ms), so a sustained >4096-entry
+/// working set can't turn every insert into an O(n) scan.
+const HTTP_PENDING_SWEEP_INTERVAL_MS: u64 = 1_000;
+
+/// Drop pending HTTP requests older than [`HTTP_PENDING_TTL_MS`] of event time.
+/// Free function so the sweep predicate is unit-testable without a capture.
+fn sweep_http_pending(p: &mut HashMap<FiveTupleKey, (u64, Option<String>)>, now_ms: u64) {
+    p.retain(|_, (start, _)| now_ms.saturating_sub(*start) <= HTTP_PENDING_TTL_MS);
+}
+
+// ── per-table entry-size estimators (#814) ──────────────────────────────────
+// Shallow `(K, V)` struct size + every String/Vec heap allocation, per
+// bounded.rs's contract: an adversary sending max-size records raises the
+// per-entry cost and thereby lowers the entry count the byte budget admits.
+
+fn tls_entry_bytes(k: &(String, String), v: &TlsRecord) -> usize {
+    std::mem::size_of::<((String, String), TlsRecord)>()
+        + bounded::str_heap(&k.0)
+        + bounded::str_heap(&k.1)
+        + bounded::opt_str_heap(&v.sni)
+        + bounded::opt_str_heap(&v.alpn)
+        + bounded::opt_str_heap(&v.ja3)
+        + bounded::opt_str_heap(&v.ja4)
+        + bounded::opt_str_heap(&v.app_protocol)
+}
+
+// `&String` is forced: the estimator must be a `fn(&K, &V)` with `K = String`.
+#[allow(clippy::ptr_arg)]
+fn dns_entry_bytes(k: &String, _v: &(u64, u64)) -> usize {
+    std::mem::size_of::<(String, (u64, u64))>() + bounded::str_heap(k)
+}
+
+// `&String` is forced: the estimator must be a `fn(&K, &V)` with `K = String`.
+#[allow(clippy::ptr_arg)]
+fn http_entry_bytes(k: &String, _v: &(u64, u64)) -> usize {
+    std::mem::size_of::<(String, (u64, u64))>() + bounded::str_heap(k)
+}
+
+// `&String` is forced: the estimator must be a `fn(&K, &V)` with `K = String`.
+#[allow(clippy::ptr_arg)]
+fn asset_entry_bytes(k: &String, v: &AssetRecord) -> usize {
+    std::mem::size_of::<(String, AssetRecord)>()
+        + bounded::str_heap(k)
+        + bounded::str_heap(&v.mac)
+        + bounded::vec_str_heap(&v.ipv4)
+        + bounded::vec_str_heap(&v.ipv6)
+        + bounded::opt_str_heap(&v.hostname)
+        + bounded::opt_str_heap(&v.vendor)
+        + bounded::opt_str_heap(&v.platform)
+        + bounded::vec_str_heap(&v.capabilities)
+        + bounded::vec_str_heap(&v.seen_via)
+        + bounded::str_heap(&v.role)
+        + bounded::vec_str_heap(&v.hostnames)
+        + bounded::opt_str_heap(&v.ja3)
+        + bounded::opt_str_heap(&v.ja4)
+        + bounded::opt_str_heap(&v.hassh)
+        + bounded::opt_str_heap(&v.p0f)
+        + bounded::opt_str_heap(&v.x509_subject)
+        + bounded::vec_str_heap(&v.x509_sans)
+}
+
+fn quic_entry_bytes(k: &(String, String), v: &QuicRecord) -> usize {
+    std::mem::size_of::<((String, String), QuicRecord)>()
+        + bounded::str_heap(&k.0)
+        + bounded::str_heap(&k.1)
+        + bounded::opt_str_heap(&v.sni)
+        + bounded::vec_str_heap(&v.alpn)
+        + bounded::str_heap(&v.version)
+        + bounded::opt_str_heap(&v.ja4)
+        + bounded::opt_str_heap(&v.app_protocol)
+}
+
+// `&String` is forced: the estimator must be a `fn(&K, &V)` with `K = String`.
+#[allow(clippy::ptr_arg)]
+fn ssh_entry_bytes(k: &String, v: &SshRecord) -> usize {
+    std::mem::size_of::<(String, SshRecord)>()
+        + bounded::str_heap(k)
+        + bounded::str_heap(&v.hassh)
+        + bounded::str_heap(&v.role)
+        + bounded::opt_str_heap(&v.banner)
+        + bounded::vec_str_heap(&v.kex_algorithms)
+}
+
+fn enc_dns_entry_bytes(k: &(String, String), v: &EncryptedDnsRecord) -> usize {
+    std::mem::size_of::<((String, String), EncryptedDnsRecord)>()
+        + bounded::str_heap(&k.0)
+        + bounded::str_heap(&k.1)
+        + bounded::str_heap(&v.transport)
+        + bounded::opt_str_heap(&v.sni)
+}
+
+// `&String` is forced: the estimator must be a `fn(&K, &V)` with `K = String`.
+#[allow(clippy::ptr_arg)]
+fn ja4h_entry_bytes(k: &String, v: &Ja4hRecord) -> usize {
+    std::mem::size_of::<(String, Ja4hRecord)>()
+        + bounded::str_heap(k)
+        + bounded::str_heap(&v.ja4h)
+        + bounded::opt_str_heap(&v.host)
+        + bounded::opt_str_heap(&v.method)
+        + bounded::opt_str_heap(&v.user_agent)
+}
 
 /// A bounded DDSketch for RED latency / duration percentiles (#325): O(1)
 /// insert, ~512 log-spaced bins at 1% relative error. Replaces the per-window
@@ -170,7 +280,6 @@ impl RedSketch {
 }
 
 /// DNS RED accumulators shared across the capture path and the drain.
-#[derive(Default)]
 pub struct DnsState {
     pub queries: AtomicU64,
     pub unanswered: AtomicU64,
@@ -185,10 +294,27 @@ pub struct DnsState {
     pub inventory: DnsInventory,
 }
 
+impl DnsState {
+    /// The inventory's byte budget is the one non-defaultable part (#814), so
+    /// the whole state is built from it.
+    pub fn with_cap(max_bytes: usize) -> Self {
+        Self {
+            queries: AtomicU64::new(0),
+            unanswered: AtomicU64::new(0),
+            noerror: AtomicU64::new(0),
+            nxdomain: AtomicU64::new(0),
+            servfail: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            rcode_other: AtomicU64::new(0),
+            rtt_ms: Mutex::new(RedSketch::default()),
+            inventory: Arc::new(Mutex::new(BoundedTable::new(max_bytes, dns_entry_bytes))),
+        }
+    }
+}
+
 /// Encrypted-DNS (DoT/DoQ/DoH) accumulators (#326). Session counts per transport
 /// plus the un-known-resolver subset (the tunneling / policy-bypass signal), and a
 /// bounded per-(transport, sni) inventory served on `@rpc/netring/encrypted_dns`.
-#[derive(Default)]
 pub struct EncDnsState {
     pub dot: AtomicU64,
     pub doq: AtomicU64,
@@ -196,11 +322,23 @@ pub struct EncDnsState {
     /// Sessions whose destination did NOT match a known public resolver.
     pub unknown_resolver: AtomicU64,
     /// Keyed by `(transport, sni)` → the served [`EncryptedDnsRecord`].
-    pub inventory: Mutex<HashMap<(String, String), EncryptedDnsRecord>>,
+    /// Byte-bounded LRU (#814): budget `tables.fp_max_bytes / 4`.
+    pub inventory: Mutex<BoundedTable<(String, String), EncryptedDnsRecord>>,
+}
+
+impl EncDnsState {
+    pub fn with_cap(max_bytes: usize) -> Self {
+        Self {
+            dot: AtomicU64::new(0),
+            doq: AtomicU64::new(0),
+            doh: AtomicU64::new(0),
+            unknown_resolver: AtomicU64::new(0),
+            inventory: Mutex::new(BoundedTable::new(max_bytes, enc_dns_entry_bytes)),
+        }
+    }
 }
 
 /// HTTP RED accumulators shared across the capture path and the drain.
-#[derive(Default)]
 pub struct HttpState {
     pub requests: AtomicU64,
     pub status_2xx: AtomicU64,
@@ -213,6 +351,21 @@ pub struct HttpState {
     pub latency_ms: Mutex<RedSketch>,
     /// Per-host inventory for the on-demand top-hosts channel.
     pub inventory: HttpInventory,
+}
+
+impl HttpState {
+    pub fn with_cap(max_bytes: usize) -> Self {
+        Self {
+            requests: AtomicU64::new(0),
+            status_2xx: AtomicU64::new(0),
+            status_3xx: AtomicU64::new(0),
+            status_4xx: AtomicU64::new(0),
+            status_5xx: AtomicU64::new(0),
+            methods: Mutex::new(HashMap::new()),
+            latency_ms: Mutex::new(RedSketch::default()),
+            inventory: Arc::new(Mutex::new(BoundedTable::new(max_bytes, http_entry_bytes))),
+        }
+    }
 }
 
 /// Per-L4 + connection-state breakdown accumulators (issue #16).
@@ -322,6 +475,19 @@ pub struct MonitorChannels {
     /// iff `bandwidth_attribution` is enabled. Taken by `main` to drive the
     /// off-hook socket-table refresh and the `@rpc/netring/bandwidth` queryable.
     pub owner_bandwidth: Option<OwnerBandwidth>,
+    /// In-flight HTTP request map (#814): `Some` iff `collect.http`, so `main`
+    /// can register its occupancy with the governor (stats-only — the TTL sweep
+    /// on the insert path is what bounds it).
+    pub http_pending: Option<HttpPending>,
+    /// Tracked-series count of the FQDN beacon detector (#814): `Some` iff the
+    /// detector is armed. Written after each stale-eviction pass, read by the
+    /// governor's stats provider — absent (unarmed) is "not measured", never 0.
+    pub fqdn_beacon_tracked: Option<Arc<AtomicU64>>,
+    /// Degrade switch for the anomaly detectors (#812/#814): while set, the
+    /// `Tuned` registry hooks and the FQDN beacon hook return without observing —
+    /// stopping both their CPU and their state growth. Flipped only by the
+    /// memory governor's Degrade step.
+    pub detectors_shed: Arc<AtomicBool>,
 }
 
 /// Flow exporter that captures netring's canonical `FlowRecord` into a bounded
@@ -364,7 +530,18 @@ struct FqdnBeacon {
     detector: RitaBeaconDetector<String>,
     memo: HashMap<FiveTupleKey, Option<FqdnTarget>>,
     last_emit: HashMap<String, flowscope::Timestamp>,
+    /// Last stale-eviction pass, in event time (#814). The detector's per-name
+    /// series were unbounded before: `evict_stale` existed upstream but was
+    /// never driven.
+    last_evict: flowscope::Timestamp,
 }
+
+/// Event-time floor between two `evict_stale` passes over the FQDN beacon's
+/// per-name series (#814).
+const FQDN_BEACON_EVICT_INTERVAL: Duration = Duration::from_secs(60);
+/// TTL for a beacon name series with no new samples — matches the 24 h the
+/// flowscope registry impls use, beyond the longest scoreable beacon interval.
+const FQDN_BEACON_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A resolved beacon target: the server endpoint's best forward name plus the
 /// client/server IPs (derived from which flow endpoint carried the claim).
@@ -667,18 +844,33 @@ pub fn build(
     let tcp_refused = Arc::new(AtomicU64::new(0));
     let tls_handshakes = Arc::new(AtomicU64::new(0));
     let tls_pq_handshakes = Arc::new(AtomicU64::new(0));
-    let tls_inventory: TlsInventory = Arc::new(Mutex::new(HashMap::new()));
-    let enc_dns = Arc::new(EncDnsState::default());
+    // Byte budgets (#814): each inventory holds a `BoundedTable` sized from
+    // `tables`; the four fingerprint inventories split `fp_max_bytes` evenly.
+    let tables = &cfg.tables;
+    let fp_quarter = (tables.fp_max_bytes / 4).max(1);
+    let tls_inventory: TlsInventory = Arc::new(Mutex::new(BoundedTable::new(
+        tables.tls_max_bytes,
+        tls_entry_bytes,
+    )));
+    let enc_dns = Arc::new(EncDnsState::with_cap(fp_quarter));
     let l4 = Arc::new(L4State::default());
     let icmp = Arc::new(IcmpState::default());
-    let dns = Arc::new(DnsState::default());
-    let http = Arc::new(HttpState::default());
+    let dns = Arc::new(DnsState::with_cap(tables.dns_max_bytes));
+    let http = Arc::new(HttpState::with_cap(tables.http_max_bytes));
     let aggregate: AggregateState = Arc::new(Mutex::new(Default::default()));
     let elephants: ElephantRing = Arc::new(Mutex::new(VecDeque::with_capacity(ELEPHANT_RING_CAP)));
-    let quic: QuicInventory = Arc::new(Mutex::new(HashMap::new()));
-    let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
-    let ja4h_fp: Ja4hInventory = Arc::new(Mutex::new(HashMap::new()));
-    let assets: AssetInventory = Arc::new(Mutex::new(HashMap::new()));
+    let quic: QuicInventory = Arc::new(Mutex::new(BoundedTable::new(fp_quarter, quic_entry_bytes)));
+    let ssh: SshInventory = Arc::new(Mutex::new(BoundedTable::new(fp_quarter, ssh_entry_bytes)));
+    let ja4h_fp: Ja4hInventory =
+        Arc::new(Mutex::new(BoundedTable::new(fp_quarter, ja4h_entry_bytes)));
+    let assets: AssetInventory = Arc::new(Mutex::new(BoundedTable::new(
+        tables.assets_max_bytes,
+        asset_entry_bytes,
+    )));
+    // Degrade switch (#812): observed by every detector hook, flipped by the
+    // governor. Constructed unconditionally — an unarmed registry just never
+    // reads it.
+    let detectors_shed = Arc::new(AtomicBool::new(false));
     let asset_dirty: AssetDirty = Arc::new(Mutex::new(std::collections::HashSet::new()));
     // Passive-DNS name cache (issue #308): only built when the DNS answer
     // stream exists to feed it. Bounded (LRU IPs × per-IP claim cap).
@@ -690,6 +882,10 @@ pub fn build(
     // Passive-DNS name-observation channel (#307): set to `Some` inside the
     // name-map drain task below (only when the map exists) and handed to `main`.
     let mut name_obs_rx: Option<mpsc::UnboundedReceiver<Vec<NameObservation>>> = None;
+    // Governor-facing occupancy handles (#814): `Some` only when the owning
+    // collector is armed — absent means "not measured", never zero.
+    let mut http_pending: Option<HttpPending> = None;
+    let mut fqdn_beacon_tracked: Option<Arc<AtomicU64>> = None;
 
     let mut b = Monitor::builder();
     b = b.name(cfg.source.clone());
@@ -1124,22 +1320,19 @@ pub fn build(
                 fp.ja4.clone().unwrap_or_default(),
             );
             if let Ok(mut inv) = inventory.lock() {
-                if let Some(rec) = inv.get_mut(&key) {
-                    rec.count += 1;
-                } else if inv.len() < TLS_INVENTORY_CAP {
-                    inv.insert(
-                        key,
-                        TlsRecord {
-                            sni: fp.sni.clone(),
-                            alpn: fp.alpn.clone(),
-                            ja3: fp.ja3.clone(),
-                            ja4: fp.ja4.clone(),
-                            count: 1,
-                            pq_key_share: fp.pq_key_share,
-                            app_protocol: Some(fp.app_protocol.as_str().to_string()),
-                        },
-                    );
-                }
+                inv.upsert(
+                    key,
+                    || TlsRecord {
+                        sni: fp.sni.clone(),
+                        alpn: fp.alpn.clone(),
+                        ja3: fp.ja3.clone(),
+                        ja4: fp.ja4.clone(),
+                        count: 0,
+                        pq_key_share: fp.pq_key_share,
+                        app_protocol: Some(fp.app_protocol.as_str().to_string()),
+                    },
+                    |rec| rec.count += 1,
+                );
             }
             Ok(())
         });
@@ -1159,11 +1352,7 @@ pub fn build(
                         && let Some(sld) = map::dns_sld(&question.name)
                         && let Ok(mut inv) = dns_h.inventory.lock()
                     {
-                        if let Some(e) = inv.get_mut(&sld) {
-                            e.0 += 1;
-                        } else if inv.len() < DNS_INV_CAP {
-                            inv.insert(sld, (1, 0));
-                        }
+                        inv.upsert(sld, || (0, 0), |e| e.0 += 1);
                     }
                 }
                 DnsMessage::Response(r) => {
@@ -1180,13 +1369,15 @@ pub fn build(
                         v.record(rtt.as_millis() as u64);
                     }
                     // NXDOMAIN tally per SLD for the on-demand top-NXDOMAIN view.
+                    // Upsert (not bump-if-present): after an LRU eviction the
+                    // response's SLD may be gone, and the NXDOMAIN signal is
+                    // exactly what shouldn't vanish with it (#814).
                     if matches!(r.rcode, DnsRcode::NXDomain)
                         && let Some(question) = r.questions.first()
                         && let Some(sld) = map::dns_sld(&question.name)
                         && let Ok(mut inv) = dns_h.inventory.lock()
-                        && let Some(e) = inv.get_mut(&sld)
                     {
-                        e.1 += 1;
+                        inv.upsert(sld, || (0, 0), |e| e.1 += 1);
                     }
                 }
                 DnsMessage::Unanswered(_) => {
@@ -1272,8 +1463,12 @@ pub fn build(
         let http_h = http.clone();
         // Per-flow request-start timestamps (ms) keyed by flow, to derive
         // request→response latency, and the request's Host so the response can
-        // attribute its status to the right host. Bounded; cleared on match.
+        // attribute its status to the right host. Cleared on match; unmatched
+        // entries are TTL-swept on the insert path (#814).
         let pending: HttpPending = Arc::new(Mutex::new(HashMap::new()));
+        http_pending = Some(pending.clone());
+        // Event-time of the last TTL sweep (interior mutability: the hook is `Fn`).
+        let pending_last_sweep = AtomicU64::new(0);
         b = b.on_ctx::<Http>(move |msg: &HttpMessage, ctx: &mut Ctx<'_>| {
             let now_ms = (ctx.ts.to_unix_f64() * 1000.0) as u64;
             let flow = ctx.flow;
@@ -1291,14 +1486,24 @@ pub fn build(
                     let host = req.host().map(|h| h.to_string());
                     if let Some(host) = &host
                         && let Ok(mut inv) = http_h.inventory.lock()
-                        && (inv.contains_key(host) || inv.len() < HTTP_INV_CAP)
                     {
-                        inv.entry(host.clone()).or_insert((0, 0)).0 += 1;
+                        inv.upsert(host.clone(), || (0, 0), |e| e.0 += 1);
                     }
-                    if let (Some(k), Ok(mut p)) = (flow, pending.lock())
-                        && p.len() < 65_536
-                    {
-                        p.insert(k, (now_ms, host));
+                    if let (Some(k), Ok(mut p)) = (flow, pending.lock()) {
+                        // TTL sweep (#814), rate-limited twice: only above the
+                        // occupancy floor, and at most once per second of event
+                        // time — a persistent >floor working set must not make
+                        // every request an O(n) scan.
+                        if p.len() > HTTP_PENDING_SWEEP_LEN
+                            && now_ms.saturating_sub(pending_last_sweep.load(Ordering::Relaxed))
+                                >= HTTP_PENDING_SWEEP_INTERVAL_MS
+                        {
+                            pending_last_sweep.store(now_ms, Ordering::Relaxed);
+                            sweep_http_pending(&mut p, now_ms);
+                        }
+                        if p.len() < HTTP_PENDING_CAP {
+                            p.insert(k, (now_ms, host));
+                        }
                     }
                 }
                 HttpMessage::Response(resp) => {
@@ -1318,12 +1523,13 @@ pub fn build(
                             v.record(lat);
                         }
                         // Attribute a 4xx/5xx to the request's Host (top-hosts).
+                        // Upsert: an evicted host's error must re-admit the row,
+                        // not vanish (#814).
                         if is_err
                             && let Some(host) = host
                             && let Ok(mut inv) = http_h.inventory.lock()
-                            && let Some(e) = inv.get_mut(&host)
                         {
-                            e.1 += 1;
+                            inv.upsert(host, || (0, 0), |e| e.1 += 1);
                         }
                     }
                 }
@@ -1348,22 +1554,19 @@ pub fn build(
             let version = fp.version.clone();
             let key = (fp.sni.clone().unwrap_or_default(), version.clone());
             if let Ok(mut m) = inv.lock() {
-                if let Some(rec) = m.get_mut(&key) {
-                    rec.count += 1;
-                } else if m.len() < QUIC_INVENTORY_CAP {
-                    m.insert(
-                        key,
-                        QuicRecord {
-                            sni: fp.sni.clone(),
-                            alpn: fp.alpn.clone().into_iter().collect(),
-                            version,
-                            count: 1,
-                            ja4: fp.ja4.clone(),
-                            pq_key_share: fp.pq_key_share,
-                            app_protocol: Some(fp.app_protocol.as_str().to_string()),
-                        },
-                    );
-                }
+                m.upsert(
+                    key,
+                    || QuicRecord {
+                        sni: fp.sni.clone(),
+                        alpn: fp.alpn.clone().into_iter().collect(),
+                        version,
+                        count: 0,
+                        ja4: fp.ja4.clone(),
+                        pq_key_share: fp.pq_key_share,
+                        app_protocol: Some(fp.app_protocol.as_str().to_string()),
+                    },
+                    |rec| rec.count += 1,
+                );
             }
             Ok(())
         });
@@ -1383,23 +1586,22 @@ pub fn build(
                 // client keeps the offered KEXINIT list, banners map by position.
                 let mut upsert =
                     |hassh: &str, role: &str, banner: Option<String>, kex: Vec<String>| {
-                        if let Some(rec) = m.get_mut(hassh) {
-                            rec.count += 1;
-                            if rec.banner.is_none() {
-                                rec.banner = banner;
-                            }
-                        } else if m.len() < SSH_INVENTORY_CAP {
-                            m.insert(
-                                hassh.to_string(),
-                                SshRecord {
-                                    hassh: hassh.to_string(),
-                                    role: role.to_string(),
-                                    banner,
-                                    count: 1,
-                                    kex_algorithms: kex,
-                                },
-                            );
-                        }
+                        m.upsert(
+                            hassh.to_string(),
+                            || SshRecord {
+                                hassh: hassh.to_string(),
+                                role: role.to_string(),
+                                banner: None,
+                                count: 0,
+                                kex_algorithms: kex,
+                            },
+                            |rec| {
+                                rec.count += 1;
+                                if rec.banner.is_none() {
+                                    rec.banner = banner;
+                                }
+                            },
+                        );
                     };
                 if let Some(h) = &fp.hassh {
                     upsert(
@@ -1453,19 +1655,16 @@ pub fn build(
             }
             if let Ok(mut inv) = state.inventory.lock() {
                 let key = (transport.clone(), fp.sni.clone().unwrap_or_default());
-                if let Some(rec) = inv.get_mut(&key) {
-                    rec.count += 1;
-                } else if inv.len() < ENC_DNS_INVENTORY_CAP {
-                    inv.insert(
-                        key,
-                        EncryptedDnsRecord {
-                            transport: transport.clone(),
-                            sni: fp.sni.clone(),
-                            via_known_resolver: fp.via_known_resolver,
-                            count: 1,
-                        },
-                    );
-                }
+                inv.upsert(
+                    key,
+                    || EncryptedDnsRecord {
+                        transport: transport.clone(),
+                        sni: fp.sni.clone(),
+                        via_known_resolver: fp.via_known_resolver,
+                        count: 0,
+                    },
+                    |rec| rec.count += 1,
+                );
             }
             if policy && !sanctioned {
                 let _ = alerts_h.send(crate::map::encrypted_dns_bypass_alert(
@@ -1489,27 +1688,26 @@ pub fn build(
         let inv = ja4h_fp.clone();
         b = b.on_http_fingerprint(move |fp: &HttpFingerprint, _ctx: &mut Ctx<'_>| {
             if let Ok(mut m) = inv.lock() {
-                if let Some(rec) = m.get_mut(&fp.ja4h) {
-                    rec.count += 1;
-                    // Backfill best-effort context the first record may have missed.
-                    if rec.host.is_none() {
-                        rec.host = fp.host.clone();
-                    }
-                    if rec.user_agent.is_none() {
-                        rec.user_agent = fp.user_agent.clone();
-                    }
-                } else if m.len() < JA4H_INVENTORY_CAP {
-                    m.insert(
-                        fp.ja4h.clone(),
-                        Ja4hRecord {
-                            ja4h: fp.ja4h.clone(),
-                            host: fp.host.clone(),
-                            method: fp.method.clone(),
-                            user_agent: fp.user_agent.clone(),
-                            count: 1,
-                        },
-                    );
-                }
+                m.upsert(
+                    fp.ja4h.clone(),
+                    || Ja4hRecord {
+                        ja4h: fp.ja4h.clone(),
+                        host: None,
+                        method: fp.method.clone(),
+                        user_agent: None,
+                        count: 0,
+                    },
+                    |rec| {
+                        rec.count += 1;
+                        // Backfill best-effort context an earlier request missed.
+                        if rec.host.is_none() {
+                            rec.host = fp.host.clone();
+                        }
+                        if rec.user_agent.is_none() {
+                            rec.user_agent = fp.user_agent.clone();
+                        }
+                    },
+                );
             }
             Ok(())
         });
@@ -1655,7 +1853,7 @@ pub fn build(
     // publishes every emitted anomaly through the ChannelSink → drain →
     // AlertReporter path (like the built-ins). Only detectors enabled at build are
     // registered; DNS-driven ones additionally need `collect.dns`.
-    if let Some(registry) = crate::detectors::build_registry(cfg, &det_cfg) {
+    if let Some(registry) = crate::detectors::build_registry(cfg, &det_cfg, &detectors_shed) {
         b = b.detectors(registry);
         tracing::info!("netring: NDR detector registry armed");
     }
@@ -1678,10 +1876,17 @@ pub fn build(
                 detector: RitaBeaconDetector::new(),
                 memo: HashMap::new(),
                 last_emit: HashMap::new(),
+                last_evict: flowscope::Timestamp::new(0, 0),
             });
+            let tracked = Arc::new(AtomicU64::new(0));
+            fqdn_beacon_tracked = Some(tracked.clone());
+            let shed_fqdn = detectors_shed.clone();
             b = b.on_ctx::<FlowPacket>(move |evt: &FlowPacket, _ctx: &mut Ctx<'_>| {
                 if !matches!(evt.proto, L4Proto::Tcp) {
                     return Ok(());
+                }
+                if shed_fqdn.load(Ordering::Relaxed) {
+                    return Ok(()); // governor Degrade step (#812): stop CPU + growth
                 }
                 let c = det.load();
                 if !c.rita_beacon_fqdn {
@@ -1690,6 +1895,14 @@ pub fn build(
                 let Ok(mut st) = state.lock() else {
                     return Ok(());
                 };
+                // Stale-series eviction (#814): the upstream detector never
+                // drives its own `evict_stale`; without this pass every name
+                // ever observed kept its sample window forever.
+                if evt.ts.saturating_sub(st.last_evict) >= FQDN_BEACON_EVICT_INTERVAL {
+                    st.last_evict = evt.ts;
+                    st.detector.evict_stale(evt.ts, FQDN_BEACON_TTL);
+                    tracked.store(st.detector.tracked() as u64, Ordering::Relaxed);
+                }
                 // Per-packet fast path: the flow's target name is memoized on
                 // its first packet (one name-map lock + ranking per flow; a
                 // beacon's later flows re-resolve — new ephemeral port, new key).
@@ -1841,12 +2054,11 @@ pub fn build(
         b = b.on_asset(move |asset: &flowscope::Asset, _ctx: &mut Ctx<'_>| {
             let record = asset_to_record(asset);
             let mac = record.mac.clone();
-            if let Ok(mut map) = inv.lock()
-                && (map.contains_key(&record.mac) || map.len() < ASSET_INVENTORY_CAP)
-            {
-                map.insert(record.mac.clone(), record);
+            if let Ok(mut map) = inv.lock() {
+                // Replace-wholesale: netring's record is authoritative for the MAC.
+                map.upsert(mac.clone(), AssetRecord::default, |slot| *slot = record);
                 // Flag this MAC for the host-evidence feed (#307). Bounded by the
-                // inventory cap above; a plain set insert is allocation-light.
+                // inventory bound above; a plain set insert is allocation-light.
                 if let Ok(mut d) = dirty.lock() {
                     d.insert(mac);
                 }
@@ -2039,6 +2251,9 @@ pub fn build(
             name_obs_rx,
             disk: capture_disk,
             owner_bandwidth,
+            http_pending,
+            fqdn_beacon_tracked,
+            detectors_shed,
         },
         keepalive,
         detector_handle,
@@ -2329,6 +2544,34 @@ mod tests {
         assert_eq!(c.default_ttl, std::time::Duration::from_secs(120));
         assert_eq!(c.grace, std::time::Duration::from_secs(30));
         assert_eq!(c.max_pending, 42);
+    }
+
+    /// #814: unmatched in-flight HTTP requests must age out on the event clock
+    /// — before the sweep they leaked forever (a request whose response is
+    /// never parsed stays pending for the life of the sensor).
+    #[test]
+    fn http_pending_sweep_drops_only_expired_entries() {
+        use flowscope::extractor::L4Proto;
+        let key = |p: u16| {
+            FiveTupleKey::new(
+                L4Proto::Tcp,
+                format!("10.0.0.5:{p}").parse().unwrap(),
+                "10.0.0.9:80".parse().unwrap(),
+            )
+        };
+        let mut pending: HashMap<FiveTupleKey, (u64, Option<String>)> = HashMap::new();
+        pending.insert(key(1000), (0, None)); // long dead
+        pending.insert(key(1001), (69_999, Some("stale.example".into()))); // just past TTL
+        pending.insert(key(1002), (70_000, None)); // exactly at TTL — still allowed
+        pending.insert(key(1003), (95_000, Some("live.example".into()))); // fresh
+        sweep_http_pending(&mut pending, 100_000);
+        assert!(!pending.contains_key(&key(1000)));
+        assert!(!pending.contains_key(&key(1001)));
+        assert!(
+            pending.contains_key(&key(1002)),
+            "TTL boundary is inclusive"
+        );
+        assert!(pending.contains_key(&key(1003)));
     }
 
     #[test]

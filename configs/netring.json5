@@ -7,10 +7,12 @@
 
   // Resource declaration (#811): the RSS budget carried into the health doc's
   // self_stats and graded by the sensor-budget alert at 80% (Critical at 95%).
-  // Declared, not enforced — the shed ladder is #812. Omit to declare none.
-  // On a 1-2 GB guest, 128 MiB is a reasonable starting claim for netring.
+  // Since #812 it also arms the shed ladder: over budget, the sensor evicts
+  // from its bounded tables and then stops the anomaly detectors instead of
+  // dying. On a 1-2 GB guest, 128 MiB is a reasonable starting claim for
+  // netring; gen-configs.sh halves it for the production profile.
   resources: {
-    // budget_rss_mb: 128,
+    budget_rss_mb: 128,
   },
 
   // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
@@ -139,6 +141,20 @@
       grace_secs: 60,           // added to every TTL before expiry
       batch_interval_secs: 10,  // new-mapping delta-feed drain cadence
       max_batch: 500,           // pending delta-feed cap between drains
+    },
+
+    // Byte budgets for the L7 inventories (#814). Each is a true-LRU table
+    // capped in BYTES (the unit the host enforces): past its budget the
+    // oldest-touched entries are evicted — never refused, so a long-running
+    // sensor keeps learning instead of freezing on what it saw first.
+    // Evictions are counted into the health doc; the memory governor (#812)
+    // evicts deeper under RSS-budget pressure through the same path.
+    tables: {
+      tls_max_bytes: 2097152,     // TLS fingerprints (@rpc/netring/tls)
+      dns_max_bytes: 4194304,     // DNS SLDs (@rpc/netring/dns)
+      http_max_bytes: 1048576,    // HTTP hosts (@rpc/netring/http)
+      assets_max_bytes: 2097152,  // passive assets (@rpc/netring/assets)
+      fp_max_bytes: 2097152,      // QUIC+SSH+encrypted-DNS+JA4H, split in quarters
     },
 
     // Host-evidence feed (#307): republish observed assets (`collect.assets`)

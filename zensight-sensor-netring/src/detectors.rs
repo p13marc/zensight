@@ -31,6 +31,7 @@
 
 use arc_swap::ArcSwap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use flowscope::detect::patterns::{
     BeaconDetector, ConnectionFloodDetector, DataExfilDetector, DnsTunnelDetector,
@@ -76,18 +77,33 @@ const DGA_STOCK_THRESHOLD: f32 = -2.0;
 pub struct Tuned<D> {
     inner: D,
     live: LiveConfig,
+    /// Governor Degrade switch (#812): while set, every observe hook returns
+    /// without delegating — stops the detector's CPU and its state growth.
+    shed: Arc<AtomicBool>,
+    /// Event-time of the last `evict_expired` pass (#814). The stock detectors
+    /// carry 24 h TTLs but nothing ever drove them — state only ever grew.
+    last_evict: Timestamp,
     /// Reused emission buffer — the inner detector writes here, then we filter
     /// into the registry's `out`.
     scratch: Vec<OwnedAnomaly>,
 }
 
+/// Event-time floor between two self-eviction fan-outs per detector (#814).
+const TUNED_EVICT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl<D> Tuned<D> {
-    pub fn new(inner: D, live: LiveConfig) -> Self {
+    pub fn new(inner: D, live: LiveConfig, shed: Arc<AtomicBool>) -> Self {
         Self {
             inner,
             live,
+            shed,
+            last_evict: Timestamp::new(0, 0),
             scratch: Vec::new(),
         }
+    }
+
+    fn is_shed(&self) -> bool {
+        self.shed.load(Ordering::Relaxed)
     }
 
     /// Drain the scratch buffer through the runtime filter into `out`. When
@@ -110,17 +126,35 @@ impl<D> Tuned<D> {
     }
 }
 
+impl<D: Detector<FlowKey>> Tuned<D> {
+    /// Drive the inner detector's built-in TTL eviction (#814), at most once per
+    /// [`TUNED_EVICT_INTERVAL`] of event time. Called from the hooks that carry
+    /// a timestamp — the registry never calls `evict_expired` on its own.
+    fn maybe_evict(&mut self, ts: Timestamp) {
+        if ts.saturating_sub(self.last_evict) >= TUNED_EVICT_INTERVAL {
+            self.last_evict = ts;
+            self.inner.evict_expired(ts);
+        }
+    }
+}
+
 impl<D: Detector<FlowKey>> Detector<FlowKey> for Tuned<D> {
     fn kind(&self) -> DetectorKind {
         self.inner.kind()
     }
 
     fn on_flow_start(&mut self, key: &FlowKey, ts: Timestamp, out: &mut Vec<OwnedAnomaly>) {
+        if self.is_shed() {
+            return;
+        }
         self.inner.on_flow_start(key, ts, &mut self.scratch);
         self.drain_filtered(Some(key), out);
     }
 
     fn on_flow_established(&mut self, key: &FlowKey, ts: Timestamp, out: &mut Vec<OwnedAnomaly>) {
+        if self.is_shed() {
+            return;
+        }
         self.inner.on_flow_established(key, ts, &mut self.scratch);
         self.drain_filtered(Some(key), out);
     }
@@ -134,6 +168,10 @@ impl<D: Detector<FlowKey>> Detector<FlowKey> for Tuned<D> {
         ts: Timestamp,
         out: &mut Vec<OwnedAnomaly>,
     ) {
+        if self.is_shed() {
+            return;
+        }
+        self.maybe_evict(ts);
         self.inner
             .on_flow_end(key, stats, history, l4, ts, &mut self.scratch);
         self.drain_filtered(Some(key), out);
@@ -146,6 +184,10 @@ impl<D: Detector<FlowKey>> Detector<FlowKey> for Tuned<D> {
         ts: Timestamp,
         out: &mut Vec<OwnedAnomaly>,
     ) {
+        if self.is_shed() {
+            return;
+        }
+        self.maybe_evict(ts);
         self.inner.on_flow_tick(key, stats, ts, &mut self.scratch);
         self.drain_filtered(Some(key), out);
     }
@@ -157,6 +199,10 @@ impl<D: Detector<FlowKey>> Detector<FlowKey> for Tuned<D> {
         ts: Timestamp,
         out: &mut Vec<OwnedAnomaly>,
     ) {
+        if self.is_shed() {
+            return;
+        }
+        self.maybe_evict(ts);
         self.inner.on_dns_query(key, qname, ts, &mut self.scratch);
         // DNS-driven anomalies keep their stock source-only key so alert
         // bucketing stays `(rule, src)` (no resolver dst fragmenting the key).
@@ -269,7 +315,11 @@ fn keep(kind: DetectorKind, a: &OwnedAnomaly, c: &AnomalyConfig) -> bool {
 ///
 /// Returns `None` when nothing is enabled, so the caller can skip
 /// `MonitorBuilder::detectors` entirely.
-pub fn build_registry(cfg: &NetringConfig, live: &LiveConfig) -> Option<DetectorRegistry<FlowKey>> {
+pub fn build_registry(
+    cfg: &NetringConfig,
+    live: &LiveConfig,
+    shed: &Arc<AtomicBool>,
+) -> Option<DetectorRegistry<FlowKey>> {
     let a = &cfg.anomalies;
     let dns = cfg.collect.dns;
     let mut reg = DetectorRegistry::new();
@@ -278,18 +328,22 @@ pub fn build_registry(cfg: &NetringConfig, live: &LiveConfig) -> Option<Detector
     if a.port_scan {
         // TRW: state keyed on the scanner IP (SrcHost), verdict-gated — no score
         // floor to lower, so stock defaults stand; `Tuned` applies mute.
-        reg.register(Tuned::new(PortScanDetector::<SrcHost>::new(), live.clone()));
+        reg.register(Tuned::new(
+            PortScanDetector::<SrcHost>::new(),
+            live.clone(),
+            shed.clone(),
+        ));
         any = true;
     }
     if a.beaconing {
         let d = BeaconDetector::<HostPair>::new().with_anomaly_threshold(BEACON_STOCK_THRESHOLD);
-        reg.register(Tuned::new(d, live.clone()));
+        reg.register(Tuned::new(d, live.clone(), shed.clone()));
         any = true;
     }
     if a.rita_beacon {
         let d =
             RitaBeaconDetector::<HostPair>::new().with_anomaly_threshold(BEACON_STOCK_THRESHOLD);
-        reg.register(Tuned::new(d, live.clone()));
+        reg.register(Tuned::new(d, live.clone(), shed.clone()));
         any = true;
     }
     if a.connection_flood {
@@ -298,30 +352,34 @@ pub fn build_registry(cfg: &NetringConfig, live: &LiveConfig) -> Option<Detector
             std::time::Duration::from_secs(1),
             FLOOD_STOCK_THRESHOLD,
         );
-        reg.register(Tuned::new(d, live.clone()));
+        reg.register(Tuned::new(d, live.clone(), shed.clone()));
         any = true;
     }
     if a.data_exfil {
         let d = DataExfilDetector::new()
             .with_n_sigma(EXFIL_STOCK_SIGMA)
             .with_min_bytes(EXFIL_STOCK_MIN_BYTES);
-        reg.register(Tuned::new(d, live.clone()));
+        reg.register(Tuned::new(d, live.clone(), shed.clone()));
         any = true;
     }
     if a.dga && dns {
         let d = DgaDetector::new().with_threshold(DGA_STOCK_THRESHOLD);
-        reg.register(Tuned::new(d, live.clone()));
+        reg.register(Tuned::new(d, live.clone(), shed.clone()));
         any = true;
     }
     if a.dns_tunnel && dns {
         let d = DnsTunnelDetector::new()
             .with_subdomain_threshold(DNS_TUNNEL_STOCK_DISTINCT)
             .with_min_qname_len(DNS_TUNNEL_STOCK_QNAME_LEN);
-        reg.register(Tuned::new(d, live.clone()));
+        reg.register(Tuned::new(d, live.clone(), shed.clone()));
         any = true;
     }
     if a.nod && dns {
-        reg.register(Tuned::new(NewlyObservedDomainDetector::new(), live.clone()));
+        reg.register(Tuned::new(
+            NewlyObservedDomainDetector::new(),
+            live.clone(),
+            shed.clone(),
+        ));
         any = true;
     }
 
@@ -336,6 +394,10 @@ mod tests {
 
     fn live(cfg: AnomalyConfig) -> LiveConfig {
         Arc::new(ArcSwap::from_pointee(cfg))
+    }
+
+    fn no_shed() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
     }
 
     fn ip(n: u8) -> IpAddr {
@@ -412,7 +474,7 @@ mod tests {
             beacon_threshold: 0.8,
             ..Default::default()
         };
-        let mut t = Tuned::new(Emitter(beacon_anomaly(0.95)), live(cfg));
+        let mut t = Tuned::new(Emitter(beacon_anomaly(0.95)), live(cfg), no_shed());
         assert!(
             drive(&mut t).is_empty(),
             "a muted detector must drop its anomaly"
@@ -429,7 +491,7 @@ mod tests {
             beacon_threshold: 0.4,
             ..Default::default()
         };
-        let mut t = Tuned::new(Emitter(beacon_anomaly(0.5)), live(cfg));
+        let mut t = Tuned::new(Emitter(beacon_anomaly(0.5)), live(cfg), no_shed());
         let out = drive(&mut t);
         assert_eq!(out.len(), 1, "sub-default score must pass a lowered gate");
         // Re-keyed with the full 5-tuple (source port preserved).
@@ -444,7 +506,7 @@ mod tests {
             beacon_threshold: 0.9, // stricter than the 0.5 score
             ..Default::default()
         };
-        let mut t = Tuned::new(Emitter(beacon_anomaly(0.5)), live(cfg));
+        let mut t = Tuned::new(Emitter(beacon_anomaly(0.5)), live(cfg), no_shed());
         assert!(drive(&mut t).is_empty());
     }
 
@@ -456,7 +518,70 @@ mod tests {
             allowlist: vec!["10.0.0.2".into()],
             ..Default::default()
         };
-        let mut t = Tuned::new(Emitter(beacon_anomaly(0.95)), live(cfg));
+        let mut t = Tuned::new(Emitter(beacon_anomaly(0.95)), live(cfg), no_shed());
         assert!(drive(&mut t).is_empty(), "allowlisted dst must drop");
+    }
+
+    #[test]
+    fn shed_flag_stops_observation_entirely() {
+        let cfg = AnomalyConfig {
+            beaconing: true,
+            beacon_threshold: 0.4,
+            ..Default::default()
+        };
+        let shed = Arc::new(AtomicBool::new(true));
+        let mut t = Tuned::new(Emitter(beacon_anomaly(0.95)), live(cfg), shed.clone());
+        assert!(drive(&mut t).is_empty(), "a shed detector must not observe");
+        // Restore: the governor flips the flag back and observation resumes.
+        shed.store(false, Ordering::Relaxed);
+        assert_eq!(drive(&mut t).len(), 1, "clearing shed restores detection");
+    }
+
+    /// #814: the wrapped detectors' built-in 24 h TTLs were never driven — a
+    /// real stock detector accumulating per-key series must shrink once events
+    /// carry it past the TTL horizon.
+    #[test]
+    fn tuned_self_evicts_stale_series_on_the_event_clock() {
+        let cfg = AnomalyConfig {
+            rita_beacon: true,
+            ..Default::default()
+        };
+        let mut t = Tuned::new(RitaBeaconDetector::<HostPair>::new(), live(cfg), no_shed());
+        let stats = FlowStats::default();
+        let hist = HistoryString::default();
+        let mut out = Vec::new();
+        // 32 distinct host pairs observed once at t≈0: 32 tracked series.
+        for i in 0..32u8 {
+            let key = FlowKey::new(
+                L4Proto::Tcp,
+                std::net::SocketAddr::new(ip(1), 40_000 + u16::from(i)),
+                std::net::SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 1, i)), 443),
+            );
+            t.on_flow_end(
+                &key,
+                &stats,
+                &hist,
+                Some(L4Proto::Tcp),
+                Timestamp::new(100 + u32::from(i), 0),
+                &mut out,
+            );
+        }
+        assert_eq!(t.tracked(), 32, "each pair holds a series");
+        // One event 25 h later (past the 24 h TTL): the rate-limited self-evict
+        // pass must retire every stale series, leaving only the fresh one.
+        let key = flowkey();
+        t.on_flow_end(
+            &key,
+            &stats,
+            &hist,
+            Some(L4Proto::Tcp),
+            Timestamp::new(100 + 25 * 60 * 60, 0),
+            &mut out,
+        );
+        assert_eq!(
+            t.tracked(),
+            1,
+            "the TTL horizon must retire the stale series"
+        );
     }
 }
