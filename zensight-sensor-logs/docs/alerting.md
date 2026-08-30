@@ -57,6 +57,11 @@ sentinel: {
   (e.g. `coredump_exe`), on top of the always-included `unit`/`app`/`message_id`.
 - **`for_secs`** — auto-resolve TTL. The alert clears this long after its last
   matching line (the "quiet period").
+- **`rate_limit`** — optional `{ max_fires, per_secs }` cap on alert
+  *publications* (#824). Distinct from `threshold`, which delays the first
+  fire: this bounds how often a flapping rule can page. Suppressed fires are
+  counted per rule and surfaced in `@rpc/logs/rules` (`suppressed`), so a
+  capped rule is visibly capped.
 
 Alert **identity** is `(rule id, unit, app, message_id)` — two lines that differ
 only in their volatile payload (count, sample) update one alert rather than
@@ -70,6 +75,29 @@ ship as built-in rules folded into this same mechanism. They match on
 `include_builtins` is true (both default true). Set `include_builtins: false` to
 drop them, or add a rule with the same `id` to override. A custom `message_id`
 rule needs no code change.
+
+### Built-in kernel patterns (#824)
+
+A second built-in set, gated by `include_kernel_builtins` (**off by default**
+— the quiet-alerts stance: silence unless asked): `ext4-fs-error`,
+`xfs-corruption`, `md-raid-failure`, `block-io-error`. These are the handful
+of lines that mean a machine's storage is dying, and they are the alerts a
+host most needs exactly when its error-budget rules are (rightly) disabled as
+noise. Pattern-based rather than `MESSAGE_ID`-based, so they work on any
+source — journald, network syslog, a tailed file — and each ships Critical
+with a modest `rate_limit` (a dying disk can print its last words thousands
+of times). Same override path as every built-in: a user rule with the same
+`id` wins.
+
+### Redaction (#824)
+
+A quoted line is scrubbed before it leaves the host: secret-looking
+`key=value` assignments (the same denylist the debug bundles use,
+`is_secret_key`) are replaced with the redaction marker in `{message}` **and**
+in regex capture groups — matching runs on the raw line, quoting never does.
+A scrubbed summary is suffixed `(redacted)`, so it is never passed off as
+verbatim; the flag stays out of the labels so a rule that sometimes matches a
+secret keeps one alert identity.
 
 ### Bounded
 

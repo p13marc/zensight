@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **logs: kernel pattern built-ins, per-rule rate limits, and redacted
+  quoting** (#824). The sentinel gains `include_kernel_builtins` (off by
+  default): `ext4-fs-error`, `xfs-corruption`, `md-raid-failure`,
+  `block-io-error` — Critical, rate-limited, source-agnostic. Every rule
+  takes an optional `rate_limit: { max_fires, per_secs }` capping alert
+  publications (suppressions counted and surfaced in `@rpc/logs/rules`). A
+  quoted line is scrubbed before it leaves the host — secret-looking
+  `key=value` assignments are replaced in `{message}` and capture groups, and
+  a scrubbed summary is suffixed `(redacted)`.
+- **systemd: a timer's *service outcome* is now judged, not just its
+  schedule** (#824). Timer expectations gain `succeeded_within_secs` — the
+  timer fired within the window **and** its triggered unit's last run
+  succeeded (`Timer.Unit` → `Service.Result`; unreadable = not satisfied,
+  never "passed") — under the new `expect-timer-succeeded` rule. New
+  threshold rule `systemd-consecutive-failures` (default 3, 0 disables)
+  counts consecutive failed *runs* by `InvocationID` change, which is
+  `restart_storm`'s logic applied where `NRestarts` cannot see: a
+  timer-triggered oneshot never restarts. The GUI expectations editor
+  round-trips the new form ("Timer service must succeed within").
+  *Breaking (config/API): `TimerExpectation.within_secs` is now optional —
+  JSON5 configs and `expectations/set` payloads are unaffected unless they
+  omitted it, which was never valid.*
+
 ## [0.11.0] - 2026-08-28
 
 A month of unreleased work, and the release an operator has to read before
