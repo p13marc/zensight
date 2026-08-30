@@ -51,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **hostspec assertions are authorable from the GUI** (#821, closing PR):
+  the Expectations view gains the `hostspec` target — eight authoring kinds
+  (require/forbid listeners split), whole-set push of the plain
+  `ExpectationsConfig` (sensor-side validation; a refusal keeps the
+  previous set), rule-slug rows shared with the sensor's alert rules so
+  Remove removes the thing that is firing, and the #791 verdict chip on
+  the status reply. With this, #821 is done: the sensor, its registry
+  slice, fleet/CI integration, and the authoring surface.
+
 - **hostspec is a fleet citizen** (#821, integration PR): in the conformance
   CI roster (it is the ideal CI sensor — no privileges, no devices, empty
   default set, every procedure served), `just sensors`/`run-sensors.sh`,

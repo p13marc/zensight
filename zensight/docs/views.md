@@ -156,7 +156,16 @@ sockets/links/routes) and pushes them to the netlink sensor at runtime as an
 `zensight/v1/*/@rpc/netlink/expectations/set` (query target `All`); the sensor
 hot-swaps its evaluator and acks in the reply (refusals arrive as `reply_err`
 `{error, message}` payloads). The current config reads back with a GET on
-`…/@rpc/netlink/expectations`.
+`…/@rpc/netlink/expectations`. Three targets share the view: **netlink**
+(incremental add/remove commands), **systemd** (whole-set `SetExpectations`
+replace, #278), and **hostspec** (#821 — whole-set replace of the PLAIN
+`ExpectationsConfig`, no command tag; the sensor validates before applying
+and a refusal keeps its previous set, arriving as command feedback). The
+hostspec form authors each assertion kind's essential fields; the long tail
+(regex `matches`, mount options, per-assertion severity/debounce) is
+config-file territory and the caption says a push rewrites the whole set
+with the form's fields. Every target's status reply carries the #791
+verdict chip beside the configured count.
 
 **Topology** (`view/topology/`) — an interactive map of the monitored network
 (redesign epic #395, layout/performance overhaul epic #439; design report

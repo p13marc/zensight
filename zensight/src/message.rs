@@ -164,6 +164,10 @@ pub enum Message {
     SetExpTarget(crate::view::expectations::ExpTarget),
     /// Set the systemd expectation kind being authored (#278).
     SetSystemdExpKind(crate::view::expectations::SystemdExpKind),
+    /// Pick the hostspec assertion kind being authored (#821).
+    SetHostspecExpKind(crate::view::expectations::HostspecExpKind),
+    /// The hostspec sentinel's current assertion set (raw JSON reply).
+    HostspecExpectationsReceived(String),
     /// A systemd sentinel status reply (ExpectationsConfig JSON) (#278).
     SystemdExpectationsReceived(String),
     /// Set the kind of expectation being authored.

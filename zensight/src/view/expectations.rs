@@ -55,10 +55,12 @@ impl std::fmt::Display for ExpKind {
 pub enum ExpTarget {
     Netlink,
     Systemd,
+    Hostspec,
 }
 
 impl ExpTarget {
-    pub const ALL: &'static [ExpTarget] = &[ExpTarget::Netlink, ExpTarget::Systemd];
+    pub const ALL: &'static [ExpTarget] =
+        &[ExpTarget::Netlink, ExpTarget::Systemd, ExpTarget::Hostspec];
 }
 
 impl std::fmt::Display for ExpTarget {
@@ -69,6 +71,7 @@ impl std::fmt::Display for ExpTarget {
             match self {
                 ExpTarget::Netlink => "netlink",
                 ExpTarget::Systemd => "systemd",
+                ExpTarget::Hostspec => "hostspec",
             }
         )
     }
@@ -112,6 +115,305 @@ impl SystemdExpKind {
 impl std::fmt::Display for SystemdExpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.label())
+    }
+}
+
+/// The kind of hostspec assertion being authored (#821). Eight GUI kinds
+/// over the sensor's seven: require- and forbid-listeners author differently
+/// enough to deserve their own entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostspecExpKind {
+    Mount,
+    File,
+    Listening,
+    ListeningForbid,
+    Symlink,
+    Absent,
+    Content,
+    Perms,
+}
+
+impl HostspecExpKind {
+    pub const ALL: &'static [HostspecExpKind] = &[
+        HostspecExpKind::Mount,
+        HostspecExpKind::File,
+        HostspecExpKind::Listening,
+        HostspecExpKind::ListeningForbid,
+        HostspecExpKind::Symlink,
+        HostspecExpKind::Absent,
+        HostspecExpKind::Content,
+        HostspecExpKind::Perms,
+    ];
+    fn label(&self) -> &'static str {
+        match self {
+            HostspecExpKind::Mount => "Mount (point / bind-of)",
+            HostspecExpKind::File => "File freshness / size",
+            HostspecExpKind::Listening => "Listener must exist",
+            HostspecExpKind::ListeningForbid => "Listener must NOT exist",
+            HostspecExpKind::Symlink => "Symlink target",
+            HostspecExpKind::Absent => "Path must be absent",
+            HostspecExpKind::Content => "File must contain",
+            HostspecExpKind::Perms => "Permissions / owner",
+        }
+    }
+}
+
+impl std::fmt::Display for HostspecExpKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
+/// The accumulated hostspec assertion set (#821). Mirrors the sensor's
+/// `ExpectationsConfig` JSON (the `expectations/set` body is the PLAIN
+/// config — no command tag; validation happens sensor-side and a refusal
+/// keeps the previous set). The form authors each kind's essential fields;
+/// the long tail (regex `matches`, mount options, per-expectation
+/// severity/debounce) is config-file territory, said so in the caption.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostspecExpDraft {
+    pub eval_interval_secs: u64,
+    /// `(name, path, is_bind_of?, fstype?)`
+    pub mounts: Vec<(String, String, Option<String>, Option<String>)>,
+    /// `(name, path, newer_than_secs?, size_within_pct?)`
+    pub files: Vec<(String, String, Option<u64>, Option<f64>)>,
+    /// `(name, port, addr?, forbid)`
+    pub listening: Vec<(String, u16, Option<String>, bool)>,
+    /// `(name, path, target)`
+    pub symlinks: Vec<(String, String, String)>,
+    /// `(name, path)`
+    pub absent: Vec<(String, String)>,
+    /// `(name, path, contains-needle)`
+    pub content: Vec<(String, String, String)>,
+    /// `(name, path, mode?, owner?)`
+    pub perms: Vec<(String, String, Option<String>, Option<String>)>,
+}
+
+impl HostspecExpDraft {
+    /// Build the `expectations/set` body (pure — unit-testable): the
+    /// sensor's plain `ExpectationsConfig` shape.
+    pub fn to_set_json(&self) -> serde_json::Value {
+        let interval = if self.eval_interval_secs == 0 {
+            60
+        } else {
+            self.eval_interval_secs
+        };
+        serde_json::json!({
+            "eval_interval_secs": interval,
+            "mounts": self.mounts.iter().map(|(n, p, b, f)| {
+                let mut o = serde_json::json!({"name": n, "path": p});
+                if let Some(b) = b { o["is_bind_of"] = b.clone().into(); }
+                if let Some(f) = f { o["fstype"] = f.clone().into(); }
+                o
+            }).collect::<Vec<_>>(),
+            "files": self.files.iter().map(|(n, p, secs, pct)| {
+                let mut o = serde_json::json!({"name": n, "path": p});
+                if let Some(s) = secs { o["newer_than_secs"] = (*s).into(); }
+                if let Some(pc) = pct { o["size_within_pct_of_previous"] = (*pc).into(); }
+                o
+            }).collect::<Vec<_>>(),
+            "listening": self.listening.iter().map(|(n, port, addr, forbid)| {
+                let mut o = serde_json::json!({"name": n, "port": port, "forbid": forbid});
+                if let Some(a) = addr { o["addr"] = a.clone().into(); }
+                o
+            }).collect::<Vec<_>>(),
+            "symlinks": self.symlinks.iter().map(|(n, p, t)|
+                serde_json::json!({"name": n, "path": p, "target": t})).collect::<Vec<_>>(),
+            "absent": self.absent.iter().map(|(n, p)|
+                serde_json::json!({"name": n, "path": p})).collect::<Vec<_>>(),
+            "content": self.content.iter().map(|(n, p, c)|
+                serde_json::json!({"name": n, "path": p, "contains": [c]})).collect::<Vec<_>>(),
+            "perms": self.perms.iter().map(|(n, p, m, o_)| {
+                let mut o = serde_json::json!({"name": n, "path": p});
+                if let Some(m) = m { o["mode"] = m.clone().into(); }
+                if let Some(ow) = o_ { o["owner"] = ow.clone().into(); }
+                o
+            }).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Parse an `@rpc/hostspec/expectations` reply into a draft (pure).
+    /// Fields the form does not author (options, matches, severity, …)
+    /// survive on the SENSOR unchanged only until the next push replaces the
+    /// whole set — the caption warns about that.
+    pub fn from_status(json: &str) -> Self {
+        let v: serde_json::Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => return Self::default(),
+        };
+        let arr = |key: &str| {
+            v.get(key)
+                .and_then(|x| x.as_array())
+                .cloned()
+                .unwrap_or_default()
+        };
+        let name = |s: &serde_json::Value| s.get("name").and_then(|x| x.as_str()).map(String::from);
+        let path = |s: &serde_json::Value| s.get("path").and_then(|x| x.as_str()).map(String::from);
+        let opt_s =
+            |s: &serde_json::Value, k: &str| s.get(k).and_then(|x| x.as_str()).map(String::from);
+        Self {
+            eval_interval_secs: v
+                .get("eval_interval_secs")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(60),
+            mounts: arr("mounts")
+                .iter()
+                .filter_map(|s| {
+                    Some((
+                        name(s)?,
+                        path(s)?,
+                        opt_s(s, "is_bind_of"),
+                        opt_s(s, "fstype"),
+                    ))
+                })
+                .collect(),
+            files: arr("files")
+                .iter()
+                .filter_map(|s| {
+                    Some((
+                        name(s)?,
+                        path(s)?,
+                        s.get("newer_than_secs").and_then(|x| x.as_u64()),
+                        s.get("size_within_pct_of_previous")
+                            .and_then(|x| x.as_f64()),
+                    ))
+                })
+                .collect(),
+            listening: arr("listening")
+                .iter()
+                .filter_map(|s| {
+                    Some((
+                        name(s)?,
+                        s.get("port").and_then(|x| x.as_u64())? as u16,
+                        opt_s(s, "addr"),
+                        s.get("forbid").and_then(|x| x.as_bool()).unwrap_or(false),
+                    ))
+                })
+                .collect(),
+            symlinks: arr("symlinks")
+                .iter()
+                .filter_map(|s| Some((name(s)?, path(s)?, opt_s(s, "target")?)))
+                .collect(),
+            absent: arr("absent")
+                .iter()
+                .filter_map(|s| Some((name(s)?, path(s)?)))
+                .collect(),
+            content: arr("content")
+                .iter()
+                .filter_map(|s| {
+                    let needle = s
+                        .get("contains")
+                        .and_then(|x| x.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    Some((name(s)?, path(s)?, needle))
+                })
+                .collect(),
+            perms: arr("perms")
+                .iter()
+                .filter_map(|s| Some((name(s)?, path(s)?, opt_s(s, "mode"), opt_s(s, "owner"))))
+                .collect(),
+        }
+    }
+
+    /// Remove one assertion by its rule slug (`<kind>:<name>`).
+    pub fn remove_rule(&mut self, rule: &str) {
+        let Some((kind, name)) = rule.split_once(':') else {
+            return;
+        };
+        match kind {
+            "mount" => self.mounts.retain(|(n, ..)| n != name),
+            "file" => self.files.retain(|(n, ..)| n != name),
+            "listening" => self.listening.retain(|(n, ..)| n != name),
+            "symlink" => self.symlinks.retain(|(n, ..)| n != name),
+            "absent" => self.absent.retain(|(n, ..)| n != name),
+            "content" => self.content.retain(|(n, ..)| n != name),
+            "perms" => self.perms.retain(|(n, ..)| n != name),
+            _ => {}
+        }
+    }
+
+    /// The configured-list rows for this draft — rule slugs match the
+    /// sensor's (`<kind>:<name>`), so a row here IS the alert rule.
+    pub fn rows(&self) -> Vec<ExpRow> {
+        let mut rows = Vec::new();
+        for (n, p, bind, fstype) in &self.mounts {
+            let detail = match (bind, fstype) {
+                (Some(b), _) => format!("{p} is a bind of {b}"),
+                (None, Some(f)) => format!("{p} mounted as {f}"),
+                (None, None) => format!("{p} is a mount point"),
+            };
+            rows.push(ExpRow {
+                rule: format!("mount:{n}"),
+                detail,
+                severity: "warning".into(),
+            });
+        }
+        for (n, p, secs, pct) in &self.files {
+            let mut parts = vec![format!("{p} exists")];
+            if let Some(s) = secs {
+                parts.push(format!("newer than {s}s"));
+            }
+            if let Some(pc) = pct {
+                parts.push(format!("size ±{pc}%"));
+            }
+            rows.push(ExpRow {
+                rule: format!("file:{n}"),
+                detail: parts.join(", "),
+                severity: "warning".into(),
+            });
+        }
+        for (n, port, addr, forbid) in &self.listening {
+            let a = addr.as_deref().unwrap_or("*");
+            let detail = if *forbid {
+                format!("NO listener on {a}:{port}")
+            } else {
+                format!("listener on {a}:{port}")
+            };
+            rows.push(ExpRow {
+                rule: format!("listening:{n}"),
+                detail,
+                severity: "warning".into(),
+            });
+        }
+        for (n, p, t) in &self.symlinks {
+            rows.push(ExpRow {
+                rule: format!("symlink:{n}"),
+                detail: format!("{p} -> {t}"),
+                severity: "warning".into(),
+            });
+        }
+        for (n, p) in &self.absent {
+            rows.push(ExpRow {
+                rule: format!("absent:{n}"),
+                detail: format!("{p} absent"),
+                severity: "warning".into(),
+            });
+        }
+        for (n, p, c) in &self.content {
+            rows.push(ExpRow {
+                rule: format!("content:{n}"),
+                detail: format!("{p} contains {c:?}"),
+                severity: "warning".into(),
+            });
+        }
+        for (n, p, m, o) in &self.perms {
+            let mut parts = Vec::new();
+            if let Some(m) = m {
+                parts.push(format!("mode {m}"));
+            }
+            if let Some(o) = o {
+                parts.push(format!("owner {o}"));
+            }
+            rows.push(ExpRow {
+                rule: format!("perms:{n}"),
+                detail: format!("{p}: {}", parts.join(", ")),
+                severity: "warning".into(),
+            });
+        }
+        rows
     }
 }
 
@@ -309,11 +611,18 @@ pub struct ExpectationsState {
     pub current: Vec<ExpRow>,
     /// The accumulated systemd expectation set (#278).
     pub systemd: SystemdExpDraft,
+    /// The kind of hostspec assertion being authored (#821).
+    pub hostspec_kind: HostspecExpKind,
+    /// The accumulated hostspec assertion set (#821).
+    pub hostspec: HostspecExpDraft,
+
     pub status_note: Option<String>,
     /// Schema verdict for the last netlink `expectations` status reply (#791).
     pub status_verdict: Option<zensight_common::schema::Verdict>,
     /// Schema verdict for the last systemd `expectations` status reply (#791).
     pub systemd_verdict: Option<zensight_common::schema::Verdict>,
+    /// Schema verdict for the last hostspec `expectations` status reply (#791).
+    pub hostspec_verdict: Option<zensight_common::schema::Verdict>,
 }
 
 impl Default for ExpectationsState {
@@ -330,9 +639,12 @@ impl Default for ExpectationsState {
             new_value: String::new(),
             current: Vec::new(),
             systemd: SystemdExpDraft::default(),
+            hostspec_kind: HostspecExpKind::Mount,
+            hostspec: HostspecExpDraft::default(),
             status_note: None,
             status_verdict: None,
             systemd_verdict: None,
+            hostspec_verdict: None,
         }
     }
 }
@@ -342,6 +654,7 @@ pub fn expectations_view(state: &ExpectationsState) -> Element<'_, Message> {
     let form: Element<'_, Message> = match state.target {
         ExpTarget::Netlink => render_form(state),
         ExpTarget::Systemd => render_systemd_form(state),
+        ExpTarget::Hostspec => render_hostspec_form(state),
     };
     let content = column![
         render_header(state),
@@ -532,10 +845,102 @@ fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
     .into()
 }
 
+/// The hostspec assertion authoring form (#821). Whole-set semantics like
+/// systemd's: each add mutates the draft and re-pushes the full set (which
+/// the sensor VALIDATES before applying — a refusal keeps its previous set
+/// and surfaces as a command-feedback toast).
+fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
+    let kind = pick_list(
+        HostspecExpKind::ALL,
+        Some(state.hostspec_kind),
+        Message::SetHostspecExpKind,
+    )
+    .width(Length::Fixed(220.0));
+
+    let mut form = row![kind].spacing(10).align_y(Alignment::Center);
+    form = form.push(
+        text_input("name (rule slug)", &state.new_name)
+            .on_input(Message::SetExpectationName)
+            .padding(8)
+            .width(Length::Fixed(160.0)),
+    );
+
+    // Field semantics per kind ride the placeholders; the sensor's
+    // validate() is the real gate.
+    match state.hostspec_kind {
+        HostspecExpKind::Listening | HostspecExpKind::ListeningForbid => {
+            form = form.push(
+                text_input("port", &state.new_port)
+                    .on_input(Message::SetExpectationPort)
+                    .padding(8)
+                    .width(Length::Fixed(90.0)),
+            );
+            form = form.push(
+                text_input("addr (optional; 0.0.0.0 and :: differ)", &state.new_value)
+                    .on_input(Message::SetExpectationValue)
+                    .padding(8)
+                    .width(Length::Fixed(240.0)),
+            );
+        }
+        kind => {
+            form = form.push(
+                text_input("path (absolute)", &state.new_metric)
+                    .on_input(Message::SetExpectationMetric)
+                    .padding(8)
+                    .width(Length::Fixed(220.0)),
+            );
+            let (ph1, ph2) = match kind {
+                HostspecExpKind::Mount => ("is_bind_of (optional)", "fstype (optional)"),
+                HostspecExpKind::File => ("newer_than secs (optional)", "size ±% (optional)"),
+                HostspecExpKind::Symlink => ("target", ""),
+                HostspecExpKind::Content => ("must contain", ""),
+                HostspecExpKind::Perms => ("mode (0600, optional)", "owner (optional)"),
+                _ => ("", ""),
+            };
+            if !ph1.is_empty() {
+                form = form.push(
+                    text_input(ph1, &state.new_value)
+                        .on_input(Message::SetExpectationValue)
+                        .padding(8)
+                        .width(Length::Fixed(190.0)),
+                );
+            }
+            if !ph2.is_empty() {
+                form = form.push(
+                    text_input(ph2, &state.new_port)
+                        .on_input(Message::SetExpectationPort)
+                        .padding(8)
+                        .width(Length::Fixed(150.0)),
+                );
+            }
+        }
+    }
+
+    let add = button(text("Add & Push").size(13))
+        .on_press(Message::AddExpectation)
+        .style(iced::widget::button::primary);
+
+    column![
+        text("Declare a host assertion").size(18),
+        form.push(add),
+        text(
+            "The whole set replaces the sensor's over expectations/set (validated there; \
+             a refusal keeps its previous set). Regex matches, mount options and \
+             per-assertion severity/debounce are config-file territory — pushing from \
+             here rewrites the set with this form's fields only.",
+        )
+        .size(11)
+        .style(dim),
+    ]
+    .spacing(10)
+    .into()
+}
+
 fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
     let rows = match state.target {
         ExpTarget::Netlink => state.current.clone(),
         ExpTarget::Systemd => state.systemd.rows(),
+        ExpTarget::Hostspec => state.hostspec.rows(),
     };
     let title = text(format!("Configured ({})", rows.len())).size(18);
     // The reply's schema verdict rides beside the count (#791): three
@@ -543,6 +948,7 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
     let verdict = match state.target {
         ExpTarget::Netlink => state.status_verdict.as_ref(),
         ExpTarget::Systemd => state.systemd_verdict.as_ref(),
+        ExpTarget::Hostspec => state.hostspec_verdict.as_ref(),
     };
     let title: Element<'_, Message> = match verdict {
         Some(v) => row![title, crate::view::components::verdict::verdict_badge(v)]
@@ -793,5 +1199,81 @@ mod tests {
         assert!(d.services.is_empty());
         d.remove_rule("forbid:failed");
         assert!(!d.forbid_failed);
+    }
+}
+
+#[cfg(test)]
+mod hostspec_tests {
+    use super::*;
+
+    fn draft() -> HostspecExpDraft {
+        HostspecExpDraft {
+            eval_interval_secs: 60,
+            mounts: vec![(
+                "vt".into(),
+                "/var/tmp".into(),
+                Some("/scratch/tmp".into()),
+                None,
+            )],
+            files: vec![(
+                "backup".into(),
+                "/backup/db.dump".into(),
+                Some(93600),
+                Some(40.0),
+            )],
+            listening: vec![
+                ("vpn".into(), 8443, Some("10.8.0.1".into()), false),
+                ("not-any4".into(), 8443, Some("0.0.0.0".into()), true),
+            ],
+            symlinks: vec![(
+                "java".into(),
+                "/etc/alternatives/java".into(),
+                "/usr/lib/jvm/x".into(),
+            )],
+            absent: vec![("left".into(), "/tmp/debug.sock".into())],
+            content: vec![(
+                "hairpin".into(),
+                "/etc/hosts".into(),
+                "10.0.0.5 registry".into(),
+            )],
+            perms: vec![(
+                "key".into(),
+                "/etc/deploy/key.pem".into(),
+                Some("0600".into()),
+                Some("deploy".into()),
+            )],
+        }
+    }
+
+    /// The push body is the sensor's PLAIN `ExpectationsConfig` JSON (no
+    /// command tag — hostspec's `expectations/set` deserializes the config
+    /// directly), and `from_status` reads the same shape back: the round
+    /// trip pins that the GUI and the sensor speak one dialect. (The sensor's
+    /// own e2e drives `expectations/set` with JSON of exactly this shape, so
+    /// the cross-crate contract is exercised from both sides without a
+    /// dependency between them.)
+    #[test]
+    fn set_json_round_trips_through_from_status() {
+        let d = draft();
+        let json = d.to_set_json();
+        assert!(json.get("type").is_none(), "plain config — no command tag");
+        assert_eq!(json["listening"][1]["forbid"], serde_json::json!(true));
+        assert_eq!(json["content"][0]["contains"][0], "10.0.0.5 registry");
+        let back = HostspecExpDraft::from_status(&json.to_string());
+        assert_eq!(d, back);
+    }
+
+    /// Row slugs are the sensor's alert rules (`<kind>:<name>`), so the
+    /// configured list's Remove button removes the thing that is firing.
+    #[test]
+    fn rows_and_remove_share_the_rule_slug() {
+        let mut d = draft();
+        let slugs: Vec<String> = d.rows().iter().map(|r| r.rule.clone()).collect();
+        assert!(slugs.contains(&"mount:vt".to_string()));
+        assert!(slugs.contains(&"listening:not-any4".to_string()));
+        d.remove_rule("mount:vt");
+        assert!(!d.rows().iter().any(|r| r.rule == "mount:vt"));
+        d.remove_rule("nonsense-no-colon");
+        assert_eq!(d.rows().len(), 7);
     }
 }
