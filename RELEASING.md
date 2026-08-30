@@ -114,10 +114,10 @@ Watch the run in the Actions tab. `release.yml` produces, all amd64-only:
 
 - **source tarball** + `SHA256SUMS` (release assets);
 - **`zensight-<ver>-linux-amd64.tar.gz`** (+ `.tar.gz.sha256`): all 12 binaries
-  (9 sensors, 2 exporters, correlator), the `packaging/systemd/` units, and the example
+  (10 sensors, 2 exporters, correlator), the `packaging/systemd/` units, and the example
   configs — the native-install path;
 - **13 container images** at `git.marcpardo.eu/marcpardo/<name>:{<ver>,latest}`:
-  `zensight-sensor-{logs,sysinfo,snmp,gnmi,modbus,netflow,netlink,netring,systemd}`,
+  `zensight-sensor-{logs,sysinfo,snmp,gnmi,modbus,netflow,netlink,netring,systemd,hostspec}`,
   `zensight-exporter-{prometheus,otel}`, `zensight-correlator`, and the all-in-one
   `zensight-sensors` bundle;
 - **flatpak**: an unsigned `zensight-<ver>.flatpak` bundle on the release, plus a

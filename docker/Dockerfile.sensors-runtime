@@ -26,6 +26,7 @@ COPY docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-sysinfo \
     docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-netring \
     docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-logs \
     docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-systemd \
+    docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-hostspec \
     /usr/local/bin/
 RUN chmod 755 /usr/local/bin/zensight-sensor-*
 

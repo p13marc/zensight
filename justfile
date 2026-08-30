@@ -1,5 +1,5 @@
 # ZenSight — build / configure / run the GUI + sensors + correlator
-#   (netring, netlink, sysinfo, logs, systemd, parallax + the identity correlator)
+#   (netring, netlink, sysinfo, logs, systemd, hostspec, parallax + the identity correlator)
 #
 #   just run            # build, grant caps, configure, then launch everything
 #                       # (just run rerun=live|record|both to add the Rerun sidecar)
@@ -8,7 +8,7 @@
 #   just gui            # run just the GUI    (just gui listen=tcp/0.0.0.0:7447 for remote sensors)
 #   just sensors        # run just the 6 sensors, no GUI/correlator (Ctrl-C stops them)
 #                       # (just sensors connect=tcp/<gui-host>:7447 to feed a remote GUI)
-#   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | parallax | correlator)
+#   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | hostspec | parallax | correlator)
 #   just rerun          # optional Rerun sidecar (evaluation, epic #415) — see the recipe
 #
 # `just run` is the live demo: `configure` writes *demo-max* configs into .run/
@@ -131,6 +131,7 @@ build:
         -p zensight-sensor-sysinfo \
         -p zensight-sensor-logs \
         -p zensight-sensor-systemd \
+        -p zensight-sensor-hostspec \
         -p zensight-sensor-parallax \
         -p zensight-correlator \
         {{ebpf_features}}
@@ -269,6 +270,11 @@ logs: build configure
 # Run the systemd sensor (unit/boot telemetry + threshold alerts + sentinel).
 systemd: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
+
+# Run the hostspec sensor (desired-state assertions; the shipped set is empty —
+# uncomment examples in configs/hostspec.json5 to hold this host to something).
+hostspec: build configure
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-hostspec --config {{rundir}}/hostspec.json5
 
 # Run the parallax sensor (live video: synthetic test pattern + local cameras).
 # Open the parallax device in the GUI and "Load streams" → preview tiles.

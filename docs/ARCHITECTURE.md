@@ -20,7 +20,7 @@ flowchart TD
         LogsSensor["zensight-sensor-logs"]
         SysinfoSensor["zensight-sensor-sysinfo"]
         NetflowSensor["zensight-sensor-netflow"]
-        OtherSensors["... modbus, gnmi, netlink,<br/>netring, systemd, parallax"]
+        OtherSensors["... modbus, gnmi, netlink,<br/>netring, systemd, hostspec, parallax"]
     end
 
     SNMPDev --> SnmpSensor
@@ -85,7 +85,7 @@ flowchart BT
 
     subgraph Apps["Applications"]
         Frontend["zensight (frontend)<br/>Iced 0.14 GUI"]
-        SensorApps["zensight-sensor-*<br/>snmp, logs, sysinfo, netflow, modbus,<br/>gnmi, netlink, netring, systemd, parallax"]
+        SensorApps["zensight-sensor-*<br/>snmp, logs, sysinfo, netflow, modbus,<br/>gnmi, netlink, netring, systemd, hostspec, parallax"]
         PromExp["zensight-exporter-prometheus<br/>HTTP /metrics"]
         OtelExp["zensight-exporter-otel<br/>OTLP gRPC/HTTP"]
     end
@@ -460,7 +460,7 @@ zensight/                            # Workspace root
 ├── (zenkey)                         # keyspace RFC + grammar/registry crate + zenctl — external repo: https://github.com/p13marc/zenkey
 ├── zensight-sensor-core/            # sensor framework         (see zensight-sensor-core/docs/)
 ├── zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/   # protocol sensors
-├── zensight-sensor-{netlink,netring,systemd}/                 # Linux / wire / systemd sensors
+├── zensight-sensor-{netlink,netring,systemd,hostspec}/        # Linux / wire / systemd / desired-state sensors
 ├── zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/          # opt-in eBPF programs
 ├── zensight-correlator/             # identity correlator      (see zensight-correlator/docs/)
 ├── zensight-exporter-{prometheus,otel}/   # exporters

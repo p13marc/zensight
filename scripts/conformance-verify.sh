@@ -42,7 +42,10 @@ PROFILE="${PROFILE:-release}"
 # the roster. netring/netlink need capture/netlink privileges; snmp/gnmi/
 # modbus/netflow/parallax need devices or protoc — they stay out of CI and in
 # reach of a local `SENSORS=… scripts/conformance-verify.sh`.
-SENSORS="${SENSORS:-sysinfo logs systemd}"
+# hostspec joined in #821: it is the IDEAL CI candidate — no privileges, no
+# devices, and its shipped config's default assertion set is empty, so every
+# declared procedure is served and judged on any runner.
+SENSORS="${SENSORS:-sysinfo logs systemd hostspec}"
 # The correlator (the `@catalog` service origin) is ON, as of #782.
 #
 # It was off, and that was a finding rather than a preference: its entities seed

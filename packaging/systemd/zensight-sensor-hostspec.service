@@ -1,0 +1,32 @@
+[Unit]
+Description=ZenSight hostspec — machine-checked desired-state assertions (#821)
+Documentation=https://github.com/p13marc/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-sensor-hostspec --config /etc/zensight/hostspec.json5
+Restart=on-failure
+RestartSec=5s
+# Graceful stop (#161): SIGTERM lets the process publish its offline status and
+# tombstone any firing alerts before exit.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+# The least privileged sensor in the fleet: read-only observation of /proc,
+# lstat/readlink, bounded file reads and /etc/passwd,group. It EXECUTES
+# NOTHING (the assertion vocabulary is closed — no command/run kind), so the
+# sandbox is total: transient user, read-only system, no capabilities.
+#
+# NOTE ProtectHome=read-only, not =yes: an operator asserting on a path under
+# /home (a service user's dotfile, a deploy key) would otherwise read
+# "unreadable" forever. Everything hostspec reads, it reads read-only anyway.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/zensight
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

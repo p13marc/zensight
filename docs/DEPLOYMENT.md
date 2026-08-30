@@ -2,7 +2,7 @@
 
 One machine runs the **GUI** (and the identity **correlator**); every machine
 you want to monitor runs one **sensors container** — the five host sensors
-`just run` spawns locally (sysinfo, netlink, netring, logs, systemd) with the
+`just run` spawns locally (sysinfo, netlink, netring, logs, systemd, hostspec) with the
 same demo-max defaults, bundled into a single image. The only thing you
 configure is the Zenoh endpoint the sensors connect to.
 
@@ -16,7 +16,7 @@ configure is the Zenoh endpoint the sensors connect to.
 ┌─ GUI machine ──────────────────┐        ┌─ monitored machine (×N) ────────┐
 │ just gui listen=tcp/0.0.0.0:7447│◀──────│ podman: zensight-sensors        │
 │ just correlator                 │  tcp  │   sysinfo · netlink · netring   │
-│                                 │ 7447  │   logs · systemd                │
+│                                 │ 7447  │   logs · systemd · hostspec     │
 └─────────────────────────────────┘        └─────────────────────────────────┘
 ```
 
@@ -135,6 +135,7 @@ equivalent `zenoh.tls` block — see `configs/sysinfo.json5`).
 | `--security-opt label=disable` | SELinux hosts (Fedora & co.): the mounted host files (`/etc/machine-id`, the D-Bus socket, journal dirs) cannot be `:Z`-relabeled — they belong to the host. |
 | `-v /etc/machine-id:…:ro` | `host_id` = sha256(machine-id ‖ salt) is the correlator's identity anchor. Without it, every container reports the image's (empty) machine-id and hosts can't be told apart reliably. |
 | `-v /run/dbus/system_bus_socket:…:ro` | the systemd sensor reads `org.freedesktop.systemd1` on the host's system bus. |
+| *(nothing)* | the hostspec sensor needs no privilege, mount or capability at all — its assertions read `/proc`, `lstat` and bounded file contents in whatever view of the filesystem the container has. NOTE that inside a container that view is the **container's**: assert host paths only where they are mounted in. |
 | `-v /var/log/journal` + `/run/log/journal` (ro) | the logs sensor reads the host journal (persistent and volatile locations). |
 | `--restart=on-failure` | the entrypoint is fail-fast: if any sensor dies the container exits non-zero and podman restarts the set. |
 
@@ -166,7 +167,7 @@ Drop this in `/etc/containers/systemd/zensight-sensors.container`, then
 
 ```ini
 [Unit]
-Description=ZenSight sensors (sysinfo, netlink, netring, logs, systemd)
+Description=ZenSight sensors (sysinfo, netlink, netring, logs, systemd, hostspec)
 After=network-online.target
 Wants=network-online.target
 
