@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI stopped being happy** (#845, 14 evidenced leniency fixes). The
+  conformance gate's one exclusion (`field-new`) was stale — its lift
+  condition, zenkey#384, had shipped in the pinned fleet 0.11.1 — and is
+  lifted; a 660-sample live run confirms zero findings, and the README now
+  requires any future exclusion to carry a re-check for its own
+  lift-condition. Conformance runs `--strict-window` (a listen window that
+  shed samples is unobservable, not quietly clean). `zensight-common` is now
+  also tested ALONE, so the #791 FeatureOff contract tests actually compile
+  in CI. The features job runs `clippy -D warnings` instead of `check`
+  (warnings could land silently in every feature-gated path) and gains
+  `--no-default-features` legs for logs (journald-less) and zensight-btf
+  (no_std). Both awk test-strippers now suppress a `#[cfg(test)]` item to
+  its brace-balanced end instead of to end-of-file (the guards had been
+  blind to ~580 production lines of zensight-common/src/config.rs); the five
+  hand-kept guard path lists collapse into one computed list with the single
+  named exemption (conformance's deliberate un-namespaced sessions) stated;
+  the session guard also matches `use …::open` imports; the D2 colour guard
+  matches the constant/struct/macro constructors and caught one live
+  violation (chart.rs `Color::BLACK` → a named theme accessor). Six shipped
+  configs (snmp/gnmi/modbus/netflow/netlink/rerun) that nothing ever parsed
+  gain `shipped_config_parses` tests. Every third-party action is pinned to
+  a commit SHA (the toolchain action now names its toolchain explicitly —
+  with a SHA the ref no longer carries it) and the bpf-linker download is
+  checksummed. `--locked` on the three behavioural scripts' builds; every
+  job has a timeout; release/features-ebpf gain concurrency groups. cargo-
+  deny's bans stay `warn` deliberately (102 duplicate-version skips would
+  rot faster than they protect — reasoning recorded in deny.toml), and the
+  new scheduled `deny-fresh` workflow re-checks advisories with the ignore
+  list stripped, so a stale ignore surfaces instead of sleeping — the same
+  staleness class that hid the field-new lift for a release.
+
 ### Added
 
 - **The three payload verdicts, rendered** (#791 — with it, epic #726 is

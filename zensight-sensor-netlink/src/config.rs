@@ -386,3 +386,17 @@ mod tests {
         assert!(cfg.netlink.collect.interfaces);
     }
 }
+
+/// The shipped example config must load (#845) — see the identical guard in
+/// the other sensor crates. Loaded through the `SensorConfig` trait so the
+/// same `validate()` the binary runs at startup runs here.
+#[cfg(test)]
+mod shipped_config {
+    use zensight_sensor_core::SensorConfig as _;
+    #[test]
+    fn shipped_config_parses() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/netlink.json5");
+        let _config = crate::config::NetlinkSensorConfig::load(path)
+            .expect("configs/netlink.json5 must load");
+    }
+}

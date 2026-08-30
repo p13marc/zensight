@@ -526,3 +526,18 @@ mod tests {
         assert_eq!(reg.data_type, DataType::U16);
     }
 }
+
+/// The shipped example config must load (#845): it ships in the release
+/// tarball and the container image, and nothing else in CI ever parsed it —
+/// so a renamed field silently reverted to its serde default in production
+/// (`gen-configs.sh` documents the identical hazard for the demo profile).
+/// Precedent: parallax/logs guard their shipped configs the same way.
+#[cfg(test)]
+mod shipped_config {
+    #[test]
+    fn shipped_config_parses() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/modbus.json5");
+        let _config = crate::config::ModbusSensorConfig::load_from_file(path)
+            .expect("configs/modbus.json5 must load");
+    }
+}

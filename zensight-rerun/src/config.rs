@@ -350,3 +350,14 @@ mod tests {
         assert!("viewer".parse::<RerunMode>().is_err());
     }
 }
+
+/// The shipped example config must load (#845) — nothing else parses it.
+#[cfg(test)]
+mod shipped_config {
+    #[test]
+    fn shipped_config_parses() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/rerun.json5");
+        let _config = crate::config::RerunConfig::load_from_file(path)
+            .expect("configs/rerun.json5 must load");
+    }
+}

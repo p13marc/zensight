@@ -1410,7 +1410,7 @@ impl<'a> Chart<'a> {
         let text = Text {
             content: "PAUSED - Viewing Past".to_string(),
             position: Point::new(badge_x + 8.0, badge_y + 4.0),
-            color: Color::BLACK,
+            color: theme::colors(&self.theme()).chart_feedback_text(),
             size: 11.0.into(),
             ..Text::default()
         };

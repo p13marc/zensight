@@ -1,0 +1,36 @@
+# Weekly advisory freshness (#845): `cargo deny check` gates PRs with the
+# ignore list in deny.toml applied — which means a stale ignore (its upstream
+# fix shipped, its rationale expired) is invisible forever. This run strips
+# the ignore list and checks advisories bare. It is a REPORT, not a gate: a
+# red run here means "read deny.toml's ignores against this output and prune",
+# not "the tree is broken". The same staleness class bit the conformance
+# gate's field-new exclusion for a full release (#845 finding 1).
+name: deny-fresh
+on:
+  schedule:
+    - cron: '17 5 * * 1'   # Mondays 05:17 UTC
+  workflow_dispatch:
+
+jobs:
+  advisories-bare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845)
+        with:
+          toolchain: "1.97"
+      - uses: https://github.com/taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        with:
+          tool: cargo-deny
+      - name: advisories with the ignore list stripped
+        run: |
+          # Empty the [advisories] ignore array in place; everything else in
+          # deny.toml (severity threshold, yanked handling) stays in force.
+          python3 - <<'PY'
+          import re
+          s = open('deny.toml').read()
+          s = re.sub(r'(?ms)^ignore = \[.*?^\]', 'ignore = []', s)
+          open('deny.toml', 'w').write(s)
+          PY
+          cargo deny check advisories

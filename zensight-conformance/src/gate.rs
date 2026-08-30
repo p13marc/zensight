@@ -82,15 +82,19 @@ impl FailOn {
 /// upstream walker bug, filed as **zenkey#384**, and not something ZenSight
 /// can fix by re-shaping a payload.
 ///
-/// **This exclusion lifts the moment zenkey#384 lands**: delete the entry,
-/// re-run, and `field-new` becomes a real warning again. Until then
-/// `--fail-on warning` would be unusable, which is the one outcome worse than
-/// an explicit exclusion — a gate nobody can turn on protects nothing.
+/// **Empty since #845.** The one entry it ever held — `field-new`, excluded
+/// while upstream's declared-path walker could not descend `oneOf`/`$ref`
+/// (zenkey#384) — lifted when the fix shipped in the pinned zenkey-fleet
+/// 0.11.1 (`judge/field.rs`, "Both additions fix the same defect (#384)").
+/// The exclusion then sat here stale for a release: its lift-condition had
+/// happened and nothing noticed, which is the exact failure mode this
+/// comment's predecessor warned about. If an entry ever returns, name the
+/// upstream issue AND add a re-check that can notice the lift.
 ///
-/// A caller can override in both directions: `--deny field-new` puts it back
-/// under the gate (that is how you check whether #384 has landed), and
-/// `--allow <id>` adds an exclusion for a run.
-pub const DEFAULT_EXCLUDED: &[CheckId] = &[CheckId::FieldNew];
+/// A caller can override in both directions: `--allow <id>` adds an
+/// exclusion for a run, `--deny <id>` puts a default exclusion back under
+/// the gate.
+pub const DEFAULT_EXCLUDED: &[CheckId] = &[];
 
 /// How to turn a report into a verdict.
 #[derive(Debug, Clone)]
@@ -265,37 +269,45 @@ mod tests {
         assert!(v.gated.is_empty());
     }
 
-    /// zenkey#384. Remove `field-new` from [`DEFAULT_EXCLUDED`] when the
-    /// upstream walker descends `oneOf`, and this test flips to asserting the
-    /// warning fails the run.
+    /// zenkey#384 landed (fleet 0.11.1), so `field-new` is a real warning
+    /// again (#845) — the flipped form of the test that used to pin the
+    /// exclusion. If this fails after a fleet bump, upstream regressed the
+    /// walker; exclude it again WITH a re-check this time.
     #[test]
-    fn field_new_is_excluded_until_zenkey_384_lands() {
-        assert_eq!(DEFAULT_EXCLUDED, &[CheckId::FieldNew]);
+    fn field_new_gates_now_that_zenkey_384_landed() {
+        assert!(DEFAULT_EXCLUDED.is_empty());
         let v = judge(
             &report(vec![finding(DoctorSeverity::Warning, CheckId::FieldNew)]),
             &Gate::default(),
         );
-        assert_eq!(judgement_exit_code(&v.judgement), 0);
-        assert_eq!(v.excluded.len(), 1);
-        // …and `--deny field-new` is how you find out whether #384 landed.
-        let strict = Gate {
-            excluded: vec![],
+        assert_eq!(judgement_exit_code(&v.judgement), 1);
+        assert!(v.excluded.is_empty());
+        // …and `--allow field-new` is still available as the operator's
+        // per-run override.
+        let lenient = Gate {
+            excluded: vec![CheckId::FieldNew],
             ..Gate::default()
         };
         let v = judge(
             &report(vec![finding(DoctorSeverity::Warning, CheckId::FieldNew)]),
-            &strict,
+            &lenient,
         );
-        assert_eq!(judgement_exit_code(&v.judgement), 1);
+        assert_eq!(judgement_exit_code(&v.judgement), 0);
     }
 
     /// An exclusion suppresses the *check*, not the severity floor: an
     /// excluded `error` is still excluded.
     #[test]
     fn an_exclusion_outranks_the_severity_floor() {
+        // The default list is empty (#845), so the exclusion under test is an
+        // explicit --allow.
+        let gate = Gate {
+            excluded: vec![CheckId::FieldNew],
+            ..Gate::default()
+        };
         let v = judge(
             &report(vec![finding(DoctorSeverity::Error, CheckId::FieldNew)]),
-            &Gate::default(),
+            &gate,
         );
         assert_eq!(judgement_exit_code(&v.judgement), 0);
         assert_eq!(v.excluded.len(), 1);
