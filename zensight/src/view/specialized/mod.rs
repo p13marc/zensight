@@ -153,6 +153,10 @@ pub fn specialized_view<'a>(
         Protocol::Netring => Some(netring::netring_sensor_view(state, artifact)),
         Protocol::Systemd => Some(systemd::systemd_host_view(state)),
         Protocol::Parallax => Some(parallax::parallax_view(state)),
+        // #821: the sentinel's surfaces are the Alerts view, the Sensors
+        // card and (form, #821 follow-through) the Expectations view; its
+        // device card carries one gauge and needs no specialized tab.
+        Protocol::Hostspec => None,
     }
 }
 
@@ -168,5 +172,7 @@ pub fn syslog_view<'a>(
 
 /// Check if a protocol has a specialized view available.
 pub fn has_specialized_view(protocol: Protocol) -> bool {
-    !matches!(protocol, Protocol::Opcua)
+    // Keep this list in lockstep with the `None` arms above — a `true` here
+    // for a `None` protocol offers a tab that renders nothing.
+    !matches!(protocol, Protocol::Opcua | Protocol::Hostspec)
 }

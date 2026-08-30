@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Protocol::Hostspec`** (#821, plumbing PR): the enum variant, wire token
+  `hostspec`, and the compiler-forced GUI arms (generic icon, generic
+  overview, no specialized tab — its surfaces are Alerts, the Sensors card
+  and, later in the epic, the Expectations form). The variant lands before
+  the crate on the `Opcua` precedent, so the sensor PR stays crate-scoped.
+
 - **The three payload verdicts, rendered** (#791 — with it, epic #726 is
   done). `zensight` gains a default-on `validate` feature enabling
   `zensight-common/validate-json`; the bus explorer's inspector judges the

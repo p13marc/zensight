@@ -175,6 +175,11 @@ pub enum Protocol {
     /// no `TelemetryPoint` firehose itself — only stream *stats* (fps/kbps) ride
     /// ordinary telemetry; the pixels ride `@media/<stream>/…` as raw bytes.
     Parallax,
+    /// Machine-checked desired-state assertions (#821): the sentinel pattern for
+    /// what D-Bus and netlink cannot see — mounts, files, listeners, symlinks,
+    /// content, permissions. Publishes alerts and one gauge
+    /// (`assertions/failing`); strictly read-only, executes nothing.
+    Hostspec,
 }
 
 impl Protocol {
@@ -192,6 +197,7 @@ impl Protocol {
             Protocol::Netring => "netring",
             Protocol::Systemd => "systemd",
             Protocol::Parallax => "parallax",
+            Protocol::Hostspec => "hostspec",
         }
     }
 
@@ -227,6 +233,7 @@ impl std::str::FromStr for Protocol {
             "netring" => Ok(Protocol::Netring),
             "systemd" => Ok(Protocol::Systemd),
             "parallax" => Ok(Protocol::Parallax),
+            "hostspec" => Ok(Protocol::Hostspec),
             _ => Err(()),
         }
     }
