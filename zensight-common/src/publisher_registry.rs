@@ -21,10 +21,59 @@ use zenoh::pubsub::Publisher;
 use crate::error::Result;
 use crate::qos::QosClass;
 
+/// Publish-side self-accounting (#811): totals a sensor's health doc reports
+/// so the platform can see its own output. All relaxed atomics — statistics,
+/// not synchronization. `published_*` are bumped here on every baseline put;
+/// `dropped`/`evicted` have no core-side source and are fed by the sensor
+/// that owns the shedding/eviction (count what is wired; the health doc's
+/// optional fields already say "absent = not measured").
+#[derive(Debug, Default)]
+pub struct PublishCounters {
+    published_total: std::sync::atomic::AtomicU64,
+    published_bytes_total: std::sync::atomic::AtomicU64,
+    dropped_total: std::sync::atomic::AtomicU64,
+    evicted_total: std::sync::atomic::AtomicU64,
+}
+
+impl PublishCounters {
+    fn record_publish(&self, bytes: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.published_total.fetch_add(1, Relaxed);
+        self.published_bytes_total.fetch_add(bytes as u64, Relaxed);
+    }
+    /// Count samples the sensor chose not to publish (shed, rate-limited).
+    pub fn add_dropped(&self, n: u64) {
+        self.dropped_total
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Count entries evicted from bounded tables.
+    pub fn add_evicted(&self, n: u64) {
+        self.evicted_total
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn published_total(&self) -> u64 {
+        self.published_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn published_bytes_total(&self) -> u64 {
+        self.published_bytes_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn dropped_total(&self) -> u64 {
+        self.dropped_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Caches one declared [`Publisher`] per key expression.
 pub struct PublisherRegistry {
     session: Arc<Session>,
     publishers: RwLock<HashMap<String, Publisher<'static>>>,
+    counters: Arc<PublishCounters>,
 }
 
 impl std::fmt::Debug for PublisherRegistry {
@@ -39,7 +88,15 @@ impl PublisherRegistry {
         Self {
             session,
             publishers: RwLock::new(HashMap::new()),
+            counters: Arc::new(PublishCounters::default()),
         }
+    }
+
+    /// The registry's publish counters (#811) — shared so the health doc can
+    /// read them and the owning sensor can feed `dropped`/`evicted` into the
+    /// same accounting.
+    pub fn counters(&self) -> Arc<PublishCounters> {
+        self.counters.clone()
     }
 
     /// Declare (once) and cache the publisher for `key` with the class's QoS.
@@ -70,6 +127,7 @@ impl PublisherRegistry {
     pub async fn put(&self, key: &str, payload: Vec<u8>, qos: QosClass) -> Result<()> {
         crate::metric_guard::check_telemetry_key(key);
         self.ensure(key, qos).await?;
+        self.counters.record_publish(payload.len());
         let publishers = self.publishers.read().await;
         publishers
             .get(key)
@@ -92,6 +150,7 @@ impl PublisherRegistry {
     ) -> Result<()> {
         crate::metric_guard::check_telemetry_key(key);
         self.ensure(key, qos).await?;
+        self.counters.record_publish(payload.len());
         let publishers = self.publishers.read().await;
         publishers
             .get(key)

@@ -146,9 +146,9 @@ pub async fn run_with_session(
 
             sample = health_sub.recv_async() => match sample {
                 Ok(sample) if sample.kind() != SampleKind::Delete => {
-                    handle_control_sample::<HealthSnapshot>(
-                        &sample, &tx_control, &stats, ControlItem::Health,
-                    )
+                    handle_control_sample::<HealthSnapshot>(&sample, &tx_control, &stats, |s| {
+                        ControlItem::Health(Box::new(s))
+                    })
                     .await;
                 }
                 Ok(_) => {}

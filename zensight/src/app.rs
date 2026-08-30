@@ -9076,6 +9076,7 @@ mod sensor_liveliness_tests {
             metrics_published: 100,
             host_id: None,
             source: source.map(str::to_string),
+            self_stats: None,
         }
     }
 

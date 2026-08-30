@@ -5,6 +5,14 @@
   // deployment on shared Zenoh infrastructure.
   zenoh: { mode: "peer" },
 
+  // Resource declaration (#811): the RSS budget carried into the health doc's
+  // self_stats and graded by the sensor-budget alert at 80% (Critical at 95%).
+  // Declared, not enforced — the shed ladder is #812. Omit to declare none.
+  // On a 1-2 GB guest, 128 MiB is a reasonable starting claim for netring.
+  resources: {
+    // budget_rss_mb: 128,
+  },
+
   // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
   // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle (and, for

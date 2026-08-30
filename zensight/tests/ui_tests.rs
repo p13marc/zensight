@@ -2455,6 +2455,7 @@ fn test_sensors_view() {
             metrics_published: 1234,
             host_id: None,
             source: None,
+            self_stats: None,
         },
     );
     // ...with a recent error report.
@@ -2540,6 +2541,7 @@ fn test_artifact_holder_pick() {
             metrics_published: 10,
             host_id: None,
             source: None,
+            self_stats: None,
         },
     );
     let kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
@@ -2621,6 +2623,7 @@ fn test_artifact_tree_confirm_card() {
             metrics_published: 10,
             host_id: None,
             source: None,
+            self_stats: None,
         },
     );
 
@@ -2712,6 +2715,7 @@ fn test_sensors_snapshot_dirs() {
             metrics_published: 10,
             host_id: None,
             source: None,
+            self_stats: None,
         },
     );
 

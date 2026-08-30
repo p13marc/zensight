@@ -1122,6 +1122,7 @@ mod tests {
             metrics_published: 0,
             host_id: None,
             source: Some("hosta".into()),
+            self_stats: None,
         };
         let payload = zensight_common::encode(&snapshot, zensight_common::Format::Json).unwrap();
         match decode_sample("v1/h-3fa9c2d41b7e/state/sysinfo/health", &payload) {

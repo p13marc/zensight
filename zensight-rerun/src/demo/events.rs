@@ -88,6 +88,7 @@ fn health(status: HealthStatus) -> HealthSnapshot {
         metrics_published: 100,
         host_id: None,
         source: Some(SOURCE.to_string()),
+        self_stats: None,
     }
 }
 

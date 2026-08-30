@@ -57,6 +57,13 @@ impl Publisher {
         &self.v1
     }
 
+    /// The baseline tier's publish counters (#811) — the health doc reads
+    /// them, and a sensor feeds its own `dropped`/`evicted` into the same
+    /// accounting.
+    pub fn counters(&self) -> Arc<zensight_common::PublishCounters> {
+        self.control.counters()
+    }
+
     /// Get the key prefix.
     pub fn telemetry_prefix(&self) -> &str {
         &self.telemetry_prefix

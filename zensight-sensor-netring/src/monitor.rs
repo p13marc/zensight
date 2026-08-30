@@ -32,10 +32,10 @@ pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
 pub type IpfixRing = Arc<Mutex<VecDeque<netring::export::FlowRecord>>>;
 
 /// Max recent flows retained for the on-demand `@rpc/netring/flows` channel.
-const FLOW_RING_CAP: usize = 512;
+pub const FLOW_RING_CAP: usize = 512;
 
 /// Max recent elephant flows retained for `@rpc/netring/elephant_flows`.
-const ELEPHANT_RING_CAP: usize = 128;
+pub const ELEPHANT_RING_CAP: usize = 128;
 
 /// Cardinality guards for the on-demand inventories (DNS / HTTP). Talkers now
 /// come from netring's bounded `aggregate()` state (#369), not a local histogram.

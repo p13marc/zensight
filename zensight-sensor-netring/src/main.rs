@@ -54,6 +54,48 @@ async fn main() -> Result<()> {
     let (mon, mut channels, keepalive, detector_handle, capture_tap_index) =
         monitor::build(&cfg, capture_tap.clone()).map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    // Self-telemetry (#811): register the bounded structures most likely to
+    // be "where the memory went" as table providers, pulled only on the 5s
+    // health tick. This is what turns "netring is 319 MB" in a health doc
+    // into "and the flow ring / TLS inventory / asset inventory hold N
+    // entries of it". Bytes are a shallow estimate where the entry type is
+    // flat, absent where heap strings dominate — absent means "cannot say",
+    // never zero.
+    {
+        let health = runner.health();
+        let flow_records = channels.flow_records.clone();
+        health.register_table_stats(Box::new(move || {
+            let entries = flow_records.lock().map(|r| r.len()).unwrap_or(0) as u64;
+            vec![zensight_common::TableStats {
+                name: "flow_ring".into(),
+                entries,
+                bytes: None,
+                capacity_entries: Some(monitor::FLOW_RING_CAP as u64),
+                capacity_bytes: None,
+            }]
+        }));
+        let tls = channels.tls_inventory.clone();
+        health.register_table_stats(Box::new(move || {
+            vec![zensight_common::TableStats {
+                name: "tls_inventory".into(),
+                entries: tls.lock().map(|m| m.len()).unwrap_or(0) as u64,
+                bytes: None,
+                capacity_entries: None,
+                capacity_bytes: None,
+            }]
+        }));
+        let assets = channels.assets.clone();
+        health.register_table_stats(Box::new(move || {
+            vec![zensight_common::TableStats {
+                name: "asset_inventory".into(),
+                entries: assets.lock().map(|m| m.len()).unwrap_or(0) as u64,
+                bytes: None,
+                capacity_entries: None,
+                capacity_bytes: None,
+            }]
+        }));
+    }
+
     // Producers for the unified artifact channel (`@rpc/netring/artifact/*`):
     // a Tier-1 report bundle and a Tier-2 dir snapshot (a natural use is a dir
     // pointed at netring's pcap output) are always registered (no-op unless
