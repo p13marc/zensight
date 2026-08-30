@@ -210,6 +210,16 @@ pub struct CollectConfig {
     #[serde(default)]
     pub power: bool,
 
+    /// Collect drive SMART health (#823): NVMe log page 0x02
+    /// (percentage_used, spare, media errors, …) via the admin ioctl, and the
+    /// three classic ATA attributes (reallocated/pending sectors, CRC errors)
+    /// via SG_IO. Default off: the reads need device access (CAP_SYS_ADMIN
+    /// for NVMe, CAP_SYS_RAWIO for ATA) and a VM has nothing to read — this
+    /// earns its keep on the hypervisor and bare metal. Missing devices or
+    /// permission => skipped gracefully, per arm.
+    #[serde(default)]
+    pub smart: bool,
+
     /// Serve the on-demand per-process detail query channel
     /// (`@rpc/sysinfo/processes?sort=cpu|mem|io&top=N`). Default on. The per-pid
     /// firehose is served only on query (P2); the small `system/processes_*`
@@ -284,6 +294,7 @@ impl Default for CollectConfig {
             cgroups: false,
             cgroup_paths: Vec::new(),
             power: false,
+            smart: false,
             process_query: true,
             netstat: true,
             softnet: true,
@@ -631,6 +642,7 @@ mod tests {
             "sysinfo.collect.tcp_states",
             "sysinfo.collect.processes",
             "sysinfo.collect.ebpf",
+            "sysinfo.collect.smart",
         ] {
             assert_eq!(at(flag), false, "{flag} must ship opt-in (false)");
         }

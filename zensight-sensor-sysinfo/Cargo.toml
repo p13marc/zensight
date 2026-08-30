@@ -12,7 +12,7 @@ license = "Apache-2.0"
 # default. Requires nightly + rust-src + bpf-linker to BUILD, and CAP_BPF/
 # CAP_PERFMON to RUN. Keeps the unprivileged default intact and keeps the
 # feature out of `cargo build --workspace` on stable CI.
-ebpf = ["dep:aya", "dep:aya-log", "dep:aya-build", "dep:libc"]
+ebpf = ["dep:aya", "dep:aya-log", "dep:aya-build"]
 
 [dependencies]
 zensight-common = { path = "../zensight-common" }
@@ -28,8 +28,10 @@ zensight-sensor-sysinfo-ebpf-common = { path = "../zensight-sensor-sysinfo-ebpf-
 # eBPF userspace (opt-in, `ebpf` feature only).
 aya = { workspace = true, optional = true }
 aya-log = { workspace = true, optional = true }
-# EPERM/capability messaging + optional RLIMIT_MEMLOCK bump on old kernels.
-libc = { version = "0.2", optional = true }
+# eBPF EPERM/capability messaging + RLIMIT_MEMLOCK, and the SMART collector's
+# NVMe admin / SG_IO ATA pass-through ioctls (#823). Unconditional since #823
+# — the logs sensor already takes it the same way.
+libc = "0.2"
 
 # System information
 sysinfo = "0.33"

@@ -972,6 +972,207 @@ pub fn collect_mem_composition() -> Option<MemComposition> {
     }
 }
 
+// ===========================================================================
+// H. Drive SMART health (#823)
+// ===========================================================================
+//
+// mdadm tells us after a drive has dropped out of the array; this asks the
+// drives themselves. Sysfs exposes NVMe *identity* only — the SMART/Health
+// log (page 0x02) needs the admin passthru ioctl (CAP_SYS_ADMIN), and ATA
+// attributes have no kernel file surface at all short of an SG_IO ATA
+// PASS-THROUGH (CAP_SYS_RAWIO). Both arms follow the RAPL discipline: a
+// missing device, EPERM, or a non-ATA disk behind /dev/sdX is a silent
+// per-arm skip, never a fabricated zero and never an error log for absence.
+// Parsing is pure (`map::parse_{nvme,ata}_smart`) so the byte layouts are
+// fixture-tested; only the ioctl plumbing lives here.
+
+/// Read SMART health from every NVMe controller and ATA disk the process can
+/// reach. Empty on a VM with neither — which reads as *not asked*.
+pub fn collect_smart() -> Vec<crate::map::SmartSample> {
+    let mut out = collect_nvme_smart();
+    out.extend(collect_ata_smart());
+    out
+}
+
+fn collect_nvme_smart() -> Vec<crate::map::SmartSample> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/nvme") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(log) = nvme_health_log(&format!("/dev/{name}")) else {
+            continue;
+        };
+        if let Some(mut s) = crate::map::parse_nvme_smart(&name, &log) {
+            s.model = std::fs::read_to_string(e.path().join("model"))
+                .ok()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty());
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// `struct nvme_passthru_cmd` from `<linux/nvme_ioctl.h>` — 72 bytes, stable
+/// kernel ABI since 4.4.
+#[repr(C)]
+#[derive(Default)]
+struct NvmeAdminCmd {
+    opcode: u8,
+    flags: u8,
+    rsvd1: u16,
+    nsid: u32,
+    cdw2: u32,
+    cdw3: u32,
+    metadata: u64,
+    addr: u64,
+    metadata_len: u32,
+    data_len: u32,
+    cdw10: u32,
+    cdw11: u32,
+    cdw12: u32,
+    cdw13: u32,
+    cdw14: u32,
+    cdw15: u32,
+    timeout_ms: u32,
+    result: u32,
+}
+
+/// `_IOWR('N', 0x41, struct nvme_passthru_cmd)` = dir 3<<30 | 72<<16 |
+/// 'N'<<8 | 0x41.
+const NVME_IOCTL_ADMIN_CMD: libc::c_ulong = 0xC048_4E41;
+
+/// Fetch the 512-byte SMART / Health Information log (Get Log Page `0x02`,
+/// controller-wide `nsid = 0xFFFFFFFF`). `None` on any failure — no device,
+/// no permission (the ioctl needs CAP_SYS_ADMIN), no NVMe.
+fn nvme_health_log(dev: &str) -> Option<[u8; 512]> {
+    use std::os::fd::AsRawFd;
+    let f = std::fs::File::open(dev).ok()?;
+    let mut buf = [0u8; 512];
+    let mut cmd = NvmeAdminCmd {
+        opcode: 0x02, // Get Log Page
+        nsid: 0xFFFF_FFFF,
+        addr: buf.as_mut_ptr() as u64,
+        data_len: 512,
+        // cdw10: NUMDL (dwords - 1 = 0x7F) << 16 | log id 0x02.
+        cdw10: 0x007F_0002,
+        ..Default::default()
+    };
+    // SAFETY: `cmd` points at a live 512-byte buffer for the duration of the
+    // call; the struct layout matches the kernel's nvme_passthru_cmd, and the
+    // kernel writes at most `data_len` bytes into `addr`.
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), NVME_IOCTL_ADMIN_CMD as _, &mut cmd) };
+    (rc == 0).then_some(buf)
+}
+
+fn collect_ata_smart() -> Vec<crate::map::SmartSample> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/block") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        // Whole SCSI/ATA disks only (`sda`, not `sda1`, not nvme/dm/loop).
+        // Whether the disk actually speaks ATA is settled by the pass-through
+        // itself: a USB bridge or SAS disk fails the ioctl cleanly and skips.
+        let is_whole_sd = name
+            .strip_prefix("sd")
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_lowercase()));
+        if !is_whole_sd {
+            continue;
+        }
+        let Some(data) = ata_smart_read_data(&format!("/dev/{name}")) else {
+            continue;
+        };
+        if let Some(mut s) = crate::map::parse_ata_smart(&name, &data) {
+            s.model = std::fs::read_to_string(e.path().join("device/model"))
+                .ok()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty());
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// `struct sg_io_hdr` from `<scsi/sg.h>` — stable ABI.
+#[repr(C)]
+struct SgIoHdr {
+    interface_id: libc::c_int,
+    dxfer_direction: libc::c_int,
+    cmd_len: u8,
+    mx_sb_len: u8,
+    iovec_count: u16,
+    dxfer_len: u32,
+    dxferp: *mut libc::c_void,
+    cmdp: *const u8,
+    sbp: *mut u8,
+    timeout: u32,
+    flags: u32,
+    pack_id: libc::c_int,
+    usr_ptr: *mut libc::c_void,
+    status: u8,
+    masked_status: u8,
+    msg_status: u8,
+    sb_len_wr: u8,
+    host_status: u16,
+    driver_status: u16,
+    resid: libc::c_int,
+    duration: u32,
+    info: u32,
+}
+
+const SG_IO: libc::c_ulong = 0x2285;
+const SG_DXFER_FROM_DEV: libc::c_int = -3;
+/// DRIVER_SENSE — sense data present; benign when the command succeeded.
+const DRIVER_SENSE: u16 = 0x08;
+
+/// SMART READ DATA via ATA PASS-THROUGH (16) (SAT): protocol PIO Data-In,
+/// T_DIR=in, BYT_BLOK=blocks, T_LENGTH=sector-count; features 0xD0, the
+/// SMART signature LBA mid/high 0x4F/0xC2, command 0xB0.
+fn ata_smart_read_data(dev: &str) -> Option<[u8; 512]> {
+    use std::os::fd::AsRawFd;
+    let f = std::fs::File::open(dev).ok()?;
+    let cdb: [u8; 16] = [
+        0x85, 0x08, 0x0E, 0x00, 0xD0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x4F, 0x00, 0xC2, 0x00, 0xB0,
+        0x00,
+    ];
+    let mut data = [0u8; 512];
+    let mut sense = [0u8; 32];
+    let mut hdr = SgIoHdr {
+        interface_id: 'S' as libc::c_int,
+        dxfer_direction: SG_DXFER_FROM_DEV,
+        cmd_len: cdb.len() as u8,
+        mx_sb_len: sense.len() as u8,
+        iovec_count: 0,
+        dxfer_len: data.len() as u32,
+        dxferp: data.as_mut_ptr().cast(),
+        cmdp: cdb.as_ptr(),
+        sbp: sense.as_mut_ptr(),
+        timeout: 5_000, // ms
+        flags: 0,
+        pack_id: 0,
+        usr_ptr: std::ptr::null_mut(),
+        status: 0,
+        masked_status: 0,
+        msg_status: 0,
+        sb_len_wr: 0,
+        host_status: 0,
+        driver_status: 0,
+        resid: 0,
+        duration: 0,
+        info: 0,
+    };
+    // SAFETY: every pointer in `hdr` (cdb, data, sense) outlives the call;
+    // the header layout matches the kernel's sg_io_hdr, and SG_IO writes at
+    // most `dxfer_len` bytes into `dxferp`.
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), SG_IO as _, &mut hdr) };
+    (rc == 0 && hdr.status == 0 && hdr.host_status == 0 && (hdr.driver_status & !DRIVER_SENSE) == 0)
+        .then_some(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
