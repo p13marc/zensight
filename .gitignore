@@ -1,3 +1,4 @@
 /target
 .run/
 __pycache__/
+.claude/worktrees/
