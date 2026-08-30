@@ -174,6 +174,12 @@ pub trait Service {
     fn tasks_current(&self) -> zbus::Result<u64>;
     #[zbus(property)]
     fn exec_main_status(&self) -> zbus::Result<i32>;
+    /// Outcome of the last completed run: `success`, `exit-code`, `signal`,
+    /// `timeout`, `core-dump`, … — the field `ExecMainStatus` alone cannot
+    /// replace, because a oneshot's failure mode may not be an exit code
+    /// (#824).
+    #[zbus(property)]
+    fn result(&self) -> zbus::Result<String>;
     #[zbus(property, name = "IPIngressBytes")]
     fn ip_ingress_bytes(&self) -> zbus::Result<u64>;
     #[zbus(property, name = "IPEgressBytes")]
@@ -205,6 +211,12 @@ pub trait Timer {
     /// Wall-clock µs of the next scheduled elapse (0/`u64::MAX` if none).
     #[zbus(property, name = "NextElapseUSecRealtime")]
     fn next_elapse_usec_realtime(&self) -> zbus::Result<u64>;
+    /// The unit this timer activates (`Unit=`, default `<name>.service`) —
+    /// the thing whose *outcome* the `succeeded_within_secs` expectation
+    /// judges: a timer can fire on schedule for a week while its service
+    /// fails every single run (#824).
+    #[zbus(property, name = "Unit")]
+    fn unit(&self) -> zbus::Result<String>;
 }
 
 /// The `org.freedesktop.systemd1.Socket` interface subset (#279 socket telemetry).

@@ -114,6 +114,11 @@
     // built-in rules (they ride journald.detect_events). Add your own:
     sentinel: {
       include_builtins: true,
+      // Built-in kernel pattern rules (#824): EXT4-fs error, XFS corruption,
+      // md/RAID disk failure, block-device I/O error — Critical, rate-limited,
+      // source-agnostic (they need no journald). Off by default: enable them
+      // on hosts whose disks you care about (i.e. enable them).
+      include_kernel_builtins: false,
       rules: [
         // Example — fire a warning on repeated SSH auth failures (quiet unless
         // a brute-force is happening); pivots into the filtered Logs feed (#558):
@@ -123,7 +128,14 @@
         //   threshold: { count: 5, within_secs: 60 },
         //   severity: "warning",
         //   summary: "SSH bruteforce on {host}: {count}× (e.g. {message})",
+        //   // Optional cap on how often a rule may page (#824): at most
+        //   // max_fires alert publications per per_secs; further fires are
+        //   // suppressed and counted (visible in @rpc/logs/rules).
+        //   rate_limit: { max_fires: 4, per_secs: 3600 },
         // },
+        // Quoted lines are scrubbed before they leave the host: secret-looking
+        // key=value assignments are replaced and the summary is suffixed
+        // "(redacted)" — same denylist as the debug bundles.
       ],
     },
 

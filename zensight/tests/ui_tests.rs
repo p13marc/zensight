@@ -9,6 +9,19 @@
 
 use iced_test::simulator;
 
+/// Force this test binary's wgpu onto the GL backend before main (#687, #829):
+/// parallel tests each standing up a Vulkan (lavapipe) device segfault in the
+/// loader with no output. Mirrors the guard in `src/lib.rs` — each test binary
+/// needs its own — and an explicit `WGPU_BACKEND` from the caller still wins.
+/// The measurements and the full story: `docs/testing.md`.
+#[ctor::ctor]
+fn force_gl_backend_for_tests() {
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        // SAFETY: pre-main, single-threaded — no concurrent env reader yet.
+        unsafe { std::env::set_var("WGPU_BACKEND", "gl") };
+    }
+}
+
 // Re-export view components for testing
 use zensight::app::{AppTheme, CurrentView};
 use zensight::message::{DeviceId, Message};

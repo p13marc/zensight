@@ -80,6 +80,10 @@ pub enum SystemdExpKind {
     ServiceActive,
     TargetActive,
     TimerWithin,
+    /// The timer fired within the window **and its service's last run
+    /// succeeded** (#824) — the form that catches a timer firing on schedule
+    /// while its service fails every run.
+    TimerSucceeded,
     RestartRate,
     ForbidFailed,
 }
@@ -89,6 +93,7 @@ impl SystemdExpKind {
         SystemdExpKind::ServiceActive,
         SystemdExpKind::TargetActive,
         SystemdExpKind::TimerWithin,
+        SystemdExpKind::TimerSucceeded,
         SystemdExpKind::RestartRate,
         SystemdExpKind::ForbidFailed,
     ];
@@ -97,6 +102,7 @@ impl SystemdExpKind {
             SystemdExpKind::ServiceActive => "Service must be active",
             SystemdExpKind::TargetActive => "Target must be active",
             SystemdExpKind::TimerWithin => "Timer must fire within",
+            SystemdExpKind::TimerSucceeded => "Timer service must succeed within",
             SystemdExpKind::RestartRate => "Restart-rate ceiling",
             SystemdExpKind::ForbidFailed => "Forbid any failed unit",
         }
@@ -118,7 +124,9 @@ pub struct SystemdExpDraft {
     pub for_secs: u64,
     pub services: Vec<String>,
     pub targets: Vec<String>,
-    pub timers: Vec<(String, u64)>,
+    /// `(timer, within_secs, succeeded_within_secs)` — either window may be
+    /// set, mirroring the sensor's two-strength `TimerExpectation` (#824).
+    pub timers: Vec<(String, Option<u64>, Option<u64>)>,
     pub restart_rates: Vec<(String, u32, u64)>,
     pub forbid_failed: bool,
 }
@@ -146,7 +154,12 @@ impl SystemdExpDraft {
             "for_secs": self.for_secs,
             "services_active": self.services.iter().map(|u| serde_json::json!({"unit": u})).collect::<Vec<_>>(),
             "targets_active": self.targets.iter().map(|t| serde_json::json!({"target": t})).collect::<Vec<_>>(),
-            "timers": self.timers.iter().map(|(t, w)| serde_json::json!({"timer": t, "within_secs": w})).collect::<Vec<_>>(),
+            "timers": self.timers.iter().map(|(t, w, sw)| {
+                let mut o = serde_json::json!({"timer": t});
+                if let Some(w) = w { o["within_secs"] = (*w).into(); }
+                if let Some(sw) = sw { o["succeeded_within_secs"] = (*sw).into(); }
+                o
+            }).collect::<Vec<_>>(),
             "restart_rates": self.restart_rates.iter().map(|(u, m, w)| serde_json::json!({"unit": u, "max": m, "window_secs": w})).collect::<Vec<_>>(),
             "forbid_failed": self.forbid_failed,
         })
@@ -182,7 +195,8 @@ impl SystemdExpDraft {
                 .filter_map(|s| {
                     Some((
                         s.get("timer").and_then(|x| x.as_str())?.to_string(),
-                        s.get("within_secs").and_then(|x| x.as_u64())?,
+                        s.get("within_secs").and_then(|x| x.as_u64()),
+                        s.get("succeeded_within_secs").and_then(|x| x.as_u64()),
                     ))
                 })
                 .collect(),
@@ -220,10 +234,16 @@ impl SystemdExpDraft {
                 severity: "warning".into(),
             });
         }
-        for (t, w) in &self.timers {
+        for (t, w, sw) in &self.timers {
+            let detail = match (w, sw) {
+                (Some(w), Some(sw)) => format!("fired within {w}s, succeeded within {sw}s"),
+                (Some(w), None) => format!("fired within {w}s"),
+                (None, Some(sw)) => format!("succeeded within {sw}s"),
+                (None, None) => "checks nothing".into(),
+            };
             rows.push(ExpRow {
                 rule: format!("timer:{t}"),
-                detail: format!("within {w}s"),
+                detail,
                 severity: "warning".into(),
             });
         }
@@ -251,7 +271,7 @@ impl SystemdExpDraft {
         } else if let Some(t) = rule.strip_prefix("target:") {
             self.targets.retain(|s| s != t);
         } else if let Some(t) = rule.strip_prefix("timer:") {
-            self.timers.retain(|(name, _)| name != t);
+            self.timers.retain(|(name, _, _)| name != t);
         } else if let Some(u) = rule.strip_prefix("restart:") {
             self.restart_rates.retain(|(name, _, _)| name != u);
         } else if rule == "forbid:failed" {
@@ -455,6 +475,7 @@ fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
         let placeholder = match state.systemd_kind {
             SystemdExpKind::TargetActive => "target (multi-user.target)",
             SystemdExpKind::TimerWithin => "timer (logrotate.timer)",
+            SystemdExpKind::TimerSucceeded => "timer (cosign.timer)",
             _ => "unit (sshd.service)",
         };
         form = form.push(
@@ -465,7 +486,7 @@ fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
         );
     }
     match state.systemd_kind {
-        SystemdExpKind::TimerWithin => {
+        SystemdExpKind::TimerWithin | SystemdExpKind::TimerSucceeded => {
             form = form.push(
                 text_input("within (secs)", &state.new_value)
                     .on_input(Message::SetExpectationValue)
@@ -702,13 +723,20 @@ mod tests {
     fn systemd_draft_command_shape() {
         let mut d = SystemdExpDraft::default();
         d.services.push("sshd.service".into());
-        d.timers.push(("logrotate.timer".into(), 90_000));
+        d.timers
+            .push(("logrotate.timer".into(), Some(90_000), None));
+        d.timers.push(("cosign.timer".into(), None, Some(3_900)));
         d.restart_rates.push(("nginx.service".into(), 5, 600));
         d.forbid_failed = true;
         let cmd = d.to_command_json();
         assert_eq!(cmd["type"], "set_expectations");
         assert_eq!(cmd["services_active"][0]["unit"], "sshd.service");
         assert_eq!(cmd["timers"][0]["within_secs"], 90_000);
+        // An unset window is absent, not zero — the sensor treats the two
+        // forms independently (#824).
+        assert!(cmd["timers"][0].get("succeeded_within_secs").is_none());
+        assert_eq!(cmd["timers"][1]["succeeded_within_secs"], 3_900);
+        assert!(cmd["timers"][1].get("within_secs").is_none());
         assert_eq!(cmd["restart_rates"][0]["max"], 5);
         assert_eq!(cmd["forbid_failed"], true);
     }
@@ -718,14 +746,19 @@ mod tests {
         let mut d = SystemdExpDraft::default();
         d.services.push("a.service".into());
         d.targets.push("multi-user.target".into());
-        d.timers.push(("b.timer".into(), 120));
+        d.timers.push(("b.timer".into(), Some(120), Some(600)));
         d.forbid_failed = true;
         // The command payload drops the "type" tag but is otherwise the config.
         let json = serde_json::to_string(&d.to_command_json()).unwrap();
         let back = SystemdExpDraft::from_status(&json);
         assert_eq!(back.services, vec!["a.service".to_string()]);
         assert_eq!(back.targets, vec!["multi-user.target".to_string()]);
-        assert_eq!(back.timers, vec![("b.timer".to_string(), 120)]);
+        // Both windows survive the round-trip — the GUI must not silently
+        // drop the succeeded form on refresh (#824).
+        assert_eq!(
+            back.timers,
+            vec![("b.timer".to_string(), Some(120), Some(600))]
+        );
         assert!(back.forbid_failed);
     }
 

@@ -256,9 +256,18 @@ impl SystemCollector {
                 0.0
             };
             raw.disks.push(crate::alerts::DiskUsageInput {
+                mount: mount.clone(),
+                fs_type: fs_type.clone(),
+                used_percent,
+            });
+            // Byte-level occupancy for the fill-rate tracker (#822): the
+            // projection needs absolute headroom, which the percent above has
+            // already thrown away.
+            raw.disk_bytes.push(crate::alerts::DiskBytesInput {
                 mount,
                 fs_type,
-                used_percent,
+                used_bytes: used,
+                total_bytes: total,
             });
         }
 

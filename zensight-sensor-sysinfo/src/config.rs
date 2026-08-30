@@ -394,6 +394,55 @@ impl SysinfoSensorConfig {
             ));
         }
 
+        // Per-mount override patterns (#822) fail at startup, not by silently
+        // never matching.
+        let alerts = &self.sysinfo.alerts;
+        for (rule, patterns) in [
+            (
+                "alerts.disk.mounts",
+                alerts
+                    .disk
+                    .mounts
+                    .iter()
+                    .map(|o| o.path.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "alerts.inode.mounts",
+                alerts
+                    .inode
+                    .mounts
+                    .iter()
+                    .map(|o| o.path.as_str())
+                    .collect(),
+            ),
+            (
+                "alerts.disk_fill_rate.mounts",
+                alerts
+                    .disk_fill_rate
+                    .mounts
+                    .iter()
+                    .map(|o| o.path.as_str())
+                    .collect(),
+            ),
+        ] {
+            for p in patterns {
+                if let Err(e) = glob::Pattern::new(p) {
+                    return Err(ConfigError::Validation(format!(
+                        "{rule}: invalid glob pattern {p:?}: {e}"
+                    )));
+                }
+            }
+        }
+        let fill = &alerts.disk_fill_rate;
+        if fill.warn_hours_to_full < fill.critical_hours_to_full {
+            return Err(ConfigError::Validation(format!(
+                "alerts.disk_fill_rate: warn_hours_to_full ({}) must be >= \
+                 critical_hours_to_full ({}) — the warning horizon is the longer one",
+                fill.warn_hours_to_full, fill.critical_hours_to_full
+            )));
+        }
+
         Ok(())
     }
 
@@ -587,6 +636,13 @@ mod tests {
         }
         assert_eq!(at("sysinfo.alerts.thermal.enabled"), false);
         assert!(at("sysinfo.sensors.exclude_chips").is_array());
+        // The per-mount override lists and the fill-rate rule (#822) must be
+        // physically present in the shipped file — parsing is lenient, so key
+        // presence here is the only guard against silent-default drift.
+        assert!(at("sysinfo.alerts.disk.mounts").is_array());
+        assert!(at("sysinfo.alerts.inode.mounts").is_array());
+        assert_eq!(at("sysinfo.alerts.disk_fill_rate.enabled"), true);
+        assert!(at("sysinfo.alerts.disk_fill_rate.mounts").is_array());
     }
 
     #[test]
@@ -627,6 +683,60 @@ mod tests {
         // Unspecified rules keep their defaults.
         assert!(a.pressure.enabled);
         assert_eq!(a.pressure.cpu_warn, 40.0);
+    }
+
+    /// The issue's exact per-mount snippet round-trips, and a partial
+    /// `disk_fill_rate` block keeps defaults for the rest (#822).
+    #[test]
+    fn test_parse_mount_overrides_and_fill_rate() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            sysinfo: {
+                alerts: {
+                    disk: {
+                        enabled: true, warn_percent: 90, critical_percent: 95,
+                        mounts: [
+                            { path: "/",        warn_percent: 75, critical_percent: 85 },
+                            { path: "/srv/dev", warn_percent: 92, critical_percent: 97 },
+                        ],
+                    },
+                    disk_fill_rate: {
+                        critical_hours_to_full: 2,
+                        mounts: [ { path: "/srv/*", warn_hours_to_full: 6 } ],
+                    },
+                }
+            }
+        }"#;
+        let config: SysinfoSensorConfig = json5::from_str(json).unwrap();
+        let a = &config.sysinfo.alerts;
+        assert_eq!(a.disk.thresholds_for("/"), (75.0, 85.0));
+        assert_eq!(a.disk.thresholds_for("/srv/dev"), (92.0, 97.0));
+        assert_eq!(a.disk.thresholds_for("/var"), (90.0, 95.0));
+        // Partial fill block: the named field is taken, the rest defaults.
+        assert_eq!(a.disk_fill_rate.critical_hours_to_full, 2.0);
+        assert_eq!(a.disk_fill_rate.window_secs, 1800);
+        assert_eq!(a.disk_fill_rate.horizons_for("/srv/dev"), (6.0, 2.0));
+        config.validate().expect("valid");
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_glob_and_inverted_horizons() {
+        let bad_glob = r#"{
+            zenoh: { mode: "peer" },
+            sysinfo: { alerts: { disk: { mounts: [ { path: "[", warn_percent: 50 } ] } } }
+        }"#;
+        let config: SysinfoSensorConfig = json5::from_str(bad_glob).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid glob"), "{err}");
+
+        let inverted = r#"{
+            zenoh: { mode: "peer" },
+            sysinfo: { alerts: { disk_fill_rate: {
+                warn_hours_to_full: 2, critical_hours_to_full: 8 } } }
+        }"#;
+        let config: SysinfoSensorConfig = json5::from_str(inverted).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("warn_hours_to_full"), "{err}");
     }
 
     #[test]

@@ -439,8 +439,15 @@ own **lib** tests take the same path and crash *more* often:
 
 (measured on `master` at `3f8083b`, interleaved so machine load was controlled)
 
-Force wgpu off Vulkan and it goes away. **There is a recipe, so you do not have
-to remember that — and it covers the whole crate, not just `ui_tests`:**
+Force wgpu off Vulkan and it goes away. **Since #829 the test binaries do that
+themselves**: a pre-main `#[ctor]` guard sets `WGPU_BACKEND=gl` unless the
+caller already set one — once in `src/lib.rs` for the `--lib` target, once at
+the top of `tests/ui_tests.rs`, because each test binary needs its own. A plain
+`cargo test -p zensight` is safe on any host, and an explicit `WGPU_BACKEND`
+from the environment still wins.
+
+The recipe remains, as the discoverable name for the same thing (and the place
+`just --list` carries this story):
 
 ```bash
 just test-ui                    # WGPU_BACKEND=gl cargo test -p zensight
@@ -450,9 +457,13 @@ just test-ui test_dashboard     # …and the usual filters and flags
 
 Deliberately **not** set in `.cargo/config.toml`: that file's `[env]` block
 applies to `cargo run` as well, and downgrading the real GUI's renderer on every
-developer machine to fix a test-only problem is the wrong trade. A recipe is the
-right shape — it is opt-in, it is discoverable from `just --list`, and it
-carries the reasoning with it.
+developer machine to fix a test-only problem is the wrong trade. The guard lives
+in the test binaries precisely because that is the only scope where "always gl"
+is correct.
+
+If you add a **new** integration-test target that builds simulators, copy the
+guard from the top of `tests/ui_tests.rs` — a target without it is back to the
+coin flip.
 
 CI is unaffected — the runner image ships no Vulkan ICD, so wgpu never takes
 this path there. Which also means a red `test` job on CI is **not** this, and

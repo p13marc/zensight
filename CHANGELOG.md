@@ -25,6 +25,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   110→355 MB on a 1 GB VM, `Healthy` throughout, found eleven days later by
   hand — is now visible in the health doc it was invisible in. Enforcement
   (the shed ladder) stays #812.
+- **logs: kernel pattern built-ins, per-rule rate limits, and redacted
+  quoting** (#824). The sentinel gains `include_kernel_builtins` (off by
+  default): `ext4-fs-error`, `xfs-corruption`, `md-raid-failure`,
+  `block-io-error` — Critical, rate-limited, source-agnostic. Every rule
+  takes an optional `rate_limit: { max_fires, per_secs }` capping alert
+  publications (suppressions counted and surfaced in `@rpc/logs/rules`). A
+  quoted line is scrubbed before it leaves the host — secret-looking
+  `key=value` assignments are replaced in `{message}` and capture groups, and
+  a scrubbed summary is suffixed `(redacted)`.
+- **systemd: a timer's *service outcome* is now judged, not just its
+  schedule** (#824). Timer expectations gain `succeeded_within_secs` — the
+  timer fired within the window **and** its triggered unit's last run
+  succeeded (`Timer.Unit` → `Service.Result`; unreadable = not satisfied,
+  never "passed") — under the new `expect-timer-succeeded` rule. New
+  threshold rule `systemd-consecutive-failures` (default 3, 0 disables)
+  counts consecutive failed *runs* by `InvocationID` change, which is
+  `restart_storm`'s logic applied where `NRestarts` cannot see: a
+  timer-triggered oneshot never restarts. The GUI expectations editor
+  round-trips the new form ("Timer service must succeed within").
+  *Breaking (config/API): `TimerExpectation.within_secs` is now optional —
+  JSON5 configs and `expectations/set` payloads are unaffected unless they
+  omitted it, which was never valid.*
+- **sysinfo: per-mount disk/inode threshold overrides and a `disk_fill_rate`
+  rule** (#822). `alerts.disk`/`alerts.inode` take a `mounts` list (exact or
+  glob path, first match wins, per-field fallback) so `/` can warn at 75%
+  while the build-scratch volume warns at 92%. The new `disk_fill_rate` rule
+  fits a least-squares trend over the recent `used_bytes` history and alerts
+  on **projected time-to-full** (default: Warning ≤24h, Critical ≤4h, 30-min
+  window) — silent until enough history exists, silent on a flat/shrinking
+  disk, and reset by a large reclaim, so absence always reads as *not asked*.
+  On by default; no registry changes (alert rules ride `alert/{alert_key}`).
+### Fixed
+
+- **`cargo test -p zensight` no longer segfaults on GPU-less hosts** (#829,
+  the #687 landmine): the test binaries now set `WGPU_BACKEND=gl` themselves
+  via pre-main `ctor` guards (`src/lib.rs` for `--lib`, `tests/ui_tests.rs`
+  for the integration target), so the parallel-test Vulkan/lavapipe crash
+  cannot occur regardless of how the tests are invoked. An explicit
+  `WGPU_BACKEND` still wins; `just test-ui` remains as the discoverable name.
+  Measured: 0 crashes in 20 `--test ui_tests` + 10 `--lib` parallel runs,
+  against ~1-in-7 and ~1-in-3 before.
+- **The alert plane's QoS agrees with the ratified profile: `express` is on
+  for `QosClass::Alert`, and for it alone** (#830). zenkey RFC 04 §3's
+  `alert` profile declares express ("rare and must-arrive, since v1.26");
+  `QosClass::express()` generalized the media-plane argument (#733) to the
+  whole table, so every live alert crossing a conformance window drew a
+  correct `qos-observed-mismatch`. Wire-behaviour change on the alert plane
+  only; the reasoning moved through `zensight-sensor-parallax/docs/qos-express.md`,
+  which now carries the alert carve-out.
+- **Alert and event puts are encoding-stamped** (#830). `publish_raw` now
+  takes the caller's encoding and stamps it (RFC 08 §7), so consumers resolve
+  alert/event payloads from metadata instead of the first-byte sniff — the
+  sniff that read an empty tombstone as CBOR and manufactured a
+  `payload-undecodable` error in the conformance gate. The judge-side half
+  (a `Delete` tombstone must not be decoded as a value) is zenkey-fleet
+  0.11.1's doctor fix; `zenkey-fleet` is bumped to 0.11.
+- **The alert seed rides the reporter's format** (#830). `serve_alerts_query`
+  hardcoded JSON while live samples used the reporter's `Format`; they agreed
+  only because every sensor passes `Format::Json` today. A CBOR reporter now
+  seeds CBOR, pinned by test.
 
 ## [0.11.0] - 2026-08-28
 

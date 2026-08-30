@@ -199,9 +199,13 @@ async fn main() -> Result<()> {
     let journald_events_on =
         matches!(&syslog_config.journald, Some(j) if j.enabled && j.detect_events);
     let budget_alerts_on = syslog_config.derived && syslog_config.error_budget.enabled;
-    // Log sentinel (#543): on when the operator declared rules, or the built-in
-    // known-events are active (they ride the journald `detect_events` gate).
-    let sentinel_on = journald_events_on || !syslog_config.sentinel.rules.is_empty();
+    // Log sentinel (#543): on when the operator declared rules, the built-in
+    // known-events are active (they ride the journald `detect_events` gate),
+    // or the kernel pattern built-ins are opted in (#824 — those are
+    // pattern-based and source-agnostic, so they take no journald gate).
+    let sentinel_on = journald_events_on
+        || !syslog_config.sentinel.rules.is_empty()
+        || syslog_config.sentinel.include_kernel_builtins;
     let alert_reporter: Option<Arc<AlertReporter>> =
         if journald_events_on || budget_alerts_on || sentinel_on {
             let reporter = AlertReporter::new(runner.publisher(), Protocol::Logs, format);

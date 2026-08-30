@@ -100,6 +100,8 @@ Put(Resolved) then a Delete tombstone):
 |---|---|---|
 | `log-error-budget` | `error_budget.enabled` (#105) | a unit burns budget (`error_ratio > target_ratio * burn_rate`) for `burn_windows` consecutive windows |
 | journald known-events | `journald.detect_events` (#61) | coredump / unit-failed / OOM matched by `MESSAGE_ID` |
+| kernel patterns (#824) | `sentinel.include_kernel_builtins` (off by default) | `ext4-fs-error` / `xfs-corruption` / `md-raid-failure` / `block-io-error` matched on the line, Critical, rate-limited |
+| sentinel rules (#543) | `sentinel.rules` | operator-declared pattern rules — see [alerting.md](alerting.md) |
 
 Late joiners seed the firing set with a plain GET on the same
 `state/logs/alert/*` selector (a storage-shaped queryable answers one reply per

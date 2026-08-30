@@ -3465,14 +3465,27 @@ impl ZenSight {
                                 draft.targets.push(name);
                             }
                         }
-                        SystemdExpKind::TimerWithin => {
+                        SystemdExpKind::TimerWithin | SystemdExpKind::TimerSucceeded => {
                             let Ok(within) = val.parse::<u64>() else {
                                 self.toasts
                                     .push(ToastSeverity::Error, "within (secs) must be a number");
                                 return Task::none();
                             };
-                            draft.timers.retain(|(t, _)| t != &name);
-                            draft.timers.push((name, within));
+                            // The two strengths merge onto one timer entry
+                            // (#824): setting the other window later keeps
+                            // what is already declared.
+                            let succeeded = kind == SystemdExpKind::TimerSucceeded;
+                            if let Some(e) = draft.timers.iter_mut().find(|(t, _, _)| t == &name) {
+                                if succeeded {
+                                    e.2 = Some(within);
+                                } else {
+                                    e.1 = Some(within);
+                                }
+                            } else if succeeded {
+                                draft.timers.push((name, None, Some(within)));
+                            } else {
+                                draft.timers.push((name, Some(within), None));
+                            }
                         }
                         SystemdExpKind::RestartRate => {
                             let (Ok(max), Ok(window)) = (val.parse::<u32>(), win.parse::<u64>())
