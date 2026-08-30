@@ -10,6 +10,7 @@ pub mod progress_bar;
 pub mod sparkline;
 pub mod status_led;
 pub mod tabs;
+pub mod verdict;
 
 pub use data_table::{Column, DataTable, SortKey, TableState};
 pub use gauge::{Gauge, GaugeStyle};
@@ -18,3 +19,4 @@ pub use progress_bar::{ProgressBar, ProgressBarStyle, fraction_bar};
 pub use sparkline::Sparkline;
 pub use status_led::{StatusLed, StatusLedState};
 pub use tabs::{TabItem, tabbed_view};
+pub use verdict::{verdict_badge, verdict_color, verdict_label};

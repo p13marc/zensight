@@ -56,6 +56,11 @@ pub struct InspectedSample {
     pub qos_ok: Option<bool>,
     /// Publisher stamp provenance, rendered.
     pub stamp: String,
+    /// The three-state schema verdict for the payload (#791): computed only
+    /// where there is something to judge — a put on a registered key.
+    /// `None` (a tombstone, or an unregistered key) renders as nothing at
+    /// all: absent, never green.
+    pub verdict: Option<zensight_common::schema::Verdict>,
     pub preview: Preview,
 }
 
@@ -65,11 +70,27 @@ impl InspectedSample {
     pub fn of(view: &SampleView, declared_type: Option<&'static str>) -> InspectedSample {
         let delete = view.kind == zenoh::sample::SampleKind::Delete;
         let payload = view.payload.to_bytes();
+        // One decode feeds both the preview and the verdict.
+        let decoded = (!delete)
+            .then(|| zensight_common::decode_auto::<serde_json::Value>(&payload).ok())
+            .flatten();
+        // The verdict judges a put on a registered key; everything else is
+        // absent rather than judged (`verdict` doc above). Undecodable bytes
+        // ARE a judgement — conformance was never reachable.
+        let verdict = match (delete, declared_type) {
+            (true, _) | (false, None) => None,
+            (false, Some(type_name)) => Some(match &decoded {
+                Some(value) => zensight_common::schema::verdict_for(type_name, value),
+                None => zensight_common::schema::Verdict::NotValidated(
+                    zensight_common::schema::NotValidated::Undecodable,
+                ),
+            }),
+        };
         let preview = if delete {
             Preview::Tombstone
         } else {
-            match zensight_common::decode_auto::<serde_json::Value>(&payload) {
-                Ok(v) => {
+            match decoded {
+                Some(v) => {
                     let mut s = serde_json::to_string_pretty(&v).unwrap_or_default();
                     if s.len() > PREVIEW_CAP {
                         s.truncate(PREVIEW_CAP);
@@ -77,7 +98,7 @@ impl InspectedSample {
                     }
                     Preview::Json(s)
                 }
-                Err(_) => {
+                None => {
                     let shown = &payload[..payload.len().min(HEX_CAP)];
                     let mut s = String::with_capacity(shown.len() * 3);
                     for (i, b) in shown.iter().enumerate() {
@@ -106,6 +127,7 @@ impl InspectedSample {
             declared_qos,
             observed_qos: super::core::axes_token(view),
             qos_ok,
+            verdict,
             stamp: match view.stamped_by {
                 None => "unstamped".to_string(),
                 Some(StampProvenance::SelfStamped) => "self-stamped".to_string(),
@@ -155,6 +177,18 @@ pub fn inspector_pane(sample: &InspectedSample) -> Element<'_, Message> {
             .map(str::to_string)
             .unwrap_or_else(|| "unregistered".to_string()),
     ));
+    if let Some(v) = &sample.verdict {
+        col = col.push(crate::view::components::verdict::verdict_badge(v));
+        if let zensight_common::schema::Verdict::Invalid(violations) = v {
+            for sentence in violations.iter().take(8) {
+                col = col.push(text(format!("· {sentence}")).size(font::CAPTION));
+            }
+            if violations.len() > 8 {
+                col = col
+                    .push(text(format!("…and {} more", violations.len() - 8)).size(font::CAPTION));
+            }
+        }
+    }
     col = col.push(fact("encoding", sample.encoding.clone()));
     col = col.push(fact("payload", format!("{} bytes", sample.payload_bytes)));
     col = col.push(fact("observed qos", sample.observed_qos.clone()));
@@ -180,4 +214,94 @@ pub fn inspector_pane(sample: &InspectedSample) -> Element<'_, Message> {
     col = col.push(preview);
 
     crate::view::components::kit::card(col.spacing(space::XS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use zenkey_fleet::IngestRow;
+    use zensight_common::schema::{NotValidated, Verdict};
+
+    fn view_of(key: &str, payload: &[u8], delete: bool) -> zenkey_fleet::SampleView {
+        crate::replay::sample_view(
+            &IngestRow {
+                key: key.into(),
+                payload: payload.to_vec(),
+                encoding: Some("application/json".into()),
+                qos: None,
+                delete,
+                attachment: None,
+            },
+            Instant::now(),
+        )
+    }
+
+    const HEALTH_KEY: &str = "v1/h-3fa9c2d41b7e/state/sysinfo/health";
+
+    /// A conformant HealthSnapshot judges `Valid` against the real
+    /// schemars-derived schema (or `FeatureOff` in a --no-default-features
+    /// build — either way, never a fake answer).
+    #[test]
+    fn a_conformant_payload_is_valid() {
+        let payload = serde_json::json!({
+            "sensor": "sysinfo", "status": "healthy", "uptime_secs": 1,
+            "devices_total": 0, "devices_responding": 0, "devices_failed": 0,
+            "last_poll_duration_ms": 0, "errors_last_hour": 0,
+            "metrics_published": 0,
+        });
+        let s = InspectedSample::of(
+            &view_of(HEALTH_KEY, &serde_json::to_vec(&payload).unwrap(), false),
+            Some("HealthSnapshot"),
+        );
+        #[cfg(feature = "validate")]
+        assert_eq!(s.verdict, Some(Verdict::Valid));
+        #[cfg(not(feature = "validate"))]
+        assert_eq!(
+            s.verdict,
+            Some(Verdict::NotValidated(NotValidated::FeatureOff))
+        );
+    }
+
+    /// A decodable but non-conformant payload judges `Invalid`, with the
+    /// violations carried for the pane to list.
+    #[cfg(feature = "validate")]
+    #[test]
+    fn a_nonconformant_payload_is_invalid_with_sentences() {
+        let s = InspectedSample::of(
+            &view_of(HEALTH_KEY, br#"{"sensor": 5}"#, false),
+            Some("HealthSnapshot"),
+        );
+        match s.verdict {
+            Some(Verdict::Invalid(violations)) => assert!(!violations.is_empty()),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    /// Undecodable bytes are a judgement of their own — conformance was
+    /// never reachable — and everything with nothing to judge is absent,
+    /// not green: a tombstone has no payload, an unregistered key no type.
+    #[test]
+    fn absent_and_unreachable_are_not_passes() {
+        let garbage = InspectedSample::of(
+            &view_of(HEALTH_KEY, &[0xff, 0x00, 0x01], false),
+            Some("HealthSnapshot"),
+        );
+        assert_eq!(
+            garbage.verdict,
+            Some(Verdict::NotValidated(NotValidated::Undecodable))
+        );
+
+        let tombstone =
+            InspectedSample::of(&view_of(HEALTH_KEY, b"", true), Some("HealthSnapshot"));
+        assert_eq!(tombstone.verdict, None);
+        assert_eq!(tombstone.preview, Preview::Tombstone);
+
+        let unregistered = InspectedSample::of(
+            &view_of("v1/h-3fa9c2d41b7e/telemetry/sysinfo/bogus", b"{}", false),
+            None,
+        );
+        assert_eq!(unregistered.verdict, None);
+        assert_eq!(unregistered.declared_type, None);
+    }
 }

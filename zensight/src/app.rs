@@ -3489,6 +3489,8 @@ impl ZenSight {
                 self.expectations.systemd_kind = kind;
             }
             Message::SystemdExpectationsReceived(json) => {
+                self.expectations.systemd_verdict =
+                    Some(Self::reply_verdict("systemd", "expectations", &json));
                 self.expectations.systemd =
                     crate::view::expectations::SystemdExpDraft::from_status(&json);
             }
@@ -3663,6 +3665,8 @@ impl ZenSight {
                 };
             }
             Message::ExpectationStatusReceived(json) => {
+                self.expectations.status_verdict =
+                    Some(Self::reply_verdict("netlink", "expectations", &json));
                 self.expectations.current = crate::view::expectations::parse_status(&json);
                 self.expectations.status_note =
                     Some(format!("{} configured", self.expectations.current.len()));
@@ -3676,7 +3680,11 @@ impl ZenSight {
                     .chain(self.query_threat_intel_status());
             }
             Message::DetectorConfigReceived(result) => match result {
-                Ok(json) => self.detection_tuning.apply_status(&json),
+                Ok(json) => {
+                    self.detection_tuning.detectors_verdict =
+                        Some(Self::reply_verdict("netring", "detectors", &json));
+                    self.detection_tuning.apply_status(&json)
+                }
                 Err(e) => {
                     self.detection_tuning.status_note = Some(e);
                 }
@@ -3784,6 +3792,8 @@ impl ZenSight {
             }
             Message::CaptureFilterStatusReceived(result) => match result {
                 Ok(json) => {
+                    self.detection_tuning.capture_filter_verdict =
+                        Some(Self::reply_verdict("netring", "capture_filter", &json));
                     self.detection_tuning.apply_capture_filter_status(&json);
                     // Surface a sensor-side validation rejection as a toast too,
                     // so it's not missed if the panel isn't on screen.
@@ -3858,6 +3868,8 @@ impl ZenSight {
             }
             Message::ThreatIntelStatusReceived(result) => match result {
                 Ok(json) => {
+                    self.detection_tuning.threat_intel_verdict =
+                        Some(Self::reply_verdict("netring", "threat_intel", &json));
                     self.detection_tuning.apply_threat_intel_status(&json);
                     // Surface a sensor-side reload error (e.g. bad YARA) as a toast.
                     if let Some(last) = self
@@ -7050,6 +7062,53 @@ impl ZenSight {
     /// it refused, which rides back on [`FleetSweep::elided`]. The sweep this
     /// replaced was unbounded and truncated silently at whatever the timeout
     /// caught.
+    /// The declared reply type for one of the GUI's fleet-RPC status calls
+    /// (#791): a linear scan over the producer's generated `ProcedureId::ALL`
+    /// matching `path()` — the registry has no reverse parse, and at
+    /// inspector scale none is needed. Hand-maintained per producer the GUI
+    /// actually queries; a producer missing here yields `NoSchema`, which
+    /// renders as "could not check", never as a pass.
+    fn reply_type_for(producer: &str, procedure: &str) -> Option<&'static str> {
+        use zensight_common::registry as r;
+        macro_rules! scan {
+            ($m:ident) => {
+                r::$m::ProcedureId::ALL
+                    .iter()
+                    .find(|p| p.path() == procedure)
+                    .and_then(|p| p.reply_type())
+            };
+        }
+        match producer {
+            "netlink" => scan!(netlink),
+            "systemd" => scan!(systemd),
+            "netring" => scan!(netring),
+            _ => None,
+        }
+    }
+
+    /// The three-state schema verdict for a fleet-RPC status body (#791).
+    ///
+    /// Computed at the one moment the GUI holds the reply's bytes as text —
+    /// the parse sites already keep the whole body. Three states, never a
+    /// boolean: unparseable bytes are `Undecodable` (conformance was never
+    /// reachable), an unknown procedure is `NoSchema`, and a build without
+    /// `validate` answers `FeatureOff` — each renders as its own absence,
+    /// never as green (see `view::components::verdict`).
+    fn reply_verdict(
+        producer: &str,
+        procedure: &str,
+        body: &str,
+    ) -> zensight_common::schema::Verdict {
+        use zensight_common::schema::{NotValidated, Verdict};
+        let Some(type_name) = Self::reply_type_for(producer, procedure) else {
+            return Verdict::NotValidated(NotValidated::NoSchema);
+        };
+        match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(value) => zensight_common::schema::verdict_for(type_name, &value),
+            Err(_) => Verdict::NotValidated(NotValidated::Undecodable),
+        }
+    }
+
     /// Start the explorer pump if none runs (#748): the demo feed in demo
     /// mode, a `Monitor` borrowed on the live session otherwise. Idempotent —
     /// a running pump (ctl present) is kept, so re-opening the view costs
@@ -9831,5 +9890,58 @@ mod zrec_replay_tests {
             derived(&a)
         };
         assert_eq!(run(), run());
+    }
+}
+
+/// The #791 receive-side verdict path: the declared reply type resolves from
+/// the generated registry, and the body judges against the compiled-in
+/// schema table — three states, never a boolean.
+#[cfg(test)]
+mod reply_verdict_tests {
+    use super::*;
+    use zensight_common::schema::{NotValidated, Verdict};
+
+    /// Every wired (producer, procedure) pair resolves its declared reply
+    /// type through `ProcedureId::ALL` — the linear scan the registry's
+    /// missing reverse parse makes necessary.
+    #[test]
+    fn the_five_wired_sites_resolve() {
+        for (producer, path, ty) in [
+            ("netlink", "expectations", "TopicStatus"),
+            ("systemd", "expectations", "TopicStatus"),
+            ("netring", "detectors", "TopicStatus"),
+            ("netring", "capture_filter", "TopicStatus"),
+            ("netring", "threat_intel", "TopicStatus"),
+        ] {
+            assert_eq!(
+                ZenSight::reply_type_for(producer, path),
+                Some(ty),
+                "{producer}/{path}"
+            );
+        }
+        assert_eq!(ZenSight::reply_type_for("nonesuch", "expectations"), None);
+    }
+
+    /// Three states out of one helper: a JSON object body validates (thinly —
+    /// `TopicStatus` is a summary schema, and a thin schema makes a thin
+    /// claim), non-JSON is `Undecodable` (conformance was never reachable),
+    /// and an unknown procedure is `NoSchema`. None of the three is a
+    /// boolean, and only the first is green.
+    #[test]
+    fn three_states_never_a_boolean() {
+        let valid = ZenSight::reply_verdict("netring", "detectors", r#"{"detectors":[]}"#);
+        #[cfg(feature = "validate")]
+        assert_eq!(valid, Verdict::Valid);
+        #[cfg(not(feature = "validate"))]
+        assert_eq!(valid, Verdict::NotValidated(NotValidated::FeatureOff));
+
+        assert_eq!(
+            ZenSight::reply_verdict("netring", "detectors", "not json at all"),
+            Verdict::NotValidated(NotValidated::Undecodable)
+        );
+        assert_eq!(
+            ZenSight::reply_verdict("netring", "no-such-procedure", "{}"),
+            Verdict::NotValidated(NotValidated::NoSchema)
+        );
     }
 }

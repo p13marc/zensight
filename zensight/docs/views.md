@@ -449,6 +449,20 @@ of the bytes that actually arrived — scoped honestly as "latest retained
 sample — watched keys only". This is the surface #791's validation verdicts
 hang from.
 
+**The verdict chip** (#791, `view/components/verdict.rs`) rides the
+inspector: the payload judged against its declared type's schema
+(`zensight_common::schema::verdict_for`, behind the GUI's default `validate`
+feature). Three states, never a boolean — `Valid`, `Invalid` (violations
+listed), and `NotValidated` in two visual groups: *chose not to*
+(`FeatureOff`/`NoRegistry`, `STATUS_UNKNOWN`) and *could not*
+(`NoSchema`/`KindUnsupported`/`Undecodable`/`BadSchema`,
+`JUDGEMENT_UNOBSERVABLE`). **`NotValidated` never reads as green** — the same
+rule the fleet view's four poles enforce (#746). The five fleet-RPC status
+panels (netlink/systemd expectations, netring detectors/capture
+filter/threat intel) carry the same chip beside the body they parse, computed
+at receive via `ProcedureId::reply_type()`. A tombstone or an unregistered
+key gets *no* chip: absent, not judged.
+
 **Deterministically testable.** Everything below the pump is session-free:
 demo mode runs the *same* pipeline (`mock::explorer::demo_stream` drives a
 real `MonitorCore` + `ExplorerCore`), and a `.zrec` capture drives it

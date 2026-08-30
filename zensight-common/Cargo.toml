@@ -48,11 +48,11 @@ default = []
 # has a use is a *payload inspector* — something looking at somebody else's
 # bytes and asking whether they conform.
 #
-# NOTHING TURNS IT ON YET, and that is honest rather than an oversight: the GUI
-# has no payload-inspection surface to turn it on for (see the deferral note in
-# `src/schema.rs`). Enabling it there today would link `jsonschema` into every
-# desktop build for a verdict nobody renders. The GUI turns it on in the same
-# change that gives it somewhere to show the answer.
+# The GUI turns it on (its default `validate` feature, #791) — in the same
+# change that gave it somewhere to show the answer: the bus explorer's
+# inspector (#748) and the fleet-RPC status panels render the three states
+# through `zensight/src/view/components/verdict.rs`. Sensors still have no
+# use for it and still don't enable it.
 #
 # Without it, `schema::verdict_for` answers
 # `Verdict::NotValidated(NotValidated::FeatureOff)` — never a fake "valid".
