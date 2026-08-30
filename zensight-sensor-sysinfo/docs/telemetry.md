@@ -33,6 +33,7 @@ and carry the original name back in a label.
 | tcp states (Linux) | `tcp_states` **(default off)** | `tcp/<state>`, `tcp/total` |
 | cgroup-v2 (Linux) | `cgroups` **(default off)** | `cgroup/cpu/{nr_throttled,throttled_usec}`, `cgroup/memory/{current,max,used_percent,oom_kills_total,oom_total}`, `cgroup/<res>/pressure/<scope>_{avg10,total_us}` |
 | thermal / power (Linux) | `power` **(default off)** | `power/rapl/<zone>/watts`, `sensors/<chip>/<fan>/rpm`, `battery/<name>/{capacity,status}`, `system/entropy_avail` |
+| drive SMART (Linux) | `smart` **(default off)** | `smart/<device>/{critical_warning,available_spare,available_spare_threshold,percentage_used,media_errors_total,power_on_hours,unsafe_shutdowns_total,data_units_{read,written}_total,reallocated_sectors_total,pending_sectors,crc_errors_total}` |
 
 Three notes on the hwmon families (`temperatures`, and `power`'s fans):
 

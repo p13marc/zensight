@@ -2,6 +2,11 @@
 
 use crate::config::SysinfoConfig;
 use crate::map::sanitize_key;
+
+/// How often the SMART ioctls actually run (#823); ticks in between republish
+/// the cached readings. Drive wear moves in hours, not seconds.
+#[cfg(target_os = "linux")]
+const SMART_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
 use std::collections::HashMap;
 use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
@@ -44,6 +49,12 @@ pub struct SystemCollector {
     /// saturation score independently of the alert evaluator's own state.
     #[cfg(target_os = "linux")]
     prev_pswpin: Option<u64>,
+    /// Cached SMART readings (#823) and when they were last refreshed — the
+    /// ioctls run every [`SMART_REFRESH`], not every tick.
+    #[cfg(target_os = "linux")]
+    smart_cache: Vec<crate::map::SmartSample>,
+    #[cfg(target_os = "linux")]
+    smart_refreshed: Option<std::time::Instant>,
     /// Linux-specific metrics collector
     #[cfg(target_os = "linux")]
     linux_metrics: LinuxMetrics,
@@ -76,6 +87,10 @@ impl SystemCollector {
             last_disk_util_percent: None,
             #[cfg(target_os = "linux")]
             prev_pswpin: None,
+            #[cfg(target_os = "linux")]
+            smart_cache: Vec::new(),
+            #[cfg(target_os = "linux")]
+            smart_refreshed: None,
             #[cfg(target_os = "linux")]
             linux_metrics: LinuxMetrics::new(),
         }
@@ -210,6 +225,9 @@ impl SystemCollector {
             if self.config.collect.mdadm {
                 count += self.collect_mdadm(timestamp).await;
             }
+            if self.config.collect.smart {
+                count += self.collect_smart(timestamp).await;
+            }
         }
 
         // Threshold alerting: evaluate the already-collected saturation data and
@@ -323,6 +341,21 @@ impl SystemCollector {
                         label: t.label,
                         temp_celsius: t.temp_celsius,
                         critical_celsius: t.critical,
+                    });
+                }
+            }
+            // Drive SMART (#823): from the collector's cached readings — the
+            // rules see the same numbers the telemetry published.
+            if self.config.collect.smart {
+                for s in &self.smart_cache {
+                    raw.smart.push(crate::alerts::SmartAlertInput {
+                        device: s.device.clone(),
+                        critical_warning: s.critical_warning,
+                        available_spare: s.available_spare,
+                        available_spare_threshold: s.available_spare_threshold,
+                        media_errors_total: s.media_errors,
+                        reallocated_total: s.reallocated_sectors,
+                        pending_sectors: s.pending_sectors,
                     });
                 }
             }
@@ -614,6 +647,26 @@ impl SystemCollector {
     async fn collect_edac(&self, timestamp: i64) -> usize {
         let samples = crate::linux::collect_edac();
         self.publish_metrics(crate::map::map_edac(&samples), timestamp)
+            .await
+    }
+
+    /// Collect drive SMART health (#823). The readings move slowly and the
+    /// reads are blocking ioctls (a dying disk can hold SG_IO to its 5 s
+    /// timeout — exactly the disk this collector exists for), so the ioctls
+    /// run off-thread and only every [`SMART_REFRESH`]; the ticks between
+    /// republish the cached readings.
+    #[cfg(target_os = "linux")]
+    async fn collect_smart(&mut self, timestamp: i64) -> usize {
+        let due = self
+            .smart_refreshed
+            .is_none_or(|t| t.elapsed() >= SMART_REFRESH);
+        if due {
+            self.smart_cache = tokio::task::spawn_blocking(crate::linux::collect_smart)
+                .await
+                .unwrap_or_default();
+            self.smart_refreshed = Some(std::time::Instant::now());
+        }
+        self.publish_metrics(crate::map::map_smart(&self.smart_cache), timestamp)
             .await
     }
 

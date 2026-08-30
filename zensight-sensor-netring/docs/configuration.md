@@ -176,6 +176,33 @@ names: {
 }
 ```
 
+## `tables` — inventory byte budgets (#814)
+
+Every L7 inventory (TLS, DNS, HTTP, assets, and the QUIC/SSH/encrypted-DNS/
+JA4H fingerprint tables) is a byte-capped true-LRU table. **Bytes are the
+contract** — the entry-count refuse-at-cap guards are retired, because
+entries are a unit nobody can convert to megabytes and refuse-at-cap froze a
+full table stale instead of letting it learn.
+
+```json5
+tables: {
+  tls_max_bytes: 2097152,     // 2 MiB — TLS asset inventory (@rpc/netring/tls)
+  dns_max_bytes: 4194304,     // 4 MiB — DNS SLD inventory
+  http_max_bytes: 1048576,    // 1 MiB — HTTP host inventory
+  assets_max_bytes: 2097152,  // 2 MiB — passive asset inventory (+ evidence)
+  fp_max_bytes: 2097152,      // 2 MiB — QUIC+SSH+encDNS+JA4H combined (÷4 each)
+}
+```
+
+Per-record byte accounting is an estimate (shallow struct size + heap
+capacities) but an adversary-proof one: max-size records raise the per-entry
+cost and lower the admitted count. Occupancy, caps and cumulative evictions
+ride the health doc's table stats (#811); the memory governor (#812) evicts
+through the same path under budget pressure, and its Degrade step stops the
+`anomaly_detectors` degradable. The `production` profile halves these budgets
+and shrinks `names.max_ips` to 2048 — a sizing decision, visible here rather
+than emergent.
+
 ## `evidence` — host-evidence feed (#307)
 
 Republishes observed assets / passive-DNS names as identity evidence on

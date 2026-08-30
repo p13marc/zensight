@@ -9,6 +9,7 @@
 //! replay (`netring.pcap`) needs no privileges. Linux only.
 
 pub mod bandwidth;
+pub mod bounded;
 pub mod capture;
 pub mod command;
 pub mod config;

@@ -39,6 +39,10 @@ const DISK_FILL_RULE: &str = "disk_fill_rate";
 const FD_RULE: &str = "fd_exhaustion";
 const THERMAL_RULE: &str = "thermal";
 const SWAP_RULE: &str = "swap_thrash";
+const SMART_SPARE_RULE: &str = "smart_spare";
+const SMART_CRITICAL_WARNING_RULE: &str = "smart_critical_warning";
+const SMART_MEDIA_ERRORS_RULE: &str = "smart_media_errors";
+const SMART_SATA_ATTRS_RULE: &str = "smart_sata_attrs";
 
 // ===========================================================================
 // Configuration
@@ -79,6 +83,8 @@ pub struct AlertsConfig {
     pub thermal: ThermalRule,
     #[serde(default)]
     pub swap: SwapRule,
+    #[serde(default)]
+    pub smart: SmartRule,
 }
 
 impl Default for AlertsConfig {
@@ -94,6 +100,7 @@ impl Default for AlertsConfig {
             fd: FdRule::default(),
             thermal: ThermalRule::default(),
             swap: SwapRule::default(),
+            smart: SmartRule::default(),
         }
     }
 }
@@ -245,6 +252,24 @@ fn mount_matches(pattern: &str, mount: &str) -> bool {
     match glob::Pattern::new(pattern) {
         Ok(p) => p.matches(mount),
         Err(_) => false,
+    }
+}
+
+/// Drive-SMART rules (#823), graded from the `smart` collector's readings.
+/// One switch for all four: `smart_spare` (available spare at/below its
+/// threshold, Critical), `smart_critical_warning` (any critical-warning bit,
+/// Critical), `smart_media_errors` (media errors increased, Warning) and
+/// `smart_sata_attrs` (reallocated sectors increased or sectors pending,
+/// Warning). Inert unless `collect.smart` provides readings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartRule {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for SmartRule {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -448,6 +473,35 @@ pub struct DiskFillInput {
     pub fill_rate_bytes_per_sec: f64,
 }
 
+/// One drive's SMART reading for alerting (#823) — raw cumulative counters;
+/// deltas are derived per device by [`derive_inputs`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SmartAlertInput {
+    pub device: String,
+    pub critical_warning: Option<u8>,
+    pub available_spare: Option<u8>,
+    pub available_spare_threshold: Option<u8>,
+    pub media_errors_total: Option<u64>,
+    pub reallocated_total: Option<u64>,
+    pub pending_sectors: Option<u64>,
+}
+
+/// One drive's derived SMART state for the pure [`evaluate`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SmartDerived {
+    pub device: String,
+    pub critical_warning: Option<u8>,
+    pub available_spare: Option<u8>,
+    pub available_spare_threshold: Option<u8>,
+    /// New media errors since the previous reading (`None` on the first).
+    pub media_errors_delta: Option<u64>,
+    pub media_errors_total: Option<u64>,
+    /// Newly reallocated sectors since the previous reading.
+    pub reallocated_delta: Option<u64>,
+    pub reallocated_total: Option<u64>,
+    pub pending_sectors: Option<u64>,
+}
+
 /// One thermal sensor reading plus its critical trip point (if known).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalInput {
@@ -473,6 +527,8 @@ pub struct RawInputs {
     pub disk_bytes: Vec<DiskBytesInput>,
     pub fd_used_percent: Option<f64>,
     pub temps: Vec<ThermalInput>,
+    /// Drive SMART readings (#823), when `collect.smart` is on.
+    pub smart: Vec<SmartAlertInput>,
 }
 
 /// Derived per-tick inputs the pure [`evaluate`] consumes. Deltas/rates are
@@ -492,6 +548,8 @@ pub struct AlertInputs {
     pub temps: Vec<ThermalInput>,
     /// Combined `pswpin + pswpout` pages per second since the previous tick.
     pub swap_pages_per_sec: Option<f64>,
+    /// Per-drive SMART state with per-device counter deltas (#823).
+    pub smart: Vec<SmartDerived>,
 }
 
 /// Previous cumulative counters, kept across ticks to derive deltas/rates.
@@ -500,6 +558,9 @@ pub struct PrevCounters {
     pub oom: Option<u64>,
     pub pswpin: Option<u64>,
     pub pswpout: Option<u64>,
+    /// Per-device SMART lifetime counters (#823): media errors, reallocated.
+    pub smart_media: std::collections::HashMap<String, u64>,
+    pub smart_realloc: std::collections::HashMap<String, u64>,
 }
 
 /// Turn raw counters into deltas/rates against `prev`, updating `prev` in place.
@@ -526,6 +587,44 @@ pub fn derive_inputs(prev: &mut PrevCounters, raw: RawInputs, interval_secs: f64
         None
     };
 
+    // Per-device SMART deltas (#823) — same discipline as the OOM delta: a
+    // first reading or a counter that went backwards yields `None`, never a
+    // spike; the previous value carries forward past a missing read.
+    let smart =
+        raw.smart
+            .iter()
+            .map(|d| {
+                let delta = |prev_map: &std::collections::HashMap<String, u64>,
+                             cur: Option<u64>| {
+                    match (prev_map.get(&d.device), cur) {
+                        (Some(&p), Some(c)) if c >= p => Some(c - p),
+                        _ => None,
+                    }
+                };
+                let media_errors_delta = delta(&prev.smart_media, d.media_errors_total);
+                let reallocated_delta = delta(&prev.smart_realloc, d.reallocated_total);
+                SmartDerived {
+                    device: d.device.clone(),
+                    critical_warning: d.critical_warning,
+                    available_spare: d.available_spare,
+                    available_spare_threshold: d.available_spare_threshold,
+                    media_errors_delta,
+                    media_errors_total: d.media_errors_total,
+                    reallocated_delta,
+                    reallocated_total: d.reallocated_total,
+                    pending_sectors: d.pending_sectors,
+                }
+            })
+            .collect();
+    for d in &raw.smart {
+        if let Some(v) = d.media_errors_total {
+            prev.smart_media.insert(d.device.clone(), v);
+        }
+        if let Some(v) = d.reallocated_total {
+            prev.smart_realloc.insert(d.device.clone(), v);
+        }
+    }
+
     // Carry forward the latest seen counters (don't clobber with a missing read).
     prev.oom = raw.oom_kill_total.or(prev.oom);
     prev.pswpin = raw.pswpin_total.or(prev.pswpin);
@@ -544,6 +643,7 @@ pub fn derive_inputs(prev: &mut PrevCounters, raw: RawInputs, interval_secs: f64
         fd_used_percent: raw.fd_used_percent,
         temps: raw.temps,
         swap_pages_per_sec,
+        smart,
     }
 }
 
@@ -892,7 +992,139 @@ pub fn evaluate(host: &str, cfg: &AlertsConfig, inputs: &AlertInputs) -> Vec<Rul
         });
     }
 
+    // Drive SMART (#823): the three signals that predict the fleet's only
+    // unrecoverable failure mode, before mdadm reports the aftermath.
+    if cfg.smart.enabled {
+        // available_spare at or below its own threshold — the drive itself
+        // says the spare pool is exhausted. Critical.
+        let alerts = inputs
+            .smart
+            .iter()
+            .filter_map(|d| Some((d, d.available_spare?, d.available_spare_threshold?)))
+            .filter(|(_, spare, thr)| spare <= thr)
+            .map(|(d, spare, thr)| {
+                mk(
+                    host,
+                    SMART_SPARE_RULE,
+                    AlertSeverity::Critical,
+                    format!(
+                        "{}: available spare {spare}% at/below threshold {thr}%",
+                        d.device
+                    ),
+                )
+                .with_label("device", d.device.clone())
+                .with_label("threshold", thr.to_string())
+            })
+            .collect();
+        out.push(RuleAlerts {
+            rule: SMART_SPARE_RULE.into(),
+            alerts,
+        });
+
+        // Any critical-warning bit. Critical, with the bits spelled out.
+        let alerts = inputs
+            .smart
+            .iter()
+            .filter_map(|d| Some((d, d.critical_warning?)))
+            .filter(|(_, w)| *w != 0)
+            .map(|(d, w)| {
+                mk(
+                    host,
+                    SMART_CRITICAL_WARNING_RULE,
+                    AlertSeverity::Critical,
+                    format!(
+                        "{}: critical_warning 0x{w:02x} ({})",
+                        d.device,
+                        critical_warning_bits(w)
+                    ),
+                )
+                .with_label("device", d.device.clone())
+            })
+            .collect();
+        out.push(RuleAlerts {
+            rule: SMART_CRITICAL_WARNING_RULE.into(),
+            alerts,
+        });
+
+        // Media errors increasing. The delta rides the summary — the alert
+        // key stays stable as the count grows.
+        let alerts = inputs
+            .smart
+            .iter()
+            .filter(|d| d.media_errors_delta.is_some_and(|n| n > 0))
+            .map(|d| {
+                mk(
+                    host,
+                    SMART_MEDIA_ERRORS_RULE,
+                    AlertSeverity::Warning,
+                    format!(
+                        "{}: {} new media error(s) since last reading (lifetime {})",
+                        d.device,
+                        d.media_errors_delta.unwrap_or(0),
+                        d.media_errors_total.unwrap_or(0)
+                    ),
+                )
+                .with_label("device", d.device.clone())
+            })
+            .collect();
+        out.push(RuleAlerts {
+            rule: SMART_MEDIA_ERRORS_RULE.into(),
+            alerts,
+        });
+
+        // ATA classics: sectors newly reallocated, or currently pending —
+        // the two attributes that precede a SATA drive leaving an array.
+        let alerts = inputs
+            .smart
+            .iter()
+            .filter(|d| {
+                d.reallocated_delta.is_some_and(|n| n > 0)
+                    || d.pending_sectors.is_some_and(|n| n > 0)
+            })
+            .map(|d| {
+                mk(
+                    host,
+                    SMART_SATA_ATTRS_RULE,
+                    AlertSeverity::Warning,
+                    format!(
+                        "{}: {} newly reallocated sector(s) (lifetime {}), {} pending",
+                        d.device,
+                        d.reallocated_delta.unwrap_or(0),
+                        d.reallocated_total.unwrap_or(0),
+                        d.pending_sectors.unwrap_or(0)
+                    ),
+                )
+                .with_label("device", d.device.clone())
+            })
+            .collect();
+        out.push(RuleAlerts {
+            rule: SMART_SATA_ATTRS_RULE.into(),
+            alerts,
+        });
+    }
+
     out
+}
+
+/// Spell out the NVMe critical-warning bits (NVM Express base spec).
+fn critical_warning_bits(w: u8) -> String {
+    let names = [
+        (0x01, "spare below threshold"),
+        (0x02, "temperature"),
+        (0x04, "media degraded"),
+        (0x08, "read-only"),
+        (0x10, "volatile backup failed"),
+    ];
+    let hit: Vec<&str> = names
+        .iter()
+        .filter(|(bit, _)| w & bit != 0)
+        .map(|(_, n)| *n)
+        .collect();
+    if hit.is_empty() {
+        "unknown bit".to_string()
+    } else {
+        hit.join(", ")
+    }
 }
 
 /// Build the per-mount alerts for a hi-watermark rule (disk space or inodes).
@@ -1521,6 +1753,7 @@ mod tests {
             oom: Some(100),
             pswpin: Some(100),
             pswpout: Some(100),
+            ..Default::default()
         };
         // Counters went backwards (reboot) → no spurious delta/rate.
         let raw = RawInputs {
@@ -1532,5 +1765,138 @@ mod tests {
         let d = derive_inputs(&mut prev, raw, 5.0);
         assert_eq!(d.oom_kill_delta, None);
         assert_eq!(d.swap_pages_per_sec, None);
+    }
+
+    // ── #823 drive SMART rules ──
+
+    fn smart_derived(device: &str) -> SmartDerived {
+        SmartDerived {
+            device: device.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn smart_spare_fires_critical_at_or_below_threshold() {
+        let cfg = AlertsConfig::default();
+        let mut ok = smart_derived("nvme0");
+        (ok.available_spare, ok.available_spare_threshold) = (Some(50), Some(10));
+        let mut bad = smart_derived("nvme1");
+        (bad.available_spare, bad.available_spare_threshold) = (Some(10), Some(10));
+        let mut unread = smart_derived("nvme2"); // no threshold: not asked
+        unread.available_spare = Some(1);
+        let inputs = AlertInputs {
+            smart: vec![ok, bad, unread],
+            ..Default::default()
+        };
+        let a = rule_alerts(&cfg, &inputs, SMART_SPARE_RULE);
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(a[0].severity, AlertSeverity::Critical);
+        assert_eq!(a[0].labels["device"], "nvme1");
+    }
+
+    #[test]
+    fn smart_critical_warning_names_the_bits() {
+        let cfg = AlertsConfig::default();
+        let mut d = smart_derived("nvme0");
+        d.critical_warning = Some(0x05); // spare + media degraded
+        let inputs = AlertInputs {
+            smart: vec![d],
+            ..Default::default()
+        };
+        let a = rule_alerts(&cfg, &inputs, SMART_CRITICAL_WARNING_RULE);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].severity, AlertSeverity::Critical);
+        assert!(
+            a[0].summary.contains("spare below threshold"),
+            "{}",
+            a[0].summary
+        );
+        assert!(a[0].summary.contains("media degraded"), "{}", a[0].summary);
+        // Zero is healthy, not a firing with an empty bit list.
+        let mut healthy = smart_derived("nvme0");
+        healthy.critical_warning = Some(0);
+        let inputs = AlertInputs {
+            smart: vec![healthy],
+            ..Default::default()
+        };
+        assert!(rule_alerts(&cfg, &inputs, SMART_CRITICAL_WARNING_RULE).is_empty());
+    }
+
+    #[test]
+    fn smart_media_errors_fire_on_delta_and_key_ignores_the_count() {
+        let cfg = AlertsConfig::default();
+        let mk_inputs = |delta: u64, total: u64| {
+            let mut d = smart_derived("nvme0");
+            d.media_errors_delta = Some(delta);
+            d.media_errors_total = Some(total);
+            AlertInputs {
+                smart: vec![d],
+                ..Default::default()
+            }
+        };
+        // Delta 0 (or first reading None): silent.
+        assert!(rule_alerts(&cfg, &mk_inputs(0, 7), SMART_MEDIA_ERRORS_RULE).is_empty());
+        let a = rule_alerts(&cfg, &mk_inputs(2, 9), SMART_MEDIA_ERRORS_RULE);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].severity, AlertSeverity::Warning);
+        // The growing count lives in the summary; the key holds still.
+        let b = rule_alerts(&cfg, &mk_inputs(5, 14), SMART_MEDIA_ERRORS_RULE);
+        assert_eq!(a[0].alert_key(), b[0].alert_key());
+    }
+
+    #[test]
+    fn smart_sata_attrs_fire_on_reallocation_or_pending() {
+        let cfg = AlertsConfig::default();
+        let mut d = smart_derived("sda");
+        d.pending_sectors = Some(3);
+        let inputs = AlertInputs {
+            smart: vec![d],
+            ..Default::default()
+        };
+        let a = rule_alerts(&cfg, &inputs, SMART_SATA_ATTRS_RULE);
+        assert_eq!(a.len(), 1);
+        assert!(a[0].summary.contains("3 pending"), "{}", a[0].summary);
+    }
+
+    #[test]
+    fn smart_deltas_are_per_device_and_reset_safe() {
+        let mut prev = PrevCounters::default();
+        let reading = |dev: &str, media: u64| SmartAlertInput {
+            device: dev.into(),
+            media_errors_total: Some(media),
+            ..Default::default()
+        };
+        // First tick: no previous → None, never a spike.
+        let d = derive_inputs(
+            &mut prev,
+            RawInputs {
+                smart: vec![reading("nvme0", 5), reading("nvme1", 0)],
+                ..Default::default()
+            },
+            5.0,
+        );
+        assert_eq!(d.smart[0].media_errors_delta, None);
+        // Second tick: per-device deltas.
+        let d = derive_inputs(
+            &mut prev,
+            RawInputs {
+                smart: vec![reading("nvme0", 8), reading("nvme1", 0)],
+                ..Default::default()
+            },
+            5.0,
+        );
+        assert_eq!(d.smart[0].media_errors_delta, Some(3));
+        assert_eq!(d.smart[1].media_errors_delta, Some(0));
+        // Counter went backwards (drive swap): None, not a wrap-around spike.
+        let d = derive_inputs(
+            &mut prev,
+            RawInputs {
+                smart: vec![reading("nvme0", 1)],
+                ..Default::default()
+            },
+            5.0,
+        );
+        assert_eq!(d.smart[0].media_errors_delta, None);
     }
 }

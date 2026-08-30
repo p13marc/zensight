@@ -65,6 +65,7 @@ families regardless of the flag.
 | `cgroups` | **false** | cgroup-v2 container-saturation metrics (Linux) |
 | `cgroup_paths` | `[]` | extra cgroup-v2 paths to monitor (with `cgroups`) |
 | `power` | **false** | RAPL/fan/battery/entropy depth (Linux) |
+| `smart` | **false** | drive SMART health via NVMe admin ioctl + ATA SG_IO (Linux; needs CAP_SYS_ADMIN / CAP_SYS_RAWIO) |
 | `ebpf` | **false** | opt-in eBPF saturation histograms (see below) |
 
 ## `sysinfo.network` / `sysinfo.disk` / `sysinfo.sensors` filters

@@ -115,6 +115,25 @@ fn sensor_card<'a>(
 
     let mut col = column![header, stats].spacing(space::SM);
 
+    // Shed ladder (#812): a shedding sensor says so, on the card, in words.
+    // Absent ladder = no ladder armed — nothing rendered, per the
+    // absent-is-not-measured rule.
+    if let Some(ladder) = snap.self_stats.as_ref().and_then(|s| s.ladder.as_ref())
+        && ladder.step > 0
+    {
+        let account = ladder
+            .reason
+            .clone()
+            .unwrap_or_else(|| "over budget".into());
+        col = col.push(
+            text(format!("Shedding (step {}): {}", ladder.step, account))
+                .size(font::CAPTION)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(theme::colors(theme).warning()),
+                }),
+        );
+    }
+
     // Unified artifact download controls (report / snapshot / capture) driven by
     // the sensor's advertised kinds. The key prefix is `zensight/<sensor>`
     // (protocol-scoped by design); the card's source becomes the request's
