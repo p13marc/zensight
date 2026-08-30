@@ -185,8 +185,10 @@ jobs:
       # depend on. Neither had a leg, so both could rot invisibly.
       - name: logs --no-default-features
         run: cargo clippy -p zensight-sensor-logs --no-default-features --all-targets --locked -- -D warnings
+      # Lib only, deliberately no --all-targets: the no_std claim is the
+      # LIBRARY's; the crate's tests and examples require std and always will.
       - name: btf --no-default-features
-        run: cargo clippy -p zensight-btf --no-default-features --all-targets --locked -- -D warnings
+        run: cargo clippy -p zensight-btf --no-default-features --locked -- -D warnings
 
       # netring detectors, each off by default and each pulling its own
       # upstream parser through the netring facade.
