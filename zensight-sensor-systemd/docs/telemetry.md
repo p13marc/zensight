@@ -29,6 +29,12 @@ Units matching a `watch_units` glob (capped by `watch_max`) stream
 tasks,exit_code}`. The `unit` label carries the raw unit name; overflow beyond
 `watch_max` is folded into `other/units_total` (logged, not silently truncated).
 
+`<name>` is the unit name through `zenkey::Chunk::slug` (#843): already-legal
+names (`sshd.service`) stay byte-identical, everything else — uppercase
+(`NetworkManager.service`), `@`-templates, spaces — gets RFC 03 §2's injective
+`_xNN_` escape (`user@1000.service` → `user_x40_1000.service`). Match on the
+`unit` **label** when you need the raw name; the key chunk is an encoding.
+
 - **Timers** (#279): watched `.timer` units add `unit/<t>/{last_trigger_usec,
   next_trigger_usec}`.
 - **Sockets** (#279): watched `.socket` units add `unit/<s>/{n_accepted,

@@ -6,24 +6,22 @@ use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 use crate::unit::UnitSample;
 
-/// Sanitize a unit name for use as a key-expression chunk: unit names can carry
-/// `@` (templated units) and other chars that are awkward/reserved in a keyexpr.
-/// The raw name is always carried in a `unit` label, so the key only needs to be
-/// stable and safe.
+/// Slug a unit name into a legal key-expression chunk (#843).
+///
+/// A unit name is foreign data, and the boundary where foreign data becomes
+/// grammar-legal is `Chunk::slug` (RFC 03 §2's injective `_xNN_` escape) —
+/// not a hand-rolled character map. The hand-rolled one this replaces had
+/// both defects the RFC warns about: it never folded case, so any unit with
+/// an uppercase letter (`NetworkManager.service` — much of a stock host)
+/// produced a chunk the grammar refuses, panicking the collector in debug
+/// builds and publishing unregistered keys in release; and its `→ _`
+/// substitution was not injective (`user@1000.service` and
+/// `user_1000.service` shared a chunk).
+///
+/// Already-legal names (`sshd.service`) stay byte-identical, and the raw
+/// name always rides the point's `unit` label, so nothing readable is lost.
 pub fn sanitize_unit(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for c in name.chars() {
-        match c {
-            '/' | ' ' | '#' | '?' | '*' | '$' | '@' => out.push('_'),
-            _ => out.push(c),
-        }
-    }
-    let trimmed = out.trim_matches('_');
-    if trimmed.is_empty() {
-        "unit".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    zenkey::Chunk::slug(name).as_str().to_string()
 }
 
 /// Build the per-unit telemetry points for one watched unit. Every point carries
@@ -293,10 +291,29 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_handles_template_and_reserved() {
+    fn sanitize_is_the_chunk_grammar() {
+        // Already-legal names stay byte-identical.
         assert_eq!(sanitize_unit("sshd.service"), "sshd.service");
-        assert_eq!(sanitize_unit("user@1000.service"), "user_1000.service");
-        assert_eq!(sanitize_unit("a b/c"), "a_b_c");
+        // Foreign bytes get the injective escape — `user@1000.service` can
+        // no longer collide with a literal `user_1000.service` (#843).
+        assert_eq!(sanitize_unit("user@1000.service"), "user_x40_1000.service");
+        assert_ne!(
+            sanitize_unit("user@1000.service"),
+            sanitize_unit("user_1000.service")
+        );
+        // The bug that found this (#843): uppercase unit names are real
+        // (NetworkManager.service) and must yield a legal chunk, not a
+        // debug-build panic.
+        for name in ["NetworkManager.service", "ModemManager.service", "a b/c"] {
+            let chunk = sanitize_unit(name);
+            assert!(
+                zensight_common::registry::is_registered_telemetry(
+                    "systemd",
+                    &format!("unit/{chunk}/active")
+                ),
+                "{name:?} -> {chunk:?} does not satisfy the registered pattern"
+            );
+        }
     }
 
     #[test]

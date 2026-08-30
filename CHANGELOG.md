@@ -172,6 +172,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On by default; no registry changes (alert rules ride `alert/{alert_key}`).
 ### Fixed
 
+- **systemd: a unit with an uppercase name no longer breaks the telemetry
+  guard** (#843, found recording the #747 fixture corpus). `sanitize_unit`
+  hand-mapped reserved characters to `_` but never folded case, so
+  `NetworkManager.service`-style units produced chunks the grammar refuses —
+  a debug-build panic in the collector task, unregistered keys in release —
+  and its `→ _` substitution was not injective (`user@1000.service` collided
+  with `user_1000.service`). It now delegates to `zenkey::Chunk::slug`, the
+  sanctioned foreign-value boundary: already-legal names stay byte-identical;
+  everything else gets the RFC 03 §2 injective `_xNN_` escape (breaking only
+  for keys that were previously broken or colliding). The raw name still
+  rides every point's `unit` label.
+
 - **`cargo test -p zensight` no longer segfaults on GPU-less hosts** (#829,
   the #687 landmine): the test binaries now set `WGPU_BACKEND=gl` themselves
   via pre-main `ctor` guards (`src/lib.rs` for `--lib`, `tests/ui_tests.rs`
