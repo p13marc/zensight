@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **sysinfo: per-mount disk/inode threshold overrides and a `disk_fill_rate`
+  rule** (#822). `alerts.disk`/`alerts.inode` take a `mounts` list (exact or
+  glob path, first match wins, per-field fallback) so `/` can warn at 75%
+  while the build-scratch volume warns at 92%. The new `disk_fill_rate` rule
+  fits a least-squares trend over the recent `used_bytes` history and alerts
+  on **projected time-to-full** (default: Warning ≤24h, Critical ≤4h, 30-min
+  window) — silent until enough history exists, silent on a flat/shrinking
+  disk, and reset by a large reclaim, so absence always reads as *not asked*.
+  On by default; no registry changes (alert rules ride `alert/{alert_key}`).
+
 ## [0.11.0] - 2026-08-28
 
 A month of unreleased work, and the release an operator has to read before
