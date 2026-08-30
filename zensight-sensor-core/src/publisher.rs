@@ -130,14 +130,27 @@ impl Publisher {
         stats
     }
 
-    /// Publish raw bytes to a control-plane key with an explicit QoS class.
+    /// Publish pre-encoded bytes to a control-plane key with an explicit QoS
+    /// class, stamped with the encoding the caller serialized them in.
     ///
     /// Alerts/commands use [`QosClass::Alert`]/[`QosClass::Command`]
     /// (reliable+block) so a firing/resolved event is never dropped on a lossy
     /// link; health/liveness use [`QosClass::HealthLiveness`] (drop-friendly).
-    pub async fn publish_raw(&self, key: &str, payload: Vec<u8>, qos: QosClass) -> Result<()> {
+    ///
+    /// The encoding is the caller's, not this publisher's session format —
+    /// an [`crate::alert::AlertReporter`] can serialize in a format of its
+    /// own — and it must be stamped: an unstamped sample leaves consumers to
+    /// the first-byte sniff, which reads an empty or non-JSON body as CBOR
+    /// (RFC 08 §7; #830).
+    pub async fn publish_raw(
+        &self,
+        key: &str,
+        payload: Vec<u8>,
+        qos: QosClass,
+        encoding: zenoh::bytes::Encoding,
+    ) -> Result<()> {
         self.control
-            .put(key, payload, qos)
+            .put_encoded(key, payload, qos, encoding)
             .await
             .map_err(|e| SensorError::Publish {
                 key: key.to_string(),

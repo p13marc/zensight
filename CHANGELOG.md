@@ -31,6 +31,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *Breaking (config/API): `TimerExpectation.within_secs` is now optional —
   JSON5 configs and `expectations/set` payloads are unaffected unless they
   omitted it, which was never valid.*
+- **sysinfo: per-mount disk/inode threshold overrides and a `disk_fill_rate`
+  rule** (#822). `alerts.disk`/`alerts.inode` take a `mounts` list (exact or
+  glob path, first match wins, per-field fallback) so `/` can warn at 75%
+  while the build-scratch volume warns at 92%. The new `disk_fill_rate` rule
+  fits a least-squares trend over the recent `used_bytes` history and alerts
+  on **projected time-to-full** (default: Warning ≤24h, Critical ≤4h, 30-min
+  window) — silent until enough history exists, silent on a flat/shrinking
+  disk, and reset by a large reclaim, so absence always reads as *not asked*.
+  On by default; no registry changes (alert rules ride `alert/{alert_key}`).
+### Fixed
+
+- **`cargo test -p zensight` no longer segfaults on GPU-less hosts** (#829,
+  the #687 landmine): the test binaries now set `WGPU_BACKEND=gl` themselves
+  via pre-main `ctor` guards (`src/lib.rs` for `--lib`, `tests/ui_tests.rs`
+  for the integration target), so the parallel-test Vulkan/lavapipe crash
+  cannot occur regardless of how the tests are invoked. An explicit
+  `WGPU_BACKEND` still wins; `just test-ui` remains as the discoverable name.
+  Measured: 0 crashes in 20 `--test ui_tests` + 10 `--lib` parallel runs,
+  against ~1-in-7 and ~1-in-3 before.
+- **The alert plane's QoS agrees with the ratified profile: `express` is on
+  for `QosClass::Alert`, and for it alone** (#830). zenkey RFC 04 §3's
+  `alert` profile declares express ("rare and must-arrive, since v1.26");
+  `QosClass::express()` generalized the media-plane argument (#733) to the
+  whole table, so every live alert crossing a conformance window drew a
+  correct `qos-observed-mismatch`. Wire-behaviour change on the alert plane
+  only; the reasoning moved through `zensight-sensor-parallax/docs/qos-express.md`,
+  which now carries the alert carve-out.
+- **Alert and event puts are encoding-stamped** (#830). `publish_raw` now
+  takes the caller's encoding and stamps it (RFC 08 §7), so consumers resolve
+  alert/event payloads from metadata instead of the first-byte sniff — the
+  sniff that read an empty tombstone as CBOR and manufactured a
+  `payload-undecodable` error in the conformance gate. The judge-side half
+  (a `Delete` tombstone must not be decoded as a value) is zenkey-fleet
+  0.11.1's doctor fix; `zenkey-fleet` is bumped to 0.11.
+- **The alert seed rides the reporter's format** (#830). `serve_alerts_query`
+  hardcoded JSON while live samples used the reporter's `Format`; they agreed
+  only because every sensor passes `Format::Json` today. A CBOR reporter now
+  seeds CBOR, pinned by test.
 
 ## [0.11.0] - 2026-08-28
 

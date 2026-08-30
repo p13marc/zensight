@@ -213,10 +213,36 @@
       },
 
       // Disk space hi-watermark per mount (Warning/Critical %). Needs collect.disk.
-      disk: { enabled: true, warn_percent: 90, critical_percent: 95 },
+      // `mounts` overrides the thresholds per mount path (exact or glob, FIRST
+      // match wins; an omitted field falls back to the global value), e.g.:
+      //   mounts: [
+      //     { path: "/",        warn_percent: 75, critical_percent: 85 },
+      //     { path: "/srv/dev", warn_percent: 92, critical_percent: 97 },
+      //   ],
+      disk: { enabled: true, warn_percent: 90, critical_percent: 95, mounts: [] },
 
       // Inode hi-watermark per mount. Needs collect.fd_inode (on by default).
-      inode: { enabled: true, warn_percent: 90, critical_percent: 95 },
+      // Takes the same per-mount `mounts` overrides as `disk`.
+      inode: { enabled: true, warn_percent: 90, critical_percent: 95, mounts: [] },
+
+      // Projected time-to-full (#822): a least-squares fit of used bytes over
+      // window_secs; alerts when the disk is projected full within
+      // warn/critical hours. Says nothing until min_window_secs and
+      // min_samples of history exist, nothing on a flat/shrinking disk, and
+      // resets after a large reclaim (sweep) rather than chasing a stale
+      // trend. "Full in under 4 hours" is actionable at 40% occupancy —
+      // exactly where the watermark above is still silent.
+      // `mounts` overrides the horizons per mount path, like `disk.mounts`:
+      //   mounts: [ { path: "/srv/dev", warn_hours_to_full: 6, critical_hours_to_full: 1 } ],
+      disk_fill_rate: {
+        enabled: true,
+        window_secs: 1800,
+        min_window_secs: 600,
+        min_samples: 5,
+        warn_hours_to_full: 24,
+        critical_hours_to_full: 4,
+        mounts: [],
+      },
 
       // File-descriptor table occupancy (fs.file-nr / fs.file-max). Warning only.
       fd: { enabled: true, warn_percent: 80 },

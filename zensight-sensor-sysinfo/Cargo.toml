@@ -18,6 +18,8 @@ ebpf = ["dep:aya", "dep:aya-log", "dep:aya-build", "dep:libc"]
 zensight-common = { path = "../zensight-common" }
 zenkey = { workspace = true }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
+# Per-mount threshold override matching (#822), the action.rs precedent.
+glob = { workspace = true }
 
 # Shared kernel<->user eBPF types (MAX_SLOTS, log2_bucket). Plain no_std lib —
 # always present so map.rs can size histograms without a feature gate.

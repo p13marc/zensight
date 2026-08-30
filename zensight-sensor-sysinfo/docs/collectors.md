@@ -120,6 +120,7 @@ first violation).
 | `pressure` | PSI `some/avg10` per resource ≥ warn/critical | on; cpu 40/70, memory 10/30, io 40/70 | `collect.pressure` |
 | `disk` | per-mount space usage ≥ warn/critical % | on; 90 / 95 | `collect.disk` |
 | `inode` | per-mount inode usage ≥ warn/critical % | on; 90 / 95 | `collect.fd_inode` |
+| `disk_fill_rate` | projected time-to-full ≤ warn/critical hours, least-squares fit over `window_secs` | on; 24h / 4h, 30-min window | `collect.disk` |
 | `fd` | FD-table occupancy ≥ warn % (Warning only) | on; 80 | `collect.fd_inode` |
 | `thermal` | temp ≥ `fraction` × critical trip point (Critical) | **off**; fraction 0.9 | `collect.temperatures` |
 | `swap` | `pswpin + pswpout` ≥ `warn_pages_per_sec` (Warning) | on; 1000 pages/s | `collect.vmstat` |
@@ -127,3 +128,44 @@ first violation).
 `thermal` is off by default because it needs `collect.temperatures` for the
 critical trip points — enable both together. Memory PSI is graded harder than
 CPU/IO by design.
+
+### Per-mount overrides (#822)
+
+One global threshold pair cannot fit both a build-scratch volume that lives at
+85% by design and a root disk that must never get there. `disk`, `inode` and
+`disk_fill_rate` each take a `mounts` list overriding their thresholds per
+mount path:
+
+```json5
+disk: {
+  enabled: true, warn_percent: 90, critical_percent: 95,
+  mounts: [
+    { path: "/",        warn_percent: 75, critical_percent: 85 },
+    { path: "/srv/*",   warn_percent: 92 },   // critical falls back to 95
+  ],
+}
+```
+
+Paths are exact or glob (`glob` crate semantics: `*` does not cross `/`).
+**First match wins** — order specific entries before broad globs. Each omitted
+field falls back to the rule-level value independently. Invalid patterns are
+rejected at startup by config validation. The resolved warn value feeds the
+key-affecting `threshold` label, so editing a mount's override retires the old
+alert key and raises a fresh one — the same lifecycle as editing the global
+threshold.
+
+### `disk_fill_rate` (#822)
+
+A percentage is a lagging indicator: "this filesystem will be full in under 4
+hours at the current rate" is actionable at 40% occupancy and useless at 95%.
+The rule keeps a per-mount `used_bytes` history, fits a least-squares trend
+over `window_secs` (default 30 min), and grades the projected hours-to-full
+against `warn_hours_to_full` / `critical_hours_to_full` (default 24h / 4h,
+per-mount overridable via its own `mounts` list).
+
+Deliberate silences, all reading as *not asked* rather than "fine": fewer than
+`min_samples` samples or less than `min_window_secs` of history; a flat or
+shrinking disk; and the ticks after a **reclaim** (a drop of >5% of the
+filesystem between two samples — a sweep or rotation invalidates the trend, so
+the history resets rather than chasing it). The projection and the fill rate
+live in the alert summary; the alert key stays stable as the projection moves.
