@@ -536,6 +536,11 @@ demo-verify:
 # this path there. Which also means a red `test` job on CI is NOT this, and
 # should be read as a real failure.
 
+# Since #829 the test binaries set WGPU_BACKEND=gl themselves (pre-main ctor
+# guards in src/lib.rs and tests/ui_tests.rs), so a plain `cargo test -p
+# zensight` is already safe; this recipe stays as the discoverable name for
+# the story above, and as the belt to the guards' braces.
+
 # The zensight crate's tests, on a renderer that survives concurrent wgpu devices (#687)
 test-ui *ARGS:
     WGPU_BACKEND=gl cargo test -p zensight {{ARGS}}

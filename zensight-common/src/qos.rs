@@ -83,7 +83,8 @@ impl QosClass {
         }
     }
 
-    /// Express is off for **every** class, `LiveVideo` included (#733).
+    /// Express is on for `Alert` alone — every other class, `LiveVideo`
+    /// included, keeps it off (#733, #830).
     ///
     /// Express means "send this message on its own, do not wait to batch it
     /// with the next one". The intuition that a video frame wants it is
@@ -95,18 +96,29 @@ impl QosClass {
     /// zenkey RFC v1.26 M1 concluded when it removed `express` from the
     /// `frame` profile, and this method has always agreed with it.
     ///
-    /// **parallax's `ZenohSink::media` disagrees** — it sets `express = true`
-    /// on the `frame` profile (`src/elements/network/zenoh.rs:1568`, doc at
-    /// `:1538`: "because a stale frame is worthless and the encoder must never
-    /// block"). We do not adopt that sink; the parallax sensor publishes
-    /// through `zensight-sensor-core`'s `RawMediaPublisher`, which reads its
-    /// QoS from here. See `zensight-sensor-parallax/docs/qos-express.md` for
+    /// The same amendment kept express on the **`alert`** profile — the
+    /// rare, must-arrive, reliable+block sample is exactly the message worth
+    /// paying per-message framing for, and none of the media argument
+    /// applies to it: an alert publisher never sheds, so "batching would
+    /// have amortised it" is a queue an alert should not sit in. This method
+    /// used to generalize the media conclusion to the whole table, which the
+    /// conformance judge (declared-vs-observed QoS, RFC 04 §3) correctly
+    /// flagged the first time a live alert crossed a doctor window (#830).
+    ///
+    /// **parallax's `ZenohSink::media` disagrees** on the media half — it
+    /// sets `express = true` on the `frame` profile
+    /// (`src/elements/network/zenoh.rs:1568`, doc at `:1538`: "because a
+    /// stale frame is worthless and the encoder must never block"). We do
+    /// not adopt that sink; the parallax sensor publishes through
+    /// `zensight-sensor-core`'s `RawMediaPublisher`, which reads its QoS
+    /// from here. See `zensight-sensor-parallax/docs/qos-express.md` for
     /// the decision and its reasoning.
     ///
-    /// Pinned by `express_is_off_for_every_class` below, so this does not get
-    /// "fixed" toward parallax's table.
+    /// Pinned by `express_is_the_alert_class_alone` below, so neither half
+    /// drifts — not toward parallax's media table, and not back to the
+    /// blanket `false` that disagreed with the ratified alert profile.
     pub fn express(self) -> bool {
-        false
+        matches!(self, QosClass::Alert)
     }
 }
 
@@ -130,6 +142,9 @@ mod tests {
             assert_eq!(q.reliability(), Reliability::Reliable);
             assert_eq!(q.priority(), Priority::InteractiveHigh);
         }
+        // They part on express: RFC 04 §3 gives it to `alert` alone (#830).
+        assert!(QosClass::Alert.express());
+        assert!(!QosClass::Command.express());
     }
 
     #[test]
@@ -152,20 +167,24 @@ mod tests {
         assert!(!q.express());
     }
 
-    /// Express stays off for every class — the whole table, not a line of two
-    /// other tests (#733).
+    /// Express belongs to `Alert` alone — the whole table, not a line of two
+    /// other tests (#733, #830).
     ///
-    /// zenkey RFC v1.26 M1 removed `express` from the `frame` profile:
-    /// batching engages only under back-pressure, so express is a no-op on an
-    /// unsaturated link and spends per-message overhead exactly when a `drop`
-    /// profile should be shedding. parallax's `ZenohSink::media` sets it *on*
-    /// for the same plane (`src/elements/network/zenoh.rs:1568`), which is the
+    /// zenkey RFC v1.26 M1 removed `express` from the `frame` profile and
+    /// kept it on `alert`: batching engages only under back-pressure, so
+    /// express is a no-op on an unsaturated link and spends per-message
+    /// overhead exactly when a `drop` profile should be shedding — but an
+    /// alert is the rare, must-arrive sample that overhead exists for, and
+    /// the conformance judge holds observed axes against that declared
+    /// profile (#830). parallax's `ZenohSink::media` sets express *on* for
+    /// the media plane (`src/elements/network/zenoh.rs:1568`), which is the
     /// table a future reader is most likely to copy from. We deliberately do
     /// not adopt that sink — see `zensight-sensor-parallax/docs/qos-express.md`
-    /// — so flipping any of these to `true` is a wire-behaviour change that
-    /// must go through that document, not through this assertion.
+    /// — so flipping any *other* class to `true` (or `Alert` back to `false`)
+    /// is a wire-behaviour change that must go through that document, not
+    /// through this assertion.
     #[test]
-    fn express_is_off_for_every_class() {
+    fn express_is_the_alert_class_alone() {
         for q in [
             QosClass::Telemetry,
             QosClass::HealthLiveness,
@@ -177,9 +196,10 @@ mod tests {
             QosClass::Event,
             QosClass::Query,
         ] {
-            assert!(
-                !q.express(),
-                "{q:?} turned express on; see docs/qos-express.md before changing this"
+            assert_eq!(
+                q.express(),
+                matches!(q, QosClass::Alert),
+                "{q:?} moved on the express axis; see docs/qos-express.md before changing this"
             );
         }
     }
