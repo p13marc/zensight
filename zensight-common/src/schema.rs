@@ -356,4 +356,171 @@ mod tests {
         assert_eq!(parsed.app(), "zensight");
         assert_eq!(parsed.len(), SCHEMAS.len());
     }
+
+    /// #815: every state family serves a **generated** schema, not a stub.
+    ///
+    /// The upstream `describe-totality` check is name-presence only — a
+    /// `summary()` `{"type":"object"}` satisfies it completely — and
+    /// `describe-missing` is Info by design. So completeness is gated here,
+    /// at test time, the way RFC 08 §6.1's subject half already is: for
+    /// every registered `class = "state"` subject, the served entry must be
+    /// schemars-generated (`$schema` stamped, non-empty `properties`).
+    /// zenwatch (zenkey#388) renders notifications through these schemas
+    /// with no compiled-in knowledge of our types; a stub here becomes a
+    /// page that says "alert fired" with no detail.
+    #[test]
+    fn every_state_family_serves_a_generated_schema() {
+        let mut checked = 0;
+        for (producer, toml) in crate::registry::REGISTRIES {
+            let slice = zenkey::parse_slice(toml)
+                .unwrap_or_else(|e| panic!("registry slice {producer}: {e}"));
+            for subject in &slice.subjects {
+                if !subject.class.is(&zenkey::grammar::Class::State) {
+                    continue;
+                }
+                let type_name = &subject.type_name;
+                let entry = SCHEMAS.get(type_name).unwrap_or_else(|| {
+                    panic!(
+                        "state family {producer}/{} ({type_name}): no schema entry",
+                        subject.path
+                    )
+                });
+                let doc = entry.json_document().unwrap_or_else(|| {
+                    panic!(
+                        "state family {producer}/{} ({type_name}): entry is not a JSON schema",
+                        subject.path
+                    )
+                });
+                assert!(
+                    doc.get("$schema").is_some(),
+                    "state family {producer}/{} ({type_name}): schema is hand-written, \
+                     not schemars-generated — a summary() stub cannot back a state family (#815)",
+                    subject.path
+                );
+                let props = doc
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "state family {producer}/{} ({type_name}): schema has no properties",
+                            subject.path
+                        )
+                    });
+                assert!(
+                    !props.is_empty(),
+                    "state family {producer}/{} ({type_name}): empty properties",
+                    subject.path
+                );
+                // No property may be a permissive anything-goes schema —
+                // `true`, or the empty `{}` schemars emits for
+                // `serde_json::Value`. That is how a field silently
+                // un-describes itself (the SensorInfo.metadata hole this
+                // test closed); a free-form field must at least state a
+                // type and a description.
+                for (field, schema) in props {
+                    // Structure = any of these keys; a bare description (or
+                    // `true`, or `{}`) is words with no contract.
+                    const STRUCTURAL: &[&str] = &[
+                        "type",
+                        "$ref",
+                        "properties",
+                        "oneOf",
+                        "anyOf",
+                        "allOf",
+                        "enum",
+                        "items",
+                        "const",
+                    ];
+                    let permissive = schema == &serde_json::json!(true)
+                        || schema
+                            .as_object()
+                            .is_some_and(|o| !o.keys().any(|k| STRUCTURAL.contains(&k.as_str())));
+                    assert!(
+                        !permissive,
+                        "state family {producer}/{} ({type_name}).{field}: \
+                         property is a permissive anything-goes schema — a \
+                         consumer decoding through it learns nothing (#815)",
+                        subject.path
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 60,
+            "only {checked} state subjects checked — registry shrank?"
+        );
+    }
+
+    /// #815: the fields a notification renderer reads are pinned by name,
+    /// per type — `#[serde(rename)]`/`skip` on any of these is a wire break
+    /// zenwatch sees before we do, unless this fails first.
+    #[test]
+    fn state_document_fields_a_renderer_reads_are_pinned() {
+        let pins: &[(&str, &[&str])] = &[
+            (
+                "Alert",
+                &[
+                    "timestamp",
+                    "source",
+                    "protocol",
+                    "kind",
+                    "rule",
+                    "severity",
+                    "state",
+                    "summary",
+                    "labels",
+                ],
+            ),
+            (
+                "HealthSnapshot",
+                &[
+                    "sensor",
+                    "status",
+                    "uptime_secs",
+                    "devices_total",
+                    "devices_responding",
+                    "devices_failed",
+                    "last_poll_duration_ms",
+                    "errors_last_hour",
+                    "metrics_published",
+                    "self_stats",
+                ],
+            ),
+            (
+                "ErrorReport",
+                &["timestamp", "error_type", "message", "retryable"],
+            ),
+            (
+                "SensorInfo",
+                &[
+                    "name",
+                    "version",
+                    "producer",
+                    "source",
+                    "last_updated",
+                    "metadata",
+                ],
+            ),
+            (
+                "HostEvidence",
+                &["sensor", "source", "host_id", "ips", "macs", "last_updated"],
+            ),
+            ("HostEntity", &["entity_id"]),
+        ];
+        for (type_name, fields) in pins {
+            let doc = SCHEMAS
+                .get(type_name)
+                .unwrap_or_else(|| panic!("{type_name} missing"))
+                .json_document()
+                .unwrap_or_else(|| panic!("{type_name} not a JSON schema"));
+            let props = doc["properties"].as_object().unwrap();
+            for f in *fields {
+                assert!(
+                    props.contains_key(*f),
+                    "{type_name}.{f} missing from the served schema (#815)"
+                );
+            }
+        }
+    }
 }

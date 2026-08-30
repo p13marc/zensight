@@ -27,11 +27,22 @@ set -euo pipefail
 PORT="${PORT:-17447}"
 HUB="tcp/127.0.0.1:${PORT}"
 PROFILE="${PROFILE:-release}"
-# The deployment: the sysinfo sensor (a producer slice) and the correlator (the
-# `@catalog` service origin, whose verbatim `@` chunk is a structurally
+# The deployment: sysinfo + logs + systemd (producer slices) and the correlator
+# (the `@catalog` service origin, whose verbatim `@` chunk is a structurally
 # different introspect key — RFC 08 §6's property D4 — so running both covers
-# both halves of the slice diff). Override to judge a bigger one.
-SENSORS="${SENSORS:-sysinfo}"
+# both halves of the slice diff). Override to judge a bigger or smaller one.
+#
+# Widened from sysinfo-only in #815: every live producer is a producer whose
+# served schemas, seeds and payloads actually get judged — a 2-producer
+# deployment left 9 of 11 slices as describe-missing counts and most state
+# families never exercised. logs and systemd are the safe additions: both are
+# built for degraded hosts (logs runs without a journal; systemd without a
+# system bus declares every procedure and says why — pinned by its
+# no_system_bus test), so a CI container that has neither still keeps them on
+# the roster. netring/netlink need capture/netlink privileges; snmp/gnmi/
+# modbus/netflow/parallax need devices or protoc — they stay out of CI and in
+# reach of a local `SENSORS=… scripts/conformance-verify.sh`.
+SENSORS="${SENSORS:-sysinfo logs systemd}"
 # The correlator (the `@catalog` service origin) is ON, as of #782.
 #
 # It was off, and that was a finding rather than a preference: its entities seed

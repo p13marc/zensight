@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every state family's served schema is now a gated contract** (#815,
+  unblocks zenkey#388's zenwatch). The audit found the invariant already
+  holds — all 14 state-family types serve real schemars-derived schemas —
+  so the gate pins it where the upstream checks cannot: `describe-totality`
+  is name-presence-only (a stub passes) and `describe-missing` is Info by
+  design. A test-time gate (the §6.1 subject-half precedent) asserts every
+  `class = "state"` subject serves a generated schema with structure in
+  every property, and pins the renderer-read fields of
+  Alert/HealthSnapshot/ErrorReport/SensorInfo/HostEvidence/HostEntity by
+  name. The one real hole is closed: `SensorInfo.metadata` rendered as an
+  anything-goes schema and is now typed as an object. The CI conformance
+  deployment widens from sysinfo-only to **sysinfo + logs + systemd** (both
+  degrade rather than exit on a journal-less/bus-less host), so served
+  schemas, seeds and payloads of four producers are live-judged every run.
+
+### Added
+
 - **HealthSnapshot: a sensor that can see itself** (#811). The health doc
   gains an optional `self_stats` block: self-measured RSS/VSZ/CPU
   (`/proc/self`, on the 5s health tick), the declared budget, publish
