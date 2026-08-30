@@ -1160,3 +1160,202 @@ pub mod fleet {
         ]
     }
 }
+
+/// Demo feed for the bus explorer (#748).
+///
+/// This is the real pipeline minus the session: a `MonitorCore` and
+/// `ExplorerCore` driven by synthesized `SampleView`s (built through the
+/// #747 replay seam, `crate::replay::sample_view`), emitting the same
+/// `ExplorerTick` messages the live pump does. The view cannot tell demo
+/// from live — which is the point, and is also living proof that a `.zrec`
+/// capture can drive this view deterministically.
+pub mod explorer {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use iced::futures::Stream;
+    use zenkey::grammar::{Origin, Producer};
+    use zenkey::origin::HostId;
+    use zenkey_fleet::{FleetEvent, IngestRow, MonitorCore, StreamItem};
+
+    use crate::message::Message;
+    use crate::view::explorer::core::{EXPLORER_CAPACITY, EXPLORER_MAX_KEYS, ExplorerCore};
+    use crate::view::explorer::inspector::InspectedSample;
+    use crate::view::explorer::pump::{ExplorerCmd, ExplorerCtl};
+
+    /// The demo fleet's fixture origin — the same placeholder every other
+    /// fixture uses (`DeviceId::fixture`).
+    const ORIGIN: &str = "h-3fa9c2d41b7e";
+
+    fn ctx(producer: &str) -> zenkey::V1Context {
+        zenkey::V1Context::with_producer(
+            Origin::Host(HostId::parse(ORIGIN).expect("fixture origin parses")),
+            Producer::new(producer).expect("registered producer name"),
+        )
+    }
+
+    fn row(key: String, qos: &str, payload: serde_json::Value) -> IngestRow {
+        IngestRow {
+            key,
+            payload: serde_json::to_vec(&payload).unwrap_or_default(),
+            encoding: Some("application/json".into()),
+            qos: Some(qos.into()),
+            delete: false,
+            attachment: None,
+        }
+    }
+
+    /// One demo tick's traffic. Deliberately includes one QoS offender —
+    /// netlink health published with `sampled` axes against its declared
+    /// `refreshed` — and, every 8th tick, one unregistered key, so the
+    /// ledgers demonstrate themselves.
+    fn traffic(n: u64) -> Vec<IngestRow> {
+        let sysinfo = ctx("sysinfo");
+        let netlink = ctx("netlink");
+        let tele = sysinfo.telemetry_prefix();
+        let mut rows = vec![
+            row(
+                format!("{tele}/cpu"),
+                "sampled",
+                serde_json::json!({"metric":"cpu","value": (n * 7 % 100) as f64}),
+            ),
+            row(
+                format!("{tele}/memory"),
+                "sampled",
+                serde_json::json!({"metric":"memory","value": (n * 13 % 100) as f64}),
+            ),
+        ];
+        if n.is_multiple_of(4) {
+            rows.push(row(
+                sysinfo.health_key().to_string(),
+                "refreshed",
+                serde_json::json!({"sensor":"sysinfo","status":"healthy","demo":true}),
+            ));
+            // The offender: right key, wrong axes.
+            rows.push(row(
+                netlink.health_key().to_string(),
+                "sampled",
+                serde_json::json!({"sensor":"netlink","status":"healthy","demo":true}),
+            ));
+        }
+        if n.is_multiple_of(8) {
+            rows.push(row(
+                format!("{tele}/bogus/unregistered"),
+                "sampled",
+                serde_json::json!({"demo":true}),
+            ));
+        }
+        rows
+    }
+
+    /// The demo pump. Same message protocol as `view::explorer::pump::run`.
+    pub fn demo_stream() -> impl Stream<Item = Message> {
+        async_stream::stream! {
+            let mcore = MonitorCore::bounded(EXPLORER_CAPACITY, EXPLORER_MAX_KEYS);
+            let mut core = ExplorerCore::default();
+            // The demo fleet's presence, both sweeps — the catalog token
+            // included, so the strip shows the D4 special case too.
+            for key in [
+                ctx("sysinfo").alive_key().to_string(),
+                ctx("netlink").alive_key().to_string(),
+                zensight_common::keyexpr::correlator_alive_key(),
+            ] {
+                core.apply(&StreamItem::Event(FleetEvent::NodeUp(key)));
+            }
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            yield Message::ExplorerStarted(ExplorerCtl::new(tx));
+
+            let mut interval = tokio::time::interval(Duration::from_millis(250));
+            let mut inspect: Option<String> = None;
+            let mut n: u64 = 0;
+            loop {
+                let out: Option<Message> = tokio::select! {
+                    cmd = rx.recv() => match cmd {
+                        Some(ExplorerCmd::Inspect(key)) => { inspect = key; None }
+                        Some(ExplorerCmd::Watch(_)) | Some(ExplorerCmd::Unwatch(_)) => {
+                            Some(Message::ExplorerError(
+                                "demo mode publishes a fixed feed — watches need a live connection"
+                                    .into(),
+                            ))
+                        }
+                        Some(ExplorerCmd::Shutdown) | None => break,
+                    },
+                    _ = interval.tick() => {
+                        n += 1;
+                        for r in traffic(n) {
+                            let view = Arc::new(crate::replay::sample_view(
+                                &r,
+                                std::time::Instant::now(),
+                            ));
+                            core.apply(&StreamItem::Event(FleetEvent::Sample(view.clone())));
+                            mcore.ingest_at(
+                                view,
+                                None,
+                                std::time::Instant::now(),
+                                std::time::SystemTime::now(),
+                            );
+                        }
+                        mcore.tick();
+                        let inspected = inspect.as_deref().and_then(|key| {
+                            let retained = mcore.retained();
+                            let view = retained.iter().rev().find(|v| v.key == key)?;
+                            Some(InspectedSample::of(view, core.declared_type(key)))
+                        });
+                        Some(Message::ExplorerTick(Arc::new(
+                            core.snapshot(&mcore, Vec::new(), inspected),
+                        )))
+                    }
+                };
+                if let Some(msg) = out {
+                    yield msg;
+                }
+            }
+            yield Message::ExplorerStopped;
+        }
+    }
+}
+
+#[cfg(test)]
+mod explorer_demo_tests {
+    use crate::message::Message;
+    use iced::futures::StreamExt;
+
+    /// The demo pump speaks the live pump's protocol: a ctl handle first,
+    /// then ticks whose snapshots carry the demo fleet's presence (both D4
+    /// sweeps) and — once enough traffic has flowed — the deliberate QoS
+    /// offender. Pinned here because demo mode is the one path no simulator
+    /// test drives end to end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demo_stream_speaks_the_pump_protocol() {
+        let mut stream = Box::pin(super::explorer::demo_stream());
+        let first = stream.next().await.expect("a first message");
+        assert!(matches!(first, Message::ExplorerStarted(_)));
+
+        // Ticks arrive every 250ms; the 4th carries the health samples,
+        // including netlink's wrong-axes offender.
+        let mut last = None;
+        for _ in 0..5 {
+            match stream.next().await.expect("a tick") {
+                Message::ExplorerTick(snap) => last = Some(snap),
+                Message::ExplorerError(e) => panic!("demo pump errored: {e}"),
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+        let snap = last.expect("at least one tick");
+        assert!(
+            snap.presence
+                .contains_key(&("@catalog".to_string(), "correlator".to_string())),
+            "the catalog's D4 token is in the demo presence"
+        );
+        assert!(snap.tree.keys > 0, "the demo tree grew keys");
+        assert!(
+            snap.qos
+                .mismatches
+                .keys()
+                .any(|k| k.contains("/state/netlink/health")),
+            "the deliberate QoS offender is on the ledger: {:?}",
+            snap.qos.mismatches
+        );
+    }
+}

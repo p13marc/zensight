@@ -9,6 +9,7 @@ pub mod dashboard;
 pub mod detection_tuning;
 pub mod device;
 pub mod expectations;
+pub mod explorer;
 pub mod fleet;
 pub mod formatting;
 pub mod freshness;
