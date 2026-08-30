@@ -14162,6 +14162,7 @@ dependencies = [
  "aya-log",
  "chrono",
  "clap",
+ "glob",
  "hostname",
  "json5 1.3.1",
  "libc",
