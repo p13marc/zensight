@@ -37,8 +37,10 @@ members = [
     "zensight-sensor-netlink-ebpf-common",
     "zensight-sensor-netlink-ebpf",
     # CI conformance harness (#744): stands a deployment up and runs
-    # zenkey-fleet's RFC judges against it. publish = false, and the ONLY
-    # crate here that may link zenkey-fleet — see its README, "The boundary".
+    # zenkey-fleet's RFC judges against it. publish = false. Links
+    # zenkey-fleet, as does `zensight` for the fleet view (#745) — the
+    # invariant is that no crate a SENSOR links may; see its README,
+    # "The boundary", and the note on the dependency below.
     "zensight-conformance",
 ]
 

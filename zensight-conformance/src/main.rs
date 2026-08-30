@@ -116,6 +116,27 @@ struct Args {
     #[arg(long)]
     strict_window: bool,
 
+    /// Record a `.zrec` capture to this path instead of judging (#747): watch
+    /// `--record-selector` for `--for` seconds (and/or `--record-max` samples)
+    /// and write what rides. The capture is the GUI's fixture corpus source —
+    /// this crate is the sanctioned place to drive zenkey-fleet against a live
+    /// deployment, so the recorder lives beside the judges rather than growing
+    /// a third harness.
+    #[arg(long, value_name = "PATH")]
+    record_zrec: Option<PathBuf>,
+
+    /// Data-plane selector to record (repeatable; required with
+    /// `--record-zrec`). Full wire selectors — remember `*` never matches a
+    /// verbatim origin (grammar D4), so `@catalog` traffic needs its own
+    /// entry.
+    #[arg(long, value_name = "SELECTOR")]
+    record_selector: Vec<String>,
+
+    /// Stop the capture after this many samples. `0` means no sample cap —
+    /// the `--for` deadline is then the only bound.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    record_max: u64,
+
     /// Emit the whole doctor report as JSON (plus the gate's verdict) instead
     /// of the human summary.
     #[arg(long)]
@@ -141,6 +162,10 @@ async fn main() -> Result<()> {
             println!("{:<28} {mark}", id.as_str());
         }
         return Ok(());
+    }
+
+    if let Some(path) = &args.record_zrec {
+        return record_capture(&args, path).await;
     }
 
     let gate = build_gate(&args)?;
@@ -203,6 +228,79 @@ async fn main() -> Result<()> {
     // thing that happens and it goes through the upstream projection rather
     // than a hand-rolled match.
     std::process::exit(judgement_exit_code(&verdict.judgement));
+}
+
+/// Record mode (#747): a passive capture of whatever rides the given
+/// selectors, written in the `.zrec` dialect (RFC 09 §5.2). No judging, no
+/// registry — a capture is an observation, and the header's `selectors` field
+/// is its coverage statement. The session is opened exactly as a doctor run's
+/// (same endpoints, scouting off by default), so the isolation discipline in
+/// `scripts/conformance-verify.sh` carries over unchanged.
+async fn record_capture(args: &Args, path: &std::path::Path) -> Result<()> {
+    use zenkey_fleet::report::ZrecHeader;
+    use zenkey_fleet::{Monitor, MonitorSpec, RecordBounds, ZREC_VERSION, ZrecSink, record};
+
+    if args.record_selector.is_empty() {
+        bail!(
+            "--record-zrec needs at least one --record-selector — a capture with no selectors watches nothing and its header could state no coverage"
+        );
+    }
+    let window = secs(args.for_secs, "--for")?;
+
+    let session = zenkey_fleet::open(&args.connect, &args.listen, args.scouting)
+        .await
+        .context("could not open the observer session")?;
+    let monitor = Monitor::start(
+        &session,
+        MonitorSpec {
+            selectors: args.record_selector.clone(),
+            ..MonitorSpec::default()
+        },
+    )
+    .await
+    .context("could not start the monitor")?;
+
+    let header = ZrecHeader {
+        zrec: ZREC_VERSION,
+        selectors: args.record_selector.clone(),
+        base: args.base.clone(),
+        captured_at: zenkey_fleet::rfc3339_now(),
+    };
+    let out = std::fs::File::create(path)
+        .with_context(|| format!("could not create {}", path.display()))?;
+    let sink = ZrecSink::spawn(out, &header)
+        .await
+        .context("could not start the capture sink")?;
+
+    let mut events = monitor.events();
+    record(
+        &mut events,
+        &sink,
+        RecordBounds {
+            max_samples: (args.record_max > 0).then_some(args.record_max),
+            max_duration: Some(window),
+        },
+        |_, _| {},
+    )
+    .await
+    .context("the capture itself failed")?;
+
+    let (samples, dropped) = sink.finish().await.context("could not flush the capture")?;
+    monitor.shutdown().await.ok();
+    let _ = session.close().await;
+
+    println!(
+        "recorded {} sample(s) ({} dropped by the capture) to {}",
+        samples,
+        dropped,
+        path.display()
+    );
+    if samples == 0 {
+        // An empty capture is not a fixture; failing loudly here is what keeps
+        // a broken regeneration run from silently emptying the corpus.
+        bail!("the capture holds no samples — nothing rode the selectors within the window");
+    }
+    Ok(())
 }
 
 fn secs(value: f64, flag: &str) -> Result<Duration> {

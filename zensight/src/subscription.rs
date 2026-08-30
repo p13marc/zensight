@@ -641,7 +641,7 @@ fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
 
 /// Route a Delete tombstone. Alerts and entities are the two keyed, lifecycle-
 /// managed state families the GUI tracks, and the registry tells them apart.
-fn parse_tombstone(key: &str) -> Option<Message> {
+pub(crate) fn parse_tombstone(key: &str) -> Option<Message> {
     let (parsed, protocol, subject) = refine_key(key)?;
     if !matches!(parsed.class, ClassOrPlane::Class(Class::State)) {
         return None;
@@ -675,7 +675,7 @@ fn parse_tombstone(key: &str) -> Option<Message> {
 ///
 /// The decoded messages keep their legacy shapes (protocol = producer base
 /// name, source = payload/origin) so the view layer is untouched.
-fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
+pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
     let parsed = parse_key(key)?;
 
     // The origin is chunk 3 of every key, so it is known here for EVERY class.

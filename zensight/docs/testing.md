@@ -254,9 +254,12 @@ zensight/
 ├── src/
 │   ├── lib.rs           # Exposes modules for testing
 │   ├── mock.rs          # Mock data generators
+│   ├── replay.rs        # .zrec capture replay (#747)
 │   └── view/            # View components to test
 └── tests/
     ├── ui_tests.rs      # Simulator-based tests
+    ├── zrec_fixtures.rs # Captured-traffic decode fixtures (#747)
+    ├── fixtures/zrec/   # The recorded corpus (see below)
     └── ice/             # E2E test recordings (optional)
         ├── navigation.ice
         └── settings.ice
@@ -270,6 +273,70 @@ zensight/
 | Device | `ui_tests.rs` | Metrics display, back button, filtering |
 | Settings | `ui_tests.rs` | Form rendering, save functionality |
 | Alerts | `ui_tests.rs` | Alert rules, acknowledgment |
+
+## Replay fixtures (`.zrec`) — #747
+
+A hand-built test sample encodes what we *think* a sensor publishes; a `.zrec`
+capture encodes what one *did*. Every wire-shape bug we have found — the
+unstamped `@media` samples, the `express` disagreement, the `FrameMeta` twin
+question — is the gap between those two. The corpus in `tests/fixtures/zrec/`
+closes it for the decode path.
+
+A `.zrec` is newline-delimited JSON in zenkey-fleet's tape dialect (RFC 09
+§5.2, now RFC 13 §4): line 1 is a header stating what was watched, every
+further line is a sample row (`"bytes"` is the lossless payload; `"value"` is
+a rendering and never round-trips) or a `{"dropped": n}` record placed where
+the capture itself lost samples.
+
+### The corpus
+
+| File | Selector | What it pins |
+|------|----------|--------------|
+| `sysinfo-telemetry.zrec` | `v1/*/telemetry/sysinfo/**` | the bulk telemetry decode → `Reading` |
+| `state-plane.zrec` | `v1/*/state/**` | health / sensor-doc / evidence routing |
+| `catalog-entities.zrec` | `v1/@catalog/state/**` | the correlator's `HostEntity` (a `v1/*` selector can never see `@catalog` — grammar D4) |
+
+Consumed by two test layers:
+
+- `tests/zrec_fixtures.rs` — headers, per-family decode coverage, and the
+  lossless round trip (row → `replay::sample_view` → `ZrecWriter` →
+  `ZrecReader` → identical row).
+- `src/app.rs` `mod zrec_replay_tests` — the whole capture folded through
+  `App::update`, twice, with identical derived state (a replay folds no live
+  time).
+
+The `zensight::replay` module is the seam: `load`/`read` a capture,
+`decode_row` (routes tombstones and strips the header's base the way the live
+session's namespace does), `messages()` for an update-fold, and
+`sample_view()` to lift a row into a `zenkey_fleet::SampleView` for
+`MonitorCore::ingest_at`-style consumers. It is deliberately session-less —
+the RFC 09 §5.2 *pane replay* posture: nothing in it can publish. Replaying
+onto a bus is `zenkey_fleet::replay()`'s job and carries the re-stamping /
+retire-gate / synthetic-marker obligations (RFC 09 §5.3) with it.
+
+### The assertion policy (and the regeneration contract)
+
+Fixture tests assert only **capture-stable facts**: which key families
+decode, which message variants appear, counts derived from the file itself.
+Never a hostname, an origin hash, a metric value, or a timestamp. Never feed
+`Message::Tick` or assert staleness in a fold test — those read the wall
+clock. The contract this buys:
+
+> Re-run `scripts/record-fixtures.sh`, and `cargo test -p zensight` must pass
+> unchanged.
+
+The script stands up the same isolated deployment as
+`scripts/conformance-verify.sh` (loopback rendezvous, multicast off, sysinfo
++ logs + systemd + correlator) and records the three captures with
+`zensight-conformance --record-zrec`. It is **manual, never CI** — the corpus
+is a pinned regression input, not weather. Recorder start order matters and
+is documented in the script: the captures open before the correlator starts,
+because entity docs publish once (on evidence arrival), not on a cadence.
+
+An exact-value assertion on fixture content is a reviewable violation of this
+section. Synthetic traffic / fault injection (`zenkey_fleet::Synth`) is
+deliberately deferred: it sits behind the fleet `decode` feature, which the
+GUI build keeps off.
 
 ## Best practices
 
