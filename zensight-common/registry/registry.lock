@@ -13,6 +13,11 @@ procedure	gnmi	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	gnmi	artifact/status	read	-	ArtifactStatus
 procedure	gnmi	describe	read	-	SchemaSet
 procedure	gnmi	introspect	read	-	RegistrySlice
+procedure	hostspec	describe	read	-	SchemaSet
+procedure	hostspec	expectations	read	-	TopicStatus
+procedure	hostspec	expectations/set	write	ExpectationsConfig	Ack
+procedure	hostspec	introspect	read	-	RegistrySlice
+procedure	hostspec	spec	read	-	HostspecEvaluation
 procedure	logs	artifact/cancel	write	-	Ack
 procedure	logs	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	logs	artifact/status	read	-	ArtifactStatus
@@ -131,6 +136,12 @@ subject	gnmi	evidence/self	state	HostEvidence
 subject	gnmi	health	state	HealthSnapshot
 subject	gnmi	sensor	state	SensorInfo
 subject	gnmi	{device}/{path...}	telemetry	TelemetryPoint
+subject	hostspec	alert/{alert_key}	state	Alert
+subject	hostspec	assertions/failing	telemetry	TelemetryPoint
+subject	hostspec	errors	state	ErrorReport
+subject	hostspec	evidence/self	state	HostEvidence
+subject	hostspec	health	state	HealthSnapshot
+subject	hostspec	sensor	state	SensorInfo
 subject	logs	alert/{alert_key}	state	Alert
 subject	logs	artifact/{kind}	state	ArtifactStatus
 subject	logs	by_severity/{severity}	telemetry	TelemetryPoint
