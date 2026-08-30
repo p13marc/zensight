@@ -182,6 +182,32 @@ Two limits worth knowing before reading a `Valid` as a strong claim:
   `subscription.rs`'s `decode_sample` and drops them. Building that surface is
   a feature in its own right; `src/schema.rs` carries the note on what it needs.
 
+## The fifth check: a state family serves a complete schema (#815)
+
+The fleet notifier (`zenwatch`, zenkey#388) is key-agnostic: it renders a
+notification by decoding the payload **through the producer's served schema**,
+with no compiled-in knowledge of `Alert` or any other ZenSight type. That turns
+schema completeness from a nicety into a wire contract — and the upstream
+checks cannot hold it: `describe-totality` is name-presence only (a
+`{"type":"object"}` stub satisfies it), and `describe-missing` is Info by
+design.
+
+So the rule is gated the way the subject half of §6.1 is — **at test time**,
+in `schema.rs`'s `every_state_family_serves_a_generated_schema`: for every
+registered `class = "state"` subject, the served entry must be
+schemars-generated (`$schema` stamped, non-empty `properties`), and **no
+property may be an anything-goes schema** (`true`, `{}`, or description-only —
+the shape a bare `serde_json::Value` field silently produces; `SensorInfo.
+metadata` was exactly that hole until #815 typed it). The fields a renderer
+actually reads (severity, rule, labels, summary, state, …) are additionally
+pinned by name in `state_document_fields_a_renderer_reads_are_pinned`, so a
+`#[serde(rename)]` breaks the build before it breaks a page.
+
+The rule for producers: **a new state subject's `type` must be a
+schemars-derived type in this crate** — a summary entry backs a procedure,
+never a state family. The deployment-side complement (re-enabling `field-new`
+in the conformance gate) waits on zenkey#384.
+
 ## See also
 
 - [`keyspace-helpers.md`](keyspace-helpers.md) — how keys are built

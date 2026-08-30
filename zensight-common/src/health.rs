@@ -309,7 +309,11 @@ pub struct SensorInfo {
     /// Free-form sensor metadata (device counts, listener addresses, …) —
     /// carried on the registration doc since the legacy `@/status` document
     /// retired with the v1 cutover (the health doc absorbs the running flag).
+    /// Every producer passes an object; the served schema says so (#815 —
+    /// schemars renders a bare `Value` as an anything-goes schema, which a
+    /// consumer decoding through the describe table learns nothing from).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("type" = "object"))]
     pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub macs: Vec<String>,
