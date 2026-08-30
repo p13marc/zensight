@@ -134,7 +134,9 @@ async fn main() -> Result<()> {
 
     let is_pcap = cfg.pcap.is_some();
     let flow_period = cfg.bandwidth_period_secs;
-    let mut runner = runner;
+    // The runner's sensor-budget alerts (#812) ride this same reporter, so
+    // the alert seed below includes them.
+    let mut runner = runner.with_alert_reporter(reporter.clone());
 
     // Late-joiner seed: serve the current firing set to consumers that connect
     // after an anomaly fired.

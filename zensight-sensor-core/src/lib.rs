@@ -41,6 +41,7 @@ mod config;
 pub mod container;
 mod error;
 pub mod event;
+pub mod governor;
 mod health;
 mod identity;
 mod liveliness;
@@ -65,6 +66,7 @@ pub use config::SensorConfig;
 pub use container::{container_id_from_cgroup, container_id_from_path, detect_self_container_id};
 pub use error::{Result, SensorError};
 pub use event::EventPublisher;
+pub use governor::{DegradeFn, EvictOutcome, MemoryGovernor, TableHandle};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, SENSOR_BUDGET_RULE,
     SensorHealth, TableStatsFn,

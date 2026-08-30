@@ -46,5 +46,11 @@ sha2 = { workspace = true }
 hostname = { workspace = true }
 if-addrs = { workspace = true }
 
+# The memory governor's malloc_trim (#812): return evicted heap to the
+# kernel so the ladder can observe its own progress. glibc-only call, gated
+# cfg(target_env = "gnu") in governor.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio-test = "0.4"

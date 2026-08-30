@@ -80,6 +80,13 @@ pub struct SensorRunner<C: SensorConfig> {
     /// [`Self::with_identity`]; drives the `state/<producer>/sensor` +
     /// `state/<producer>/evidence/**` publication task (keyed by [`Self::source`]).
     identity: Option<crate::identity::SharedIdentity>,
+    /// The memory governor (#812): registered tables/degradables + the shed
+    /// ladder, stepped on the health tick.
+    governor: Arc<crate::governor::MemoryGovernor>,
+    /// The sensor's own alert reporter, when it shared one via
+    /// [`Self::with_alert_reporter`] — runner-emitted alerts (`sensor-budget`)
+    /// then ride the same reporter `serve_alerts_query` seeds from.
+    alert_reporter: Option<Arc<crate::alert::AlertReporter>>,
     /// Spawned tasks.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -174,8 +181,25 @@ impl<C: SensorConfig> SensorRunner<C> {
             liveliness: None,
             health,
             identity: None,
+            governor: Arc::new(crate::governor::MemoryGovernor::default()),
+            alert_reporter: None,
             tasks: Vec::new(),
         })
+    }
+
+    /// The memory governor (#812) — sensors register evictable tables and
+    /// degradables on it; the health tick drives its shed ladder.
+    pub fn governor(&self) -> Arc<crate::governor::MemoryGovernor> {
+        self.governor.clone()
+    }
+
+    /// Share the sensor's own [`AlertReporter`](crate::alert::AlertReporter)
+    /// with the runner, so runner-emitted alerts (`sensor-budget`, #812) ride
+    /// the reporter whose `serve_alerts_query` seed late joiners read —
+    /// instead of a runner-private reporter the seed cannot see.
+    pub fn with_alert_reporter(mut self, reporter: Arc<crate::alert::AlertReporter>) -> Self {
+        self.alert_reporter = Some(reporter);
+        self
     }
 
     /// Declare the sensor-level liveliness token now instead of at [`Self::run`].
@@ -405,44 +429,66 @@ impl<C: SensorConfig> SensorRunner<C> {
 
         // Periodically publish sensor health to `state/<producer>/health` so
         // the frontend's Sensors view and dashboard health bar populate. The
-        // first tick fires immediately, then every 5s. The tick also grades
-        // the `sensor-budget` rule (#811) against the same measurement it
+        // first tick fires immediately, then every 5s. The tick also steps
+        // the memory governor's shed ladder (#812) and grades the
+        // `sensor-budget` rule (#811) against the same measurement it
         // publishes (sampling twice would corrupt the CPU diff).
         {
             let health = self.health.clone();
+            let governor = self.governor.clone();
             // The budget reporter needs a Protocol; a producer without one
-            // (custom sensors) just skips the rule with a note. NOTE: these
-            // alerts ride the runner's own reporter, so a sensor's
-            // `serve_alerts_query` seed does not include them — unifying the
-            // reporters is #812's business.
-            let budget_reporter = if self.config.budget_bytes().is_some() {
-                match self.name.parse::<zensight_common::Protocol>() {
-                    Ok(proto) => Some((
+            // (custom sensors) just skips the rule with a note. Built whenever
+            // the Protocol parses — not only when the config declares a
+            // budget — because a budget may also be *discovered* from the
+            // cgroup below. Prefers the sensor's own reporter
+            // (`with_alert_reporter`) so `serve_alerts_query` seeds these
+            // alerts too.
+            let budget_reporter = match self.name.parse::<zensight_common::Protocol>() {
+                Ok(proto) => {
+                    let reporter = self.alert_reporter.clone().unwrap_or_else(|| {
                         Arc::new(crate::alert::AlertReporter::new(
                             self.publisher.clone(),
                             proto,
                             Format::Json,
-                        )),
-                        proto,
-                    )),
-                    Err(_) => {
+                        ))
+                    });
+                    Some((reporter, proto))
+                }
+                Err(_) => {
+                    if self.config.budget_bytes().is_some() {
                         tracing::warn!(
                             producer = %self.name,
                             "budget declared but producer has no Protocol; sensor-budget rule disabled"
                         );
-                        None
                     }
+                    None
                 }
-            } else {
-                None
             };
             let (source, sensor_name) = (self.source.clone(), self.name.clone());
+            let config_budget = self.config.budget_bytes();
             let task = tokio::spawn(async move {
+                // Budget discovery (#812): a config-declared budget always
+                // wins; in a container with none, take a fraction of the
+                // cgroup's memory.max so the ladder cannot disagree with the
+                // drop-in the operator actually wrote. `max` (unlimited)
+                // discovers nothing — no budget, no ladder.
+                if config_budget.is_none()
+                    && let Some(max) =
+                        crate::procutil::self_cgroup().and_then(|c| c.memory_max_bytes)
+                {
+                    let budget = (max as f64 * crate::governor::CGROUP_BUDGET_FRACTION) as u64;
+                    health.set_budget_bytes(budget);
+                    tracing::info!(
+                        budget_bytes = budget,
+                        cgroup_memory_max = max,
+                        "memory budget discovered from cgroup"
+                    );
+                }
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
                 let mut firing = false;
                 loop {
                     tick.tick().await;
-                    let snapshot = health.snapshot_with_self();
+                    let snapshot = crate::governor::governed_snapshot(&health, &governor);
                     if let Err(e) = health.publish_snapshot(&snapshot).await {
                         tracing::warn!(error = %e, "Failed to publish sensor health");
                     }

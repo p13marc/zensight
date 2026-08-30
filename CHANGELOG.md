@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **sensor-core: a memory governor, and a sensor that sheds instead of
+  dying** (#812). The health tick now drives a shed ladder against the
+  declared budget — Evict (LRU from the largest registered table, then
+  `malloc_trim`) → Degrade (registered optional work stopped, health status
+  `Degraded`) → Saturated (the loudest possible report) — and **dying is not
+  on it**. Budgets are config-declared or, in a container, discovered as
+  75% of cgroup `memory.max`, so the ladder cannot disagree with the
+  operator's drop-in; thresholds agree with the `sensor-budget` alert
+  (80/95/75). The ladder's state (`self_stats.ladder`: step, per-table
+  evictions, degraded list, a human reason) publishes every tick — a
+  silently degraded sensor is a lying sensor. Sensors register evictable
+  tables and degradables on `runner.governor()`; `with_alert_reporter`
+  routes the runner's budget alerts through the sensor's own seeded
+  reporter (retiring the #811 seed gap). No budget + no cgroup limit = the
+  ladder never arms; nothing changes for unwired sensors.
+
+### Added
+
 - **HealthSnapshot: a sensor that can see itself** (#811). The health doc
   gains an optional `self_stats` block: self-measured RSS/VSZ/CPU
   (`/proc/self`, on the 5s health tick), the declared budget, publish
