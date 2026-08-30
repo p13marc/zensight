@@ -149,6 +149,45 @@ pub struct SelfStats {
     /// cgroup-v2 context, when the sensor runs in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cgroup: Option<CgroupSelf>,
+    /// The memory governor's shed-ladder state (#812). Absent when no ladder
+    /// is armed (no budget declared or discovered) or on older sensors —
+    /// absent reads as *no ladder*, never as "step 0".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder: Option<LadderState>,
+}
+
+/// The shed ladder's published state (#812): which rung is active and what
+/// has been shed to stay inside the budget. A silently degraded sensor is a
+/// lying sensor — every step is reported, every tick.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LadderState {
+    /// 0 nominal, 1 evicting, 2 degraded (optional work stopped),
+    /// 3 saturated (everything shed and still over budget — the loudest
+    /// possible report; dying is not on the ladder).
+    pub step: u8,
+    /// When the current step was entered (epoch ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<i64>,
+    /// Cumulative per-table evictions since the ladder last left step 0.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evicted: Vec<LadderEviction>,
+    /// Degradables currently applied (by registered name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<String>,
+    /// Human account of the pressure and the response, e.g. "rss 31 MiB at
+    /// 97% of 32 MiB budget; evicted 4096 entries (2.1 MiB) from dns_inventory".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What the ladder evicted from one table (#812) — honest counts of what was
+/// actually freed, not what was requested.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LadderEviction {
+    pub table: String,
+    pub entries: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 /// One bounded table's occupancy and capacity (#811), in entries and — where
@@ -345,6 +384,42 @@ mod tests {
         assert_eq!(partial.rss_bytes, Some(1024));
         assert_eq!(partial.cpu_percent, None);
         assert!(partial.tables.is_empty());
+        // #812: no ladder in the payload = no ladder, never "step 0".
+        assert_eq!(partial.ladder, None);
+    }
+
+    /// #812: the ladder state rides `self_stats` additively and its own
+    /// optional fields stay absent when unset.
+    #[test]
+    fn ladder_state_roundtrip_and_absence() {
+        let stats = SelfStats {
+            ladder: Some(LadderState {
+                step: 2,
+                since_ms: Some(1_700_000_000_000),
+                evicted: vec![LadderEviction {
+                    table: "tls_inventory".into(),
+                    entries: 4096,
+                    bytes: Some(2 * 1024 * 1024),
+                }],
+                degraded: vec!["anomaly_detectors".into()],
+                reason: Some("rss 31 MiB at 97% of 32 MiB budget".into()),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&stats).unwrap();
+        let back: SelfStats = serde_json::from_value(json).unwrap();
+        assert_eq!(back, stats);
+        // A minimal ladder payload (old producer mid-incident, new fields
+        // unknown) decodes with defaults.
+        let thin: LadderState = serde_json::from_str(r#"{"step": 1}"#).unwrap();
+        assert_eq!(thin.step, 1);
+        assert!(thin.evicted.is_empty() && thin.degraded.is_empty());
+        assert_eq!(thin.since_ms, None);
+        // An armed-but-nominal ladder serializes without the empty vectors.
+        let nominal = serde_json::to_value(LadderState::default()).unwrap();
+        assert!(nominal.get("evicted").is_none());
+        assert!(nominal.get("degraded").is_none());
+        assert!(nominal.get("reason").is_none());
     }
 
     #[test]

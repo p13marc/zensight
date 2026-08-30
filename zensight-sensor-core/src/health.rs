@@ -604,6 +604,8 @@ impl SensorHealth {
             evicted_total: counters.map(|c| c.evicted_total()).filter(|&n| n > 0),
             tables,
             cgroup: crate::procutil::self_cgroup(),
+            // Stamped by the runner's governed tick (#812), not measured here.
+            ladder: None,
         }
     }
 
@@ -696,6 +698,24 @@ pub fn budget_level(
         Some(zensight_common::AlertSeverity::Warning)
     } else {
         None
+    }
+}
+
+/// The health status the shed ladder implies (#812): `Degraded` from step 2
+/// (optional work actually stopped — which is exactly what Degraded means to
+/// zenwatch and the fleet card), never from step 1 (LRU eviction inside plan
+/// is normal operation; flipping the card amber for it trains operators to
+/// ignore amber). The device-census verdict is only ever *upgraded* toward
+/// Degraded — an existing `Error`/`Unhealthy` stands.
+pub fn ladder_status(
+    census: zensight_common::HealthStatus,
+    ladder_step: u8,
+) -> zensight_common::HealthStatus {
+    use zensight_common::HealthStatus::*;
+    if ladder_step >= 2 && matches!(census, Healthy | Starting) {
+        Degraded
+    } else {
+        census
     }
 }
 

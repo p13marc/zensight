@@ -75,7 +75,7 @@ pub use event::EventRecord;
 pub use evidence::{CloudFacts, HostEvidence, NameObservation};
 pub use health::{
     CgroupSelf, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus,
-    SelfStats, SensorInfo, TableStats,
+    LadderEviction, LadderState, SelfStats, SensorInfo, TableStats,
 };
 pub use interfaces::{IfStatus, InterfaceCounters, InterfaceEntry, InterfaceRates, InterfaceTable};
 pub use keyexpr::{
