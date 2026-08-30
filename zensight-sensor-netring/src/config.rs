@@ -96,6 +96,11 @@ pub struct NetringConfig {
     /// Requires `collect.dns` (the answer stream) — a no-op without it.
     #[serde(default)]
     pub names: NamesConfig,
+    /// Byte budgets for the L7 inventories (#814): LRU past the cap — the
+    /// entry-count refuse-at-cap guards are retired. Bytes are the contract,
+    /// because bytes are what the host enforces.
+    #[serde(default)]
+    pub tables: TablesConfig,
     /// Host-evidence feed (#307): republish observed assets / passive-DNS names
     /// as identity evidence on `state/netring/evidence/**` for the correlator.
     #[serde(default)]
@@ -353,6 +358,61 @@ impl Default for EvidenceConfig {
 }
 
 /// Passive-DNS name-cache tuning (issue #308). Maps onto flowscope's
+/// Byte budgets for the L7 inventories (#814). Five knobs, not nineteen:
+/// each named inventory gets its own, and the four fingerprint inventories
+/// (QUIC / SSH / encrypted-DNS / JA4H) share `fp_max_bytes` in quarters —
+/// they are the same kind of thing at the same scale. Sizes are enforced by
+/// [`crate::bounded::BoundedTable`] (incremental per-record accounting, true
+/// LRU); occupancy and caps ride the health doc's table stats (#811), and
+/// the memory governor (#812) can evict deeper under budget pressure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TablesConfig {
+    /// TLS asset inventory (`@rpc/netring/tls`).
+    #[serde(default = "default_tls_max_bytes")]
+    pub tls_max_bytes: usize,
+    /// DNS SLD inventory (`@rpc/netring/dns`).
+    #[serde(default = "default_dns_max_bytes")]
+    pub dns_max_bytes: usize,
+    /// HTTP host inventory (`@rpc/netring/http`).
+    #[serde(default = "default_http_max_bytes")]
+    pub http_max_bytes: usize,
+    /// Passive asset inventory (`@rpc/netring/assets` + evidence).
+    #[serde(default = "default_assets_max_bytes")]
+    pub assets_max_bytes: usize,
+    /// QUIC + SSH + encrypted-DNS + JA4H fingerprint inventories, combined
+    /// (each gets a quarter).
+    #[serde(default = "default_fp_max_bytes")]
+    pub fp_max_bytes: usize,
+}
+
+fn default_tls_max_bytes() -> usize {
+    2 * 1024 * 1024
+}
+fn default_dns_max_bytes() -> usize {
+    4 * 1024 * 1024
+}
+fn default_http_max_bytes() -> usize {
+    1024 * 1024
+}
+fn default_assets_max_bytes() -> usize {
+    2 * 1024 * 1024
+}
+fn default_fp_max_bytes() -> usize {
+    2 * 1024 * 1024
+}
+
+impl Default for TablesConfig {
+    fn default() -> Self {
+        Self {
+            tls_max_bytes: default_tls_max_bytes(),
+            dns_max_bytes: default_dns_max_bytes(),
+            http_max_bytes: default_http_max_bytes(),
+            assets_max_bytes: default_assets_max_bytes(),
+            fp_max_bytes: default_fp_max_bytes(),
+        }
+    }
+}
+
 /// `NameMapConfig`; every cap is bounded so a CDN-heavy network can't grow the
 /// map without limit. Enabled by default but inert unless `collect.dns` is on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
