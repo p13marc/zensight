@@ -227,6 +227,86 @@ async fn a_host_annotation_change_does_not_orphan_a_firing_alert() {
     assert!(reporter.firing_alerts().is_empty(), "alert list not empty");
 }
 
+/// Alert puts are encoding-stamped with the *reporter's* format, and the
+/// seed replies ride that same format (#830).
+///
+/// Two agreements, both previously accidental. The put path went through an
+/// unstamped `put`, so consumers resolved the payload by first-byte sniff —
+/// which reads an empty or non-JSON body as CBOR (that sniff is how a
+/// tombstone became a `payload-undecodable` finding in the conformance
+/// gate). And the seed hardcoded `serde_json::to_vec` while the live samples
+/// used `encode(alert, self.format)`; they agreed only because every sensor
+/// happened to pass `Format::Json`. The reporter here deliberately uses CBOR
+/// over a JSON-format publisher session, so either regression — stamping the
+/// session's format instead of the reporter's, or the seed falling back to
+/// JSON — fails by name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alert_puts_are_stamped_and_the_seed_rides_the_reporter_format() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let sub = session
+        .declare_subscriber("v1/*/state/netlink/alert/*")
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Session format JSON, reporter format CBOR — the reporter's must win.
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = Arc::new(AlertReporter::new(
+        publisher,
+        Protocol::Netlink,
+        Format::Cbor,
+    ));
+
+    let source = unique_source();
+    reporter
+        .observe(sample_alert(&source), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+
+    let s = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+        .await
+        .expect("recv firing timed out")
+        .expect("recv firing");
+    assert_eq!(
+        *s.encoding(),
+        Format::Cbor.encoding(),
+        "a live alert put must be stamped with the reporter's encoding, not \
+         sniffed and not the session's (RFC 08 §7, #830)"
+    );
+    let got: Alert = decode_auto(&s.payload().to_bytes()).expect("decode firing");
+    assert_eq!(got.state, AlertState::Firing);
+
+    let selector = format!(
+        "{}/*",
+        reporter.publisher().v1().const_state_key(&["alert"])
+    );
+    let seed = tokio::spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let replies = session
+        .get(&selector)
+        .timeout(Duration::from_secs(5))
+        .await
+        .expect("seed get");
+    let mut seen = 0;
+    while let Ok(reply) = replies.recv_async().await {
+        let sample = reply.result().expect("value reply");
+        let bytes = sample.payload().to_bytes();
+        assert_ne!(
+            bytes.first(),
+            Some(&b'{'),
+            "a seed reply serialized as JSON under a CBOR reporter — the seed \
+             must ride the same format as the live samples on the key (#830)"
+        );
+        let got: Alert = decode_auto(&bytes).expect("decode seed as cbor");
+        assert_eq!(got.state, AlertState::Firing);
+        seen += 1;
+    }
+    assert_eq!(seen, 1, "exactly the one firing alert");
+
+    seed.abort();
+}
+
 /// The alert seed's replies carry an HLC timestamp (#782).
 ///
 /// # Why this test exists, and why it is here rather than in a doc

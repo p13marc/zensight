@@ -71,7 +71,12 @@ impl EventPublisher {
         let payload = encode(record, self.publisher.format())
             .map_err(|e| SensorError::Serialization(e.to_string()))?;
         self.publisher
-            .publish_raw(&key, payload, QosClass::Event)
+            .publish_raw(
+                &key,
+                payload,
+                QosClass::Event,
+                self.publisher.format().encoding(),
+            )
             .await
     }
 }
