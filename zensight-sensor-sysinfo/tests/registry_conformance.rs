@@ -127,6 +127,31 @@ fn cgroup_metrics_are_registered() {
     assert_all_registered("cgroup", &map_cgroup(&c));
 }
 
+fn full_smart() -> SmartSample {
+    // Every field populated so all twelve registered smart families emit.
+    SmartSample {
+        device: "nvme0".into(),
+        model: Some("EXAMPLE 2TB".into()),
+        critical_warning: Some(1),
+        available_spare: Some(9),
+        available_spare_threshold: Some(10),
+        percentage_used: Some(87),
+        media_errors: Some(7),
+        power_on_hours: Some(17_000),
+        unsafe_shutdowns: Some(42),
+        data_units_read: Some(1),
+        data_units_written: Some(2),
+        reallocated_sectors: Some(12),
+        pending_sectors: Some(3),
+        crc_errors: Some(4),
+    }
+}
+
+#[test]
+fn smart_metrics_are_registered() {
+    assert_all_registered("smart", &map_smart(&[full_smart()]));
+}
+
 #[test]
 fn power_metrics_are_registered() {
     let p = PowerSample {
@@ -451,6 +476,7 @@ fn every_registered_family_has_an_emitter() {
         procs_blocked: Some(1),
     }));
     push(map_fd(&FdStat { used: 1, max: 2 }));
+    push(map_smart(&[full_smart()]));
     push(map_inodes(&[InodeStat {
         mount: "/var/log".into(),
         fs_type: "ext4".into(),

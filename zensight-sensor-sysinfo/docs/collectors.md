@@ -66,6 +66,12 @@ and skip gracefully when a `/proc`/`/sys` file is absent.
   `cgroup_paths`.
 - **power** — RAPL energy→watts, hwmon fan RPM, battery capacity/status, kernel
   entropy pool.
+- **smart** — drive SMART health (#823): NVMe wear/spare/media-errors via the
+  admin health log (CAP_SYS_ADMIN), the three classic ATA attributes via SG_IO
+  (CAP_SYS_RAWIO). mdadm reports a drive *after* it left the array; this asks
+  the drives themselves. Ioctls run every 60 s off-thread; missing devices or
+  permission skip silently, per arm. NVMe temperature deliberately rides the
+  existing `temperatures` collector (kernel nvme hwmon), not this one.
 - **ebpf** — `runqlat` + `biolatency` histograms on `@rpc/sysinfo/latency`;
   opt-in build only (see [configuration.md](configuration.md)).
 

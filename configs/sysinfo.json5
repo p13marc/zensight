@@ -117,6 +117,18 @@
       // sensor still reports fans/battery/entropy, but no watts.
       power: false,
 
+      // Drive SMART health (#823): NVMe wear/spare/media-errors via the admin
+      // health log, and the three classic ATA attributes (reallocated/pending
+      // sectors, CRC errors) via SG_IO. OFF by default: a VM has nothing to
+      // read — enable on the hypervisor and bare metal. NOTE the reads need
+      // device access: CAP_SYS_ADMIN for the NVMe admin ioctl, CAP_SYS_RAWIO
+      // for the ATA pass-through (an AmbientCapabilities= drop-in on the
+      // systemd unit, or root). Missing devices/permission are skipped
+      // silently, per arm — NVMe can work while ATA doesn't, and vice versa.
+      // NVMe temperature is deliberately NOT here: the kernel's nvme hwmon
+      // already surfaces it through `temperatures` above.
+      smart: false,
+
       // Top processes by CPU/memory (can be resource-intensive)
       processes: false,
 

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **sysinfo: a `smart` collector — the drives themselves, before mdadm
+  reports the aftermath** (#823). Default off. NVMe health via the admin
+  health-log ioctl (wear `percentage_used`, `available_spare` vs threshold,
+  `critical_warning` bits, media errors, power-on hours, unsafe shutdowns,
+  data units) and the three classic ATA attributes (reallocated/pending
+  sectors, UDMA CRC errors) via SG_IO pass-through — kernel interfaces, no
+  smartctl. Ioctls run every 60s off-thread; missing devices or permission
+  (CAP_SYS_ADMIN / CAP_SYS_RAWIO — see the unit-file notes) skip silently
+  per arm; NVMe temperature stays with the `temperatures` collector (kernel
+  nvme hwmon). Twelve new registered `smart/{device}/*` families (registry
+  1.4). Four alert rules: `smart_spare` (spare at/below its own threshold,
+  Critical), `smart_critical_warning` (any bit, Critical, bits spelled
+  out), `smart_media_errors` (per-device delta, Warning),
+  `smart_sata_attrs` (newly reallocated or pending sectors, Warning).
+
+### Added
+
 - **HealthSnapshot: a sensor that can see itself** (#811). The health doc
   gains an optional `self_stats` block: self-measured RSS/VSZ/CPU
   (`/proc/self`, on the 5s health tick), the declared budget, publish

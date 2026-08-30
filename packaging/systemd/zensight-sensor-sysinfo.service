@@ -43,6 +43,15 @@ ReadOnlyPaths=/etc/zensight
 # CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
 # ProtectKernelTunables=no
 #
+# The SMART collector (#823, `collect.smart: true`) needs device access:
+# CAP_SYS_ADMIN for the NVMe admin health-log ioctl, CAP_SYS_RAWIO for the
+# ATA SG_IO pass-through, plus read access to /dev/nvme* and /dev/sd*
+# (DeviceAllow / a `disk` supplementary group). Same rule as eBPF above:
+# a SMART deployment REPLACES the capability lines, per arm it needs —
+# NVMe-only hosts want only CAP_SYS_ADMIN.
+# AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_RAWIO
+# CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO
+#
 # The default build needs no capabilities at all, so drop the whole set. This
 # line and the commented one above are alternatives: an eBPF build replaces
 # this with that, it does not add to it (#670). While it was commented out the

@@ -722,6 +722,167 @@ pub fn map_power(s: &PowerSample) -> Vec<Metric> {
 }
 
 // ===========================================================================
+// H. Drive SMART health (#823)
+// ===========================================================================
+
+/// One drive's SMART health reading (#823): the NVMe SMART/Health log fields,
+/// or the three classic ATA attributes — whichever the device speaks. Unread
+/// fields stay `None`; a `None` is *not asked*, never zero. NVMe temperature
+/// is deliberately absent: `CONFIG_NVME_HWMON` already surfaces it through
+/// the `temperatures` collector as an hwmon chip named `nvme`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SmartSample {
+    /// Kernel device name (`nvme0`, `sda`) — sanitized into the key.
+    pub device: String,
+    /// Model string from sysfs, when known (payload label only).
+    pub model: Option<String>,
+    /// NVMe `critical_warning` bitfield (byte 0 of the health log): bit 0
+    /// spare below threshold, 1 temperature, 2 media degraded, 3 read-only,
+    /// 4 volatile-backup failed.
+    pub critical_warning: Option<u8>,
+    /// NVMe normalized spare capacity remaining, percent.
+    pub available_spare: Option<u8>,
+    /// The threshold `available_spare` must stay above.
+    pub available_spare_threshold: Option<u8>,
+    /// NVMe wear estimate, percent of rated endurance used (may exceed 100).
+    pub percentage_used: Option<u8>,
+    pub media_errors: Option<u64>,
+    pub power_on_hours: Option<u64>,
+    pub unsafe_shutdowns: Option<u64>,
+    /// NVMe data units (1 unit = 512 000 bytes).
+    pub data_units_read: Option<u64>,
+    pub data_units_written: Option<u64>,
+    /// ATA attribute 5, raw lifetime count.
+    pub reallocated_sectors: Option<u64>,
+    /// ATA attribute 197, raw current count (a gauge — sectors leave the
+    /// pending state by being reallocated or rewritten).
+    pub pending_sectors: Option<u64>,
+    /// ATA attribute 199, raw lifetime count.
+    pub crc_errors: Option<u64>,
+}
+
+/// Parse the NVMe SMART / Health Information log page (Get Log Page `0x02`,
+/// 512 bytes, NVM Express base spec figure "SMART / Health Information Log").
+/// Wide counters are 16-byte little-endian; values beyond `u64` clamp (a
+/// drive with 2^64 media errors has larger problems than a clamped counter).
+pub fn parse_nvme_smart(device: &str, log: &[u8]) -> Option<SmartSample> {
+    if log.len() < 512 {
+        return None;
+    }
+    let u128le = |off: usize| -> u128 {
+        u128::from_le_bytes(log[off..off + 16].try_into().expect("16-byte slice"))
+    };
+    let clamp = |v: u128| u64::try_from(v).unwrap_or(u64::MAX);
+    Some(SmartSample {
+        device: device.to_string(),
+        critical_warning: Some(log[0]),
+        available_spare: Some(log[3]),
+        available_spare_threshold: Some(log[4]),
+        percentage_used: Some(log[5]),
+        data_units_read: Some(clamp(u128le(32))),
+        data_units_written: Some(clamp(u128le(48))),
+        power_on_hours: Some(clamp(u128le(128))),
+        unsafe_shutdowns: Some(clamp(u128le(144))),
+        media_errors: Some(clamp(u128le(160))),
+        ..Default::default()
+    })
+}
+
+/// Parse ATA SMART READ DATA (512 bytes): the attribute table starts at
+/// offset 2, 30 entries of 12 bytes — `[id, flags:2, current, worst, raw:6,
+/// reserved]`. Only the three unambiguous lifetime attributes are read
+/// (#823): 5 reallocated, 197 current-pending, 199 UDMA CRC. `None` when no
+/// interesting attribute is present (an SSD may expose none of the three).
+pub fn parse_ata_smart(device: &str, data: &[u8]) -> Option<SmartSample> {
+    if data.len() < 512 {
+        return None;
+    }
+    let mut s = SmartSample {
+        device: device.to_string(),
+        ..Default::default()
+    };
+    let mut any = false;
+    for i in 0..30 {
+        let off = 2 + i * 12;
+        let id = data[off];
+        if id == 0 {
+            continue;
+        }
+        // 48-bit little-endian raw value at entry offset 5.
+        let raw = u64::from_le_bytes([
+            data[off + 5],
+            data[off + 6],
+            data[off + 7],
+            data[off + 8],
+            data[off + 9],
+            data[off + 10],
+            0,
+            0,
+        ]);
+        match id {
+            5 => (s.reallocated_sectors, any) = (Some(raw), true),
+            197 => (s.pending_sectors, any) = (Some(raw), true),
+            199 => (s.crc_errors, any) = (Some(raw), true),
+            _ => {}
+        }
+    }
+    any.then_some(s)
+}
+
+/// Map drive SMART readings to wire metrics under `smart/<device>/...`.
+pub fn map_smart(samples: &[SmartSample]) -> Vec<Metric> {
+    fn labeled(s: &SmartSample, m: Metric) -> Metric {
+        let m = m.label("device", s.device.clone());
+        match &s.model {
+            Some(model) => m.label("model", model.clone()),
+            None => m,
+        }
+    }
+    let mut out = Vec::new();
+    for s in samples {
+        let dev = sanitize_key(&s.device);
+        let gauges: [(&str, Option<f64>); 5] = [
+            ("critical_warning", s.critical_warning.map(f64::from)),
+            ("available_spare", s.available_spare.map(f64::from)),
+            (
+                "available_spare_threshold",
+                s.available_spare_threshold.map(f64::from),
+            ),
+            ("percentage_used", s.percentage_used.map(f64::from)),
+            ("pending_sectors", s.pending_sectors.map(|v| v as f64)),
+        ];
+        for (name, v) in gauges {
+            if let Some(v) = v {
+                out.push(labeled(s, Metric::gauge(format!("smart/{dev}/{name}"), v)));
+            }
+        }
+        let counters: [(&str, Option<u64>); 6] = [
+            ("media_errors_total", s.media_errors),
+            ("power_on_hours", s.power_on_hours),
+            ("unsafe_shutdowns_total", s.unsafe_shutdowns),
+            ("data_units_read_total", s.data_units_read),
+            ("data_units_written_total", s.data_units_written),
+            ("reallocated_sectors_total", s.reallocated_sectors),
+        ];
+        for (name, v) in counters {
+            if let Some(v) = v {
+                out.push(labeled(
+                    s,
+                    Metric::counter(format!("smart/{dev}/{name}"), v),
+                ));
+            }
+        }
+        if let Some(v) = s.crc_errors {
+            out.push(labeled(
+                s,
+                Metric::counter(format!("smart/{dev}/crc_errors_total"), v),
+            ));
+        }
+    }
+    out
+}
+
+// ===========================================================================
 // F. Per-process detail query channel (selector parsing)
 // ===========================================================================
 
@@ -2299,5 +2460,108 @@ mod tests {
         let def = LatencyReport::default();
         assert!(!def.available);
         assert_eq!(def.runqlat.total, 0);
+    }
+
+    // ── #823 drive SMART ──
+
+    /// A synthetic NVMe SMART/Health log with every field the parser reads.
+    fn nvme_log_fixture() -> [u8; 512] {
+        let mut log = [0u8; 512];
+        log[0] = 0x05; // critical_warning: spare + media degraded
+        log[1..3].copy_from_slice(&330u16.to_le_bytes()); // 330 K (~57 °C), unread
+        log[3] = 9; // available_spare
+        log[4] = 10; // available_spare_threshold
+        log[5] = 87; // percentage_used
+        log[32..48].copy_from_slice(&123_456u128.to_le_bytes()); // data_units_read
+        log[48..64].copy_from_slice(&234_567u128.to_le_bytes()); // data_units_written
+        log[128..144].copy_from_slice(&17_000u128.to_le_bytes()); // power_on_hours
+        log[144..160].copy_from_slice(&42u128.to_le_bytes()); // unsafe_shutdowns
+        log[160..176].copy_from_slice(&7u128.to_le_bytes()); // media_errors
+        log
+    }
+
+    #[test]
+    fn nvme_smart_log_parses_the_health_fields() {
+        let s = parse_nvme_smart("nvme0", &nvme_log_fixture()).expect("parses");
+        assert_eq!(s.critical_warning, Some(0x05));
+        assert_eq!(s.available_spare, Some(9));
+        assert_eq!(s.available_spare_threshold, Some(10));
+        assert_eq!(s.percentage_used, Some(87));
+        assert_eq!(s.data_units_read, Some(123_456));
+        assert_eq!(s.data_units_written, Some(234_567));
+        assert_eq!(s.power_on_hours, Some(17_000));
+        assert_eq!(s.unsafe_shutdowns, Some(42));
+        assert_eq!(s.media_errors, Some(7));
+        // ATA fields stay untouched on an NVMe reading.
+        assert_eq!(s.reallocated_sectors, None);
+        // A short buffer is not a reading.
+        assert_eq!(parse_nvme_smart("nvme0", &[0u8; 100]), None);
+    }
+
+    #[test]
+    fn nvme_wide_counters_clamp_rather_than_truncate() {
+        let mut log = nvme_log_fixture();
+        log[160..176].copy_from_slice(&(u128::from(u64::MAX) + 5).to_le_bytes());
+        let s = parse_nvme_smart("nvme0", &log).unwrap();
+        assert_eq!(s.media_errors, Some(u64::MAX));
+    }
+
+    /// A synthetic ATA SMART READ DATA block with the three classic
+    /// attributes plus decoys the parser must ignore.
+    fn ata_data_fixture() -> [u8; 512] {
+        let mut data = [0u8; 512];
+        let mut entry = |slot: usize, id: u8, raw: u64| {
+            let off = 2 + slot * 12;
+            data[off] = id;
+            let raw6 = raw.to_le_bytes();
+            data[off + 5..off + 11].copy_from_slice(&raw6[..6]);
+        };
+        entry(0, 9, 20_000); // power-on hours — deliberately ignored (vendor-messy)
+        entry(3, 5, 12); // reallocated
+        entry(7, 197, 3); // pending
+        entry(12, 199, 1_048_576); // CRC errors — exercises >2 raw bytes
+        data
+    }
+
+    #[test]
+    fn ata_smart_attributes_parse_by_id_not_position() {
+        let s = parse_ata_smart("sda", &ata_data_fixture()).expect("parses");
+        assert_eq!(s.reallocated_sectors, Some(12));
+        assert_eq!(s.pending_sectors, Some(3));
+        assert_eq!(s.crc_errors, Some(1_048_576));
+        assert_eq!(s.media_errors, None, "NVMe fields untouched on ATA");
+        // No interesting attributes at all → None, not a zeroed sample.
+        assert_eq!(parse_ata_smart("sdb", &[0u8; 512]), None);
+    }
+
+    #[test]
+    fn map_smart_emits_registered_names_and_skips_absent_fields() {
+        let nvme = parse_nvme_smart("nvme0", &nvme_log_fixture()).unwrap();
+        let mut ata = parse_ata_smart("sda", &ata_data_fixture()).unwrap();
+        ata.model = Some("EXAMPLEDISK 2TB".into());
+        let metrics = map_smart(&[nvme, ata]);
+        // Registered names (the Metric constructor debug-panics otherwise —
+        // this test IS the registry guard for the family).
+        let names: Vec<&str> = metrics.iter().map(|m| m.metric.as_str()).collect();
+        assert!(names.contains(&"smart/nvme0/percentage_used"));
+        assert!(names.contains(&"smart/nvme0/media_errors_total"));
+        assert!(names.contains(&"smart/sda/reallocated_sectors_total"));
+        assert!(names.contains(&"smart/sda/pending_sectors"));
+        assert!(names.contains(&"smart/sda/crc_errors_total"));
+        // Absent fields emit nothing: the ATA sample has no NVMe wear field.
+        assert!(!names.contains(&"smart/sda/percentage_used"));
+        // The model rides as a payload label, never in the key.
+        let realloc = metrics
+            .iter()
+            .find(|m| m.metric == "smart/sda/reallocated_sectors_total")
+            .unwrap();
+        assert_eq!(
+            realloc
+                .labels
+                .iter()
+                .find(|(k, _)| *k == "model")
+                .map(|(_, v)| v.as_str()),
+            Some("EXAMPLEDISK 2TB")
+        );
     }
 }
