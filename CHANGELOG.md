@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The alert plane's QoS agrees with the ratified profile: `express` is on
+  for `QosClass::Alert`, and for it alone** (#830). zenkey RFC 04 §3's
+  `alert` profile declares express ("rare and must-arrive, since v1.26");
+  `QosClass::express()` generalized the media-plane argument (#733) to the
+  whole table, so every live alert crossing a conformance window drew a
+  correct `qos-observed-mismatch`. Wire-behaviour change on the alert plane
+  only; the reasoning moved through `zensight-sensor-parallax/docs/qos-express.md`,
+  which now carries the alert carve-out.
+- **Alert and event puts are encoding-stamped** (#830). `publish_raw` now
+  takes the caller's encoding and stamps it (RFC 08 §7), so consumers resolve
+  alert/event payloads from metadata instead of the first-byte sniff — the
+  sniff that read an empty tombstone as CBOR and manufactured a
+  `payload-undecodable` error in the conformance gate. The judge-side half
+  (a `Delete` tombstone must not be decoded as a value) is zenkey-fleet
+  0.11.1's doctor fix; `zenkey-fleet` is bumped to 0.11.
+- **The alert seed rides the reporter's format** (#830). `serve_alerts_query`
+  hardcoded JSON while live samples used the reporter's `Format`; they agreed
+  only because every sensor passes `Format::Json` today. A CBOR reporter now
+  seeds CBOR, pinned by test.
+
 ## [0.11.0] - 2026-08-28
 
 A month of unreleased work, and the release an operator has to read before

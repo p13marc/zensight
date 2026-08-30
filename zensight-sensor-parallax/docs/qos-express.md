@@ -21,7 +21,8 @@ true`), reasoned at `:1538`: *"because a stale frame is worthless and the
 encoder must never block"*.
 
 Ours is `zensight-common/src/qos.rs`'s `QosClass::express`, which returns
-`false` for every class including `LiveVideo`.
+`false` for every media-carrying class including `LiveVideo` (`Alert` is the
+one exception — see the carve-out below).
 
 ## Why off is right
 
@@ -57,11 +58,28 @@ matching-listener viewer edges, key minting from the registry, and the
 nothing about any of that. Adopting it to inherit one QoS table we disagree
 with would be a poor trade.
 
-## What would change this
+## The alert carve-out (2026-08-30, #830)
+
+This document's conclusion is about the **media** plane, and for a while
+`QosClass::express()` generalized it to the whole table — including `Alert`,
+where zenkey's ratified `alert` profile (RFC 04 §3, "the rare and must-arrive
+profile alone, since v1.26") declares express **on**. The conformance judge
+holds observed axes against the declared profile, so the first live alert to
+cross a doctor window was correctly flagged as `qos-observed-mismatch`.
+
+The generalization, not the RFC, was wrong. Neither half of the media
+argument applies to an alert: it is rare (nothing to batch with, and the
+per-message framing cost is paid a handful of times an hour, not per frame),
+and it is reliable+block (an alert publisher never sheds, so under
+back-pressure express moves the one sample that must arrive ahead of the
+batch queue instead of into it). `QosClass::Alert.express()` is now `true`;
+every other class stays off.
+
+## What would change the media half
 
 A measurement, on a link that matters, showing express reducing end-to-end
-frame latency without raising drop rate. Until then, `express()` returning
-`false` for every class is pinned by `express_is_off_for_every_class` in
-`zensight-common/src/qos.rs` — a named test rather than an assertion buried in
-two others, precisely so that "parallax sets it, so should we" is not a
-one-line change.
+frame latency without raising drop rate. Until then, the table — express for
+`Alert` alone, off for every other class — is pinned by
+`express_is_the_alert_class_alone` in `zensight-common/src/qos.rs` — a named
+test rather than an assertion buried in two others, precisely so that
+"parallax sets it, so should we" is not a one-line change.
