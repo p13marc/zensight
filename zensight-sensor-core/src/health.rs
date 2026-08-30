@@ -123,6 +123,34 @@ pub struct SensorHealth {
     publisher: Option<Publisher>,
     /// Liveliness manager for Zenoh presence tokens.
     liveliness_manager: Option<Arc<LivelinessManager>>,
+    /// Declared memory budget, bytes (#811); 0 = undeclared. Carried into
+    /// `self_stats.budget_bytes` and graded by the runner's budget rule —
+    /// never enforced here (#812 is the enforcement).
+    budget_bytes: AtomicU64,
+    /// The baseline tier's publish counters (#811), shared with the
+    /// [`Publisher`]'s registry; the sensor may feed dropped/evicted totals
+    /// into the same accounting.
+    publish_counters: Option<Arc<zensight_common::PublishCounters>>,
+    /// Self CPU sampler (#811) — diffed on the health tick.
+    cpu_sampler: Mutex<crate::procutil::SelfCpuSampler>,
+    /// Per-table occupancy providers (#811), registered by the sensor and
+    /// pulled only on the health tick — nothing on hot paths.
+    table_providers: TableStatsProviders,
+}
+
+/// A pull callback reporting one or more tables' occupancy (#811). Invoked on
+/// the 5s health tick only. **Must not call back into [`SensorHealth`]** (the
+/// providers run under its lock).
+pub type TableStatsFn = Box<dyn Fn() -> Vec<zensight_common::TableStats> + Send + Sync>;
+
+#[derive(Default)]
+struct TableStatsProviders(Mutex<Vec<TableStatsFn>>);
+
+impl std::fmt::Debug for TableStatsProviders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.0.lock().map(|v| v.len()).unwrap_or(0);
+        write!(f, "TableStatsProviders({n})")
+    }
 }
 
 /// Device state for liveness tracking.
@@ -196,6 +224,11 @@ pub struct HealthSnapshot {
     /// mixed-fleet/persisted payloads predating the host-scoped keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Self-measured resource telemetry (#811) — shape shared with the
+    /// consumer copy via [`zensight_common::SelfStats`]. Absent = not
+    /// measured (a plain [`SensorHealth::snapshot`], or an older sensor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_stats: Option<zensight_common::SelfStats>,
 }
 
 /// Device liveness information for serialization.
@@ -270,7 +303,38 @@ impl SensorHealth {
             source: None,
             publisher: None,
             liveliness_manager: None,
+            budget_bytes: AtomicU64::new(0),
+            publish_counters: None,
+            cpu_sampler: Mutex::new(crate::procutil::SelfCpuSampler::default()),
+            table_providers: TableStatsProviders::default(),
         }
+    }
+
+    /// Declare the memory budget carried into `self_stats` (#811). 0 clears.
+    pub fn set_budget_bytes(&self, bytes: u64) {
+        self.budget_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Attach the publish counters read on each health tick (#811). The
+    /// runner wires this from [`Publisher::counters`].
+    pub fn with_publish_counters(
+        mut self,
+        counters: Arc<zensight_common::PublishCounters>,
+    ) -> Self {
+        self.publish_counters = Some(counters);
+        self
+    }
+
+    /// Register a table-occupancy provider (#811): a cheap pull callback the
+    /// health tick invokes (every 5s, never per sample). Register one per
+    /// bounded structure worth naming — this is the field that turns "the
+    /// sensor is big" into "the flow table is 280 MB of it".
+    pub fn register_table_stats(&self, provider: TableStatsFn) {
+        self.table_providers
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(provider);
     }
 
     /// Stamp the host identity onto future snapshots (identity envelope, #301).
@@ -493,6 +557,53 @@ impl SensorHealth {
             metrics_published: self.metrics_published.load(Ordering::SeqCst),
             host_id: self.host_id.read().expect("host_id lock poisoned").clone(),
             source: self.source.clone(),
+            // Self-measurement is the health *tick*'s job
+            // ([`snapshot_with_self`]) — the plain snapshot stays cheap for
+            // callers that only want the counters.
+            self_stats: None,
+        }
+    }
+
+    /// [`snapshot`](Self::snapshot) plus the self-measured `self_stats`
+    /// (#811): `/proc/self` memory + CPU, the publish counters, the declared
+    /// budget, registered table providers, and cgroup context. Called from
+    /// the health tick — measurement happens every 5s, never per sample.
+    pub fn snapshot_with_self(&self) -> HealthSnapshot {
+        let mut snap = self.snapshot();
+        snap.self_stats = Some(self.collect_self_stats());
+        snap
+    }
+
+    fn collect_self_stats(&self) -> zensight_common::SelfStats {
+        let mem = crate::procutil::self_memory();
+        let cpu_percent = self
+            .cpu_sampler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sample();
+        let budget = self.budget_bytes.load(Ordering::Relaxed);
+        let counters = self.publish_counters.as_ref();
+        let tables = {
+            let providers = self
+                .table_providers
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            providers.iter().flat_map(|p| p()).collect()
+        };
+        zensight_common::SelfStats {
+            rss_bytes: mem.map(|(rss, _)| rss),
+            vsz_bytes: mem.map(|(_, vsz)| vsz),
+            cpu_percent,
+            budget_bytes: (budget > 0).then_some(budget),
+            published_total: counters.map(|c| c.published_total()),
+            published_bytes_total: counters.map(|c| c.published_bytes_total()),
+            // Dropped/evicted are sensor-fed: report them only once something
+            // was wired, so an unwired sensor reads as *not measured*.
+            dropped_total: counters.map(|c| c.dropped_total()).filter(|&n| n > 0),
+            evicted_total: counters.map(|c| c.evicted_total()).filter(|&n| n > 0),
+            tables,
+            cgroup: crate::procutil::self_cgroup(),
         }
     }
 
@@ -529,16 +640,24 @@ impl SensorHealth {
             .collect()
     }
 
-    /// Publish health metrics to Zenoh.
+    /// Publish health metrics to Zenoh — including `self_stats` (#811): the
+    /// health tick is where self-measurement happens.
     pub async fn publish_health(&self) -> Result<()> {
+        let snapshot = self.snapshot_with_self();
+        self.publish_snapshot(&snapshot).await
+    }
+
+    /// Publish an already-taken snapshot — split from
+    /// [`publish_health`](Self::publish_health) so the runner's budget rule
+    /// can grade the *same* measurement it publishes (sampling twice would
+    /// corrupt the CPU diff).
+    pub async fn publish_snapshot(&self, snapshot: &HealthSnapshot) -> Result<()> {
         let Some(ref publisher) = self.publisher else {
             return Ok(());
         };
-
-        let snapshot = self.snapshot();
         let key = publisher.v1().health_key();
         publisher
-            .publish_json(&key, &snapshot, zensight_common::QosClass::HealthLiveness)
+            .publish_json(&key, snapshot, zensight_common::QosClass::HealthLiveness)
             .await
     }
 
@@ -553,6 +672,73 @@ impl SensorHealth {
             .publish_json(&key, report, zensight_common::QosClass::HealthLiveness)
             .await
     }
+}
+
+/// The `sensor-budget` rule slug (#811).
+pub const SENSOR_BUDGET_RULE: &str = "sensor-budget";
+
+/// Grade RSS against the declared budget (#811): Warning at ≥ 80 %,
+/// Critical at ≥ 95 %, and — once firing — the alert holds until usage drops
+/// under 75 % (hysteresis, so a sensor oscillating around the threshold
+/// updates one alert instead of flapping). Pure; the runner drives it.
+pub fn budget_level(
+    currently_firing: bool,
+    rss_bytes: u64,
+    budget_bytes: u64,
+) -> Option<zensight_common::AlertSeverity> {
+    if budget_bytes == 0 {
+        return None;
+    }
+    let ratio = rss_bytes as f64 / budget_bytes as f64;
+    if ratio >= 0.95 {
+        Some(zensight_common::AlertSeverity::Critical)
+    } else if ratio >= 0.80 || (currently_firing && ratio >= 0.75) {
+        Some(zensight_common::AlertSeverity::Warning)
+    } else {
+        None
+    }
+}
+
+/// The `sensor-budget` alert message (#811): an alert that says "this sensor
+/// is large" is a page; one that names the table that is growing is a fix.
+pub fn budget_summary(stats: &zensight_common::SelfStats) -> String {
+    let (rss, budget) = (
+        stats.rss_bytes.unwrap_or(0),
+        stats.budget_bytes.unwrap_or(0),
+    );
+    let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+    let pct = if budget > 0 {
+        (rss as f64 / budget as f64 * 100.0).round()
+    } else {
+        0.0
+    };
+    let mut out = format!(
+        "rss {:.0} MiB at {pct:.0}% of {:.0} MiB budget",
+        mib(rss),
+        mib(budget)
+    );
+    // Name the largest table — by bytes when known, else by entries.
+    let largest = stats
+        .tables
+        .iter()
+        .max_by_key(|t| (t.bytes.unwrap_or(0), t.entries));
+    if let Some(t) = largest {
+        match t.bytes {
+            Some(b) => {
+                out.push_str(&format!(
+                    "; largest table {}: {:.0} MiB ({} entries)",
+                    t.name,
+                    mib(b),
+                    t.entries
+                ));
+            }
+            None => out.push_str(&format!(
+                "; largest table {}: {} entries",
+                t.name, t.entries
+            )),
+        }
+    }
+    out
 }
 
 impl ErrorReport {
@@ -615,6 +801,90 @@ mod tests {
         assert_eq!(snapshot.sensor, "test");
         assert_eq!(snapshot.status, zensight_common::HealthStatus::Healthy);
         assert_eq!(snapshot.devices_total, 0);
+        // The plain snapshot never self-measures (#811).
+        assert!(snapshot.self_stats.is_none());
+    }
+
+    /// #811: the health tick's snapshot measures the process itself.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn snapshot_with_self_measures_this_process() {
+        let health = SensorHealth::new("test");
+        let snap = health.snapshot_with_self();
+        let stats = snap.self_stats.expect("measured");
+        assert!(stats.rss_bytes.unwrap_or(0) > 0, "a running test has RSS");
+        assert!(stats.vsz_bytes.unwrap_or(0) > 0);
+        // First sample: nothing to diff CPU against — None, not zero.
+        assert_eq!(stats.cpu_percent, None);
+        // No budget declared, nothing wired: absent, never zero.
+        assert_eq!(stats.budget_bytes, None);
+        assert_eq!(stats.dropped_total, None);
+        assert!(stats.tables.is_empty());
+
+        health.set_budget_bytes(64 * 1024 * 1024);
+        health.register_table_stats(Box::new(|| {
+            vec![zensight_common::TableStats {
+                name: "demo".into(),
+                entries: 7,
+                bytes: None,
+                capacity_entries: Some(16),
+                capacity_bytes: None,
+            }]
+        }));
+        let stats = health.snapshot_with_self().self_stats.expect("measured");
+        assert_eq!(stats.budget_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(stats.tables.len(), 1);
+        assert_eq!(stats.tables[0].entries, 7);
+    }
+
+    /// #811 budget grading: 80/95 thresholds with 75% release hysteresis.
+    #[test]
+    fn budget_level_thresholds_and_hysteresis() {
+        use zensight_common::AlertSeverity::{Critical, Warning};
+        let gib = 100u64;
+        // No budget → never grades.
+        assert_eq!(budget_level(false, 90, 0), None);
+        // Below 80%: quiet.
+        assert_eq!(budget_level(false, 79, gib), None);
+        // 80% fires Warning; 95% escalates Critical.
+        assert_eq!(budget_level(false, 80, gib), Some(Warning));
+        assert_eq!(budget_level(false, 95, gib), Some(Critical));
+        // Hysteresis: once firing, 76% still holds; 74% releases.
+        assert_eq!(budget_level(true, 76, gib), Some(Warning));
+        assert_eq!(budget_level(true, 74, gib), None);
+        // Not firing at 76%: stays quiet (no premature fire).
+        assert_eq!(budget_level(false, 76, gib), None);
+    }
+
+    /// #811: the alert message names the table that is growing — the
+    /// difference between a page and a fix.
+    #[test]
+    fn budget_summary_names_the_largest_table() {
+        let mib = |n: u64| n * 1024 * 1024;
+        let stats = zensight_common::SelfStats {
+            rss_bytes: Some(mib(355)),
+            budget_bytes: Some(mib(400)),
+            tables: vec![
+                zensight_common::TableStats {
+                    name: "small".into(),
+                    entries: 10,
+                    bytes: Some(mib(2)),
+                    ..Default::default()
+                },
+                zensight_common::TableStats {
+                    name: "flow_inventory".into(),
+                    entries: 1_200_000,
+                    bytes: Some(mib(280)),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let s = budget_summary(&stats);
+        assert!(s.contains("355 MiB"), "{s}");
+        assert!(s.contains("89%"), "{s}");
+        assert!(s.contains("flow_inventory"), "{s}");
+        assert!(s.contains("280 MiB"), "{s}");
     }
 
     #[test]

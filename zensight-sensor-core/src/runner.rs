@@ -157,8 +157,12 @@ impl<C: SensorConfig> SensorRunner<C> {
         let health = Arc::new(
             crate::health::SensorHealth::new(name.clone())
                 .with_publisher(publisher.clone())
-                .with_source(source.clone()),
+                .with_source(source.clone())
+                // Self-telemetry (#811): the health tick reads the baseline
+                // tier's publish counters and any declared budget.
+                .with_publish_counters(publisher.counters()),
         );
+        health.set_budget_bytes(config.budget_bytes().unwrap_or(0));
 
         Ok(Self {
             name,
@@ -401,15 +405,53 @@ impl<C: SensorConfig> SensorRunner<C> {
 
         // Periodically publish sensor health to `state/<producer>/health` so
         // the frontend's Sensors view and dashboard health bar populate. The
-        // first tick fires immediately, then every 5s.
+        // first tick fires immediately, then every 5s. The tick also grades
+        // the `sensor-budget` rule (#811) against the same measurement it
+        // publishes (sampling twice would corrupt the CPU diff).
         {
             let health = self.health.clone();
+            // The budget reporter needs a Protocol; a producer without one
+            // (custom sensors) just skips the rule with a note. NOTE: these
+            // alerts ride the runner's own reporter, so a sensor's
+            // `serve_alerts_query` seed does not include them — unifying the
+            // reporters is #812's business.
+            let budget_reporter = if self.config.budget_bytes().is_some() {
+                match self.name.parse::<zensight_common::Protocol>() {
+                    Ok(proto) => Some((
+                        Arc::new(crate::alert::AlertReporter::new(
+                            self.publisher.clone(),
+                            proto,
+                            Format::Json,
+                        )),
+                        proto,
+                    )),
+                    Err(_) => {
+                        tracing::warn!(
+                            producer = %self.name,
+                            "budget declared but producer has no Protocol; sensor-budget rule disabled"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let (source, sensor_name) = (self.source.clone(), self.name.clone());
             let task = tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+                let mut firing = false;
                 loop {
                     tick.tick().await;
-                    if let Err(e) = health.publish_health().await {
+                    let snapshot = health.snapshot_with_self();
+                    if let Err(e) = health.publish_snapshot(&snapshot).await {
                         tracing::warn!(error = %e, "Failed to publish sensor health");
+                    }
+                    if let (Some((reporter, proto)), Some(stats)) =
+                        (&budget_reporter, &snapshot.self_stats)
+                    {
+                        firing =
+                            grade_budget(reporter, *proto, &source, &sensor_name, stats, firing)
+                                .await;
                     }
                 }
             });
@@ -543,6 +585,59 @@ impl<C: SensorConfig> SensorRunner<C> {
         tracing::info!(sensor = %self.name, "Goodbye!");
 
         Ok(())
+    }
+}
+
+/// Drive the `sensor-budget` rule (#811) for one health tick: observe the
+/// alert while RSS is over the declared budget, reconcile it away otherwise.
+/// Returns whether the alert is firing (the caller's hysteresis state).
+async fn grade_budget(
+    reporter: &crate::alert::AlertReporter,
+    proto: zensight_common::Protocol,
+    source: &str,
+    sensor_name: &str,
+    stats: &zensight_common::SelfStats,
+    firing: bool,
+) -> bool {
+    use crate::health::{SENSOR_BUDGET_RULE, budget_level, budget_summary};
+
+    let level = match (stats.rss_bytes, stats.budget_bytes) {
+        // Not measured, or no budget: nothing to grade — clear stale state.
+        (Some(rss), Some(budget)) => budget_level(firing, rss, budget),
+        _ => None,
+    };
+    match level {
+        Some(severity) => {
+            let alert = zensight_common::Alert::new(
+                source,
+                proto,
+                zensight_common::AlertKind::SensorHealth,
+                SENSOR_BUDGET_RULE,
+                severity,
+                budget_summary(stats),
+            )
+            .with_label("sensor", sensor_name.to_string());
+            let key = alert.alert_key();
+            // Two-tick debounce lives in the rule's own cadence: observe with
+            // zero for-duration but only after `budget_level` said so — the
+            // 80/95/75 hysteresis is the anti-flap, not a timer.
+            if let Err(e) = reporter
+                .observe(alert, Some(std::time::Duration::ZERO))
+                .await
+            {
+                tracing::warn!(error = %e, "sensor-budget: publish failed");
+            }
+            if let Err(e) = reporter.reconcile(SENSOR_BUDGET_RULE, &[key]).await {
+                tracing::warn!(error = %e, "sensor-budget: reconcile failed");
+            }
+            true
+        }
+        None => {
+            if let Err(e) = reporter.reconcile(SENSOR_BUDGET_RULE, &[]).await {
+                tracing::warn!(error = %e, "sensor-budget: reconcile failed");
+            }
+            false
+        }
     }
 }
 

@@ -50,3 +50,37 @@ async fn declares_once_per_key_and_reuses() {
         .unwrap();
     assert_eq!(registry.len().await, 2);
 }
+
+/// #811: every baseline put is counted (messages and payload bytes) into the
+/// shared [`PublishCounters`]; dropped/evicted stay sensor-fed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn puts_are_counted_into_the_shared_counters() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let registry = PublisherRegistry::new(session);
+    let counters = registry.counters();
+    assert_eq!(counters.published_total(), 0);
+
+    registry
+        .put("pubreg-count/a", vec![0u8; 100], QosClass::Telemetry)
+        .await
+        .unwrap();
+    registry
+        .put_encoded(
+            "pubreg-count/b",
+            vec![0u8; 50],
+            QosClass::Alert,
+            zenoh::bytes::Encoding::APPLICATION_JSON,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(counters.published_total(), 2);
+    assert_eq!(counters.published_bytes_total(), 150);
+    assert_eq!(counters.dropped_total(), 0);
+
+    // The sensor-fed side rides the same Arc.
+    counters.add_dropped(3);
+    counters.add_evicted(1);
+    assert_eq!(counters.dropped_total(), 3);
+    assert_eq!(counters.evicted_total(), 1);
+}

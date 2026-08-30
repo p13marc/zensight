@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **HealthSnapshot: a sensor that can see itself** (#811). The health doc
+  gains an optional `self_stats` block: self-measured RSS/VSZ/CPU
+  (`/proc/self`, on the 5s health tick), the declared budget, publish
+  counters (every baseline put counted in messages and bytes; sensor-fed
+  dropped/evicted), per-table occupancy from registered providers, and the
+  sensor's own cgroup-v2 memory context. Every field optional and
+  serde-defaulted — absent is *not measured*, never zero; no registry
+  changes (additive type evolution on the existing `health` subject). A
+  declared budget (`SensorConfig::budget_bytes()`; netring's
+  `resources.budget_rss_mb` is the exemplar, with flow-ring/TLS/asset table
+  providers wired) arms the **`sensor-budget`** rule: Warning ≥80%,
+  Critical ≥95%, release <75%, message naming the largest table. The GUI
+  sensor cards show RSS and budget% when present. The 2026-08-17 incident —
+  110→355 MB on a 1 GB VM, `Healthy` throughout, found eleven days later by
+  hand — is now visible in the health doc it was invisible in. Enforcement
+  (the shed ladder) stays #812.
+
 ## [0.11.0] - 2026-08-28
 
 A month of unreleased work, and the release an operator has to read before

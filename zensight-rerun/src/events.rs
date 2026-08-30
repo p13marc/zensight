@@ -263,6 +263,7 @@ mod tests {
             metrics_published: 0,
             host_id: None,
             source: Some("host1".into()),
+            self_stats: None,
         }
     }
 

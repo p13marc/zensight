@@ -137,6 +137,23 @@ Three rules:
 High-cardinality detail (offending IP, JA4, expected/actual) belongs in `labels`
 / `summary`, never in the key — so a 1000-port scan stays one alert.
 
+## Health self-telemetry — `SelfStats` (#811)
+
+`HealthSnapshot` (the `state/<producer>/health` doc) carries an optional
+`self_stats: SelfStats` — the sensor measuring *itself*: `rss_bytes`,
+`vsz_bytes`, `cpu_percent`, the declared `budget_bytes`, publish counters
+(`published_total`/`published_bytes_total`, sensor-fed `dropped_total`/
+`evicted_total`), per-table occupancy (`tables: Vec<TableStats>` — name,
+entries, bytes and capacities where the owner can say), and the sensor's own
+cgroup-v2 memory context (`CgroupSelf`).
+
+The discipline is the same as the media work established: **every field is
+optional and serde-defaulted, and absent reads as *not measured*, never as
+zero** — mixed-version fleets are normal, and an old sensor's payload simply
+has no `self_stats`. Measurement happens on the producer's health tick
+(`zensight-sensor-core/docs/framework.md`, "Self-telemetry"); the
+`sensor-budget` alert grades RSS against the declared budget at 80 %.
+
 ## Runtime control — the `@rpc` plane
 
 Commands do not exist in v1: runtime control is request/reply GETs on the

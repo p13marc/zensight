@@ -33,7 +33,9 @@ pub const CONTROL_QUEUE: usize = 1024;
 #[derive(Debug, Clone)]
 pub enum ControlItem {
     Alert(Alert),
-    Health(HealthSnapshot),
+    // Boxed like `Entity`: the health doc grew `self_stats` (#811) and now
+    // dwarfs the other variants.
+    Health(Box<HealthSnapshot>),
     Entity(Box<HostEntity>),
 }
 

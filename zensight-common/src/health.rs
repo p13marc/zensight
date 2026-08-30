@@ -98,6 +98,91 @@ pub struct HealthSnapshot {
     /// mixed-fleet/persisted payloads predating the host-scoped keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Self-measured resource telemetry (#811): the fields that let the
+    /// platform notice its *own* growth. Absent on payloads from older
+    /// sensors — absent always reads as *not measured*, never as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_stats: Option<SelfStats>,
+}
+
+/// A sensor's self-measured resource usage (#811), collected on the health
+/// tick from `/proc/self/*`, the publish counters, and any registered table
+/// providers. Every field is optional and serde-defaulted: mixed-version
+/// fleets are normal, and a missing field must read as *not asked*.
+///
+/// Motivating incident (2026-08-17): a sensor bundle grew 110→355 MB RSS on a
+/// 1 GB VM, was OOM-killed, and reported `Healthy` throughout — by every
+/// question the health doc knew how to ask, it was.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SelfStats {
+    /// Resident set size, bytes (`/proc/self/status` `VmRSS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    /// Virtual size, bytes (`VmSize`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vsz_bytes: Option<u64>,
+    /// CPU busy fraction since the previous health tick, percent of one core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f64>,
+    /// What the sensor was told it may use (declared, not enforced — the
+    /// enforcement ladder is #812). Absent = no budget declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_bytes: Option<u64>,
+    /// Publications through the baseline declared-publisher path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_total: Option<u64>,
+    /// Payload bytes through the same path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_bytes_total: Option<u64>,
+    /// Samples the sensor chose not to publish (shed, rate-limited) — fed by
+    /// the sensor, counted only where wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_total: Option<u64>,
+    /// Entries evicted from bounded tables — fed by the sensor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evicted_total: Option<u64>,
+    /// Per-table occupancy, from providers the sensor registered. This is
+    /// the field that turns "the sensor is big" into "the flow table is
+    /// 280 MB of it".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<TableStats>,
+    /// cgroup-v2 context, when the sensor runs in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<CgroupSelf>,
+}
+
+/// One bounded table's occupancy and capacity (#811), in entries and — where
+/// the owner can say — bytes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TableStats {
+    pub name: String,
+    pub entries: u64,
+    /// Estimated bytes held; absent when the owner cannot say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_entries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
+}
+
+/// The sensor's own cgroup-v2 memory context (#811) — what the operator's
+/// drop-in actually allows, read from `/sys/fs/cgroup<own path>`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CgroupSelf {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_current_bytes: Option<u64>,
+    /// `memory.max`; `None` also when the literal is `max` (unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_high_bytes: Option<u64>,
+    /// `memory.events` `oom_kill`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oom_kills: Option<u64>,
+    /// `memory.events` `oom`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oom_events: Option<u64>,
 }
 
 /// Device liveness information.
@@ -228,6 +313,38 @@ mod tests {
         assert_eq!(snapshot.sensor, "snmp");
         assert_eq!(snapshot.status, HealthStatus::Healthy);
         assert_eq!(snapshot.devices_total, 10);
+        // An old-sensor payload (no self_stats key at all): absent, not zeroed
+        // and not an error — mixed-version fleets are normal (#811).
+        assert_eq!(snapshot.self_stats, None);
+    }
+
+    /// #811: the self-telemetry payload's optionality discipline.
+    #[test]
+    fn self_stats_roundtrip_and_absent_fields_stay_absent() {
+        let stats = SelfStats {
+            rss_bytes: Some(355 * 1024 * 1024),
+            budget_bytes: Some(400 * 1024 * 1024),
+            tables: vec![TableStats {
+                name: "flow_inventory".into(),
+                entries: 1_200_000,
+                bytes: Some(280 * 1024 * 1024),
+                capacity_entries: None,
+                capacity_bytes: Some(16 * 1024 * 1024),
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&stats).unwrap();
+        // Unmeasured fields are ABSENT on the wire, not null/zero.
+        assert!(json.get("cpu_percent").is_none());
+        assert!(json.get("dropped_total").is_none());
+        assert!(json.get("cgroup").is_none());
+        let back: SelfStats = serde_json::from_value(json).unwrap();
+        assert_eq!(back, stats);
+        // And a partial payload decodes with everything else defaulted.
+        let partial: SelfStats = serde_json::from_str(r#"{"rss_bytes": 1024}"#).unwrap();
+        assert_eq!(partial.rss_bytes, Some(1024));
+        assert_eq!(partial.cpu_percent, None);
+        assert!(partial.tables.is_empty());
     }
 
     #[test]

@@ -74,7 +74,8 @@ pub use error::{Error, Result};
 pub use event::EventRecord;
 pub use evidence::{CloudFacts, HostEvidence, NameObservation};
 pub use health::{
-    DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
+    CgroupSelf, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus,
+    SelfStats, SensorInfo, TableStats,
 };
 pub use interfaces::{IfStatus, InterfaceCounters, InterfaceEntry, InterfaceRates, InterfaceTable};
 pub use keyexpr::{
@@ -87,7 +88,7 @@ pub use keyexpr::{
     names_query_key, origin_rpc_key, parse_full_key, parse_key, pdns_key, refine_full_key,
     refine_key, validate_relative_selector,
 };
-pub use publisher_registry::PublisherRegistry;
+pub use publisher_registry::{PublishCounters, PublisherRegistry};
 pub use qos::QosClass;
 pub use query_detail::{
     AssetRecord, CaptureRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord,

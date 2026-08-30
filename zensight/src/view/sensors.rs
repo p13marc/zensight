@@ -87,7 +87,7 @@ fn sensor_card<'a>(
     };
     let header = section_header(header_label, Some(health_badge(snap.status)));
 
-    let stats = row![
+    let mut stats = row![
         stat("Devices", format!("{}", snap.devices_total)),
         stat("Responding", format!("{}", snap.devices_responding)),
         stat("Failed", format!("{}", snap.devices_failed)),
@@ -98,6 +98,20 @@ fn sensor_card<'a>(
     ]
     .spacing(space::LG)
     .align_y(Alignment::Center);
+
+    // Self-telemetry (#811): only rendered when the sensor measured itself —
+    // an older sensor's card simply has no RSS/Budget stats, which is the
+    // honest reading of "absent = not measured".
+    if let Some(stats_self) = &snap.self_stats {
+        let mib = |b: u64| format!("{:.0} MiB", b as f64 / (1024.0 * 1024.0));
+        if let Some(rss) = stats_self.rss_bytes {
+            stats = stats.push(stat("RSS", mib(rss)));
+            if let Some(budget) = stats_self.budget_bytes.filter(|&b| b > 0) {
+                let pct = (rss as f64 / budget as f64 * 100.0).round();
+                stats = stats.push(stat("Budget", format!("{} ({pct:.0}%)", mib(budget))));
+            }
+        }
+    }
 
     let mut col = column![header, stats].spacing(space::SM);
 

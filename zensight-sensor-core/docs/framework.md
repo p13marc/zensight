@@ -240,6 +240,43 @@ the health doc also absorbs the retired `@/status` running flag). Errors feed a
 **rolling one-hour window** of 60 one-minute buckets, so `errors_last_hour` is a
 true sliding count that ages out old failures.
 
+### Self-telemetry (#811)
+
+The health tick's snapshot carries `self_stats` — the fields that let the
+platform notice its *own* growth, after a sensor bundle grew 110→355 MB RSS,
+was OOM-killed, and reported `Healthy` throughout:
+
+- **rss/vsz/cpu** — self-measured from `/proc/self/{status,stat}` on the 5 s
+  tick, never per sample. CPU is a diff against the previous tick (`None` on
+  the first — absent is *not measured*, never zero).
+- **publish accounting** — every baseline-tier put is counted (messages +
+  payload bytes) in the `PublishCounters` shared between the
+  `PublisherRegistry` and the health doc; a sensor feeds its own
+  `dropped`/`evicted` totals into the same `Arc` (`publisher.counters()`).
+  Advanced-tier publications are not counted — understating is permitted,
+  the fields are optional.
+- **table providers** — `health.register_table_stats(Box::new(|| ...))`
+  registers a pull callback reporting `{name, entries, bytes?, capacity_*?}`
+  per bounded structure; providers run only on the health tick and **must
+  not call back into `SensorHealth`**. This is the field that turns "the
+  sensor is big" into "the flow table is 280 MB of it". netring is the
+  wired exemplar (flow ring, TLS inventory, asset inventory).
+- **budget** — `SensorConfig::budget_bytes()` (e.g. netring's
+  `resources.budget_rss_mb`) is carried into `self_stats.budget_bytes`.
+  **Declared, not enforced** — the shed ladder is #812.
+- **cgroup context** — `memory.{current,max,high}` + OOM counters from the
+  sensor's own cgroup-v2, when it runs in one (`max` = unlimited = absent).
+
+When a budget is declared, the runner grades the **`sensor-budget`** rule on
+the same measurement it publishes: Warning ≥ 80 %, Critical ≥ 95 %, releasing
+under 75 % (hysteresis), with a message that names the largest table. These
+alerts ride a runner-owned reporter, so a sensor's own `serve_alerts_query`
+seed does not include them (unifying the reporters is #812's business).
+
+Every `self_stats` field is optional and serde-defaulted: an older sensor's
+health doc simply has no `self_stats`, and absent always reads as *not
+measured*.
+
 ## Alert reporting
 
 `alert.rs` — `AlertReporter` is the sensor-side counterpart to

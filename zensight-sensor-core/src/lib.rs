@@ -66,7 +66,8 @@ pub use container::{container_id_from_cgroup, container_id_from_path, detect_sel
 pub use error::{Result, SensorError};
 pub use event::EventPublisher;
 pub use health::{
-    DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, SensorHealth,
+    DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, SENSOR_BUDGET_RULE,
+    SensorHealth, TableStatsFn,
 };
 pub use identity::{HostIdentity, SharedIdentity};
 pub use liveliness::LivelinessManager;

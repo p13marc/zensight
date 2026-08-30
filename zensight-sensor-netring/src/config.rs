@@ -27,6 +27,20 @@ pub struct NetringSensorConfig {
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
+    /// Resource declaration (#811): `resources.budget_rss_mb` is carried into
+    /// the health doc's `self_stats.budget_bytes` and graded by the runner's
+    /// `sensor-budget` rule at 80% — declared, not enforced (#812).
+    #[serde(default)]
+    pub resources: ResourcesConfig,
+}
+
+/// The declared resource envelope (#811).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourcesConfig {
+    /// Declared RSS budget, MiB. Absent = undeclared (no `sensor-budget`
+    /// alerts, and the health doc's `budget_bytes` stays absent).
+    #[serde(default)]
+    pub budget_rss_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -886,6 +900,11 @@ impl SensorConfig for NetringSensorConfig {
     }
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
         self.artifacts.clone()
+    }
+    fn budget_bytes(&self) -> Option<u64> {
+        self.resources
+            .budget_rss_mb
+            .map(|mb| mb.saturating_mul(1024 * 1024))
     }
     fn validate(&self) -> zensight_sensor_core::Result<()> {
         if self.netring.pcap.is_none() && self.netring.interfaces.is_empty() {

@@ -75,6 +75,17 @@ pub trait SensorConfig: Sized + DeserializeOwned {
         zensight_common::IdentityConfig::default()
     }
 
+    /// Declared memory budget in bytes (#811) — carried into the health
+    /// doc's `self_stats.budget_bytes` and graded by the runner's
+    /// `sensor-budget` rule at 80 %. **Declared, not enforced** (#812 is the
+    /// enforcement ladder). Default: no budget — absent reads as
+    /// *undeclared*, never as unlimited-and-fine. A sensor opts in by
+    /// carrying e.g. `resources.budget_bytes` in its config and overriding
+    /// this.
+    fn budget_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// Validate the configuration.
     ///
     /// Called automatically after loading. Override to add custom validation.
