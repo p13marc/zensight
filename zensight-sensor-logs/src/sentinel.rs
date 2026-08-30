@@ -51,6 +51,13 @@ pub struct LogRulesConfig {
     /// On by default so upgrading keeps the known-events working unchanged.
     #[serde(default = "crate::config::default_true")]
     pub include_builtins: bool,
+    /// Include the built-in **kernel pattern** rules (#824): EXT4-fs error,
+    /// md/RAID disk failure, block-device I/O error — the handful of lines
+    /// that mean a machine is dying. **Off by default** (the quiet-alerts
+    /// stance: silence unless asked), and pattern-based, so unlike
+    /// `include_builtins` they work on any source, not just journald.
+    #[serde(default)]
+    pub include_kernel_builtins: bool,
     /// Operator-declared rules.
     #[serde(default)]
     pub rules: Vec<LogRule>,
@@ -61,6 +68,7 @@ impl Default for LogRulesConfig {
         Self {
             eval_interval_secs: default_eval_interval(),
             include_builtins: true,
+            include_kernel_builtins: false,
             rules: Vec::new(),
         }
     }
@@ -97,6 +105,20 @@ pub struct LogRule {
     /// (the "quiet period"). Defaults to 300s.
     #[serde(default = "default_for_secs")]
     pub for_secs: u64,
+    /// Cap on *fires* per window (#824): at most `max_fires` alert
+    /// publications within `per_secs`, further fires suppressed (and counted)
+    /// until the window frees. Distinct from `threshold`, which delays the
+    /// first fire; this bounds how often a flapping rule can page. `None` =
+    /// no cap.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimit>,
+}
+
+/// A `max_fires per per_secs` cap on alert publications for one rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimit {
+    pub max_fires: u64,
+    pub per_secs: u64,
 }
 
 /// Match criteria for a [`LogRule`]. An empty matcher matches everything.
@@ -140,6 +162,9 @@ struct CompiledRule {
     rule: LogRule,
     regex: Option<Regex>,
     hits: AtomicU64,
+    /// Fires eaten by the rule's `rate_limit` (#824) — surfaced in
+    /// [`RulesStatus`] so a capped rule is visibly capped, never silently so.
+    suppressed: AtomicU64,
 }
 
 impl CompiledRule {
@@ -218,6 +243,11 @@ fn compile(cfg: &LogRulesConfig) -> Compiled {
         .then(builtin_rules)
         .unwrap_or_default()
         .into_iter()
+        .chain(
+            cfg.include_kernel_builtins
+                .then(kernel_builtin_rules)
+                .unwrap_or_default(),
+        )
         .filter(|r| !user_ids.contains(r.id.as_str()));
     let all = builtins.chain(cfg.rules.iter().cloned());
     for rule in all {
@@ -239,6 +269,7 @@ fn compile(cfg: &LogRulesConfig) -> Compiled {
             rule,
             regex,
             hits: AtomicU64::new(0),
+            suppressed: AtomicU64::new(0),
         });
     }
     Compiled {
@@ -268,15 +299,26 @@ impl SentinelHandle {
     /// Current ruleset + per-rule hit counters, for the read RPC.
     pub fn snapshot(&self) -> RulesStatus {
         let cfg = self.config.read().unwrap().clone();
-        let hits = {
+        let (hits, suppressed) = {
             let compiled = self.compiled.read().unwrap();
-            compiled
+            let hits = compiled
                 .rules
                 .iter()
                 .map(|r| (r.rule.id.clone(), r.hits.load(Ordering::Relaxed)))
-                .collect()
+                .collect();
+            let suppressed = compiled
+                .rules
+                .iter()
+                .filter(|r| r.suppressed.load(Ordering::Relaxed) > 0)
+                .map(|r| (r.rule.id.clone(), r.suppressed.load(Ordering::Relaxed)))
+                .collect();
+            (hits, suppressed)
         };
-        RulesStatus { config: cfg, hits }
+        RulesStatus {
+            config: cfg,
+            hits,
+            suppressed,
+        }
     }
 }
 
@@ -285,6 +327,11 @@ impl SentinelHandle {
 pub struct RulesStatus {
     pub config: LogRulesConfig,
     pub hits: HashMap<String, u64>,
+    /// Fires eaten by each rule's `rate_limit` (#824); absent/empty when no
+    /// rule has suppressed anything. Serde-defaulted: mixed-version fleets
+    /// decode old payloads to empty, never to an error.
+    #[serde(default)]
+    pub suppressed: HashMap<String, u64>,
 }
 
 // ---- the sentinel --------------------------------------------------------
@@ -294,6 +341,8 @@ pub struct RulesStatus {
 struct State {
     /// rule id → recent match instants (for threshold windows).
     windows: HashMap<String, VecDeque<Instant>>,
+    /// rule id → recent *fire* instants (for `rate_limit` windows, #824).
+    fires: HashMap<String, VecDeque<Instant>>,
     /// alert_key → (rule id, expiry) for dedup + reconcile.
     active: HashMap<String, (String, Instant)>,
 }
@@ -386,6 +435,26 @@ impl LogSentinel {
             // rule doesn't re-fire per line. Re-emitting is harmless (the
             // reporter debounces) but wasteful.
             let is_new = !matches!(state.active.get(&key), Some((_, exp)) if *exp > now);
+
+            // Rate limit (#824): cap *fires*, not matches — checked only on
+            // the leading edge, before the active entry is written, so a
+            // suppressed fire leaves no state behind and the next match after
+            // the window frees fires normally. Suppressions are counted.
+            if is_new && let Some(rl) = &cr.rule.rate_limit {
+                let win = state.fires.entry(cr.rule.id.clone()).or_default();
+                let horizon = now
+                    .checked_sub(Duration::from_secs(rl.per_secs.max(1)))
+                    .unwrap_or(now);
+                while win.front().is_some_and(|&t| t < horizon) {
+                    win.pop_front();
+                }
+                if win.len() as u64 >= rl.max_fires.max(1) {
+                    cr.suppressed.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                win.push_back(now);
+            }
+
             state
                 .active
                 .insert(key.clone(), (cr.rule.id.clone(), expiry));
@@ -399,10 +468,35 @@ impl LogSentinel {
     /// Reconcile expired alerts (resolve anything past its quiet period) and
     /// prune stale window entries. Runs on the eval-interval tick.
     pub async fn reconcile(&self, reporter: &AlertReporter, now: Instant) {
+        // Each rule's rate-limit window length, for pruning quiet rules'
+        // fire history (a rule that stops matching would otherwise keep its
+        // window until the next match).
+        let limits: HashMap<String, u64> = {
+            let compiled = self.handle.compiled.read().unwrap();
+            compiled
+                .rules
+                .iter()
+                .filter_map(|r| {
+                    r.rule
+                        .rate_limit
+                        .as_ref()
+                        .map(|rl| (r.rule.id.clone(), rl.per_secs.max(1)))
+                })
+                .collect()
+        };
+
         // Group the still-active keys by rule id.
         let by_rule: HashMap<String, Vec<String>> = {
             let mut state = self.state.lock().unwrap();
             state.active.retain(|_, (_, exp)| *exp > now);
+            state.fires.retain(|rule, win| {
+                // A rule without a limit any more (hot-swap) drops its window.
+                let Some(&per_secs) = limits.get(rule) else {
+                    return false;
+                };
+                win.retain(|&t| now.duration_since(t) < Duration::from_secs(per_secs));
+                !win.is_empty()
+            });
             let mut m: HashMap<String, Vec<String>> = HashMap::new();
             for (key, (rule, _)) in state.active.iter() {
                 m.entry(rule.clone()).or_default().push(key.clone());
@@ -445,30 +539,73 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Redact secret-looking `key=value` assignments in a log line before it is
+/// quoted into an alert (#824). Same denylist as the debug bundle
+/// ([`zensight_sensor_core::is_secret_key`]) so what counts as a secret cannot
+/// drift; same line-oriented shape as systemd's `redact_unit_file`. Returns
+/// the text and whether anything was replaced — a redacted quote is flagged,
+/// never passed off as verbatim.
+fn redact_line(text: &str) -> (String, bool) {
+    let mut redacted = false;
+    let out = text
+        .split(' ')
+        .map(|tok| match tok.split_once('=') {
+            Some((key, _))
+                if !key.is_empty()
+                    && zensight_sensor_core::is_secret_key(key.trim_matches('"'), &[]) =>
+            {
+                redacted = true;
+                format!("{key}={}", zensight_sensor_core::REDACTED_MARKER)
+            }
+            _ => tok.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (out, redacted)
+}
+
 /// Build the alert for a matched rule, substituting the summary template and
 /// lifting the requested labels.
 fn build_alert(host: &str, rule: &LogRule, msg: &SyslogMessage, count: u64) -> Alert {
     let unit = journald_field(msg, "unit");
     let app = msg.app_name.clone();
 
+    // The line is redacted before any of it can reach a summary — matching
+    // ran on the raw text above, but what leaves the host is scrubbed, and
+    // capture groups substitute from the scrubbed copy (#824).
+    let (safe_message, was_redacted) = redact_line(&msg.message);
+
     // The count and sample line live in the *summary*, not in labels: the
     // reporter derives an alert's identity from its labels (`alert_key`), and a
     // per-line-varying count/sample would make every line look like a distinct
     // alert, defeating dedup + auto-resolve. Identity is (rule, unit, app,
-    // message_id); the count/sample are the mutable payload.
-    let summary = match &rule.summary {
-        Some(tmpl) => render_summary(tmpl, rule, msg, count, unit.as_deref(), app.as_deref()),
+    // message_id); the count/sample are the mutable payload. (`redacted`
+    // stays out of the labels for the same reason: a rule that sometimes
+    // matches a secret must not split its alert key.)
+    let mut summary = match &rule.summary {
+        Some(tmpl) => render_summary(
+            tmpl,
+            rule,
+            msg,
+            &safe_message,
+            count,
+            unit.as_deref(),
+            app.as_deref(),
+        ),
         None if count > 1 => format!(
             "{} (repeated {count}×): {}",
             rule.id,
-            truncate(&msg.message, default_summary_max())
+            truncate(&safe_message, default_summary_max())
         ),
         None => format!(
             "{}: {}",
             rule.id,
-            truncate(&msg.message, default_summary_max())
+            truncate(&safe_message, default_summary_max())
         ),
     };
+    if was_redacted {
+        summary.push_str(" (redacted)");
+    }
 
     let mut alert = Alert::new(
         host.to_string(),
@@ -497,11 +634,15 @@ fn build_alert(host: &str, rule: &LogRule, msg: &SyslogMessage, count: u64) -> A
     alert
 }
 
-/// Substitute `{...}` placeholders in a summary template.
+/// Substitute `{...}` placeholders in a summary template. `safe_message` is
+/// the redacted copy of the line: both `{message}` and the regex capture
+/// groups substitute from it, so a secret can reach a summary through
+/// neither (#824).
 fn render_summary(
     tmpl: &str,
     rule: &LogRule,
     msg: &SyslogMessage,
+    safe_message: &str,
     count: u64,
     unit: Option<&str>,
     app: Option<&str>,
@@ -512,7 +653,7 @@ fn render_summary(
         .as_ref()
         .and_then(|p| Regex::new(p).ok())
         .and_then(|re| {
-            re.captures(&msg.message).map(|c| {
+            re.captures(safe_message).map(|c| {
                 (0..c.len())
                     .map(|i| c.get(i).map(|m| m.as_str().to_string()).unwrap_or_default())
                     .collect::<Vec<_>>()
@@ -534,7 +675,7 @@ fn render_summary(
             name.push(ch);
         }
         match name.as_str() {
-            "message" => out.push_str(&truncate(&msg.message, default_summary_max())),
+            "message" => out.push_str(&truncate(safe_message, default_summary_max())),
             "count" => out.push_str(&count.to_string()),
             "unit" => out.push_str(unit.unwrap_or("")),
             "app" => out.push_str(app.unwrap_or("")),
@@ -617,6 +758,7 @@ pub fn builtin_rules() -> Vec<LogRule> {
         labels_from: labels_from.iter().map(|s| s.to_string()).collect(),
         // Point events: brief incident, coalesce a burst, auto-resolve quickly.
         for_secs: 30,
+        rate_limit: None,
     };
     vec![
         ev(
@@ -646,6 +788,55 @@ pub fn builtin_rules() -> Vec<LogRule> {
     ]
 }
 
+/// The built-in **kernel pattern** rules (#824): the unambiguous lines that
+/// mean storage is dying. Gated by `include_kernel_builtins` (off by default —
+/// the quiet-alerts stance) and pattern-based rather than `MESSAGE_ID`-based,
+/// so they catch the lines from any source: journald, a network syslog
+/// stream, a tailed file. Overridable by a same-id user rule like every
+/// built-in; a modest rate limit ships on each, because a dying disk can
+/// print its last words thousands of times.
+pub fn kernel_builtin_rules() -> Vec<LogRule> {
+    let ev = |id: &str, pattern: &str, summary: &str| LogRule {
+        id: id.to_string(),
+        description: Some(format!("built-in kernel pattern: {id}")),
+        matcher: LogMatch {
+            pattern: Some(pattern.to_string()),
+            ..Default::default()
+        },
+        threshold: None,
+        severity: AlertSeverity::Critical,
+        summary: Some(summary.to_string()),
+        labels_from: vec![],
+        for_secs: 600,
+        rate_limit: Some(RateLimit {
+            max_fires: 6,
+            per_secs: 3600,
+        }),
+    };
+    vec![
+        ev(
+            "ext4-fs-error",
+            r"EXT4-fs error \(device ([^)]+)\)",
+            "ext4-fs-error on {1}: {message}",
+        ),
+        ev(
+            "xfs-corruption",
+            r"XFS \(([^)]+)\): (Corruption|Metadata corruption|Internal error)",
+            "xfs-corruption on {1}: {message}",
+        ),
+        ev(
+            "md-raid-failure",
+            r"md/raid[^:]*:[^:]*: Disk failure on (\S+)",
+            "md-raid-failure: {message}",
+        ),
+        ev(
+            "block-io-error",
+            r"(?:blk_update_request: )?I/O error, dev (\S+)",
+            "block-io-error on {1}: {message}",
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +856,7 @@ mod tests {
             summary: None,
             labels_from: vec![],
             for_secs: default_for_secs(),
+            rate_limit: None,
         }
     }
 
@@ -902,5 +1094,165 @@ mod tests {
         // Case-insensitive MESSAGE_ID match.
         m.msg_id = Some("abcdef0123456789abcdef0123456789".into());
         assert_eq!(s.evaluate(&m, Instant::now()).len(), 1);
+    }
+
+    // ---- #824: rate limit, redaction, kernel built-ins ----
+
+    #[test]
+    fn rate_limit_caps_fires_and_frees_after_the_window() {
+        let mut r = rule(
+            "flappy",
+            LogMatch {
+                pattern: Some("boom".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        r.for_secs = 1; // expire fast so each evaluate is a fresh fire
+        r.rate_limit = Some(RateLimit {
+            max_fires: 2,
+            per_secs: 60,
+        });
+        let s = LogSentinel::new(
+            "h",
+            LogRulesConfig {
+                include_builtins: false,
+                rules: vec![r],
+                ..Default::default()
+            },
+        );
+        let line = msg("<27>Oct 11 00:00:00 h app: boom");
+        let t0 = Instant::now();
+        assert_eq!(s.evaluate(&line, t0).len(), 1, "fire 1");
+        assert_eq!(
+            s.evaluate(&line, t0 + Duration::from_secs(2)).len(),
+            1,
+            "fire 2"
+        );
+        assert_eq!(
+            s.evaluate(&line, t0 + Duration::from_secs(4)).len(),
+            0,
+            "fire 3 suppressed by the cap"
+        );
+        // The suppression is visible, not silent.
+        assert_eq!(s.handle().snapshot().suppressed.get("flappy"), Some(&1));
+        // Past the window, the rule fires again.
+        assert_eq!(
+            s.evaluate(&line, t0 + Duration::from_secs(70)).len(),
+            1,
+            "window freed"
+        );
+    }
+
+    #[test]
+    fn secrets_are_redacted_from_summaries_and_captures() {
+        let (safe, redacted) = redact_line("connect failed password=hunter2 host=db1");
+        assert!(redacted);
+        assert!(!safe.contains("hunter2"), "{safe}");
+        assert!(safe.contains("host=db1"), "non-secrets survive: {safe}");
+
+        let mut r = rule(
+            "db",
+            LogMatch {
+                pattern: Some(r"password=(\S+)".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        // A template that quotes both the line and the capture group.
+        r.summary = Some("db: {message} [{1}]".into());
+        let s = LogSentinel::new(
+            "h",
+            LogRulesConfig {
+                include_builtins: false,
+                rules: vec![r],
+                ..Default::default()
+            },
+        );
+        let fired = s.evaluate(
+            &msg("<27>Oct 11 00:00:00 h app: connect failed password=hunter2 host=db1"),
+            Instant::now(),
+        );
+        assert_eq!(fired.len(), 1, "matching ran on the raw line");
+        assert!(
+            !fired[0].summary.contains("hunter2"),
+            "neither {{message}} nor a capture may leak the secret: {}",
+            fired[0].summary
+        );
+        assert!(
+            fired[0].summary.ends_with("(redacted)"),
+            "a scrubbed quote is flagged, never passed off as verbatim: {}",
+            fired[0].summary
+        );
+    }
+
+    #[test]
+    fn kernel_builtins_are_opt_in_and_match_the_motivating_lines() {
+        let lines = [
+            "<2>Oct 11 00:00:00 h kernel: EXT4-fs error (device sda1): ext4_find_entry:1455: inode #2: comm cron: reading directory lblock 0",
+            "<2>Oct 11 00:00:00 h kernel: md/raid1:md0: Disk failure on nvme1n1p2, disabling device.",
+            "<2>Oct 11 00:00:00 h kernel: blk_update_request: I/O error, dev nvme0n1, sector 123456",
+            "<2>Oct 11 00:00:00 h kernel: XFS (dm-3): Metadata corruption detected at xfs_inode_buf_verify",
+        ];
+
+        // Off by default: the quiet-alerts stance.
+        let quiet = LogSentinel::new(
+            "h",
+            LogRulesConfig {
+                include_builtins: false,
+                ..Default::default()
+            },
+        );
+        for line in &lines {
+            assert!(quiet.evaluate(&msg(line), Instant::now()).is_empty());
+        }
+
+        // Opted in: each motivating line is a Critical, its device named.
+        let s = LogSentinel::new(
+            "h",
+            LogRulesConfig {
+                include_builtins: false,
+                include_kernel_builtins: true,
+                ..Default::default()
+            },
+        );
+        let mut rules_fired = Vec::new();
+        for line in &lines {
+            let fired = s.evaluate(&msg(line), Instant::now());
+            assert_eq!(fired.len(), 1, "{line}");
+            assert_eq!(fired[0].severity, AlertSeverity::Critical);
+            rules_fired.push(fired[0].rule.clone());
+        }
+        assert_eq!(
+            rules_fired,
+            [
+                "ext4-fs-error",
+                "md-raid-failure",
+                "block-io-error",
+                "xfs-corruption"
+            ]
+        );
+        // A user rule with the same id still overrides a kernel built-in.
+        let overridden = LogSentinel::new(
+            "h",
+            LogRulesConfig {
+                include_builtins: false,
+                include_kernel_builtins: true,
+                rules: vec![rule(
+                    "ext4-fs-error",
+                    LogMatch {
+                        pattern: Some("never-matches".into()),
+                        ..Default::default()
+                    },
+                    None,
+                )],
+                ..Default::default()
+            },
+        );
+        assert!(
+            overridden
+                .evaluate(&msg(lines[0]), Instant::now())
+                .is_empty()
+        );
     }
 }

@@ -111,9 +111,16 @@ channel (`<alert_key>` = 16-hex FNV-1a of rule + labels; firing = Put, resolved
 
 - **Threshold alerts** (#276, `systemd.alerts.*`): `systemd-unit-failed`,
   `systemd-system-degraded`, `systemd-restart-storm`, `systemd-timer-overdue`,
-  `systemd-unit-mem`.
+  `systemd-unit-mem`, and `systemd-consecutive-failures` (#824 —
+  `restart_storm`'s logic where `NRestarts` cannot see: a timer-triggered
+  oneshot never restarts, so failed *runs* are counted by `InvocationID`
+  changes and judged by `Service.Result`).
 - **Sentinel** (#277, `systemd.expectations`): declarative service-health
   expectations, hot-swappable via a GET on `@rpc/systemd/expectations/set`.
+  Timer expectations come in two strengths (#824): `within_secs` proves the
+  timer *fired*; `succeeded_within_secs` proves it fired **and** its
+  triggered unit's last run succeeded — the one-word difference that catches
+  a timer firing on schedule for a week while its service fails every run.
 
 See [units-and-actions.md](units-and-actions.md) for both.
 

@@ -23,6 +23,7 @@ use crate::dbus::{ManagerProxy, TimerProxy, UnitProxy};
 pub const SERVICE_ACTIVE_RULE: &str = "expect-service-active";
 pub const TARGET_ACTIVE_RULE: &str = "expect-target-active";
 pub const TIMER_RULE: &str = "expect-timer";
+pub const TIMER_SUCCEEDED_RULE: &str = "expect-timer-succeeded";
 pub const RESTART_RATE_RULE: &str = "expect-restart-rate";
 pub const FORBID_FAILED_RULE: &str = "forbid-failed";
 
@@ -38,11 +39,24 @@ pub struct TargetActiveExpectation {
     pub target: String,
 }
 
-/// "expect timer `<timer>` triggered within `<within_secs>`".
+/// A timer expectation, in one of two strengths (#824):
+///
+/// - `within_secs` — "the timer **fired** within the window". Proves the
+///   schedule elapsed, and nothing else.
+/// - `succeeded_within_secs` — "the timer fired within the window **and its
+///   triggered service's last run succeeded**". The one-word difference that
+///   catches the failure `within_secs` cannot: a timer firing hourly, on
+///   schedule, whose service failed hourly for eight days.
+///
+/// Both may be set (both are checked, under their own rules); an expectation
+/// with neither is inert and warned about at sweep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimerExpectation {
     pub timer: String,
-    pub within_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub succeeded_within_secs: Option<u64>,
 }
 
 /// "expect service `<unit>` restarts_rate < `<max>` per `<window_secs>`".
@@ -96,6 +110,20 @@ pub fn timer_ok(last_trigger_usec: u64, now_usec: u64, within_secs: u64) -> bool
     }
     let age_usec = now_usec.saturating_sub(last_trigger_usec);
     age_usec <= within_secs.saturating_mul(1_000_000)
+}
+
+/// A timer satisfies "succeeded within `within_secs`" iff it *fired* within
+/// the window **and** its triggered service's last completed run succeeded
+/// (`Service.Result == "success"`). An unreadable result (`None` — no such
+/// service, D-Bus refusal) is **not** satisfied: "could not check" must never
+/// read as "passed" (#824).
+pub fn timer_succeeded_ok(
+    last_trigger_usec: u64,
+    now_usec: u64,
+    within_secs: u64,
+    service_result: Option<&str>,
+) -> bool {
+    timer_ok(last_trigger_usec, now_usec, within_secs) && service_result == Some("success")
 }
 
 // ─── Hot-swap handle ─────────────────────────────────────────────────────────
@@ -242,29 +270,61 @@ impl Evaluator {
         }
         self.reconcile(TARGET_ACTIVE_RULE, &tgt_keys).await;
 
-        // expect timer triggered within.
+        // expect timer triggered / succeeded within.
         let now = Self::now_usec();
         let mut timer_keys = Vec::new();
+        let mut timer_ok_keys = Vec::new();
         for e in &exp.timers {
+            if e.within_secs.is_none() && e.succeeded_within_secs.is_none() {
+                warn!(
+                    timer = %e.timer,
+                    "sentinel: timer expectation with neither within_secs nor \
+                     succeeded_within_secs checks nothing"
+                );
+                continue;
+            }
             let last = self
                 .timer_last_trigger(&manager, &e.timer)
                 .await
                 .unwrap_or(0);
-            if !timer_ok(last, now, e.within_secs) {
+            if let Some(within) = e.within_secs
+                && !timer_ok(last, now, within)
+            {
                 let a = self.alert(
                     TIMER_RULE,
                     AlertSeverity::Warning,
                     &e.timer,
-                    format!(
-                        "expected timer {} triggered within {}s",
-                        e.timer, e.within_secs
-                    ),
+                    format!("expected timer {} triggered within {within}s", e.timer),
                 );
                 timer_keys.push(a.alert_key());
                 self.observe(a, for_duration).await;
             }
+            // The stronger form (#824): the timer fired AND its triggered
+            // service's last run succeeded. `LastTriggerUSec` advancing on
+            // schedule says nothing about the run's outcome.
+            if let Some(within) = e.succeeded_within_secs {
+                let (triggered_unit, result) = self.timer_service_result(&manager, &e.timer).await;
+                if !timer_succeeded_ok(last, now, within, result.as_deref()) {
+                    let outcome = match &result {
+                        Some(r) => format!("last run: {r}"),
+                        None => "run outcome unreadable".to_string(),
+                    };
+                    let a = self.alert(
+                        TIMER_SUCCEEDED_RULE,
+                        AlertSeverity::Warning,
+                        &e.timer,
+                        format!(
+                            "expected timer {} to have a successful {} run within {within}s ({outcome})",
+                            e.timer, triggered_unit
+                        ),
+                    );
+                    timer_ok_keys.push(a.alert_key());
+                    self.observe(a, for_duration).await;
+                }
+            }
         }
         self.reconcile(TIMER_RULE, &timer_keys).await;
+        self.reconcile(TIMER_SUCCEEDED_RULE, &timer_ok_keys).await;
 
         // expect restart rate below a ceiling.
         let mut rate_keys = Vec::new();
@@ -369,6 +429,44 @@ impl Evaluator {
             .ok()?;
         p.last_trigger_usec().await.ok()
     }
+    /// The unit a timer triggers (`Timer.Unit`, falling back to the
+    /// `<name>.service` convention when unreadable) and that unit's
+    /// `Service.Result` — `None` when the outcome cannot be read, which the
+    /// caller must treat as *not satisfied*, never as success (#824).
+    async fn timer_service_result(
+        &self,
+        manager: &ManagerProxy<'_>,
+        timer: &str,
+    ) -> (String, Option<String>) {
+        let triggered = async {
+            let path = manager.load_unit(timer).await.ok()?;
+            let p = TimerProxy::builder(&self.conn)
+                .path(path)
+                .ok()?
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .build()
+                .await
+                .ok()?;
+            p.unit().await.ok().filter(|u| !u.is_empty())
+        }
+        .await
+        .unwrap_or_else(|| format!("{}.service", timer.trim_end_matches(".timer")));
+
+        let result = async {
+            let path = manager.load_unit(&triggered).await.ok()?;
+            let p = crate::dbus::ServiceProxy::builder(&self.conn)
+                .path(path)
+                .ok()?
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .build()
+                .await
+                .ok()?;
+            p.result().await.ok()
+        }
+        .await;
+        (triggered, result)
+    }
+
     async fn n_restarts(&self, manager: &ManagerProxy<'_>, unit: &str) -> Option<u32> {
         let path = manager.load_unit(unit).await.ok()?;
         let p = crate::dbus::ServiceProxy::builder(&self.conn)
@@ -406,6 +504,62 @@ mod tests {
         assert!(!timer_ok(u64::MAX, now, 60));
     }
 
+    /// #824: the timer fired on schedule — and that alone must not satisfy
+    /// the *succeeded* form. LastTriggerUSec advanced hourly for eight days
+    /// while every run failed; this is the check that would have caught it
+    /// on day one.
+    #[test]
+    fn timer_succeeded_needs_both_the_fire_and_the_success() {
+        let now = 1_000_000_000u64;
+        let fired_recently = now - 30_000_000;
+        // Fired + succeeded → satisfied.
+        assert!(timer_succeeded_ok(fired_recently, now, 60, Some("success")));
+        // Fired on schedule, service failing → NOT satisfied (the cosign case).
+        assert!(!timer_succeeded_ok(
+            fired_recently,
+            now,
+            60,
+            Some("exit-code")
+        ));
+        assert!(!timer_succeeded_ok(
+            fired_recently,
+            now,
+            60,
+            Some("timeout")
+        ));
+        // Unreadable outcome is "could not check", never "passed".
+        assert!(!timer_succeeded_ok(fired_recently, now, 60, None));
+        // Didn't fire in the window at all → not satisfied, success or not.
+        assert!(!timer_succeeded_ok(
+            now - 120_000_000,
+            now,
+            60,
+            Some("success")
+        ));
+        assert!(!timer_succeeded_ok(0, now, 60, Some("success")));
+    }
+
+    #[test]
+    fn timer_expectation_accepts_either_form() {
+        // The issue's "one-word difference": the declarative form parses with
+        // either window, or both.
+        let json = r#"{ "timers": [
+            { "timer": "logrotate.timer", "within_secs": 90000 },
+            { "timer": "cosign.timer", "succeeded_within_secs": 3900 },
+            { "timer": "both.timer", "within_secs": 60, "succeeded_within_secs": 120 }
+        ] }"#;
+        let cfg: ExpectationsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.timers[0].within_secs, Some(90_000));
+        assert_eq!(cfg.timers[0].succeeded_within_secs, None);
+        assert_eq!(cfg.timers[1].succeeded_within_secs, Some(3_900));
+        assert_eq!(cfg.timers[2].within_secs, Some(60));
+        assert_eq!(cfg.timers[2].succeeded_within_secs, Some(120));
+        // Round-trips through its own serialization.
+        let back: ExpectationsConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(cfg, back);
+    }
+
     #[test]
     fn expectations_config_json_roundtrip() {
         let cfg = ExpectationsConfig {
@@ -416,7 +570,8 @@ mod tests {
             }],
             timers: vec![TimerExpectation {
                 timer: "logrotate.timer".into(),
-                within_secs: 90_000,
+                within_secs: Some(90_000),
+                succeeded_within_secs: None,
             }],
             forbid_failed: true,
             ..Default::default()

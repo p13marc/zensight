@@ -27,6 +27,13 @@ pub struct UnitSample {
     pub tasks: Option<u64>,
     /// Exit status of the main process (meaningful when `active_state == failed`).
     pub exec_main_status: i32,
+    /// `Service.Result` of the last completed run (`success`, `exit-code`,
+    /// `signal`, …); `None` on non-service units (#824).
+    pub service_result: Option<String>,
+    /// `Unit.InvocationID` — changes per run, which is what lets the
+    /// consecutive-failures rule count *runs* rather than polls (#824).
+    /// Empty when unset/unreadable.
+    pub invocation_id: Vec<u8>,
     pub ip_ingress_bytes: Option<u64>,
     pub ip_egress_bytes: Option<u64>,
     pub io_read_bytes: Option<u64>,
@@ -64,6 +71,7 @@ pub async fn sample_unit(
         active_state: unit.active_state().await?,
         sub_state: unit.sub_state().await?,
         active_enter_usec: unit.active_enter_timestamp().await.unwrap_or(0),
+        invocation_id: unit.invocation_id().await.unwrap_or_default(),
         ..Default::default()
     };
     // Service-interface resource accounting is best-effort. Disable the property
@@ -78,6 +86,7 @@ pub async fn sample_unit(
     {
         s.n_restarts = svc.n_restarts().await.unwrap_or(0);
         s.exec_main_status = svc.exec_main_status().await.unwrap_or(0);
+        s.service_result = svc.result().await.ok();
         s.mem_bytes = svc.memory_current().await.ok().and_then(accounting);
         s.cpu_usec = svc
             .cpu_usage_nsec()

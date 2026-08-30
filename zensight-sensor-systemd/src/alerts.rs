@@ -1,13 +1,16 @@
 //! Built-in threshold alerts (#276).
 //!
 //! Turns systemd state into actionable alerts via the sensor-core
-//! [`AlertReporter`] (firing → resolved → tombstone). Five rules:
+//! [`AlertReporter`] (firing → resolved → tombstone). Six rules:
 //! - `systemd-unit-failed`     — a watched unit is in `ActiveState=failed`
 //! - `systemd-system-degraded` — `SystemState=degraded` or `NFailedUnits>0`
 //! - `systemd-restart-storm`   — a watched unit's `NRestarts` climbed past a
 //!   threshold within a sliding window (restart-loop signal)
 //! - `systemd-timer-overdue`   — a watched timer's next elapse is past due
 //! - `systemd-unit-mem`        — a watched unit's `MemoryCurrent` over a ceiling
+//! - `systemd-consecutive-failures` — a watched unit's *runs* keep failing
+//!   (#824): `restart_storm`'s logic where `NRestarts` cannot see, counting
+//!   runs by `InvocationID` and judging them by `Service.Result`
 //!
 //! The evaluate step is pure (state → alerts) so every rule is unit-testable; the
 //! stateful bits (restart windows) live in [`AlertEvaluator`]. Every rule is
@@ -36,6 +39,7 @@ pub const DEGRADED_RULE: &str = "systemd-system-degraded";
 pub const RESTART_STORM_RULE: &str = "systemd-restart-storm";
 pub const TIMER_OVERDUE_RULE: &str = "systemd-timer-overdue";
 pub const UNIT_MEM_RULE: &str = "systemd-unit-mem";
+pub const CONSECUTIVE_FAILURES_RULE: &str = "systemd-consecutive-failures";
 
 /// Threshold-alert configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +68,13 @@ pub struct AlertsConfig {
     /// Grace period (seconds) past a timer's next elapse before it's `overdue`.
     #[serde(default = "default_timer_overdue_grace_secs")]
     pub timer_overdue_grace_secs: u64,
+    /// Consecutive failed *runs* of a watched unit that fire
+    /// `systemd-consecutive-failures` (0 disables). This is `restart_storm`'s
+    /// logic applied where `NRestarts` cannot see (#824): a timer-triggered
+    /// oneshot never *restarts* — each trigger is a fresh run, counted by its
+    /// `InvocationID` changing, judged by `Service.Result`.
+    #[serde(default = "default_consecutive_failures_threshold")]
+    pub consecutive_failures_threshold: u32,
 }
 
 impl Default for AlertsConfig {
@@ -77,6 +88,7 @@ impl Default for AlertsConfig {
             restart_storm_window_secs: default_restart_storm_window_secs(),
             unit_mem_ceiling_bytes: 0,
             timer_overdue_grace_secs: default_timer_overdue_grace_secs(),
+            consecutive_failures_threshold: default_consecutive_failures_threshold(),
         }
     }
 }
@@ -96,6 +108,9 @@ fn default_restart_storm_window_secs() -> u64 {
 fn default_timer_overdue_grace_secs() -> u64 {
     300
 }
+fn default_consecutive_failures_threshold() -> u32 {
+    3
+}
 
 /// A watched timer's schedule, for the overdue rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +129,9 @@ pub struct AlertInputs {
     pub timers: Vec<TimerSample>,
     /// Units flagged by the restart-storm window: `(name, restarts_in_window)`.
     pub storm_units: Vec<(String, u32)>,
+    /// Units with a consecutive-failed-run streak at/over the threshold:
+    /// `(name, streak)` (#824).
+    pub failing_units: Vec<(String, u32)>,
     /// Current wall-clock µs (for the timer-overdue comparison).
     pub now_usec: u64,
 }
@@ -238,6 +256,34 @@ pub fn evaluate(host: &str, cfg: &AlertsConfig, inputs: &AlertInputs) -> Vec<Rul
         });
     }
 
+    // Consecutive failed runs (#824). The streaks are pre-computed into the
+    // inputs (stateful, like `storm_units`); grading here stays pure. The
+    // streak count lives in the summary — a growing streak must update one
+    // alert in place, not mint a key per run.
+    if cfg.consecutive_failures_threshold > 0 {
+        let alerts = inputs
+            .failing_units
+            .iter()
+            .map(|(name, streak)| {
+                alert(
+                    host,
+                    CONSECUTIVE_FAILURES_RULE,
+                    AlertSeverity::Warning,
+                    format!(
+                        "unit {name} failed {streak} consecutive run(s) (threshold {})",
+                        cfg.consecutive_failures_threshold
+                    ),
+                )
+                .with_label("unit", name.clone())
+                .with_label("threshold", cfg.consecutive_failures_threshold.to_string())
+            })
+            .collect();
+        out.push(RuleAlerts {
+            rule: CONSECUTIVE_FAILURES_RULE.to_string(),
+            alerts,
+        });
+    }
+
     if cfg.unit_mem_ceiling_bytes > 0 {
         let ceiling = cfg.unit_mem_ceiling_bytes;
         let alerts = inputs
@@ -303,6 +349,58 @@ fn restart_storm(
     storm
 }
 
+/// One unit's consecutive-failed-run streak (#824), keyed by the invocation
+/// that last moved it — so a poll seeing the same failed run twice counts it
+/// once.
+struct FailStreak {
+    last_invocation: Vec<u8>,
+    streak: u32,
+}
+
+/// Advance the per-unit failure streaks from this tick's samples. Pure over
+/// the passed-in map, like [`restart_storm`]. A *run* is an `InvocationID`;
+/// the judgment is:
+/// - `failed` with a new invocation → one more failed run (streak += 1);
+/// - a completed-or-healthy state (`inactive` after a run, or `active`) whose
+///   `Service.Result` is `success` → the unit recovered (streak = 0);
+/// - anything else (`activating`, mid-run states, absent `Result`) → no
+///   change: a run in flight is not evidence in either direction.
+///
+/// Returns `(name, streak)` for every unit whose streak is at/over
+/// `threshold`.
+fn consecutive_failures(
+    streaks: &mut HashMap<String, FailStreak>,
+    units: &[UnitSample],
+    threshold: u32,
+) -> Vec<(String, u32)> {
+    if threshold == 0 {
+        return Vec::new();
+    }
+    let mut failing = Vec::new();
+    for u in units {
+        let e = streaks.entry(u.name.clone()).or_insert(FailStreak {
+            last_invocation: Vec::new(),
+            streak: 0,
+        });
+        if u.is_failed() {
+            if !u.invocation_id.is_empty() && u.invocation_id != e.last_invocation {
+                e.streak = e.streak.saturating_add(1);
+                e.last_invocation = u.invocation_id.clone();
+            }
+        } else if matches!(u.active_state.as_str(), "inactive" | "active")
+            && u.service_result.as_deref() == Some("success")
+        {
+            e.streak = 0;
+        }
+        if e.streak >= threshold {
+            failing.push((u.name.clone(), e.streak));
+        }
+    }
+    // A unit that left the watchlist takes its streak with it.
+    streaks.retain(|name, _| units.iter().any(|u| &u.name == name));
+    failing
+}
+
 /// Drives [`evaluate`] each tick, holding the restart-window state and the
 /// [`AlertReporter`].
 pub struct AlertEvaluator {
@@ -310,6 +408,7 @@ pub struct AlertEvaluator {
     cfg: AlertsConfig,
     reporter: Arc<AlertReporter>,
     restart_windows: HashMap<String, RestartWindow>,
+    fail_streaks: HashMap<String, FailStreak>,
 }
 
 impl AlertEvaluator {
@@ -319,6 +418,7 @@ impl AlertEvaluator {
             cfg,
             reporter,
             restart_windows: HashMap::new(),
+            fail_streaks: HashMap::new(),
         }
     }
 
@@ -354,12 +454,18 @@ impl AlertEvaluator {
             return;
         }
         let storm_units = self.storm_units(&units, now);
+        let failing_units = consecutive_failures(
+            &mut self.fail_streaks,
+            &units,
+            self.cfg.consecutive_failures_threshold,
+        );
         let inputs = AlertInputs {
             system_state,
             n_failed_units,
             units,
             timers,
             storm_units,
+            failing_units,
             now_usec,
         };
         let for_duration = (self.cfg.for_secs > 0).then(|| Duration::from_secs(self.cfg.for_secs));
@@ -394,6 +500,87 @@ mod tests {
 
     fn rule<'a>(out: &'a [RuleAlerts], rule: &str) -> &'a RuleAlerts {
         out.iter().find(|r| r.rule == rule).expect("rule present")
+    }
+
+    /// #824: a timer-triggered oneshot never "restarts" — each trigger is a
+    /// fresh run. The streak counts runs by `InvocationID`, so the same
+    /// failed run polled five times is one failure, and a completed
+    /// successful run resets it.
+    #[test]
+    fn consecutive_failures_count_runs_not_polls() {
+        let mut streaks = HashMap::new();
+        let failed = |invocation: u8| UnitSample {
+            name: "cosign.service".into(),
+            active_state: "failed".into(),
+            service_result: Some("exit-code".into()),
+            invocation_id: vec![invocation],
+            ..Default::default()
+        };
+        // Three polls of the SAME failed run: one failure, under threshold 3.
+        for _ in 0..3 {
+            assert!(consecutive_failures(&mut streaks, &[failed(1)], 3).is_empty());
+        }
+        // Two more runs, each failing: streak reaches 3 → flagged.
+        assert!(consecutive_failures(&mut streaks, &[failed(2)], 3).is_empty());
+        let flagged = consecutive_failures(&mut streaks, &[failed(3)], 3);
+        assert_eq!(flagged, vec![("cosign.service".to_string(), 3)]);
+
+        // Mid-run states are not evidence either way.
+        let activating = UnitSample {
+            name: "cosign.service".into(),
+            active_state: "activating".into(),
+            service_result: Some("success".into()), // stale default during a run
+            invocation_id: vec![4],
+            ..Default::default()
+        };
+        let still = consecutive_failures(&mut streaks, &[activating], 3);
+        assert_eq!(still, vec![("cosign.service".to_string(), 3)]);
+
+        // A completed successful run resets the streak.
+        let recovered = UnitSample {
+            name: "cosign.service".into(),
+            active_state: "inactive".into(),
+            service_result: Some("success".into()),
+            invocation_id: vec![4],
+            ..Default::default()
+        };
+        assert!(consecutive_failures(&mut streaks, &[recovered], 3).is_empty());
+
+        // A unit that leaves the watchlist takes its streak with it.
+        let other = UnitSample {
+            name: "other.service".into(),
+            active_state: "active".into(),
+            ..Default::default()
+        };
+        consecutive_failures(&mut streaks, &[other], 3);
+        assert!(!streaks.contains_key("cosign.service"));
+    }
+
+    #[test]
+    fn consecutive_failures_rule_fires_and_keeps_streak_out_of_the_key() {
+        let cfg = AlertsConfig::default(); // threshold 3
+        let mk_inputs = |streak: u32| AlertInputs {
+            failing_units: vec![("cosign.service".into(), streak)],
+            ..Default::default()
+        };
+        let out = evaluate(HOST, &cfg, &mk_inputs(3));
+        let ra = rule(&out, CONSECUTIVE_FAILURES_RULE);
+        assert_eq!(ra.alerts.len(), 1);
+        assert_eq!(
+            ra.alerts[0].labels.get("unit").map(String::as_str),
+            Some("cosign.service")
+        );
+        assert!(ra.alerts[0].summary.contains("3 consecutive"));
+        // The growing streak updates one alert in place — same key.
+        let out5 = evaluate(HOST, &cfg, &mk_inputs(5));
+        assert_eq!(
+            rule(&out, CONSECUTIVE_FAILURES_RULE).alerts[0].alert_key(),
+            rule(&out5, CONSECUTIVE_FAILURES_RULE).alerts[0].alert_key()
+        );
+        // The rule is emitted (empty) even with nothing failing — reconcile
+        // needs it to clear a recovered unit.
+        let quiet = evaluate(HOST, &cfg, &AlertInputs::default());
+        assert!(rule(&quiet, CONSECUTIVE_FAILURES_RULE).alerts.is_empty());
     }
 
     #[test]

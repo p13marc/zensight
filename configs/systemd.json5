@@ -56,6 +56,11 @@
       restart_storm_window_secs: 300,
       unit_mem_ceiling_bytes: 0,   // 0 disables the unit-mem rule
       timer_overdue_grace_secs: 300,
+      // Consecutive failed *runs* of a watched unit (#824): restart_storm's
+      // logic where NRestarts cannot see — a timer-triggered oneshot never
+      // restarts, each trigger is a fresh run (counted by InvocationID,
+      // judged by Service.Result). 0 disables.
+      consecutive_failures_threshold: 3,
     },
 
     // cgroup-tree query (#280) — served on demand at @rpc/systemd/cgroups[?path=<rel>];
@@ -69,7 +74,12 @@
     //   for_secs: 15,
     //   services_active: [{ unit: "sshd.service" }],
     //   targets_active: [{ target: "multi-user.target" }],
-    //   timers: [{ timer: "logrotate.timer", within_secs: 90000 }],
+    //   // Two timer strengths (#824): `within_secs` proves the timer FIRED;
+    //   // `succeeded_within_secs` proves it fired AND its service's last run
+    //   // SUCCEEDED — the form that catches a timer firing on schedule while
+    //   // its service fails every run. Either or both per timer.
+    //   timers: [{ timer: "logrotate.timer", within_secs: 90000 },
+    //            { timer: "cosign.timer", succeeded_within_secs: 3900 }],
     //   restart_rates: [{ unit: "nginx.service", max: 5, window_secs: 600 }],
     //   forbid_failed: true,
     // },

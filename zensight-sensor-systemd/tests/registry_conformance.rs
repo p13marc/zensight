@@ -39,6 +39,8 @@ fn full_unit() -> UnitSample {
         cpu_usec: Some(12_345_678),
         tasks: Some(17),
         exec_main_status: 1,
+        service_result: Some("exit-code".to_string()),
+        invocation_id: vec![0xab; 16],
         ip_ingress_bytes: Some(4096),
         ip_egress_bytes: Some(2048),
         io_read_bytes: Some(8192),
