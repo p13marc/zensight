@@ -54,46 +54,221 @@ async fn main() -> Result<()> {
     let (mon, mut channels, keepalive, detector_handle, capture_tap_index) =
         monitor::build(&cfg, capture_tap.clone()).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Self-telemetry (#811): register the bounded structures most likely to
-    // be "where the memory went" as table providers, pulled only on the 5s
-    // health tick. This is what turns "netring is 319 MB" in a health doc
-    // into "and the flow ring / TLS inventory / asset inventory hold N
-    // entries of it". Bytes are a shallow estimate where the entry type is
-    // flat, absent where heap strings dominate — absent means "cannot say",
-    // never zero.
+    // Memory governance (#812/#814): every byte-bounded inventory registers
+    // with the governor — occupancy + caps join the health doc's table stats
+    // on the tick (#811), and the LRU evict handle is what the shed ladder's
+    // Evict step drives, so local caps and budget pressure share one eviction
+    // path. Rings and structures with no evict handle register stats-only.
+    // Alongside each registration a cumulative-evictions reader is collected
+    // for the periodic counter-diff task below.
+    let mut evicted_sources: Vec<Box<dyn Fn() -> u64 + Send>> = Vec::new();
     {
-        let health = runner.health();
+        use std::sync::{Arc, Mutex};
+        use zensight_sensor_core::{EvictOutcome, MemoryGovernor, TableHandle};
+        use zensight_sensor_netring::bounded::BoundedTable;
+
+        fn stats_unreadable(name: &'static str) -> zensight_common::TableStats {
+            // Poisoned lock: report nothing rather than a fabricated zero.
+            zensight_common::TableStats {
+                name: name.into(),
+                entries: 0,
+                bytes: None,
+                capacity_entries: None,
+                capacity_bytes: None,
+            }
+        }
+
+        fn register_bounded<K, V>(
+            governor: &MemoryGovernor,
+            evicted_sources: &mut Vec<Box<dyn Fn() -> u64 + Send>>,
+            name: &'static str,
+            table: &Arc<Mutex<BoundedTable<K, V>>>,
+        ) where
+            K: Eq + std::hash::Hash + Clone + Send + 'static,
+            V: Send + 'static,
+        {
+            let stats = table.clone();
+            let evict = table.clone();
+            governor.register_table(TableHandle {
+                name: name.into(),
+                stats: Box::new(move || match stats.lock() {
+                    Ok(t) => zensight_common::TableStats {
+                        name: name.into(),
+                        entries: t.len() as u64,
+                        bytes: Some(t.bytes() as u64),
+                        capacity_entries: None,
+                        capacity_bytes: Some(t.max_bytes() as u64),
+                    },
+                    Err(_) => stats_unreadable(name),
+                }),
+                evict: Some(Box::new(move |target| {
+                    let (entries, bytes) = evict
+                        .lock()
+                        .map(|mut t| t.evict_bytes(target))
+                        .unwrap_or((0, 0));
+                    EvictOutcome { entries, bytes }
+                })),
+            });
+            let totals = table.clone();
+            evicted_sources.push(Box::new(move || {
+                totals.lock().map(|t| t.evicted_totals().0).unwrap_or(0)
+            }));
+        }
+
+        /// Stats-only registration: a ring or foreign cache the governor can
+        /// see but not evict.
+        fn register_stats_only(
+            governor: &MemoryGovernor,
+            name: &'static str,
+            stats: Box<dyn Fn() -> zensight_common::TableStats + Send + Sync>,
+        ) {
+            governor.register_table(TableHandle {
+                name: name.into(),
+                stats,
+                evict: None,
+            });
+        }
+
+        let governor = runner.governor();
+        register_bounded(
+            &governor,
+            &mut evicted_sources,
+            "tls_inventory",
+            &channels.tls_inventory,
+        );
+        register_bounded(
+            &governor,
+            &mut evicted_sources,
+            "dns_inventory",
+            &channels.dns.inventory,
+        );
+        register_bounded(
+            &governor,
+            &mut evicted_sources,
+            "http_inventory",
+            &channels.http.inventory,
+        );
+        register_bounded(
+            &governor,
+            &mut evicted_sources,
+            "asset_inventory",
+            &channels.assets,
+        );
+        register_bounded(
+            &governor,
+            &mut evicted_sources,
+            "quic_inventory",
+            &channels.quic,
+        );
+        register_bounded(
+            &governor,
+            &mut evicted_sources,
+            "ssh_inventory",
+            &channels.ssh,
+        );
+        // EncDnsState owns its table directly (no Arc<Mutex> alias), so it is
+        // registered by hand through the state Arc.
+        {
+            let stats = channels.enc_dns.clone();
+            let evict = channels.enc_dns.clone();
+            governor.register_table(TableHandle {
+                name: "enc_dns_inventory".into(),
+                stats: Box::new(move || match stats.inventory.lock() {
+                    Ok(t) => zensight_common::TableStats {
+                        name: "enc_dns_inventory".into(),
+                        entries: t.len() as u64,
+                        bytes: Some(t.bytes() as u64),
+                        capacity_entries: None,
+                        capacity_bytes: Some(t.max_bytes() as u64),
+                    },
+                    Err(_) => stats_unreadable("enc_dns_inventory"),
+                }),
+                evict: Some(Box::new(move |target| {
+                    let (entries, bytes) = evict
+                        .inventory
+                        .lock()
+                        .map(|mut t| t.evict_bytes(target))
+                        .unwrap_or((0, 0));
+                    EvictOutcome { entries, bytes }
+                })),
+            });
+            let totals = channels.enc_dns.clone();
+            evicted_sources.push(Box::new(move || {
+                totals
+                    .inventory
+                    .lock()
+                    .map(|t| t.evicted_totals().0)
+                    .unwrap_or(0)
+            }));
+        }
+        #[cfg(feature = "ja4plus")]
+        register_bounded(
+            &governor,
+            &mut evicted_sources,
+            "ja4h_inventory",
+            &channels.ja4h_fp,
+        );
+
         let flow_records = channels.flow_records.clone();
-        health.register_table_stats(Box::new(move || {
-            let entries = flow_records.lock().map(|r| r.len()).unwrap_or(0) as u64;
-            vec![zensight_common::TableStats {
+        register_stats_only(
+            &governor,
+            "flow_ring",
+            Box::new(move || zensight_common::TableStats {
                 name: "flow_ring".into(),
-                entries,
+                entries: flow_records.lock().map(|r| r.len()).unwrap_or(0) as u64,
                 bytes: None,
                 capacity_entries: Some(monitor::FLOW_RING_CAP as u64),
                 capacity_bytes: None,
-            }]
-        }));
-        let tls = channels.tls_inventory.clone();
-        health.register_table_stats(Box::new(move || {
-            vec![zensight_common::TableStats {
-                name: "tls_inventory".into(),
-                entries: tls.lock().map(|m| m.len()).unwrap_or(0) as u64,
+            }),
+        );
+        let elephants = channels.elephants.clone();
+        register_stats_only(
+            &governor,
+            "elephants",
+            Box::new(move || zensight_common::TableStats {
+                name: "elephants".into(),
+                entries: elephants.lock().map(|r| r.len()).unwrap_or(0) as u64,
                 bytes: None,
-                capacity_entries: None,
+                capacity_entries: Some(monitor::ELEPHANT_RING_CAP as u64),
                 capacity_bytes: None,
-            }]
-        }));
-        let assets = channels.assets.clone();
-        health.register_table_stats(Box::new(move || {
-            vec![zensight_common::TableStats {
-                name: "asset_inventory".into(),
-                entries: assets.lock().map(|m| m.len()).unwrap_or(0) as u64,
-                bytes: None,
-                capacity_entries: None,
-                capacity_bytes: None,
-            }]
-        }));
+            }),
+        );
+        if let Some(pending) = &channels.http_pending {
+            let pending = pending.clone();
+            register_stats_only(
+                &governor,
+                "http_pending",
+                Box::new(move || zensight_common::TableStats {
+                    name: "http_pending".into(),
+                    entries: pending.lock().map(|p| p.len()).unwrap_or(0) as u64,
+                    bytes: None,
+                    capacity_entries: None,
+                    capacity_bytes: None,
+                }),
+            );
+        }
+        if let Some(tracked) = &channels.fqdn_beacon_tracked {
+            let tracked = tracked.clone();
+            register_stats_only(
+                &governor,
+                "fqdn_beacon",
+                Box::new(move || zensight_common::TableStats {
+                    name: "fqdn_beacon".into(),
+                    entries: tracked.load(std::sync::atomic::Ordering::Relaxed),
+                    bytes: None,
+                    capacity_entries: None,
+                    capacity_bytes: None,
+                }),
+            );
+        }
+
+        // Degrade step (#812): the ladder stops the anomaly detectors before it
+        // reaches Saturated — an alert-less window beats an OOM kill.
+        let shed = channels.detectors_shed.clone();
+        governor.register_degradable(
+            "anomaly_detectors",
+            Box::new(move |on| shed.store(on, std::sync::atomic::Ordering::Relaxed)),
+        );
     }
 
     // Producers for the unified artifact channel (`@rpc/netring/artifact/*`):
@@ -197,10 +372,16 @@ async fn main() -> Result<()> {
     // TTL'd Tier-1 blobs on the engine's own BlobServer (same `@blob/artifact`
     // prefix as the artifact channel — servers ignore ids they don't own).
     let mut capture_disk_trigger = None;
+    // Held for the eviction-counter diff task below (#814); the engine's file
+    // evictions and channel drops are fleet-visible through the same counters
+    // as the table evictions.
+    let mut disk_stats_for_counters: Option<Arc<zensight_sensor_netring::disk::CaptureDiskStats>> =
+        None;
     if let Some((disk_rx, disk_stats)) = channels.disk.take() {
         use zensight_sensor_netring::{command, disk, query};
         let to_disk = cfg.capture.to_disk.clone();
         let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
+        disk_stats_for_counters = Some(disk_stats.clone());
         let handle = disk::CaptureDiskHandle::new(ctl_tx, disk_stats.clone());
         let index: disk::CaptureIndex =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
@@ -303,6 +484,57 @@ async fn main() -> Result<()> {
                  (`capture.to_disk.mode` other than `off`)",
             ),
         ));
+    }
+
+    // Eviction accounting (#814): fold each table's cumulative evicted totals —
+    // local LRU overflow and governor pressure use the same counter — into the
+    // fleet-visible PublishCounters once a minute, as diffs (a re-added
+    // cumulative would inflate forever). The capture-to-disk engine's retention
+    // evictions and channel drops join the same cadence. The shed controller's
+    // totals stay out: they live inside the monitor's capture-stats hook, and
+    // its shed count already streams as `capture/<source>/shed/*` telemetry.
+    {
+        use std::sync::atomic::Ordering;
+        let counters = runner.publisher().counters();
+        let disk_stats = disk_stats_for_counters;
+        runner.spawn(async move {
+            let mut prev: Vec<u64> = evicted_sources.iter().map(|f| f()).collect();
+            let (mut prev_disk_evicted, mut prev_disk_dropped) = disk_stats
+                .as_ref()
+                .map(|s| {
+                    (
+                        s.evictions.load(Ordering::Relaxed),
+                        s.dropped.load(Ordering::Relaxed),
+                    )
+                })
+                .unwrap_or((0, 0));
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                for (prev, source) in prev.iter_mut().zip(&evicted_sources) {
+                    let now = source();
+                    let delta = now.saturating_sub(*prev);
+                    if delta > 0 {
+                        counters.add_evicted(delta);
+                    }
+                    *prev = now;
+                }
+                if let Some(s) = &disk_stats {
+                    let evicted = s.evictions.load(Ordering::Relaxed);
+                    let dropped = s.dropped.load(Ordering::Relaxed);
+                    let d_evicted = evicted.saturating_sub(prev_disk_evicted);
+                    let d_dropped = dropped.saturating_sub(prev_disk_dropped);
+                    if d_evicted > 0 {
+                        counters.add_evicted(d_evicted);
+                    }
+                    if d_dropped > 0 {
+                        counters.add_dropped(d_dropped);
+                    }
+                    prev_disk_evicted = evicted;
+                    prev_disk_dropped = dropped;
+                }
+            }
+        });
     }
 
     // On-demand query channels (P2): recent-flow ring, TLS asset inventory,

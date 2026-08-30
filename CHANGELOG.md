@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **netring: every table bounded in bytes, and `production` is now a sizing
+  profile** (#814). The 319 MB-on-a-quiet-scanner class of growth is
+  structurally gone: the eight refuse-at-cap L7 inventories become
+  byte-capped true-LRU `BoundedTable`s (five `tables.*` knobs; a full table
+  now admits new data by evicting stale data — the freeze-stale and
+  asset-desync bugs retire together), `HttpPending` gets a TTL sweep, and
+  the two genuinely unbounded detector structures finally have their
+  upstream eviction hooks driven on event time (no forks). Every bounded
+  table registers with the #812 governor — occupancy/caps in the health
+  doc, one shared evict path for local overflow and budget pressure — and
+  `anomaly_detectors` is the registered degradable. `production` now also
+  *sizes*: 64 MiB budget, passive-DNS at 2048 IPs, inventory budgets
+  halved — ~4.5 MiB of hard table caps, visible in config rather than
+  emergent; `demo-max` keeps the full envelope.
+
 - **sensor-core: a memory governor, and a sensor that sheds instead of
   dying** (#812). The health tick now drives a shed ladder against the
   declared budget — Evict (LRU from the largest registered table, then

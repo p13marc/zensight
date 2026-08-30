@@ -162,7 +162,7 @@ pub async fn run_asset_evidence(
         if refresh_due {
             last_refresh_ms = now;
             if let Ok(map) = assets.lock() {
-                candidates.extend(map.keys().cloned());
+                candidates.extend(map.iter().map(|(mac, _)| mac.clone()));
             }
         }
 
@@ -187,7 +187,9 @@ pub async fn run_asset_evidence(
         }
 
         for mac in list {
-            let record = match assets.lock().ok().and_then(|m| m.get(&mac).cloned()) {
+            // `peek`: a background feed read must not rewrite the LRU order the
+            // capture path's eviction depends on (#814).
+            let record = match assets.lock().ok().and_then(|m| m.peek(&mac).cloned()) {
                 Some(r) => r,
                 None => continue,
             };

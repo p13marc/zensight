@@ -96,6 +96,11 @@ pub struct NetringConfig {
     /// Requires `collect.dns` (the answer stream) — a no-op without it.
     #[serde(default)]
     pub names: NamesConfig,
+    /// Byte budgets for the L7 inventories (#814): LRU past the cap — the
+    /// entry-count refuse-at-cap guards are retired. Bytes are the contract,
+    /// because bytes are what the host enforces.
+    #[serde(default)]
+    pub tables: TablesConfig,
     /// Host-evidence feed (#307): republish observed assets / passive-DNS names
     /// as identity evidence on `state/netring/evidence/**` for the correlator.
     #[serde(default)]
@@ -348,6 +353,61 @@ impl Default for EvidenceConfig {
             min_interval_secs: default_evidence_min_interval(),
             refresh_secs: default_evidence_refresh(),
             max_per_tick: default_evidence_max_per_tick(),
+        }
+    }
+}
+
+/// Byte budgets for the L7 inventories (#814). Five knobs, not nineteen:
+/// each named inventory gets its own, and the four fingerprint inventories
+/// (QUIC / SSH / encrypted-DNS / JA4H) share `fp_max_bytes` in quarters —
+/// they are the same kind of thing at the same scale. Sizes are enforced by
+/// [`crate::bounded::BoundedTable`] (incremental per-record accounting, true
+/// LRU); occupancy and caps ride the health doc's table stats (#811), and
+/// the memory governor (#812) can evict deeper under budget pressure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TablesConfig {
+    /// TLS asset inventory (`@rpc/netring/tls`).
+    #[serde(default = "default_tls_max_bytes")]
+    pub tls_max_bytes: usize,
+    /// DNS SLD inventory (`@rpc/netring/dns`).
+    #[serde(default = "default_dns_max_bytes")]
+    pub dns_max_bytes: usize,
+    /// HTTP host inventory (`@rpc/netring/http`).
+    #[serde(default = "default_http_max_bytes")]
+    pub http_max_bytes: usize,
+    /// Passive asset inventory (`@rpc/netring/assets` + evidence).
+    #[serde(default = "default_assets_max_bytes")]
+    pub assets_max_bytes: usize,
+    /// QUIC + SSH + encrypted-DNS + JA4H fingerprint inventories, combined
+    /// (each gets a quarter).
+    #[serde(default = "default_fp_max_bytes")]
+    pub fp_max_bytes: usize,
+}
+
+fn default_tls_max_bytes() -> usize {
+    2 * 1024 * 1024
+}
+fn default_dns_max_bytes() -> usize {
+    4 * 1024 * 1024
+}
+fn default_http_max_bytes() -> usize {
+    1024 * 1024
+}
+fn default_assets_max_bytes() -> usize {
+    2 * 1024 * 1024
+}
+fn default_fp_max_bytes() -> usize {
+    2 * 1024 * 1024
+}
+
+impl Default for TablesConfig {
+    fn default() -> Self {
+        Self {
+            tls_max_bytes: default_tls_max_bytes(),
+            dns_max_bytes: default_dns_max_bytes(),
+            http_max_bytes: default_http_max_bytes(),
+            assets_max_bytes: default_assets_max_bytes(),
+            fp_max_bytes: default_fp_max_bytes(),
         }
     }
 }
@@ -975,6 +1035,21 @@ mod tests {
         // `dir` must be a real key, not a comment: gen-configs.sh seds it to the
         // demo's pcap path, and validation rejects `mode != off` without it.
         assert!(at("netring.capture.to_disk.dir").is_null());
+
+        // #814: production is also a sizing profile — gen-configs.sh seds the
+        // RSS budget and every table byte-budget down, and a sed can only flip
+        // a key that is physically present.
+        assert_eq!(at("resources.budget_rss_mb"), 128);
+        let defaults = TablesConfig::default();
+        for (key, want) in [
+            ("netring.tables.tls_max_bytes", defaults.tls_max_bytes),
+            ("netring.tables.dns_max_bytes", defaults.dns_max_bytes),
+            ("netring.tables.http_max_bytes", defaults.http_max_bytes),
+            ("netring.tables.assets_max_bytes", defaults.assets_max_bytes),
+            ("netring.tables.fp_max_bytes", defaults.fp_max_bytes),
+        ] {
+            assert_eq!(at(key), want, "{key} must spell out its default");
+        }
     }
 
     #[test]
@@ -1009,6 +1084,30 @@ mod tests {
         assert_eq!(a.rita_beacon_threshold, 0.9);
         assert_eq!(a.dns_tunnel_distinct, 50);
         assert_eq!(a.dns_tunnel_qname_len, 100);
+    }
+
+    /// #814: a partial `tables` block overrides only the named budget — the
+    /// other four keep their serde field defaults (and present-but-empty must
+    /// agree with omitted, i.e. the derived `Default`).
+    #[test]
+    fn partial_tables_block_keeps_the_other_defaults() {
+        let cfg: NetringSensorConfig = json5::from_str(
+            r#"{ netring: { interfaces: ["eth0"], tables: { dns_max_bytes: 123 } } }"#,
+        )
+        .unwrap();
+        let t = &cfg.netring.tables;
+        assert_eq!(t.dns_max_bytes, 123);
+        let d = TablesConfig::default();
+        assert_eq!(t.tls_max_bytes, d.tls_max_bytes);
+        assert_eq!(t.http_max_bytes, d.http_max_bytes);
+        assert_eq!(t.assets_max_bytes, d.assets_max_bytes);
+        assert_eq!(t.fp_max_bytes, d.fp_max_bytes);
+        let omitted: NetringSensorConfig =
+            json5::from_str(r#"{ netring: { interfaces: ["eth0"] } }"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&omitted.netring.tables).unwrap(),
+            serde_json::to_value(&d).unwrap()
+        );
     }
 
     #[test]
