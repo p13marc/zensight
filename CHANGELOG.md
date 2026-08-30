@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cargo test -p zensight` no longer segfaults on GPU-less hosts** (#829,
+  the #687 landmine): the test binaries now set `WGPU_BACKEND=gl` themselves
+  via pre-main `ctor` guards (`src/lib.rs` for `--lib`, `tests/ui_tests.rs`
+  for the integration target), so the parallel-test Vulkan/lavapipe crash
+  cannot occur regardless of how the tests are invoked. An explicit
+  `WGPU_BACKEND` still wins; `just test-ui` remains as the discoverable name.
+  Measured: 0 crashes in 20 `--test ui_tests` + 10 `--lib` parallel runs,
+  against ~1-in-7 and ~1-in-3 before.
+
 ## [0.11.0] - 2026-08-28
 
 A month of unreleased work, and the release an operator has to read before
