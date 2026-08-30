@@ -15,6 +15,11 @@
 # the entire suite, because the suite only ever asserted substrings of a body it
 # never validated.
 #
+# Phase 2 (#845) closes the same gap for the OTHER exporter: the OTLP exporter
+# had never been executed by anything — its release smoke is `--help`, its
+# integration tests are pure functions. Here it joins the same hub and must
+# deliver at least one OTLP/HTTP metrics export to a local sink.
+#
 # ISOLATION (the project rule, same as scripts/image-verify.sh): this runs on its
 # OWN rendezvous port and its OWN scrape port, with multicast OFF. It never
 # touches 7447 and never joins a live fleet. No containers, no zenohd, no sudo —
@@ -23,6 +28,7 @@ set -euo pipefail
 
 PORT="${PORT:-17447}"
 SCRAPE_PORT="${SCRAPE_PORT:-19464}"
+OTLP_PORT="${OTLP_PORT:-19465}"
 HUB="tcp/127.0.0.1:${PORT}"
 SCRAPE="127.0.0.1:${SCRAPE_PORT}"
 PROFILE="${PROFILE:-release}"
@@ -74,10 +80,10 @@ die() {
 }
 
 echo "==> building"
-cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-sensor-sysinfo >/dev/null
+cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-exporter-otel -p zensight-sensor-sysinfo >/dev/null
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
-require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-sensor-sysinfo"
+require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" "$BIN/zensight-sensor-sysinfo"
 
 tmp="$(mktemp -d)"
 echo "==> generating configs into $tmp"
@@ -237,3 +243,84 @@ echo
 echo "OK — sysinfo -> Zenoh -> exporter -> /metrics"
 echo "     $accepted points accepted, $series exported lines, all TYPE tokens legal,"
 echo "     no duplicate label names."
+
+# ---------------------------------------------------------------------------
+# Phase 2 (#845): the OTLP exporter, executed. Nothing anywhere had ever run
+# it: the release smoke is `--help`, `cargo test` covers pure conversion
+# functions, and `just demo-otel` is manual and needs a container. This is
+# honest smoke, not schema validation: a stdlib-python sink accepts OTLP/HTTP
+# POSTs and the assertion is that at least one metrics export ARRIVES with
+# the protobuf content-type and a non-empty body. The sink answers 200 with
+# an empty body — a valid encoding of the empty ExportMetricsServiceResponse.
+#
+# The exporter CONNECTS to the same hub the prometheus exporter is listening
+# on, so the running sysinfo sensor feeds both and this phase adds one
+# process and one sink.
+# ---------------------------------------------------------------------------
+echo "==> phase 2: starting an OTLP/HTTP sink on 127.0.0.1:$OTLP_PORT"
+python3 - "$OTLP_PORT" "$tmp/otlp-sink.log" >"$tmp/otlp-sink.stdout" 2>&1 <<'PY' &
+import sys, http.server
+
+port, log_path = int(sys.argv[1]), sys.argv[2]
+
+class Sink(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        with open(log_path, "a") as f:
+            f.write(f"{self.path} {self.headers.get('Content-Type','')} {len(body)}\n")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-protobuf")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+    def log_message(self, *a):
+        pass
+
+http.server.HTTPServer(("127.0.0.1", port), Sink).serve_forever()
+PY
+pids+=($!)
+
+# Point the generated otel config at the sink over http. Both keys exist in
+# the committed example (the gen-configs.sh rule: a sed can only flip a key
+# that is really in configs/*.json5).
+sed -E -e "s|endpoint: \"[^\"]+\"|endpoint: \"http://127.0.0.1:${OTLP_PORT}\"|" \
+       -e "s|protocol: \"grpc\"|protocol: \"http\"|" \
+       "$tmp/otel-exporter.json5" > "$tmp/otel-exporter-ci.json5"
+
+echo "==> starting otel exporter (connecting to $HUB, exporting to the sink)"
+ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
+    "$BIN/zensight-exporter-otel" --config "$tmp/otel-exporter-ci.json5" \
+    >"$tmp/otel.log" 2>&1 &
+pids+=($!)
+
+echo "==> waiting for a metrics export to reach the sink"
+# export_interval_secs is 10 in the shipped config; give it four intervals.
+got=""
+for _ in $(seq 40); do
+    if [[ -f "$tmp/otlp-sink.log" ]] && grep -q '^/v1/metrics ' "$tmp/otlp-sink.log"; then
+        got=1; break
+    fi
+    still_running "${pids[@]:-}" || break
+    sleep 1
+done
+if [[ -z "$got" ]]; then
+    keep_logs_on_failure
+    dead=$(dead_children "${pids[@]:-}")
+    if [[ -n "$dead" ]]; then
+        die "no OTLP export reached the sink, and a process this script started is \
+already gone. Its log says why.$(logs_note "$tmp" "$tmp/otel.log" "$tmp/otlp-sink.stdout")"
+    fi
+    die "no OTLP metrics export reached the sink in 40s with every process alive. \
+The exporter either received no telemetry (discovery) or cannot speak OTLP/HTTP \
+to the sink.$(logs_note "$tmp" "$tmp/otel.log" "$tmp/otlp-sink.log")"
+fi
+
+# The export is real protobuf with content, not an empty keep-alive.
+bad=$(awk '$1 == "/v1/metrics" && ($2 !~ /protobuf/ || $3 == 0)' "$tmp/otlp-sink.log")
+[[ -z "$bad" ]] || die "an OTLP metrics POST arrived malformed (path content-type bytes):
+$bad"
+
+exports=$(grep -c '^/v1/metrics ' "$tmp/otlp-sink.log" || true)
+echo
+echo "OK — sysinfo -> Zenoh -> otel exporter -> OTLP/HTTP sink"
+echo "     $exports metrics export(s) delivered, protobuf content-type, non-empty body."
