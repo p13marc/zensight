@@ -7139,3 +7139,65 @@ fn test_snmp_event_ring_dedup_and_order() {
         "newest first, deduped"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bus explorer (#748)
+// ---------------------------------------------------------------------------
+
+mod explorer_ui {
+    use super::simulator;
+    use std::sync::Arc;
+    use zensight::view::explorer::{ExplorerState, core::ExplorerCore, explorer_view};
+
+    /// Cold state: the view says what it needs instead of rendering an empty
+    /// tree that could be mistaken for a quiet bus.
+    #[test]
+    fn test_explorer_disconnected_empty_state() {
+        let state = ExplorerState::default();
+        let mut ui = simulator(explorer_view(&state));
+        assert!(
+            ui.find("The bus explorer needs a connection. Open it while connected (or in demo mode) to start a monitor.")
+                .is_ok()
+        );
+    }
+
+    /// A running explorer renders every loss ledger as its own labelled tile —
+    /// four distinct facts, zeros included (RFC 13 forbids folding them).
+    #[test]
+    fn test_explorer_ledger_tiles_are_distinct() {
+        let mcore = zenkey_fleet::MonitorCore::bounded(8, 4);
+        let epoch = std::time::Instant::now();
+        let row = zenkey_fleet::IngestRow {
+            key: "v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu".into(),
+            payload: b"{}".to_vec(),
+            encoding: None,
+            qos: Some("sampled".into()),
+            delete: false,
+            attachment: None,
+        };
+        mcore.ingest_at(
+            Arc::new(zensight::replay::sample_view(&row, epoch)),
+            None,
+            epoch,
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        mcore.tick();
+
+        let mut state = ExplorerState::default();
+        state.running = true;
+        state.apply_tick(Arc::new(ExplorerCore::default().snapshot(
+            &mcore,
+            Vec::new(),
+            None,
+        )));
+
+        let mut ui = simulator(explorer_view(&state));
+        for label in ["keys evicted", "keys unwatched", "samples shed", "retained"] {
+            assert!(ui.find(label).is_ok(), "ledger tile {label:?} missing");
+        }
+        assert!(
+            ui.find("keys as this session sees them (base-relative)")
+                .is_ok()
+        );
+    }
+}

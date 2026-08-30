@@ -121,6 +121,7 @@ pub enum CurrentView {
     Incidents,
     Bandwidth,
     Fleet,
+    Explorer,
 }
 
 /// Application theme.
@@ -256,6 +257,13 @@ pub struct ZenSight {
     bandwidth: crate::view::bandwidth::BandwidthState,
     /// Fleet capabilities: what each host's build says it serves (#469).
     fleet: crate::view::fleet::FleetState,
+    /// Bus-explorer view state (#748): the live key-tree and its ledgers.
+    explorer: crate::view::explorer::ExplorerState,
+    /// Command handle on the running explorer pump (`None` = no pump). The
+    /// pump owns the `Monitor` — a monitor belongs to the session it was
+    /// declared on, so this is dropped on (dis)connect like
+    /// `fleet_queriers`.
+    explorer_ctl: Option<crate::view::explorer::pump::ExplorerCtl>,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -493,6 +501,8 @@ impl ZenSight {
             incidents: crate::view::incident::IncidentsState::default(),
             bandwidth: crate::view::bandwidth::BandwidthState::default(),
             fleet: crate::view::fleet::FleetState::default(),
+            explorer: crate::view::explorer::ExplorerState::default(),
+            explorer_ctl: None,
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -2237,6 +2247,12 @@ impl ZenSight {
                 // A declared querier belongs to the session it was declared on
                 // (#745): a reconnect must not fetch through a dead one.
                 self.fleet_queriers = std::sync::Arc::new(tokio::sync::OnceCell::new());
+                // Same rule for the explorer's monitor (#748): the old pump
+                // rides the old session; ask it to tear down. Re-opening the
+                // view starts a fresh one on this session.
+                if let Some(ctl) = self.explorer_ctl.take() {
+                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Shutdown);
+                }
                 self.dashboard.connected = true;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Connected;
@@ -2271,6 +2287,12 @@ impl ZenSight {
                 self.session = None;
                 self.command_registry = None;
                 self.fleet_queriers = std::sync::Arc::new(tokio::sync::OnceCell::new());
+                // The explorer's monitor rode that session (#748). The last
+                // snapshot stays readable — a dead fleet's final tree is
+                // still evidence.
+                if let Some(ctl) = self.explorer_ctl.take() {
+                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Shutdown);
+                }
                 self.dashboard.connected = false;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
@@ -2836,6 +2858,58 @@ impl ZenSight {
             }
             Message::FleetTableFilter(q) => {
                 self.fleet.table.set_filter(q);
+            }
+
+            Message::OpenExplorer => {
+                self.set_view(CurrentView::Explorer);
+                self.save_current_view();
+                return self.start_explorer();
+            }
+            Message::ExplorerStarted(ctl) => {
+                self.explorer_ctl = Some(ctl);
+                self.explorer.running = true;
+                self.explorer.error = None;
+            }
+            Message::ExplorerTick(snapshot) => {
+                self.explorer.apply_tick(snapshot);
+            }
+            Message::ExplorerWatchInput(input) => {
+                self.explorer.watch_input = input;
+            }
+            Message::ExplorerWatchSubmit => {
+                let selector = self.explorer.watch_input.trim().to_string();
+                if !selector.is_empty()
+                    && let Some(ctl) = &self.explorer_ctl
+                {
+                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Watch(selector));
+                    self.explorer.watch_input.clear();
+                }
+            }
+            Message::ExplorerUnwatch(id) => {
+                if let Some(ctl) = &self.explorer_ctl {
+                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Unwatch(id));
+                }
+            }
+            Message::ExplorerToggleNode(path) => {
+                self.explorer.toggle(path);
+            }
+            Message::ExplorerSelectKey(key) => {
+                self.explorer.selected = key.clone();
+                if let Some(ctl) = &self.explorer_ctl {
+                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Inspect(key));
+                }
+            }
+            Message::ExplorerStop => {
+                if let Some(ctl) = &self.explorer_ctl {
+                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Shutdown);
+                }
+            }
+            Message::ExplorerStopped => {
+                self.explorer_ctl = None;
+                self.explorer.running = false;
+            }
+            Message::ExplorerError(e) => {
+                self.explorer.error = Some(e);
             }
 
             Message::OpenSettings => {
@@ -6976,6 +7050,27 @@ impl ZenSight {
     /// it refused, which rides back on [`FleetSweep::elided`]. The sweep this
     /// replaced was unbounded and truncated silently at whatever the timeout
     /// caught.
+    /// Start the explorer pump if none runs (#748): the demo feed in demo
+    /// mode, a `Monitor` borrowed on the live session otherwise. Idempotent —
+    /// a running pump (ctl present) is kept, so re-opening the view costs
+    /// nothing and the accumulated rates/ledgers survive view switches.
+    fn start_explorer(&mut self) -> Task<Message> {
+        if self.explorer_ctl.is_some() {
+            return Task::none();
+        }
+        if self.demo_mode {
+            return Task::stream(crate::mock::explorer::demo_stream());
+        }
+        match self.session.clone() {
+            Some(session) => Task::stream(crate::view::explorer::pump::run(session)),
+            None => {
+                self.explorer.error =
+                    Some("not connected — the monitor needs a session".to_string());
+                Task::none()
+            }
+        }
+    }
+
     fn query_fleet(&self) -> Task<Message> {
         if self.demo_mode {
             return Task::done(Message::FleetLoaded(Ok(crate::mock::fleet::sweep())));
@@ -7146,6 +7241,7 @@ impl ZenSight {
             | CurrentView::Inventory
             | CurrentView::Bandwidth
             | CurrentView::Fleet
+            | CurrentView::Explorer
             | CurrentView::Incidents => {
                 self.set_view(CurrentView::Dashboard);
             }
@@ -7282,6 +7378,7 @@ impl ZenSight {
             }
             CurrentView::Bandwidth => crate::view::bandwidth::bandwidth_view(&self.bandwidth),
             CurrentView::Fleet => crate::view::fleet::fleet_view(&self.fleet),
+            CurrentView::Explorer => crate::view::explorer::explorer_view(&self.explorer),
             CurrentView::Incidents => {
                 crate::view::incident::incidents_view(&self.alerts, &self.incidents)
             }

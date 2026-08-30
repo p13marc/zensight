@@ -401,6 +401,60 @@ base stripped from every key it is handed — which also means a namespaced
 deployment is observable here exactly as an un-namespaced one is, unlike a
 `zenctl` pointed at it.
 
+### Bus explorer (`view/explorer/`, #748)
+
+The live key-tree — what `zengui` is upstream, for this deployment's bus,
+built on `zenkey_fleet::Monitor`. A **new** view: it does not replace
+`subscription.rs`, the focus-mode machinery, or the redb store; the
+dashboards' data path is untouched.
+
+**The pump owns the monitor.** `Monitor::shutdown(self)` consumes it, so an
+`App` field cannot hold one and tear it down acknowledged. Instead a
+`Task::stream` (`explorer/pump.rs`) owns the monitor on the GUI's session
+(borrowed, like the fleet queriers — never a second session, never
+`zenkey_fleet::open`); `App` holds only an `ExplorerCtl` command handle,
+dropped on (dis)connect exactly like `fleet_queriers` — a monitor belongs to
+the session it was declared on. Teardown is the pump's `shutdown().await`, so
+a fresh monitor over the same keys cannot race the old subscribers'
+undeclares.
+
+**Throttled by construction.** Per-sample work — the observed-vs-declared QoS
+fold, presence — happens in the pump (`explorer/core.rs`, `ExplorerCore`).
+The GUI receives one `ExplorerTick` per monitor stats tick (250 ms, the
+redraw cadence), whatever the bus rate; the tree flatten
+(`explorer/tree.rs::tree_rows`) runs in `update` on tick/toggle, never per
+redraw.
+
+**Lazy, bounded, and honest about every bound.** The monitor starts with no
+data-plane subscribers (liveliness only — **both** sweeps, because `*` in the
+origin position can never match the verbatim `@catalog`, grammar D4); the
+user adds watches (`v1/**`) from the view. Keys are bounded at 10 000, the
+broadcast at 1024, retention at 16 MiB / 60 s — and each bound has its own
+ledger tile: keys evicted, keys unwatched, samples shed, retention drops.
+**Four distinct facts, never summed** (RFC 13); zeros are rendered rather
+than appearing only when bad. Key labels are captioned *base-relative* — a
+namespaced session strips the base on ingress, so "the wire key" would be a
+lie.
+
+**The QoS ledger** compares each sample's four wire axes against the
+registry's declared profile (`SampleView::qos_matches`) — the
+`QosObservedMismatch` check, live, instead of in a doctor report. An
+unregistered key is a *distinct* mark, never a mismatch: nothing was
+declared, so nothing can disagree.
+
+**The inspector** (`explorer/inspector.rs`) is the GUI's first
+payload-inspection surface: key, declared type (generated registry), true
+byte size, declared-vs-observed QoS, stamp provenance, and a bounded preview
+of the bytes that actually arrived — scoped honestly as "latest retained
+sample — watched keys only". This is the surface #791's validation verdicts
+hang from.
+
+**Deterministically testable.** Everything below the pump is session-free:
+demo mode runs the *same* pipeline (`mock::explorer::demo_stream` drives a
+real `MonitorCore` + `ExplorerCore`), and a `.zrec` capture drives it
+identically via `replay::sample_view` + `MonitorCore::ingest_at` (#747) —
+the view cannot tell live traffic from a fixture.
+
 ## Streamed rollups vs pulled records
 
 Several specialized views show the same shape twice, and it is deliberate

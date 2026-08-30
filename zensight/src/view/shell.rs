@@ -93,6 +93,12 @@ fn nav_items(current: CurrentView) -> Vec<NavItem> {
             active: matches!(current, Fleet),
         },
         NavItem {
+            label: "Bus",
+            message: Message::OpenExplorer,
+            icon: icons::chart,
+            active: matches!(current, Explorer),
+        },
+        NavItem {
             label: "Expectations",
             message: Message::OpenExpectations,
             icon: icons::check,
@@ -161,6 +167,7 @@ fn breadcrumb<'a>(current: CurrentView, device: Option<&'a str>) -> Element<'a, 
         CurrentView::Inventory => "Inventory",
         CurrentView::Bandwidth => "Bandwidth",
         CurrentView::Fleet => "Fleet",
+        CurrentView::Explorer => "Bus",
         CurrentView::Incidents => "Incidents",
         CurrentView::Settings => "Settings",
     };

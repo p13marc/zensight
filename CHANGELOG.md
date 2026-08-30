@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bus explorer** (#748, the last #726 child): a new "Bus" view — the live
+  key-tree on `zenkey_fleet::Monitor`, bounded with explicit drop
+  accounting. A pump task owns the monitor on the GUI's session (borrowed,
+  never a second session) and folds per-sample work off the GUI thread; the
+  view receives one snapshot per 250 ms stats tick whatever the bus rate.
+  Lazy by construction (liveliness only — both D4 sweeps, so "catalog dead"
+  and "no entities" render differently — until the user adds a watch), and
+  every bound has its own ledger tile: keys 10 000 with an eviction count,
+  broadcast shed, unwatched retirements, retention 16 MiB/60 s — four
+  distinct loss facts, never summed (RFC 13), zeros rendered. Per-sample
+  observed-vs-declared QoS (`qos_matches` against the generated registry's
+  profile) surfaces `QosObservedMismatch` live, with unregistered keys as a
+  distinct mark, never a mismatch. The inspector pane is the GUI's first
+  payload-inspection surface — key, declared type, true size,
+  declared-vs-observed axes, stamp provenance, bounded byte preview, scoped
+  "latest retained sample, watched keys only" — the surface #791's verdicts
+  will hang from. Demo mode runs the same session-free pipeline against a
+  real `MonitorCore`, which doubles as proof the #747 replay seam drives
+  this view deterministically.
+
 - **`.zrec` captures as GUI decode fixtures** (#747, the fifth of six #726
   children). `zensight::replay` loads a zenkey-fleet tape capture and feeds
   it to the real decode path with no bus and no live time: `decode_row`

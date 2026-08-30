@@ -98,6 +98,10 @@ pub fn commands() -> Vec<Command> {
             message: Message::OpenFleet,
         },
         Command {
+            label: "Go to Bus Explorer",
+            message: Message::OpenExplorer,
+        },
+        Command {
             label: "Open Settings",
             message: Message::OpenSettings,
         },
