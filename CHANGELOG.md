@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The three payload verdicts, rendered** (#791 — with it, epic #726 is
+  done). `zensight` gains a default-on `validate` feature enabling
+  `zensight-common/validate-json`; the bus explorer's inspector judges the
+  selected key's retained bytes against its declared type's schema, and the
+  five fleet-RPC status panels (netlink/systemd expectations, netring
+  detectors/capture filter/threat intel) judge their reply bodies at
+  receive, via the generated `ProcedureId::reply_type()`. One chip renders
+  all of it (`view/components/verdict.rs`, on `kit::badge` — meaning never
+  by colour alone): `Valid` green, `Invalid` red with violations listed,
+  and the six `NotValidated` reasons in two visual groups — *chose not to*
+  (`FeatureOff`/`NoRegistry`, grey) and *could not* (`NoSchema`/
+  `KindUnsupported`/`Undecodable`/`BadSchema`, the #746
+  `JUDGEMENT_UNOBSERVABLE` violet). **"I did not check" never renders as a
+  pass** — pinned by a property test, and the `--no-default-features` build
+  (now a named CI features step) degrades to an honest "not checked". A
+  tombstone or unregistered key gets no chip at all: absent, not judged.
+
 - **Bus explorer** (#748, the last #726 child): a new "Bus" view — the live
   key-tree on `zenkey_fleet::Monitor`, bounded with explicit drop
   accounting. A pump task owns the monitor on the GUI's session (borrowed,

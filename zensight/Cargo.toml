@@ -69,7 +69,13 @@ parallax-pipeline = { workspace = true, features = ["h264"], optional = true }
 regex = "1.13.1"
 
 [features]
-default = []
+default = ["validate"]
+# Three-state payload verdicts (#791): JSON-Schema validation behind the
+# explorer's inspector chip and the fleet-RPC status panels. Default ON —
+# verdicts are the point of a monitoring GUI; a `--no-default-features`
+# build stays first-class because `NotValidated::FeatureOff` renders as
+# "not checked", never as a pass (CI checks that build compiles).
+validate = ["zensight-common/validate-json"]
 # Enable the tester developer tool (F12 to record/play tests)
 tester = ["iced/tester"]
 # Opt-in H.264 live view for parallax streams (#409). Default OFF: it pulls

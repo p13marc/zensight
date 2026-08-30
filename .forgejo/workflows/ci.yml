@@ -140,6 +140,12 @@ jobs:
           key: features
           cache-targets: false
 
+      # zensight: default features OFF (#791). `validate` is default-ON, so a
+      # workspace build never type-checks the FeatureOff path — the exact
+      # blind spot this job exists for, in the other direction: the build
+      # where verdicts must degrade to "not checked" rather than vanish.
+      - name: zensight --no-default-features
+        run: cargo check -p zensight --no-default-features --locked
       # zensight: the F12 UI recorder.
       - name: zensight --features tester
         run: cargo check -p zensight --features tester --locked

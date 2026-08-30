@@ -97,6 +97,25 @@ Prefer building shared widgets here (and reusing them from views) over
 hand-rolling styled widgets in a view module — that keeps both the look and the
 color-guard compliance in one place.
 
+### The verdict chip (`verdict.rs`, #791)
+
+`verdict_badge(&Verdict)` renders the three-state payload verdict on
+`kit::badge` (dot + words — meaning never by colour alone). Colour resolves
+through the verdict's *pole*, never a boolean:
+
+| Verdict | Swatch |
+|---|---|
+| `Valid` | `STATUS_ONLINE` |
+| `Invalid` | `STATUS_OFFLINE` |
+| `NotValidated(FeatureOff \| NoRegistry)` — *chose not to* | `STATUS_UNKNOWN` |
+| `NotValidated(NoSchema \| KindUnsupported \| Undecodable \| BadSchema)` — *could not* | `JUDGEMENT_UNOBSERVABLE` |
+
+The rule (the whole point of #791): **`NotValidated` must never read as a
+passing check** — same failure #746 removed from the fleet view. Six reasons,
+two groups; the full reason always rides the label. A property test in
+`verdict.rs` pins "never green"; don't add a verdict rendering anywhere else
+without going through this component.
+
 ## Adding a color: checklist
 
 1. Is it theme-dependent? Add a `ThemeColors` accessor in `theme.rs`.

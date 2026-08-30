@@ -101,6 +101,11 @@ pub struct DetectionTuningState {
     pub threat_yara_input: String,
     /// The sensor's live threat-intel status, once fetched.
     pub threat_intel: Option<ThreatIntelView>,
+    /// Schema verdicts for the three status replies (#791) — set beside the
+    /// bodies they judge, at the receive sites in `app.rs`.
+    pub detectors_verdict: Option<zensight_common::schema::Verdict>,
+    pub capture_filter_verdict: Option<zensight_common::schema::Verdict>,
+    pub threat_intel_verdict: Option<zensight_common::schema::Verdict>,
 }
 
 impl DetectionTuningState {
@@ -244,13 +249,15 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
     let refresh = button(text("Refresh").size(12))
         .on_press(Message::RefreshDetectorConfig)
         .style(iced::widget::button::secondary);
-    let header = row![
-        text("Detection Tuning (netring)").size(16),
-        iced::widget::Space::new().width(Length::Fill),
-        refresh,
-    ]
-    .align_y(Alignment::Center)
-    .spacing(8);
+    let mut header = row![text("Detection Tuning (netring)").size(16)];
+    if let Some(v) = &state.detectors_verdict {
+        header = header.push(crate::view::components::verdict::verdict_badge(v));
+    }
+    let header = header
+        .push(iced::widget::Space::new().width(Length::Fill))
+        .push(refresh)
+        .align_y(Alignment::Center)
+        .spacing(8);
 
     if !state.loaded {
         let note = state
@@ -368,7 +375,12 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
         color: Some(theme::colors(t).danger()),
     };
 
-    let header = text("Capture Focus (netring)").size(16);
+    let mut header = row![text("Capture Focus (netring)").size(16)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if let Some(v) = &state.capture_filter_verdict {
+        header = header.push(crate::view::components::verdict::verdict_badge(v));
+    }
     let input_row = row![
         text_input(
             "BPF expr, e.g. host 10.0.0.5 and port 443",
@@ -470,7 +482,13 @@ fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let mut body = column![text("Threat Intel (netring)").size(16), ioc_row, yara_row].spacing(8);
+    let mut ti_header = row![text("Threat Intel (netring)").size(16)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if let Some(v) = &state.threat_intel_verdict {
+        ti_header = ti_header.push(crate::view::components::verdict::verdict_badge(v));
+    }
+    let mut body = column![ti_header, ioc_row, yara_row].spacing(8);
 
     match &state.threat_intel {
         None => {

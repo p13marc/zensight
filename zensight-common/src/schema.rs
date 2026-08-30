@@ -154,23 +154,24 @@ pub static DESCRIBE_JSON: LazyLock<String> = LazyLock::new(|| SCHEMAS.to_json())
 // with it — and never *used*: nothing in this workspace validated a payload
 // against it. `verdict_for` closes that, behind the `validate-json` feature.
 //
-// **The GUI wiring is deliberately NOT here yet.** #741 asks for the verdict to
-// be surfaced in "the GUI's payload-inspection paths (subject/detail views,
-// artifact/query paths)". Those paths do not exist: the GUI decodes bytes into
-// typed structs at `zensight/src/subscription.rs`'s `decode_sample` and drops
-// them, `zensight/src/store.rs` keeps numeric samples only, and no view renders
-// a payload body except systemd's unit file (verbatim text, not a schema'd
-// type). There is no place to put a verdict chip, so wiring one in means
-// building a payload inspector first — a feature, not an upgrade consequence.
+// **The GUI wiring landed with #748 + #791.** The payload-inspection surface
+// this comment used to say did not exist is the bus explorer's inspector
+// (`zensight/src/view/explorer/inspector.rs`), which keeps the observed bytes
+// (`SampleView.payload`) and renders the verdict through the three-state chip
+// in `zensight/src/view/components/verdict.rs` — colour by pole, six
+// `NotValidated` reasons in two visual groups ("could not" vs "chose not
+// to"), and `NotValidated` reads as absent, never as green. The five
+// RPC-status parse sites in `zensight/src/app.rs` that keep their whole body
+// (netlink/systemd `expectations`, netring `detectors`/`capture_filter`/
+// `threat_intel`) compute a verdict at receive via
+// `ProcedureId::reply_type()` and render it beside the panel each body feeds.
+// `zensight`'s default `validate` feature turns `validate-json` on; a
+// `--no-default-features` build stays honest through `FeatureOff`.
 //
-// What that change needs, when it happens: a reply's declared type name, which
-// the generated registry already carries (`ProcedureId::reply_type()`); the
-// ~10 `String::from_utf8_lossy(&sample.payload()…)` RPC-reply parse sites in
-// `zensight/src/app.rs`; and a three-state chip built on
-// `view::components::kit::badge` with `theme::colors(..).status_healthy()` /
-// `status_error()` / `status_unknown()` — never a two-state check mark, since
-// the whole point is that `NotValidated` must read as absent rather than as a
-// pass.
+// Still deferred, deliberately: the typed decode sites that show no body
+// (`view/artifact_fetch.rs`'s `ArtifactStatus` fan-ins, parallax's
+// `Vec<StreamDescriptor>`) — a chip there would assert something about bytes
+// no view renders; they gain one when they gain a body surface.
 // ---------------------------------------------------------------------------
 
 /// Did a payload conform to the schema its registry type declares?

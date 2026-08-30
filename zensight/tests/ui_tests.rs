@@ -7201,3 +7201,50 @@ mod explorer_ui {
         );
     }
 }
+
+mod verdict_ui {
+    use super::simulator;
+    use std::sync::Arc;
+    use zensight::view::explorer::{ExplorerState, core::ExplorerCore, explorer_view};
+
+    /// The verdict chip renders inside the inspector pane, with the reason in
+    /// words — meaning never carried by colour alone (#791).
+    #[test]
+    fn test_inspector_shows_the_verdict_chip() {
+        let mcore = zenkey_fleet::MonitorCore::bounded(8, 4);
+        let epoch = std::time::Instant::now();
+        let key = "v1/h-3fa9c2d41b7e/state/sysinfo/health";
+        let row = zenkey_fleet::IngestRow {
+            key: key.into(),
+            // Garbage bytes: the chip must say "could not check", visibly.
+            payload: vec![0xff, 0x00],
+            encoding: None,
+            qos: Some("refreshed".into()),
+            delete: false,
+            attachment: None,
+        };
+        let view = Arc::new(zensight::replay::sample_view(&row, epoch));
+        mcore.ingest_at(view.clone(), None, epoch, std::time::SystemTime::UNIX_EPOCH);
+        mcore.tick();
+
+        let mut core = ExplorerCore::default();
+        let inspected = zensight::view::explorer::inspector::InspectedSample::of(
+            &view,
+            core.declared_type(key),
+        );
+        let mut state = ExplorerState::default();
+        state.running = true;
+        state.selected = Some(key.to_string());
+        state.apply_tick(Arc::new(core.snapshot(&mcore, Vec::new(), Some(inspected))));
+
+        let mut ui = simulator(explorer_view(&state));
+        assert!(
+            ui.find("could not check — bytes did not decode").is_ok(),
+            "the NotValidated chip must state its reason in words"
+        );
+        assert!(
+            ui.find("latest retained sample — watched keys only")
+                .is_ok()
+        );
+    }
+}

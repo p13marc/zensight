@@ -310,6 +310,10 @@ pub struct ExpectationsState {
     /// The accumulated systemd expectation set (#278).
     pub systemd: SystemdExpDraft,
     pub status_note: Option<String>,
+    /// Schema verdict for the last netlink `expectations` status reply (#791).
+    pub status_verdict: Option<zensight_common::schema::Verdict>,
+    /// Schema verdict for the last systemd `expectations` status reply (#791).
+    pub systemd_verdict: Option<zensight_common::schema::Verdict>,
 }
 
 impl Default for ExpectationsState {
@@ -327,6 +331,8 @@ impl Default for ExpectationsState {
             current: Vec::new(),
             systemd: SystemdExpDraft::default(),
             status_note: None,
+            status_verdict: None,
+            systemd_verdict: None,
         }
     }
 }
@@ -532,6 +538,19 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
         ExpTarget::Systemd => state.systemd.rows(),
     };
     let title = text(format!("Configured ({})", rows.len())).size(18);
+    // The reply's schema verdict rides beside the count (#791): three
+    // states, and "not checked" reads as absent, never as a pass.
+    let verdict = match state.target {
+        ExpTarget::Netlink => state.status_verdict.as_ref(),
+        ExpTarget::Systemd => state.systemd_verdict.as_ref(),
+    };
+    let title: Element<'_, Message> = match verdict {
+        Some(v) => row![title, crate::view::components::verdict::verdict_badge(v)]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        None => title.into(),
+    };
 
     if rows.is_empty() {
         let note = state
