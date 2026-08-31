@@ -13894,6 +13894,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "zensight-sensor-container"
+version = "0.12.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hostname",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "json5 1.3.1",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 1.1.3+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "zenkey",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
+]
+
+[[package]]
 name = "zensight-sensor-core"
 version = "0.12.0"
 dependencies = [

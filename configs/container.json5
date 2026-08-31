@@ -1,0 +1,121 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",
+    // namespace: "my-deployment",  // OPTIONAL — the deployment base (#466), empty
+                                    // by default. All participants must agree.
+    connect: [],                    // Endpoints to connect to (for client mode)
+    // listen: ["tcp/0.0.0.0:7448"],
+  },
+
+  // Serialization format for telemetry
+  serialization: "cbor",            // "json" or "cbor"
+
+  // container (#819): the whole workload on a Quadlet fleet, and invisible
+  // before this. sysinfo's cgroups collector can be pointed at explicit paths,
+  // is off by default and does not enumerate; the systemd sensor sees
+  // `caddy.service` as a unit, not as Caddy 2.11.4 at a particular digest with
+  // a healthcheck that has been failing since deployment day.
+  //
+  // Two sources, joined:
+  //   * the RUNTIME SOCKET (read-only) — image reference + digest, healthcheck
+  //     state, restart count, exit code, ports, mounts, and the systemd unit
+  //     that owns the container (the PODMAN_SYSTEMD_UNIT label), so a
+  //     container joins up with the systemd sensor's view;
+  //   * the KERNEL (cgroup v2) — memory, memory.max, CPU, throttling, OOM
+  //     counts and PSI. This is what would have named netring rather than
+  //     "the bundle" on 2026-08-17.
+  //
+  // READ-ONLY. The socket client has two methods and both are GETs; there is
+  // no action surface at all.
+  container: {
+    // Runtime sockets. Empty = the conventional ones, in order: rootful podman
+    // (/run/podman/podman.sock), this user's rootless podman
+    // ($XDG_RUNTIME_DIR/podman/podman.sock), then /run/docker.sock. Only the
+    // ones that actually exist are polled.
+    //
+    // In a container, mount the socket READ-ONLY:
+    //   -v /run/podman/podman.sock:/run/podman/podman.sock:ro
+    sockets: [],
+
+    // source: "host-01",           // override the source id (default: hostname)
+
+    poll_interval_secs: 30,
+    timeout_secs: 10,               // must be SHORTER than poll_interval_secs
+
+    // Where the unified cgroup hierarchy is mounted. Override when the sensor
+    // itself runs in a container against a bind-mounted host cgroupfs.
+    cgroup_root: "/sys/fs/cgroup",
+
+    // Containers to skip entirely, by exact name.
+    ignore: [],
+
+    // Identity claims about containers (name + IPs, observer: container), so
+    // netlink's wire-only podman-bridge entities merge into them instead of
+    // floating in the catalog as rows with an IP and nothing else.
+    evidence: true,
+
+    // ── THE ONLY PART OF THIS SENSOR THAT LEAVES THE HOST ──────────────────
+    //
+    // Resolves each container's configured tag against its registry to answer
+    // "is the pinned digest still the newest?" — the live gauge that replaces
+    // image-update-report.sh and its monthly mail — and, optionally, whether a
+    // cosign signature object exists for the running digest, which is what
+    // cosign silently signing nothing for eight days looked like from outside.
+    //
+    // OFF BY DEFAULT, on purpose. Requests are anonymous and read-only (no
+    // credentials are read, sent or stored), and `registries` is a hard
+    // allowlist: startup REFUSES `enabled: true` with an empty list, because
+    // an allowlist that defaults to everything is not one.
+    upstream: {
+      enabled: false,
+      interval_secs: 21600,         // 6 h — registries rate-limit, and the answer
+                                    // changes on a release cadence, not a poll one
+      signatures: false,            // needs `enabled`
+      registries: [],               // e.g. ["git.marcpardo.eu", "docker.io"]
+    },
+
+    // The assertions. Each one is a finding the 2026-08-28 audit made by hand.
+    alerts: {
+      enabled: true,
+      for_secs: 60,
+
+      // A configured healthcheck is failing.
+      unhealthy: true,
+      // A healthcheck is configured and has NEVER produced a result — garage
+      // reported `unhealthy` from the day it was deployed while serving
+      // traffic perfectly, because a CMD-SHELL probe in a distroless image
+      // with no /bin/sh can never run. A separate rule with a separate
+      // sentence, because "the probe is broken" sends an operator somewhere
+      // completely different from "the service is failing".
+      health_never_ran: true,
+
+      // More than restart_max restarts within restart_window_secs. A restart
+      // loop is a first-class state, not something to infer from the journal.
+      restart_loop: true,
+      restart_max: 3,
+      restart_window_secs: 600,
+
+      // The kernel OOM-killed something in this container's cgroup. Graded on
+      // the DELTA — the counter is cumulative, and firing on the total would
+      // alert forever about a kill from last year.
+      oom_killed: true,
+
+      // Exited non-zero and not running.
+      exited_nonzero: true,
+
+      // These two need `upstream` above; without it they fire nothing, because
+      // "not checked" is not "behind" and is emphatically not "unsigned".
+      image_behind: true,
+      unsigned: true,
+
+      // Containers exempt from every rule above, by exact name.
+      exempt: [],
+    },
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",
+  },
+}

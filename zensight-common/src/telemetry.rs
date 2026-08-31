@@ -185,6 +185,12 @@ pub enum Protocol {
     /// vzdump outcomes and sizes, cluster/HA/replication state. Polls the PVE
     /// API read-only with a scoped token; **no action surface at all**.
     Pve,
+    /// OCI containers (#819) — the whole workload on the reference fleet, and
+    /// invisible before this: per-container cgroup/OOM/restart/exit-code,
+    /// image reference **and digest**, healthcheck state including the
+    /// never-ran case, signature presence, and the systemd unit that owns it.
+    /// Read-only socket + cgroup files; no action surface.
+    Container,
 }
 
 impl Protocol {
@@ -204,6 +210,7 @@ impl Protocol {
             Protocol::Parallax => "parallax",
             Protocol::Hostspec => "hostspec",
             Protocol::Pve => "pve",
+            Protocol::Container => "container",
         }
     }
 
@@ -242,6 +249,7 @@ impl std::str::FromStr for Protocol {
             "parallax" => Ok(Protocol::Parallax),
             "hostspec" => Ok(Protocol::Hostspec),
             "pve" => Ok(Protocol::Pve),
+            "container" => Ok(Protocol::Container),
             _ => Err(()),
         }
     }

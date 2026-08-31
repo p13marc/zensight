@@ -1,0 +1,38 @@
+# ZenSight container sensor — one container, one cgroup, its own budget (#813).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via
+# the sensor's health doc self_stats and adjust. See README.md beside this.
+#
+# It reads two things and writes nothing:
+#   * the podman socket, MOUNTED READ-ONLY (:ro below). The sensor's client has
+#     two methods and both are GETs, but the mount is read-only anyway: a
+#     security posture that depends on the code being right is not one.
+#   * the host cgroup hierarchy, read-only, for the per-container memory / OOM
+#     / PSI numbers the runtime does not report.
+[Unit]
+Description=ZenSight container sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-container:latest
+ContainerName=zensight-sensor-container
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+Volume=/run/podman/podman.sock:/run/podman/podman.sock:ro
+Volume=/sys/fs/cgroup:/sys/fs/cgroup:ro
+# The socket is root-owned; without this the sensor sees nothing and says so
+# every cycle. Grant nothing else — no CAP_SYS_ADMIN, no privileged flag.
+User=0:0
+
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/container.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

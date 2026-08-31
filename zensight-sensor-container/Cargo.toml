@@ -1,0 +1,57 @@
+[package]
+name = "zensight-sensor-container"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Zenoh sensor for OCI containers — per-container cgroup/OOM/restart telemetry, image reference and digest, healthcheck state, signature presence. Read-only; no action surface."
+license = "Apache-2.0"
+
+[dependencies]
+zenkey = { workspace = true }
+zensight-common = { path = "../zensight-common" }
+zensight-sensor-core = { path = "../zensight-sensor-core" }
+hostname = "0.4"
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "sync", "time", "net", "fs"] }
+
+# Zenoh
+zenoh.workspace = true
+
+# The podman socket is HTTP over a UNIX socket, which reqwest cannot speak —
+# hence hyper directly. Both are already in the tree (reqwest and the
+# Prometheus exporter's axum pull them), so this adds no new stack.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# The OPTIONAL, explicitly-egressing upstream-digest and signature checks —
+# the only part of this sensor that talks to the internet, and off by default.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json5.workspace = true
+
+# CLI
+clap = { workspace = true, features = ["derive"] }
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# Error handling
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+toml.workspace = true
+
+[[bin]]
+name = "zensight-sensor-container"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
