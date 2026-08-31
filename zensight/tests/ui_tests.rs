@@ -7248,3 +7248,19 @@ mod verdict_ui {
         );
     }
 }
+
+mod hostspec_expectations_ui {
+    use super::simulator;
+    use zensight::view::expectations::{ExpTarget, ExpectationsState, expectations_view};
+
+    /// The hostspec authoring form renders for the new target (#821), with
+    /// the whole-set caption that tells an operator what a push rewrites.
+    #[test]
+    fn test_hostspec_form_renders() {
+        let mut state = ExpectationsState::default();
+        state.target = ExpTarget::Hostspec;
+        let mut ui = simulator(expectations_view(&state));
+        assert!(ui.find("Declare a host assertion").is_ok());
+        assert!(ui.find("Add & Push").is_ok());
+    }
+}

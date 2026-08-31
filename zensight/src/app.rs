@@ -3483,10 +3483,20 @@ impl ZenSight {
                 return match target {
                     ExpTarget::Netlink => self.query_expectations(),
                     ExpTarget::Systemd => self.query_systemd_expectations(),
+                    ExpTarget::Hostspec => self.query_hostspec_expectations(),
                 };
             }
             Message::SetSystemdExpKind(kind) => {
                 self.expectations.systemd_kind = kind;
+            }
+            Message::SetHostspecExpKind(kind) => {
+                self.expectations.hostspec_kind = kind;
+            }
+            Message::HostspecExpectationsReceived(json) => {
+                self.expectations.hostspec_verdict =
+                    Some(Self::reply_verdict("hostspec", "expectations", &json));
+                self.expectations.hostspec =
+                    crate::view::expectations::HostspecExpDraft::from_status(&json);
             }
             Message::SystemdExpectationsReceived(json) => {
                 self.expectations.systemd_verdict =
@@ -3517,6 +3527,116 @@ impl ZenSight {
             }
             Message::AddExpectation => {
                 use crate::view::expectations::{ExpKind, ExpTarget, SystemdExpKind};
+                // Hostspec sentinel (#821): mutate the accumulated draft, then
+                // push the WHOLE set (plain ExpectationsConfig — the sensor
+                // validates before applying; a refusal keeps its previous set
+                // and lands here as command feedback).
+                if self.expectations.target == ExpTarget::Hostspec {
+                    use crate::view::expectations::HostspecExpKind;
+                    let name = self.expectations.new_name.trim().to_string();
+                    if name.is_empty() {
+                        self.toasts
+                            .push(ToastSeverity::Error, "Assertion name is required");
+                        return Task::none();
+                    }
+                    let kind = self.expectations.hostspec_kind;
+                    let path = self.expectations.new_metric.trim().to_string();
+                    let v1 = self.expectations.new_value.trim().to_string();
+                    let v2 = self.expectations.new_port.trim().to_string();
+                    let needs_path = !matches!(
+                        kind,
+                        HostspecExpKind::Listening | HostspecExpKind::ListeningForbid
+                    );
+                    if needs_path && path.is_empty() {
+                        self.toasts
+                            .push(ToastSeverity::Error, "Path is required (absolute)");
+                        return Task::none();
+                    }
+                    let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
+                    let draft = &mut self.expectations.hostspec;
+                    match kind {
+                        HostspecExpKind::Mount => {
+                            draft.mounts.retain(|(n, ..)| n != &name);
+                            draft.mounts.push((name, path, opt(&v1), opt(&v2)));
+                        }
+                        HostspecExpKind::File => {
+                            let secs = match v1.is_empty() {
+                                true => None,
+                                false => match v1.parse::<u64>() {
+                                    Ok(s) => Some(s),
+                                    Err(_) => {
+                                        self.toasts.push(
+                                            ToastSeverity::Error,
+                                            "newer_than must be a number of seconds",
+                                        );
+                                        return Task::none();
+                                    }
+                                },
+                            };
+                            let pct = match v2.is_empty() {
+                                true => None,
+                                false => match v2.parse::<f64>() {
+                                    Ok(p) => Some(p),
+                                    Err(_) => {
+                                        self.toasts
+                                            .push(ToastSeverity::Error, "size ±% must be a number");
+                                        return Task::none();
+                                    }
+                                },
+                            };
+                            draft.files.retain(|(n, ..)| n != &name);
+                            draft.files.push((name, path, secs, pct));
+                        }
+                        HostspecExpKind::Listening | HostspecExpKind::ListeningForbid => {
+                            let Ok(port) = v2.parse::<u16>() else {
+                                self.toasts
+                                    .push(ToastSeverity::Error, "Port must be a number");
+                                return Task::none();
+                            };
+                            let forbid = kind == HostspecExpKind::ListeningForbid;
+                            draft.listening.retain(|(n, ..)| n != &name);
+                            draft.listening.push((name, port, opt(&v1), forbid));
+                        }
+                        HostspecExpKind::Symlink => {
+                            if v1.is_empty() {
+                                self.toasts
+                                    .push(ToastSeverity::Error, "Symlink target is required");
+                                return Task::none();
+                            }
+                            draft.symlinks.retain(|(n, ..)| n != &name);
+                            draft.symlinks.push((name, path, v1));
+                        }
+                        HostspecExpKind::Absent => {
+                            draft.absent.retain(|(n, ..)| n != &name);
+                            draft.absent.push((name, path));
+                        }
+                        HostspecExpKind::Content => {
+                            if v1.is_empty() {
+                                self.toasts
+                                    .push(ToastSeverity::Error, "A needle to contain is required");
+                                return Task::none();
+                            }
+                            draft.content.retain(|(n, ..)| n != &name);
+                            draft.content.push((name, path, v1));
+                        }
+                        HostspecExpKind::Perms => {
+                            if v1.is_empty() && v2.is_empty() {
+                                self.toasts.push(
+                                    ToastSeverity::Error,
+                                    "mode and/or owner is required (a vacuous perms entry is refused)",
+                                );
+                                return Task::none();
+                            }
+                            draft.perms.retain(|(n, ..)| n != &name);
+                            draft.perms.push((name, path, opt(&v1), opt(&v2)));
+                        }
+                    }
+                    let command = self.expectations.hostspec.to_set_json();
+                    let key = zensight_common::fleet_command_key("hostspec", "expectations");
+                    return self
+                        .send_command(key, &command, "hostspec assertions pushed".to_string())
+                        .chain(self.query_hostspec_expectations());
+                }
                 // Systemd sentinel (#278): mutate the accumulated draft, then push
                 // the full set via SetExpectations.
                 if self.expectations.target == ExpTarget::Systemd {
@@ -3643,6 +3763,14 @@ impl ZenSight {
             }
             Message::RemoveExpectation(rule) => {
                 use crate::view::expectations::ExpTarget;
+                if self.expectations.target == ExpTarget::Hostspec {
+                    self.expectations.hostspec.remove_rule(&rule);
+                    let command = self.expectations.hostspec.to_set_json();
+                    let key = zensight_common::fleet_command_key("hostspec", "expectations");
+                    return self
+                        .send_command(key, &command, format!("Removed {rule}"))
+                        .chain(self.query_hostspec_expectations());
+                }
                 if self.expectations.target == ExpTarget::Systemd {
                     self.expectations.systemd.remove_rule(&rule);
                     let command = self.expectations.systemd.to_command_json();
@@ -3662,6 +3790,7 @@ impl ZenSight {
                 return match self.expectations.target {
                     ExpTarget::Netlink => self.query_expectations(),
                     ExpTarget::Systemd => self.query_systemd_expectations(),
+                    ExpTarget::Hostspec => self.query_hostspec_expectations(),
                 };
             }
             Message::ExpectationStatusReceived(json) => {
@@ -4850,6 +4979,40 @@ impl ZenSight {
                     Message::CommandFeedback {
                         success: false,
                         message: "No systemd sentinel responded".to_string(),
+                    }
+                }
+                Err(e) => Message::CommandFeedback {
+                    success: false,
+                    message: format!("Status query failed: {e}"),
+                },
+            }
+        })
+    }
+
+    /// Query the hostspec sentinel's current assertion set (#821). Routes to
+    /// `HostspecExpectationsReceived`.
+    fn query_hostspec_expectations(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let key = zensight_common::fleet_rpc_key("hostspec", "expectations");
+        Task::future(async move {
+            match session
+                .get(&key)
+                .target(zenoh::query::QueryTarget::All)
+                .await
+            {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        let body =
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
+                        return Message::HostspecExpectationsReceived(body);
+                    }
+                    Message::CommandFeedback {
+                        success: false,
+                        message: "No hostspec sensor responded".to_string(),
                     }
                 }
                 Err(e) => Message::CommandFeedback {
@@ -7082,6 +7245,7 @@ impl ZenSight {
             "netlink" => scan!(netlink),
             "systemd" => scan!(systemd),
             "netring" => scan!(netring),
+            "hostspec" => scan!(hostspec),
             _ => None,
         }
     }
