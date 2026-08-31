@@ -51,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **hostspec is a fleet citizen** (#821, integration PR): in the conformance
+  CI roster (it is the ideal CI sensor — no privileges, no devices, empty
+  default set, every procedure served), `just sensors`/`run-sensors.sh`,
+  gen-configs, both sensors images, all four release lists, and a hardened
+  systemd unit that is the least privileged in packaging/ (DynamicUser,
+  ProtectSystem=strict, empty capability set; ProtectHome=read-only so
+  /home assertions stay observable). Docs tables and counts updated
+  throughout; KEYSPACE's fleet-push list gains hostspec expectations.
+
 - **`zensight-sensor-hostspec`** (#821): machine-checked desired-state
   assertions — the sentinel pattern for what D-Bus and netlink cannot see.
   Seven read-only assertion kinds (mounts incl. bind-of through computed

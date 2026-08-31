@@ -30,6 +30,7 @@ each. The canonical cross-cutting references live in [`docs/`](docs/).
 | [`zensight-sensor-netlink`](zensight-sensor-netlink/) | Linux kernel networking (RTNETLINK/sock_diag) + sentinel |
 | [`zensight-sensor-netring`](zensight-sensor-netring/) | Wire-level flow/L7/NDR (AF_PACKET/AF_XDP or pcap) + detectors |
 | [`zensight-sensor-systemd`](zensight-sensor-systemd/) | systemd unit/service/boot telemetry (D-Bus) + sentinel + gated actions |
+| [`zensight-sensor-hostspec`](zensight-sensor-hostspec/) | machine-checked desired-state assertions (mounts/files/listeners/symlinks/content/perms) — read-only sentinel, executes nothing |
 | [`zensight-correlator`](zensight-correlator/) | Fuses identity evidence → one `HostEntity` per host |
 | [`zensight-exporter-prometheus`](zensight-exporter-prometheus/) | Prometheus `/metrics` + remote-write |
 | [`zensight-exporter-otel`](zensight-exporter-otel/) | OpenTelemetry OTLP metrics/logs/traces |
@@ -90,7 +91,7 @@ just netring   # | netlink | sysinfo | logs | systemd | parallax
 (openh264 compiled from source → a C++ compiler is required); a plain
 `cargo build --workspace` stays codec-free (JPEG previews only).
 
-`just sensors` spawns five sensors — sysinfo, netlink, netring, logs, systemd — plus
+`just sensors` spawns six sensors — sysinfo, netlink, netring, logs, systemd, hostspec — plus
 **parallax if its binary has been built** (it is skipped otherwise). parallax
 is still **source-only**: no release build produces its binary and it is not in
 the sensors container image, because it compiles openh264 from C++ source

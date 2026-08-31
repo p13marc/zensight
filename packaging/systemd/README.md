@@ -41,7 +41,9 @@ $ for f in packaging/systemd/*.service; do
     systemd-analyze security --offline=true "$f" | tail -1
   done | sort -k1
 
-5.6   correlator, both exporters, gnmi, modbus, netflow, snmp, sysinfo, systemd
+5.6   correlator, both exporters, gnmi, modbus, netflow, snmp, sysinfo, systemd,
+      hostspec (ProtectHome=read-only — an operator may assert on /home paths;
+      everything hostspec reads, it reads read-only, and it executes nothing)
 5.7   parallax        (empty set, plus DeviceAllow — see below)
 5.8   logs            CAP_NET_BIND_SERVICE
 5.8   netring         CAP_NET_RAW + CAP_IPC_LOCK

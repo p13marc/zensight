@@ -38,7 +38,8 @@ RUN cargo build --release \
     -p zensight-sensor-netlink \
     -p zensight-sensor-netring \
     -p zensight-sensor-logs \
-    -p zensight-sensor-systemd
+    -p zensight-sensor-systemd \
+    -p zensight-sensor-hostspec
 
 # =============================================================================
 # Stage 2: Minimal runtime image
@@ -58,6 +59,7 @@ COPY --from=builder \
     /build/target/release/zensight-sensor-netring \
     /build/target/release/zensight-sensor-logs \
     /build/target/release/zensight-sensor-systemd \
+    /build/target/release/zensight-sensor-hostspec \
     /usr/local/bin/
 
 # The committed example configs — transformed into demo-max run configs at

@@ -36,6 +36,7 @@ reference pages are under `<crate>/docs/`.
 | [zensight-sensor-netlink](../zensight-sensor-netlink/) | telemetry · sentinel · configuration |
 | [zensight-sensor-netring](../zensight-sensor-netring/) | telemetry · detectors · configuration |
 | [zensight-sensor-systemd](../zensight-sensor-systemd/) | telemetry · units-and-actions · configuration |
+| [zensight-sensor-hostspec](../zensight-sensor-hostspec/) | assertions · configuration |
 | [zensight-correlator](../zensight-correlator/) | correlation · keyspace · storage |
 | [zensight-exporter-prometheus](../zensight-exporter-prometheus/) | reference |
 | [zensight-exporter-otel](../zensight-exporter-otel/) | reference |
