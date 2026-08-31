@@ -13902,6 +13902,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "flume",
  "hostname",
  "if-addrs",
  "json5 1.3.1",

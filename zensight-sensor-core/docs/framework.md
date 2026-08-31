@@ -212,6 +212,48 @@ documented rather than discovered:
 > Until then the contract above is the contract: **bound the cost of one query,
 > not the number in flight.**
 
+## Reconciling `@desired` (#816)
+
+`desired::reconcile_topic` is the consumer half of fleet desired-state: a
+controller publishes per-host policy under
+`v1/@desired/state/<this-host>/<producer>/<topic>` (see `docs/KEYSPACE.md`
+for the full contract), and the sensor converges on it.
+
+```rust
+let (marker, _task) = zensight_sensor_core::desired::reconcile_topic(
+    session.clone(),
+    runner.publisher(),
+    DesiredTopic { topic: "expectations", desired_key },   // registry-built key
+    config.desired.clone(),                                 // DesiredConfig (kill switch + cadence)
+    file_baseline,                                          // what a Delete reverts to
+    move |cfg| { let h = handle.clone(); async move {
+        validate(&cfg).map_err(|e| e)?;                     // the SAME gate the RPC path runs
+        h.replace(cfg).await;
+        Ok(())
+    }},
+);
+```
+
+Discipline (each of these is load-bearing):
+
+- **The storage GET is the primary path** — a seed GET at startup plus a
+  periodic re-GET (`refresh_secs`) is level-triggered and survives missed
+  samples, reconnects, router restarts. The AdvancedSubscriber (history +
+  recovery) is the latency accelerator only.
+- **LWW by sample timestamp**; replays and re-seeds are idempotent; an
+  unstamped sample is refused (it cannot be ordered).
+- **Rejection keeps the previous good config** and rides the
+  `state/<producer>/applied/<topic>` marker (`AppliedConfig.last_rejected`)
+  — on the bus, not only in a log. The marker also says which of the two
+  writers (file | desired | rpc) won last; hand the returned `AppliedMarker`
+  to your `serve_topic` apply closure so RPC applies stamp `source: rpc`.
+- **Kill switch first**: `desired.enabled = false` in file config declares
+  nothing and applies nothing — but still publishes the marker
+  (`source: file`), because "disabled" must never read as "silent".
+- **The structural never-list**: this module deserializes only your `Doc`
+  type and calls only your `apply` — session endpoints/TLS/namespace have no
+  writer here.
+
 ## Host identity
 
 `identity.rs` — `HostIdentity::detect()` reads the local system:

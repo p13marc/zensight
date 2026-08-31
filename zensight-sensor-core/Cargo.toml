@@ -17,6 +17,10 @@ dirs = { workspace = true }
 # it in; we depend on it explicitly rather than relying on feature unification.
 zenoh = { workspace = true, features = ["internal"] }
 zenoh-ext = { workspace = true }
+# Unbounded channel for the @desired reconciler's AdvancedSubscriber (#816)
+# — must match zenoh's flume so the (Sender, Receiver) pair satisfies
+# IntoHandler (the correlator makes the same choice for the same reason).
+flume = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

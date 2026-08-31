@@ -51,6 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `@desired` reconciler** (#816 pt 2):
+  `zensight_sensor_core::desired::reconcile_topic` — seed GET + periodic
+  re-GET as the level-triggered primary path (survives missed samples,
+  reconnects, router restarts) with the AdvancedSubscriber
+  history+recovery recipe as the accelerator; LWW by sample timestamp
+  (unstamped refused — unorderable); invalid documents rejected loudly
+  with the previous good config kept and the rejection riding the applied
+  marker; Delete reverts to the file baseline; the kill switch declares
+  and applies nothing but still publishes `source: file` ("disabled" must
+  never read as "silent"). E2E over an isolated pair pins late-start
+  convergence through a publisher cache, both rejection paths, the
+  delete-revert, the kill switch, and the zenoh-ext verbatim-chunk canary.
+
 - **The `@desired` service slice + the applied-config marker** (#816 pt 1).
   New registry slice `desired.toml`: a controller publishes per-host runtime
   policy under `v1/@desired/state/<host>/<producer>/<topic>` (target host
