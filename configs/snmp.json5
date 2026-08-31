@@ -65,13 +65,28 @@
       // engine_state_path: "/var/lib/zensight-snmp/snmp-trap-engine.json",
     },
 
-    // Devices to poll
+    // v1/v2c OPT-IN (#825). A community string is a CLEARTEXT credential on
+    // the wire — anyone on the path reads it and replays it (netring even
+    // ships a detector for exactly this pattern). The sensor therefore
+    // REFUSES to start with a v1/v2c device configured unless this flag
+    // says, explicitly, that you accept the cost. Prefer v3 authPriv below.
+    // allow_insecure_versions: true,
+
+    // Devices to poll. The example leads with SNMPv3 authPriv — in 2026
+    // that is the shipped default, not the aspiration (#825). Secrets take
+    // "${ENV_VAR}" and "file:/path" indirection everywhere.
     devices: [
       {
         name: "router01",              // Used in key expressions
         address: "192.168.1.1:161",    // SNMP agent address
-        community: "public",           // Community string
-        version: "v2c",                // "v1" or "v2c"
+        version: "v3",
+        security: {
+          username: "zensight-ro",
+          auth_protocol: "SHA256",     // "MD5" | "SHA" | "SHA224".."SHA512"
+          auth_password: "file:/run/credentials/snmp/router01.auth",
+          priv_protocol: "AES",        // "DES" | "AES" | "AES192" | "AES256"
+          priv_password: "file:/run/credentials/snmp/router01.priv",
+        },
         poll_interval_secs: 30,        // Polling interval
 
         // Individual OIDs to poll with GET
@@ -91,11 +106,12 @@
         // retries: 2,                  // retransmissions after a timeout
         // max_repetitions: 20,         // GETBULK rows per round-trip (v2c/v3)
       },
-      // Add more devices here
+      // A legacy v1/v2c device — needs `allow_insecure_versions: true`
+      // above, and the comment there says what that costs.
       // {
-      //   name: "switch01",
+      //   name: "legacy-ups",
       //   address: "192.168.1.2:161",
-      //   community: "public",
+      //   community: "${SNMP_LEGACY_COMMUNITY}",
       //   version: "v2c",
       //   poll_interval_secs: 60,
       //   oid_group: "network_interfaces",  // Reference a predefined group
