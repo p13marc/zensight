@@ -12,8 +12,13 @@ Hundreds of units exist per host, so per-unit series are scoped to a watchlist
 to bound key cardinality. `systemd.watch_units` is a list of globs (`*`, `?`,
 `[…]` semantics via the `glob` crate); invalid patterns are logged and skipped.
 Matched units (up to `watch_max`, default 50) stream `unit/<name>/*` telemetry
-(see [telemetry.md](telemetry.md)); matches beyond the cap are dropped (logged,
-not silently truncated) and folded into the `other/*` aggregate bucket. Watched
+(see [telemetry.md](telemetry.md)). Under the cap, exact-named entries always
+survive (#865): an operator who spelled out `sshd.service` gets `sshd.service`,
+whatever the cap; wildcard matches fill the remaining room sorted by unit name
+(deterministic — never D-Bus enumeration order, which leads with sockets and
+once cost every named service its slot). Matches beyond the cap are dropped —
+logged by name (exact drops at warn, wildcard drops as a count plus a sample,
+full list at debug) — and folded into the `other/*` aggregate bucket. Watched
 `.timer` and `.socket` units get their own extra keys.
 
 ## Sentinel (#277)

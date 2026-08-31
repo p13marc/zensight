@@ -21,7 +21,7 @@ fully commented example. Validation rejects `poll_interval_secs == 0`.
 | `poll_interval_secs` | `15` | Manager read interval (must be > 0). |
 | `source` | hostname | sensor instance id in payloads; falls back to `unknown` (v1 keys are origin-scoped, so it no longer appears in key expressions). |
 | `watch_units` | `[]` | glob list of units to stream `unit/<name>/*` for (empty = aggregates only). |
-| `watch_max` | `50` | hard cap on watched units; excess folded into `other/*`. |
+| `watch_max` | `50` | hard cap on watched units; exact-named entries kept first, wildcard matches fill the rest name-sorted (#865); excess dropped (logged by name) and folded into `other/*`. |
 | `ip_io_accounting` | `false` | include IP/IO byte + `ip_*_bps` series for watched units that enabled accounting. |
 | `events_capacity` | `256` | bounded control-plane event ring (`@rpc/systemd/events`). |
 | `alerts` | see below | threshold alerts (#276). |

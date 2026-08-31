@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The systemd watchlist cap no longer drops exact-named units** (#865).
+  `watch_max` truncated matches in D-Bus `ListUnits` order — an order that
+  means nothing and happens to lead with sockets — so a wildcard-heavy
+  watchlist (the demo: 96 matches vs cap 50) dropped every explicitly-named
+  service. Those are precisely the units with IP accounting, which killed
+  their `ip_*_bps` series (the GUI Bandwidth Services table rendered empty)
+  and their threshold-alert inputs, while the operator's nine deliberate
+  patterns were silently not honored. Exact (non-wildcard) patterns now
+  always survive the cap; wildcard matches fill the remaining room sorted by
+  unit name (publication order of watched units is now name-sorted, no
+  longer D-Bus arrival order); drops are logged by name — exact drops at
+  warn, wildcard drops as a count plus a first-10 sample, the full list at
+  debug. The demo config also raises `watch_max` to 100 so the Timers /
+  Sockets panels see the whole curated match set truncation-free.
+
 - **The memory governor no longer thrashes when the budget is below the
   process baseline** (#864). A budget under netring's ~297 MiB capture-ring
   baseline armed the #812 shed ladder from second one with an unreachable

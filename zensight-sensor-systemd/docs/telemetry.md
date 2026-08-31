@@ -24,10 +24,13 @@ computed from the Manager monotonic timestamps exactly like `systemd-analyze`.
 
 ### Per-unit watchlist (#273)
 
-Units matching a `watch_units` glob (capped by `watch_max`) stream
+Units matching a `watch_units` glob (capped by `watch_max`; exact-named
+entries survive the cap first, wildcard matches fill the rest sorted by unit
+name — #865) stream
 `unit/<name>/{active,state,restarts_total,active_since_usec,mem_bytes,cpu_usec,
 tasks,exit_code}`. The `unit` label carries the raw unit name; overflow beyond
-`watch_max` is folded into `other/units_total` (logged, not silently truncated).
+`watch_max` is dropped (logged by name, not silently truncated) and folded
+into `other/units_total`.
 
 `<name>` is the unit name through `zenkey::Chunk::slug` (#843): already-legal
 names (`sshd.service`) stay byte-identical, everything else — uppercase
