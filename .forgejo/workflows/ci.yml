@@ -224,6 +224,13 @@ jobs:
       - uses: https://github.com/taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-deny
+      # The advisory-db clone persists in the runner lane's cargo home, and a
+      # clone corrupted mid-fetch ("expected flush after ref listing") fails
+      # every later run ON THAT LANE as `advisories FAILED` — intermittent by
+      # lane, indistinguishable from a real advisory without logs. A fresh
+      # shallow clone costs seconds; a wedged lane costs an afternoon.
+      - name: reset the advisory-db cache (self-heal)
+        run: rm -rf ~/.cargo/advisory-dbs
       - run: cargo deny check
 
   lint:
