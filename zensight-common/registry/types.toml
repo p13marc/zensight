@@ -60,6 +60,12 @@ kind = "json-schema"
 [types.HostspecEvaluation]
 kind = "json-schema"
 
+[types.HostspecExpectations]
+kind = "json-schema"
+
+[types.AppliedConfig]
+kind = "json-schema"
+
 [types.FrameMeta]
 kind = "json-schema"
 

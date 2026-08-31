@@ -67,9 +67,7 @@ impl zensight_sensor_core::SensorConfig for HostspecSensorConfig {
     /// refused over `expectations/set` refuses to start, with the same
     /// message naming every offending expectation.
     fn validate(&self) -> zensight_sensor_core::Result<()> {
-        self.hostspec
-            .expectations
-            .validate()
+        crate::sentinel::validate(&self.hostspec.expectations)
             .map_err(zensight_sensor_core::SensorError::config)
     }
 }
@@ -98,10 +96,7 @@ mod tests {
             cfg.hostspec.expectations.is_empty(),
             "the shipped default set must be empty (conformance-safe)"
         );
-        cfg.hostspec
-            .expectations
-            .validate()
-            .expect("shipped set validates");
+        crate::sentinel::validate(&cfg.hostspec.expectations).expect("shipped set validates");
     }
 
     #[test]
@@ -116,7 +111,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        cfg.validate().unwrap();
+        crate::sentinel::validate(&cfg).unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
         let back: ExpectationsConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg, back);

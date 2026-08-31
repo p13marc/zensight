@@ -22,6 +22,7 @@ zensight/v1/<origin>/@rpc/<producer>/<procedure...>      request/reply
 zensight/v1/<origin>/@media/<producer>/<stream>/…        opaque video
 zensight/v1/<origin>/@blob/{artifact,tree,store}/…       bulk content
 zensight/v1/@catalog/…                                   the identity catalog
+zensight/v1/@desired/state/<host>/<producer>/<topic>     fleet desired state (#816)
 ```
 
 - `<origin>` = `h-<12hex>` (sha256 of machine-id + salt, RFC
@@ -82,6 +83,48 @@ zensight/v1/@catalog/…                                   the identity catalog
   `<metric>.rate` (a `Gauge`; `By/s` for octet counters, else `1/s`) next to
   the raw lifetime counter — a dot-suffix on the leaf chunk, not an extra
   subject chunk, so it stays inside the registered `{metric...}` family.
+
+## `@desired` — fleet configuration as desired state (#816)
+
+A controller publishes per-host runtime POLICY under the `@desired` service
+origin, the **target host id as the first subject chunk** (RFC 07 §3's G1
+proxy rule; zenkey-build's H4 lint enforces the ordering):
+
+```
+zensight/v1/@desired/state/h-3fa9c2d41b7e/hostspec/expectations
+```
+
+LWW and storage-backed (`configs/router-evidence-storage.json5` grows a
+`zensight-desired` storage — `*` never matches a verbatim `@` origin, so the
+selector is its own, D4). The target sensor **reconciles**: a GET seed
+against the storage at startup plus a periodic re-GET (`desired.refresh_secs`,
+level-triggered — survives any missed sample or reconnect), with the live
+subscription as the accelerator. A `Delete` reverts the target to its
+file-config baseline. This is convergence; durable pub/sub *commands* are
+the permanently forbidden alternative (RFC 12).
+
+What it carries in v1: the hostspec assertion set
+(`HostspecExpectations` — a real schemars type, which is what the RFC 08 §7
+schema gate requires of a state-class payload). The systemd/netlink/logs
+sentinels have the identical seam and join when their config types migrate
+to real schemas.
+
+**The never-list** (the most important constraint): nothing under `@desired`
+may carry secrets or anything a sensor needs to reach the bus — endpoints,
+TLS material, the namespace. One bad desired publish must never lock the
+fleet out of its own supervision. The consumer enforces this structurally:
+the reconciler deserializes only the sentinel's own config type and writes
+only that sentinel's handle. A per-sensor kill switch
+(`desired.enabled: false`) lives in FILE config.
+
+**Two writers, one honest marker.** An operator's `@rpc/<producer>/<topic>/set`
+and the `@desired` reconciler both write the same sentinel handle; the rule
+is LWW by arrival, and `state/<producer>/applied/<topic>` (`AppliedConfig`)
+says which source won last (`file | desired | rpc`), what document is in
+force (JSON-encoded — its schema is the topic type's own), and the most
+recent *rejected* desired doc: an invalid document is refused loudly, the
+previous good config keeps running, and the refusal is on the bus, not only
+in a log.
 
 ## Where the machine-readable truth lives
 

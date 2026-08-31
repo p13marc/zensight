@@ -1,0 +1,48 @@
+# Subject registry: @desired (fleet desired-state author). RFC 07 §3, RFC 12 §3;
+# issue #816.
+#
+# A controller publishes runtime POLICY for a target host under this service
+# origin, with the TARGET HOST ID AS THE FIRST SUBJECT CHUNK (the G1
+# desired-state proxy rule; zenkey-build's H4 lint enforces the ordering).
+# LWW + storage-backed: the target reconciles on connect and reconnect, so a
+# sensor that was offline during a change picks it up when it returns. This is
+# convergence, never commands — RFC 12 is explicit that durable pub/sub
+# imperatives are the permanently forbidden alternative.
+#
+# What must NEVER move onto this origin (the single most important constraint
+# in #816): secrets, and anything a sensor needs to REACH THE BUS — endpoints,
+# TLS material, the namespace. A sensor must always find its router from local
+# file config, or one bad desired publish locks the fleet out of its own
+# supervision. Structurally enforced on the consumer side: the reconciler
+# (zensight-sensor-core::desired) only ever deserializes a sentinel's own
+# config type and only ever writes that sentinel's handle.
+#
+# ttl_s = 0 on every subject: desired state is operator policy — it never
+# ages out; it is replaced or deleted (a delete reverts the target to its
+# file-config baseline).
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[service]
+name = "desired"
+origin = "@desired"
+description = "fleet desired-state author (#816): per-host runtime policy, target host first subject chunk; LWW, storage-backed, reconciled on (re)connect"
+
+# v1 carries the HOSTSPEC topic only. The systemd/netlink/logs sentinels have
+# the identical seam (SentinelHandle::replace) but their config types are
+# sensor-crate types with summary schemas, and a state-class subject needs a
+# real schemars-generated schema (#815's gate — it refused exactly this).
+# They join when their types migrate to zensight-common, tracked in the
+# follow-up issue this file's PR names.
+
+[[subject]]
+path = "{host}/hostspec/expectations"
+class = "state"
+type = "HostspecExpectations"
+cardinality = 10000
+ttl_s = 0
+since = "1.0"
+description = "desired hostspec assertion set for {host} (#821 — its natural fleet-wide author)"

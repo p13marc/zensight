@@ -28,26 +28,25 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, RwLock};
 
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
 use zensight_sensor_core::AlertReporter;
 
+// The wire types live in zensight-common (#816): three consumers — this
+// sensor, the GUI's authoring form, and the @desired fleet author — and the
+// RFC 08 §7 schema gate all need them there. Re-exported so in-crate paths
+// (and the e2e) read unchanged.
+pub use zensight_common::hostspec::{
+    AbsentExpectation, AssertionResult, AssertionStatus, ContentExpectation, ExpectationsConfig,
+    FileExpectation, HostspecEvaluation, ListeningExpectation, MountExpectation, PermsExpectation,
+    SymlinkExpectation, parse_mode,
+};
+
 use crate::observe::{
     self, FileFacts, IdTables, ListenEntry, MountEntry, Observation, containing_mount,
     visible_mount,
 };
-
-fn default_eval_interval() -> u64 {
-    60
-}
-fn default_severity() -> AlertSeverity {
-    AlertSeverity::Warning
-}
-fn default_true() -> bool {
-    true
-}
 
 /// One failed clause of one assertion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,354 +91,6 @@ fn unreadable(subject: (&str, &str), what: &str, err: &str) -> Violation {
 // ---------------------------------------------------------------------------
 // The assertion vocabulary — seven kinds, closed.
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MountExpectation {
-    pub name: String,
-    /// The mount point, absolute.
-    pub path: String,
-    /// Assert `path` is a bind of this source path (same filesystem, root
-    /// computed through the containing mount — btrfs subvolumes included).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_bind_of: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fstype: Option<String>,
-    /// Each listed option must be present (mount or superblock options).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<String>,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub for_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FileExpectation {
-    pub name: String,
-    pub path: String,
-    /// `false` asserts the opposite of `absent`: this file may exist but its
-    /// other clauses are only checked when it does. Default: must exist.
-    #[serde(default = "default_true")]
-    pub exists: bool,
-    /// Maximum mtime age, seconds ("the nightly backup is newer than 26h").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub newer_than_secs: Option<u64>,
-    /// Fire when the size drifts more than this percentage from the latched
-    /// baseline — the last size that PASSED. The baseline advances only on a
-    /// pass, so a halved backup stays firing instead of self-resolving one
-    /// sweep later when the halved size becomes "previous". In-memory: a
-    /// restart reseeds the baseline on first observation (documented).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_within_pct_of_previous: Option<f64>,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub for_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ListeningExpectation {
-    pub name: String,
-    pub port: u16,
-    /// Exact bound address to require (or forbid). `None` = any listener on
-    /// the port. `0.0.0.0` and `::` are DISTINCT wildcards — forbid both if
-    /// you mean "not world-reachable" on a dual-stack host (the shipped
-    /// example shows the pair).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub addr: Option<String>,
-    /// `true`: fire when a matching listener EXISTS (the bound-to-0.0.0.0
-    /// case); `false`: fire when none does.
-    #[serde(default)]
-    pub forbid: bool,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub for_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SymlinkExpectation {
-    pub name: String,
-    pub path: String,
-    /// The literal `readlink` target — never canonicalized: the assertion is
-    /// about what the link SAYS, not what it currently resolves to.
-    pub target: String,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub for_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AbsentExpectation {
-    pub name: String,
-    pub path: String,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub for_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ContentExpectation {
-    pub name: String,
-    pub path: String,
-    /// Literal substrings; each must be present.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub contains: Vec<String>,
-    /// Regexes; each must match somewhere.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub matches: Vec<String>,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub for_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PermsExpectation {
-    pub name: String,
-    pub path: String,
-    /// Octal permission bits, exact ("0600"). `lstat` needs no read
-    /// permission, so this works on secrets the sensor cannot open.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    /// Owner by name (`/etc/passwd`) or numeric uid. NSS/LDAP-resolved hosts
-    /// should use numeric.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub for_secs: Option<u64>,
-}
-
-/// The whole hot-swappable assertion set. Every field defaults, so a partial
-/// `expectations/set` payload is legal and means "empty for the kinds you
-/// omitted" — the systemd convention.
-///
-/// `Default` is hand-written to agree with the serde defaults: the derived
-/// impl would zero `eval_interval_secs`, making an absent `expectations`
-/// block fail its own validation — caught by the minimal-config test.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExpectationsConfig {
-    #[serde(default = "default_eval_interval")]
-    pub eval_interval_secs: u64,
-    /// Set-wide alert debounce; `0` = fire on the first failing sweep (see
-    /// the module doc for why that is the right default here).
-    #[serde(default)]
-    pub default_for_secs: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mounts: Vec<MountExpectation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<FileExpectation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub listening: Vec<ListeningExpectation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub symlinks: Vec<SymlinkExpectation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub absent: Vec<AbsentExpectation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub content: Vec<ContentExpectation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub perms: Vec<PermsExpectation>,
-}
-
-/// `(kind, name, severity, for_secs)` for every expectation, in a stable
-/// order — the sweep and the `spec` reply both walk this.
-macro_rules! for_each_kind {
-    ($cfg:expr, $f:expr) => {{
-        let f = $f;
-        for e in &$cfg.mounts {
-            f("mount", &e.name);
-        }
-        for e in &$cfg.files {
-            f("file", &e.name);
-        }
-        for e in &$cfg.listening {
-            f("listening", &e.name);
-        }
-        for e in &$cfg.symlinks {
-            f("symlink", &e.name);
-        }
-        for e in &$cfg.absent {
-            f("absent", &e.name);
-        }
-        for e in &$cfg.content {
-            f("content", &e.name);
-        }
-        for e in &$cfg.perms {
-            f("perms", &e.name);
-        }
-    }};
-}
-
-impl ExpectationsConfig {
-    pub fn is_empty(&self) -> bool {
-        self.mounts.is_empty()
-            && self.files.is_empty()
-            && self.listening.is_empty()
-            && self.symlinks.is_empty()
-            && self.absent.is_empty()
-            && self.content.is_empty()
-            && self.perms.is_empty()
-    }
-
-    /// Validate the whole set — called at config load (refuse to start) and
-    /// before every hot-swap `replace` (refuse with `error/invalid-args`).
-    /// Collects every failure, each naming its expectation, instead of
-    /// stopping at the first: an operator fixing a fleet push wants the
-    /// whole list once.
-    pub fn validate(&self) -> Result<(), String> {
-        let mut errs: Vec<String> = Vec::new();
-        if self.eval_interval_secs == 0 {
-            errs.push("eval_interval_secs must be >= 1".into());
-        }
-        let mut names: HashSet<(&str, &str)> = HashSet::new();
-        let mut check_name = |kind: &'static str, name: &str, errs: &mut Vec<String>| {
-            if name.is_empty() {
-                errs.push(format!("{kind}: an expectation has an empty name"));
-            } else if !names.insert((kind, unsafe {
-                // SAFETY-free equivalent: leak-free borrow across the closure —
-                // names only lives for this call. (Simpler spelled with owned
-                // strings; kept borrowed to avoid per-call allocs.)
-                std::mem::transmute::<&str, &'static str>(name)
-            })) {
-                errs.push(format!(
-                    "{kind}:{name}: duplicate name — the rule slug would collide and \
-                     cross-resolve alerts"
-                ));
-            }
-        };
-        let abs = |kind: &str, name: &str, field: &str, p: &str, errs: &mut Vec<String>| {
-            if !p.starts_with('/') {
-                errs.push(format!("{kind}:{name}: {field} {p:?} is not absolute"));
-            }
-        };
-        for e in &self.mounts {
-            check_name("mount", &e.name, &mut errs);
-            abs("mount", &e.name, "path", &e.path, &mut errs);
-            if let Some(src) = &e.is_bind_of {
-                abs("mount", &e.name, "is_bind_of", src, &mut errs);
-            }
-            if e.is_bind_of.is_none() && e.fstype.is_none() && e.options.is_empty() {
-                // A bare mount expectation still asserts "is a mount point";
-                // that is a real claim, so nothing to reject.
-            }
-        }
-        for e in &self.files {
-            check_name("file", &e.name, &mut errs);
-            abs("file", &e.name, "path", &e.path, &mut errs);
-            if let Some(s) = e.newer_than_secs
-                && s == 0
-            {
-                errs.push(format!("file:{}: newer_than_secs must be > 0", e.name));
-            }
-            if let Some(p) = e.size_within_pct_of_previous
-                && p.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
-            {
-                errs.push(format!(
-                    "file:{}: size_within_pct_of_previous must be > 0",
-                    e.name
-                ));
-            }
-            if !e.exists && (e.newer_than_secs.is_some() || e.size_within_pct_of_previous.is_some())
-            {
-                // Legal: the clauses apply when it exists. Nothing to reject.
-            }
-        }
-        for e in &self.listening {
-            check_name("listening", &e.name, &mut errs);
-            if let Some(a) = &e.addr
-                && a.parse::<std::net::IpAddr>().is_err()
-            {
-                errs.push(format!(
-                    "listening:{}: addr {a:?} is not an IP address",
-                    e.name
-                ));
-            }
-        }
-        for e in &self.symlinks {
-            check_name("symlink", &e.name, &mut errs);
-            abs("symlink", &e.name, "path", &e.path, &mut errs);
-        }
-        for e in &self.absent {
-            check_name("absent", &e.name, &mut errs);
-            abs("absent", &e.name, "path", &e.path, &mut errs);
-        }
-        for e in &self.content {
-            check_name("content", &e.name, &mut errs);
-            abs("content", &e.name, "path", &e.path, &mut errs);
-            if e.contains.is_empty() && e.matches.is_empty() {
-                errs.push(format!(
-                    "content:{}: neither contains nor matches — checks nothing",
-                    e.name
-                ));
-            }
-            for m in &e.matches {
-                if let Err(err) = regex::Regex::new(m) {
-                    errs.push(format!("content:{}: bad regex {m:?}: {err}", e.name));
-                }
-            }
-        }
-        for e in &self.perms {
-            check_name("perms", &e.name, &mut errs);
-            abs("perms", &e.name, "path", &e.path, &mut errs);
-            if e.mode.is_none() && e.owner.is_none() && e.group.is_none() {
-                errs.push(format!(
-                    "perms:{}: no mode, owner or group — checks nothing",
-                    e.name
-                ));
-            }
-            if let Some(m) = &e.mode
-                && parse_mode(m).is_none()
-            {
-                errs.push(format!(
-                    "perms:{}: mode {m:?} is not octal permission bits (e.g. \"0600\")",
-                    e.name
-                ));
-            }
-        }
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            Err(errs.join("; "))
-        }
-    }
-
-    /// Every rule slug the current set can produce (`<kind>:<name>`), for the
-    /// seen-rules GC.
-    pub fn rule_slugs(&self) -> HashSet<String> {
-        let out = std::cell::RefCell::new(HashSet::new());
-        for_each_kind!(self, |kind: &str, name: &str| {
-            out.borrow_mut().insert(format!("{kind}:{name}"));
-        });
-        out.into_inner()
-    }
-}
-
-impl Default for ExpectationsConfig {
-    fn default() -> Self {
-        ExpectationsConfig {
-            eval_interval_secs: default_eval_interval(),
-            default_for_secs: 0,
-            mounts: Vec::new(),
-            files: Vec::new(),
-            listening: Vec::new(),
-            symlinks: Vec::new(),
-            absent: Vec::new(),
-            content: Vec::new(),
-            perms: Vec::new(),
-        }
-    }
-}
-
-pub fn parse_mode(s: &str) -> Option<u32> {
-    let v = u32::from_str_radix(s, 8).ok()?;
-    (v <= 0o7777).then_some(v)
-}
 
 // ---------------------------------------------------------------------------
 // Pure checkers — one per kind. Fixture in, violations out.
@@ -824,38 +475,6 @@ pub fn check_perms(
 // The `spec` reply: what this host is being held to.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AssertionStatus {
-    Pass,
-    Fail,
-    /// Could not check — and that is never a pass (module doc).
-    Unreadable,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssertionResult {
-    /// `<kind>:<name>` — the alert rule this assertion fires under.
-    pub rule: String,
-    pub kind: String,
-    pub name: String,
-    pub status: AssertionStatus,
-    /// First violation summary when not passing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    pub severity: AlertSeverity,
-}
-
-/// The `@rpc/hostspec/spec` reply: per-assertion outcome plus when it was
-/// computed. `evaluated_at_ms == 0` is the honest "not yet evaluated" —
-/// never a fabricated pass.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HostspecEvaluation {
-    pub evaluated_at_ms: i64,
-    pub eval_interval_secs: u64,
-    pub assertions: Vec<AssertionResult>,
-}
-
 // ---------------------------------------------------------------------------
 // The evaluator.
 // ---------------------------------------------------------------------------
@@ -1157,6 +776,128 @@ impl Evaluator {
         if let Err(e) = self.reporter.reconcile(rule, &firing_keys).await {
             tracing::warn!(error = %e, "hostspec: failed to reconcile alerts");
         }
+    }
+}
+
+/// Validate a whole assertion set — called at config load (refuse to start)
+/// and before every hot-swap `replace` (refuse with `error/invalid-args`).
+/// Collects every failure, each naming its expectation. Lives in the SENSOR
+/// (the wire types moved to zensight-common in #816): validation needs the
+/// regex engine, and every other consumer of the types trusts this gate over
+/// the bus rather than compiling it in.
+pub fn validate(cfg: &ExpectationsConfig) -> Result<(), String> {
+    let mut errs: Vec<String> = Vec::new();
+    if cfg.eval_interval_secs == 0 {
+        errs.push("eval_interval_secs must be >= 1".into());
+    }
+    let mut names: HashSet<(&str, &str)> = HashSet::new();
+    let mut check_name = |kind: &'static str, name: &str, errs: &mut Vec<String>| {
+        if name.is_empty() {
+            errs.push(format!("{kind}: an expectation has an empty name"));
+        } else if !names.insert((kind, unsafe {
+            // SAFETY-free equivalent: leak-free borrow across the closure —
+            // names only lives for this call. (Simpler spelled with owned
+            // strings; kept borrowed to avoid per-call allocs.)
+            std::mem::transmute::<&str, &'static str>(name)
+        })) {
+            errs.push(format!(
+                "{kind}:{name}: duplicate name — the rule slug would collide and \
+                 cross-resolve alerts"
+            ));
+        }
+    };
+    let abs = |kind: &str, name: &str, field: &str, p: &str, errs: &mut Vec<String>| {
+        if !p.starts_with('/') {
+            errs.push(format!("{kind}:{name}: {field} {p:?} is not absolute"));
+        }
+    };
+    for e in &cfg.mounts {
+        check_name("mount", &e.name, &mut errs);
+        abs("mount", &e.name, "path", &e.path, &mut errs);
+        if let Some(src) = &e.is_bind_of {
+            abs("mount", &e.name, "is_bind_of", src, &mut errs);
+        }
+        if e.is_bind_of.is_none() && e.fstype.is_none() && e.options.is_empty() {
+            // A bare mount expectation still asserts "is a mount point";
+            // that is a real claim, so nothing to reject.
+        }
+    }
+    for e in &cfg.files {
+        check_name("file", &e.name, &mut errs);
+        abs("file", &e.name, "path", &e.path, &mut errs);
+        if let Some(s) = e.newer_than_secs
+            && s == 0
+        {
+            errs.push(format!("file:{}: newer_than_secs must be > 0", e.name));
+        }
+        if let Some(p) = e.size_within_pct_of_previous
+            && p.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+        {
+            errs.push(format!(
+                "file:{}: size_within_pct_of_previous must be > 0",
+                e.name
+            ));
+        }
+        if !e.exists && (e.newer_than_secs.is_some() || e.size_within_pct_of_previous.is_some()) {
+            // Legal: the clauses apply when it exists. Nothing to reject.
+        }
+    }
+    for e in &cfg.listening {
+        check_name("listening", &e.name, &mut errs);
+        if let Some(a) = &e.addr
+            && a.parse::<std::net::IpAddr>().is_err()
+        {
+            errs.push(format!(
+                "listening:{}: addr {a:?} is not an IP address",
+                e.name
+            ));
+        }
+    }
+    for e in &cfg.symlinks {
+        check_name("symlink", &e.name, &mut errs);
+        abs("symlink", &e.name, "path", &e.path, &mut errs);
+    }
+    for e in &cfg.absent {
+        check_name("absent", &e.name, &mut errs);
+        abs("absent", &e.name, "path", &e.path, &mut errs);
+    }
+    for e in &cfg.content {
+        check_name("content", &e.name, &mut errs);
+        abs("content", &e.name, "path", &e.path, &mut errs);
+        if e.contains.is_empty() && e.matches.is_empty() {
+            errs.push(format!(
+                "content:{}: neither contains nor matches — checks nothing",
+                e.name
+            ));
+        }
+        for m in &e.matches {
+            if let Err(err) = regex::Regex::new(m) {
+                errs.push(format!("content:{}: bad regex {m:?}: {err}", e.name));
+            }
+        }
+    }
+    for e in &cfg.perms {
+        check_name("perms", &e.name, &mut errs);
+        abs("perms", &e.name, "path", &e.path, &mut errs);
+        if e.mode.is_none() && e.owner.is_none() && e.group.is_none() {
+            errs.push(format!(
+                "perms:{}: no mode, owner or group — checks nothing",
+                e.name
+            ));
+        }
+        if let Some(m) = &e.mode
+            && parse_mode(m).is_none()
+        {
+            errs.push(format!(
+                "perms:{}: mode {m:?} is not octal permission bits (e.g. \"0600\")",
+                e.name
+            ));
+        }
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs.join("; "))
     }
 }
 
@@ -1509,7 +1250,7 @@ mod tests {
             ],
         }))
         .unwrap();
-        let err = cfg.validate().unwrap_err();
+        let err = validate(&cfg).unwrap_err();
         for needle in [
             "bad-re",
             "vacuous",
@@ -1522,6 +1263,6 @@ mod tests {
             assert!(err.contains(needle), "missing {needle:?} in: {err}");
         }
         // And the default config validates.
-        ExpectationsConfig::default().validate().unwrap();
+        validate(&ExpectationsConfig::default()).unwrap();
     }
 }

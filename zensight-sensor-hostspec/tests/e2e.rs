@@ -136,17 +136,27 @@ async fn the_sentinel_contract_end_to_end() {
         "per-expectation severity rides the alert"
     );
 
-    // 2. `spec` answers with honest per-assertion statuses.
-    let replies = session
-        .get("v1/*/@rpc/hostspec/spec")
-        .timeout(Duration::from_secs(5))
-        .await
-        .expect("spec get");
-    let reply = replies.recv_async().await.expect("spec reply");
-    let sample = reply.result().expect("spec ok");
-    let eval: HostspecEvaluation =
-        serde_json::from_slice(&sample.payload().to_bytes()).expect("spec decodes");
-    assert!(eval.evaluated_at_ms > 0, "a sweep has run");
+    // 2. `spec` answers with honest per-assertion statuses. The alerts
+    // publish DURING the sweep and the evaluation snapshot lands at its end,
+    // so a GET fired the instant the alerts arrive can honestly see
+    // `evaluated_at_ms == 0` ("not yet evaluated") — poll briefly for the
+    // completed snapshot instead of racing it.
+    let mut eval = HostspecEvaluation::default();
+    for _ in 0..50 {
+        let replies = session
+            .get("v1/*/@rpc/hostspec/spec")
+            .timeout(Duration::from_secs(5))
+            .await
+            .expect("spec get");
+        let reply = replies.recv_async().await.expect("spec reply");
+        let sample = reply.result().expect("spec ok");
+        eval = serde_json::from_slice(&sample.payload().to_bytes()).expect("spec decodes");
+        if eval.evaluated_at_ms > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(eval.evaluated_at_ms > 0, "a sweep completed within 5s");
     let status = |rule: &str| {
         eval.assertions
             .iter()

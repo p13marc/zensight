@@ -101,6 +101,12 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<Vec<crate::query_detail::TimerRecord>>("Vec<TimerRecord>")
         .json::<Vec<crate::query_detail::TlsRecord>>("Vec<TlsRecord>")
         .json::<Vec<crate::query_detail::UnitRecord>>("Vec<UnitRecord>")
+        // hostspec's wire types (#816): real schemas, because the @desired
+        // service publishes HostspecExpectations as a state-class payload and
+        // the #815 gate (rightly) refuses a summary stub there.
+        .json::<crate::hostspec::ExpectationsConfig>("HostspecExpectations")
+        .json::<crate::desired::AppliedConfig>("AppliedConfig")
+        .json::<crate::hostspec::HostspecEvaluation>("HostspecEvaluation")
         // ── registry drift the table makes visible (RFC 08 §5) ────────────
         // The registry says Vec<HttpRecord>/Vec<IpfixRecord>; the wire types
         // are HttpHostRecord/NetflowRecord. Served under the registry name so
@@ -112,8 +118,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .entry("CaptureDiskCommand", summary("netring capture-to-disk command — defined in zensight-sensor-netring::command"))
         .entry("CaptureDiskStatus", summary("netring capture-to-disk status — defined in zensight-sensor-netring::command"))
         .entry("ExpectationCommand", summary("netlink sentinel expectation command — defined in zensight-sensor-netlink::command"))
-        .entry("ExpectationsConfig", summary("sentinel expectations config — defined in zensight-sensor-{netlink,systemd,hostspec}::sentinel"))
-        .entry("HostspecEvaluation", summary("hostspec assertion evaluation (per-assertion pass/fail/unreadable + timestamps) — defined in zensight-sensor-hostspec::sentinel"))
+        .entry("ExpectationsConfig", summary("sentinel expectations config — defined in zensight-sensor-{netlink,systemd}::sentinel"))
         .entry("LogRulesConfig", summary("log sentinel ruleset (pattern→alert rules) — defined in zensight-sensor-logs::sentinel"))
         .entry("RulesStatus", summary("log sentinel ruleset + per-rule hit counters — defined in zensight-sensor-logs::sentinel"))
         .entry("Vec<EventRecord>", summary("event ring records — defined in zensight-sensor-{netlink,systemd}::events"))
