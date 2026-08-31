@@ -118,7 +118,7 @@ jobs:
         run: |
           cd src
           pkgs=""
-          for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd hostspec pve container; do
+          for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd hostspec pve container probe; do
             pkgs="$pkgs -p zensight-sensor-$s"
           done
           pkgs="$pkgs -p zensight-exporter-prometheus -p zensight-exporter-otel -p zensight-correlator"
@@ -127,7 +127,7 @@ jobs:
         run: |
           cd src
           mkdir -p docker-bins/docker-binaries-amd64
-          for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd hostspec pve container; do
+          for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd hostspec pve container probe; do
             cp "target/release/zensight-sensor-$s" docker-bins/docker-binaries-amd64/
           done
           cp target/release/zensight-exporter-prometheus target/release/zensight-exporter-otel \
@@ -156,6 +156,7 @@ jobs:
                    zensight-sensor-hostspec \
                    zensight-sensor-pve \
                    zensight-sensor-container \
+                   zensight-sensor-probe \
                    zensight-exporter-prometheus zensight-exporter-otel zensight-correlator; do
             image="$REGISTRY/marcpardo/$c"
             buildah --storage-driver vfs build $labels \
@@ -241,6 +242,7 @@ jobs:
                    zensight-sensor-hostspec \
                    zensight-sensor-pve \
                    zensight-sensor-container \
+                   zensight-sensor-probe \
                    zensight-exporter-prometheus zensight-exporter-otel zensight-correlator \
                    zensight-sensors; do
             image="$REGISTRY/marcpardo/$c"

@@ -10,6 +10,7 @@
 #                       # (just sensors connect=tcp/<gui-host>:7447 to feed a remote GUI)
 #   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | hostspec | parallax | correlator)
 #   just container      # the container sensor (#819) — needs a runtime socket
+#   just probe          # the outside-in probe sensor (#820) — needs targets
 #   just pve            # the Proxmox VE sensor (#818) — needs a PVE endpoint
 #                       # and a read-only API token, so it is not in `just run`
 #   just rerun          # optional Rerun sidecar (evaluation, epic #415) — see the recipe
@@ -157,6 +158,7 @@ build:
         -p zensight-sensor-hostspec \
         -p zensight-sensor-pve \
         -p zensight-sensor-container \
+        -p zensight-sensor-probe \
         -p zensight-sensor-parallax \
         -p zensight-correlator \
         {{ebpf_features}}
@@ -296,6 +298,14 @@ logs: build configure
 # Run the systemd sensor (unit/boot telemetry + threshold alerts + sentinel).
 systemd: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
+
+# Run the outside-in probe sensor (#820). NOT part of `just run`: its whole
+# value is the targets an operator names, and a probe with no targets checks
+# nothing. Fill in configs/probe.json5 first — every target there is commented
+# out, because a demo cannot invent a URL worth watching.
+probe config="configs/probe.json5": build
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-sensor-probe --config "{{trim_start_match(config, 'config=')}}"
 
 # Run the container sensor (#819). NOT part of `just run`: it needs a container
 # runtime socket, and on a host with none it would be a sensor reporting a

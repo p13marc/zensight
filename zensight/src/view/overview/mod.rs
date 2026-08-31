@@ -159,6 +159,9 @@ pub fn overview_section<'a>(
             // gauges; a container-shaped tab (image digests, health, restart
             // history) is a follow-up, not a blocker.
             Protocol::Container => generic_overview(&protocol_devices, "containers"),
+            // #820: one device per configured target.
+            // #820: one device per configured target.
+            Protocol::Probe => generic_overview(&protocol_devices, "probe targets"),
         };
         column![alert_tile, body].spacing(8).into()
     } else {
@@ -306,6 +309,7 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
         Protocol::Hostspec => "hostspec",
         Protocol::Pve => "PVE",
         Protocol::Container => "Containers",
+        Protocol::Probe => "Probes",
     }
 }
 

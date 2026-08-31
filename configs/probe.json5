@@ -1,0 +1,129 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",
+    // namespace: "my-deployment",  // OPTIONAL — the deployment base (#466), empty
+                                    // by default. All participants must agree.
+    connect: [],                    // Endpoints to connect to (for client mode)
+    // listen: ["tcp/0.0.0.0:7448"],
+  },
+
+  // Serialization format for telemetry
+  serialization: "cbor",            // "json" or "cbor"
+
+  // probe (#820): the outside-in view. Everything else ZenSight measures is
+  // INSIDE. Nothing checked that the thing works from outside — that the site
+  // answers, that the certificate is valid, that the name resolves, that the
+  // port is reachable from where a user actually is.
+  //
+  // That gap cost eight days on 2026-08-20: a reboot dropped an /etc/hosts
+  // entry, a guest resolved a name to a public IP it cannot reach, cosign and
+  // Renovate broke, and the diagnosis eventually hinged on someone noticing
+  // that failing CI runs took 2m16s — a 20 s connect timeout. A guest-side
+  // probe would have said "timeout, 20 s" in one interval. Two issues were
+  // filed on an expired-token theory first.
+  //
+  // WHAT THIS DOES NOT DO: a probe running on the server cannot tell you the
+  // server is unreachable. This is not a replacement for external outage
+  // monitoring, and a deployment that treats it as one has a blind spot
+  // exactly where it believes it has coverage.
+  //
+  // A CLIENT ONLY: it makes the requests configured below and nothing else.
+  // No listeners, no action surface.
+  probe: {
+    // WHERE THIS SENSOR IS LOOKING FROM. Half the answer — the same target
+    // checked from the edge, from a guest and from a workstation gives three
+    // different and equally true results, and two hosts disagreeing is not a
+    // contradiction, it is the finding. Rides on every result and every alert.
+    // Defaults to the hostname.
+    // vantage: "vm-apps",
+
+    interval_secs: 60,       // per-target override below; floored at 5s so this
+                             // cannot be configured into a load generator
+    timeout_secs: 10,        // must be SHORTER than a target's interval
+    max_concurrent: 8,       // checks in flight at once, across all targets
+
+    targets: [
+      // Everything below is an EXAMPLE. Replace the hosts with yours; an empty
+      // targets list is valid and checks nothing (the sensor says so at start).
+
+      // HTTP: status, latency, and the redirect chain. `expect_status` empty
+      // means any 2xx. A redirect that leaves the configured host FAILS unless
+      // allow_offhost_redirect is set — a probe that silently follows one is
+      // checking something other than what it was asked about.
+      // {
+      //   name: "forge",
+      //   kind: "http",
+      //   target: "https://git.marcpardo.eu/",
+      //   expect_status: [200],
+      //   expect_body: "Forgejo",
+      //   // allow_offhost_redirect: false,   // the default
+      //   // method: "GET", headers: [["User-Agent", "zensight"]],
+      // },
+
+      // The 2026-08-20 check, from a guest. If the hosts entry goes missing
+      // again this times out in one interval, and the alert says "timeout"
+      // with the duration attached — which is the whole diagnosis.
+      // { name: "forge-from-guest", kind: "tcp", target: "git.marcpardo.eu:443",
+      //   timeout_secs: 5 },
+
+      // TLS: chain validity, DAYS TO EXPIRY, issuer, SANs, protocol.
+      // inspect_untrusted completes the handshake even when the chain does not
+      // validate, so an expired or self-signed certificate is REPORTED rather
+      // than producing a bare connection error. Reading a certificate is not
+      // trusting it: the verdict is published as tls_chain_valid.
+      // { name: "forge-tls", kind: "tls", target: "git.marcpardo.eu:443" },
+
+      // DNS, WITH THE RESOLVER NAMED — that is the check. `resolver` omitted
+      // uses the system one, and the result still says which it was, so
+      // "resolves to the wrong address on this host" becomes expressible.
+      // { name: "forge-dns", kind: "dns", target: "git.marcpardo.eu",
+      //   expect_addrs: ["10.0.0.10"] },
+      // { name: "forge-dns-public", kind: "dns", target: "git.marcpardo.eu",
+      //   resolver: "1.1.1.1:53" },
+
+      // The one NON-NETWORK check, and the one that needs no configuration
+      // beyond a path: read a PEM off disk and publish its notAfter. It
+      // retires the monthly cron that warns when a ZenSight mesh certificate
+      // is within 60 days of expiry, and removes the oddity of a supervision
+      // system needing an external timer to watch its own certificates.
+      // { name: "mesh-cert", kind: "certfile",
+      //   target: "/etc/zensight/tls/cert.pem", interval_secs: 3600 },
+
+      // ICMP needs a raw socket (CAP_NET_RAW, or net.ipv4.ping_group_range
+      // covering this process). It is a BUILD FEATURE, off by default —
+      // `cargo build --features icmp` — and startup REFUSES an icmp target in
+      // a build without it, naming the tcp alternative, rather than letting
+      // the check silently never run.
+      // { name: "gateway", kind: "icmp", target: "10.0.0.1" },
+    ],
+
+    alerts: {
+      enabled: true,
+      for_secs: 120,
+
+      down: true,              // the check did not succeed, for any reason
+      // A TIMEOUT gets its own rule and SUPPRESSES `down`, so one page arrives
+      // with the right diagnosis instead of two with a vaguer one on top. A
+      // hang means packets are going somewhere that never answers; a refusal
+      // means the service said no. Eight days went into rediscovering that.
+      timeout: true,
+
+      offhost_redirect: true,  // a redirect left the configured host
+
+      expiry_warn_days: 30,    // certificate expiry, from a socket OR a file
+      expiry_critical_days: 7, // days_to_expiry goes NEGATIVE once expired
+      chain_invalid: true,
+      san_mismatch: true,
+
+      dns_unexpected: true,    // an answer that did not contain what this
+                               // vantage point expects — the other half of
+                               // the 2026-08-20 hairpin
+    },
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",
+  },
+}

@@ -45,7 +45,13 @@ PROFILE="${PROFILE:-release}"
 # hostspec joined in #821: it is the IDEAL CI candidate — no privileges, no
 # devices, and its shipped config's default assertion set is empty, so every
 # declared procedure is served and judged on any runner.
-SENSORS="${SENSORS:-sysinfo logs systemd hostspec}"
+# probe joined in #820 on the same argument, and it is the only one of that
+# issue's three new sensors that can: pve needs a hypervisor API and container
+# needs a runtime socket, neither of which a CI runner has. probe's shipped
+# target list is empty (every example is commented out, because a demo cannot
+# invent a URL worth watching), so it reaches nothing at all here — it declares
+# its slice, serves it, publishes targets/total=0, and is judged.
+SENSORS="${SENSORS:-sysinfo logs systemd hostspec probe}"
 # The correlator (the `@catalog` service origin) is ON, as of #782.
 #
 # It was off, and that was a finding rather than a preference: its entities seed

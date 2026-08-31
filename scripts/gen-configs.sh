@@ -301,6 +301,14 @@ else
     cp -f "$configs_dir/hostspec.json5" "$outdir/hostspec.json5"
 fi
 
+# probe (#820): copied verbatim for BOTH profiles. Its shipped target list is
+# empty — every example in the file is commented out — because no generator can
+# invent a URL worth watching, and a probe pointed somewhere by default would be
+# a monitoring tool making requests nobody asked for. The empty list is a valid,
+# conformance-green state: the slice is declared and served, targets/total
+# publishes 0, and nothing leaves the host.
+cp -f "$configs_dir/probe.json5" "$outdir/probe.json5"
+
 # correlator: fuses the sensors' identity evidence into one HostEntity per
 # host. Machine-agnostic; the example config already has every merge rule on.
 cp -f "$configs_dir/correlator.json5" "$outdir/correlator.json5"

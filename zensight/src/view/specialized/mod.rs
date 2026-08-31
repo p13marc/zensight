@@ -165,6 +165,11 @@ pub fn specialized_view<'a>(
         // #819: surfaces are the per-container device cards, the Alerts view
         // and the state documents in the Bus explorer, as for pve above.
         Protocol::Container => None,
+        // #820: the surfaces are the per-target device cards, the Alerts view
+        // and the result documents in the Bus explorer.
+        // #820: the surfaces are the per-target device cards, the Alerts view
+        // and the result documents in the Bus explorer.
+        Protocol::Probe => None,
     }
 }
 
@@ -184,6 +189,10 @@ pub fn has_specialized_view(protocol: Protocol) -> bool {
     // for a `None` protocol offers a tab that renders nothing.
     !matches!(
         protocol,
-        Protocol::Opcua | Protocol::Hostspec | Protocol::Pve | Protocol::Container
+        Protocol::Opcua
+            | Protocol::Hostspec
+            | Protocol::Pve
+            | Protocol::Container
+            | Protocol::Probe
     )
 }

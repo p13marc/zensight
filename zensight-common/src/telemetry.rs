@@ -191,6 +191,12 @@ pub enum Protocol {
     /// never-ran case, signature presence, and the systemd unit that owns it.
     /// Read-only socket + cgroup files; no action surface.
     Container,
+    /// Outside-in synthetic checks (#820) — HTTP/TLS/DNS/TCP/ICMP against
+    /// configured targets, plus local certificate files. The one sensor whose
+    /// answer depends on *where it runs*: the same target from the edge, from
+    /// a guest and from a workstation gives three different, equally true
+    /// answers, so every result carries its vantage point.
+    Probe,
 }
 
 impl Protocol {
@@ -211,6 +217,7 @@ impl Protocol {
             Protocol::Hostspec => "hostspec",
             Protocol::Pve => "pve",
             Protocol::Container => "container",
+            Protocol::Probe => "probe",
         }
     }
 
@@ -250,6 +257,7 @@ impl std::str::FromStr for Protocol {
             "hostspec" => Ok(Protocol::Hostspec),
             "pve" => Ok(Protocol::Pve),
             "container" => Ok(Protocol::Container),
+            "probe" => Ok(Protocol::Probe),
             _ => Err(()),
         }
     }
