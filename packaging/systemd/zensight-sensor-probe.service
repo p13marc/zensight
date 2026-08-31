@@ -1,0 +1,54 @@
+[Unit]
+Description=ZenSight probe sensor (#820) — outside-in synthetic checks
+Documentation=https://git.marcpardo.eu/marcpardo/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zensight-sensor-probe --config /etc/zensight/probe.json5
+Restart=on-failure
+RestartSec=10
+
+# A client only: it opens the connections its config names and nothing else.
+# No listeners, no action surface, no capability — unless the binary was built
+# --features icmp, which needs CAP_NET_RAW; see the commented block below.
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# ICMP targets need a raw socket. Uncomment ONLY if the binary was built with
+# --features icmp and you actually configured an icmp target; a tcp probe needs
+# none of this and answers the same operational question for most services.
+# AmbientCapabilities=CAP_NET_RAW
+# CapabilityBoundingSet=CAP_NET_RAW
+# RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_PACKET
+
+# Certificate files it is asked to read (kind: "certfile") must be listed here,
+# because ProtectSystem=strict hides everything else. One line per directory.
+ReadOnlyPaths=/etc/zensight
+# ReadOnlyPaths=/etc/zensight/tls
+
+# A starting point, not a measurement (#812/#813).
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

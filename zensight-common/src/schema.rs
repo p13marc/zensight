@@ -115,6 +115,8 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::pve::PveClusterHealth>("PveClusterHealth")
         // container's state document (#819).
         .json::<crate::container::ContainerInfo>("ContainerInfo")
+        // probe's state document (#820).
+        .json::<crate::probe::ProbeResult>("ProbeResult")
         // ── registry drift the table makes visible (RFC 08 §5) ────────────
         // The registry says Vec<HttpRecord>/Vec<IpfixRecord>; the wire types
         // are HttpHostRecord/NetflowRecord. Served under the registry name so

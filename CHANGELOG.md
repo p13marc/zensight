@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-sensor-probe` — the outside-in view** (#820). Everything else
+  ZenSight measures is *inside*; nothing checked that the thing works from
+  outside. That gap cost eight days: on 2026-08-20 a reboot dropped an
+  `/etc/hosts` entry, a guest resolved `git.marcpardo.eu` to the public IP it
+  cannot reach (the edge DNAT matches the external interface only), cosign and
+  Renovate both broke, and the diagnosis eventually hinged on someone noticing
+  that failing CI runs took *2m16s* — a 20 s connect timeout — and that the
+  forge's router log showed zero requests. Two issues were filed on an
+  expired-token theory first. A guest-side probe would have said "timeout,
+  20 s" within one interval.
+
+  Six check kinds: **HTTP** (status, expected-status and body match, TTFB,
+  redirect chain), **TLS** (chain validity, days to expiry, issuer, SANs and
+  SAN match, protocol), **DNS** (answers, and **the resolver named** — without
+  which "resolves to the wrong address *here*" cannot be written down),
+  **TCP**, opt-in **ICMP** behind an `icmp` build feature, and **local
+  certificate files**, which need no network at all and retire the monthly cron
+  that watched ZenSight's own mesh certificates.
+
+  Three deliberate distinctions. **A timeout is its own outcome**, not a
+  failure with different text: `probe-timeout` suppresses the generic
+  `probe-down`, and the duration rides on the alert, because on 2026-08-20 the
+  duration *was* the diagnosis. **The vantage point is half the answer** — the
+  same target from the edge, from a guest and from a workstation gives three
+  different, equally true results, so `vantage` is on every document and every
+  alert and two hosts disagreeing is the finding rather than a contradiction.
+  **An absent verdict is not a negative one**: a PEM on disk has no chain, so
+  `chain_valid` is `None` and no gauge claims otherwise, and a check that did
+  not run says so in words that deny being evidence about its target.
+
+  Bounded by construction and checked at startup: an explicit target list, a
+  5 s interval floor so it cannot be configured into a load generator, a
+  concurrency cap, unique target names, per-kind target shapes, and a timeout
+  that **must** be shorter than its own interval. A client only — no listeners,
+  no write surface, and a test that fails if a `write` procedure ever appears
+  in the slice.
+
+  Joins the CI conformance roster: with an empty target list it reaches nothing
+  at all, declares its slice, serves it, and is judged like any other producer
+  — verified with six producers live and zero gated findings. It is **not** in
+  `just run`: every example target ships commented out, because no generator
+  can invent a URL worth watching. The docs say plainly what it does not do —
+  *a probe running on the server cannot tell you the server is unreachable* —
+  and the sensor logs that at startup.
+
 - **`zensight-sensor-container` — the whole workload, previously invisible**
   (#819). Every service on the reference fleet is a Podman Quadlet container,
   and no sensor knew what a container *was*: sysinfo's cgroups collector is

@@ -1,0 +1,35 @@
+# ZenSight probe sensor — one container, one cgroup, its own budget (#813).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via
+# the sensor's health doc self_stats and adjust. See README.md beside this.
+#
+# WHERE THIS RUNS IS THE POINT (#820). The same target checked from the edge,
+# from a guest and from a workstation gives three different and equally true
+# answers, and the vantage point rides on every result and every alert. Deploy
+# this in more than one place on purpose: on the edge for the outside view, on
+# a guest for the hairpin view — the check that would have caught 2026-08-20 —
+# and it will disagree with itself, usefully.
+[Unit]
+Description=ZenSight probe sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-probe:latest
+ContainerName=zensight-sensor-probe
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+# Certificate files to watch (kind: "certfile"), read-only.
+# Volume=/etc/zensight/tls:/etc/zensight/tls:ro
+
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/probe.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

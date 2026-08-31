@@ -32,6 +32,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-sensor-systemd/` | systemd unit/boot telemetry (D-Bus) + sentinel + gated actions |
 | `zensight-sensor-hostspec/` | machine-checked desired-state assertions (#821): mounts/files/listeners/symlinks/content/perms sentinel — read-only, executes nothing |
 | `zensight-sensor-container/` | OCI containers (#819): per-container cgroup/OOM/restart/exit-code, image ref + digest, healthcheck state (incl. *never ran*), signature presence, and the owning systemd unit — read-only socket + cgroupfs, no action surface |
+| `zensight-sensor-probe/` | outside-in synthetic checks (#820): HTTP/TLS/DNS/TCP (+opt-in ICMP) against configured targets, plus local certificate expiry — a client only, and every result carries its vantage point |
 | `zensight-sensor-pve/` | Proxmox VE (#818): guests + their `onboot`/NIC-firewall config, storage allocated-vs-capacity, vzdump outcomes and size trend, cluster/HA/replication — read-only, **no action surface at all** |
 | `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline) |
 | `zensight-correlator/` | fuses identity evidence → one `HostEntity` per host |

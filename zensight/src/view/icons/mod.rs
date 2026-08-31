@@ -289,6 +289,11 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Pve => protocol_generic(size),
         // #819: the generic mark until containers earn iconography of their own.
         zensight_common::Protocol::Container => protocol_generic(size),
+        // #820: the generic mark; a probe's identity is its vantage point, not
+        // a protocol logo.
+        // #820: the generic mark; a probe's identity is its vantage point, not
+        // a protocol logo.
+        zensight_common::Protocol::Probe => protocol_generic(size),
     }
 }
 

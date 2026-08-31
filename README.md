@@ -32,6 +32,7 @@ each. The canonical cross-cutting references live in [`docs/`](docs/).
 | [`zensight-sensor-systemd`](zensight-sensor-systemd/) | systemd unit/service/boot telemetry (D-Bus) + sentinel + gated actions |
 | [`zensight-sensor-hostspec`](zensight-sensor-hostspec/) | machine-checked desired-state assertions (mounts/files/listeners/symlinks/content/perms) — read-only sentinel, executes nothing |
 | [`zensight-sensor-container`](zensight-sensor-container/) | the whole workload on a Quadlet fleet: per-container memory/OOM/restart, image digest, healthcheck state including the never-ran case; read-only, no action surface |
+| [`zensight-sensor-probe`](zensight-sensor-probe/) | the outside-in view: HTTP/TLS/DNS/TCP checks and local certificate expiry, with a timeout as its own outcome and the vantage point on every result |
 | [`zensight-sensor-pve`](zensight-sensor-pve/) | the hypervisor as a hypervisor — guest `onboot`/firewall config, thin-pool over-commitment, vzdump outcomes and size trend; read-only, no action surface |
 | [`zensight-correlator`](zensight-correlator/) | Fuses identity evidence → one `HostEntity` per host |
 | [`zensight-exporter-prometheus`](zensight-exporter-prometheus/) | Prometheus `/metrics` + remote-write |

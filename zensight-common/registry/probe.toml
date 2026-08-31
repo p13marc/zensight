@@ -1,0 +1,191 @@
+# Subject registry: probe (outside-in synthetic checks). RFC 08 §2; issue #820.
+#
+# Everything else ZenSight measures is INSIDE. Nothing checked that the thing
+# works from outside — that the site answers, that the certificate is valid,
+# that the name resolves, that the port is reachable from where a user is.
+#
+# That gap cost eight days on 2026-08-20: a reboot dropped an /etc/hosts entry,
+# a guest resolved a name to a public IP it cannot reach, cosign and Renovate
+# broke, and the diagnosis eventually hinged on someone noticing that failing
+# CI runs took 2m16s — a 20 s connect timeout — and that the forge's router log
+# showed zero requests. A guest-side probe would have said "timeout, 20 s" in
+# one interval. Two issues were filed on an expired-token theory first.
+#
+# Targets are the <device>s; the origin stays the probing host's. The SAME
+# target checked from the edge, from a guest and from a workstation gives three
+# different and equally true answers, so `vantage` rides in every document and
+# every alert — without it those three are indistinguishable.
+#
+# This sensor is a CLIENT ONLY. It makes the requests an operator configures
+# and nothing else; there is no write surface and no procedure below can
+# acquire one.
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "probe"
+description = "outside-in synthetic checks (#820): HTTP status/latency/redirects, TLS chain + days-to-expiry, DNS with the resolver named, TCP connect, optional ICMP — plus local certificate files, which need no network at all"
+
+# ── Per-target telemetry ─────────────────────────────────────────────────────
+
+[[subject]]
+path = "{target}/up"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "1 when the check succeeded, 0 otherwise — published every interval, so a failing target reads as 0 and never as silence"
+
+[[subject]]
+path = "{target}/duration_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "total elapsed, milliseconds. Published on a TIMEOUT too: the duration IS the diagnosis — 20 s of connect timeout is what the 2026-08-20 hairpin looked like, and recognising it took eight days"
+
+[[subject]]
+path = "{target}/timeout"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "1 when the check timed out rather than failing — a connection that hangs is a different diagnosis from one that is refused"
+
+[[subject]]
+path = "{target}/http_status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "HTTP status code, when one was received"
+
+[[subject]]
+path = "{target}/http_ttfb_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "time to first byte, milliseconds — separates a slow server from a slow network"
+
+[[subject]]
+path = "{target}/tls_days_to_expiry"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "days until notAfter; NEGATIVE once expired, because clamping would make 'expired an hour ago' and 'expires in a month' look equally survivable"
+
+[[subject]]
+path = "{target}/tls_chain_valid"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "1 when the presented chain validated against the trust store"
+
+[[subject]]
+path = "{target}/dns_answers"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "how many records the resolver returned"
+
+[[subject]]
+path = "targets/total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "configured targets"
+
+[[subject]]
+path = "targets/failing"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "targets whose last check did not succeed"
+
+# ── State documents ──────────────────────────────────────────────────────────
+
+[[subject]]
+path = "target/{target}"
+class = "state"
+type = "ProbeResult"
+cardinality = 512
+ttl_s = 900
+since = "1.0"
+description = "the full result: outcome (ok/failed/TIMEOUT as distinct states), duration, the checker's own error text, and the per-kind detail — HTTP status + redirect chain, TLS issuer/SANs/expiry, DNS answers WITH THE RESOLVER NAMED"
+
+# ── Framework subjects ───────────────────────────────────────────────────────
+
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework)"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim of the probing host — which is load-bearing here: the vantage point is half the answer (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 128
+ttl_s = 900
+since = "1.0"
+description = "probe assertions: target down, timed out, unexpected status, body missing, certificate expiring or expired, chain invalid, SAN mismatch, DNS answer unexpected, redirect off-host"
+
+# ── Procedures ───────────────────────────────────────────────────────────────
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.0"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
