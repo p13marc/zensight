@@ -30,3 +30,14 @@ relative paths, uncompilable regexes, non-octal modes, vacuous entries).
 
 There is no `enabled` flag: hostspec *is* its sentinel. Delete the
 expectations (or push the empty set) to hold the host to nothing.
+
+## `@desired` (#816)
+
+The assertion set is the fleet's first `@desired`-authorable topic: a
+controller (or `zenctl`) publishes it under
+`v1/@desired/state/<host>/hostspec/expectations`, and the sensor reconciles —
+seed GET + periodic re-GET against the deployment storage as the primary
+path, live subscription as the accelerator, LWW between the three writers
+(file baseline, desired, RPC). `state/hostspec/applied/expectations` says
+which won last and carries any rejected desired doc. `desired.enabled: false`
+in file config is the kill switch. The full contract: `docs/KEYSPACE.md`.

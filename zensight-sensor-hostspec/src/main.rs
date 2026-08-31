@@ -66,8 +66,45 @@ async fn main() -> Result<()> {
     let handle = evaluator.handle();
     runner.spawn(evaluator.run());
 
+    // The @desired reconciler (#816): this sensor's expectation set is the
+    // v1 fleet-authorable topic. The reconciler and the RPC surface are the
+    // two writers to one handle; the shared marker says who won last.
+    let desired_cfg = runner.config().desired.clone();
+    let desired_key = {
+        use zensight_common::registry::desired;
+        desired::key(&desired::Subject::hostspec_expectations(
+            zensight_common::PROFILE.host_id(),
+        ))
+    };
+    let apply_handle = handle.clone();
+    let (marker, _reconcile_task) = zensight_sensor_core::desired::reconcile_topic(
+        runner.session().clone(),
+        runner.publisher(),
+        zensight_sensor_core::desired::DesiredTopic {
+            topic: "expectations",
+            desired_key,
+        },
+        desired_cfg,
+        expectations.clone(),
+        move |cfg: zensight_common::hostspec::ExpectationsConfig| {
+            let h = apply_handle.clone();
+            async move {
+                // The SAME gate the RPC path runs: an invalid desired doc is
+                // refused (kept off the handle) and rides the marker.
+                zensight_sensor_hostspec::sentinel::validate(&cfg)?;
+                h.replace(cfg).await;
+                Ok(())
+            }
+        },
+    );
+
     let session = runner.session().clone();
-    runner.spawn(command::run(session, "hostspec".to_string(), handle));
+    runner.spawn(command::run(
+        session,
+        "hostspec".to_string(),
+        handle,
+        marker,
+    ));
 
     runner
         .run_with_metadata(Some(serde_json::json!({

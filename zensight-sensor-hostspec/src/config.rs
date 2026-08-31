@@ -22,6 +22,12 @@ pub struct HostspecSensorConfig {
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// `@desired` reconcile settings (#816): the kill switch and refresh
+    /// cadence. File config on purpose — the mechanism that could misbehave
+    /// must be disarmable from outside itself.
+    #[serde(default)]
+    pub desired: zensight_common::desired::DesiredConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

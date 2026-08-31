@@ -114,6 +114,17 @@
     },
   },
 
+  // `@desired` fleet reconcile (#816): this sensor's expectation set can be
+  // authored fleet-wide under v1/@desired/state/<this-host>/hostspec/
+  // expectations (LWW, storage-backed; see docs/KEYSPACE.md). The kill
+  // switch lives HERE, in file config, so the mechanism is disarmable from
+  // outside itself. The applied set is visible on
+  // state/hostspec/applied/expectations (source: file | desired | rpc).
+  // desired: {
+  //   enabled: true,
+  //   refresh_secs: 300,   // storage re-GET cadence (the primary path)
+  // },
+
   // Logging configuration
   logging: {
     level: "info",

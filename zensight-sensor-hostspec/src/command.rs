@@ -19,8 +19,16 @@ use crate::sentinel::{ExpectationsConfig, SentinelHandle};
 
 pub const EXPECTATIONS_TOPIC: &str = "expectations";
 
-/// Serve until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: SentinelHandle) {
+/// Serve until the session closes. `marker` is the shared `applied/<topic>`
+/// publisher (#816): an RPC apply is the second writer to the sentinel
+/// handle, and stamping `source: rpc` here is what keeps the marker honest
+/// about which writer won last.
+pub async fn run(
+    session: Arc<zenoh::Session>,
+    producer: String,
+    handle: SentinelHandle,
+    marker: zensight_sensor_core::desired::AppliedMarker,
+) {
     let ctx = zensight_sensor_core::v1::for_producer(&producer);
     let apply_handle = handle.clone();
     let status_handle = handle.clone();
@@ -31,9 +39,19 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Sentine
         EXPECTATIONS_TOPIC,
         move |cfg: ExpectationsConfig| {
             let h = apply_handle.clone();
+            let m = marker.clone();
             async move {
                 crate::sentinel::validate(&cfg).map_err(RpcError::invalid_args)?;
-                h.replace(cfg).await;
+                h.replace(cfg.clone()).await;
+                // The RPC writer stamps the shared marker (#816): two writers,
+                // LWW by arrival, and this is what says who won last.
+                m.publish(
+                    zensight_common::desired::AppliedSource::Rpc,
+                    &cfg,
+                    None,
+                    None,
+                )
+                .await;
                 Ok(())
             }
         },

@@ -70,6 +70,20 @@
           volume: { id: "fs", dir: "catalog" },
           garbage_collection: { period: 3600, lifespan: 86400 },
         },
+        // Fleet desired state (#816). Its own selector for the same D4
+        // reason as @catalog. The GC lifespan is LONG on purpose: desired
+        // docs are operator policy replaced-or-deleted, never aged out, and
+        // the storage's answer to the seed GET is the reconciler's primary
+        // convergence path — a collected doc would silently un-configure a
+        // returning sensor. Tombstones (delete = revert to file baseline)
+        // still need GC eventually; a week outlives any realistic offline
+        // window.
+        "zensight-desired": {
+          key_expr: "v1/@desired/state/**",
+          strip_prefix: "v1/@desired",
+          volume: { id: "fs", dir: "desired" },
+          garbage_collection: { period: 3600, lifespan: 604800 },
+        },
       },
     },
   },
