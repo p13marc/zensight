@@ -7,81 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [0.12.0] - 2026-08-31
 
-- **The systemd watchlist cap no longer drops exact-named units** (#865).
-  `watch_max` truncated matches in D-Bus `ListUnits` order — an order that
-  means nothing and happens to lead with sockets — so a wildcard-heavy
-  watchlist (the demo: 96 matches vs cap 50) dropped every explicitly-named
-  service. Those are precisely the units with IP accounting, which killed
-  their `ip_*_bps` series (the GUI Bandwidth Services table rendered empty)
-  and their threshold-alert inputs, while the operator's nine deliberate
-  patterns were silently not honored. Exact (non-wildcard) patterns now
-  always survive the cap; wildcard matches fill the remaining room sorted by
-  unit name (publication order of watched units is now name-sorted, no
-  longer D-Bus arrival order); drops are logged by name — exact drops at
-  warn, wildcard drops as a count plus a first-10 sample, the full list at
-  debug. The demo config also raises `watch_max` to 100 so the Timers /
-  Sockets panels see the whole curated match set truncation-free.
+**The operator release** (epic #809). ZenSight has been a very good instrument
+and a very poor operator: it measured more of its reference fleet, more
+precisely, than anything else running there — and in three weeks of production
+it never told anybody anything, while the sensor bundle OOM-killed a 1 GB VM
+on 2026-08-17 *while reporting `status: Healthy`*. Both halves of that were the
+same missing idea: **no model of itself as a thing that runs somewhere and must
+behave.** This release adds it, in four parts.
 
-- **The memory governor no longer thrashes when the budget is below the
-  process baseline** (#864). A budget under netring's ~297 MiB capture-ring
-  baseline armed the #812 shed ladder from second one with an unreachable
-  eviction target, so every 5 s tick LRU-wiped all seven L7 inventories
-  (tls/dns/http/asset/quic/ssh/enc_dns — a few KB against a ~160 MiB
-  shortfall) and five GUI views rendered empty for the life of the process.
-  The ladder now latches **futile** when a round frees under 1 % of its
-  target: eviction stops (the tables keep their data), the ladder climbs to
-  Saturated and holds, and the health doc says why —
-  `self_stats.ladder.futile` (new, additive) plus a "raise budget_rss_mb"
-  reason. The latch clears on a budget resize or genuine relief below the
-  clear line; recovery needs no restart. Thrashing, like dying, is not on
-  the ladder. The deployment fact that exposed it is also fixed: the demo
-  budget rises 128 → 448 MiB and the production profile's 64 MiB sed is
-  deleted — both profiles measure the same ~297 MiB idle baseline
-  (2026-08-31, VmHWM), because detectors-off saves table churn, not rings.
+- **Self-knowledge** — a sensor can now see its own size (#811: RSS, VSZ, CPU,
+  cgroup context and per-table occupancy in the health doc) and act on it
+  (#812: a declared budget and a four-step shed ladder that evicts, degrades
+  and saturates instead of dying). #814 is the first consumer: every netring
+  table is bounded in bytes and `production` became a sizing profile.
+- **Reach** — every state family's served schema is a gated contract (#815),
+  which is the precondition for a notifier that can leave the bus.
+- **Blast radius** — per-sensor packaging (#813): one `.container` per sensor
+  with its own `MemoryMax` and its own on/off switch, so one sensor's death
+  stops taking the other four with it during an incident.
+- **Control** — fleet configuration as desired state (#816): the `@desired`
+  service slice, an applied-config marker that says who won, and hostspec
+  (#821) as its first reconciling citizen — a read-only sensor that holds a
+  host to machine-checked assertions and executes nothing.
 
-### Changed
+One entry below breaks a *deployment*: the SNMP sensor now refuses to start on
+a v1/v2c config without an explicit flag. Read **Changed — BREAKING** first.
 
-- **The OTLP exporter is executed in CI** (#845, finding 15 — the medium
-  one). demo-verify.sh gains a phase 2: the otel exporter joins the same
-  isolated hub the Prometheus phase stands up, pointed over OTLP/HTTP at a
-  stdlib-python sink, and the gate is that a real metrics export ARRIVES —
-  protobuf content-type, non-empty body. Until now the exporter's only
-  executions were `--help` in the release smoke and a manual `just
-  demo-otel`; the exact gap (#752/#753) that demo-smoke closed for
-  Prometheus had been standing open on the OTel side since the crate landed.
+#### Upgrading to 0.12.0
 
-- **CI stopped being happy** (#845, 14 evidenced leniency fixes). The
-  conformance gate's one exclusion (`field-new`) was stale — its lift
-  condition, zenkey#384, had shipped in the pinned fleet 0.11.1 — and is
-  lifted; a 660-sample live run confirms zero findings, and the README now
-  requires any future exclusion to carry a re-check for its own
-  lift-condition. Conformance runs `--strict-window` (a listen window that
-  shed samples is unobservable, not quietly clean). `zensight-common` is now
-  also tested ALONE, so the #791 FeatureOff contract tests actually compile
-  in CI. The features job runs `clippy -D warnings` instead of `check`
-  (warnings could land silently in every feature-gated path) and gains
-  `--no-default-features` legs for logs (journald-less) and zensight-btf
-  (no_std). Both awk test-strippers now suppress a `#[cfg(test)]` item to
-  its brace-balanced end instead of to end-of-file (the guards had been
-  blind to ~580 production lines of zensight-common/src/config.rs); the five
-  hand-kept guard path lists collapse into one computed list with the single
-  named exemption (conformance's deliberate un-namespaced sessions) stated;
-  the session guard also matches `use …::open` imports; the D2 colour guard
-  matches the constant/struct/macro constructors and caught one live
-  violation (chart.rs `Color::BLACK` → a named theme accessor). Six shipped
-  configs (snmp/gnmi/modbus/netflow/netlink/rerun) that nothing ever parsed
-  gain `shipped_config_parses` tests. Every third-party action is pinned to
-  a commit SHA (the toolchain action now names its toolchain explicitly —
-  with a SHA the ref no longer carries it) and the bpf-linker download is
-  checksummed. `--locked` on the three behavioural scripts' builds; every
-  job has a timeout; release/features-ebpf gain concurrency groups. cargo-
-  deny's bans stay `warn` deliberately (102 duplicate-version skips would
-  rot faster than they protect — reasoning recorded in deny.toml), and the
-  new scheduled `deny-fresh` workflow re-checks advisories with the ignore
-  list stripped, so a stale ignore surfaces instead of sleeping — the same
-  staleness class that hid the field-new lift for a release.
+1. **SNMP configs using v1/v2c will refuse to start.** Either move the device
+   to v3 authPriv (the shipped example now shows it) or set
+   `snmp.allow_insecure_versions: true` and accept the documented cost. The
+   refusal names the device and the flag.
+2. **No alert re-key this time** — the `RELEASING.md` sweep does not apply to
+   this release.
+3. Optional but recommended: give each sensor a budget
+   (`resources.budget_rss_mb`, or a cgroup `memory.max` the governor can
+   discover) so the shed ladder can arm, and adopt `packaging/quadlet/`'s
+   per-sensor units in place of the all-in-one bundle.
+
+### Changed — BREAKING
+
+- **SNMP leads with v3; the cleartext versions are now an explicit opt-in**
+  (#825 items 1+3). `configs/snmp.json5`'s example device is SNMPv3 authPriv
+  (SHA256/AES, credentials through the existing `file:` indirection), because
+  in 2026 that is the shipped default and not the aspiration. v1/v2c moved
+  behind `snmp.allow_insecure_versions` (default **false**): `validate()`
+  refuses to start with any v1/v2c device — or any trap-listener community —
+  configured, naming the device and the flag. A community string is a
+  cleartext credential on the wire, and netring ships a detector for exactly
+  that; accepting the cost should be something someone typed, not something
+  someone copied. **Breaking for any config that relied on the old v2c
+  example**: set `allow_insecure_versions: true` (the commented legacy-device
+  example shows the opt-in beside its cost), or move the device to v3. The
+  refusal message says which.
+
+  Item 3 of the same issue was *verified* rather than built, and pinned: traps
+  already ride the `events` class as durable `EventRecord`s, with alerts only
+  through the bounded rule mapping. `zensight-sensor-snmp/tests/trap_storm.rs`
+  now proves a storm cannot amplify — 50 identical traps are one alert key, one
+  bus publication, `active_count` 1 — with the one deliberate exception (a
+  severity escalation re-publishes; a worsening alert must not be muted by
+  idempotence) pinned beside it. Items 2 (per-device PDU budget) and 4
+  (discovery mode) remain open on #825.
 
 ### Added
 
@@ -334,7 +324,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window) — silent until enough history exists, silent on a flat/shrinking
   disk, and reset by a large reclaim, so absence always reads as *not asked*.
   On by default; no registry changes (alert rules ride `alert/{alert_key}`).
+
+### Changed
+
+- **Per-sensor is the fleet unit; the bundle is the demo** (#813). The
+  all-in-one sensors image gave five sensors one cgroup and one `MemoryMax`:
+  on vm-edge, 2026-08-17, netring grew, the kernel picked a victim, and
+  `FAIL_FAST` handed the victim's exit to the entrypoint — which killed
+  sysinfo, netlink, logs and systemd on its way out. The four sensors that
+  would have explained the incident were terminated by the one that caused it,
+  and "disable netring *there*" was not expressible. `packaging/quadlet/` now
+  ships one `.container` per sensor against the per-component images every
+  release already builds — each with its own `MemoryMax` (reference-fleet
+  starting points; measure with the health doc's `self_stats`), its own
+  `Restart=on-failure` and its own on/off switch — and `docs/DEPLOYMENT.md`
+  demotes the bundle to the one-command demo it is. The demo the bundle keeps
+  is fixed too: `ZENSIGHT_SENSORS=sysinfo,systemd,logs` subsetting in
+  `run-sensors.sh` and through the container entrypoint (the missing lever),
+  and `FAIL_FAST` is gone, replaced by per-child supervision — exponential
+  backoff (2, 4, 8 … 60 s), restarts logged, and a child that spends its
+  `MAX_RESTARTS` budget given up on while the rest keep running.
+
+- **The OTLP exporter is executed in CI** (#845, finding 15 — the medium
+  one). demo-verify.sh gains a phase 2: the otel exporter joins the same
+  isolated hub the Prometheus phase stands up, pointed over OTLP/HTTP at a
+  stdlib-python sink, and the gate is that a real metrics export ARRIVES —
+  protobuf content-type, non-empty body. Until now the exporter's only
+  executions were `--help` in the release smoke and a manual `just
+  demo-otel`; the exact gap (#752/#753) that demo-smoke closed for
+  Prometheus had been standing open on the OTel side since the crate landed.
+
+- **CI stopped being happy** (#845, 14 evidenced leniency fixes). The
+  conformance gate's one exclusion (`field-new`) was stale — its lift
+  condition, zenkey#384, had shipped in the pinned fleet 0.11.1 — and is
+  lifted; a 660-sample live run confirms zero findings, and the README now
+  requires any future exclusion to carry a re-check for its own
+  lift-condition. Conformance runs `--strict-window` (a listen window that
+  shed samples is unobservable, not quietly clean). `zensight-common` is now
+  also tested ALONE, so the #791 FeatureOff contract tests actually compile
+  in CI. The features job runs `clippy -D warnings` instead of `check`
+  (warnings could land silently in every feature-gated path) and gains
+  `--no-default-features` legs for logs (journald-less) and zensight-btf
+  (no_std). Both awk test-strippers now suppress a `#[cfg(test)]` item to
+  its brace-balanced end instead of to end-of-file (the guards had been
+  blind to ~580 production lines of zensight-common/src/config.rs); the five
+  hand-kept guard path lists collapse into one computed list with the single
+  named exemption (conformance's deliberate un-namespaced sessions) stated;
+  the session guard also matches `use …::open` imports; the D2 colour guard
+  matches the constant/struct/macro constructors and caught one live
+  violation (chart.rs `Color::BLACK` → a named theme accessor). Six shipped
+  configs (snmp/gnmi/modbus/netflow/netlink/rerun) that nothing ever parsed
+  gain `shipped_config_parses` tests. Every third-party action is pinned to
+  a commit SHA (the toolchain action now names its toolchain explicitly —
+  with a SHA the ref no longer carries it) and the bpf-linker download is
+  checksummed. `--locked` on the three behavioural scripts' builds; every
+  job has a timeout; release/features-ebpf gain concurrency groups. cargo-
+  deny's bans stay `warn` deliberately (102 duplicate-version skips would
+  rot faster than they protect — reasoning recorded in deny.toml), and the
+  new scheduled `deny-fresh` workflow re-checks advisories with the ignore
+  list stripped, so a stale ignore surfaces instead of sleeping — the same
+  staleness class that hid the field-new lift for a release.
+
 ### Fixed
+
+- **The systemd watchlist cap no longer drops exact-named units** (#865).
+  `watch_max` truncated matches in D-Bus `ListUnits` order — an order that
+  means nothing and happens to lead with sockets — so a wildcard-heavy
+  watchlist (the demo: 96 matches vs cap 50) dropped every explicitly-named
+  service. Those are precisely the units with IP accounting, which killed
+  their `ip_*_bps` series (the GUI Bandwidth Services table rendered empty)
+  and their threshold-alert inputs, while the operator's nine deliberate
+  patterns were silently not honored. Exact (non-wildcard) patterns now
+  always survive the cap; wildcard matches fill the remaining room sorted by
+  unit name (publication order of watched units is now name-sorted, no
+  longer D-Bus arrival order); drops are logged by name — exact drops at
+  warn, wildcard drops as a count plus a first-10 sample, the full list at
+  debug. The demo config also raises `watch_max` to 100 so the Timers /
+  Sockets panels see the whole curated match set truncation-free.
+
+- **The memory governor no longer thrashes when the budget is below the
+  process baseline** (#864). A budget under netring's ~297 MiB capture-ring
+  baseline armed the #812 shed ladder from second one with an unreachable
+  eviction target, so every 5 s tick LRU-wiped all seven L7 inventories
+  (tls/dns/http/asset/quic/ssh/enc_dns — a few KB against a ~160 MiB
+  shortfall) and five GUI views rendered empty for the life of the process.
+  The ladder now latches **futile** when a round frees under 1 % of its
+  target: eviction stops (the tables keep their data), the ladder climbs to
+  Saturated and holds, and the health doc says why —
+  `self_stats.ladder.futile` (new, additive) plus a "raise budget_rss_mb"
+  reason. The latch clears on a budget resize or genuine relief below the
+  clear line; recovery needs no restart. Thrashing, like dying, is not on
+  the ladder. The deployment fact that exposed it is also fixed: the demo
+  budget rises 128 → 448 MiB and the production profile's 64 MiB sed is
+  deleted — both profiles measure the same ~297 MiB idle baseline
+  (2026-08-31, VmHWM), because detectors-off saves table churn, not rings.
 
 - **systemd: a unit with an uppercase name no longer breaks the telemetry
   guard** (#843, found recording the #747 fixture corpus). `sanitize_unit`
