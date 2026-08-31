@@ -361,6 +361,11 @@ pub fn isolated_zenoh_config() -> zenoh::Config {
 /// tests stay quick; raise per test where retry behavior is the subject.
 pub fn v2c_device(name: &str, addr: SocketAddr) -> DeviceConfig {
     DeviceConfig {
+        // No budget by default: every existing test measures poll behaviour,
+        // and a rate ceiling would silently change what they are testing. The
+        // budget tests set it explicitly (#825 item 2).
+        max_pdus_per_sec: None,
+        max_concurrent: None,
         name: name.to_string(),
         address: addr.to_string(),
         community: "public".to_string(),

@@ -397,6 +397,30 @@ pub struct DeviceConfig {
     /// GETBULK max-repetitions for table walks (v2c/v3).
     #[serde(default = "default_max_repetitions")]
     pub max_repetitions: u32,
+    /// **Per-device PDU ceiling** (#825 item 2). An SNMP sensor's
+    /// characteristic failure is hammering a device weaker than itself — an
+    /// eight-year-old switch CPU, or a UPS card that reboots under load — and
+    /// one device's tolerance says nothing about another's, so this is
+    /// declared per device rather than per sensor.
+    ///
+    /// A GET is charged one token before it is issued. A **walk is charged
+    /// after it completes**, from the rows it really returned
+    /// (`ceil(rows / max_repetitions) + 1` for GETBULK): how many PDUs a walk
+    /// takes is not knowable before the table is read, and estimating it would
+    /// make this number mean something other than what it says. Over budget
+    /// the poller **waits** rather than dropping the poll — a sensor that
+    /// skips work to stay under budget has traded the device's health for a
+    /// gap in its own telemetry.
+    ///
+    /// Absent or 0 = no ceiling, which is what every deployment before #825
+    /// had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pdus_per_sec: Option<f64>,
+    /// **Outstanding operations against this device** (#825 item 2). A walk
+    /// holds its slot for its whole duration, which is the part that bounds
+    /// concurrent load. Absent or 0 = unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<usize>,
 
     /// Individual OIDs to poll with GET.
     #[serde(default)]
@@ -995,6 +1019,8 @@ mod tests {
         );
 
         let device = DeviceConfig {
+            max_pdus_per_sec: None,
+            max_concurrent: None,
             name: "test".to_string(),
             address: "127.0.0.1:161".to_string(),
             community: "public".to_string(),

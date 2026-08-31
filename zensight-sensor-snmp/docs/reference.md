@@ -288,6 +288,8 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `timeout_secs` | u64 | Per-request timeout, per attempt (default 5). |
 | `retries` | u32 | Retransmissions after a timed-out request (default 2; also budgets SNMPv3 report/resync flows). |
 | `max_repetitions` | u32 | GETBULK max-repetitions for walks on v2c/v3 (default 20). |
+| `max_pdus_per_sec` | f64? | PDU ceiling for **this** device (#825). Absent = none. See "The per-device PDU budget" below. |
+| `max_concurrent` | usize? | Outstanding operations against **this** device (#825). Absent = unbounded. |
 | `oids` | string[] | Individual OIDs polled with GET. |
 | `walks` | string[] | OID subtrees polled with WALK (GETBULK on v2c/v3, GETNEXT on v1; tooBig responses are recovered by bisection). |
 | `oid_group` | string? | Reference a predefined `oid_groups` entry instead of inline `oids`/`walks`. |
@@ -338,6 +340,96 @@ Safety and dedup decisions (the issue's research questions):
   mode. Adopting a device stays an operator action (paste the snippet).
 - An SNMP sweep can trip IDS in some environments — keep it scoped to
   networks you operate.
+
+### One-shot discovery: `--discover <cidr>` (#825 item 4)
+
+*"The gap between 'supported' and 'usable' for SNMP is always the config."*
+The block above answers **"what appeared on my network since I last looked"**;
+this answers **"what is out there right now, so I can write a config"** — and
+it is the one that makes the sensor pleasant to adopt.
+
+```bash
+zensight-sensor-snmp --config configs/snmp.json5 --discover 10.0.0.0/24 \
+    > devices.json5
+```
+
+It sweeps, identifies what answers, **prints a proposed config to stdout**, and
+exits. It never applies anything, and **it never touches the bus**: the runner,
+the session and the publishers are not constructed at all on that path. That is
+structural rather than a promise — an operator sweeping a subnet from a laptop
+should not thereby join a fleet.
+
+Diagnostics go to stderr and the proposal to stdout, so the redirect above
+yields a file that is *only* the proposal. Each device is annotated with what it
+said about itself (sysName, sysObjectID, a one-line bounded sysDescr, matched
+profiles), and the header says three things an operator needs before pasting:
+the name becomes the device slug in every key; a device that answered a
+community answered a **cleartext** credential and needs
+`allow_insecure_versions` (item 1); and anything older or smaller than the
+machine polling it wants a `max_pdus_per_sec` (item 2).
+
+Nothing answering prints a sentence rather than an empty file — *silence from
+an SNMP agent is indistinguishable from silence from a filtered port* — and
+exits 0, because that is a finding, not a failure of the sweep.
+
+| Flag | Default | |
+|---|---|---|
+| `--discover <CIDR>` | — | the sweep, and the mode switch |
+| `--discover-credentials <NAME>` | every set in the config | named sets (#538), tried in order |
+| `--discover-port` | 161 | |
+| `--discover-timeout` | 1 | seconds per probe |
+| `--discover-concurrency` | 32 | |
+
+Addresses already in `snmp.devices` are skipped, so running this against a
+subnet you already monitor returns the **new** devices rather than a copy of
+your own config. The 4096-address cap applies here too.
+
+## The per-device PDU budget (#825 item 2)
+
+An SNMP sensor's characteristic failure is **hammering a device weaker than
+itself** — an eight-year-old switch CPU, or a UPS management card that reboots
+under load. Before #825 each device polled on its own timer with no cap on
+outstanding requests and no ceiling on PDU rate: correct, and entirely
+dependent on the operator having chosen a gentle interval.
+
+This is the SNMP-shaped instance of the fleet-wide budget work in #812. The
+resource being bounded is **someone else's device**, which is why it is
+declared per device: one switch's tolerance says nothing about another's.
+
+```json5
+devices: [
+  { name: "old-switch", address: "10.0.0.2:161", version: "v3", /* … */
+    max_pdus_per_sec: 20,   // token bucket; burst = one second's worth
+    max_concurrent: 2 },    // outstanding operations against THIS device
+]
+```
+
+Both are optional and independent; absent (or `0`) means no ceiling, so every
+deployment from before #825 behaves exactly as it did.
+
+**Honest accounting.** A GET is one PDU and is charged one token *before* it is
+issued. A walk is **not** charged in advance: the client issues GETBULK
+requests carrying up to `max_repetitions` rows each, and how many that takes is
+not knowable before the table is read. Estimating it would make
+`max_pdus_per_sec` a number that means something other than what it says. So a
+walk is debited **after it completes**, from the rows it really returned —
+`ceil(rows / max_repetitions) + 1` for GETBULK, `rows + 1` for the GETNEXT
+fallback on v1. A large table therefore drains the bucket and delays the *next*
+operation, which is the behaviour wanted: the device gets a rest proportional
+to the work it just did.
+
+**Over budget the poller waits.** It never drops a poll. A sensor that skips
+work to stay under budget has traded the device's health for a gap in its own
+telemetry, which is the wrong trade — and it is pinned by an e2e test that
+measures the wall clock against a live agent and then asserts every row still
+arrived.
+
+`max_concurrent` gates outstanding operations, and a walk holds its slot for
+its whole duration — that is the part that bounds concurrent load on the
+device, as distinct from the rate.
+
+Bulk-walking itself is not new: the client has picked GETBULK for v2c/v3 since
+#559, honours `max_repetitions`, and is pinned by `v2c_walk_uses_getbulk`.
 
 ## Resilience (#539)
 

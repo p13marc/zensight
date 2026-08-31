@@ -4,6 +4,8 @@
 //! tests can drive the poller against an in-process SNMP agent.
 
 pub mod alerts;
+pub mod budget;
+pub mod cli;
 pub mod config;
 pub mod discovery;
 pub mod evidence;

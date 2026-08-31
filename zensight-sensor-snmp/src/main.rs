@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use zensight_common::v1::V1ContextExt;
-use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
+use zensight_sensor_core::{SensorConfig, SensorRunner};
 
+use zensight_sensor_snmp::cli::SnmpArgs;
 use zensight_sensor_snmp::config::SnmpSensorConfig;
 use zensight_sensor_snmp::mib::MibResolver;
 use zensight_sensor_snmp::poller::SnmpPoller;
@@ -16,7 +17,24 @@ use zensight_sensor_snmp::trap::TrapReceiver;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI arguments
-    let args = SensorArgs::parse_with_default("snmp.json5");
+    let args = SnmpArgs::parse_with_default("snmp.json5");
+
+    // The one-shot discovery mode (#825 item 4) short-circuits HERE, before
+    // the runner, the session or any publisher exists. An operator sweeping a
+    // subnet from a laptop should not thereby join a fleet, and the way to
+    // guarantee that is to never build the thing that would.
+    if let Some(cidr) = args.discover.clone() {
+        // Diagnostics go to stderr and the proposal to stdout, so
+        // `--discover … > devices.json5` yields a file that is only the
+        // proposal. No tracing subscriber is installed at all on this path:
+        // the sweep says what it is doing in plain sentences.
+        let found = zensight_sensor_snmp::cli::discover(&args, &cidr).await?;
+        // A sweep that found nothing is a finding, not a failure of the sweep,
+        // so the exit code stays 0 and the proposal says so in words.
+        let _ = found;
+        return Ok(());
+    }
+    let args = args.common;
 
     // Load configuration using the framework's SensorConfig trait
     let config = SnmpSensorConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{}", e))?;

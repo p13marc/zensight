@@ -170,6 +170,66 @@ async fn v2c_walk_uses_getbulk() {
     );
 }
 
+/// The per-device PDU budget (#825 item 2), against a live agent.
+///
+/// An SNMP sensor's characteristic failure is hammering a device weaker than
+/// itself. A budget that only exists in a config field is not a budget, so
+/// this measures the WALL CLOCK: a 64-row walk plus three GETs, under a
+/// ceiling low enough that the arithmetic has to make the poll wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pdu_budget_actually_slows_a_poll_down() {
+    let agent = SimAgent::start(SimMib::new().with_if_table(64)).await;
+    let mut device = v2c_device("weak-switch", agent.addr());
+    device.walks = vec![format!("{IF_TABLE}.10")];
+    device.max_repetitions = 4; // 64 rows / 4 = 16 responses + 1 = 17 PDUs
+    // The first poll spends the full burst; the second has to wait for it to
+    // refill, which is the behaviour the issue asks for: slow down, never drop.
+    device.max_pdus_per_sec = Some(10.0);
+
+    let rig = rig(device).await;
+    rig.poller.poll_once().await.expect("first poll");
+    let start = std::time::Instant::now();
+    rig.poller.poll_once().await.expect("second poll");
+    let waited = start.elapsed();
+
+    assert!(
+        waited >= Duration::from_millis(500),
+        "a 17-PDU walk under a 10 PDU/s ceiling must WAIT; it took {waited:?}"
+    );
+    // And it waited rather than dropping work: every row still arrived. (The
+    // second cycle also derives a `.rate` sibling per counter, so the map
+    // holds both — what matters is that no row is missing.)
+    let points = collect_points(&rig, IDLE).await;
+    for row in 1..=64 {
+        assert!(
+            points.contains_key(&format!("if/{row}/in_octets")),
+            "row {row} was shed. The budget must slow the poll down, never drop \
+             it — a sensor that skips work to stay under budget has traded the \
+             device's health for a gap in its own telemetry"
+        );
+    }
+}
+
+/// An unconfigured budget must cost nothing at all, so every deployment from
+/// before #825 behaves exactly as it did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_budget_means_no_delay() {
+    let agent = SimAgent::start(SimMib::new().with_if_table(64)).await;
+    let mut device = v2c_device("unbudgeted", agent.addr());
+    device.walks = vec![format!("{IF_TABLE}.10")];
+    assert!(device.max_pdus_per_sec.is_none());
+
+    let rig = rig(device).await;
+    rig.poller.poll_once().await.expect("first poll");
+    let start = std::time::Instant::now();
+    rig.poller.poll_once().await.expect("second poll");
+    assert!(
+        start.elapsed() < Duration::from_millis(400),
+        "an absent budget must not throttle: {:?}",
+        start.elapsed()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutated_values_show_up_next_cycle() {
     let mib = base_mib();
@@ -1957,4 +2017,32 @@ async fn discovery_proposes_unconfigured_responders() {
         found.suggested
     );
     assert!(found.suggested.contains("credentials: \"lab\""));
+
+    // The one-shot CLI's rendering, over the SAME report (#825 item 4): what
+    // an operator actually pastes has to be a config, annotated with what each
+    // device said about itself, and it has to say that nothing was applied.
+    let proposal = zensight_sensor_snmp::cli::render(&report.discovered, "127.0.0.0/30");
+    assert!(proposal.contains("NOTHING WAS APPLIED"), "{proposal}");
+    assert!(proposal.contains("devices: ["), "{proposal}");
+    assert!(
+        proposal.contains("// sysName:     sim-device"),
+        "{proposal}"
+    );
+    assert!(
+        proposal.contains("// sysObjectID: 1.3.6.1.4.1.99999.1.1"),
+        "{proposal}"
+    );
+    assert!(
+        proposal.contains("// profiles:    generic-device"),
+        "{proposal}"
+    );
+    assert!(
+        proposal.contains(&agent_new.addr().to_string()),
+        "{proposal}"
+    );
+    // A device that answered a community string answered a CLEARTEXT
+    // credential, and the config it goes into will refuse to start without the
+    // #825 item-1 flag. The proposal has to say so, or it hands the operator a
+    // config that does not run.
+    assert!(proposal.contains("allow_insecure_versions"), "{proposal}");
 }

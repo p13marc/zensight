@@ -105,6 +105,28 @@
         // timeout_secs: 5,             // per-request timeout, per attempt
         // retries: 2,                  // retransmissions after a timeout
         // max_repetitions: 20,         // GETBULK rows per round-trip (v2c/v3)
+
+        // PER-DEVICE PDU BUDGET (#825). An SNMP sensor's characteristic
+        // failure is hammering a device weaker than itself — an eight-year-old
+        // switch CPU, or a UPS management card that reboots under load. One
+        // device's tolerance says nothing about another's, so this is declared
+        // HERE rather than once for the sensor.
+        //
+        // Absent = no ceiling, which is what every deployment before #825 had.
+        // Set it on anything older or smaller than the machine polling it.
+        //
+        // A GET costs one token, charged before it is issued. A WALK is
+        // charged AFTER it completes, from the rows it really returned
+        // (ceil(rows / max_repetitions) + 1 for GETBULK) — how many PDUs a
+        // walk takes is not knowable before the table is read, and estimating
+        // it would make this number mean something other than what it says.
+        //
+        // Over budget the poller WAITS. It never drops a poll: a sensor that
+        // skips work to stay under budget has traded the device's health for
+        // a gap in its own telemetry.
+        // max_pdus_per_sec: 20,        // token bucket; burst = one second's worth
+        // max_concurrent: 2,           // outstanding operations against THIS device
+                                        // (a walk holds its slot for its whole run)
       },
       // A legacy v1/v2c device — needs `allow_insecure_versions: true`
       // above, and the comment there says what that costs.

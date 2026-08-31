@@ -64,6 +64,10 @@ pub struct SnmpPoller {
     /// Fleet-known-IP sink (#541): evidence-observed IPs feed discovery's
     /// never-re-propose set.
     known_ips: Option<Arc<std::sync::RwLock<std::collections::HashSet<String>>>>,
+    /// Per-device PDU budget (#825 item 2). Inert unless the device config
+    /// sets `max_pdus_per_sec` or `max_concurrent`, so existing deployments
+    /// behave exactly as before.
+    budget: crate::budget::DeviceBudget,
 }
 
 /// What one full poll cycle saw (#539) — feeds backoff/breaker/health.
@@ -103,6 +107,16 @@ impl SnmpPoller {
     ) -> Self {
         let oids = device.all_oids(oid_groups);
         let walks = device.all_walks(oid_groups);
+        let budget =
+            crate::budget::DeviceBudget::new(device.max_pdus_per_sec, device.max_concurrent);
+        if budget.is_active() {
+            tracing::info!(
+                device = %device.name,
+                max_pdus_per_sec = ?device.max_pdus_per_sec,
+                max_concurrent = ?device.max_concurrent,
+                "snmp: per-device PDU budget armed (#825)"
+            );
+        }
 
         Self {
             device,
@@ -124,6 +138,7 @@ impl SnmpPoller {
             consecutive_failures: std::sync::atomic::AtomicU32::new(0),
             health: None,
             known_ips: None,
+            budget,
         }
     }
 
@@ -640,6 +655,10 @@ impl SnmpPoller {
     /// Perform an SNMP GET operation, returning the wire value.
     async fn snmp_get(&self, oid_str: &str) -> Result<Option<(String, Value)>> {
         let oid = parse_oid(oid_str)?;
+        // One PDU, charged before it is issued (#825 item 2): a GET's cost is
+        // knowable in advance, unlike a walk's.
+        self.budget.charge(1.0).await;
+        let _slot = self.budget.slot().await;
         let varbind = self
             .client()
             .await?
@@ -663,6 +682,12 @@ impl SnmpPoller {
     /// subtree boundary / EndOfMibView, and bisects on tooBig.
     async fn snmp_walk(&self, subtree_str: &str) -> Result<Vec<(String, Value)>> {
         let subtree = parse_oid(subtree_str)?;
+        // The walk itself is charged AFTER it completes (#825 item 2). How
+        // many PDUs a GETBULK walk takes is not knowable before the table is
+        // read, and estimating it would make `max_pdus_per_sec` mean something
+        // other than what it says. The slot is held for the whole walk, which
+        // is the part that bounds concurrent load on the device.
+        let _slot = self.budget.slot().await;
         let mut stream = self
             .client()
             .await?
@@ -675,6 +700,15 @@ impl SnmpPoller {
             let oid_string = oid_to_string(&varbind.oid);
             results.push((oid_string, varbind.value));
         }
+        // Debited from the rows that were really returned, so a large table
+        // gives the device a rest proportional to the work it just did.
+        self.budget
+            .charge(crate::budget::walk_pdu_cost(
+                results.len(),
+                self.device.max_repetitions,
+                !matches!(self.device.version, crate::config::SnmpVersion::V1),
+            ))
+            .await;
         Ok(results)
     }
 
