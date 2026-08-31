@@ -10,7 +10,7 @@
 # per-package profiles are ignored for non-root members, so none are set here.
 [package]
 name = "zensight-sensor-netlink-ebpf"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 rust-version.workspace = true
 license = "Apache-2.0"

@@ -7,100 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-31
+
+**The fleet release** (epic #810). The sensors ZenSight shipped were excellent
+at the machine as a *Linux host*: `/proc`, PSI, netlink, journald, D-Bus, the
+wire. The reference deployment is not primarily a Linux host — it is a
+**Proxmox hypervisor running six VMs whose entire workload is Quadlet
+containers, reached from outside over TLS** — and of those four nouns ZenSight
+understood one.
+
+Every finding of that fleet's 2026-08-28 audit was something a sensor could
+have been asserting continuously, found instead by a human reading
+configuration carefully, once, weeks late. Three new sensors turn those
+findings into assertions:
+
+| Found by hand | Now asserted |
+|---|---|
+| VM 140 had `onboot=0` and `firewall=0` on its NIC — its firewall file was inert and :8000 was open to the whole service zone | `pve` |
+| 990 GB provisioned on a 937 GB pool | `pve` |
+| garage reporting `unhealthy` since deployment while working fine | `container` |
+| cosign silently signing nothing for eight days | `container` |
+| 12 pinned images behind upstream, surfaced by a monthly mail | `container` |
+| the `/etc/hosts` hairpin, diagnosed after eight days by noticing a 20 s connect timeout | `probe` |
+
+#### Upgrading to 0.13.0
+
+**Nothing breaks.** No wire contract moved, no series was renamed, and no
+default changed for an existing sensor. The three new sensors are additive and
+none of them starts on its own: `pve` needs an endpoint and a read-only
+`PVEAuditor` token, `container` needs a runtime socket, and `probe` needs
+targets. None is in `just run` or the all-in-one demo bundle; each ships as a
+per-sensor image and a hardened systemd unit, per #813.
+
+**Read before deploying `pve` or `container`:** neither has met a real Proxmox
+API or a real podman socket. Both are tested against in-process fakes built
+from the documented API shapes and from the audit's own failures — an LXC NIC
+line whose MAC lives in `hwaddr`, a `firewall` key that is absent rather than
+`0`, a healthcheck reporting `unhealthy` with an empty log. The first
+deployment of either is the first real test, and should be read as one.
+
+**One thing that is opt-in on purpose:** `container`'s upstream-digest and
+cosign-signature checks are the only part of any of these sensors that leaves
+the host. They are off by default and refuse to start with an empty registry
+allowlist.
+
 ### Added
 
-- **SNMP: a per-device PDU budget, and a one-shot `--discover`** (#825 items 2
-  and 4 — items 1 and 3 shipped in 0.12.0, and the issue closes with these).
+- **`zensight-sensor-pve` — the hypervisor as a hypervisor** (#818). The
+  reference fleet's Proxmox host was watched by three native binaries
+  reporting CPU, memory, disks, units and the journal: a complete picture of a
+  *Linux box*, on the one machine whose failure is total. Everything that made
+  it a hypervisor was invisible, and the 2026-08-28 audit found three things by
+  hand, once, weeks late — VM 140 with `onboot=0` (it would not have come back
+  after a host reboot), that guest's NIC with no `firewall=1` (so `140.fw` was
+  inert and :8000 was open to the whole service zone for an unknown period),
+  and 990 GB provisioned on a 937 GB pool. **None of those is a metric that
+  spikes**; they are configuration facts that stopped matching intent, and all
+  three are now continuous assertions.
 
-  **The budget.** An SNMP sensor's characteristic failure is hammering a device
-  weaker than itself — an eight-year-old switch CPU, or a UPS management card
-  that reboots under load. Until now each device polled on its own timer with
-  no cap on outstanding requests and no ceiling on PDU rate: correct, and
-  entirely dependent on the operator having chosen a gentle interval. Devices
-  gain `max_pdus_per_sec` and `max_concurrent`; both absent means no ceiling,
-  so every existing deployment behaves exactly as before. This is the
-  SNMP-shaped instance of #812's fleet-wide budget work, and it is declared
-  **per device** because the resource being bounded is *someone else's device*
-  and one switch's tolerance says nothing about another's.
+  The sensor polls `/api2/json` with a read-only `PVEAuditor` token (through
+  the framework's `file:`/`${ENV}` indirection, so the secret never enters a
+  config file) and publishes: per-guest state documents joining runtime status
+  with the config that decides the *next* reboot (`onboot`, per-NIC
+  `firewall`, per-disk `backup=0`, provisioned size); per-pool capacity, use
+  and **allocated** — the promised total that is invisible in `used` and fills
+  a thin pool on its own schedule; per-guest backup summaries carrying the
+  newest two volumes, so **a dump that succeeds while halving** is expressible
+  where a green exit code is not; cluster quorum, HA and replication; and a
+  third-party identity claim per guest (name + configured MACs) so the
+  hypervisor's view of a VM fuses with that VM's own sensors in the catalog.
+  Ten alert rules, each reconciled every sweep.
 
-  The accounting is honest about what it can know: a GET costs one token,
-  charged before it is issued; a **walk is charged after it completes**, from
-  the rows it really returned (`ceil(rows / max_repetitions) + 1` for GETBULK,
-  `rows + 1` for GETNEXT on v1). How many PDUs a walk takes is not knowable
-  before the table is read, and estimating it would make `max_pdus_per_sec` a
-  number meaning something other than what it says. A large table therefore
-  drains the bucket and delays the *next* operation — the device gets a rest
-  proportional to the work it just did. Over budget the poller **waits**; it
-  never drops a poll, because a sensor that skips work to stay under budget has
-  traded the device's health for a gap in its own telemetry. Pinned by an e2e
-  that measures the wall clock against a live agent under a 10 PDU/s ceiling
-  and then asserts all 64 rows still arrived. (GETBULK itself is not new — the
-  client has picked it for v2c/v3 since #559, pinned by `v2c_walk_uses_getbulk`.)
+  **There is no action surface — not disabled, absent.** Nothing in the crate
+  constructs a non-GET request, the registry slice declares no `write`
+  procedure, and a test fails if one ever appears: a monitor that can stop a VM
+  is a different threat model and would have to be a separate, deliberate
+  decision. Three poll cadences (status 60 s, guest config 300 s, backups
+  900 s), a concurrency cap, and a startup that refuses a timeout not shorter
+  than its interval, because the API is a perl daemon on that same machine. A
+  403 is treated as a fact about the install (a read-only token, or an install
+  without HA), never as sensor failure.
 
-  **`--discover <cidr>`.** The gap between "supported" and "usable" for SNMP is
-  always the config. The new one-shot mode sweeps a subnet, identifies what
-  answers by sysName/sysObjectID/sysDescr, prints a **proposed config to
-  stdout**, and exits — annotated per device, with a header saying that nothing
-  was applied, that the name becomes the device slug in every key, that a
-  device answering a community answered a *cleartext* credential and needs
-  `allow_insecure_versions`, and that anything smaller than the machine polling
-  it wants a `max_pdus_per_sec`. It **never touches the bus**: the runner, the
-  session and the publishers are not constructed at all on that path, so an
-  operator sweeping a subnet from a laptop does not thereby join a fleet.
-  Diagnostics go to stderr, so `--discover 10.0.0.0/24 > devices.json5` yields
-  a file that is only the proposal. Addresses already in `snmp.devices` are
-  skipped, and an empty sweep prints a sentence rather than an empty file —
-  *silence from an SNMP agent is indistinguishable from silence from a filtered
-  port* — and exits 0, because that is a finding rather than a failure of the
-  sweep. It is distinct from the existing `snmp.discovery` block, which is a
-  continuous in-process sweep publishing a `DiscoveryReport`: the two answer
-  "what is out there right now, so I can write a config" and "what appeared on
-  my network since I last looked".
-
-- **`zensight-sensor-probe` — the outside-in view** (#820). Everything else
-  ZenSight measures is *inside*; nothing checked that the thing works from
-  outside. That gap cost eight days: on 2026-08-20 a reboot dropped an
-  `/etc/hosts` entry, a guest resolved `git.marcpardo.eu` to the public IP it
-  cannot reach (the edge DNAT matches the external interface only), cosign and
-  Renovate both broke, and the diagnosis eventually hinged on someone noticing
-  that failing CI runs took *2m16s* — a 20 s connect timeout — and that the
-  forge's router log showed zero requests. Two issues were filed on an
-  expired-token theory first. A guest-side probe would have said "timeout,
-  20 s" within one interval.
-
-  Six check kinds: **HTTP** (status, expected-status and body match, TTFB,
-  redirect chain), **TLS** (chain validity, days to expiry, issuer, SANs and
-  SAN match, protocol), **DNS** (answers, and **the resolver named** — without
-  which "resolves to the wrong address *here*" cannot be written down),
-  **TCP**, opt-in **ICMP** behind an `icmp` build feature, and **local
-  certificate files**, which need no network at all and retire the monthly cron
-  that watched ZenSight's own mesh certificates.
-
-  Three deliberate distinctions. **A timeout is its own outcome**, not a
-  failure with different text: `probe-timeout` suppresses the generic
-  `probe-down`, and the duration rides on the alert, because on 2026-08-20 the
-  duration *was* the diagnosis. **The vantage point is half the answer** — the
-  same target from the edge, from a guest and from a workstation gives three
-  different, equally true results, so `vantage` is on every document and every
-  alert and two hosts disagreeing is the finding rather than a contradiction.
-  **An absent verdict is not a negative one**: a PEM on disk has no chain, so
-  `chain_valid` is `None` and no gauge claims otherwise, and a check that did
-  not run says so in words that deny being evidence about its target.
-
-  Bounded by construction and checked at startup: an explicit target list, a
-  5 s interval floor so it cannot be configured into a load generator, a
-  concurrency cap, unique target names, per-kind target shapes, and a timeout
-  that **must** be shorter than its own interval. A client only — no listeners,
-  no write surface, and a test that fails if a `write` procedure ever appears
-  in the slice.
-
-  Joins the CI conformance roster: with an empty target list it reaches nothing
-  at all, declares its slice, serves it, and is judged like any other producer
-  — verified with six producers live and zero gated findings. It is **not** in
-  `just run`: every example target ships commented out, because no generator
-  can invent a URL worth watching. The docs say plainly what it does not do —
-  *a probe running on the server cannot tell you the server is unreachable* —
-  and the sensor logs that at startup.
+  Not in `just run`: no demo can invent a Proxmox endpoint or a credential.
+  `just pve` runs it, `packaging/systemd/` ships a hardened unit for the
+  native-on-the-hypervisor pattern the reference deployment's security rules
+  require, and `packaging/quadlet/` covers polling from a guest. Tested against
+  an in-process fake API serving Proxmox's real document shapes — including its
+  inconsistencies, which is where the bugs were: an LXC NIC line carries its
+  MAC in `hwaddr` rather than positionally, and `firewall` absent means *off*
+  while `backup` absent means *on*.
 
 - **`zensight-sensor-container` — the whole workload, previously invisible**
   (#819). Every service on the reference fleet is a Podman Quadlet container,
@@ -151,49 +146,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server serving real libpod documents and a real cgroup tree on disk, with
   the fixture built from the audit's own failures.
 
-- **`zensight-sensor-pve` — the hypervisor as a hypervisor** (#818). The
-  reference fleet's Proxmox host was watched by three native binaries
-  reporting CPU, memory, disks, units and the journal: a complete picture of a
-  *Linux box*, on the one machine whose failure is total. Everything that made
-  it a hypervisor was invisible, and the 2026-08-28 audit found three things by
-  hand, once, weeks late — VM 140 with `onboot=0` (it would not have come back
-  after a host reboot), that guest's NIC with no `firewall=1` (so `140.fw` was
-  inert and :8000 was open to the whole service zone for an unknown period),
-  and 990 GB provisioned on a 937 GB pool. **None of those is a metric that
-  spikes**; they are configuration facts that stopped matching intent, and all
-  three are now continuous assertions.
+- **`zensight-sensor-probe` — the outside-in view** (#820). Everything else
+  ZenSight measures is *inside*; nothing checked that the thing works from
+  outside. That gap cost eight days: on 2026-08-20 a reboot dropped an
+  `/etc/hosts` entry, a guest resolved `git.marcpardo.eu` to the public IP it
+  cannot reach (the edge DNAT matches the external interface only), cosign and
+  Renovate both broke, and the diagnosis eventually hinged on someone noticing
+  that failing CI runs took *2m16s* — a 20 s connect timeout — and that the
+  forge's router log showed zero requests. Two issues were filed on an
+  expired-token theory first. A guest-side probe would have said "timeout,
+  20 s" within one interval.
 
-  The sensor polls `/api2/json` with a read-only `PVEAuditor` token (through
-  the framework's `file:`/`${ENV}` indirection, so the secret never enters a
-  config file) and publishes: per-guest state documents joining runtime status
-  with the config that decides the *next* reboot (`onboot`, per-NIC
-  `firewall`, per-disk `backup=0`, provisioned size); per-pool capacity, use
-  and **allocated** — the promised total that is invisible in `used` and fills
-  a thin pool on its own schedule; per-guest backup summaries carrying the
-  newest two volumes, so **a dump that succeeds while halving** is expressible
-  where a green exit code is not; cluster quorum, HA and replication; and a
-  third-party identity claim per guest (name + configured MACs) so the
-  hypervisor's view of a VM fuses with that VM's own sensors in the catalog.
-  Ten alert rules, each reconciled every sweep.
+  Six check kinds: **HTTP** (status, expected-status and body match, TTFB,
+  redirect chain), **TLS** (chain validity, days to expiry, issuer, SANs and
+  SAN match, protocol), **DNS** (answers, and **the resolver named** — without
+  which "resolves to the wrong address *here*" cannot be written down),
+  **TCP**, opt-in **ICMP** behind an `icmp` build feature, and **local
+  certificate files**, which need no network at all and retire the monthly cron
+  that watched ZenSight's own mesh certificates.
 
-  **There is no action surface — not disabled, absent.** Nothing in the crate
-  constructs a non-GET request, the registry slice declares no `write`
-  procedure, and a test fails if one ever appears: a monitor that can stop a VM
-  is a different threat model and would have to be a separate, deliberate
-  decision. Three poll cadences (status 60 s, guest config 300 s, backups
-  900 s), a concurrency cap, and a startup that refuses a timeout not shorter
-  than its interval, because the API is a perl daemon on that same machine. A
-  403 is treated as a fact about the install (a read-only token, or an install
-  without HA), never as sensor failure.
+  Three deliberate distinctions. **A timeout is its own outcome**, not a
+  failure with different text: `probe-timeout` suppresses the generic
+  `probe-down`, and the duration rides on the alert, because on 2026-08-20 the
+  duration *was* the diagnosis. **The vantage point is half the answer** — the
+  same target from the edge, from a guest and from a workstation gives three
+  different, equally true results, so `vantage` is on every document and every
+  alert and two hosts disagreeing is the finding rather than a contradiction.
+  **An absent verdict is not a negative one**: a PEM on disk has no chain, so
+  `chain_valid` is `None` and no gauge claims otherwise, and a check that did
+  not run says so in words that deny being evidence about its target.
 
-  Not in `just run`: no demo can invent a Proxmox endpoint or a credential.
-  `just pve` runs it, `packaging/systemd/` ships a hardened unit for the
-  native-on-the-hypervisor pattern the reference deployment's security rules
-  require, and `packaging/quadlet/` covers polling from a guest. Tested against
-  an in-process fake API serving Proxmox's real document shapes — including its
-  inconsistencies, which is where the bugs were: an LXC NIC line carries its
-  MAC in `hwaddr` rather than positionally, and `firewall` absent means *off*
-  while `backup` absent means *on*.
+  Bounded by construction and checked at startup: an explicit target list, a
+  5 s interval floor so it cannot be configured into a load generator, a
+  concurrency cap, unique target names, per-kind target shapes, and a timeout
+  that **must** be shorter than its own interval. A client only — no listeners,
+  no write surface, and a test that fails if a `write` procedure ever appears
+  in the slice.
+
+  Joins the CI conformance roster: with an empty target list it reaches nothing
+  at all, declares its slice, serves it, and is judged like any other producer
+  — verified with six producers live and zero gated findings. It is **not** in
+  `just run`: every example target ships commented out, because no generator
+  can invent a URL worth watching. The docs say plainly what it does not do —
+  *a probe running on the server cannot tell you the server is unreachable* —
+  and the sensor logs that at startup.
+
+- **SNMP: a per-device PDU budget, and a one-shot `--discover`** (#825 items 2
+  and 4 — items 1 and 3 shipped in 0.12.0, and the issue closes with these).
+
+  **The budget.** An SNMP sensor's characteristic failure is hammering a device
+  weaker than itself — an eight-year-old switch CPU, or a UPS management card
+  that reboots under load. Until now each device polled on its own timer with
+  no cap on outstanding requests and no ceiling on PDU rate: correct, and
+  entirely dependent on the operator having chosen a gentle interval. Devices
+  gain `max_pdus_per_sec` and `max_concurrent`; both absent means no ceiling,
+  so every existing deployment behaves exactly as before. This is the
+  SNMP-shaped instance of #812's fleet-wide budget work, and it is declared
+  **per device** because the resource being bounded is *someone else's device*
+  and one switch's tolerance says nothing about another's.
+
+  The accounting is honest about what it can know: a GET costs one token,
+  charged before it is issued; a **walk is charged after it completes**, from
+  the rows it really returned (`ceil(rows / max_repetitions) + 1` for GETBULK,
+  `rows + 1` for GETNEXT on v1). How many PDUs a walk takes is not knowable
+  before the table is read, and estimating it would make `max_pdus_per_sec` a
+  number meaning something other than what it says. A large table therefore
+  drains the bucket and delays the *next* operation — the device gets a rest
+  proportional to the work it just did. Over budget the poller **waits**; it
+  never drops a poll, because a sensor that skips work to stay under budget has
+  traded the device's health for a gap in its own telemetry. Pinned by an e2e
+  that measures the wall clock against a live agent under a 10 PDU/s ceiling
+  and then asserts all 64 rows still arrived. (GETBULK itself is not new — the
+  client has picked it for v2c/v3 since #559, pinned by `v2c_walk_uses_getbulk`.)
+
+  **`--discover <cidr>`.** The gap between "supported" and "usable" for SNMP is
+  always the config. The new one-shot mode sweeps a subnet, identifies what
+  answers by sysName/sysObjectID/sysDescr, prints a **proposed config to
+  stdout**, and exits — annotated per device, with a header saying that nothing
+  was applied, that the name becomes the device slug in every key, that a
+  device answering a community answered a *cleartext* credential and needs
+  `allow_insecure_versions`, and that anything smaller than the machine polling
+  it wants a `max_pdus_per_sec`. It **never touches the bus**: the runner, the
+  session and the publishers are not constructed at all on that path, so an
+  operator sweeping a subnet from a laptop does not thereby join a fleet.
+  Diagnostics go to stderr, so `--discover 10.0.0.0/24 > devices.json5` yields
+  a file that is only the proposal. Addresses already in `snmp.devices` are
+  skipped, and an empty sweep prints a sentence rather than an empty file —
+  *silence from an SNMP agent is indistinguishable from silence from a filtered
+  port* — and exits 0, because that is a finding rather than a failure of the
+  sweep. It is distinct from the existing `snmp.discovery` block, which is a
+  continuous in-process sweep publishing a `DiscoveryReport`: the two answer
+  "what is out there right now, so I can write a config" and "what appeared on
+  my network since I last looked".
 
 - **Gated systemd service control can finally be demonstrated** (#866). The
   whole surface — allowlist matching, the arm/confirm/cancel flow, the
