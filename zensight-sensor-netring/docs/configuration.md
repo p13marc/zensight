@@ -201,7 +201,11 @@ ride the health doc's table stats (#811); the memory governor (#812) evicts
 through the same path under budget pressure, and its Degrade step stops the
 `anomaly_detectors` degradable. The `production` profile halves these budgets
 and shrinks `names.max_ips` to 2048 — a sizing decision, visible here rather
-than emergent.
+than emergent. The overall RSS budget (`resources.budget_rss_mb`, 448) is
+**not** profile-sized (#864): netring's baseline RSS is capture rings +
+allocator (~297 MiB before any traffic, on both profiles) and none of that is
+evictable — a budget below the baseline latches the governor's futility guard
+and the sensor reports Saturated forever instead of shedding.
 
 ## `evidence` — host-evidence feed (#307)
 

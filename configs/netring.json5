@@ -9,10 +9,16 @@
   // self_stats and graded by the sensor-budget alert at 80% (Critical at 95%).
   // Since #812 it also arms the shed ladder: over budget, the sensor evicts
   // from its bounded tables and then stops the anomaly detectors instead of
-  // dying. On a 1-2 GB guest, 128 MiB is a reasonable starting claim for
-  // netring; gen-configs.sh halves it for the production profile.
+  // dying. The budget MUST sit above netring's baseline RSS — capture rings +
+  // allocator, ~297 MiB before any traffic on both profiles (#864, measured
+  // 2026-08-31 via VmHWM) — because that memory is not evictable: a budget
+  // below baseline latches the governor's futility guard and reports
+  // Saturated from second one. 448 puts the ladder's clear line (75% =
+  // 336 MiB) comfortably over baseline plus the table byte-caps. One number
+  // for both profiles: detectors-off saves only table churn, not rings, so
+  // gen-configs.sh no longer resizes it for production.
   resources: {
-    budget_rss_mb: 128,
+    budget_rss_mb: 448,
   },
 
   // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
