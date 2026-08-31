@@ -1,0 +1,27 @@
+# ZenSight logs sensor — one container, one cgroup, its own budget (#813).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via
+# the sensor's health doc self_stats and adjust. See README.md beside this.
+[Unit]
+Description=ZenSight logs sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-logs:latest
+ContainerName=zensight-sensor-logs
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+Volume=/var/log/journal:/var/log/journal:ro
+Volume=/run/log/journal:/run/log/journal:ro
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/logs.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

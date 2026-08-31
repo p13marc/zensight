@@ -1,0 +1,26 @@
+# ZenSight systemd sensor — one container, one cgroup, its own budget (#813).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via
+# the sensor's health doc self_stats and adjust. See README.md beside this.
+[Unit]
+Description=ZenSight systemd sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-systemd:latest
+ContainerName=zensight-sensor-systemd
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+Volume=/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/systemd.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

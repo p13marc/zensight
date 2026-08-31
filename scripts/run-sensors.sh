@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# run-sensors.sh — spawn and supervise the local sensor set.
+# run-sensors.sh — spawn and supervise the local sensor set. THE BUNDLE IS A
+# DEMO (#813): the fleet unit is one container/unit per sensor, each with its
+# own MemoryMax and restart policy (packaging/quadlet/, docs/DEPLOYMENT.md);
+# this script exists for `just run`, `just sensors` and the all-in-one demo
+# image, and is built so one sensor's crash can never blank the rest.
 #
-# The single spawner behind `just sensors`, `just run`, and the all-in-one
-# sensors container image (docker/entrypoint-sensors.sh). Starts the host
-# sensors (sysinfo, netlink, netring, logs, systemd, hostspec — plus parallax
-# where the binary exists) and optionally the identity correlator, anchors them to this
-# process, and tears them all down on TERM/INT/EXIT.
+# Starts the selected sensors (default: every one whose binary exists —
+# sysinfo, netlink, netring, logs, systemd, hostspec, plus parallax where
+# built) and optionally the identity correlator, anchors them to this
+# process, supervises each child with restart-and-backoff, and tears
+# everything down on TERM/INT/EXIT.
 #
 # Parameterized by environment (all with local-dev defaults):
 #   BINDIR           where the binaries live            (default target/release)
@@ -16,9 +20,16 @@
 #   CONNECT          Zenoh endpoint the sensors connect to
 #                                                       (default tcp/127.0.0.1:7447)
 #   WITH_CORRELATOR  1 = also run zensight-correlator   (default 0)
-#   FAIL_FAST        1 = exit non-zero as soon as any child dies (container
-#                    mode; restart is the orchestrator's job). 0 = keep the
-#                    rest running, like `just run` always did.  (default 0)
+#   ZENSIGHT_SENSORS comma/space-separated subset to run (#813) — e.g.
+#                    "sysinfo,systemd,logs" on a box where netring holds
+#                    319 MB to watch no traffic. Default: all present.
+#   MAX_RESTARTS     per-child restart budget before that child is given up
+#                    on (the REST keep running)          (default 5)
+#
+# FAIL_FAST is GONE (#813): it made the first crash take down the four
+# sensors that would have explained it — vm-edge, 2026-08-17. Supervision is
+# per-child now: exponential backoff (2,4,8,… capped 60s), restarts logged,
+# a child that exhausts MAX_RESTARTS is dropped while the rest carry on.
 
 set -euo pipefail
 
@@ -27,7 +38,18 @@ CONFDIR="${CONFDIR:-.run}"
 LOGDIR="${LOGDIR:-.run}"
 CONNECT="${CONNECT:-tcp/127.0.0.1:7447}"
 WITH_CORRELATOR="${WITH_CORRELATOR:-0}"
-FAIL_FAST="${FAIL_FAST:-0}"
+ZENSIGHT_SENSORS="${ZENSIGHT_SENSORS:-}"
+MAX_RESTARTS="${MAX_RESTARTS:-5}"
+
+# Is this sensor selected? Empty selection = all.
+selected() {
+    [[ -z "$ZENSIGHT_SENSORS" ]] && return 0
+    local want
+    for want in ${ZENSIGHT_SENSORS//,/ }; do
+        [[ "$want" == "$1" ]] && return 0
+    done
+    return 1
+}
 
 # Sensors connect to the hub (`ZenohConfig::with_env_overrides` replaces the
 # config file's `connect` list) instead of relying on multicast discovery,
@@ -40,15 +62,48 @@ export ZENSIGHT_ZENOH_CONNECT="$CONNECT"
 # each other. Overridable for anyone who genuinely wants multicast.
 export ZENSIGHT_ZENOH_SCOUTING="${ZENSIGHT_ZENOH_SCOUTING:-false}"
 
+# Supervise one child: run, and on unexpected exit restart with exponential
+# backoff (2,4,8,… capped 60s) up to MAX_RESTARTS — then give up on THIS
+# child while the rest carry on. One sensor's crash must never blank the
+# four that would explain it (#813).
+supervise() {
+    local bin="$1" cfg="$2" name attempt=0 delay rc
+    name="${cfg%.json5}"
+    while true; do
+        # `set -e` is script-global and would kill THIS supervisor at the
+        # child's first non-zero exit — the exact opposite of supervision.
+        # Suspend it around the child only.
+        if [[ "$LOGDIR" == "-" ]]; then
+            # Interleave on stdout with a per-sensor prefix (container mode).
+            set +e
+            "$BINDIR/$bin" --config "$CONFDIR/$cfg" 2>&1 | sed -u "s/^/[$name] /"
+            rc=${PIPESTATUS[0]}
+            set -e
+        else
+            set +e
+            "$BINDIR/$bin" --config "$CONFDIR/$cfg" >> "$LOGDIR/$name.log" 2>&1
+            rc=$?
+            set -e
+        fi
+        attempt=$((attempt + 1))
+        if (( attempt > MAX_RESTARTS )); then
+            echo "run-sensors: $name exited (rc=$rc) — restart budget ($MAX_RESTARTS) spent, giving up on it (the rest keep running)" >&2
+            return 1
+        fi
+        delay=$(( 2 ** attempt )); (( delay > 60 )) && delay=60
+        echo "run-sensors: $name exited (rc=$rc) — restart $attempt/$MAX_RESTARTS in ${delay}s" >&2
+        sleep "$delay"
+    done
+}
+
 spawn() {
     local bin="$1" cfg="$2" name
     name="${cfg%.json5}"
-    if [[ "$LOGDIR" == "-" ]]; then
-        # Interleave on stdout with a per-sensor prefix (container mode).
-        "$BINDIR/$bin" --config "$CONFDIR/$cfg" 2>&1 | sed -u "s/^/[$name] /" &
-    else
-        "$BINDIR/$bin" --config "$CONFDIR/$cfg" > "$LOGDIR/$name.log" 2>&1 &
+    if ! selected "$name"; then
+        echo "run-sensors: $name not in ZENSIGHT_SENSORS — skipped"
+        return 0
     fi
+    supervise "$bin" "$cfg" &
 }
 
 # Kill the whole process group on TERM/INT/EXIT so no sensor outlives the
@@ -57,7 +112,8 @@ trap 'trap - TERM INT EXIT; kill 0 2>/dev/null' TERM INT EXIT
 
 extra=""
 [[ "$WITH_CORRELATOR" == 1 ]] && extra=" + correlator"
-echo "Starting sensors$extra (connecting to $CONNECT)…"
+sel="${ZENSIGHT_SENSORS:-all}"
+echo "Starting sensors [$sel]$extra (connecting to $CONNECT)…"
 spawn zensight-sensor-sysinfo sysinfo.json5
 spawn zensight-sensor-netlink netlink.json5
 spawn zensight-sensor-netring netring.json5
@@ -76,14 +132,6 @@ if [[ "$WITH_CORRELATOR" == 1 ]]; then
     spawn zensight-correlator correlator.json5
 fi
 
-if [[ "$FAIL_FAST" == 1 ]]; then
-    # Container mode: the first child to exit takes the pod down non-zero so
-    # the orchestrator's restart policy kicks in.
-    wait -n
-    echo "run-sensors: a sensor exited — stopping the rest" >&2
-    exit 1
-else
-    # Local mode: keep the survivors running; Ctrl-C (or the caller's trap)
-    # stops everything.
-    wait
-fi
+# Each child is supervised individually; the script itself only ends on
+# TERM/INT (the trap) or when every supervisor has given up.
+wait

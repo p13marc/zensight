@@ -137,7 +137,7 @@ equivalent `zenoh.tls` block — see `configs/sysinfo.json5`).
 | `-v /run/dbus/system_bus_socket:…:ro` | the systemd sensor reads `org.freedesktop.systemd1` on the host's system bus. |
 | *(nothing)* | the hostspec sensor needs no privilege, mount or capability at all — its assertions read `/proc`, `lstat` and bounded file contents in whatever view of the filesystem the container has. NOTE that inside a container that view is the **container's**: assert host paths only where they are mounted in. |
 | `-v /var/log/journal` + `/run/log/journal` (ro) | the logs sensor reads the host journal (persistent and volatile locations). |
-| `--restart=on-failure` | the entrypoint is fail-fast: if any sensor dies the container exits non-zero and podman restarts the set. |
+| `--restart=on-failure` | belt-and-braces for the whole container; since #813 the entrypoint supervises each sensor individually (restart with backoff), so one sensor's crash no longer takes the set down. |
 
 Missing mounts are **warnings, not failures** — the affected sensor idles and
 the other four keep publishing. `podman logs zensight-sensors` shows the
@@ -161,6 +161,14 @@ Rootful + the explicit `--cap-add` list above is the conventional shape for
 host-observing agents (same as node-exporter-style deployments).
 
 ## 3. Start on boot (quadlet)
+
+> **The bundle is the demo (#813).** A fleet runs ONE CONTAINER PER SENSOR —
+> `packaging/quadlet/` ships a `.container` unit per sensor, each with its
+> own `MemoryMax` and restart policy, against the per-sensor images every
+> release already builds. The all-in-one unit below remains the one-command
+> demo path; its entrypoint now supervises each sensor with restart-and-
+> backoff (one crash never blanks the rest) and honours
+> `ZENSIGHT_SENSORS=sysinfo,systemd,logs` for subsetting.
 
 Drop this in `/etc/containers/systemd/zensight-sensors.container`, then
 `systemctl daemon-reload && systemctl start zensight-sensors`:

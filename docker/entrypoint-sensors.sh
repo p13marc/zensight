@@ -83,14 +83,16 @@ echo "netring capture interface: $IFACE"
     --outdir /run/zensight \
     --configs-dir /usr/share/zensight/configs
 
-# ── 5. Hand off to the shared spawner: 5 sensors, no correlator (it runs once,
-#       beside the GUI), interleaved logs on stdout, fail-fast so podman's
-#       --restart policy handles recovery. ────────────────────────────────────
+# ── 5. Hand off to the shared spawner. Per-child restart-with-backoff
+#       (#813): one sensor's crash restarts THAT sensor and never blanks the
+#       rest — FAIL_FAST used to hand the whole set to the OOM victim's exit
+#       (vm-edge, 2026-08-17). ZENSIGHT_SENSORS (e.g. "sysinfo,systemd,logs")
+#       selects a subset; default is every sensor in the image. ──────────────
 exec env \
     BINDIR=/usr/local/bin \
     CONFDIR=/run/zensight \
     LOGDIR=- \
     CONNECT="$ZENSIGHT_ZENOH_CONNECT" \
     WITH_CORRELATOR=0 \
-    FAIL_FAST=1 \
+    ZENSIGHT_SENSORS="${ZENSIGHT_SENSORS:-}" \
     /usr/local/bin/run-sensors.sh
