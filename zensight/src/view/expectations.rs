@@ -616,6 +616,10 @@ pub struct ExpectationsState {
     /// The accumulated hostspec assertion set (#821).
     pub hostspec: HostspecExpDraft,
 
+    /// The verbatim `@rpc/hostspec/spec` answer (#867), so an empty assertion
+    /// set can be shown as the state it is rather than as an absence.
+    pub hostspec_spec: Option<String>,
+
     pub status_note: Option<String>,
     /// Schema verdict for the last netlink `expectations` status reply (#791).
     pub status_verdict: Option<zensight_common::schema::Verdict>,
@@ -641,6 +645,7 @@ impl Default for ExpectationsState {
             systemd: SystemdExpDraft::default(),
             hostspec_kind: HostspecExpKind::Mount,
             hostspec: HostspecExpDraft::default(),
+            hostspec_spec: None,
             status_note: None,
             status_verdict: None,
             systemd_verdict: None,
@@ -959,6 +964,34 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
     };
 
     if rows.is_empty() {
+        // An empty set is not the same fact as an unfetched one, and for
+        // hostspec it is a *designed* state — assertions are per-host operator
+        // policy and the shipped default holds a host to nothing (#821). Until
+        // #867 both read as the same blank pane, which is how the sensor got
+        // reported as broken by the person who had built it two days earlier.
+        if state.target == ExpTarget::Hostspec && state.hostspec_verdict.is_some() {
+            let mut col = column![
+                title,
+                text("This host is held to nothing.").size(14),
+                text(
+                    "That is a valid state, not a failure: the sweep runs, the \
+                     failing-assertion gauge reads 0, and the sensor is healthy. \
+                     Author an assertion in the form above and press Push to hold \
+                     this host to something."
+                )
+                .size(12)
+                .style(dim),
+            ]
+            .spacing(8);
+            // The sensor's own answer, verbatim — it is the authority on what
+            // it is being held to, and a rendering of it would be a second
+            // opinion nobody asked for.
+            if let Some(spec) = state.hostspec_spec.as_deref() {
+                col = col.push(text("@rpc/hostspec/spec answers:").size(11).style(dim));
+                col = col.push(text(spec.to_string()).size(11).font(iced::Font::MONOSPACE));
+            }
+            return col.into();
+        }
         let note = state
             .status_note
             .clone()

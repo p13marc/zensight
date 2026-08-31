@@ -168,6 +168,11 @@ pub enum Message {
     SetHostspecExpKind(crate::view::expectations::HostspecExpKind),
     /// The hostspec sentinel's current assertion set (raw JSON reply).
     HostspecExpectationsReceived(String),
+    /// The hostspec sensor's `@rpc/hostspec/spec` answer — "what is this host
+    /// being held to" (raw JSON reply, #867). Kept verbatim: an empty set is a
+    /// *state*, and the sensor's own words for it are more trustworthy than
+    /// the GUI's guess at why a pane is blank.
+    HostspecSpecReceived(String),
     /// A systemd sentinel status reply (ExpectationsConfig JSON) (#278).
     SystemdExpectationsReceived(String),
     /// Set the kind of expectation being authored.

@@ -165,7 +165,13 @@ hostspec form authors each assertion kind's essential fields; the long tail
 (regex `matches`, mount options, per-assertion severity/debounce) is
 config-file territory and the caption says a push rewrites the whole set
 with the form's fields. Every target's status reply carries the #791
-verdict chip beside the configured count.
+verdict chip beside the configured count. For **hostspec**, an empty set is a
+*designed* state rather than an absence, so once the sensor has answered the
+pane says "This host is held to nothing", explains that the sweep runs and the
+failing gauge reads 0, and prints the `@rpc/hostspec/spec` answer verbatim
+(#867). Before a reply arrives it still says "Press Refresh" — the two facts
+are different and had been rendering identically, which is how a working
+sensor got reported as broken.
 
 **Topology** (`view/topology/`) — an interactive map of the monitored network
 (redesign epic #395, layout/performance overhaul epic #439; design report

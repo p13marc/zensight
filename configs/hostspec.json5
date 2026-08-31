@@ -111,6 +111,32 @@
       //   { name: "deploy-key", path: "/etc/deploy/key.pem", mode: "0600",
       //     owner: "deploy", severity: "critical" },
       // ],
+
+      // ── Demo assertions — `just run` / --profile demo-max only (#867) ────
+      //
+      // scripts/gen-configs.sh UNCOMMENTS the `//DEMO ` lines below for
+      // demo-max and leaves them commented for production, so the SHIPPED
+      // default set stays empty exactly as documented above. Two clauses
+      // that hold on any Linux host, and one that DELIBERATELY fails — the
+      // netlink `demo-expected-service` motif (configs/netlink.json5) — so
+      // the demo shows both a green sweep and a real firing alert with the
+      // failing clause in its labels, instead of an empty pane that is
+      // indistinguishable from a broken sensor.
+      //
+      // Uncomment them here too if you want the same on a hand-run sensor.
+      //DEMO mounts: [
+      //DEMO   { name: "demo-root-mounted", path: "/", severity: "warning" },
+      //DEMO ],
+      //DEMO files: [
+      //DEMO   { name: "demo-etc-hostname", path: "/etc/hostname", severity: "warning" },
+      //DEMO ],
+      //DEMO listening: [
+      //DEMO   // Demo: a service that should be listening but (intentionally)
+      //DEMO   // isn't — this FIRES on `just run`, on purpose.
+      //DEMO   { name: "demo-expected-listener", port: 65001, addr: "127.0.0.1",
+      //DEMO     severity: "warning" },
+      //DEMO ],
+      // ─────────────────────────────────────────────────────────────────────
     },
   },
 
