@@ -99,6 +99,12 @@ authorization model are security-sensitive.
 | `allow_unit_files` | **false** | additionally permit `enable`/`disable` |
 | `allow_daemon_reload` | **false** | additionally permit `daemon-reload` |
 | `history_capacity` | 64 | bounded action ring served on `@rpc/systemd/actions` |
+
+To *see* this working without pointing it at a real unit, use the #866 demo
+lever: `sudo scripts/demo-actions.sh install` then `just actions=1 run` (which
+passes `gen-configs.sh --actions zensight-demo.service`). When the gate refuses,
+the served `ActionCapability` now carries a `reason` naming the switch and this
+file — see [units-and-actions.md](units-and-actions.md).
 | `expose_unit_files` | **false** | serve unit-file contents on `@rpc/systemd/unit/file` |
 
 The three switches are separate because the verbs they gate need three
