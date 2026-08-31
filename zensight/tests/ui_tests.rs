@@ -4500,6 +4500,7 @@ fn gate_allowing(allow: &[&str]) -> zensight_common::action::ActionCapability {
         verbs: zensight_common::action::Verb::all(),
         unit_files: false,
         daemon_reload: false,
+        reason: None,
     }
 }
 
@@ -4518,6 +4519,31 @@ fn test_systemd_actions_absent_on_a_read_only_host() {
         ui.find("Service control is disabled on this host — the sensor is read-only.")
             .is_ok(),
         "and the table says why, once, rather than per row"
+    );
+}
+
+/// When the sensor supplies its own reason (#866), that is what the operator
+/// reads — it names the switch and the file, which the frontend cannot know.
+/// The generic sentence stays for a sensor older than the field, pinned above.
+#[test]
+fn test_systemd_gate_note_prefers_the_hosts_own_reason() {
+    let state = systemd_units_state(
+        &["nginx.service"],
+        zensight_common::action::ActionCapability::disabled_because(
+            30,
+            "actions.enabled is false in this sensor's config (configs/systemd.json5).",
+        ),
+    );
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    assert!(
+        ui.find("actions.enabled is false in this sensor's config (configs/systemd.json5).")
+            .is_ok(),
+        "the host's own words, naming the switch and the file"
+    );
+    assert!(
+        ui.find("Service control is disabled on this host — the sensor is read-only.")
+            .is_err(),
+        "and not the frontend's guess on top of it"
     );
 }
 

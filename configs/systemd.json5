@@ -84,6 +84,12 @@
     //   forbid_failed: true,
     // },
 
+    // To watch this work without arming a real unit, use the #866 demo lever:
+    //   sudo scripts/demo-actions.sh install   # inert unit + one-unit polkit rule
+    //   just actions=1 run
+    // When it refuses, the capability answer now carries a `reason` naming the
+    // switch and this file, so a greyed-out button explains itself.
+    //
     // Gated service control (#283) — DEFAULT OFF. Destructive + privileged; the
     // sensor is strictly read-only unless this is explicitly enabled with an
     // allowlist. Authorization is enforced by systemd/polkit (run as root, or add

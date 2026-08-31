@@ -65,7 +65,17 @@ pub fn validate(allow: &[String], unit: &str) -> Result<(), String> {
 /// the mapping from config to advertised capability is unit-testable.
 pub fn capability(cfg: &ActionsConfig) -> ActionCapability {
     if !cfg.enabled {
-        return ActionCapability::disabled(cfg.job_timeout_secs);
+        // The reason travels with the answer (#866). "Disabled" is already an
+        // answer rather than a silence; without the why, a greyed-out button
+        // is still indistinguishable from a broken one, and the operator has
+        // no way to learn which file to edit.
+        return ActionCapability::disabled_because(
+            cfg.job_timeout_secs,
+            "actions.enabled is false in this sensor's config (configs/systemd.json5) \
+             — the sensor is deliberately read-only. Set actions.enabled with an \
+             actions.allow_units allowlist, and grant the manage-units polkit \
+             action, to permit gated service control.",
+        );
     }
     let mut verbs = vec![Verb::Start, Verb::Stop, Verb::Restart, Verb::Reload];
     if cfg.allow_unit_files {
@@ -75,6 +85,13 @@ pub fn capability(cfg: &ActionsConfig) -> ActionCapability {
     if cfg.allow_daemon_reload {
         verbs.push(Verb::DaemonReload);
     }
+    // Enabled with an empty allowlist accepts nothing: a distinct fact from
+    // "switched off", and one an operator would otherwise diagnose by trying.
+    let reason = cfg.allow_units.is_empty().then(|| {
+        "actions.enabled is true but actions.allow_units is empty, so every unit \
+         is refused. Add unit-name globs to permit control."
+            .to_string()
+    });
     ActionCapability {
         enabled: true,
         allow_units: cfg.allow_units.clone(),
@@ -82,6 +99,7 @@ pub fn capability(cfg: &ActionsConfig) -> ActionCapability {
         verbs,
         unit_files: cfg.allow_unit_files,
         daemon_reload: cfg.allow_daemon_reload,
+        reason,
     }
 }
 
@@ -613,6 +631,33 @@ mod tests {
             !cap.verbs.contains(&Verb::DaemonReload),
             "daemon-reload stays off unless its own switch is set"
         );
+    }
+
+    /// A refusal has to say which switch refused (#866). Until it did, a greyed
+    /// button was indistinguishable from a broken one, and the reason lived
+    /// only in the sensor's log — on a machine the operator is not reading.
+    #[test]
+    fn a_refusal_says_why_and_a_permission_does_not() {
+        let off = capability(&ActionsConfig::default());
+        let why = off.reason.as_deref().expect("a disabled host says why");
+        assert!(why.contains("actions.enabled"), "names the switch: {why}");
+        assert!(
+            why.contains("configs/systemd.json5"),
+            "names the file to edit: {why}"
+        );
+
+        // Enabled with an empty allowlist is a DIFFERENT refusal, and reads as
+        // a working gate until you try it.
+        let empty = capability(&cfg(true, &[]));
+        let why = empty
+            .reason
+            .as_deref()
+            .expect("an empty allowlist says why");
+        assert!(why.contains("allow_units"), "names the allowlist: {why}");
+        assert!(empty.enabled, "the switch really is on");
+
+        // Nothing to explain when the host permits something.
+        assert_eq!(capability(&cfg(true, &["nginx.service"])).reason, None);
     }
 
     /// The advertised capability must agree with the gate that actually runs —

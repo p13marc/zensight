@@ -165,6 +165,17 @@ pub struct ActionCapability {
     /// `actions.allow_daemon_reload` — whether `daemon-reload` is permitted.
     #[serde(default)]
     pub daemon_reload: bool,
+    /// Why this host will refuse, in the host's own words, when it will (#866).
+    ///
+    /// `None` on a host that permits something, and on any sensor older than
+    /// this field. A gated control that cannot say *why* it is gated reads as
+    /// broken — the same complaint #867 answers for an empty pane — and the
+    /// GUI's guess at the reason is a second opinion: only the sensor knows
+    /// whether the switch is off, the allowlist is empty, or the build lacks
+    /// the surface. Additive and optional, so an older frontend ignores it and
+    /// an older sensor simply omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl ActionCapability {
@@ -177,6 +188,16 @@ impl ActionCapability {
             verbs: Vec::new(),
             unit_files: false,
             daemon_reload: false,
+            reason: None,
+        }
+    }
+
+    /// The same, saying why (#866) — what a sensor should serve, so a gated
+    /// control can explain itself instead of reading as a bug.
+    pub fn disabled_because(job_timeout_secs: u64, reason: impl Into<String>) -> Self {
+        Self {
+            reason: Some(reason.into()),
+            ..Self::disabled(job_timeout_secs)
         }
     }
 
@@ -313,6 +334,7 @@ mod tests {
             verbs: Verb::all(),
             unit_files: false,
             daemon_reload: false,
+            reason: None,
         };
         assert!(cap.permits(Verb::Restart));
         assert!(!cap.permits(Verb::Enable), "unit_files is off");

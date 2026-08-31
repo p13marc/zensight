@@ -50,6 +50,48 @@ declared at all** — there is no write surface to reach. This section describes
 the gating as implemented in `src/action.rs`; treat it as the authoritative
 security contract.
 
+### Demonstrating it (#866)
+
+Default-off was right; having **no opt-in lever at all** was not. Every
+generated config had `actions` commented out since the block existed, so the
+allowlist, the arm/confirm/cancel flow, the in-flight lock, the audit ring and
+the refuse-don't-hide contract shipped correct and never once watched working —
+the same blind spot #845 closed for the exporters.
+
+```bash
+sudo scripts/demo-actions.sh install     # an inert unit + a one-unit polkit rule
+just actions=1 run                       # start/stop it from the GUI's Units tab
+sudo scripts/demo-actions.sh remove      # put the machine back
+```
+
+`scripts/demo-actions.sh` installs `zensight-demo.service` — `sleep infinity`
+under `DynamicUser`, no network, `ProtectSystem=strict`, empty
+`CapabilityBoundingSet` — plus a polkit rule that grants `manage-units` for
+**that unit, to that user**, and nothing else (no `manage-unit-files`, no
+`reload-daemon`). `gen-configs.sh --actions <glob>` is the underlying flag;
+`just actions=1` passes `zensight-demo.service`. The demo therefore never
+touches a unit anything depends on, and both halves are removable.
+
+Root is required, and that is the honest cost of demonstrating a privileged
+surface: the script asks for it explicitly rather than hiding a `sudo` inside a
+build recipe.
+
+### Saying why, when the answer is no (#866)
+
+`ActionCapability` carries an optional `reason` — the host's own words for its
+refusal, served alongside `enabled: false`. Two distinct facts it can now
+express, which previously looked identical from outside:
+
+| Config | `reason` |
+|---|---|
+| `actions.enabled` false | names the switch and `configs/systemd.json5` |
+| `enabled` true, `allow_units` empty | says every unit is refused, and why |
+| `enabled` true, allowlist non-empty | `None` — nothing to explain |
+
+The frontend shows it verbatim in place of its own generic sentence (which
+stays as the fallback for a sensor older than the field). A gated control that
+cannot say *why* it is gated reads as a broken one.
+
 ### The verbs, and why they are gated separately
 
 | Verb | `Manager` method | Enqueues a job | Extra switch | polkit action |

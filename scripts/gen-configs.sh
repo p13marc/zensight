@@ -60,10 +60,22 @@
 #                  so `just configure` passes it only when it built one. Never
 #                  passed by the container: a rootless podman userns cannot load
 #                  BPF at all, and claiming `ebpf: true` there would be a lie.
+#   --actions UNIT optional (#866): arm the systemd sensor's GATED SERVICE
+#                  CONTROL for exactly this one unit glob. Off unless passed,
+#                  and never passed by the container. Its only intended
+#                  argument is `zensight-demo.service`, the inert unit
+#                  scripts/demo-actions.sh installs together with a polkit rule
+#                  scoped to that unit and one user — because the surface it
+#                  arms (allowlist, arm/confirm, in-flight lock, audit ring)
+#                  had no run path at all and so had never been watched
+#                  working. Pointing it at a real unit is possible and is your
+#                  decision; the sensor still refuses everything outside the
+#                  glob, and unit-file writes and daemon-reload stay off.
 
 set -euo pipefail
 
 iface="" outdir="" configs_dir="" snapshot_dir="" pcap_dir="" ebpf=0 exporters=0
+actions_unit=""
 profile="demo-max"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -75,13 +87,14 @@ while [[ $# -gt 0 ]]; do
         --pcap-dir)     pcap_dir="$2"; shift 2 ;;
         --ebpf)         ebpf=1; shift ;;
         --exporters)    exporters=1; shift ;;
+        --actions)      actions_unit="$2"; shift 2 ;;
         *) echo "gen-configs.sh: unknown argument '$1'" >&2; exit 64 ;;
     esac
 done
 if [[ -z "$iface" || -z "$outdir" || -z "$configs_dir" ]]; then
     echo "Usage: gen-configs.sh --iface IFACE --outdir DIR --configs-dir DIR \
 [--profile demo-max|production] [--snapshot-dir PATH] [--pcap-dir PATH] [--ebpf] \\
-[--exporters]" >&2
+[--exporters] [--actions UNIT]" >&2
     exit 64
 fi
 case "$profile" in demo-max|production) ;; *)
@@ -335,8 +348,17 @@ fi
 # channels regardless of the watchlist, so a broad watch just streams a lot of
 # per-unit telemetry every tick for no UI gain (and, stacked on the other
 # maxed-out sensors, can starve the desktop). `actions` (gated start/stop/
-# restart) stays OFF — it mutates real units and is privileged.
-cat > "$outdir/systemd.json5" <<'JSON5'
+# restart) stays OFF unless --actions names a unit glob (#866) — it mutates
+# real units and is privileged, so the lever is explicit, scoped to one glob,
+# and grants neither unit-file writes nor daemon-reload. See
+# scripts/demo-actions.sh for the inert unit and the one-unit polkit rule it
+# is meant to be pointed at.
+if [[ -n "$actions_unit" ]]; then
+    actions_block="    actions: { enabled: true, allow_units: [\"$actions_unit\"], job_timeout_secs: 30, history_capacity: 64 },"
+else
+    actions_block="    // actions: { enabled: false }  // gated service control — off unless gen-configs.sh --actions UNIT."
+fi
+cat > "$outdir/systemd.json5" <<JSON5
 {
   zenoh: { mode: "peer", serialization: "json" },
   // On-demand redacted debug bundle (Sensors → report) — safe to enable.
@@ -374,7 +396,7 @@ cat > "$outdir/systemd.json5" <<'JSON5'
       targets_active: [{ target: "default.target" }],
       forbid_failed: true,
     },
-    // actions: { enabled: false }  // gated service control — off for the demo.
+$actions_block
     collect: { list_units: true, boot: true, mounts: true, journal: true },
   },
   logging: { level: "info" },

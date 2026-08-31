@@ -473,6 +473,7 @@ mod tests {
             verbs: Verb::all(),
             unit_files: true,
             daemon_reload: true,
+            reason: None,
         }
     }
 

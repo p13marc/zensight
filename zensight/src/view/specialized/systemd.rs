@@ -328,6 +328,19 @@ fn type_chips(d: &SystemdDetailState) -> Element<'_, Message> {
 
 /// The one-line explanation of this host's gate, when there is something to say.
 fn gate_note(d: &SystemdDetailState) -> Option<Element<'_, Message>> {
+    // The host's own words win when it supplies them (#866): only the sensor
+    // knows which switch is off and which file holds it. The sentences below
+    // stay as the fallback for a sensor older than the `reason` field.
+    if let Fetch::Ready(ref c) = d.capability
+        && let Some(reason) = c.reason.as_deref()
+    {
+        return Some(
+            text(reason.to_string())
+                .size(font::CAPTION)
+                .style(dim)
+                .into(),
+        );
+    }
     let note = match d.capability {
         Fetch::Ready(ref c) if !c.enabled => {
             "Service control is disabled on this host — the sensor is read-only.".to_string()

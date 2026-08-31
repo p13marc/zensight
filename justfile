@@ -10,6 +10,9 @@
 #                       # (just sensors connect=tcp/<gui-host>:7447 to feed a remote GUI)
 #   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | hostspec | parallax | correlator)
 #   just rerun          # optional Rerun sidecar (evaluation, epic #415) — see the recipe
+#   just demo-actions   # install the inert unit + polkit rule that make gated
+#                       # service control demonstrable (#866), then:
+#                       #   just actions=1 run
 #
 # `just run` is the live demo: `configure` writes *demo-max* configs into .run/
 # (via scripts/gen-configs.sh — also used by the sensors container image) with
@@ -31,7 +34,8 @@
 # journal-read access — add your user to the `systemd-journal` group if it can't.
 # systemd reads the org.freedesktop.systemd1 D-Bus (system bus) read-only and is
 # unprivileged; the demo config enables everything *except* gated service control
-# (`actions`), which is left off because it stops/restarts real units.
+# (`actions`), which is left off because it stops/restarts real units. `just
+# actions=1 run` arms it for ONE inert unit — see `just demo-actions` and #866.
 
 # Build profile: "release" (default) or "dev".
 profile := "release"
@@ -45,6 +49,22 @@ relflag := if profile == "release" { "--release" } else { "" }
 
 # Run configs are generated here (gitignored), so committed examples stay clean.
 rundir := ".run"
+
+# Gated systemd service control (#866). "0" (default) leaves `actions` off in
+# the generated config, which is what every run has always done — and is why
+# the whole allowlist / arm-confirm / in-flight-lock / audit-ring surface had
+# never once been watched working. "1" arms it for exactly ONE inert unit,
+# `zensight-demo.service`, which `sudo scripts/demo-actions.sh install` creates
+# along with a polkit rule scoped to that unit and your user:
+#
+#   sudo scripts/demo-actions.sh install     # the unit + the one-unit polkit rule
+#   just actions=1 run                       # then start/stop it from the GUI
+#   sudo scripts/demo-actions.sh remove      # put the machine back
+#
+# Without the polkit rule (or root) the sensor still refuses — correctly, and
+# now with a reason string the GUI shows. Point it somewhere else by editing
+# .run/systemd.json5; the default demo never touches a unit anything needs.
+actions := "0"
 
 # eBPF collectors (#99): "auto" builds them iff this host has the toolchain, and
 # silently goes without otherwise, so `just run` stays portable. "1" forces them
@@ -234,6 +254,7 @@ configure:
         --snapshot-dir "{{justfile_directory()}}/docs" \
         --pcap-dir "{{justfile_directory()}}/{{rundir}}/pcap" \
         --exporters \
+        {{ if actions == "1" { "--actions zensight-demo.service" } else { "" } }} \
         {{ if ebpf_on == "1" { "--ebpf" } else { "" } }}
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
@@ -270,6 +291,20 @@ logs: build configure
 # Run the systemd sensor (unit/boot telemetry + threshold alerts + sentinel).
 systemd: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
+
+# Make gated systemd service control demonstrable (#866). Installs an inert
+# `zensight-demo.service` (a `sleep infinity` under DynamicUser, no network)
+# plus a polkit rule granting manage-units on THAT UNIT to THIS USER and
+# nothing else. Both need root, which is the honest cost of demonstrating a
+# privileged surface — the script asks for it rather than hiding a sudo here.
+# Then: `just actions=1 run`, systemd device → Units, filter `zensight-demo`.
+# `just demo-actions-remove` puts the machine back.
+demo-actions:
+    sudo scripts/demo-actions.sh install "$USER"
+
+# Remove the #866 demo unit and its polkit rule.
+demo-actions-remove:
+    sudo scripts/demo-actions.sh remove
 
 # Run the hostspec sensor (desired-state assertions; the shipped set is empty —
 # uncomment examples in configs/hostspec.json5 to hold this host to something).

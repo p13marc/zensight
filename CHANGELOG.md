@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Gated systemd service control can finally be demonstrated** (#866). The
+  whole surface — allowlist matching, the arm/confirm/cancel flow, the
+  in-flight lock, the audit ring on `@rpc/systemd/actions`, c620838's
+  refuse-don't-hide contract — shipped correct end to end and **permanently
+  un-demonstrable**: `actions.enabled` has been false in every generated config
+  since the block existed, and there was no opt-in path at all. That is the
+  blind spot #845 closed for the exporters, one feature over. Default-off stays
+  (it mutates real units and needs polkit), but there is now a lever:
+  `sudo scripts/demo-actions.sh install` creates `zensight-demo.service` — an
+  inert `sleep infinity` under `DynamicUser` with no network,
+  `ProtectSystem=strict` and an empty `CapabilityBoundingSet` — plus a polkit
+  rule granting `manage-units` for **that unit, to that user, and nothing else**
+  (no `manage-unit-files`, no `reload-daemon`); `just actions=1 run` then arms
+  the sensor for exactly that glob via the new `gen-configs.sh --actions UNIT`.
+  `sudo scripts/demo-actions.sh remove` puts the machine back. The demo never
+  touches a unit anything depends on, and the root requirement is asked for
+  explicitly rather than hidden inside a build recipe.
+
+- **A refused action says which switch refused it** (#866). `ActionCapability`
+  gains an optional `reason` (additive; older sensors omit it, older frontends
+  ignore it), served with the `enabled: false` answer the sensor already gave.
+  It distinguishes two facts that looked identical from outside — the master
+  switch being off (naming `configs/systemd.json5`) and an empty `allow_units`
+  refusing every unit — and the GUI shows the host's words in place of its own
+  generic sentence, which stays as the fallback. Only the sensor knows which
+  file holds the switch; a gated control that cannot say why it is gated reads
+  as a broken one.
+
 ### Fixed
 
 - **hostspec no longer demos as a blank pane** (#867). Nothing was broken —
