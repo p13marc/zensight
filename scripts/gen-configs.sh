@@ -20,10 +20,12 @@
 #     hardware thermal alert, and the actionable systemd ops alerts remain on,
 #     as do the on-demand debug reports. Chosen for real deployments where the
 #     detector suite's false positives are noise (2026-07 fleet experience).
-#     Since #814 production is also a SIZING profile: netring's RSS budget
-#     drops to 64 MiB, its inventory byte-budgets are halved, and the
-#     passive-DNS cache shrinks to 2048 IPs (with the beacon detectors off it
-#     only feeds flow/talker name enrichment).
+#     Since #814 production is also a SIZING profile: netring's inventory
+#     byte-budgets are halved and the passive-DNS cache shrinks to 2048 IPs
+#     (with the beacon detectors off it only feeds flow/talker name
+#     enrichment). The RSS budget is NOT profile-sized (#864): baseline RSS
+#     is dominated by the capture rings on both profiles, and a budget below
+#     that floor is a permanent futility-guard trip, not a saving.
 #
 # A sed can only flip a key that is really in configs/*.json5 — a key that is
 # merely absent takes the Rust `#[serde(default)]` silently, and nothing here
@@ -109,11 +111,14 @@ if [[ "$profile" == "production" ]]; then
     # scan-shaped) — production turns it off with the rest of the suite.
     netring_seds+=(
     -e 's/port_scan: true/port_scan: false/'
-    # Sizing (#814): a production fleet host gives netring half the demo's
-    # envelope. Every value below matches a key physically present in
+    # Sizing (#814): a production fleet host halves netring's table
+    # byte-budgets. The RSS budget itself is NOT resized (#864): baseline RSS
+    # is capture rings + allocator (~297 MiB on both profiles, measured
+    # 2026-08-31) and detectors-off saves none of it — a budget below that
+    # floor latches the governor's futility guard on every host, every run.
+    # Every value below matches a key physically present in
     # configs/netring.json5 (pinned by shipped_config_spells_out_the_opt_in_
     # detectors); each sed carries its key name so they cannot cross-match.
-    -e 's/budget_rss_mb: 128/budget_rss_mb: 64/'
     # Passive-DNS cache: with the beacon detectors off it only feeds
     # flow/talker name enrichment, which a hot working set of 2048 IPs covers.
     -e 's/max_ips: 16384/max_ips: 2048/'
@@ -364,5 +369,5 @@ notes=""
 [[ -n "$snapshot_dir" ]]        && notes+=" snapshot='$snapshot_dir'"
 [[ "$exclude_chips" != "[]" ]]  && notes+=" hwmon-exclude=$exclude_chips"
 detectors="detectors on"
-[[ "$profile" == "production" ]] && detectors="detectors OFF, sized down (64 MiB budget, halved tables)"
+[[ "$profile" == "production" ]] && detectors="detectors OFF, sized down (halved tables)"
 echo "Configured ($profile): netring iface='$iface' (L7 on, $detectors), netlink, logs=journald, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator$notes  (configs in $outdir/)"

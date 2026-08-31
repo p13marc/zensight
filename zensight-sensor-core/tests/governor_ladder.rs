@@ -157,6 +157,98 @@ fn ladder_evicts_names_the_table_degrades_and_never_exits() {
     // Reaching this line IS the final assertion: the process never exited.
 }
 
+/// #864's done-when: a budget below the process baseline must not become
+/// scorched-earth LRU forever. The target is unreachable by construction
+/// (the RSS is the test binary itself, not the table), so the governor gets
+/// exactly one honest round, latches futile, holds Saturated loudly — and
+/// the table keeps its data. Raising the budget recovers without a restart.
+#[test]
+fn budget_below_process_baseline_saturates_loudly_without_thrashing() {
+    let health = SensorHealth::new("test");
+    let governor = MemoryGovernor::default();
+    let evict_calls = Arc::new(Mutex::new(0u32));
+    {
+        let c = evict_calls.clone();
+        // A tiny inventory table, the #864 shape: a few entries, a few KiB —
+        // nothing next to the process baseline the budget ignores.
+        governor.register_table(TableHandle {
+            name: "tls_inventory".into(),
+            stats: Box::new(|| TableStats {
+                name: "tls_inventory".into(),
+                entries: 2,
+                bytes: Some(2048),
+                ..Default::default()
+            }),
+            evict: Some(Box::new(move |_ask| {
+                *c.lock().unwrap() += 1;
+                EvictOutcome {
+                    entries: 2,
+                    bytes: 2048,
+                }
+            })),
+        });
+    }
+    let degraded_flag = Arc::new(AtomicBool::new(false));
+    {
+        let f = degraded_flag.clone();
+        governor.register_degradable(
+            "test_collector",
+            Box::new(move |apply| f.store(apply, Ordering::SeqCst)),
+        );
+    }
+
+    let baseline = governed_snapshot(&health, &governor)
+        .self_stats
+        .and_then(|s| s.rss_bytes)
+        .expect("self-measured RSS on Linux");
+    // Half the baseline: instant Critical, target unreachable forever.
+    health.set_budget_bytes(baseline / 2);
+
+    let mut last = None;
+    for _ in 0..15 {
+        last = governed_snapshot(&health, &governor).self_stats;
+    }
+    let stats = last.expect("measured");
+    let ladder = stats.ladder.as_ref().expect("budget set => ladder armed");
+    assert!(
+        *evict_calls.lock().unwrap() <= 2,
+        "eviction must stop after futility, not repeat every tick (called {}x)",
+        *evict_calls.lock().unwrap()
+    );
+    assert_eq!(
+        (ladder.step, ladder.futile),
+        (3, true),
+        "an impossible budget holds Saturated with the futility latch set"
+    );
+    let reason = ladder.reason.as_deref().unwrap_or("");
+    assert!(
+        reason.contains("raise budget_rss_mb"),
+        "the report must tell the operator the actual fix: {reason}"
+    );
+    assert!(
+        degraded_flag.load(Ordering::SeqCst),
+        "degrading is free and still applies on the futile path"
+    );
+
+    // The operator's fix — a budget above RSS — recovers without a restart.
+    let rss = stats.rss_bytes.expect("rss");
+    health.set_budget_bytes(rss * 2);
+    let mut recovered = false;
+    for _ in 0..40 {
+        let snap = governed_snapshot(&health, &governor);
+        let l = snap.self_stats.as_ref().and_then(|s| s.ladder.as_ref());
+        if l.is_some_and(|l| l.step == 0 && !l.futile) {
+            recovered = true;
+            break;
+        }
+    }
+    assert!(recovered, "a resized budget must walk the ladder back down");
+    assert!(
+        !degraded_flag.load(Ordering::SeqCst),
+        "recovery must restore the degradable"
+    );
+}
+
 /// The literal done-when numbers, RSS-strict: after the ladder is done, the
 /// real process RSS is back under the budget. Ignored by default — raw RSS
 /// depends on allocator behavior and parallel test threads, so this runs

@@ -14,6 +14,13 @@
 //! | 2 | **Degrade** — registered optional work stopped |
 //! | 3 | **Saturated** — everything shed, still over budget: the loudest possible report |
 //!
+//! Thrashing is not on the ladder either (#864): an eviction round that
+//! frees a negligible fraction of its target proves the over-budget RSS is
+//! not in the evictable tables, so the ladder latches *futile*, stops asking
+//! (the tables keep their data), climbs to Saturated, and says so — instead
+//! of wiping every table again on the next tick, forever. The latch clears
+//! when the budget changes or RSS drops below the clear line.
+//!
 //! The thresholds deliberately agree with [`crate::health::budget_level`]
 //! (Warning ≥ 80 %, Critical ≥ 95 %, clear < 75 %), so the `sensor-budget`
 //! alert and the ladder describe one condition, never two.
@@ -71,16 +78,25 @@ const RECOVER_TICKS: u32 = 6;
 /// Minimum ticks between any two transitions — one spike must not slam
 /// collectors off and on.
 const COOLDOWN_TICKS: u32 = 2;
+/// A round that freed less than this fraction of its target proves the RSS
+/// is not in the evictable tables — thrashing, which is not on the ladder.
+const FUTILE_FRACTION: f64 = 0.01;
+/// Targets below this never latch futile: near the clear line allocator
+/// jitter dominates, and a tiny round is not evidence of anything.
+const FUTILE_MIN_TARGET: u64 = 1024 * 1024;
 
 /// What one tick decided. Side effects are the caller's ([`MemoryGovernor::step`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Decision {
     step: u8,
     /// Bytes to try to free this tick (down to `CLEAR_RATIO × budget`).
+    /// `None` while the futility latch is set — asking again is thrashing.
     evict_target: Option<u64>,
     /// `Some(true)` = apply degradables, `Some(false)` = restore them —
     /// emitted only on the transition, like the netring shed controller.
     apply_degrade: Option<bool>,
+    /// Eviction has been proven futile under the current budget (#864).
+    futile: bool,
 }
 
 /// The pure ladder state machine: `(rss, budget)` per tick in, a [`Decision`]
@@ -92,6 +108,13 @@ struct LadderMachine {
     ticks_in_step: u32,
     ticks_since_transition: u32,
     under_clear_streak: u32,
+    /// Latched by [`note_eviction`](Self::note_eviction): eviction was tried
+    /// and demonstrated useless. While set, no evict target is issued and the
+    /// ladder holds Saturated.
+    futile: bool,
+    /// The budget in force when the latch set — a resize clears the latch and
+    /// gives eviction a fresh chance under the new budget.
+    futile_budget: u64,
 }
 
 impl Default for LadderMachine {
@@ -103,6 +126,8 @@ impl Default for LadderMachine {
             // transition that never happened.
             ticks_since_transition: COOLDOWN_TICKS + 1,
             under_clear_streak: 0,
+            futile: false,
+            futile_budget: 0,
         }
     }
 }
@@ -122,6 +147,12 @@ impl LadderMachine {
         } else {
             rss as f64 / budget as f64
         };
+        // The futility latch holds only while its premise does: a resized
+        // budget or genuine relief below the clear line gives eviction a
+        // fresh chance, and the normal hysteresis walks the ladder down.
+        if self.futile && (budget != self.futile_budget || ratio < CLEAR_RATIO) {
+            self.futile = false;
+        }
         self.ticks_in_step = self.ticks_in_step.saturating_add(1);
         self.ticks_since_transition = self.ticks_since_transition.saturating_add(1);
         if ratio < CLEAR_RATIO {
@@ -139,10 +170,13 @@ impl LadderMachine {
                 }
             }
             1 => {
-                // Escalate on Critical pressure, or on being stuck: three
-                // ticks of eviction that never brought relief below the
-                // entry line means eviction alone is not enough.
+                // Escalate on Critical pressure, on proven futility, or on
+                // being stuck: three ticks of eviction that never brought
+                // relief below the entry line means eviction alone is not
+                // enough. (Degrading is free and idempotent — unlike wiping
+                // tables — so the futile path still fans it.)
                 if (ratio >= CRITICAL_RATIO
+                    || self.futile
                     || (ratio >= ENTER_RATIO && self.ticks_in_step > STUCK_TICKS))
                     && cooled
                 {
@@ -153,9 +187,10 @@ impl LadderMachine {
                 }
             }
             2 => {
-                // A full post-transition tick still at Critical: nothing left
-                // to shed — saturated, and reporting is all that remains.
-                if ratio >= CRITICAL_RATIO && self.ticks_in_step > 1 && cooled {
+                // A full post-transition tick still at Critical — or with the
+                // futility latch set: nothing left to shed — saturated, and
+                // reporting is all that remains.
+                if (ratio >= CRITICAL_RATIO || self.futile) && self.ticks_in_step > 1 && cooled {
                     self.transition(3);
                 } else if self.under_clear_streak >= RECOVER_TICKS && cooled {
                     self.transition(1);
@@ -163,10 +198,13 @@ impl LadderMachine {
                 }
             }
             _ => {
-                if ratio < CRITICAL_RATIO && cooled {
+                if !self.futile && ratio < CRITICAL_RATIO && cooled {
                     // Pressure relented below Critical: back to Degraded
                     // (degradables stay applied until the full recovery path
-                    // walks down through step 2).
+                    // walks down through step 2). While futile, hold — a
+                    // budget between the clear and Critical lines must not
+                    // bounce 3↔2 forever; descent goes through the latch
+                    // clearing above.
                     self.transition(2);
                 } else if self.under_clear_streak >= RECOVER_TICKS && cooled {
                     self.transition(1);
@@ -177,8 +215,9 @@ impl LadderMachine {
 
         // Evict every tick the ladder is armed and over the entry line —
         // aiming at the alert's clear line so the ladder and the
-        // `sensor-budget` rule stop worrying at the same place.
-        let evict_target = (self.step >= 1 && ratio >= ENTER_RATIO)
+        // `sensor-budget` rule stop worrying at the same place. Never while
+        // the futility latch is set: asking again is thrashing (#864).
+        let evict_target = (self.step >= 1 && ratio >= ENTER_RATIO && !self.futile)
             .then(|| rss.saturating_sub((budget as f64 * CLEAR_RATIO) as u64))
             .filter(|&t| t > 0);
 
@@ -186,7 +225,31 @@ impl LadderMachine {
             step: self.step,
             evict_target,
             apply_degrade,
+            futile: self.futile,
         }
+    }
+
+    /// Feed back what one eviction round actually achieved (#864). Latches
+    /// the futility flag when a meaningful target was answered with a
+    /// negligible known amount freed — proof the over-budget RSS is not in
+    /// the evictable tables. A round containing any "cannot say" outcome
+    /// (`entries > 0, bytes == 0`) never latches: unknown is not futile.
+    /// Returns the latch state.
+    fn note_eviction(
+        &mut self,
+        target: u64,
+        freed_known: u64,
+        freed_unknown: bool,
+        budget: u64,
+    ) -> bool {
+        if target >= FUTILE_MIN_TARGET
+            && !freed_unknown
+            && (freed_known as f64) < target as f64 * FUTILE_FRACTION
+        {
+            self.futile = true;
+            self.futile_budget = budget;
+        }
+        self.futile
     }
 }
 
@@ -260,10 +323,30 @@ impl MemoryGovernor {
             .decide(rss, budget);
 
         let mut round: Vec<(String, EvictOutcome)> = Vec::new();
+        let mut futile = decision.futile;
         if let Some(target) = decision.evict_target {
             round = self.evict_round(target);
             if round.iter().any(|(_, o)| o.bytes > 0 || o.entries > 0) {
                 malloc_trim();
+            }
+            // Feed the round's honest outcome back to the machine (#864): a
+            // negligible fraction of the target means eviction cannot help
+            // and must stop, not repeat.
+            let freed_known: u64 = round.iter().map(|(_, o)| o.bytes).sum();
+            let freed_unknown = round.iter().any(|(_, o)| o.entries > 0 && o.bytes == 0);
+            futile = self
+                .machine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note_eviction(target, freed_known, freed_unknown, budget);
+            if futile && !decision.futile {
+                tracing::warn!(
+                    target_bytes = target,
+                    freed_bytes = freed_known,
+                    "memory governor: eviction is futile — over-budget RSS is not in \
+                     evictable tables; holding Saturated without further eviction; \
+                     raise budget_rss_mb"
+                );
             }
         }
         if let Some(apply) = decision.apply_degrade {
@@ -311,9 +394,10 @@ impl MemoryGovernor {
 
         Some(LadderState {
             step: decision.step,
+            futile,
             since_ms: log.since_ms,
             reason: (decision.step > 0)
-                .then(|| ladder_reason(rss, budget, &evicted, &log.degraded)),
+                .then(|| ladder_reason(rss, budget, &evicted, &log.degraded, futile)),
             degraded: log.degraded.clone(),
             evicted,
         })
@@ -365,7 +449,13 @@ impl MemoryGovernor {
 
 /// The ladder's human account — the sentence an operator reads before any
 /// number: pressure, and what was done about it.
-fn ladder_reason(rss: u64, budget: u64, evicted: &[LadderEviction], degraded: &[String]) -> String {
+fn ladder_reason(
+    rss: u64,
+    budget: u64,
+    evicted: &[LadderEviction],
+    degraded: &[String],
+    futile: bool,
+) -> String {
     let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
     let pct = (rss as f64 / budget as f64 * 100.0).round();
     let mut out = format!(
@@ -389,6 +479,12 @@ fn ladder_reason(rss: u64, budget: u64, evicted: &[LadderEviction], degraded: &[
     }
     if !degraded.is_empty() {
         out.push_str(&format!("; degraded: {}", degraded.join(", ")));
+    }
+    if futile {
+        out.push_str(
+            "; eviction cannot help — over-budget RSS is not in evictable tables; \
+             raise budget_rss_mb",
+        );
     }
     out
 }
@@ -560,6 +656,133 @@ mod tests {
         let names: Vec<&str> = state.evicted.iter().map(|e| e.table.as_str()).collect();
         assert!(names.contains(&"big") && names.contains(&"small"));
         assert!(state.reason.as_deref().unwrap_or("").contains("90 MiB"));
+    }
+
+    #[test]
+    fn futile_round_latches_climbs_to_saturated_and_stops_asking() {
+        // The #864 shape: budget below the process baseline, target huge and
+        // unreachable. One honest report of a negligible round must stop all
+        // further eviction and carry the ladder to Saturated — never past.
+        let mut m = machine();
+        let (rss, budget) = (290 * MIB, 128 * MIB);
+        let d = m.decide(rss, budget);
+        assert_eq!(d.step, 1);
+        let target = d.evict_target.expect("armed and over the entry line");
+        assert_eq!(target, rss - 96 * MIB); // rss − 75% of budget
+        assert!(m.note_eviction(target, 300 * 1024, false, budget));
+
+        let mut degrades = 0;
+        let mut max_step = 0;
+        for _ in 0..10 {
+            let d = m.decide(rss, budget);
+            assert_eq!(d.evict_target, None, "no table is ever asked again");
+            assert!(d.futile);
+            if d.apply_degrade == Some(true) {
+                degrades += 1;
+            }
+            max_step = max_step.max(d.step);
+        }
+        assert_eq!(degrades, 1, "degrade still fans exactly once");
+        assert_eq!((max_step, m.step), (3, 3));
+    }
+
+    #[test]
+    fn futile_latch_ignores_unknown_byte_outcomes() {
+        // A round containing a "cannot say" outcome (entries freed, bytes
+        // unreported) is unknown, not futile: keep evicting.
+        let mut m = machine();
+        let budget = 128 * MIB;
+        let d = m.decide(290 * MIB, budget);
+        let target = d.evict_target.unwrap();
+        assert!(!m.note_eviction(target, 0, true, budget));
+        assert!(m.decide(290 * MIB, budget).evict_target.is_some());
+    }
+
+    #[test]
+    fn futile_latch_needs_a_meaningful_target() {
+        // Just over the entry line the target is tiny; a small round there is
+        // allocator jitter, not proof.
+        let mut m = machine();
+        let budget = 100 * MIB;
+        let d = m.decide(80 * MIB, budget);
+        let target = d.evict_target.unwrap();
+        assert!(target < FUTILE_MIN_TARGET * 6); // 5 MiB on this budget
+        assert!(!m.note_eviction(512 * 1024, 0, false, budget));
+        assert!(m.decide(80 * MIB, budget).evict_target.is_some());
+    }
+
+    #[test]
+    fn futile_latch_clears_on_budget_change_and_on_relief() {
+        // Latch under a hopeless budget, then resize: the latch clears,
+        // eviction gets a fresh chance, and once RSS sits under the clear
+        // line the ladder walks down with restore fanned exactly once.
+        let mut m = machine();
+        let (rss, budget) = (290 * MIB, 128 * MIB);
+        let target = m.decide(rss, budget).evict_target.unwrap();
+        m.note_eviction(target, 0, false, budget);
+        for _ in 0..8 {
+            m.decide(rss, budget);
+        }
+        assert_eq!((m.step, m.futile), (3, true));
+
+        // Operator raises the budget well above RSS: latch premise gone.
+        let new_budget = 512 * MIB;
+        let d = m.decide(rss, new_budget);
+        assert!(!d.futile && !m.futile);
+        // 290/512 ≈ 57% < clear: recovery streak walks 3→2→1→0, restoring
+        // degradables exactly once on the 2→1 transition.
+        let mut restores = 0;
+        for _ in 0..(3 * (RECOVER_TICKS + COOLDOWN_TICKS)) {
+            if m.decide(rss, new_budget).apply_degrade == Some(false) {
+                restores += 1;
+            }
+        }
+        assert_eq!((m.step, restores), (0, 1));
+    }
+
+    #[test]
+    fn governor_stops_evicting_when_tables_cannot_cover_the_target_and_reports_it() {
+        // Full-governor futility: a table of a few hundred KiB against a
+        // 160 MiB shortfall. The evict fn must be called exactly once across
+        // many ticks, and the published state must say why.
+        let gov = MemoryGovernor::default();
+        let calls: Arc<Mutex<u32>> = Arc::default();
+        let c = calls.clone();
+        gov.register_table(TableHandle {
+            name: "tls_inventory".into(),
+            stats: Box::new(|| TableStats {
+                name: "tls_inventory".into(),
+                entries: 2,
+                bytes: Some(200 * 1024),
+                ..Default::default()
+            }),
+            evict: Some(Box::new(move |_ask| {
+                *c.lock().unwrap() += 1;
+                EvictOutcome {
+                    entries: 2,
+                    bytes: 200 * 1024,
+                }
+            })),
+        });
+
+        let stats = SelfStats {
+            rss_bytes: Some(290 * MIB),
+            budget_bytes: Some(128 * MIB),
+            ..Default::default()
+        };
+        let mut last = None;
+        for _ in 0..10 {
+            last = gov.step(&stats);
+        }
+        assert_eq!(*calls.lock().unwrap(), 1, "one round, then never again");
+        let state = last.expect("ladder armed");
+        assert_eq!((state.step, state.futile), (3, true));
+        let reason = state.reason.as_deref().unwrap_or("");
+        assert!(reason.contains("eviction cannot help"), "reason: {reason}");
+        assert!(reason.contains("raise budget_rss_mb"), "reason: {reason}");
+        // The one honest round is still accounted.
+        assert_eq!(state.evicted.len(), 1);
+        assert_eq!(state.evicted[0].table, "tls_inventory");
     }
 
     #[test]
