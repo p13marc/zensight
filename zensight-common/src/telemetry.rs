@@ -180,6 +180,11 @@ pub enum Protocol {
     /// content, permissions. Publishes alerts and one gauge
     /// (`assertions/failing`); strictly read-only, executes nothing.
     Hostspec,
+    /// Proxmox VE (#818): the hypervisor as a hypervisor — guests and their
+    /// `onboot`/firewall configuration, storage pools' allocated-vs-capacity,
+    /// vzdump outcomes and sizes, cluster/HA/replication state. Polls the PVE
+    /// API read-only with a scoped token; **no action surface at all**.
+    Pve,
 }
 
 impl Protocol {
@@ -198,6 +203,7 @@ impl Protocol {
             Protocol::Systemd => "systemd",
             Protocol::Parallax => "parallax",
             Protocol::Hostspec => "hostspec",
+            Protocol::Pve => "pve",
         }
     }
 
@@ -206,6 +212,7 @@ impl Protocol {
     pub fn display_name(&self) -> &'static str {
         match self {
             Protocol::Logs => "Logs",
+            Protocol::Pve => "PVE",
             _ => self.as_str(),
         }
     }
@@ -234,6 +241,7 @@ impl std::str::FromStr for Protocol {
             "systemd" => Ok(Protocol::Systemd),
             "parallax" => Ok(Protocol::Parallax),
             "hostspec" => Ok(Protocol::Hostspec),
+            "pve" => Ok(Protocol::Pve),
             _ => Err(()),
         }
     }

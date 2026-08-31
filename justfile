@@ -9,6 +9,8 @@
 #   just sensors        # run just the 6 sensors, no GUI/correlator (Ctrl-C stops them)
 #                       # (just sensors connect=tcp/<gui-host>:7447 to feed a remote GUI)
 #   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | hostspec | parallax | correlator)
+#   just pve            # the Proxmox VE sensor (#818) — needs a PVE endpoint
+#                       # and a read-only API token, so it is not in `just run`
 #   just rerun          # optional Rerun sidecar (evaluation, epic #415) — see the recipe
 #   just demo-actions   # install the inert unit + polkit rule that make gated
 #                       # service control demonstrable (#866), then:
@@ -152,6 +154,7 @@ build:
         -p zensight-sensor-logs \
         -p zensight-sensor-systemd \
         -p zensight-sensor-hostspec \
+        -p zensight-sensor-pve \
         -p zensight-sensor-parallax \
         -p zensight-correlator \
         {{ebpf_features}}
@@ -291,6 +294,15 @@ logs: build configure
 # Run the systemd sensor (unit/boot telemetry + threshold alerts + sentinel).
 systemd: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
+
+# Run the Proxmox VE sensor (#818). NOT part of `just run`: it needs a PVE API
+# endpoint and a read-only PVEAuditor token, which no demo can invent. Copy
+# configs/pve.json5, fill in host + token, then:
+#   just pve                       # uses .run/pve.json5 if you put one there,
+#                                  # else configs/pve.json5
+pve config="configs/pve.json5": build
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-sensor-pve --config "{{trim_start_match(config, 'config=')}}"
 
 # Make gated systemd service control demonstrable (#866). Installs an inert
 # `zensight-demo.service` (a `sleep infinity` under DynamicUser, no network)

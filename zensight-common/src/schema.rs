@@ -107,6 +107,12 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::hostspec::ExpectationsConfig>("HostspecExpectations")
         .json::<crate::desired::AppliedConfig>("AppliedConfig")
         .json::<crate::hostspec::HostspecEvaluation>("HostspecEvaluation")
+        // pve's state documents (#818). Real schemas, not summaries: these are
+        // state-class payloads and the #815 gate refuses stubs there.
+        .json::<crate::pve::PveGuest>("PveGuest")
+        .json::<crate::pve::PveStoragePool>("PveStoragePool")
+        .json::<crate::pve::PveBackupSummary>("PveBackupSummary")
+        .json::<crate::pve::PveClusterHealth>("PveClusterHealth")
         // ── registry drift the table makes visible (RFC 08 §5) ────────────
         // The registry says Vec<HttpRecord>/Vec<IpfixRecord>; the wire types
         // are HttpHostRecord/NetflowRecord. Served under the registry name so

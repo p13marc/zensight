@@ -96,6 +96,8 @@ procedure	parallax	introspect	read	-	RegistrySlice
 procedure	parallax	stream/report	write	MediaReceiverReport	Ack
 procedure	parallax	stream/set	write	Command<StreamControl>	Ack
 procedure	parallax	streams	read	-	Vec<StreamDescriptor>
+procedure	pve	describe	read	-	SchemaSet
+procedure	pve	introspect	read	-	RegistrySlice
 procedure	snmp	artifact/cancel	write	-	Ack
 procedure	snmp	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	snmp	artifact/status	read	-	ArtifactStatus
@@ -401,6 +403,41 @@ subject	parallax	{stream}/stats/kbps	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/rc_drops	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/sink_queue	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/viewers	telemetry	TelemetryPoint
+subject	pve	alert/{alert_key}	state	Alert
+subject	pve	backup/{vmid}	state	PveBackupSummary
+subject	pve	backup/{vmid}/age_secs	telemetry	TelemetryPoint
+subject	pve	backup/{vmid}/duration_secs	telemetry	TelemetryPoint
+subject	pve	backup/{vmid}/ok	telemetry	TelemetryPoint
+subject	pve	backup/{vmid}/size_bytes	telemetry	TelemetryPoint
+subject	pve	backup/{vmid}/size_change_pct	telemetry	TelemetryPoint
+subject	pve	cluster	state	PveClusterHealth
+subject	pve	cluster/guests_running	telemetry	TelemetryPoint
+subject	pve	cluster/guests_total	telemetry	TelemetryPoint
+subject	pve	cluster/nodes_online	telemetry	TelemetryPoint
+subject	pve	cluster/nodes_total	telemetry	TelemetryPoint
+subject	pve	cluster/quorate	telemetry	TelemetryPoint
+subject	pve	cluster/replication_failed	telemetry	TelemetryPoint
+subject	pve	errors	state	ErrorReport
+subject	pve	evidence/device/{device}	state	HostEvidence
+subject	pve	evidence/self	state	HostEvidence
+subject	pve	guest/{vmid}	state	PveGuest
+subject	pve	guest/{vmid}/cpu_ratio	telemetry	TelemetryPoint
+subject	pve	guest/{vmid}/disk_bytes	telemetry	TelemetryPoint
+subject	pve	guest/{vmid}/disk_max_bytes	telemetry	TelemetryPoint
+subject	pve	guest/{vmid}/mem_bytes	telemetry	TelemetryPoint
+subject	pve	guest/{vmid}/mem_max_bytes	telemetry	TelemetryPoint
+subject	pve	guest/{vmid}/provisioned_bytes	telemetry	TelemetryPoint
+subject	pve	guest/{vmid}/running	telemetry	TelemetryPoint
+subject	pve	guest/{vmid}/uptime_secs	telemetry	TelemetryPoint
+subject	pve	health	state	HealthSnapshot
+subject	pve	sensor	state	SensorInfo
+subject	pve	storage/{store}	state	PveStoragePool
+subject	pve	storage/{store}/allocated_bytes	telemetry	TelemetryPoint
+subject	pve	storage/{store}/avail_bytes	telemetry	TelemetryPoint
+subject	pve	storage/{store}/overcommit_ratio	telemetry	TelemetryPoint
+subject	pve	storage/{store}/total_bytes	telemetry	TelemetryPoint
+subject	pve	storage/{store}/used_bytes	telemetry	TelemetryPoint
+subject	pve	storage/{store}/used_ratio	telemetry	TelemetryPoint
 subject	snmp	alert/{alert_key}	state	Alert
 subject	snmp	artifact/{kind}	state	ArtifactStatus
 subject	snmp	discovery	state	DiscoveryReport

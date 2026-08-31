@@ -1,0 +1,58 @@
+[package]
+name = "zensight-sensor-pve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Zenoh sensor for Proxmox VE — guests and their onboot/firewall configuration, storage over-commitment, vzdump outcomes and size trend, cluster/HA/replication. Read-only; no action surface."
+license = "Apache-2.0"
+
+[dependencies]
+zenkey = { workspace = true }
+zensight-common = { path = "../zensight-common" }
+zensight-sensor-core = { path = "../zensight-sensor-core" }
+hostname = "0.4"
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "sync", "time"] }
+
+# Zenoh
+zenoh.workspace = true
+
+# The PVE API is HTTPS + JSON. rustls only — the same stack
+# zensight-exporter-prometheus already ships, so no OpenSSL enters the tree.
+# `danger_accept_invalid_certs` is reachable through a config flag because a
+# stock Proxmox install has a self-signed certificate and refusing to run
+# there would just push operators to a worse workaround; the flag is loud and
+# documented.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json5.workspace = true
+
+# CLI
+clap = { workspace = true, features = ["derive"] }
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# Error handling
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+toml.workspace = true
+# The fake PVE API the e2e tests poll. Same shape as the SNMP sensor's
+# in-process simulated agent: the sensor is exercised against a real socket
+# speaking real JSON, because a mocked client would only prove the mock.
+axum = "0.8"
+
+[[bin]]
+name = "zensight-sensor-pve"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

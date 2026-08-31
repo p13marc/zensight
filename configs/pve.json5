@@ -1,0 +1,126 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",
+    // namespace: "my-deployment",  // OPTIONAL — the deployment base (#466), empty
+                                    // by default. All participants must agree.
+    connect: [],                    // Endpoints to connect to (for client mode)
+    // listen: ["tcp/0.0.0.0:7448"],
+  },
+
+  // Serialization format for telemetry
+  serialization: "cbor",            // "json" or "cbor"
+
+  // pve (#818): the hypervisor as a HYPERVISOR. Everything else ZenSight runs
+  // on a Proxmox host measures it as a Linux box; this sensor reads the PVE
+  // API for the facts that make it a hypervisor — and, in particular, for the
+  // CONFIGURATION FACTS that stop matching intent without any metric moving:
+  //
+  //   * a guest with onboot=0 that will not come back after a host reboot
+  //   * a NIC without firewall=1, which makes that guest's whole .fw file inert
+  //   * more storage promised to thin volumes than the pool actually has
+  //   * a backup that SUCCEEDS while shrinking
+  //
+  // All four were found by hand, once, weeks late, in the 2026-08-28 audit of
+  // the reference fleet. That is what this sensor is for.
+  //
+  // READ-ONLY, AND THERE IS NO ACTION SURFACE — not disabled, absent. A
+  // monitor that can stop a VM is a different threat model and would be a
+  // separate, deliberate decision (see the systemd sensor's `actions` block
+  // for the shape one would have to take).
+  //
+  // Run it as a native binary ON the PVE host (the reference deployment's
+  // security rules forbid containers there; the release tarball ships a
+  // hardened systemd unit for exactly this pattern), with a read-only
+  // PVEAuditor API token in a root-0600 file.
+  pve: {
+    // The PVE API host. A HOST, not a URL — the scheme, port and /api2/json
+    // path are added for you, and a URL here is refused by name at startup.
+    host: "127.0.0.1",
+    port: 8006,
+
+    // A read-only API token, in full:
+    //   PVEAPIToken=zensight@pve!ro=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    //
+    // Create it with PVEAuditor and nothing more:
+    //   pveum user add zensight@pve
+    //   pveum acl modify / --users zensight@pve --roles PVEAuditor
+    //   pveum user token add zensight@pve ro --privsep 0
+    //
+    // NEVER put the secret in this file. `file:` reads it from disk at start
+    // (root-0600, outside git); `${VAR}` reads an environment variable. The
+    // `PVEAPIToken=` prefix is added if the resolved value does not carry it.
+    token: "file:/etc/zensight/pve.token",
+
+    // Restrict to these PVE nodes. Empty = every node the API lists, which on
+    // a standalone install is the one node.
+    nodes: [],
+
+    // `source` for the hypervisor-scoped series (pools, cluster). Guests carry
+    // their own — the VMID, deliberately, so a rename does not fork every
+    // series and every alert key; the name rides in the labels.
+    // source: "pve01",
+
+    // Three cadences, because the three things move at three speeds and
+    // polling all of them at the fastest would mean a monitoring sensor
+    // hammering the machine whose failure is total.
+    poll_interval_secs: 60,      // runtime status: one /cluster/resources call
+    config_interval_secs: 300,   // guest config: one call per guest; human timescale
+    backup_interval_secs: 900,   // vzdump tasks + stored volumes; nightly timescale
+
+    // Must be SHORTER than poll_interval_secs, and startup refuses otherwise:
+    // a timeout that cannot expire before the next tick is not a bound.
+    timeout_secs: 15,
+    max_concurrent: 4,
+
+    // A stock Proxmox install has a SELF-SIGNED API certificate. Turning this
+    // on means the endpoint is no longer authenticated — an on-path attacker
+    // can feed this sensor whatever hypervisor state they like. It is opt-in,
+    // logged at warn on every start, and the better answer is to give the API
+    // a real certificate.
+    accept_invalid_certs: false,
+
+    // Third-party identity claims about guests (name + configured MACs,
+    // observer: pve) so the hypervisor's view of a VM fuses in the catalog
+    // with what that VM's own sensors report.
+    evidence: true,
+
+    // The assertions. These ship ON: you are already editing this file to put
+    // a token in it, and a monitoring tool whose checks all default to
+    // disabled asserts nothing.
+    alerts: {
+      enabled: true,
+      for_secs: 120,          // debounce; a guest mid-migration briefly looks stopped
+
+      // The 2026-08-28 findings, as continuous assertions.
+      guest_onboot: true,     // onboot=0 on a non-template guest
+      guest_not_running: true,// onboot=1 but the guest is not running
+      nic_firewall: true,     // a NIC without firewall=1 — an inert .fw file
+
+      // Guests exempt from the three above: one that is MEANT to be off, or
+      // sits on a bridge with no firewall at all.
+      exempt_vmids: [],
+
+      pool_used_pct: 85.0,          // 0 disables; >=95% grades critical
+      pool_overcommit_ratio: 1.0,   // allocated/total; 1.0 = "more promised than exists"
+
+      backup_failed: true,          // the last vzdump task did not exit OK
+      // The newest dump is older than this. 0 = OFF, because backup cadence is
+      // deployment policy and a wrong default here is a nightly false
+      // positive. For a nightly job, 93600 (26 h) leaves room for a slow run.
+      backup_stale_secs: 0,
+      // The newest dump is this much smaller than the one before it. THIS is
+      // the one a green exit code cannot show: "the job exited 0" is what the
+      // mail notification already says.
+      backup_shrink_pct: 40.0,
+
+      quorum: true,           // never fires on a standalone node — no quorum to lose
+      replication: true,
+    },
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",
+  },
+}

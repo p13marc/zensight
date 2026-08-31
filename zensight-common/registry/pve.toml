@@ -1,0 +1,352 @@
+# Subject registry: pve (Proxmox VE). RFC 08 §2; issue #818.
+#
+# The hypervisor is the one machine whose failure is total, and it was
+# monitored as a Linux box. What this slice adds is not more metrics — it is
+# the CONFIGURATION FACTS that stopped matching intent, which is what the
+# 2026-08-28 audit found by hand: a guest with onboot=0, a NIC with
+# firewall=0 that made a whole firewall file inert, 990 GB provisioned on a
+# 937 GB pool. None of those is a metric that spikes, so the real output is
+# the state documents plus the alert set; the gauges exist so the guests have
+# device cards, Prometheus has series, and the family-coverage audit has
+# families to cover.
+#
+# Guests are the <device>s (per-guest DeviceLiveness, the SNMP/gNMI shape);
+# the origin stays the polling host's.
+#
+# THERE IS NO ACTION SURFACE, deliberately, and no procedure below can
+# acquire one: a monitor that can stop a VM is a different threat model and
+# would be a separate, explicit decision (the systemd sensor's `actions`
+# block is the precedent for how that would have to look).
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "pve"
+description = "Proxmox VE hypervisor telemetry (#818): guests + their onboot/firewall config, storage allocated-vs-capacity, vzdump outcomes and size trend, cluster/HA/replication — read-only, no action surface"
+
+# ── Per-guest telemetry ──────────────────────────────────────────────────────
+
+[[subject]]
+path = "guest/{vmid}/cpu_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "guest CPU utilisation, 0..1 as PVE reports it (not per-core)"
+
+[[subject]]
+path = "guest/{vmid}/mem_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "guest memory in use"
+
+[[subject]]
+path = "guest/{vmid}/mem_max_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "guest memory ceiling"
+
+[[subject]]
+path = "guest/{vmid}/disk_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "guest disk in use, where the storage plugin can report it (0 on plugins that cannot)"
+
+[[subject]]
+path = "guest/{vmid}/disk_max_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "guest disk ceiling"
+
+[[subject]]
+path = "guest/{vmid}/provisioned_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "sum of this guest's declared disk sizes — what it has been promised, which is what over-commits a thin pool"
+
+[[subject]]
+path = "guest/{vmid}/uptime_secs"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "guest uptime (0 when stopped)"
+
+[[subject]]
+path = "guest/{vmid}/running"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "1 when the guest is running, 0 otherwise — published every poll, so a stopped guest reads as 0 and never as silence"
+
+# ── Per-pool telemetry ───────────────────────────────────────────────────────
+
+[[subject]]
+path = "storage/{store}/total_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.0"
+description = "pool capacity"
+
+[[subject]]
+path = "storage/{store}/used_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.0"
+description = "pool bytes actually consumed"
+
+[[subject]]
+path = "storage/{store}/avail_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.0"
+description = "pool bytes free"
+
+[[subject]]
+path = "storage/{store}/used_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.0"
+description = "used/total, 0..1"
+
+[[subject]]
+path = "storage/{store}/allocated_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.0"
+description = "sum of the declared sizes of the volumes this pool holds — the number that is invisible in `used` and fills the pool on its own schedule"
+
+[[subject]]
+path = "storage/{store}/overcommit_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.0"
+description = "allocated/total; above 1.0 the pool is over-committed (990 GB on a 937 GB pool = 1.06)"
+
+# ── Per-guest backup telemetry ───────────────────────────────────────────────
+
+[[subject]]
+path = "backup/{vmid}/size_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "newest stored dump size for this guest"
+
+[[subject]]
+path = "backup/{vmid}/size_change_pct"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "newest vs previous dump, percent; negative means it shrank — the one a green exit code cannot show"
+
+[[subject]]
+path = "backup/{vmid}/age_secs"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "age of the newest stored dump"
+
+[[subject]]
+path = "backup/{vmid}/duration_secs"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "how long the last vzdump task ran"
+
+[[subject]]
+path = "backup/{vmid}/ok"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "1 when the last vzdump task exited OK, 0 otherwise"
+
+# ── Cluster-wide telemetry ───────────────────────────────────────────────────
+
+[[subject]]
+path = "cluster/quorate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "1 quorate, 0 not; not published at all on a standalone node, where there is no quorum to have"
+
+[[subject]]
+path = "cluster/nodes_online"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "cluster members reporting online"
+
+[[subject]]
+path = "cluster/nodes_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "cluster members known"
+
+[[subject]]
+path = "cluster/guests_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "guests known to this hypervisor (templates excluded)"
+
+[[subject]]
+path = "cluster/guests_running"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "guests currently running"
+
+[[subject]]
+path = "cluster/replication_failed"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "replication jobs whose last run failed (0 where replication is unconfigured)"
+
+# ── State documents ──────────────────────────────────────────────────────────
+
+[[subject]]
+path = "guest/{vmid}"
+class = "state"
+type = "PveGuest"
+cardinality = 512
+ttl_s = 900
+since = "1.0"
+description = "the guest as the hypervisor knows it: runtime status joined with the config facts that decide the NEXT reboot — onboot, per-NIC firewall, per-disk backup exclusion"
+
+[[subject]]
+path = "storage/{store}"
+class = "state"
+type = "PveStoragePool"
+cardinality = 128
+ttl_s = 900
+since = "1.0"
+description = "pool capacity, use, and what has been PROMISED to thin volumes"
+
+[[subject]]
+path = "backup/{vmid}"
+class = "state"
+type = "PveBackupSummary"
+cardinality = 512
+ttl_s = 86400
+since = "1.0"
+description = "last vzdump task outcome plus the newest two stored volumes — the size comparison comes from the store, so a sensor restart does not reset the baseline"
+
+[[subject]]
+path = "cluster"
+class = "state"
+type = "PveClusterHealth"
+cardinality = 1
+ttl_s = 900
+since = "1.0"
+description = "quorum, members, HA resources and replication results; quorate is absent on a standalone node rather than false"
+
+[[subject]]
+path = "evidence/device/{device}"
+common = "evidence_device"
+class = "state"
+type = "HostEvidence"
+cardinality = 512
+ttl_s = 900
+since = "1.0"
+description = "third-party identity claim about a guest (observer = pve; {device} is the vmid): its name and configured MACs, so the hypervisor's view of a VM fuses with that VM's own sensors in the catalog (RFC 06 §4)"
+
+# ── Framework subjects ───────────────────────────────────────────────────────
+
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework)"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim of the host running the sensor (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 128
+ttl_s = 900
+since = "1.0"
+description = "hypervisor assertions: onboot-off, NIC firewall off, guest not running, pool usage/over-commitment, backup failed/stale/shrunk, quorum lost, replication failed"
+
+# ── Procedures ───────────────────────────────────────────────────────────────
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.0"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"

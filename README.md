@@ -31,6 +31,7 @@ each. The canonical cross-cutting references live in [`docs/`](docs/).
 | [`zensight-sensor-netring`](zensight-sensor-netring/) | Wire-level flow/L7/NDR (AF_PACKET/AF_XDP or pcap) + detectors |
 | [`zensight-sensor-systemd`](zensight-sensor-systemd/) | systemd unit/service/boot telemetry (D-Bus) + sentinel + gated actions |
 | [`zensight-sensor-hostspec`](zensight-sensor-hostspec/) | machine-checked desired-state assertions (mounts/files/listeners/symlinks/content/perms) — read-only sentinel, executes nothing |
+| [`zensight-sensor-pve`](zensight-sensor-pve/) | the hypervisor as a hypervisor — guest `onboot`/firewall config, thin-pool over-commitment, vzdump outcomes and size trend; read-only, no action surface |
 | [`zensight-correlator`](zensight-correlator/) | Fuses identity evidence → one `HostEntity` per host |
 | [`zensight-exporter-prometheus`](zensight-exporter-prometheus/) | Prometheus `/metrics` + remote-write |
 | [`zensight-exporter-otel`](zensight-exporter-otel/) | OpenTelemetry OTLP metrics/logs/traces |

@@ -1,0 +1,56 @@
+[Unit]
+Description=ZenSight Proxmox VE sensor (#818) — read-only hypervisor telemetry
+Documentation=https://git.marcpardo.eu/marcpardo/zensight
+After=network-online.target pve-cluster.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zensight-sensor-pve --config /etc/zensight/pve.json5
+Restart=on-failure
+RestartSec=10
+
+# The sensor reads the PVE API over the network and nothing else. It holds no
+# capability, writes nothing, and has no action surface at all — see the crate
+# docs: a monitor that can stop a VM is a different threat model.
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# The config and the API token. The token belongs in its own root-0600 file
+# referenced as `file:/etc/zensight/pve.token` — never inline in the JSON5, and
+# never in git. Under DynamicUser the sensor cannot read a root-0600 file, so
+# the token is passed through systemd's credential store instead:
+#
+#   LoadCredential=pve.token:/etc/zensight/pve.token
+#   token: "file:/run/credentials/zensight-sensor-pve.service/pve.token"
+#
+# which keeps the file root-0600 on disk and hands the sensor a copy no other
+# unit can read.
+LoadCredential=pve.token:/etc/zensight/pve.token
+ReadOnlyPaths=/etc/zensight
+
+# A starting point, not a measurement (#812/#813): the sensor's own health doc
+# reports `self_stats.rss_bytes`, so size this from what it actually uses.
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

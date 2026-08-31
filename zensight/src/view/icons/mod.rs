@@ -284,6 +284,9 @@ pub fn protocol_icon<Message: 'static>(
         // A gauge-and-alerts sentinel has no iconography of its own yet;
         // the generic mark keeps the tab honest (#821).
         zensight_common::Protocol::Hostspec => protocol_generic(size),
+        // #818: a hypervisor is not a protocol with an icon vocabulary of its
+        // own yet; the generic mark keeps the tab honest.
+        zensight_common::Protocol::Pve => protocol_generic(size),
     }
 }
 

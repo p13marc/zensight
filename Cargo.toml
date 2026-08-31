@@ -22,6 +22,7 @@ members = [
     "zensight-btf",
     "zensight-sensor-systemd",
     "zensight-sensor-hostspec",
+    "zensight-sensor-pve",
     # EVALUATION ONLY (epic #415): Rerun visualization adapter prototype.
     # publish = false, nothing depends on it; may be removed wholesale if the
     # evaluation concludes "do not adopt" (docs/plans/rerun/).
