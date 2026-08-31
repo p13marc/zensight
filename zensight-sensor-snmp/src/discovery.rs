@@ -230,6 +230,11 @@ async fn probe(
 
     for (set_name, set) in sets {
         let device = crate::config::DeviceConfig {
+            // A discovery probe is two GETs against a device that may not
+            // exist; it is bounded by the sweep's own semaphore and needs no
+            // budget of its own.
+            max_pdus_per_sec: None,
+            max_concurrent: None,
             name: "discovery-probe".to_string(),
             address: addr.to_string(),
             community: set

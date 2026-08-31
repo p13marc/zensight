@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SNMP: a per-device PDU budget, and a one-shot `--discover`** (#825 items 2
+  and 4 — items 1 and 3 shipped in 0.12.0, and the issue closes with these).
+
+  **The budget.** An SNMP sensor's characteristic failure is hammering a device
+  weaker than itself — an eight-year-old switch CPU, or a UPS management card
+  that reboots under load. Until now each device polled on its own timer with
+  no cap on outstanding requests and no ceiling on PDU rate: correct, and
+  entirely dependent on the operator having chosen a gentle interval. Devices
+  gain `max_pdus_per_sec` and `max_concurrent`; both absent means no ceiling,
+  so every existing deployment behaves exactly as before. This is the
+  SNMP-shaped instance of #812's fleet-wide budget work, and it is declared
+  **per device** because the resource being bounded is *someone else's device*
+  and one switch's tolerance says nothing about another's.
+
+  The accounting is honest about what it can know: a GET costs one token,
+  charged before it is issued; a **walk is charged after it completes**, from
+  the rows it really returned (`ceil(rows / max_repetitions) + 1` for GETBULK,
+  `rows + 1` for GETNEXT on v1). How many PDUs a walk takes is not knowable
+  before the table is read, and estimating it would make `max_pdus_per_sec` a
+  number meaning something other than what it says. A large table therefore
+  drains the bucket and delays the *next* operation — the device gets a rest
+  proportional to the work it just did. Over budget the poller **waits**; it
+  never drops a poll, because a sensor that skips work to stay under budget has
+  traded the device's health for a gap in its own telemetry. Pinned by an e2e
+  that measures the wall clock against a live agent under a 10 PDU/s ceiling
+  and then asserts all 64 rows still arrived. (GETBULK itself is not new — the
+  client has picked it for v2c/v3 since #559, pinned by `v2c_walk_uses_getbulk`.)
+
+  **`--discover <cidr>`.** The gap between "supported" and "usable" for SNMP is
+  always the config. The new one-shot mode sweeps a subnet, identifies what
+  answers by sysName/sysObjectID/sysDescr, prints a **proposed config to
+  stdout**, and exits — annotated per device, with a header saying that nothing
+  was applied, that the name becomes the device slug in every key, that a
+  device answering a community answered a *cleartext* credential and needs
+  `allow_insecure_versions`, and that anything smaller than the machine polling
+  it wants a `max_pdus_per_sec`. It **never touches the bus**: the runner, the
+  session and the publishers are not constructed at all on that path, so an
+  operator sweeping a subnet from a laptop does not thereby join a fleet.
+  Diagnostics go to stderr, so `--discover 10.0.0.0/24 > devices.json5` yields
+  a file that is only the proposal. Addresses already in `snmp.devices` are
+  skipped, and an empty sweep prints a sentence rather than an empty file —
+  *silence from an SNMP agent is indistinguishable from silence from a filtered
+  port* — and exits 0, because that is a finding rather than a failure of the
+  sweep. It is distinct from the existing `snmp.discovery` block, which is a
+  continuous in-process sweep publishing a `DiscoveryReport`: the two answer
+  "what is out there right now, so I can write a config" and "what appeared on
+  my network since I last looked".
+
 - **`zensight-sensor-probe` — the outside-in view** (#820). Everything else
   ZenSight measures is *inside*; nothing checked that the thing works from
   outside. That gap cost eight days: on 2026-08-20 a reboot dropped an
