@@ -51,6 +51,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-sensor-hostspec`** (#821): machine-checked desired-state
+  assertions — the sentinel pattern for what D-Bus and netlink cannot see.
+  Seven read-only assertion kinds (mounts incl. bind-of through computed
+  device+root, files with mtime freshness and a latched size baseline, TCP
+  listeners with require/forbid and distinct `0.0.0.0`/`::` wildcards,
+  literal symlink targets, provable absence, capped content
+  contains/matches, permissions incl. lstat-only secrets) — a CLOSED
+  vocabulary that **executes nothing** (no command/run kind ever; the
+  binary/version kind was deliberately rejected). Failures are alerts with
+  the failing clause in the labels; the set hot-swaps over
+  `@rpc/hostspec/expectations/set` with real validation before apply
+  (refuses `error/invalid-args`, previous good set kept — new over both
+  older sentinels); `@rpc/hostspec/spec` answers "what is this host held
+  to" per-assertion as pass/fail/**unreadable** (an observation the sensor
+  could not make is never a pass). One gauge `assertions/failing` publishes
+  every sweep, 0 included. New registry slice `hostspec.toml` (registry
+  1.0, lock regenerated); the shipped config's default set is empty on
+  purpose — verified live: a 5-producer conformance run (sysinfo + logs +
+  systemd + hostspec + catalog) passes strict with the slice in sync.
+
 - **`Protocol::Hostspec`** (#821, plumbing PR): the enum variant, wire token
   `hostspec`, and the compiler-forced GUI arms (generic icon, generic
   overview, no specialized tab — its surfaces are Alerts, the Sensors card

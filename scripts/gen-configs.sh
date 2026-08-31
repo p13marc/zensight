@@ -263,6 +263,11 @@ sed -E \
     -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
     "$configs_dir/parallax.json5" > "$outdir/parallax.json5"
 
+# hostspec (#821): the shipped config's default assertion set is EMPTY on
+# purpose (assertions are per-host operator policy, and an empty set is a
+# valid, conformance-green state), so the demo profile is the file verbatim.
+cp -f "$configs_dir/hostspec.json5" "$outdir/hostspec.json5"
+
 # correlator: fuses the sensors' identity evidence into one HostEntity per
 # host. Machine-agnostic; the example config already has every merge rule on.
 cp -f "$configs_dir/correlator.json5" "$outdir/correlator.json5"

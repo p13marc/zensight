@@ -1,0 +1,121 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",
+    // namespace: "my-deployment",  // OPTIONAL — the deployment base (#466), empty
+                                    // by default. All participants must agree.
+    connect: [],                    // Endpoints to connect to (for client mode)
+    // listen: ["tcp/0.0.0.0:7448"],
+  },
+
+  // Serialization format for telemetry
+  serialization: "cbor",            // "json" or "cbor"
+
+  // hostspec (#821): machine-checked desired-state assertions — the sentinel
+  // pattern for what D-Bus and netlink cannot see. Read-only, unprivileged,
+  // EXECUTES NOTHING (the vocabulary is closed: no command/run/binary kind,
+  // deliberately — that would be remote execution wearing a monitoring hat).
+  //
+  // Failures publish as alerts on state/hostspec/alert/* with the failing
+  // clause in the labels (check/path/expected/actual); the current set is
+  // hot-swappable over @rpc/hostspec/expectations/set (validated first —
+  // a bad regex or relative path refuses with error/invalid-args and the
+  // previous good set keeps running); "what is this host held to" answers
+  // on @rpc/hostspec/spec. One gauge, telemetry/hostspec/assertions/failing,
+  // publishes the failing count every sweep — 0 included.
+  //
+  // The DEFAULT SET IS EMPTY on purpose: assertions are per-host operator
+  // policy, and an empty set is a valid state (spec answers "held to
+  // nothing", the gauge reads 0). Every kind below is a commented example —
+  // they are the issue's own motifs; adapt paths before uncommenting.
+  //
+  // NOTE the honest overlaps: hostspec notices drift BETWEEN configuration-
+  // management converges (it does not converge anything); listeners are read
+  // from THIS network namespace (a containerized service's socket is
+  // invisible here); owner/group names resolve via /etc/passwd,group only —
+  // NSS/LDAP hosts should assert numeric ids.
+  hostspec: {
+    // source: "host-01",           // override the source id (default: hostname)
+
+    expectations: {
+      // How often the whole set is evaluated. A hot-swap retimes the loop.
+      // eval_interval_secs: 60,
+
+      // Set-wide alert debounce, seconds. 0 (the default) fires on the first
+      // failing sweep — host state does not flap the way sockets do, and a
+      // debounce only delays the page. Give flappy checks (a listener during
+      // a service restart) a per-expectation for_secs instead.
+      // default_for_secs: 0,
+
+      // Every expectation carries: name (unique per kind — it is the alert
+      // rule slug, e.g. mount:var-tmp-scratch), severity ("info" | "warning"
+      // (default) | "critical"), and optional for_secs.
+
+      // mounts — is a path mounted, from where, how. is_bind_of catches
+      // /var/tmp silently ceasing to be a bind of the scratch disk (and the
+      // build artefacts filling the root disk again).
+      // mounts: [
+      //   { name: "var-tmp-scratch", path: "/var/tmp", is_bind_of: "/scratch/tmp",
+      //     severity: "critical" },
+      //   { name: "data-ext4-noatime", path: "/data", fstype: "ext4",
+      //     options: ["noatime"] },
+      // ],
+
+      // files — existence, freshness, size stability. newer_than_secs is a
+      // maximum mtime age ("the nightly backup is newer than 26h" = 93600).
+      // size_within_pct_of_previous latches the last size that PASSED as its
+      // baseline, so a halved backup stays firing instead of self-resolving
+      // one sweep later; the baseline is in-memory (a restart reseeds it on
+      // first observation).
+      // files: [
+      //   { name: "nightly-backup", path: "/backup/db.dump",
+      //     newer_than_secs: 93600, size_within_pct_of_previous: 40 },
+      // ],
+
+      // listening — TCP listeners in this namespace, by port and exact bound
+      // address; forbid: true fires when a matching listener EXISTS. NOTE
+      // "0.0.0.0" and "::" are DISTINCT wildcards: forbid both if you mean
+      // "not world-reachable" on a dual-stack host.
+      // listening: [
+      //   { name: "api-vpn-only",  port: 8443, addr: "10.8.0.1" },
+      //   { name: "api-not-any4",  port: 8443, addr: "0.0.0.0", forbid: true, for_secs: 120 },
+      //   { name: "api-not-any6",  port: 8443, addr: "::",      forbid: true, for_secs: 120 },
+      // ],
+
+      // symlinks — the LITERAL readlink target (never canonicalized: the
+      // assertion is about what the link says).
+      // symlinks: [
+      //   { name: "java-alt", path: "/etc/alternatives/java",
+      //     target: "/usr/lib/jvm/temurin-21/bin/java" },
+      // ],
+
+      // absent — leftovers from an experiment. An EPERM on the parent is
+      // reported as unreadable, never as a pass: absence must be PROVABLE.
+      // absent: [
+      //   { name: "no-debug-socket", path: "/tmp/debug.sock" },
+      // ],
+
+      // content — literal substrings (contains) and/or regexes (matches),
+      // each required. Reads are capped at 1 MiB; past the cap the check
+      // reports unreadable-too-large rather than truncating.
+      // content: [
+      //   { name: "hosts-hairpin", path: "/etc/hosts",
+      //     contains: ["10.0.0.5 registry.internal"] },
+      //   { name: "cloudinit-guard", path: "/etc/cloud/cloud.cfg.d/99-hosts.cfg",
+      //     contains: ["manage_etc_hosts: false"] },
+      // ],
+
+      // perms — mode (octal, exact) / owner / group. lstat needs no read
+      // permission, so this works on secrets the sensor cannot open.
+      // perms: [
+      //   { name: "deploy-key", path: "/etc/deploy/key.pem", mode: "0600",
+      //     owner: "deploy", severity: "critical" },
+      // ],
+    },
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",
+  },
+}

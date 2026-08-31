@@ -1,0 +1,116 @@
+# Subject registry: hostspec (desired-state assertions). RFC 08 §2; issue #821.
+#
+# The sentinel pattern (#277/#278) for the things D-Bus and netlink cannot
+# see: mounts, files, listening sockets, symlinks, file content, permissions.
+# The assertion vocabulary is CLOSED — deliberately no command/run assertion,
+# and the sensor executes nothing at all: that would be a remote-execution
+# surface wearing a monitoring hat. One telemetry gauge (the count of failing
+# assertions) exists so the host has a device card, Prometheus has a signal,
+# and the family-coverage audit has a family to cover; the real output is the
+# alert set, with the failing assertion in the labels.
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "hostspec"
+description = "machine-checked desired-state assertions (mounts/files/listeners/symlinks/content/perms) — sentinel alerts + one failing-count gauge; read-only, executes nothing"
+
+[[subject]]
+path = "assertions/failing"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "count of currently-failing assertions (gauge; published every sweep, 0 included — an empty set reads as 0, never as silence)"
+
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework)"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "assertion alerts; firing->resolved on one key, the failing assertion (check/path/expected/actual) in the labels"
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.0"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
+
+[[procedure]]
+path = "expectations"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current assertion set (sentinel expectations hot-swap)"
+
+[[procedure]]
+path = "expectations/set"
+kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
+request = "ExpectationsConfig"
+reply = "Ack"
+since = "1.0"
+description = "replace the assertion set; validated (paths absolute, regexes compile, modes octal, names unique) before apply — refuses with error/invalid-args"
+
+[[procedure]]
+path = "spec"
+kind = "read"
+reply = "HostspecEvaluation"
+idempotent = true
+since = "1.0"
+description = "what this host is being held to: per-assertion pass/fail/unreadable with detail, plus the last evaluation timestamp (0 = not yet evaluated)"
