@@ -162,6 +162,9 @@ pub fn specialized_view<'a>(
         // documents in the Bus explorer. A hypervisor-shaped tab — guests,
         // pools, backup trend — is worth building and is a follow-up.
         Protocol::Pve => None,
+        // #819: surfaces are the per-container device cards, the Alerts view
+        // and the state documents in the Bus explorer, as for pve above.
+        Protocol::Container => None,
     }
 }
 
@@ -181,6 +184,6 @@ pub fn has_specialized_view(protocol: Protocol) -> bool {
     // for a `None` protocol offers a tab that renders nothing.
     !matches!(
         protocol,
-        Protocol::Opcua | Protocol::Hostspec | Protocol::Pve
+        Protocol::Opcua | Protocol::Hostspec | Protocol::Pve | Protocol::Container
     )
 }

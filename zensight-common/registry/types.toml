@@ -247,6 +247,10 @@ kind = "json-schema"
 [types.PveClusterHealth]
 kind = "json-schema"
 
+# container's state document (#819).
+[types.ContainerInfo]
+kind = "json-schema"
+
 # The `describe` reply's own envelope (RFC 08 §7).
 [types.SchemaSet]
 kind = "json-schema"

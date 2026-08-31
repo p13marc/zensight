@@ -1,0 +1,51 @@
+[Unit]
+Description=ZenSight container sensor (#819) — read-only per-container telemetry
+Documentation=https://git.marcpardo.eu/marcpardo/zensight
+After=network-online.target podman.socket
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zensight-sensor-container --config /etc/zensight/container.json5
+Restart=on-failure
+RestartSec=10
+
+# Reads the runtime socket and the cgroup hierarchy. Writes nothing, holds no
+# capability, and has no action surface — the socket client has two methods and
+# both are GETs.
+#
+# NOT DynamicUser: the rootful podman socket is root-owned, and a dynamic user
+# cannot read it. Running as root here buys read access to one socket and one
+# read-only filesystem tree, and everything below removes the rest.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+# AF_UNIX for the runtime socket; INET for the bus (and, only if the upstream
+# collector is deliberately enabled, for the registry).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# ProtectControlGroups would hide the cgroup tree this sensor exists to read.
+ProtectControlGroups=no
+ReadOnlyPaths=/etc/zensight /sys/fs/cgroup /run/podman
+
+# A starting point, not a measurement (#812/#813): the health doc reports
+# `self_stats.rss_bytes` — size this from what it actually uses.
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

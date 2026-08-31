@@ -33,3 +33,4 @@
 # conditional, and are excused here.
 netlink	sockets/tcp/connlat_us_p50	eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)
 netlink	sockets/tcp/connlat_us_p95	eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)
+container	{name}/image_behind_upstream	needs `container.upstream.enabled` — the one collector that leaves the host, off by default (#819)

@@ -231,6 +231,7 @@ mod tests {
             Protocol::Parallax,
             Protocol::Hostspec,
             Protocol::Pve,
+            Protocol::Container,
         ] {
             let m = member(p.as_str(), "host1");
             let key = member_key(&m).expect("known protocol maps");

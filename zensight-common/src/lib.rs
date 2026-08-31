@@ -16,6 +16,7 @@ pub mod bandwidth;
 pub mod command;
 pub mod comparison;
 pub mod config;
+pub mod container;
 pub mod desired;
 pub mod discovery;
 pub mod entity;

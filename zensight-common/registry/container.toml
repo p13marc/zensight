@@ -1,0 +1,288 @@
+# Subject registry: container (Podman/OCI). RFC 08 §2; issue #819.
+#
+# Every service on the reference fleet is a Quadlet container and no sensor
+# knew what a container was. Four separate findings of the 2026-08-28 audit are
+# subjects below: garage reporting `unhealthy` since the day it was deployed
+# (a distroless image whose CMD-SHELL probe could never run), cosign signing
+# nothing for eight days, twelve pinned images behind upstream surfaced by a
+# monthly mail, and per-container memory not existing as a number — which is
+# why the 2026-08-17 OOM was blamed on "the bundle" for eleven days.
+#
+# Containers are the <device>s; the origin stays the host's. The device slug is
+# the container NAME, not its id: an id changes every time the container is
+# recreated, which is every deploy, and a series that forks on every deploy is
+# a series nobody can read.
+#
+# Read-only: a read-only socket mount and cgroup files. There is no write
+# surface and no procedure below can acquire one — stopping a container is a
+# different threat model, the same argument the pve slice makes (#818).
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "container"
+description = "per-container cgroup/OOM/restart/health telemetry (#819): image ref + digest, healthcheck state incl. never-ran, restart count and exit code, signature presence, and the owning systemd unit — read-only, no action surface"
+
+# ── Per-container resource telemetry ─────────────────────────────────────────
+
+[[subject]]
+path = "{name}/memory_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "cgroup memory.current — the per-container number whose absence made the 2026-08-17 OOM 'the bundle' for eleven days"
+
+[[subject]]
+path = "{name}/memory_max_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "cgroup memory.max; not published at all when unlimited, because 0 would read as a ceiling of zero"
+
+[[subject]]
+path = "{name}/memory_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "memory.current / memory.max, 0..1; absent when the container has no limit"
+
+[[subject]]
+path = "{name}/memory_peak_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "cgroup memory.peak — the high-water mark a live gauge misses between polls"
+
+[[subject]]
+path = "{name}/cpu_usage_usec_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "cumulative CPU time (cpu.stat usage_usec)"
+
+[[subject]]
+path = "{name}/cpu_throttled_usec_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "cumulative throttled time (cpu.stat throttled_usec) — a CPU limit biting, invisible in usage"
+
+[[subject]]
+path = "{name}/oom_kills_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "cgroup memory.events oom_kill — cumulative, and the number that names a victim"
+
+[[subject]]
+path = "{name}/memory_max_events_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "cgroup memory.events max — how often the limit was reached at all, which rises long before a kill"
+
+[[subject]]
+path = "{name}/cpu_pressure_avg10"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "PSI cpu some avg10, percent"
+
+[[subject]]
+path = "{name}/memory_pressure_avg10"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "PSI memory some avg10, percent"
+
+[[subject]]
+path = "{name}/io_pressure_avg10"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "PSI io some avg10, percent"
+
+[[subject]]
+path = "{name}/pids"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "cgroup pids.current"
+
+# ── Per-container lifecycle telemetry ────────────────────────────────────────
+
+[[subject]]
+path = "{name}/running"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "1 when running, 0 otherwise — published every poll, so a stopped container reads as 0 and never as silence"
+
+[[subject]]
+path = "{name}/restart_count"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "runtime restart count; a restart loop is a first-class state, not something to infer from the journal"
+
+[[subject]]
+path = "{name}/exit_code"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "last exit code, when the container has exited"
+
+[[subject]]
+path = "{name}/uptime_secs"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "seconds since the container started"
+
+[[subject]]
+path = "{name}/healthy"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "1 healthy, 0 unhealthy; NOT published when no healthcheck is configured or none has ever run — a check that cannot run is not a failing service, and 0 would say it is"
+
+[[subject]]
+path = "{name}/image_behind_upstream"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "1 when the running digest differs from the tag's current upstream digest — the live gauge that replaces a monthly image-update mail. Only with the explicitly-egressing collector on"
+
+[[subject]]
+path = "containers/total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "containers known to this runtime"
+
+[[subject]]
+path = "containers/running"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "containers currently running"
+
+[[subject]]
+path = "containers/unhealthy"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.0"
+description = "containers whose healthcheck is currently failing"
+
+# ── State documents ──────────────────────────────────────────────────────────
+
+[[subject]]
+path = "container/{name}"
+class = "state"
+type = "ContainerInfo"
+cardinality = 512
+ttl_s = 900
+since = "1.0"
+description = "the container as the runtime and the kernel jointly know it: image ref + digest, healthcheck state (incl. never-ran), restart count, exit code, ports, mounts, restart policy, cgroup resources, and the systemd unit that owns it"
+
+[[subject]]
+path = "evidence/device/{device}"
+common = "evidence_device"
+class = "state"
+type = "HostEvidence"
+cardinality = 512
+ttl_s = 900
+since = "1.0"
+description = "third-party identity claim about a container (observer = container): its name and IPs, so netlink's wire-only podman-bridge entities merge into it instead of floating in the catalog (RFC 06 §4)"
+
+# ── Framework subjects ───────────────────────────────────────────────────────
+
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework)"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim of the host running the sensor (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 128
+ttl_s = 900
+since = "1.0"
+description = "container assertions: unhealthy, healthcheck-never-ran, restart loop, OOM-killed, exited non-zero, image behind upstream, unsigned image"
+
+# ── Procedures ───────────────────────────────────────────────────────────────
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.0"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"

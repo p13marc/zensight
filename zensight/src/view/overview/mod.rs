@@ -155,6 +155,10 @@ pub fn overview_section<'a>(
             // generic table already renders exactly that; a bespoke view is a
             // follow-up, not a blocker for the sensor existing.
             Protocol::Pve => generic_overview(&protocol_devices, "guests"),
+            // #819: one device per container. The generic table renders the
+            // gauges; a container-shaped tab (image digests, health, restart
+            // history) is a follow-up, not a blocker.
+            Protocol::Container => generic_overview(&protocol_devices, "containers"),
         };
         column![alert_tile, body].spacing(8).into()
     } else {
@@ -301,6 +305,7 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
         Protocol::Parallax => "Parallax",
         Protocol::Hostspec => "hostspec",
         Protocol::Pve => "PVE",
+        Protocol::Container => "Containers",
     }
 }
 

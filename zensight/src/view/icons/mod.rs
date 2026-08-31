@@ -287,6 +287,8 @@ pub fn protocol_icon<Message: 'static>(
         // #818: a hypervisor is not a protocol with an icon vocabulary of its
         // own yet; the generic mark keeps the tab honest.
         zensight_common::Protocol::Pve => protocol_generic(size),
+        // #819: the generic mark until containers earn iconography of their own.
+        zensight_common::Protocol::Container => protocol_generic(size),
     }
 }
 

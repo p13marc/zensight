@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-sensor-container` — the whole workload, previously invisible**
+  (#819). Every service on the reference fleet is a Podman Quadlet container,
+  and no sensor knew what a container *was*: sysinfo's cgroups collector is
+  off by default and cannot enumerate, the systemd sensor sees `caddy.service`
+  as a unit rather than as Caddy 2.11.4 at a particular digest, and netlink
+  surfaces the podman bridges' containers as eleven catalog rows with IPs and
+  nothing else. Four separate findings of the 2026-08-28 audit are now fields.
+
+  The sensor joins two sources. From the **runtime socket** (read-only,
+  podman's libpod API or Docker's compatibility API): image reference **and
+  digest**, healthcheck state, restart count, last exit code, ports, mounts,
+  restart policy, and — through the `PODMAN_SYSTEMD_UNIT` label — the systemd
+  unit that owns the container, which every alert carries so an operator gets
+  something restartable instead of a container id. From the **kernel** (cgroup
+  v2): `memory.current`, `memory.max`, `memory.peak`, CPU time and throttling,
+  `oom_kill`, PSI and pids — the per-container numbers whose absence made the
+  2026-08-17 OOM "the bundle" for eleven days.
+
+  The distinction that matters most: **`unhealthy` and "the healthcheck has
+  never produced a result" are different facts**, and they had been rendering
+  as the same one. garage reported `unhealthy` from the day it was deployed
+  while serving traffic perfectly — a distroless image with no `/bin/sh`, so a
+  `CMD-SHELL` probe could never execute — and nobody noticed for weeks,
+  because the alert sent people to debug garage. `HealthState::NeverRan` is a
+  separate rule with a separate sentence, and the `healthy` gauge is **not
+  published at all** in that state: a `0` there tells every dashboard the
+  service is down.
+
+  Seven rules. The restart-loop and OOM rules grade the **delta** against the
+  previous sweep, because both counters are cumulative and firing on the total
+  would alert forever about a kill from last year.
+
+  **Read-only, and no egress by default.** The socket client has two methods
+  and both are GETs; the registry slice declares no `write` procedure and a
+  test fails if one appears; the shipped units mount the socket `:ro` anyway.
+  Exactly one collector leaves the host — the upstream-digest and cosign
+  signature checks, which replace `image-update-report.sh` and its monthly
+  mail — and it is off by default, restricted to a **named registry
+  allowlist** that startup refuses to leave empty, and anonymous (no
+  credentials are read, sent, or stored). "Not checked" is never reported as
+  "behind" or "unsigned": silence is not evidence.
+
+  Not in `just run` — on a host with no runtime it would report a failure
+  every cycle for something that host does not do — and not in the demo
+  bundle; `just container`, a hardened systemd unit and a quadlet that mounts
+  the socket and cgroupfs read-only. Tested against a real UNIX-socket HTTP
+  server serving real libpod documents and a real cgroup tree on disk, with
+  the fixture built from the audit's own failures.
+
 - **`zensight-sensor-pve` — the hypervisor as a hypervisor** (#818). The
   reference fleet's Proxmox host was watched by three native binaries
   reporting CPU, memory, disks, units and the journal: a complete picture of a
