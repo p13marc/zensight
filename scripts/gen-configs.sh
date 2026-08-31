@@ -328,7 +328,11 @@ cat > "$outdir/systemd.json5" <<'JSON5'
     watch_units: ["*.timer", "*.socket", "sshd.service", "NetworkManager.service",
                   "systemd-journald.service", "systemd-logind.service",
                   "dbus-broker.service", "polkit.service", "user@*.service"],
-    watch_max: 50,
+    // This watchlist matches ~96 units on a desktop reference host (libvirt
+    // sockets dominate); 100 keeps the demo truncation-free so the Timers /
+    // Sockets panels see everything. The exact-named services above survive
+    // the cap regardless (#865 — exact patterns get watch_max priority).
+    watch_max: 100,
     ip_io_accounting: true,       // per-unit IP + disk IO byte counters
     events_capacity: 512,         // control-plane event ring (@/query/events)
     alerts: {

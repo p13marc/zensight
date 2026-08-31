@@ -43,13 +43,18 @@ pub struct SystemdConfig {
 
     /// Unit-name globs to stream per-unit telemetry for (#273). Empty = none.
     /// Hundreds of units exist per host, so per-unit series are watchlist-scoped
-    /// to bound key cardinality. Matched with `glob` semantics (`*`, `?`, `[…]`).
+    /// to bound key cardinality. Matched with `glob` semantics (`*`, `?`, `[…]`);
+    /// an entry with none of those is an *exact* name and gets `watch_max`
+    /// priority (#865).
     #[serde(default)]
     pub watch_units: Vec<String>,
 
-    /// Hard cap on how many matched units stream per-unit telemetry (#273). Excess
-    /// matches are dropped (and logged — no silent truncation) and folded into the
-    /// `other/*` aggregate bucket.
+    /// Hard cap on how many matched units stream per-unit telemetry (#273).
+    /// Exact-named `watch_units` entries always survive the cap; wildcard
+    /// matches fill the remaining room sorted by unit name (#865 — never D-Bus
+    /// enumeration order). Excess matches are dropped — logged by name (exact
+    /// drops at warn, wildcard drops as count + sample; no silent truncation) —
+    /// and folded into the `other/*` aggregate bucket.
     #[serde(default = "default_watch_max")]
     pub watch_max: usize,
 

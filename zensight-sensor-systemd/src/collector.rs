@@ -256,27 +256,45 @@ impl SystemdCollector {
 
         let mut points = build_points(&self.source, &counts, boot.as_ref(), aggregates.as_ref());
 
-        // Per-unit watchlist streaming (#273): match names, cap at watch_max, and
-        // fold the rest into the `other/*` bucket. The sampled units + timers are
-        // also fed to the threshold-alert evaluator (#276).
+        // Per-unit watchlist streaming (#273): match names, cap at watch_max
+        // with exact-name priority (#865), and fold the rest into the
+        // `other/*` bucket. The sampled units + timers are also fed to the
+        // threshold-alert evaluator (#276).
         let mut samples: Vec<crate::unit::UnitSample> = Vec::new();
         let mut timers: Vec<crate::alerts::TimerSample> = Vec::new();
         if !self.watch.is_empty() {
-            let matched: Vec<&ListedUnit> = listed
-                .iter()
-                .filter(|u| self.watch.iter().any(|g| g.matches(&u.0)))
-                .collect();
-
             let cap = self.config.watch_max;
-            let streamed = matched.len().min(cap);
-            if matched.len() > cap {
+            let sel = select_watched(&listed, &self.watch, cap);
+            if !sel.dropped_exact.is_empty() {
+                // Only possible when the exact-named patterns alone exceed
+                // the cap — explicit config is being ignored; say which.
                 tracing::warn!(
-                    matched = matched.len(),
+                    dropped = ?sel.dropped_exact,
                     watch_max = cap,
-                    "watch_units matched more units than watch_max; truncating (excess folded into other/*)"
+                    "watch_max dropped exact-named watch_units entries; raise watch_max"
                 );
             }
-            for u in matched.iter().take(cap) {
+            if !sel.dropped_wildcard.is_empty() {
+                let sample: Vec<&str> = sel
+                    .dropped_wildcard
+                    .iter()
+                    .take(10)
+                    .map(String::as_str)
+                    .collect();
+                tracing::warn!(
+                    matched = sel.kept.len() + sel.dropped_exact.len() + sel.dropped_wildcard.len(),
+                    watch_max = cap,
+                    dropped = sel.dropped_wildcard.len(),
+                    sample = ?sample,
+                    "watch_units matched more units than watch_max; dropping wildcard matches (folded into other/*)"
+                );
+                tracing::debug!(
+                    dropped = ?sel.dropped_wildcard,
+                    "watch_max full wildcard drop list"
+                );
+            }
+            let streamed = sel.kept.len();
+            for u in &sel.kept {
                 match crate::unit::sample_unit(
                     &conn,
                     &u.6,
@@ -415,6 +433,65 @@ impl SystemdCollector {
     }
 }
 
+/// One tick's watchlist selection (#865): which matched units stream, and
+/// which the `watch_max` cap dropped, split by how they matched.
+struct WatchSelection<'a> {
+    kept: Vec<&'a ListedUnit>,
+    dropped_exact: Vec<String>,
+    dropped_wildcard: Vec<String>,
+}
+
+/// An exact pattern names one unit; anything carrying a glob metacharacter is
+/// a wildcard. `glob::Pattern` keeps the source string, so it is authoritative.
+fn pattern_is_exact(p: &glob::Pattern) -> bool {
+    !p.as_str().contains(['*', '?', '['])
+}
+
+/// Apply the watchlist and `watch_max` to one `ListUnits` enumeration (pure —
+/// unit-testable). Units matched by an exact pattern always survive the cap
+/// (#865): an operator who spelled out `sshd.service` gets `sshd.service`,
+/// whatever the cap. Wildcard matches fill whatever room remains. Both
+/// partitions are sorted by unit name — deterministic across ticks and hosts,
+/// never D-Bus arrival order, which leads with sockets and once cost every
+/// named service its slot.
+fn select_watched<'a>(
+    listed: &'a [ListedUnit],
+    watch: &[glob::Pattern],
+    cap: usize,
+) -> WatchSelection<'a> {
+    let (exact, wildcard): (Vec<&glob::Pattern>, Vec<&glob::Pattern>) =
+        watch.iter().partition(|p| pattern_is_exact(p));
+    let mut kept: Vec<&ListedUnit> = Vec::new();
+    let mut wildcard_matched: Vec<&ListedUnit> = Vec::new();
+    for u in listed {
+        if exact.iter().any(|g| g.matches(&u.0)) {
+            kept.push(u);
+        } else if wildcard.iter().any(|g| g.matches(&u.0)) {
+            wildcard_matched.push(u);
+        }
+    }
+    kept.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    wildcard_matched.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    let dropped_exact: Vec<String> = kept
+        .split_off(cap.min(kept.len()))
+        .into_iter()
+        .map(|u| u.0.clone())
+        .collect();
+    let room = cap.saturating_sub(kept.len());
+    let dropped_wildcard: Vec<String> = wildcard_matched
+        .split_off(room.min(wildcard_matched.len()))
+        .into_iter()
+        .map(|u| u.0.clone())
+        .collect();
+    kept.append(&mut wildcard_matched);
+    WatchSelection {
+        kept,
+        dropped_exact,
+        dropped_wildcard,
+    }
+}
+
 /// Build the full telemetry point set for one tick (pure — unit-testable).
 pub fn build_points(
     source: &str,
@@ -452,6 +529,122 @@ mod tests {
     // Points are built by `checked_point`, so the lib no longer names Protocol;
     // the tests still assert on it.
     use zensight_common::telemetry::Protocol;
+
+    /// Minimal `ListUnits` row (same shape as query.rs's test helper).
+    fn lu(name: &str) -> ListedUnit {
+        (
+            name.to_string(),
+            format!("{name} desc"),
+            "loaded".to_string(),
+            "active".to_string(),
+            "running".to_string(),
+            String::new(),
+            zbus::zvariant::OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/x").unwrap(),
+            0,
+            String::new(),
+            zbus::zvariant::OwnedObjectPath::try_from("/").unwrap(),
+        )
+    }
+
+    fn pats(ps: &[&str]) -> Vec<glob::Pattern> {
+        ps.iter().map(|p| glob::Pattern::new(p).unwrap()).collect()
+    }
+
+    fn names(kept: &[&ListedUnit]) -> Vec<String> {
+        kept.iter().map(|u| u.0.clone()).collect()
+    }
+
+    #[test]
+    fn pattern_is_exact_classification() {
+        for exact in ["sshd.service", "user@1000.service", "dbus-broker.service"] {
+            assert!(
+                pattern_is_exact(&glob::Pattern::new(exact).unwrap()),
+                "{exact}"
+            );
+        }
+        for wild in [
+            "*.timer",
+            "user@*.service",
+            "foo?.service",
+            "foo[ab].service",
+        ] {
+            assert!(
+                !pattern_is_exact(&glob::Pattern::new(wild).unwrap()),
+                "{wild}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_watched_exact_matches_survive_cap() {
+        // The #865 repro in miniature: D-Bus enumeration leads with a wall of
+        // sockets, the named service arrives last, and the cap is small.
+        let mut listed: Vec<ListedUnit> = (0..8).map(|i| lu(&format!("sock{i}.socket"))).collect();
+        listed.push(lu("sshd.service"));
+        let sel = select_watched(&listed, &pats(&["*.socket", "sshd.service"]), 4);
+        assert_eq!(sel.kept.len(), 4);
+        assert_eq!(sel.kept[0].0, "sshd.service", "exact-named unit kept first");
+        assert!(sel.dropped_exact.is_empty());
+        assert_eq!(sel.dropped_wildcard.len(), 5);
+    }
+
+    #[test]
+    fn select_watched_wildcard_fill_sorted_by_name() {
+        // Shuffled arrival order in; the surviving wildcards are the
+        // alphabetically-first ones, deterministically.
+        let listed = vec![lu("c.timer"), lu("a.timer"), lu("d.timer"), lu("b.timer")];
+        let sel = select_watched(&listed, &pats(&["*.timer"]), 2);
+        assert_eq!(names(&sel.kept), ["a.timer", "b.timer"]);
+        assert_eq!(sel.dropped_wildcard, ["c.timer", "d.timer"]);
+    }
+
+    #[test]
+    fn select_watched_exacts_over_cap_dropped_sorted() {
+        let listed = vec![
+            lu("e.service"),
+            lu("c.service"),
+            lu("a.service"),
+            lu("d.service"),
+        ];
+        let sel = select_watched(
+            &listed,
+            &pats(&["a.service", "c.service", "d.service", "e.service"]),
+            3,
+        );
+        assert_eq!(names(&sel.kept), ["a.service", "c.service", "d.service"]);
+        assert_eq!(sel.dropped_exact, ["e.service"]);
+        assert!(sel.dropped_wildcard.is_empty());
+    }
+
+    #[test]
+    fn select_watched_under_cap_no_drops() {
+        let listed = vec![lu("b.timer"), lu("sshd.service"), lu("a.timer")];
+        let sel = select_watched(&listed, &pats(&["sshd.service", "*.timer"]), 50);
+        // Kept order is exacts first, then wildcards, each name-sorted —
+        // documents that publication order is no longer D-Bus arrival order.
+        assert_eq!(names(&sel.kept), ["sshd.service", "a.timer", "b.timer"]);
+        assert!(sel.dropped_exact.is_empty() && sel.dropped_wildcard.is_empty());
+    }
+
+    #[test]
+    fn select_watched_exact_beats_overlapping_wildcard() {
+        // A unit matching both an exact and a wildcard pattern counts as
+        // exact: it survives while pure-wildcard matches drop.
+        let listed = vec![lu("a.service"), lu("b.service"), lu("sshd.service")];
+        let sel = select_watched(&listed, &pats(&["sshd.service", "*.service"]), 1);
+        assert_eq!(names(&sel.kept), ["sshd.service"]);
+        assert_eq!(sel.dropped_wildcard, ["a.service", "b.service"]);
+    }
+
+    #[test]
+    fn select_watched_no_match_no_watch() {
+        let listed = vec![lu("a.service")];
+        let sel = select_watched(&listed, &pats(&[]), 10);
+        assert!(sel.kept.is_empty());
+        assert!(sel.dropped_exact.is_empty() && sel.dropped_wildcard.is_empty());
+        let sel = select_watched(&listed, &pats(&["*.timer"]), 10);
+        assert!(sel.kept.is_empty());
+    }
 
     #[test]
     fn aggregates_count_by_state() {
