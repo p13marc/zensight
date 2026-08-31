@@ -339,6 +339,19 @@ There is no step 4. Thresholds agree with `budget_level` (80/95/75), so the
 down with hysteresis (< 75 % for 6 ticks per step, restore fanned on leaving
 step 2), with a 2-tick cool-down between transitions.
 
+**Futility guard (#864)**: an eviction round that frees under 1 % of its
+target (and the target is ≥ 1 MiB — allocator jitter is not evidence) proves
+the over-budget RSS is not in the evictable tables (capture rings, allocator
+baseline, a mis-sized budget). The ladder then latches *futile*: eviction
+stops — the tables keep their data instead of being LRU-wiped every tick —
+the ladder climbs to Saturated and holds there, and
+`self_stats.ladder.futile` plus a "raise budget_rss_mb" `reason` say why. A
+round containing a "cannot say" outcome (entries freed, bytes unreported)
+never latches. The latch clears when the budget changes (operator resized —
+eviction gets a fresh chance) or RSS drops below the 75 % clear line; normal
+hysteresis then walks the ladder down. Thrashing, like dying, is not on the
+ladder.
+
 **Sensor wiring** (netring is the exemplar):
 
 - `runner.governor().register_table(TableHandle { name, stats, evict })` —
@@ -358,8 +371,9 @@ CGROUP_BUDGET_FRACTION` (0.75) — the container default, so the ladder cannot
 disagree with the operator's drop-in. No budget and no cgroup limit = the
 ladder never arms and nothing changes.
 
-**Reporting**: the ladder's state (`self_stats.ladder`: step, cumulative
-per-table evictions, degraded list, a human `reason`) publishes every tick —
+**Reporting**: the ladder's state (`self_stats.ladder`: step, the `futile`
+latch, cumulative per-table evictions, degraded list, a human `reason`)
+publishes every tick —
 a silently degraded sensor is a lying sensor. From step 2 the health
 `status` itself upgrades to `Degraded` (`ladder_status`; step 1 is normal
 operation and deliberately does not recolor the fleet card).

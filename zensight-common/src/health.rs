@@ -163,8 +163,15 @@ pub struct SelfStats {
 pub struct LadderState {
     /// 0 nominal, 1 evicting, 2 degraded (optional work stopped),
     /// 3 saturated (everything shed and still over budget — the loudest
-    /// possible report; dying is not on the ladder).
+    /// possible report; dying is not on the ladder). Saturated is also held
+    /// when eviction is proven [`futile`](Self::futile) (#864).
     pub step: u8,
+    /// Eviction was tried and freed a negligible fraction of its target: the
+    /// over-budget RSS is not in evictable tables (#864). The ladder holds
+    /// Saturated without further eviction — the tables keep their data — and
+    /// the operator's fix is a bigger `budget_rss_mb`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub futile: bool,
     /// When the current step was entered (epoch ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_ms: Option<i64>,
@@ -399,6 +406,7 @@ mod tests {
         let stats = SelfStats {
             ladder: Some(LadderState {
                 step: 2,
+                futile: false,
                 since_ms: Some(1_700_000_000_000),
                 evicted: vec![LadderEviction {
                     table: "tls_inventory".into(),
@@ -419,11 +427,18 @@ mod tests {
         assert_eq!(thin.step, 1);
         assert!(thin.evicted.is_empty() && thin.degraded.is_empty());
         assert_eq!(thin.since_ms, None);
+        // #864: `futile` defaults false for old producers…
+        assert!(!thin.futile);
         // An armed-but-nominal ladder serializes without the empty vectors.
         let nominal = serde_json::to_value(LadderState::default()).unwrap();
         assert!(nominal.get("evicted").is_none());
         assert!(nominal.get("degraded").is_none());
         assert!(nominal.get("reason").is_none());
+        // …and is skipped when false, so a non-futile doc is byte-identical
+        // to a pre-#864 one.
+        assert!(nominal.get("futile").is_none());
+        let futile: LadderState = serde_json::from_str(r#"{"step": 3, "futile": true}"#).unwrap();
+        assert!(futile.futile);
     }
 
     #[test]

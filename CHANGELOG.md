@@ -24,6 +24,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   debug. The demo config also raises `watch_max` to 100 so the Timers /
   Sockets panels see the whole curated match set truncation-free.
 
+- **The memory governor no longer thrashes when the budget is below the
+  process baseline** (#864). A budget under netring's ~297 MiB capture-ring
+  baseline armed the #812 shed ladder from second one with an unreachable
+  eviction target, so every 5 s tick LRU-wiped all seven L7 inventories
+  (tls/dns/http/asset/quic/ssh/enc_dns — a few KB against a ~160 MiB
+  shortfall) and five GUI views rendered empty for the life of the process.
+  The ladder now latches **futile** when a round frees under 1 % of its
+  target: eviction stops (the tables keep their data), the ladder climbs to
+  Saturated and holds, and the health doc says why —
+  `self_stats.ladder.futile` (new, additive) plus a "raise budget_rss_mb"
+  reason. The latch clears on a budget resize or genuine relief below the
+  clear line; recovery needs no restart. Thrashing, like dying, is not on
+  the ladder. The deployment fact that exposed it is also fixed: the demo
+  budget rises 128 → 448 MiB and the production profile's 64 MiB sed is
+  deleted — both profiles measure the same ~297 MiB idle baseline
+  (2026-08-31, VmHWM), because detectors-off saves table churn, not rings.
+
 ### Changed
 
 - **The OTLP exporter is executed in CI** (#845, finding 15 — the medium

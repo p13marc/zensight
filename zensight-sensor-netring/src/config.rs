@@ -1036,10 +1036,12 @@ mod tests {
         // demo's pcap path, and validation rejects `mode != off` without it.
         assert!(at("netring.capture.to_disk.dir").is_null());
 
-        // #814: production is also a sizing profile — gen-configs.sh seds the
-        // RSS budget and every table byte-budget down, and a sed can only flip
-        // a key that is physically present.
-        assert_eq!(at("resources.budget_rss_mb"), 128);
+        // #814: production is also a sizing profile — gen-configs.sh seds
+        // every table byte-budget down, and a sed can only flip a key that is
+        // physically present. The RSS budget is deliberately NOT profile-sized
+        // (#864): it must clear the ~297 MiB capture-ring baseline on every
+        // profile, or the governor's futility guard trips at boot.
+        assert_eq!(at("resources.budget_rss_mb"), 448);
         let defaults = TablesConfig::default();
         for (key, want) in [
             ("netring.tables.tls_max_bytes", defaults.tls_max_bytes),
