@@ -38,6 +38,16 @@ pub struct SnmpConfig {
     #[serde(default)]
     pub source: Option<String>,
 
+    /// Opt-in for SNMP v1/v2c devices (#825): a community string is a
+    /// CLEARTEXT credential on the wire — netring even ships a detector for
+    /// exactly this. `false` (the default) refuses to start with any
+    /// v1/v2c-versioned device or trap community configured; setting it
+    /// `true` is the explicit, logged acknowledgement of what it costs.
+    /// SNMPv3 authPriv is the supported default and what the shipped config
+    /// leads with.
+    #[serde(default)]
+    pub allow_insecure_versions: bool,
+
     /// SNMP trap listener configuration.
     #[serde(default)]
     pub trap_listener: TrapListenerConfig,
@@ -652,6 +662,26 @@ impl zensight_sensor_core::SensorConfig for SnmpSensorConfig {
     }
 
     fn validate(&self) -> zensight_sensor_core::Result<()> {
+        // v1/v2c gate (#825): cleartext credentials need the explicit flag.
+        if !self.snmp.allow_insecure_versions {
+            for device in &self.snmp.devices {
+                if matches!(device.version, SnmpVersion::V1 | SnmpVersion::V2c) {
+                    return Err(zensight_sensor_core::SensorError::config(format!(
+                        "Device '{}' uses SNMP {} — a cleartext community on the wire.                          Prefer v3 authPriv; if this device genuinely cannot, set                          snmp.allow_insecure_versions = true to accept the cost (#825)",
+                        device.name,
+                        match device.version {
+                            SnmpVersion::V1 => "v1",
+                            _ => "v2c",
+                        }
+                    )));
+                }
+            }
+            if !self.snmp.trap_listener.communities.is_empty() {
+                return Err(zensight_sensor_core::SensorError::config(
+                    "trap_listener.communities configures v1/v2c trap senders — cleartext                      communities on the wire. Prefer v3 users; set                      snmp.allow_insecure_versions = true to accept the cost (#825)",
+                ));
+            }
+        }
         // Validate that devices have required fields
         for device in &self.snmp.devices {
             if device.name.is_empty() {
@@ -1060,6 +1090,56 @@ mod tests {
         assert_eq!(security.username, "public");
         assert_eq!(security.auth_protocol, AuthProtocol::None);
         assert_eq!(security.priv_protocol, PrivProtocol::None);
+    }
+}
+
+#[cfg(test)]
+mod insecure_gate_tests {
+    use zensight_sensor_core::SensorConfig as _;
+
+    /// #825: a v1/v2c device is a cleartext credential on the wire and needs
+    /// the explicit opt-in; the refusal names the device and the flag.
+    #[test]
+    fn v2c_refuses_without_the_flag_and_starts_with_it() {
+        let base = r#"{ zenoh: { mode: "peer" }, snmp: { devices: [
+            { name: "legacy", address: "10.0.0.9:161", community: "public", version: "v2c" }
+        ] } }"#;
+        let cfg: crate::config::SnmpSensorConfig = json5::from_str(base).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("legacy") && err.contains("allow_insecure_versions"),
+            "{err}"
+        );
+
+        let with_flag = base.replace("snmp: {", "snmp: { allow_insecure_versions: true,");
+        let cfg: crate::config::SnmpSensorConfig = json5::from_str(&with_flag).unwrap();
+        cfg.validate().expect("explicit opt-in starts");
+    }
+
+    /// Same gate for trap communities (v1/v2c senders).
+    #[test]
+    fn trap_communities_need_the_flag_too() {
+        let cfg: crate::config::SnmpSensorConfig = json5::from_str(
+            r#"{ zenoh: { mode: "peer" },
+                 snmp: { trap_listener: { enabled: true, communities: ["public"] } } }"#,
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("allow_insecure_versions"), "{err}");
+    }
+
+    /// v3 needs no flag — it is the supported default.
+    #[test]
+    fn v3_needs_no_flag() {
+        let cfg: crate::config::SnmpSensorConfig = json5::from_str(
+            r#"{ zenoh: { mode: "peer" }, snmp: { devices: [
+                { name: "r1", address: "10.0.0.1:161", version: "v3",
+                  security: { username: "ro", auth_protocol: "SHA256", auth_password: "x",
+                              priv_protocol: "AES", priv_password: "y" } }
+            ] } }"#,
+        )
+        .unwrap();
+        cfg.validate().expect("v3 authPriv is the default path");
     }
 }
 
