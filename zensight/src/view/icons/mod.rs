@@ -281,6 +281,9 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Netring => protocol_netring(size),
         zensight_common::Protocol::Systemd => protocol_systemd(size),
         zensight_common::Protocol::Parallax => protocol_parallax(size),
+        // A gauge-and-alerts sentinel has no iconography of its own yet;
+        // the generic mark keeps the tab honest (#821).
+        zensight_common::Protocol::Hostspec => protocol_generic(size),
     }
 }
 

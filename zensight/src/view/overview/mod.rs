@@ -150,6 +150,7 @@ pub fn overview_section<'a>(
             Protocol::Opcua => generic_overview(&protocol_devices, "OPC-UA nodes"),
             Protocol::Systemd => generic_overview(&protocol_devices, "systemd units"),
             Protocol::Parallax => generic_overview(&protocol_devices, "video streams"),
+            Protocol::Hostspec => generic_overview(&protocol_devices, "host assertions"),
         };
         column![alert_tile, body].spacing(8).into()
     } else {
@@ -294,6 +295,7 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
         Protocol::Netring => "Netring",
         Protocol::Systemd => "systemd",
         Protocol::Parallax => "Parallax",
+        Protocol::Hostspec => "hostspec",
     }
 }
 
