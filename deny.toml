@@ -23,10 +23,15 @@ ignore = [
     "RUSTSEC-2026-0195",
     "RUSTSEC-2026-0192", # ttf-parser unmaintained (via resvg/usvg, iced tree)
     "RUSTSEC-2026-0206", # rustybuzz unmaintained (via resvg/usvg, iced tree)
-    # wasmtime 43.x type-index mixup: via yara-x behind the opt-in
-    # netring/yara feature; no fixed release on the 43 line — re-check on
-    # the next netring/yara-x bump.
-    "RUSTSEC-2026-0222",
+    # wasmtime 43.x, via yara-x behind the opt-in netring/yara feature; no
+    # fixed release on the 43 line, and no chain fix exists yet (netring
+    # 0.29 pins yara-x ^1.19 -> wasmtime ^43; yara-x 1.20 wants ^45, also
+    # unfixed). wasmtime here runs yara-x's own compiled rules — operator-
+    # authored, no untrusted wasm, no WASI preopens — so both advisories'
+    # exposure is nil in this use. Re-check on the next netring/yara-x bump;
+    # the weekly deny-fresh run resurfaces these so they cannot rot silently.
+    "RUSTSEC-2026-0222", # type-index mixup
+    "RUSTSEC-2026-0269", # fs sandbox escape on trailing-slash paths (2026-08-31)
 ]
 
 [licenses]
