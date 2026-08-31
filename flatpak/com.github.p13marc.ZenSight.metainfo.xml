@@ -55,6 +55,20 @@
     <keyword>modbus</keyword>
   </keywords>
   <releases>
+    <release version="0.12.0" date="2026-08-31">
+      <description>
+        <p>The operator release: ZenSight gains a model of itself as something
+        that runs somewhere and must behave. A sensor can now see its own size
+        and sheds load instead of dying, every state family's served schema is
+        a gated contract, sensors are packaged one container per sensor with
+        their own memory limits, and fleet configuration becomes desired state
+        rather than hand-edited files — with a new read-only hostspec sensor
+        holding each host to machine-checked assertions.</p>
+        <p>One deployment-breaking change: the SNMP sensor refuses to start on
+        a v1/v2c configuration without an explicit opt-in flag. See the
+        CHANGELOG in the repository for the full list and migration notes.</p>
+      </description>
+    </release>
     <release version="0.11.0" date="2026-08-28">
       <description>
         <p>A month of accumulated work, and a release to read before upgrading:
