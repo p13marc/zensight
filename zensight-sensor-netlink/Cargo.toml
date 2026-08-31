@@ -100,4 +100,4 @@ assets = [
 ]
 
 [dev-dependencies]
-aya-obj = "0.2"
+aya-obj = "0.3"
