@@ -1,0 +1,36 @@
+# ZenSight Proxmox VE sensor — one container, one cgroup, its own budget (#813).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via
+# the sensor's health doc self_stats and adjust. See README.md beside this.
+#
+# NOTE ON PLACEMENT (#818). The reference deployment's security rules forbid
+# containers ON THE HYPERVISOR, so there this sensor runs as a native binary
+# from packaging/systemd/zensight-sensor-pve.service. This unit is for the
+# other shape: polling the PVE API from a guest or a management host. It needs
+# only network reach to :8006 and a read-only PVEAuditor token — the sensor has
+# no action surface at all.
+[Unit]
+Description=ZenSight Proxmox VE sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-pve:latest
+ContainerName=zensight-sensor-pve
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+# The API token, root-0600 on the host, read-only inside. Referenced from the
+# config as `file:/run/secrets/pve.token`.
+Volume=/etc/zensight/pve.token:/run/secrets/pve.token:ro
+
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/pve.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

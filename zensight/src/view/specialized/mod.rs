@@ -157,6 +157,11 @@ pub fn specialized_view<'a>(
         // card and (form, #821 follow-through) the Expectations view; its
         // device card carries one gauge and needs no specialized tab.
         Protocol::Hostspec => None,
+        // #818: the pve sensor's surfaces are the per-guest device cards (the
+        // generic view renders its gauges), the Alerts view, and the state
+        // documents in the Bus explorer. A hypervisor-shaped tab — guests,
+        // pools, backup trend — is worth building and is a follow-up.
+        Protocol::Pve => None,
     }
 }
 
@@ -174,5 +179,8 @@ pub fn syslog_view<'a>(
 pub fn has_specialized_view(protocol: Protocol) -> bool {
     // Keep this list in lockstep with the `None` arms above — a `true` here
     // for a `None` protocol offers a tab that renders nothing.
-    !matches!(protocol, Protocol::Opcua | Protocol::Hostspec)
+    !matches!(
+        protocol,
+        Protocol::Opcua | Protocol::Hostspec | Protocol::Pve
+    )
 }

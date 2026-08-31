@@ -143,12 +143,14 @@ in a log.
   module carries the typed key builders.
 - **The registry is load-bearing.** Publishing a telemetry subject that is not
   registered panics in debug builds and warns once per name in release
-  (`zensight_common::metric_guard`). This is only meaningful because the six host
-  producers (sysinfo, netlink, netring, systemd, logs, parallax) register their
-  telemetry as real subject families rather than a `{metric...}` catch-all — a
-  catch-all makes the lint vacuously true (issue #468). `snmp`/`modbus`/`gnmi`/
-  `netflow` keep a rest-var by design: their metric tree belongs to the polled
-  device, not to us.
+  (`zensight_common::metric_guard`). This is only meaningful because the host
+  producers (sysinfo, netlink, netring, systemd, logs, parallax, hostspec) —
+  and, though it polls a remote API, `pve` (#818) — register their telemetry as
+  real subject families rather than a `{metric...}` catch-all; a catch-all makes
+  the lint vacuously true (issue #468). `snmp`/`modbus`/`gnmi`/`netflow` keep a
+  rest-var by design: their metric tree belongs to the polled device, not to us.
+  `pve` does not, because a hypervisor's vocabulary is ours: guests, pools,
+  dumps and quorum are a closed set we name, not an OID tree a vendor owns.
 - **The registry must not lie** (RFC 08 §6.1, #484). The check above runs one
   direction — *published ⊆ registered*. The reverse — *registered ⊆ served* —
   is a distinct MUST, and the first does not imply it: a registry may be a

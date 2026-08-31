@@ -151,6 +151,10 @@ pub fn overview_section<'a>(
             Protocol::Systemd => generic_overview(&protocol_devices, "systemd units"),
             Protocol::Parallax => generic_overview(&protocol_devices, "video streams"),
             Protocol::Hostspec => generic_overview(&protocol_devices, "host assertions"),
+            // #818: one device per guest, plus the hypervisor itself. The
+            // generic table already renders exactly that; a bespoke view is a
+            // follow-up, not a blocker for the sensor existing.
+            Protocol::Pve => generic_overview(&protocol_devices, "guests"),
         };
         column![alert_tile, body].spacing(8).into()
     } else {
@@ -296,6 +300,7 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
         Protocol::Systemd => "systemd",
         Protocol::Parallax => "Parallax",
         Protocol::Hostspec => "hostspec",
+        Protocol::Pve => "PVE",
     }
 }
 

@@ -31,6 +31,7 @@ pub mod media;
 pub mod metric_guard;
 pub mod pipeline_health;
 pub mod publisher_registry;
+pub mod pve;
 pub mod qos;
 pub mod query_detail;
 pub mod registry;

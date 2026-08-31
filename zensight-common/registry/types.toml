@@ -234,6 +234,19 @@ kind = "json-schema"
 [types."Vec<XfrmRecord>"]
 kind = "json-schema"
 
+# pve's state documents (#818) — the hypervisor as a hypervisor.
+[types.PveGuest]
+kind = "json-schema"
+
+[types.PveStoragePool]
+kind = "json-schema"
+
+[types.PveBackupSummary]
+kind = "json-schema"
+
+[types.PveClusterHealth]
+kind = "json-schema"
+
 # The `describe` reply's own envelope (RFC 08 §7).
 [types.SchemaSet]
 kind = "json-schema"

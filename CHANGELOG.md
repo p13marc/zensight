@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-sensor-pve` — the hypervisor as a hypervisor** (#818). The
+  reference fleet's Proxmox host was watched by three native binaries
+  reporting CPU, memory, disks, units and the journal: a complete picture of a
+  *Linux box*, on the one machine whose failure is total. Everything that made
+  it a hypervisor was invisible, and the 2026-08-28 audit found three things by
+  hand, once, weeks late — VM 140 with `onboot=0` (it would not have come back
+  after a host reboot), that guest's NIC with no `firewall=1` (so `140.fw` was
+  inert and :8000 was open to the whole service zone for an unknown period),
+  and 990 GB provisioned on a 937 GB pool. **None of those is a metric that
+  spikes**; they are configuration facts that stopped matching intent, and all
+  three are now continuous assertions.
+
+  The sensor polls `/api2/json` with a read-only `PVEAuditor` token (through
+  the framework's `file:`/`${ENV}` indirection, so the secret never enters a
+  config file) and publishes: per-guest state documents joining runtime status
+  with the config that decides the *next* reboot (`onboot`, per-NIC
+  `firewall`, per-disk `backup=0`, provisioned size); per-pool capacity, use
+  and **allocated** — the promised total that is invisible in `used` and fills
+  a thin pool on its own schedule; per-guest backup summaries carrying the
+  newest two volumes, so **a dump that succeeds while halving** is expressible
+  where a green exit code is not; cluster quorum, HA and replication; and a
+  third-party identity claim per guest (name + configured MACs) so the
+  hypervisor's view of a VM fuses with that VM's own sensors in the catalog.
+  Ten alert rules, each reconciled every sweep.
+
+  **There is no action surface — not disabled, absent.** Nothing in the crate
+  constructs a non-GET request, the registry slice declares no `write`
+  procedure, and a test fails if one ever appears: a monitor that can stop a VM
+  is a different threat model and would have to be a separate, deliberate
+  decision. Three poll cadences (status 60 s, guest config 300 s, backups
+  900 s), a concurrency cap, and a startup that refuses a timeout not shorter
+  than its interval, because the API is a perl daemon on that same machine. A
+  403 is treated as a fact about the install (a read-only token, or an install
+  without HA), never as sensor failure.
+
+  Not in `just run`: no demo can invent a Proxmox endpoint or a credential.
+  `just pve` runs it, `packaging/systemd/` ships a hardened unit for the
+  native-on-the-hypervisor pattern the reference deployment's security rules
+  require, and `packaging/quadlet/` covers polling from a guest. Tested against
+  an in-process fake API serving Proxmox's real document shapes — including its
+  inconsistencies, which is where the bugs were: an LXC NIC line carries its
+  MAC in `hwaddr` rather than positionally, and `firewall` absent means *off*
+  while `backup` absent means *on*.
+
 - **Gated systemd service control can finally be demonstrated** (#866). The
   whole surface — allowlist matching, the arm/confirm/cancel flow, the
   in-flight lock, the audit ring on `@rpc/systemd/actions`, c620838's
@@ -57,7 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verbatim beside it. Pinned by a config test that applies the generator's own
   transform (the demo block would otherwise rot unnoticed while commented out)
   and two UI tests, one per fact.
-
 ## [0.12.0] - 2026-08-31
 
 **The operator release** (epic #809). ZenSight has been a very good instrument
