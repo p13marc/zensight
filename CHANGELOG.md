@@ -51,6 +51,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `@desired` service slice + the applied-config marker** (#816 pt 1).
+  New registry slice `desired.toml`: a controller publishes per-host runtime
+  policy under `v1/@desired/state/<host>/<producer>/<topic>` (target host
+  first — RFC 07 §3's G1 rule, H4-linted), LWW, storage-backed, ttl 0
+  (policy never ages out; delete reverts to file baseline). v1 carries the
+  hostspec topic; the other sentinels join when their config types gain real
+  schemas (#849 — the #815 gate refused the summary stubs, correctly, which
+  also drove hostspec's wire types into `zensight-common/src/hostspec.rs`
+  as real schemars types, renaming the registry type to
+  `HostspecExpectations` via a pre-release force-relock). New shared types
+  in `zensight-common/src/desired.rs`: `DesiredConfig` (file-config kill
+  switch + refresh cadence) and `AppliedConfig` — the
+  `state/<producer>/applied/<topic>` marker saying which source won last
+  (`file|desired|rpc`), the doc in force (JSON-encoded — its schema is the
+  topic type's own), and the last **rejected** desired doc, so a refusal is
+  on the bus, not only in a log. KEYSPACE.md documents the contract,
+  including the never-list: nothing under `@desired` may carry secrets or
+  bus-reachability config.
+
 - **hostspec assertions are authorable from the GUI** (#821, closing PR):
   the Expectations view gains the `hostspec` target — eight authoring kinds
   (require/forbid listeners split), whole-set push of the plain

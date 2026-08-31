@@ -113,6 +113,7 @@ pub fn declared_of(
         S::Catalog(s) => (s.qos(), s.payload_type()),
         S::Gnmi(s) => (s.qos(), s.payload_type()),
         S::Hostspec(s) => (s.qos(), s.payload_type()),
+        S::Desired(s) => (s.qos(), s.payload_type()),
         S::Logs(s) => (s.qos(), s.payload_type()),
         S::Modbus(s) => (s.qos(), s.payload_type()),
         S::Netflow(s) => (s.qos(), s.payload_type()),

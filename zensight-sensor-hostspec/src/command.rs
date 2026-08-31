@@ -32,7 +32,7 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Sentine
         move |cfg: ExpectationsConfig| {
             let h = apply_handle.clone();
             async move {
-                cfg.validate().map_err(RpcError::invalid_args)?;
+                crate::sentinel::validate(&cfg).map_err(RpcError::invalid_args)?;
                 h.replace(cfg).await;
                 Ok(())
             }

@@ -15,7 +15,7 @@ procedure	gnmi	describe	read	-	SchemaSet
 procedure	gnmi	introspect	read	-	RegistrySlice
 procedure	hostspec	describe	read	-	SchemaSet
 procedure	hostspec	expectations	read	-	TopicStatus
-procedure	hostspec	expectations/set	write	ExpectationsConfig	Ack
+procedure	hostspec	expectations/set	write	HostspecExpectations	Ack
 procedure	hostspec	introspect	read	-	RegistrySlice
 procedure	hostspec	spec	read	-	HostspecEvaluation
 procedure	logs	artifact/cancel	write	-	Ack
@@ -130,6 +130,7 @@ subject	catalog	alias/{old_id}	state	AliasRecord
 subject	catalog	assertion/{id}	state	OperatorAssertion
 subject	catalog	entity/{entity_id}	state	HostEntity
 subject	catalog	pdns/{ip_slug}	state	PdnsRecord
+subject	desired	{host}/hostspec/expectations	state	HostspecExpectations
 subject	gnmi	artifact/{kind}	state	ArtifactStatus
 subject	gnmi	errors	state	ErrorReport
 subject	gnmi	evidence/self	state	HostEvidence
@@ -137,6 +138,7 @@ subject	gnmi	health	state	HealthSnapshot
 subject	gnmi	sensor	state	SensorInfo
 subject	gnmi	{device}/{path...}	telemetry	TelemetryPoint
 subject	hostspec	alert/{alert_key}	state	Alert
+subject	hostspec	applied/{topic}	state	AppliedConfig
 subject	hostspec	assertions/failing	telemetry	TelemetryPoint
 subject	hostspec	errors	state	ErrorReport
 subject	hostspec	evidence/self	state	HostEvidence
