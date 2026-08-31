@@ -31,6 +31,21 @@ relative paths, uncompilable regexes, non-octal modes, vacuous entries).
 There is no `enabled` flag: hostspec *is* its sentinel. Delete the
 expectations (or push the empty set) to hold the host to nothing.
 
+## The demo block (#867)
+
+The file also carries a `//DEMO `-marked block that
+`scripts/gen-configs.sh --profile demo-max` uncomments and `--profile
+production` leaves alone, so the shipped default set stays empty while
+`just run` still shows the feature. It asserts two things that hold on any
+Linux host (`/` is mounted, `/etc/hostname` exists) and one that
+**deliberately fails** — a required listener on `:65001` that is not there —
+so the demo shows a green sweep *and* a real firing alert with the failing
+clause in its labels. It is the same motif as netlink's
+`demo-expected-service`, inverted only in which profile does the editing.
+`demo_profile_assertion_set_parses_and_validates` (in `src/config.rs`) applies
+the generator's transform and pins the result, since nothing else would notice
+the block rotting while it sits commented out.
+
 ## `@desired` (#816)
 
 The assertion set is the fleet's first `@desired`-authorable topic: a

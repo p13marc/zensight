@@ -270,8 +270,23 @@ sed -E \
 
 # hostspec (#821): the shipped config's default assertion set is EMPTY on
 # purpose (assertions are per-host operator policy, and an empty set is a
-# valid, conformance-green state), so the demo profile is the file verbatim.
-cp -f "$configs_dir/hostspec.json5" "$outdir/hostspec.json5"
+# valid, conformance-green state), so PRODUCTION is the file verbatim.
+#
+# demo-max uncomments the committed `//DEMO ` block (#867). An empty pane is
+# indistinguishable from a broken sensor — it was reported as a regression by
+# the person who built the sensor two days earlier — and the one sensor whose
+# whole job is machine-checked expectations was demoing as a sensor with no
+# expectations. The block asserts two things true on any Linux host (/ is
+# mounted, /etc/hostname exists) and one that DELIBERATELY fails (a listener
+# on :65001 that is not there), so the demo shows a green sweep AND a real
+# firing alert. Same motif, same production-drop, as netlink's
+# `demo-expected-service` above — inverted only in which profile does the
+# editing, because hostspec's documented default must stay the empty set.
+if [[ "$profile" == "demo-max" ]]; then
+    sed -E 's|^( *)//DEMO |\1|' "$configs_dir/hostspec.json5" > "$outdir/hostspec.json5"
+else
+    cp -f "$configs_dir/hostspec.json5" "$outdir/hostspec.json5"
+fi
 
 # correlator: fuses the sensors' identity evidence into one HostEntity per
 # host. Machine-agnostic; the example config already has every merge rule on.

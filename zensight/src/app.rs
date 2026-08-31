@@ -3483,7 +3483,9 @@ impl ZenSight {
                 return match target {
                     ExpTarget::Netlink => self.query_expectations(),
                     ExpTarget::Systemd => self.query_systemd_expectations(),
-                    ExpTarget::Hostspec => self.query_hostspec_expectations(),
+                    ExpTarget::Hostspec => self
+                        .query_hostspec_expectations()
+                        .chain(self.query_hostspec_spec()),
                 };
             }
             Message::SetSystemdExpKind(kind) => {
@@ -3491,6 +3493,17 @@ impl ZenSight {
             }
             Message::SetHostspecExpKind(kind) => {
                 self.expectations.hostspec_kind = kind;
+            }
+            Message::HostspecSpecReceived(json) => {
+                // Pretty-print if it parses, so the verbatim answer is readable;
+                // if it does not parse, show exactly what came back rather than
+                // hiding a malformed reply behind a friendly sentence.
+                self.expectations.hostspec_spec = Some(
+                    serde_json::from_str::<serde_json::Value>(&json)
+                        .ok()
+                        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                        .unwrap_or(json),
+                );
             }
             Message::HostspecExpectationsReceived(json) => {
                 self.expectations.hostspec_verdict =
@@ -3635,7 +3648,10 @@ impl ZenSight {
                     let key = zensight_common::fleet_command_key("hostspec", "expectations");
                     return self
                         .send_command(key, &command, "hostspec assertions pushed".to_string())
-                        .chain(self.query_hostspec_expectations());
+                        .chain(
+                            self.query_hostspec_expectations()
+                                .chain(self.query_hostspec_spec()),
+                        );
                 }
                 // Systemd sentinel (#278): mutate the accumulated draft, then push
                 // the full set via SetExpectations.
@@ -3769,7 +3785,10 @@ impl ZenSight {
                     let key = zensight_common::fleet_command_key("hostspec", "expectations");
                     return self
                         .send_command(key, &command, format!("Removed {rule}"))
-                        .chain(self.query_hostspec_expectations());
+                        .chain(
+                            self.query_hostspec_expectations()
+                                .chain(self.query_hostspec_spec()),
+                        );
                 }
                 if self.expectations.target == ExpTarget::Systemd {
                     self.expectations.systemd.remove_rule(&rule);
@@ -3790,7 +3809,9 @@ impl ZenSight {
                 return match self.expectations.target {
                     ExpTarget::Netlink => self.query_expectations(),
                     ExpTarget::Systemd => self.query_systemd_expectations(),
-                    ExpTarget::Hostspec => self.query_hostspec_expectations(),
+                    ExpTarget::Hostspec => self
+                        .query_hostspec_expectations()
+                        .chain(self.query_hostspec_spec()),
                 };
             }
             Message::ExpectationStatusReceived(json) => {
@@ -4986,6 +5007,36 @@ impl ZenSight {
                     message: format!("Status query failed: {e}"),
                 },
             }
+        })
+    }
+
+    /// Query the hostspec sensor's `spec` answer — what this host is being
+    /// held to (#867). Routes to `HostspecSpecReceived`. Failures are silent
+    /// on purpose: this is decoration beside the assertion set, and a toast
+    /// for it would fire on every deployment that runs no hostspec sensor.
+    fn query_hostspec_spec(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let key = zensight_common::fleet_rpc_key("hostspec", "spec");
+        Task::future(async move {
+            let body = match session
+                .get(&key)
+                .target(zenoh::query::QueryTarget::All)
+                .await
+            {
+                Ok(replies) => match replies.recv_async().await {
+                    Ok(reply) => match reply.result() {
+                        Ok(sample) => {
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string()
+                        }
+                        Err(_) => String::new(),
+                    },
+                    Err(_) => String::new(),
+                },
+                Err(_) => String::new(),
+            };
+            Message::HostspecSpecReceived(body)
         })
     }
 

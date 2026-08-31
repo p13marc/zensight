@@ -7263,4 +7263,37 @@ mod hostspec_expectations_ui {
         assert!(ui.find("Declare a host assertion").is_ok());
         assert!(ui.find("Add & Push").is_ok());
     }
+
+    /// Before a reply arrives, an empty list means "not fetched" and must keep
+    /// saying so — the honest empty state below is only honest once the sensor
+    /// has actually answered (#867).
+    #[test]
+    fn test_hostspec_empty_before_reply_says_refresh() {
+        let mut state = ExpectationsState::default();
+        state.target = ExpTarget::Hostspec;
+        let mut ui = simulator(expectations_view(&state));
+        assert!(ui.find("Press Refresh to load the current set.").is_ok());
+        assert!(ui.find("This host is held to nothing.").is_err());
+    }
+
+    /// After a reply carrying an empty set, the pane says what the state IS
+    /// rather than looking broken, and shows the sensor's own `spec` answer
+    /// verbatim (#867). An empty pane was reported as a regression by the
+    /// person who had built the sensor two days earlier.
+    #[test]
+    fn test_hostspec_empty_after_reply_is_a_state_not_an_absence() {
+        let mut state = ExpectationsState::default();
+        state.target = ExpTarget::Hostspec;
+        // What a reply sets: the schema verdict is the "the sensor answered"
+        // signal the view keys off.
+        state.hostspec_verdict = Some(zensight_common::schema::Verdict::NotValidated(
+            zensight_common::schema::NotValidated::NoSchema,
+        ));
+        state.hostspec_spec =
+            Some("{\n  \"evaluated_at_ms\": 0,\n  \"assertions\": []\n}".to_string());
+        let mut ui = simulator(expectations_view(&state));
+        assert!(ui.find("This host is held to nothing.").is_ok());
+        assert!(ui.find("@rpc/hostspec/spec answers:").is_ok());
+        assert!(ui.find("Press Refresh to load the current set.").is_err());
+    }
 }

@@ -105,6 +105,51 @@ mod tests {
         crate::sentinel::validate(&cfg.hostspec.expectations).expect("shipped set validates");
     }
 
+    /// The `//DEMO ` block in the shipped config is what `gen-configs.sh
+    /// --profile demo-max` uncomments (#867). It is inert here — the test
+    /// above pins that — so nothing else would notice if it stopped parsing,
+    /// or if the deliberately-failing clause quietly became a passing one.
+    /// This applies the generator's own transform and checks the result.
+    #[test]
+    fn demo_profile_assertion_set_parses_and_validates() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/hostspec.json5");
+        let text = std::fs::read_to_string(path).expect("configs/hostspec.json5 exists");
+        // The same substitution as scripts/gen-configs.sh: strip the marker,
+        // keep the indentation.
+        let demo: String = text
+            .lines()
+            .map(|l| match l.split_once("//DEMO ") {
+                Some((indent, rest)) if indent.trim().is_empty() => format!("{indent}{rest}"),
+                _ => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !demo.lines().any(|l| l.trim_start().starts_with("//DEMO ")),
+            "every marker line must be uncommented by the transform"
+        );
+        let cfg: HostspecSensorConfig = json5::from_str(&demo).expect("demo config parses");
+        let exp = &cfg.hostspec.expectations;
+        crate::sentinel::validate(exp).expect("demo set validates");
+        assert!(
+            !exp.is_empty(),
+            "the demo profile must hold this host to something"
+        );
+        assert_eq!(exp.mounts.len(), 1, "one green mount assertion");
+        assert_eq!(exp.files.len(), 1, "one green file assertion");
+        // The one that DELIBERATELY fails, the netlink `demo-expected-service`
+        // motif: a listener that is not there. If this ever starts passing the
+        // demo stops showing the alert pipeline at all.
+        assert_eq!(exp.listening.len(), 1);
+        let l = &exp.listening[0];
+        assert_eq!(l.name, "demo-expected-listener");
+        assert!(
+            !l.forbid,
+            "it must REQUIRE a listener, so its absence fires"
+        );
+        assert_eq!(l.port, 65001);
+    }
+
     #[test]
     fn expectations_round_trip_json() {
         let cfg: ExpectationsConfig = json5::from_str(

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **hostspec no longer demos as a blank pane** (#867). Nothing was broken —
+  the shipped assertion set is empty on purpose, `gen-configs.sh` copied the
+  file verbatim, and the sensor said so in its logs — but *an empty pane is
+  indistinguishable from a broken sensor*, which is why it was reported as a
+  regression by the person who had built it two days earlier. Two independent
+  halves: (1) `configs/hostspec.json5` gains a `//DEMO `-marked block that
+  `gen-configs.sh` uncomments for `demo-max` and leaves alone for
+  `production`, so the shipped default stays the documented empty set while
+  `just run` asserts two things true on any Linux host (`/` mounted,
+  `/etc/hostname` exists) and one that **deliberately fails** — a required
+  listener on `:65001` — giving the demo both a green sweep and a real firing
+  alert; the netlink `demo-expected-service` motif, inverted only in which
+  profile edits. (2) The Expectations view now distinguishes "not fetched
+  yet" from "held to nothing": once the sensor has answered, an empty set
+  reads as the state it is, with the `@rpc/hostspec/spec` answer shown
+  verbatim beside it. Pinned by a config test that applies the generator's own
+  transform (the demo block would otherwise rot unnoticed while commented out)
+  and two UI tests, one per fact.
+
 ## [0.12.0] - 2026-08-31
 
 **The operator release** (epic #809). ZenSight has been a very good instrument
