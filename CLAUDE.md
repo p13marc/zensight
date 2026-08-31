@@ -69,15 +69,19 @@ CI is **Forgejo Actions** (`.forgejo/workflows/`) — there is no `.github/` in 
 GitHub is a passive push mirror. `ci.yml` enforces, as a merge gate, in four jobs:
 
 - **test** — `cargo test --workspace --locked`
-- **demo-smoke** — `PROFILE=debug scripts/demo-verify.sh`: one real sensor, one real
-  exporter, one real scrape. Nothing in CI had ever *executed* an exporter before it.
-- **features** — `cargo check` per optional feature (`zensight` `tester`/`h264`, netring's
-  six detectors). A default workspace build never type-checks these; `h264` shipped broken
-  for a week under exactly that blind spot. The `ebpf` legs are out-of-band in
-  `features-ebpf.yml` (nightly + `bpf-linker`).
+- **demo-smoke** — `PROFILE=debug scripts/demo-verify.sh`: one real sensor, BOTH real
+  exporters (a Prometheus scrape and, since #845, an OTLP/HTTP export to a local
+  sink), executed. Nothing in CI had ever *executed* an exporter before it.
+- **features** — `cargo clippy -D warnings` per optional feature (`zensight`
+  `tester`/`h264`/no-default, netring's six detectors, logs/btf no-default — #845
+  upgraded these from `cargo check`, which passed on warnings). A default workspace
+  build never type-checks these; `h264` shipped broken for a week under exactly that
+  blind spot. The `ebpf` legs are out-of-band in `features-ebpf.yml` (nightly +
+  `bpf-linker`).
 - **lint** — `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked
-  -- -D warnings`, plus five grep guards: a **design-system color guard** (no ad-hoc
-  `Color::from_rgb`/`from_rgba` outside `zensight/src/view/{theme.rs,tokens.rs,components/}`
+  -- -D warnings`, plus five grep guards: a **design-system color guard** (no ad-hoc Color
+  constructors — `from_rgb*`, `new`, the constants, `color!`, the struct literal —
+  outside `zensight/src/view/{theme.rs,tokens.rs,components/}`
   — see [`zensight/docs/design-system.md`](zensight/docs/design-system.md)), a
   **`session.put`/`session.delete` ban** (publish through declared publishers), a ban on
   exporters hand-rolling `declare_subscriber` (history/recovery, #763), a ban on raw

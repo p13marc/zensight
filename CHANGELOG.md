@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The OTLP exporter is executed in CI** (#845, finding 15 — the medium
+  one). demo-verify.sh gains a phase 2: the otel exporter joins the same
+  isolated hub the Prometheus phase stands up, pointed over OTLP/HTTP at a
+  stdlib-python sink, and the gate is that a real metrics export ARRIVES —
+  protobuf content-type, non-empty body. Until now the exporter's only
+  executions were `--help` in the release smoke and a manual `just
+  demo-otel`; the exact gap (#752/#753) that demo-smoke closed for
+  Prometheus had been standing open on the OTel side since the crate landed.
+
 - **CI stopped being happy** (#845, 14 evidenced leniency fixes). The
   conformance gate's one exclusion (`field-new`) was stale — its lift
   condition, zenkey#384, had shipped in the pinned fleet 0.11.1 — and is

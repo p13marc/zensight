@@ -61,8 +61,10 @@ jobs:
   # Both were invisible to the whole suite, which only ever asserted substrings
   # of a body it never validated.
   #
-  # This closes it: one real sensor, one real exporter, one real scrape, on
-  # isolated ports with no containers and no privileges.
+  # This closes it: one real sensor, BOTH real exporters (a Prometheus scrape,
+  # and — #845 — an OTLP/HTTP export into a local sink; the otel exporter had
+  # never been executed by anything), on isolated ports with no containers
+  # and no privileges.
   demo-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
