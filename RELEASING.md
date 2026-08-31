@@ -25,12 +25,17 @@ git status                       # clean
 a parallel signal, not a gate: `release.yml` does not wait for it. Tag only a commit whose
 master CI already passed.
 
-**Dry-run the release pipeline first** when packaging or workflows changed (and always
-until the pipeline has a few tagged runs behind it): trigger `release.yml` via
-`workflow_dispatch` (Actions tab → Release → Run workflow, on master). It builds
-everything — binaries in the `rust:1.97-bookworm` container, all images plus an in-image
-smoke test, the tarball, the flatpak — but publishes nothing (every push/upload step is
-gated on the ref being a tag).
+> **There is no dry run any more.** This paragraph used to say that
+> `workflow_dispatch` builds everything and publishes nothing "because every
+> push/upload step is gated on the ref being a tag". That gating is gone:
+> `release.yml` now resolves `RELEASE_TAG`/`RELEASE_SHA` from a **required**
+> `tag` input and every upload uses it unconditionally. Dispatching the
+> workflow **publishes the release and pushes the images**. It is the
+> re-run-a-failed-release path (see the workflow's own header comment), not a
+> rehearsal.
+>
+> Corrected 2026-08-31, during the 0.12.0/0.13.0 cuts, by reading the workflow:
+> there is no `startsWith(github.ref, 'refs/tags/')` left anywhere in it.
 
 ## 1. CHANGELOG.md
 
@@ -104,9 +109,25 @@ git tag -a X.Y.Z -m "ZenSight X.Y.Z — <theme>"
 git push origin X.Y.Z
 ```
 
+
 > **The tag takes no `v` prefix.** `release.yml` triggers on `[0-9]+.[0-9]+.[0-9]+`;
 > `v0.8.0` matches nothing and silently does nothing. Tags are **annotated** (`-a`), message
 > `ZenSight <version>[ — <theme>]`.
+
+> **Give the runner time before concluding the tag did nothing.** There is one
+> runner and jobs queue serially across every open PR, so the tag's own runs can
+> take a while to appear — during the 0.13.0 cut they were mistaken for runs that
+> were never created, and the release was then dispatched by hand for no reason.
+> Confirm with a *large* listing rather than the top of the newest-first page:
+>
+> ```bash
+> curl -H "Authorization: token $TOKEN" \
+>   "https://git.marcpardo.eu/api/v1/repos/marcpardo/zensight/actions/tasks?limit=200" \
+>   | jq -r '.workflow_runs[] | select(.head_branch=="X.Y.Z") | "\(.name) \(.status)"'
+> ```
+>
+> A completed tag push produces the whole CI suite **plus** `release`, `images`,
+> `flatpak` and `checksums`, all with `event: push` on the tag's own ref.
 
 ## 5. Watch and finish
 
