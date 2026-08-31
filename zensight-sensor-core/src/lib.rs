@@ -39,6 +39,7 @@ pub mod artifact;
 pub mod cloud;
 mod config;
 pub mod container;
+pub mod desired;
 mod error;
 pub mod event;
 pub mod governor;
