@@ -19,6 +19,12 @@ use zensight_sensor_core::{EvictOutcome, MemoryGovernor, SensorHealth, TableHand
 const CHUNK: usize = 64 * 1024;
 const MIB: u64 = 1024 * 1024;
 
+/// RSS is process-global: two ladder tests reading `/proc/self/status`
+/// concurrently shift each other's ratios (one test's allocations are the
+/// other's mystery pressure), so every test that measures real RSS holds
+/// this for its whole body.
+static RSS_LOCK: Mutex<()> = Mutex::new(());
+
 type Ballast = Arc<Mutex<Vec<Vec<u8>>>>;
 
 fn touched_chunk(i: usize) -> Vec<u8> {
@@ -67,6 +73,7 @@ fn register_ballast(governor: &MemoryGovernor, ballast: &Ballast) {
 /// and the process is still here to assert all of it.
 #[test]
 fn ladder_evicts_names_the_table_degrades_and_never_exits() {
+    let _rss = RSS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let health = SensorHealth::new("test");
     let governor = MemoryGovernor::default();
     let ballast: Ballast = Arc::default();
@@ -164,6 +171,7 @@ fn ladder_evicts_names_the_table_degrades_and_never_exits() {
 /// the table keeps its data. Raising the budget recovers without a restart.
 #[test]
 fn budget_below_process_baseline_saturates_loudly_without_thrashing() {
+    let _rss = RSS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let health = SensorHealth::new("test");
     let governor = MemoryGovernor::default();
     let evict_calls = Arc::new(Mutex::new(0u32));
@@ -257,6 +265,7 @@ fn budget_below_process_baseline_saturates_loudly_without_thrashing() {
 #[test]
 #[ignore = "RSS-strict; run manually with --test-threads=1"]
 fn rss_returns_under_budget_after_shedding() {
+    let _rss = RSS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let health = SensorHealth::new("test");
     let governor = MemoryGovernor::default();
     let ballast: Ballast = Arc::default();
