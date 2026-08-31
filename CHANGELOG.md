@@ -51,6 +51,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **hostspec reconciles `@desired`** (#816, closing PR): the assertion set
+  is the fleet's first desired-authorable topic. The sensor wires
+  `reconcile_topic` beside its RPC surface — three writers (file baseline,
+  desired, RPC) onto one sentinel handle, one shared
+  `applied/expectations` marker saying who won last (the RPC path now
+  stamps `source: rpc`), the same `validate()` gating all of them. The
+  deployment storage config gains a `zensight-desired` storage (own
+  selector — D4; week-long GC lifespan, because the storage's seed-GET
+  answer is the reconciler's primary convergence path and a collected doc
+  would silently un-configure a returning sensor). systemd/netlink/logs
+  join via #849.
+
 - **The `@desired` reconciler** (#816 pt 2):
   `zensight_sensor_core::desired::reconcile_topic` — seed GET + periodic
   re-GET as the level-triggered primary path (survives missed samples,

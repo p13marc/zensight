@@ -104,10 +104,15 @@ async fn the_sentinel_contract_end_to_end() {
     );
     let handle = evaluator.handle();
     let eval_task = tokio::spawn(evaluator.run());
+    let marker = zensight_sensor_core::desired::AppliedMarker::new(
+        Publisher::new(session.clone(), "hostspec", Format::Json),
+        "expectations",
+    );
     let cmd_task = tokio::spawn(command::run(
         session.clone(),
         "hostspec".to_string(),
         handle.clone(),
+        marker,
     ));
 
     // 1. Both assertions fire, each carrying its failing clause.
