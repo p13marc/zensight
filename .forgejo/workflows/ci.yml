@@ -295,10 +295,13 @@ jobs:
       # D2 (#28): all colors must come from the design-system modules. Widened
       # in #845: the old pattern matched only `Color::from_rgb*`, so the
       # associated constants (`Color::BLACK` — one was live in chart.rs), the
-      # struct literal and the `color!` macro all walked past it.
+      # struct literal and the `color!` macro all walked past it. The literal
+      # arm matches a literal whatever field leads — it used to require `r`,
+      # so `Color { a: .., ..base }` walked past it too (two were live in
+      # chart.rs; they use `tokens::with_alpha` now).
       - name: no ad-hoc colors (D2 guard)
         run: |
-          hits=$(grep -rnE "Color::(from_rgb|new|BLACK|WHITE|TRANSPARENT)\b|iced::color!|Color \{ *r *:" zensight/src --include='*.rs' \
+          hits=$(grep -rnE "Color::(from_rgb|new|BLACK|WHITE|TRANSPARENT)\b|iced::color!|Color *\{ *[rgba] *:" zensight/src --include='*.rs' \
             | grep -vE "view/theme\.rs|view/tokens\.rs|view/components/" || true)
           if [ -n "$hits" ]; then
             echo "::error::Ad-hoc Color::from_rgb outside the design-system modules:"

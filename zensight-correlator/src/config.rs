@@ -49,8 +49,6 @@ pub struct CorrelatorConfig {
     #[serde(default = "default_reemit_secs")]
     pub reemit_secs: u64,
 
-    /// Roll device-liveness status onto entities (worst-of-members). Disable if
-
     /// Per-rule kill-switches.
     #[serde(default)]
     pub rules: RulesConfig,

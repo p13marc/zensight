@@ -47,7 +47,10 @@ const LOSS_REREPORT_WINDOWS: u32 = 6;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI arguments
-    let args = SensorArgs::parse_with_default("syslog.json5");
+    // `logs.json5`, like every other sensor's `<name>.json5`: it is the file
+    // the units, the quadlets and the tarball ship. (`syslog.json5` is the
+    // network-listener example and stays a `--config` choice.)
+    let args = SensorArgs::parse_with_default("logs.json5");
 
     // Load configuration
     let config = SyslogSensorConfig::load_from_file(&args.config)?;

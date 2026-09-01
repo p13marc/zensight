@@ -18,9 +18,13 @@ journalctl -u zensight-sensor-sysinfo -f
 
 ## Privileges
 
-Every unit runs unprivileged under a transient `DynamicUser` with a minimal
-sandbox (`ProtectSystem=strict`, `NoNewPrivileges`, read-only `/etc/zensight`).
-Some units need extra capabilities, granted as *ambient* caps (still no root):
+Every unit but one runs unprivileged under a transient `DynamicUser` with a
+minimal sandbox (`ProtectSystem=strict`, `NoNewPrivileges`, read-only
+`/etc/zensight`). The exception is **`zensight-sensor-container`**, which runs
+as root on purpose: the rootful podman/docker socket is root-owned and a
+`DynamicUser` cannot be granted a stable group to reach it — the unit says so
+in its own comments, and it keeps the rest of the sandbox. Some units need
+extra capabilities, granted as *ambient* caps (still no root):
 
 | Unit | Capability | Why |
 |------|-----------|-----|
@@ -44,6 +48,7 @@ $ for f in packaging/systemd/*.service; do
 5.6   correlator, both exporters, gnmi, modbus, netflow, snmp, sysinfo, systemd,
       hostspec (ProtectHome=read-only — an operator may assert on /home paths;
       everything hostspec reads, it reads read-only, and it executes nothing)
+5.6   probe, pve      (empty set; both are clients — nothing on the host to reach)
 5.7   parallax        (empty set, plus DeviceAllow — see below)
 5.8   logs            CAP_NET_BIND_SERVICE
 5.8   netring         CAP_NET_RAW + CAP_IPC_LOCK
@@ -111,4 +116,11 @@ is being taken away here.
 ## Graceful stop
 
 All units stop with `SIGTERM` (`TimeoutStopSec=20s`), which lets a sensor publish
-its offline status and tombstone any firing alerts before exit (see #161).
+its offline status and tombstone any firing alerts before exit (see #161). Every
+unit's `ExecStart` names `/usr/bin` — the three 0.13.0 sensors said
+`/usr/local/bin` for one release, which was exactly the "unit that fails at exec"
+the note at the top of this file is about.
+
+`zensight-sensor-container` runs as root (see *Privileges*) and does not score in
+the band above; `systemd-analyze security` puts it around 8, which is the honest
+number for a process that reads a root-owned socket.

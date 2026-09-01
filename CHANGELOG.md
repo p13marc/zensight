@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of that: the `linux-amd64` tarball copies `packaging/systemd/` wholesale, so
   every release since #411 has shipped
   `zensight-sensor-parallax.service` with `ExecStart=/usr/bin/zensight-sensor-parallax`
-  next to fifteen binaries that do not include it. An operator installing that
+  next to sixteen binaries that do not include it. An operator installing that
   unit got a service that fails at exec — an artifact promising a binary it
   does not carry.
 
@@ -68,6 +68,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExpectationsConfig` is systemd's alone. The belief came from a *description
   string* in the schema table, not from any binding. Both registry additions
   relocked as purely additive.
+
+- **`zensight-sensor-pve --diagnose`** (#880): a one-shot that asks the
+  configured API everything the backup and storage rules depend on — which pools
+  will be listed, what each content listing returns, which volids name no guest
+  this sensor can read, how old each vzdump task is, and what the guest disks sum
+  to per pool — prints it in plain sentences and exits. Read-only, and it never
+  opens a Zenoh session: debugging a token should not join a fleet. Follows
+  `--discover` in the SNMP sensor (#825).
+
+- **pve, container and probe telemetry lands on a host card** (#883, #884,
+  #885). Three sensors shipped in 0.13.0 filed every series under the *subject
+  being described* rather than the *host doing the describing*: a VMID (`160`),
+  a container name (`systemd-vaultwarden`), a probe target (`forge-http`). The
+  GUI groups host cards by `(protocol, source)`, so on the reference fleet 438
+  series fragmented across **41 identities that are not hosts** and the operator
+  who opened the 0.13.0 GUI reported, correctly, that "pve, container and probe
+  do not show any metrics".
+
+  `source` is now the reporting host in all three, as in sysinfo. Nothing is
+  lost: the subject was already in the key path (`guest/160/…`,
+  `systemd-vaultwarden/…`, `forge-http/…`) and in rich labels
+  (`vmid`/`name`/`node`, `container`/`unit`/`image`, `target`/`kind`/`vantage`),
+  and `exposition.rs` sources the Prometheus/OTel per-subject dimensions from
+  the key's pattern vars, not from `source` — so every existing dimension
+  survives and the `source`, `host_name` and `hostname` labels become correct
+  rather than naming a guest. The `device` identity model stays for things that
+  really are separate devices, which is why snmp is unchanged.
+
+  Three consequences worth naming:
+
+  - **pve's alert `source`** moves to the host too. This re-keys nothing:
+    `alert_key` hashes `rule` + labels and has never included `source`.
+  - **probe alerts gained a `probe` label** (the operator's own name for the
+    check), because an alert key is a digest and without it nothing on the
+    alert said *which configured target* it was about once `source` became the
+    vantage point. This does re-key probe alerts — and #882's adoption clears
+    the old keys on the first restart, with no manual sweep.
+  - **backup points gained a `vmid` label** and **cluster points a `node`
+    label**. Both families previously carried no labels at all, so a consumer
+    holding one as a value had no idea what it described.
+
+- **`sensor-pve`: the API endpoint address is not an identity** (#885).
+  `pve.source` fell back to `pve.host`, which on the deployment
+  `configs/pve.json5` and `packaging/systemd/` both recommend — a native binary
+  **on** the PVE node — is `127.0.0.1`. Every hypervisor-scoped series (pools,
+  cluster, HA) was therefore filed under a loopback address, the one address
+  guaranteed to be ambiguous across machines. It now falls back to the
+  hostname, as every other host sensor does, which is also what makes this
+  sensor's `evidence/self` agree with sysinfo's on the same box. The PVE node
+  name rides as the `node` label, now on every series rather than some.
+
+- **`sensor-container`: telemetry carries host identity** (#884). All 307 of
+  307 points on the reference fleet carried none, while the same sensor's alerts
+  carried `host.id`. Fixed by the above rather than by a new label: `source` is
+  now the reporting host, which is exactly how sysinfo and snmp label
+  provenance, so a `TelemetryPoint` handed to a consumer as a value knows where
+  it came from. It also disambiguates the fleet — container names are unique per
+  host, not globally, so four machines running `zensight-sensor-logs` used to
+  produce four series agreeing on `source`, `metric` and every label.
+
+  The gap that let all three ship: the e2e suites asserted only key
+  expressions, never `point.source`, so they passed either way. All three now
+  assert the reporting host on every point, and the subject in the labels.
+
+- **Alerts are retracted, not abandoned — a firing set that outlives its
+  process** (#882). When a condition cleared, `reconcile` published
+  `Put(Resolved)` + a `Delete` tombstone, and always had. What no build did was
+  survive its own restart: a new process starts with an empty firing set, so an
+  alert that was firing beforehand and is no longer true is never fired again
+  *and therefore never resolved*. Without a storage nobody noticed — the sample
+  aged out of the network. The reference fleet deployed `zensight-latest` on
+  `v1/*/state/**` on 2026-09-01 and the same afternoon watched three alerts sit
+  `firing` for good: a `swap_thrash` still reading 2052 pages/s sixteen minutes
+  after `si/so` went to zero, a `pressure_io` reading 50.9% against a live
+  1.61%, and two `probe-down`s for targets that had been deleted from the
+  config.
+
+  Sensors now own both ends of their own lifetime, and `SensorRunner` drives
+  both for any reporter handed to it with `with_alert_reporter`:
+
+  - **on start**, `AlertReporter::adopt_persisted` GETs the producer's own alert
+    selector and takes ownership of whatever the previous incarnation left
+    there. Adopted alerts enter the active set already `published`, which is the
+    truth, so the existing sweep finishes the job with no new lifecycle state:
+    the first `reconcile` of each rule retracts what is no longer violated, and
+    re-observing what still is publishes nothing. This is the half that covers
+    SIGKILL, an OOM kill, and the common case of a restart whose config no
+    longer defines the target.
+  - **on stop**, `resolve_all` — written for this and wired to nothing until now
+    — retracts and tombstones everything still firing, before the session
+    closes. Three docs, `RELEASING.md` included, had claimed this already
+    happened.
+
+  Three shapes are retired on the spot rather than adopted, because no sweep can
+  reach them: a `Resolved` whose `Delete` was lost, a document whose key does
+  not match the `alert_key` its own payload derives (the #737 re-key stranding,
+  which producers now clear for themselves — see `RELEASING.md`), and a rule the
+  build no longer has, for producers that declare their rule table with
+  `with_known_rules`. A deployment with no storage answers the GET with nothing
+  and behaves exactly as before.
+
+  Handing the runner the reporter now also declares `serve_alerts_query`, so one
+  registration replaces three rituals; the eleven per-sensor
+  `runner.spawn(serve_alerts_query(…))` lines are gone.
 
 ### Fixed
 
@@ -317,111 +421,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "info"`. Refusals and listing failures now warn once per endpoint per
   transition, and say what the consequence is.
 
-### Added
+- **The release image smoke test can see a sensor die again.** It judged the
+  bundle healthy when `timeout` had to kill the spawner (rc 124), on the
+  theory that `FAIL_FAST=1` made the spawner exit with the first dead child.
+  #813 removed `FAIL_FAST`: the spawner now supervises each child with 62 s
+  of backoff inside the step's 25 s window, so rc was *always* 124 and a
+  sensor exiting at startup passed the gate. The step now fails on the
+  supervisor's own `exited (rc=…)` line.
 
-- **`zensight-sensor-pve --diagnose`** (#880): a one-shot that asks the
-  configured API everything the backup and storage rules depend on — which pools
-  will be listed, what each content listing returns, which volids name no guest
-  this sensor can read, how old each vzdump task is, and what the guest disks sum
-  to per pool — prints it in plain sentences and exits. Read-only, and it never
-  opens a Zenoh session: debugging a token should not join a fleet. Follows
-  `--discover` in the SNMP sensor (#825).
+- **`RELEASING.md`'s version-drift check could never fire.** Its grep for
+  `version.workspace = true` was unanchored and matched
+  `rust-version.workspace = true` — present in both manifests that hardcode
+  their version — so it reported the trap closed while it stood open.
+  Anchored; it now prints exactly the two eBPF manifests. The document's
+  artifact list (12 binaries, 13 images, a `.tar.gz.sha256`) is brought to
+  what `release.yml` produces (17, 18, an in-tarball `SHA256SUMS`), and its
+  "parallax ships in no artifact" note is retired with #512.
 
-- **pve, container and probe telemetry lands on a host card** (#883, #884,
-  #885). Three sensors shipped in 0.13.0 filed every series under the *subject
-  being described* rather than the *host doing the describing*: a VMID (`160`),
-  a container name (`systemd-vaultwarden`), a probe target (`forge-http`). The
-  GUI groups host cards by `(protocol, source)`, so on the reference fleet 438
-  series fragmented across **41 identities that are not hosts** and the operator
-  who opened the 0.13.0 GUI reported, correctly, that "pve, container and probe
-  do not show any metrics".
+- **The three 0.13.0 units (`pve`, `container`, `probe`) say `/usr/bin`**
+  like the other fourteen — installing to `/usr/bin` as the README suggests
+  gave three units that failed at exec — and carry the `TimeoutStopSec=20s`
+  the packaging README claims for all units. That README no longer says every
+  unit runs under `DynamicUser` (the container sensor runs as root on
+  purpose, and now says so where an operator reads about privileges).
 
-  `source` is now the reporting host in all three, as in sysinfo. Nothing is
-  lost: the subject was already in the key path (`guest/160/…`,
-  `systemd-vaultwarden/…`, `forge-http/…`) and in rich labels
-  (`vmid`/`name`/`node`, `container`/`unit`/`image`, `target`/`kind`/`vantage`),
-  and `exposition.rs` sources the Prometheus/OTel per-subject dimensions from
-  the key's pattern vars, not from `source` — so every existing dimension
-  survives and the `source`, `host_name` and `hostname` labels become correct
-  rather than naming a guest. The `device` identity model stays for things that
-  really are separate devices, which is why snmp is unchanged.
+- `just stop` stops `zensight-sensor-hostspec`, which `just run` starts.
 
-  Three consequences worth naming:
+- **NetFlow: the per-exporter parser map is bounded** (256, least recently
+  seen evicted — a real exporter re-sends its templates), datagrams are
+  processed on the receive loop instead of one spawned task per packet piling
+  up behind a bounded channel, and a socket stuck in an error state backs off
+  and gives up after 50 consecutive errors rather than spinning and flooding
+  the log. NetFlow is UDP with no handshake: the map grew by one parser per
+  source address ever seen, forever.
 
-  - **pve's alert `source`** moves to the host too. This re-keys nothing:
-    `alert_key` hashes `rule` + labels and has never included `source`.
-  - **probe alerts gained a `probe` label** (the operator's own name for the
-    check), because an alert key is a digest and without it nothing on the
-    alert said *which configured target* it was about once `source` became the
-    vantage point. This does re-key probe alerts — and #882's adoption clears
-    the old keys on the first restart, with no manual sweep.
-  - **backup points gained a `vmid` label** and **cluster points a `node`
-    label**. Both families previously carried no labels at all, so a consumer
-    holding one as a value had no idea what it described.
+- **SNMP: a walk that fails partway is charged to the PDU budget** (#825). The
+  charge came after the row loop's `?`, so a timing-out device — exactly what
+  the budget protects — had its PDUs go unaccounted and the next cycle came
+  back at full rate.
 
-- **`sensor-pve`: the API endpoint address is not an identity** (#885).
-  `pve.source` fell back to `pve.host`, which on the deployment
-  `configs/pve.json5` and `packaging/systemd/` both recommend — a native binary
-  **on** the PVE node — is `127.0.0.1`. Every hypervisor-scoped series (pools,
-  cluster, HA) was therefore filed under a loopback address, the one address
-  guaranteed to be ambiguous across machines. It now falls back to the
-  hostname, as every other host sensor does, which is also what makes this
-  sensor's `evidence/self` agree with sysinfo's on the same box. The PVE node
-  name rides as the `node` label, now on every series rather than some.
+- **`labels_shadowed` means something again** for snmp/modbus/gnmi/netflow:
+  `exposition::identify` offered every pattern variable twice when there was
+  no semconv entry, so the shadow counter — the signal that exists to make a
+  dropped label visible — was permanently non-zero on those four producers.
 
-- **`sensor-container`: telemetry carries host identity** (#884). All 307 of
-  307 points on the reference fleet carried none, while the same sensor's alerts
-  carried `host.id`. Fixed by the above rather than by a new label: `source` is
-  now the reporting host, which is exactly how sysinfo and snmp label
-  provenance, so a `TelemetryPoint` handed to a consumer as a value knows where
-  it came from. It also disambiguates the fleet — container names are unique per
-  host, not globally, so four machines running `zensight-sensor-logs` used to
-  produce four series agreeing on `source`, `metric` and every label.
+- Root README drift: `zenoh-blob/` and
+  `zensight-keyspace` are gone (external `zblob` and `zenkey`), `docs/rfcs/`
+  never existed here, parallax has a row, and the `Protocol` list names all
+  fifteen variants. `configs/correlator.json5` lists the `cloud_instance` rule
+  (default on, confidence 0.95) it omitted, and no longer cites a 420 s
+  refresh cadence — sensors refresh evidence every 60 s. An orphaned doc
+  comment in the correlator config is gone. `zensight-sensor-logs` defaults
+  to `logs.json5`, the file the units and the tarball ship.
 
-  The gap that let all three ship: the e2e suites asserted only key
-  expressions, never `point.source`, so they passed either way. All three now
-  assert the reporting host on every point, and the subject in the labels.
-
-- **Alerts are retracted, not abandoned — a firing set that outlives its
-  process** (#882). When a condition cleared, `reconcile` published
-  `Put(Resolved)` + a `Delete` tombstone, and always had. What no build did was
-  survive its own restart: a new process starts with an empty firing set, so an
-  alert that was firing beforehand and is no longer true is never fired again
-  *and therefore never resolved*. Without a storage nobody noticed — the sample
-  aged out of the network. The reference fleet deployed `zensight-latest` on
-  `v1/*/state/**` on 2026-09-01 and the same afternoon watched three alerts sit
-  `firing` for good: a `swap_thrash` still reading 2052 pages/s sixteen minutes
-  after `si/so` went to zero, a `pressure_io` reading 50.9% against a live
-  1.61%, and two `probe-down`s for targets that had been deleted from the
-  config.
-
-  Sensors now own both ends of their own lifetime, and `SensorRunner` drives
-  both for any reporter handed to it with `with_alert_reporter`:
-
-  - **on start**, `AlertReporter::adopt_persisted` GETs the producer's own alert
-    selector and takes ownership of whatever the previous incarnation left
-    there. Adopted alerts enter the active set already `published`, which is the
-    truth, so the existing sweep finishes the job with no new lifecycle state:
-    the first `reconcile` of each rule retracts what is no longer violated, and
-    re-observing what still is publishes nothing. This is the half that covers
-    SIGKILL, an OOM kill, and the common case of a restart whose config no
-    longer defines the target.
-  - **on stop**, `resolve_all` — written for this and wired to nothing until now
-    — retracts and tombstones everything still firing, before the session
-    closes. Three docs, `RELEASING.md` included, had claimed this already
-    happened.
-
-  Three shapes are retired on the spot rather than adopted, because no sweep can
-  reach them: a `Resolved` whose `Delete` was lost, a document whose key does
-  not match the `alert_key` its own payload derives (the #737 re-key stranding,
-  which producers now clear for themselves — see `RELEASING.md`), and a rule the
-  build no longer has, for producers that declare their rule table with
-  `with_known_rules`. A deployment with no storage answers the GET with nothing
-  and behaves exactly as before.
-
-  Handing the runner the reporter now also declares `serve_alerts_query`, so one
-  registration replaces three rituals; the eleven per-sensor
-  `runner.spawn(serve_alerts_query(…))` lines are gone.
+- **The design-system colour guard matches every `Color { … }` literal**, not
+  only one whose first field is `r`; the three `Color { a: …, ..base }` that
+  walked past it use a new `tokens::with_alpha`.
 
 ## [0.13.0] - 2026-08-31
 

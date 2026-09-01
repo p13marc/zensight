@@ -31,8 +31,8 @@
 
   // How long (seconds) a HostEvidence claim is trusted after its last refresh.
   // Claims older than this are ignored by the merge rules and age out of the
-  // entity view. Sensors refresh live claims at <= TTL/2, so 900s pairs with the
-  // sensors' 420s refresh cadence.
+  // entity view. Sensors refresh live claims every 60s (sensor-core's
+  // registration/evidence loop), so 900s tolerates a dozen missed refreshes.
   evidence_ttl_secs: 900,
 
   // Debounce (ms) between an evidence change and a recompute, so a burst of
@@ -49,6 +49,7 @@
   // so disable it on networks with duplicate hostnames.
   rules: {
     host_id: true,        // sha256(machine-id) equal  -> confidence 1.0
+    cloud_instance: true, // same cloud (provider, instance_id) -> confidence 0.95 (#311)
     mac_ip: true,         // shared MAC AND shared IP   -> confidence 0.8
     fqdn: true,           // equal FQDN                 -> confidence 0.5
     hostname_enabled: true, // equal hostname           -> confidence 0.25

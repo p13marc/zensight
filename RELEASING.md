@@ -62,23 +62,27 @@ Also update `flatpak/com.github.p13marc.ZenSight.metainfo.xml`: its `<releases>`
 
 | File | Note |
 |---|---|
-| `Cargo.toml` (`[workspace.package] version`) | the 21 normal crates inherit this |
+| `Cargo.toml` (`[workspace.package] version`) | the 25 normal crates inherit this |
 | `zensight-sensor-netlink-ebpf/Cargo.toml` | **hardcodes its version — does not inherit** |
 | `zensight-sensor-sysinfo-ebpf/Cargo.toml` | **hardcodes its version — does not inherit** |
 
-> **Trap 1.** The two eBPF crates are the only 2 of the 23 member manifests that do not use
+> **Trap 1.** The two eBPF crates are the only 2 of the 27 member manifests that do not use
 > `version.workspace = true`. They are `publish = false`, but every prior release moved them
 > and a mismatch is confusing. Verify with:
 > ```bash
 > for f in $(find . -name Cargo.toml -not -path './target/*' -mindepth 2); do
->   grep -q 'version.workspace = true' "$f" || echo "$f"
+>   grep -qE '^version\.workspace = true' "$f" || echo "$f"
 > done
 > ```
+> The `^` is load-bearing. This check shipped for several releases as an unanchored
+> `grep -q 'version.workspace = true'`, which also matches `rust-version.workspace = true`
+> — present in both hardcoding manifests — so it printed nothing and reported the trap
+> closed while it stood open. It must print exactly the two eBPF manifests.
 
 Then regenerate the lock:
 
 ```bash
-cargo check --workspace     # updates Cargo.lock for the 24 workspace crates
+cargo check --workspace     # updates Cargo.lock for the 27 workspace crates
 ```
 
 > **Trap 2.** **Never `sed` `Cargo.lock`.** Several unrelated third-party crates
@@ -134,13 +138,15 @@ git push origin X.Y.Z
 Watch the run in the Actions tab. `release.yml` produces, all amd64-only:
 
 - **source tarball** + `SHA256SUMS` (release assets);
-- **`zensight-<ver>-linux-amd64.tar.gz`** (+ `.tar.gz.sha256`): all 12 binaries
-  (10 sensors, 2 exporters, correlator), the `packaging/systemd/` units, and the example
-  configs — the native-install path;
-- **13 container images** at `git.marcpardo.eu/marcpardo/<name>:{<ver>,latest}`:
-  `zensight-sensor-{logs,sysinfo,snmp,gnmi,modbus,netflow,netlink,netring,systemd,hostspec}`,
+- **`zensight-<ver>-linux-amd64.tar.gz`**: all 17 binaries (14 sensors, 2 exporters,
+  correlator) with an internal `SHA256SUMS`, the `packaging/systemd/` units, and the
+  example configs — the native-install path. There is no separate `.tar.gz.sha256`
+  asset; the `checksums` job publishes one release-wide `SHA256SUMS`;
+- **18 container images** at `git.marcpardo.eu/marcpardo/<name>:{<ver>,latest}`:
+  `zensight-sensor-{logs,sysinfo,snmp,gnmi,modbus,netflow,netlink,netring,systemd,hostspec,pve,container,probe,parallax}`,
   `zensight-exporter-{prometheus,otel}`, `zensight-correlator`, and the all-in-one
-  `zensight-sensors` bundle;
+  `zensight-sensors` bundle (the six host sensors; parallax stays out of it on purpose —
+  see the 0.14.0 changelog);
 - **flatpak**: an unsigned `zensight-<ver>.flatpak` bundle on the release, plus a
   force-push of the OSTree export to the repo's `flatpak-export` branch — vm-edge's
   `deploy-flatpak.timer` picks that up within ~5 min, GPG-signs it, and publishes to
@@ -231,10 +237,11 @@ answers is a leftover.
 
 ## Notes
 
-- **Not every workspace member is packaged.** `zensight-sensor-parallax` ships in no
-  artifact (see #512). If you add a sensor crate, add it to `release.yml`'s **three lists**
+- **Every sensor crate is packaged since #512** (parallax was the last holdout). If you
+  add a sensor crate, add it to `release.yml`'s **three lists**
   (the `-p` build list, the staging `cp` loop, the image loop), to
-  `docker/Dockerfile.sensors-runtime`'s COPY list, and to `packaging/systemd/`. Nothing
+  `docker/Dockerfile.sensors-runtime`'s COPY list if it belongs in the bundle, and to
+  `packaging/systemd/` (with `ExecStart=/usr/bin/…` like the others). Nothing
   asserts these stay in lockstep any more (the old `rust.yml` sensor-count guard died with
   the GitHub pipeline) — check by hand.
 - The `images` job runs inside `rust:1.97-bookworm` **on purpose**: the binaries must link

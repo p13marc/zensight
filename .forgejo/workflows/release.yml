@@ -187,14 +187,13 @@ jobs:
           # `introspect` lied to the fleet for three weeks.
           #
           # So: run the real entrypoint — interface detection, config
-          # generation, all five binaries, the shared spawner under
-          # FAIL_FAST=1 — for 25s against an endpoint with nothing behind it.
+          # generation, all six binaries, the shared spawner — for 25s
+          # against an endpoint with nothing behind it.
           # Sensors are Zenoh peers and retry an unreachable endpoint in the
           # background, so no router is needed here (verified).
           #
-          # Healthy means `timeout` had to kill it (124). Any other exit means
-          # the spawner returned on its own, which under FAIL_FAST=1 means a
-          # sensor died. Missing privileges and missing host services are NOT
+          # Healthy means `timeout` had to kill it (124) AND the supervisor
+          # logged no child exit. Missing privileges and missing host services are NOT
           # failures and must not be: netring without CAP_NET_RAW reports the
           # privilege and keeps running, and the systemd sensor without a
           # system bus answers `error/systemd/no-system-bus` — both are #648's
@@ -205,8 +204,22 @@ jobs:
               timeout -s TERM 25 /usr/local/bin/entrypoint-sensors.sh >/tmp/smoke.log 2>&1
             rc=$?
             if [ "$rc" != 124 ]; then
-              echo "::error::sensors image: the spawner exited on its own (rc=$rc) — a sensor died at startup"
+              echo "::error::sensors image: the spawner exited on its own (rc=$rc)"
               tail -n 80 /tmp/smoke.log
+              exit 1
+            fi
+            # The "a sensor died" arm. It used to be the rc check above, on the
+            # theory that FAIL_FAST=1 made the spawner exit with the first
+            # dead child — but #813 removed FAIL_FAST: the spawner now
+            # supervises each child with 2,4,8,16,32 s of backoff before
+            # giving up on it, which is 62 s of sleeping inside a 25 s window.
+            # rc was therefore always 124, and a sensor that exited at startup
+            # (a bad generated config, exit 64, a missing file) passed the
+            # gate for as long as that lasted. The supervisor logs every exit
+            # it sees; that line is the signal.
+            if grep -qE "run-sensors: .* exited \(rc=" /tmp/smoke.log; then
+              echo "::error::sensors image: a sensor exited at startup and was restarted by the supervisor"
+              grep -nE "run-sensors: .* exited \(rc=" /tmp/smoke.log
               exit 1
             fi
             if grep -q "panicked at" /tmp/smoke.log; then

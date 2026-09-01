@@ -37,7 +37,8 @@ each. The canonical cross-cutting references live in [`docs/`](docs/).
 | [`zensight-correlator`](zensight-correlator/) | Fuses identity evidence → one `HostEntity` per host |
 | [`zensight-exporter-prometheus`](zensight-exporter-prometheus/) | Prometheus `/metrics` + remote-write |
 | [`zensight-exporter-otel`](zensight-exporter-otel/) | OpenTelemetry OTLP metrics/logs/traces |
-| [`zenoh-blob`](zenoh-blob/) | Resumable content-addressed large-data transfer over Zenoh |
+| [`zensight-sensor-parallax`](zensight-sensor-parallax/) | live video (V4L2/RTSP/test pattern) → H.264 + JPEG previews on `@media` |
+| [`zblob`](https://github.com/p13marc/zblob) | Resumable content-addressed large-data transfer over Zenoh (external crate) |
 
 ## Key expressions
 
@@ -59,10 +60,11 @@ zensight/v1/@catalog/…                                   the identity catalog
 
 `<class>` is `telemetry` (periodic samples), `state` (LWW documents), or `events`
 (append-only). Commands are `@rpc` GETs, not publications. Never `format!` a key —
-use the typed builders in `zensight-keyspace`.
+use the typed builders (`zensight_common::registry`, over the external
+[`zenkey`](https://github.com/p13marc/zenkey) grammar crate).
 
 The deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md); the normative
-spec is [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md). The machine-readable
+spec lives in [the zenkey repo](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md). The machine-readable
 truth is [`zensight-common/registry/*.toml`](zensight-common/registry/) — or ask a
 running build: `zenctl topic list`.
 
@@ -149,7 +151,7 @@ are not wanted (e.g. a hypervisor):
 tar xf zensight-<ver>-linux-amd64.tar.gz && cd zensight-<ver>-linux-amd64
 sha256sum -c SHA256SUMS
 sudo install -m 755 zensight-sensor-sysinfo /usr/local/bin/
-sudo install -m 644 systemd/zensight-sensor-sysinfo.service /etc/systemd/system/  # adjust ExecStart to /usr/local/bin
+sudo install -m 644 systemd/zensight-sensor-sysinfo.service /etc/systemd/system/  # every unit says /usr/bin: adjust ExecStart, or install to /usr/bin
 sudo install -D -m 644 configs/sysinfo.json5 /etc/zensight/sysinfo.json5          # point it at your Zenoh router
 sudo systemctl enable --now zensight-sensor-sysinfo
 ```
@@ -176,7 +178,8 @@ Every sensor emits a common `TelemetryPoint` (full model in
 pub struct TelemetryPoint {
     pub timestamp: i64,          // Unix epoch milliseconds
     pub source: String,          // device/host identifier
-    pub protocol: Protocol,      // snmp, logs, netflow, modbus, sysinfo, gnmi, netlink, netring, systemd
+    pub protocol: Protocol,      // snmp, logs, netflow, modbus, sysinfo, gnmi, netlink, netring, systemd,
+                                 // hostspec, pve, container, probe, parallax (+ opcua, reserved)
     pub metric: String,          // metric name/path
     pub value: TelemetryValue,   // Counter | Gauge | Text | Boolean | Binary
     pub labels: HashMap<String, String>,

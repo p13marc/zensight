@@ -6,7 +6,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/zensight-sensor-pve --config /etc/zensight/pve.json5
+ExecStart=/usr/bin/zensight-sensor-pve --config /etc/zensight/pve.json5
+# SIGTERM with time to publish offline status and tombstone firing alerts (#161).
+KillSignal=SIGTERM
+TimeoutStopSec=20s
 Restart=on-failure
 RestartSec=10
 

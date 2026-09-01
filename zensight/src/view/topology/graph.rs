@@ -606,7 +606,7 @@ impl<'a> TopologyGraphProgram<'a> {
         // Draw label
         let label_color = if is_stale || node.dimmed || hover_dim {
             let c = self.node_label_color();
-            Color { a: c.a * 0.4, ..c }
+            crate::view::tokens::with_alpha(c, c.a * 0.4)
         } else {
             self.node_label_color()
         };

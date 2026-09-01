@@ -649,7 +649,7 @@ image-verify:
 
 # Stop any running sensors + correlator started by `just run`.
 stop:
-    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs|systemd|parallax)' || true
+    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs|systemd|hostspec|parallax)' || true
     -pkill -f 'zensight-correlator' || true
     -pkill -f 'zensight-rerun' || true
 
