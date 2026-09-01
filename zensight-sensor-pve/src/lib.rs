@@ -13,9 +13,14 @@
 //!
 //! None of those is a metric that spikes. They are **configuration facts that
 //! stopped matching intent**, which is what a polling sensor with per-device
-//! liveness is for. The gauges exist so the guests get device cards,
-//! Prometheus gets series and the family-coverage audit has families; the
-//! real output is the state documents and the alert set.
+//! liveness is for. The gauges exist so the hypervisor's card carries its
+//! guests and pools, Prometheus gets series and the family-coverage audit has
+//! families; the real output is the state documents and the alert set.
+//!
+//! Everything here is filed under the **reporting host** (#883): a guest, a
+//! pool and a cluster are facets of this hypervisor, not separate machines
+//! that publish for themselves. The vmid, the storage name and the node ride
+//! in the key path and in the labels, where a rename costs nothing.
 //!
 //! # What this sensor deliberately is not
 //!

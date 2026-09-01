@@ -201,8 +201,13 @@ impl Poller {
             }
 
             for (metric, value) in points {
-                let mut p = checked_point(&r.name, &metric, TelemetryValue::Gauge(value));
-                p.labels = labels.clone();
+                // `source` is the vantage point, never the target (#883). A
+                // probe result is by construction *an observation made from
+                // somewhere*: filing it under the target discards the one
+                // thing this sensor exists to record, and makes two hosts
+                // probing the same URL collide on one identity.
+                let p = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
+                    .with_labels(labels.clone());
                 if self.publisher.publish(&metric, &p).await.is_ok() {
                     published += 1;
                 }
@@ -234,7 +239,7 @@ impl Poller {
             // checked this tick — otherwise a target with a slow interval
             // would have its alerts resolved and re-fired on every fast tick.
             let all: Vec<ProbeResult> = self.last.values().cloned().collect();
-            let firing = alerts::grade(&self.cfg.alerts, &all);
+            let firing = alerts::grade(&self.cfg.alerts, &self.source, &all);
             let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
             for a in &firing {
                 by_rule

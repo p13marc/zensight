@@ -35,7 +35,9 @@ recognising it by hand took eight days.
 **The vantage point is half the answer.** The same target checked from the
 edge, from a guest and from a workstation gives three different, equally true
 results. Two hosts disagreeing is not a contradiction — it is precisely the
-shape of the hairpin. `vantage` rides on every result document and every alert,
+shape of the hairpin. Every series and every alert is therefore filed under the
+vantage point, never the target (#883) — two hosts checking the same URL are two
+answers, not one collision. `vantage` rides on every result document and every alert,
 so deploy this in more than one place *on purpose*.
 
 **An absent verdict is not a negative one.** A PEM on disk has no chain to

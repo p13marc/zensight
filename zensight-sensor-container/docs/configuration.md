@@ -9,7 +9,7 @@ touches is the egress block, and only if they want it.
 | Key | Default | Note |
 |---|---|---|
 | `container.sockets` | `[]` | empty = the conventional paths, in order; only the ones that exist are polled |
-| `container.source` | the hostname | |
+| `container.source` | the hostname | the reporting host every series and alert is filed under. A container name is unique *per host*, not globally, so the container rides in the key path and in the `container`/`image`/`unit` labels — never as the identity of the series (#883/#884) |
 | `container.poll_interval_secs` | `30` | |
 | `container.timeout_secs` | `10` | **must be shorter than the interval** |
 | `container.cgroup_root` | `/sys/fs/cgroup` | override when the sensor itself runs in a container against a bind-mounted host cgroupfs |

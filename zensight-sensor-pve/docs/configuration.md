@@ -52,7 +52,7 @@ read.
 | `pve.port` | `8006` | |
 | `pve.token` | — | see above |
 | `pve.nodes` | `[]` | restrict to these PVE nodes; empty = all the API lists |
-| `pve.source` | the host | the `source` for pool/cluster series; guests carry their vmid |
+| `pve.source` | this machine's hostname | the reporting host every series, alert and evidence claim is filed under. Used to default to `pve.host`, which labelled everything `127.0.0.1` on the recommended deployment (#885). The vmid, storage and node are labels, not sources (#883) |
 | `pve.poll_interval_secs` | `60` | runtime status — one `/cluster/resources` call |
 | `pve.config_interval_secs` | `300` | guest configuration — one call per guest |
 | `pve.backup_interval_secs` | `900` | vzdump tasks + stored volumes |

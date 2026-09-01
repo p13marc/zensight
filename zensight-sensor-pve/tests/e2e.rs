@@ -318,7 +318,10 @@ async fn the_hypervisor_contract_end_to_end() {
         .expect("VM 140's onboot=0 must fire");
     assert_eq!(onboot.labels["vmid"], "140");
     assert_eq!(onboot.labels["name"], "vm-apps");
-    assert_eq!(onboot.source, "140", "the vmid is the device, not the name");
+    assert_eq!(
+        onboot.source, "pve",
+        "the reporting hypervisor is the source; the vmid is a label (#883)"
+    );
 
     let fw = fired
         .get("guest-nic-firewall-off")
@@ -328,7 +331,11 @@ async fn the_hypervisor_contract_end_to_end() {
     let over = fired
         .get("pool-overcommitted")
         .expect("958 G promised on 937 G must fire");
-    assert_eq!(over.source, "local-lvm");
+    assert_eq!(over.labels["storage"], "local-lvm");
+    assert_eq!(
+        over.source, "pve",
+        "the reporting hypervisor is the source; the pool is a label (#883)"
+    );
     assert!(
         over.summary.contains("no configuration change"),
         "{}",
@@ -401,16 +408,53 @@ async fn the_hypervisor_contract_end_to_end() {
     // Gauges: the backup that succeeded and halved is a number, not only an
     // alert, so a dashboard can see the trend before the threshold trips.
     let mut seen: std::collections::HashMap<String, f64> = Default::default();
+    let mut points: Vec<(String, TelemetryPoint)> = Vec::new();
     while let Ok(Ok(sample)) =
         tokio::time::timeout(Duration::from_millis(200), telemetry_sub.recv_async()).await
     {
-        if let Ok(p) = decode_auto::<TelemetryPoint>(&sample.payload().to_bytes())
-            && let zensight_common::TelemetryValue::Gauge(v) = p.value
-        {
+        if let Ok(p) = decode_auto::<TelemetryPoint>(&sample.payload().to_bytes()) {
             let key = sample.key_expr().as_str();
-            seen.insert(key.split("/telemetry/pve/").nth(1).unwrap().to_string(), v);
+            let subject = key.split("/telemetry/pve/").nth(1).unwrap().to_string();
+            if let zensight_common::TelemetryValue::Gauge(v) = p.value {
+                seen.insert(subject.clone(), v);
+            }
+            points.push((subject, p));
         }
     }
+
+    // #883: every point is filed under the REPORTING HOST. The gap that let
+    // this ship was that these assertions keyed only off the key expression,
+    // so a `source` naming the guest, the pool or the probe target passed
+    // unnoticed — and the GUI groups host cards by `(protocol, source)`, so
+    // none of it landed on a card. Each subject stays in the key and, from
+    // here on, in the labels.
+    assert!(!points.is_empty());
+    for (subject, p) in &points {
+        assert_eq!(
+            p.source, "pve",
+            "{subject} is filed under {} rather than the reporting host",
+            p.source
+        );
+    }
+    let by_subject = |s: &str| {
+        points
+            .iter()
+            .find(|(k, _)| k == s)
+            .unwrap_or_else(|| panic!("no point for {s}"))
+            .1
+            .clone()
+    };
+    assert_eq!(by_subject("guest/140/running").labels["vmid"], "140");
+    assert_eq!(by_subject("guest/140/running").labels["name"], "vm-apps");
+    assert_eq!(
+        by_subject("storage/local-lvm/used_ratio").labels["storage"],
+        "local-lvm"
+    );
+    assert_eq!(
+        by_subject("backup/140/size_change_pct").labels["vmid"],
+        "140",
+        "the backup points named no subject at all before #883"
+    );
     assert_eq!(seen.get("guest/140/running"), Some(&1.0));
     // The runtime numbers the registry advertises must actually be emitted —
     // a registered family with no emitter is a promise `introspect` makes and

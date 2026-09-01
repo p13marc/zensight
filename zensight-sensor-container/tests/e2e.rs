@@ -307,22 +307,46 @@ async fn the_container_contract_end_to_end() {
 
     // ── The gauges ──────────────────────────────────────────────────────────
     let mut seen: std::collections::HashMap<String, f64> = Default::default();
+    let mut points: Vec<(String, TelemetryPoint)> = Vec::new();
     while let Ok(Ok(s)) =
         tokio::time::timeout(Duration::from_millis(500), telemetry_sub.recv_async()).await
     {
-        if let Ok(p) = decode_auto::<TelemetryPoint>(&s.payload().to_bytes())
-            && let zensight_common::TelemetryValue::Gauge(v) = p.value
-        {
+        if let Ok(p) = decode_auto::<TelemetryPoint>(&s.payload().to_bytes()) {
             let key = s.key_expr().as_str();
-            seen.insert(
-                key.split("/telemetry/container/")
-                    .nth(1)
-                    .unwrap()
-                    .to_string(),
-                v,
-            );
+            let subject = key
+                .split("/telemetry/container/")
+                .nth(1)
+                .unwrap()
+                .to_string();
+            if let zensight_common::TelemetryValue::Gauge(v) = p.value {
+                seen.insert(subject.clone(), v);
+            }
+            points.push((subject, p));
         }
     }
+
+    // #883/#884: every point is filed under the host running the container,
+    // and every point names the container it is about. Before this, 307 of
+    // 307 points on the reference fleet carried no host identity at all while
+    // the same sensor's alerts carried `host.id` — and a container name is
+    // unique per host, not globally, so four machines running the same image
+    // agreed on `source`, `metric` and every label.
+    assert!(!points.is_empty());
+    for (subject, p) in &points {
+        assert_eq!(
+            p.source, "testhost",
+            "{subject} is filed under {} rather than the reporting host",
+            p.source
+        );
+    }
+    let netring_point = points
+        .iter()
+        .find(|(k, _)| k == "netring/memory_bytes")
+        .expect("netring/memory_bytes")
+        .1
+        .clone();
+    assert_eq!(netring_point.labels["container"], "netring");
+    assert!(netring_point.labels.contains_key("image"));
     assert_eq!(seen.get("netring/memory_bytes"), Some(&67_000_000.0));
     assert_eq!(seen.get("netring/oom_kills_total"), Some(&1.0));
     assert_eq!(seen.get("caddy/healthy"), Some(&1.0));

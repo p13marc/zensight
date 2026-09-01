@@ -70,9 +70,10 @@ pub struct PveConfig {
     /// which on a standalone install is the one node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<String>,
-    /// Override the `source` used for hypervisor-scoped series (storage,
-    /// cluster). Default: the PVE node's own name, which is what an operator
-    /// types into Proxmox's UI.
+    /// Override this sensor's `source` — the reporting host every series and
+    /// alert is filed under. Default: this machine's hostname, which on the
+    /// recommended deployment (a native binary **on** the PVE node) is the
+    /// node name an operator types into Proxmox's UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Runtime status poll (cheap: one `/cluster/resources` call).
@@ -187,9 +188,27 @@ impl Default for PveAlertsConfig {
 }
 
 impl PveConfig {
-    /// The `source` for hypervisor-scoped series. Guests carry their own.
+    /// The reporting host: the `source` of every series, alert and evidence
+    /// claim this sensor emits.
+    ///
+    /// It used to fall back to `pve.host` — the API endpoint address — which
+    /// on the deployment `configs/pve.json5` and `packaging/systemd/` both
+    /// recommend is `127.0.0.1`, the one address guaranteed to be ambiguous
+    /// across machines (#885). An address is an endpoint, not an identity.
+    ///
+    /// The fallback is now the hostname, as in every other host sensor. That
+    /// is what makes this sensor's `evidence/self` agree with sysinfo's on the
+    /// same box, which is what fuses its series onto the right host entity;
+    /// the PVE node name stays where it belongs, as the `node` label on every
+    /// series. `host` remains the last resort so this can never return empty.
     pub fn resolved_source(&self) -> String {
-        self.source.clone().unwrap_or_else(|| self.host.clone())
+        self.source.clone().unwrap_or_else(|| {
+            hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| self.host.clone())
+        })
     }
 
     pub fn base_url(&self) -> String {
@@ -282,7 +301,21 @@ mod tests {
         assert!(c.pve.evidence);
         assert!(c.pve.alerts.enabled);
         assert_eq!(c.pve.base_url(), "https://pve.example:8006/api2/json");
-        assert_eq!(c.pve.resolved_source(), "pve.example");
+    }
+
+    /// #885: `source` is the reporting host, and used to fall back to
+    /// `pve.host` — the API endpoint address, which on the deployment this
+    /// sensor's own packaging recommends is `127.0.0.1`.
+    #[test]
+    fn the_default_source_is_this_host_never_the_api_address() {
+        let c = cfg(r#"{ pve: { host: "127.0.0.1", token: "t" } }"#).unwrap();
+        let host = hostname::get().unwrap().into_string().unwrap();
+        assert_eq!(c.pve.resolved_source(), host);
+        assert_ne!(c.pve.resolved_source(), "127.0.0.1");
+
+        let overridden =
+            cfg(r#"{ pve: { host: "127.0.0.1", token: "t", source: "pve01" } }"#).unwrap();
+        assert_eq!(overridden.pve.resolved_source(), "pve01");
     }
 
     /// The assertions ship ON. A monitoring sensor whose checks all default to

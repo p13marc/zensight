@@ -32,6 +32,7 @@ pub const ALL_RULES: &[&str] = &[
 ];
 
 fn alert(
+    source: &str,
     r: &ProbeResult,
     rule: &str,
     severity: AlertSeverity,
@@ -39,7 +40,7 @@ fn alert(
     extra: &[(&str, String)],
 ) -> Alert {
     let mut a = Alert::new(
-        &r.name,
+        source,
         Protocol::Probe,
         AlertKind::Expectation,
         rule,
@@ -47,6 +48,11 @@ fn alert(
         summary,
     );
     let mut labels = HashMap::new();
+    // The operator's own handle for this check. It is the key chunk on the
+    // telemetry side, but an alert key is a digest, so without this label the
+    // alert named only the URL — and since #883 moved `source` to the vantage
+    // point, nothing on the alert said *which configured target* it was about.
+    labels.insert("probe".to_string(), r.name.clone());
     labels.insert("target".to_string(), r.target.clone());
     labels.insert("kind".to_string(), r.kind.to_string());
     // Half the answer. Two hosts probing the same URL and disagreeing is not a
@@ -62,7 +68,11 @@ fn alert(
     a
 }
 
-pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
+/// Grade one sweep. `source` is the reporting host — the vantage point — and
+/// is the `source` of every alert, as of #883: a probe result is an
+/// observation made from somewhere, and two hosts probing the same target
+/// must not collide on one identity. The target rides in the labels.
+pub fn grade(cfg: &ProbeAlertsConfig, source: &str, results: &[ProbeResult]) -> Vec<Alert> {
     let mut out = Vec::new();
     if !cfg.enabled {
         return out;
@@ -73,6 +83,7 @@ pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
             // down alert, so an operator gets one page with the right
             // diagnosis rather than two with a vaguer one on top.
             ProbeOutcome::Timeout if cfg.timeout => out.push(alert(
+                source,
                 r,
                 RULE_TIMEOUT,
                 AlertSeverity::Critical,
@@ -85,6 +96,7 @@ pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
                 &[("error", r.error.clone().unwrap_or_default())],
             )),
             ProbeOutcome::Timeout | ProbeOutcome::Failed if cfg.down => out.push(alert(
+                source,
                 r,
                 RULE_DOWN,
                 AlertSeverity::Critical,
@@ -105,6 +117,7 @@ pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
                 .is_some_and(|e| e.contains("redirected off the configured host"))
         {
             out.push(alert(
+                source,
                 r,
                 RULE_OFFHOST_REDIRECT,
                 AlertSeverity::Warning,
@@ -124,6 +137,7 @@ pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
             && days <= cfg.expiry_warn_days
         {
             out.push(alert(
+                source,
                 r,
                 RULE_CERT_EXPIRING,
                 if days <= cfg.expiry_critical_days {
@@ -147,6 +161,7 @@ pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
         // to check — and must not read as "invalid".
         if cfg.chain_invalid && tls.chain_valid == Some(false) {
             out.push(alert(
+                source,
                 r,
                 RULE_CHAIN_INVALID,
                 AlertSeverity::Critical,
@@ -162,6 +177,7 @@ pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
         // Likewise `None`: no name was asked about, so no verdict exists.
         if cfg.san_mismatch && tls.san_matched == Some(false) {
             out.push(alert(
+                source,
                 r,
                 RULE_SAN_MISMATCH,
                 AlertSeverity::Critical,
@@ -181,6 +197,7 @@ pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
             && d.expected_matched == Some(false)
         {
             out.push(alert(
+                source,
                 r,
                 RULE_DNS_UNEXPECTED,
                 AlertSeverity::Critical,
@@ -204,6 +221,10 @@ pub fn grade(cfg: &ProbeAlertsConfig, results: &[ProbeResult]) -> Vec<Alert> {
 mod tests {
     use super::*;
     use zensight_common::probe::{DnsResult, HttpResult, ProbeKind, TlsResult};
+
+    /// The reporting host: every alert is filed under it, never under the
+    /// target being probed (#883).
+    const HOST: &str = "workstation01";
 
     fn base(kind: ProbeKind, outcome: ProbeOutcome) -> ProbeResult {
         ProbeResult {
@@ -233,7 +254,7 @@ mod tests {
     fn the_hairpin_reports_as_a_timeout_with_its_duration_and_vantage() {
         let mut r = base(ProbeKind::Http, ProbeOutcome::Timeout);
         r.error = Some("operation timed out".into());
-        let a = grade(&ProbeAlertsConfig::default(), &[r]);
+        let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
         assert_eq!(rules(&a), vec![RULE_TIMEOUT], "and NOT also probe-down");
         assert_eq!(a[0].labels["duration_ms"], "20000");
         assert_eq!(a[0].labels["vantage"], "vm-apps");
@@ -249,7 +270,7 @@ mod tests {
         let mut r = base(ProbeKind::Http, ProbeOutcome::Failed);
         r.error = Some("connection refused".into());
         assert_eq!(
-            rules(&grade(&ProbeAlertsConfig::default(), &[r])),
+            rules(&grade(&ProbeAlertsConfig::default(), HOST, &[r])),
             vec![RULE_DOWN]
         );
     }
@@ -259,6 +280,7 @@ mod tests {
         assert!(
             grade(
                 &ProbeAlertsConfig::default(),
+                HOST,
                 &[base(ProbeKind::Http, ProbeOutcome::Ok)]
             )
             .is_empty()
@@ -278,7 +300,7 @@ mod tests {
                 days_to_expiry: Some(days),
                 ..Default::default()
             });
-            let a = grade(&ProbeAlertsConfig::default(), &[r]);
+            let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
             match want {
                 None => assert!(a.is_empty(), "{days} days should not fire"),
                 Some(sev) => {
@@ -303,7 +325,7 @@ mod tests {
             san_matched: None,
             ..Default::default()
         });
-        assert!(grade(&ProbeAlertsConfig::default(), &[r]).is_empty());
+        assert!(grade(&ProbeAlertsConfig::default(), HOST, &[r]).is_empty());
     }
 
     #[test]
@@ -317,7 +339,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            rules(&grade(&ProbeAlertsConfig::default(), &[r])),
+            rules(&grade(&ProbeAlertsConfig::default(), HOST, &[r])),
             vec![RULE_CHAIN_INVALID, RULE_SAN_MISMATCH]
         );
     }
@@ -332,7 +354,7 @@ mod tests {
             resolver: Some("127.0.0.53".into()),
             expected_matched: Some(false),
         });
-        let a = grade(&ProbeAlertsConfig::default(), &[r]);
+        let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
         assert!(rules(&a).contains(&RULE_DNS_UNEXPECTED));
         let dns = a.iter().find(|x| x.rule == RULE_DNS_UNEXPECTED).unwrap();
         assert_eq!(dns.labels["resolver"], "127.0.0.53");
@@ -347,7 +369,7 @@ mod tests {
             redirects: vec!["https://elsewhere.example/".into()],
             ..Default::default()
         });
-        let a = grade(&ProbeAlertsConfig::default(), &[r]);
+        let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
         assert!(rules(&a).contains(&RULE_OFFHOST_REDIRECT));
     }
 
@@ -379,6 +401,7 @@ mod tests {
 
         let fired: std::collections::HashSet<String> = grade(
             &ProbeAlertsConfig::default(),
+            HOST,
             &[timeout, down, redirect, cert, dns],
         )
         .iter()
