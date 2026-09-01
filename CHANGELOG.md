@@ -71,6 +71,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The systemd sentinel and its `@desired` reconciler run on a stock
+  install.** Both were built only inside the branch that requires a file-config
+  `expectations` block, and the shipped `configs/systemd.json5` comments that
+  block out — so on a host with no local set, which is the *primary* case for
+  a fleet-authored one, nothing subscribed to `@desired`, nothing seeded, and
+  `state/systemd/applied/expectations` was never published at all. The
+  sentinel now runs whenever alerting is on; the file block seeds the set, and
+  an empty set evaluates to nothing. (`ExpectationsConfig::default()` is now
+  that empty set with the serde cadence, `eval_interval_secs: 10`; the derived
+  `Default` gave `0`, which the new validation would have refused on every
+  stock install.)
+
+- **The systemd sentinel validates every writer's set** — file at startup (a
+  bad one is a startup error), `@rpc/…/expectations/set` (refused with the
+  reason) and `@desired` (kept off the handle, reason on the marker's
+  `last_rejected`). Its desired apply closure was `Ok(())` unconditionally, so
+  `eval_interval_secs: 0`, a timer with no window and a restart rate over a
+  zero window were all accepted and stamped `source: desired`. Same gate as
+  hostspec's (#816).
+
+- **A hot-swapped `eval_interval_secs` takes effect.** The sentinel read it
+  once at startup, so a set that changed it was stamped "applied" on the
+  marker while the sweep cadence stayed what the file said — the marker
+  asserting something false about the one thing it exists to be honest about.
+
+- **The `applied/<topic>` marker restates what the last writer put there.**
+  After an operator's RPC `set`, a later *refused* desired document made the
+  reconciler republish the marker with the document it had applied before the
+  RPC write — the pre-RPC set, as "in force". The marker now owns the
+  effective state and both writers update it. systemd and hostspec both.
+
+- **`expect-restart-rate` fires at `max`, as its own doc says** ("restarts
+  `< max` per window"); it fired only above it, so exactly `max` restarts in a
+  window passed in silence.
+
+- **probe: a target's own `timeout_secs` applies to HTTP.** The override is
+  documented, validated against the target's interval and computed by the
+  poller — and reached every kind except HTTP, which used the shared client's
+  global timeout. Now per request.
+
+- **probe: the response body is read only when `expect_body` will look at it,
+  and then at most 256 KiB.** A plain up/down check buffered the whole body,
+  uncapped, on data from the network, inside a `MemoryMax=64M` unit. A needle
+  past the cap is reported as not present, with a truncation note.
+
+- **pve on a cluster: a non-shared pool is one pool per node.** Pools were
+  deduplicated on the name alone, but `local`/`local-lvm` exist on *every*
+  node as distinct pools; a three-node cluster kept one and dropped two, the
+  vzdump node list was derived from the survivors so backup tasks on the other
+  nodes were invisible (defeating #880's `backup-job-failed`), and #881's
+  derived allocation summed every node's guest disks into the one surviving
+  pool — roughly N× too high, and a false `pool-overcommitted`. Now only
+  `shared` pools collapse (asked once, as the code's own comment claimed); the
+  derived total for a non-shared pool counts that node's guests; a non-shared
+  pool whose name is not unique across the cluster carries the node in its key
+  chunk (`storage/<node>-<name>`), while a unique name — every pool on a
+  standalone node — keeps the chunk it has always had.
+
+- **pve: `cluster/nodes_total` and `nodes_online` are absent, not `0`, when
+  `/cluster/status` could not be asked** — the same rule `quorate` already
+  followed; `0` read as "every node is down". A failed pool-gauge publish is
+  no longer counted as published. `backup-stale`'s sentence no longer renders a
+  49 h age and a 48 h limit both as "2 d". The dead `Observation::now_secs` is
+  gone.
+
+- hostspec's `validate` no longer routes borrowed names through a
+  `transmute` to `'static`; it allocates the handful of strings instead.
+
 - **`@rpc/systemd/expectations/set` accepts the shape it advertises** (#849).
   The registry has declared this request as `ExpectationsConfig` — the plain
   expectation set — since 1.0, which is what hostspec's equivalent accepts and

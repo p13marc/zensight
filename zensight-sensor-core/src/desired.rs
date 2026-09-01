@@ -62,6 +62,19 @@ pub struct AppliedMarker {
     publisher: Publisher,
     key: String,
     topic: &'static str,
+    /// What is actually in force right now, as last published by EITHER
+    /// writer. Owned by the marker, not by the reconciler, because the
+    /// reconciler is only one of the two writers: when it restates the
+    /// effective config beside a rejection it must restate what the RPC
+    /// writer put there, not what it last applied itself.
+    effective: std::sync::Arc<std::sync::Mutex<Effective>>,
+}
+
+#[derive(Clone)]
+struct Effective {
+    source: AppliedSource,
+    json: String,
+    desired_timestamp: Option<String>,
 }
 
 impl AppliedMarker {
@@ -75,6 +88,11 @@ impl AppliedMarker {
             publisher,
             key,
             topic,
+            effective: std::sync::Arc::new(std::sync::Mutex::new(Effective {
+                source: AppliedSource::File,
+                json: "null".to_string(),
+                desired_timestamp: None,
+            })),
         }
     }
 
@@ -87,12 +105,40 @@ impl AppliedMarker {
         desired_timestamp: Option<String>,
         last_rejected: Option<RejectedDesired>,
     ) {
+        let json = serde_json::to_string(effective).unwrap_or_default();
+        self.publish_raw(source, json, desired_timestamp, last_rejected)
+            .await;
+    }
+
+    /// Restate what is in force — as last published by whichever writer
+    /// won — with a rejection riding beside it. Never a guess: the marker
+    /// itself remembers the last good publish, so an RPC write followed by
+    /// a refused desired document restates the RPC document, not the one
+    /// the reconciler applied before it.
+    pub async fn reject(&self, rejected: RejectedDesired) {
+        let e = self.effective.lock().unwrap().clone();
+        self.publish_raw(e.source, e.json, e.desired_timestamp, Some(rejected))
+            .await;
+    }
+
+    async fn publish_raw(
+        &self,
+        source: AppliedSource,
+        json: String,
+        desired_timestamp: Option<String>,
+        last_rejected: Option<RejectedDesired>,
+    ) {
+        *self.effective.lock().unwrap() = Effective {
+            source,
+            json: json.clone(),
+            desired_timestamp: desired_timestamp.clone(),
+        };
         let marker = AppliedConfig {
             topic: self.topic.to_string(),
             source,
             applied_at: zensight_common::current_timestamp_millis(),
             desired_timestamp,
-            effective_json: serde_json::to_string(effective).unwrap_or_default(),
+            effective_json: json,
             last_rejected,
         };
         if let Err(e) = self
@@ -248,9 +294,6 @@ async fn seed_get<Doc, A, AF>(
 struct ReconcileState<Doc> {
     baseline: Doc,
     last_applied: Option<zenoh::time::Timestamp>,
-    /// What is actually in force right now — restated (with the rejection
-    /// attached) when a bad doc is refused, so the marker never guesses.
-    effective: (AppliedSource, Doc, Option<String>),
 }
 
 impl<Doc> ReconcileState<Doc>
@@ -259,9 +302,8 @@ where
 {
     fn new(baseline: Doc) -> Self {
         ReconcileState {
-            baseline: baseline.clone(),
+            baseline,
             last_applied: None,
-            effective: (AppliedSource::File, baseline, None),
         }
     }
 
@@ -294,7 +336,6 @@ where
                             topic = marker.topic,
                             "desired: delete — reverted to file baseline"
                         );
-                        self.effective = (AppliedSource::File, doc.clone(), None);
                         marker.publish(AppliedSource::File, &doc, None, None).await;
                     }
                     Err(e) => {
@@ -321,8 +362,6 @@ where
                     Ok(()) => {
                         self.last_applied = Some(ts);
                         tracing::info!(topic = marker.topic, ts = %ts, "desired: applied");
-                        self.effective =
-                            (AppliedSource::Desired, doc.clone(), Some(ts.to_string()));
                         marker
                             .publish(AppliedSource::Desired, &doc, Some(ts.to_string()), None)
                             .await;
@@ -338,20 +377,14 @@ where
     }
 
     async fn reject(&self, marker: &AppliedMarker, ts: zenoh::time::Timestamp, error: String) {
-        // The marker restates what IS in force — the last GOOD apply, never
-        // a guess — with the rejection riding beside it.
-        let (source, doc, desired_ts) = &self.effective;
+        // The marker restates what IS in force — the last GOOD publish by
+        // either writer, never a guess — with the rejection riding beside it.
         marker
-            .publish(
-                *source,
-                doc,
-                desired_ts.clone(),
-                Some(RejectedDesired {
-                    at: zensight_common::current_timestamp_millis(),
-                    timestamp: Some(ts.to_string()),
-                    error,
-                }),
-            )
+            .reject(RejectedDesired {
+                at: zensight_common::current_timestamp_millis(),
+                timestamp: Some(ts.to_string()),
+                error,
+            })
             .await;
     }
 }

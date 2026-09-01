@@ -790,16 +790,14 @@ pub fn validate(cfg: &ExpectationsConfig) -> Result<(), String> {
     if cfg.eval_interval_secs == 0 {
         errs.push("eval_interval_secs must be >= 1".into());
     }
-    let mut names: HashSet<(&str, &str)> = HashSet::new();
+    // Owned names: a few allocations per validation, and no lifetime
+    // sleight of hand. This ran through a `transmute` to `&'static str` for
+    // a while to save them; a config gate runs a handful of times a day.
+    let mut names: HashSet<(&'static str, String)> = HashSet::new();
     let mut check_name = |kind: &'static str, name: &str, errs: &mut Vec<String>| {
         if name.is_empty() {
             errs.push(format!("{kind}: an expectation has an empty name"));
-        } else if !names.insert((kind, unsafe {
-            // SAFETY-free equivalent: leak-free borrow across the closure —
-            // names only lives for this call. (Simpler spelled with owned
-            // strings; kept borrowed to avoid per-call allocs.)
-            std::mem::transmute::<&str, &'static str>(name)
-        })) {
+        } else if !names.insert((kind, name.to_string())) {
             errs.push(format!(
                 "{kind}:{name}: duplicate name — the rule slug would collide and \
                  cross-resolve alerts"
