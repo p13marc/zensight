@@ -6,11 +6,18 @@ you want to monitor runs one **sensors container** — the five host sensors
 same demo-max defaults, bundled into a single image. The only thing you
 configure is the Zenoh endpoint the sensors connect to.
 
-> The parallax live-video sensor is **not** in the image (it is source-only — it
-> compiles openh264 from C++ source; #512). `just run` adds it locally when its
-> binary has been built; the container never has it. A self-built binary can be
-> installed as a system service: its unit ships in the release tarball
-> (`packaging/systemd/zensight-sensor-parallax.service`, #411).
+> The parallax live-video sensor is **not** in this bundle image, on purpose —
+> but it is packaged (#512). It has its own component image,
+> `git.marcpardo.eu/marcpardo/zensight-sensor-parallax`, and its binary ships in
+> the release tarball with the rest.
+>
+> It stays out of the bundle because it is the only component that is not pure
+> Rust (openh264 is compiled from C++ source, so it is the only one linking
+> `libstdc++`) and the only one that needs `/dev/video*`. Folding it in would
+> put both on every host that wants the six host sensors and no camera. Run it
+> where there is a camera, from its own image or as a system service
+> (`packaging/systemd/zensight-sensor-parallax.service`, #411 — note
+> `SupplementaryGroups=video` and the `DeviceAllow`).
 
 ```
 ┌─ GUI machine ──────────────────┐        ┌─ monitored machine (×N) ────────┐

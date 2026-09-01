@@ -23,12 +23,18 @@ ARG BINARY_PACKAGE
 ARG TARGETARCH
 
 # Union of runtime deps across sensors/exporters (all small):
-# libsystemd0: logs (journald) · libssl3: snmp · libpcap0.8: netring
+# libsystemd0: logs (journald) · libssl3: snmp · libpcap0.8: netring ·
+# libstdc++6: parallax (#512) — openh264 is compiled from C++ source, so it is
+# the one binary here that is not pure Rust. bookworm-slim happens to carry
+# libstdc++6 already, which is exactly why it is named: an implicit dependency
+# that works by accident is one base-image change away from a component that
+# builds green and will not exec.
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libsystemd0 \
     libssl3 \
     libpcap0.8 \
+    libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for running the binary

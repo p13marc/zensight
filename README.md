@@ -95,16 +95,19 @@ just netring   # | netlink | sysinfo | logs | systemd | parallax
 `cargo build --workspace` stays codec-free (JPEG previews only).
 
 `just sensors` spawns six sensors — sysinfo, netlink, netring, logs, systemd, hostspec — plus
-**parallax if its binary has been built** (it is skipped otherwise). parallax
-is still **source-only**: no release build produces its binary and it is not in
-the sensors container image, because it compiles openh264 from C++ source
-(#512). Build it with `cargo build --release -p zensight-sensor-parallax`.
+**parallax if its binary has been built** (it is skipped otherwise).
 
-It does now have a hardened systemd unit
-(`packaging/systemd/zensight-sensor-parallax.service`, #411), which ships in
-the release tarball alongside the others — so a self-built binary installs the
-same way every other sensor does. Note the unit needs `SupplementaryGroups=video`
-and a `DeviceAllow` for `/dev/video*`; see `packaging/systemd/README.md`.
+parallax **is packaged** as of #512: the release tarball carries its binary
+alongside the others, and it has its own component image
+(`git.marcpardo.eu/marcpardo/zensight-sensor-parallax`). It is deliberately
+**not** in the all-in-one `zensight-sensors` bundle — it is the only component
+that compiles openh264 from C++ source, and the only one that needs
+`/dev/video*` access, so folding it in would put a C++ toolchain dependency and
+a device grant on every host that just wants the six host sensors.
+
+Its hardened systemd unit is `packaging/systemd/zensight-sensor-parallax.service`
+(#411); it needs `SupplementaryGroups=video` and a `DeviceAllow` for
+`/dev/video*` — see `packaging/systemd/README.md`.
 
 To monitor **multiple machines**, run the GUI (+ correlator) on one host and the
 all-in-one sensors container (`git.marcpardo.eu/marcpardo/zensight-sensors`) on each of the
