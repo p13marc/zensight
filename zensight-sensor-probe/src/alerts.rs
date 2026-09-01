@@ -260,7 +260,15 @@ mod tests {
         r.error = Some("operation timed out".into());
         let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
         assert_eq!(rules(&a), vec![RULE_TIMEOUT], "and NOT also probe-down");
-        assert_eq!(a[0].labels["duration_ms"], "20000");
+        // The duration is in the sentence, never a label: a label is
+        // identity, and a per-check wall-clock re-keyed every alert every
+        // sweep, so none ever outlived its `for:` window.
+        assert!(
+            a[0].summary.contains("timed out after 20000 ms"),
+            "{}",
+            a[0].summary
+        );
+        assert!(!a[0].labels.contains_key("duration_ms"));
         assert_eq!(a[0].labels["vantage"], "vm-apps");
         assert!(
             a[0].summary.contains("not the same as being refused"),
