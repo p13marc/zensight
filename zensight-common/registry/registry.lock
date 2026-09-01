@@ -165,6 +165,7 @@ subject	container	{name}/restart_count	telemetry	TelemetryPoint
 subject	container	{name}/running	telemetry	TelemetryPoint
 subject	container	{name}/uptime_secs	telemetry	TelemetryPoint
 subject	desired	{host}/hostspec/expectations	state	HostspecExpectations
+subject	desired	{host}/systemd/expectations	state	ExpectationsConfig
 subject	gnmi	artifact/{kind}	state	ArtifactStatus
 subject	gnmi	errors	state	ErrorReport
 subject	gnmi	evidence/self	state	HostEvidence
@@ -676,6 +677,7 @@ subject	sysinfo	tcp/{state}	telemetry	TelemetryPoint
 subject	sysinfo	{cpu}/schedstat/run_delay_ns_total	telemetry	TelemetryPoint
 subject	sysinfo	{cpu}/times/{component}	telemetry	TelemetryPoint
 subject	systemd	alert/{alert_key}	state	Alert
+subject	systemd	applied/{topic}	state	AppliedConfig
 subject	systemd	artifact/{kind}	state	ArtifactStatus
 subject	systemd	boot/{phase}	telemetry	TelemetryPoint
 subject	systemd	errors	state	ErrorReport

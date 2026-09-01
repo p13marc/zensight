@@ -105,6 +105,13 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         // service publishes HostspecExpectations as a state-class payload and
         // the #815 gate (rightly) refuses a summary stub there.
         .json::<crate::hostspec::ExpectationsConfig>("HostspecExpectations")
+        // systemd's, for the same reason (#849). The registry name stays
+        // `ExpectationsConfig` — the name a shipped `@rpc/systemd/expectations/set`
+        // already advertises — because nothing collides with it: netlink's
+        // set procedure takes `ExpectationCommand` and logs' takes
+        // `LogRulesConfig`, so renaming would break a shipped path for a
+        // payload whose bytes do not change.
+        .json::<crate::systemd::ExpectationsConfig>("ExpectationsConfig")
         .json::<crate::desired::AppliedConfig>("AppliedConfig")
         .json::<crate::hostspec::HostspecEvaluation>("HostspecEvaluation")
         // pve's state documents (#818). Real schemas, not summaries: these are
@@ -129,7 +136,6 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .entry("CaptureDiskCommand", summary("netring capture-to-disk command — defined in zensight-sensor-netring::command"))
         .entry("CaptureDiskStatus", summary("netring capture-to-disk status — defined in zensight-sensor-netring::command"))
         .entry("ExpectationCommand", summary("netlink sentinel expectation command — defined in zensight-sensor-netlink::command"))
-        .entry("ExpectationsConfig", summary("sentinel expectations config — defined in zensight-sensor-{netlink,systemd}::sentinel"))
         .entry("LogRulesConfig", summary("log sentinel ruleset (pattern→alert rules) — defined in zensight-sensor-logs::sentinel"))
         .entry("RulesStatus", summary("log sentinel ruleset + per-rule hit counters — defined in zensight-sensor-logs::sentinel"))
         .entry("Vec<EventRecord>", summary("event ring records — defined in zensight-sensor-{netlink,systemd}::events"))

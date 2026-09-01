@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The systemd sentinel joins `@desired`** (#849, the first of three). Its
+  expectation set can now be authored fleet-wide on
+  `v1/@desired/state/<host>/systemd/expectations` — LWW, storage-backed,
+  reconciled on connect and reconnect — with
+  `state/systemd/applied/expectations` saying which of `file | desired | rpc`
+  is actually in force. The seam is hostspec's (#816), unchanged.
+
+  The blocker was RFC 08 §7's schema gate: a state-class payload needs a real
+  schemars-generated schema, and a sensor-crate type can never provide one
+  (`zensight-common` cannot depend on a sensor, so `describe` could only carry
+  a summary stub — #815's gate refused exactly that). So the expectation
+  vocabulary moved to `zensight-common::systemd`, as hostspec's did. Checking
+  logic stayed in the sensor; these are data.
+
+  **No breaking registry change was needed**, contrary to the issue's plan. It
+  anticipated an `ExpectationsConfig` name collision between the systemd and
+  netlink sentinels, requiring a retire-and-sibling or a coordinated
+  force-relock. There is no collision: netlink's `expectations/set` takes
+  `ExpectationCommand` and logs' `rules/set` takes `LogRulesConfig`, so
+  `ExpectationsConfig` is systemd's alone. The belief came from a *description
+  string* in the schema table, not from any binding. Both registry additions
+  relocked as purely additive.
+
+### Fixed
+
+- **`@rpc/systemd/expectations/set` accepts the shape it advertises** (#849).
+  The registry has declared this request as `ExpectationsConfig` — the plain
+  expectation set — since 1.0, which is what hostspec's equivalent accepts and
+  what `@desired` carries. The sensor only ever accepted the tagged
+  `{"type": "set_expectations", …}` envelope the GUI happens to send, so a
+  fleet tool that built its body from `describe` was refused by the very sensor
+  that had told it what to send. Both shapes are now accepted, so no existing
+  caller moves and the registry's claim becomes true — rather than renaming the
+  declared type to match the accident, which would break a shipped path for a
+  payload whose bytes do not change.
+
 ### Fixed
 
 - **`sensor-pve`: a whole-job vzdump is one fact, not seven false criticals**

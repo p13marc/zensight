@@ -47,6 +47,7 @@ pub mod session;
 pub mod state;
 pub mod stream;
 pub mod subscribe;
+pub mod systemd;
 pub mod telemetry;
 pub mod v1;
 
