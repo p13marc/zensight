@@ -284,7 +284,9 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         && let Ok(alert) =
                             zensight_common::decode_auto::<Alert>(&sample.payload().to_bytes())
                     {
-                        seeded.push(alert);
+                        let origin = zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
+                            .map(|p| p.origin.to_string());
+                        seeded.push((origin, alert));
                     }
                 }
                 if !seeded.is_empty() {
@@ -649,6 +651,7 @@ pub(crate) fn parse_tombstone(key: &str) -> Option<Message> {
     match subject.common_state()? {
         CommonState::Alert { alert_key } => Some(Message::AlertCleared {
             protocol,
+            origin: parsed.origin.to_string(),
             alert_key: alert_key.to_string(),
         }),
         CommonState::CatalogEntity { entity_id } => {
@@ -745,7 +748,12 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         ZensightState::Common(CommonState::Sensor) => {
             decode!(SensorInfo, Message::SensorInfoReceived)
         }
-        ZensightState::Common(CommonState::Alert { .. }) => decode!(Alert, Message::AlertReceived),
+        ZensightState::Common(CommonState::Alert { .. }) => decode!(Alert, |alert| {
+            Message::AlertReceived {
+                origin: Some(origin),
+                alert,
+            }
+        }),
         ZensightState::Stream { .. } => {
             decode!(zensight_common::stream::StreamStatus, |status| {
                 Message::ParallaxStreamStatus {
@@ -918,7 +926,7 @@ pub fn demo_subscription() -> Subscription<Message> {
                 // Emit sensor-decided alerts (netring anomalies, netlink
                 // expectation violations) with firing/resolved transitions.
                 for alert in simulator.generate_alerts() {
-                    yield Message::AlertReceived(alert);
+                    yield Message::AlertReceived { origin: None, alert };
                 }
 
                 // Every 5 ticks (~3 seconds), generate health snapshots
@@ -1160,9 +1168,11 @@ mod tests {
         match msg {
             Message::AlertCleared {
                 protocol,
+                origin,
                 alert_key,
             } => {
                 assert_eq!(protocol, "netlink");
+                assert_eq!(origin, "h-3fa9c2d41b7e", "the tombstone's only identity");
                 assert_eq!(alert_key, "9f2c81ab04d7e3f1");
             }
             _ => panic!("expected AlertCleared"),
@@ -1223,7 +1233,10 @@ mod tests {
         );
         let payload = zensight_common::encode(&alert, zensight_common::Format::Json).unwrap();
         match decode_sample(&key, &payload) {
-            Some(Message::AlertReceived(got)) => assert_eq!(got.rule, "port_scan"),
+            Some(Message::AlertReceived { alert: got, origin }) => {
+                assert_eq!(got.rule, "port_scan");
+                assert!(origin.is_some(), "the origin rides from the key");
+            }
             other => panic!("expected AlertReceived, got {other:?}"),
         }
     }

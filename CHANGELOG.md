@@ -205,6 +205,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - hostspec's `validate` no longer routes borrowed names through a
   `transmute` to `'static`; it allocates the handful of strings instead.
 
+- **GUI: history read back after a restart belonged to another metric.** The
+  local store keyed its redb sample rows by a `MetricId` minted in *network
+  arrival order* and never written down, so every launch re-numbered every
+  metric and a chart seeded "from history" read another metric's buckets —
+  plausible numbers, wrong series, for up to the minute tier's 30 days. The
+  ids are now persisted (`metrics` table, written in the same transaction as
+  the samples) and rebuilt on open, with a `meta` schema marker; a pre-v2
+  file is moved aside as `metrics.redb.schema-v1` rather than read, the way an
+  older redb format already was. Its rows were mislabelled on every launch,
+  so nothing correct is lost. The metric key also carries the publishing
+  origin now, the collision `DeviceId` closed in #474: two hosts reporting
+  one hostname were interleaved into a single sawtooth series.
+
+- **GUI: an alert `Delete` tombstone actually clears the alert.** The
+  tombstone handler looked the bare 16-hex hash up in a map keyed by
+  `<source>/<hash>`, so it matched nothing, ever — a stale Firing seeded from
+  storage and retired by #882's adoption sweep stayed on screen for good. The
+  origin chunk now rides with every received and seeded alert, and the
+  tombstone — which has no payload, so the origin and the hash are all it
+  carries — finds its entry by them. Two hosts firing the same rule with the
+  same labels share a hash; one's tombstone does not clear the other's.
+
+- **GUI: incident cards see acks and timelines.** They looked both up by the
+  bare hash while the maps are keyed by `<source>/<hash>`, so the "N unacked"
+  badge never dropped after Ack and every timeline was empty (since #453).
+
+- **GUI: an acknowledgement does not outlive its firing.** Resolving an alert
+  left its ack behind, so the next firing of the same condition arrived
+  pre-acked — dimmed, off the badge, invisible.
+
+- **GUI: the metric store no longer buffers every sample forever when there
+  is no database** (`--demo`, a locked file, a read-only data dir): the flush
+  that would drain the buffer can never run without one.
+
+- **GUI: the default build can open a parallax stream.** Without
+  `--features h264` the catalogue row rendered no controls at all, and the
+  JPEG preview path — the documented default — was reachable from nowhere.
+  A "Preview" button opens it.
+
+- **GUI: a muted alert source can be un-muted.** "Mute 24h" was undoable only
+  by waiting: the muted count was text, and nothing emitted the unsilence
+  message the app already handled. Each muted source now has an "Unmute"
+  button in the section header.
+
 - **`@rpc/systemd/expectations/set` accepts the shape it advertises** (#849).
   The registry has declared this request as `ExpectationsConfig` — the plain
   expectation set — since 1.0, which is what hostspec's equivalent accepts and

@@ -26,12 +26,28 @@ growing (retention increases from hot → cold).
 
 ### Keys and typing
 
-Metric paths are interned to a compact `MetricId(u32)` per the architecture
-contract, so the store is keyed by small integers rather than strings. The redb
-`samples` table maps a packed `(metric_id, tier, bucket_ts)` key (a `u128`) to a
-downsampled `f64`. A `Sample` is a plain `{ ts: i64 (ms), value: f64 }` record,
-and the `TelemetryValue → f64` projection lives in one place
-(`telemetry_to_f64`).
+Metric paths — `<protocol>/<origin>/<source>|<metric>`, the origin included
+for the same reason `DeviceId` carries one (#474: two hosts with one hostname
+are two devices) — are interned to a compact `MetricId(u32)` per the
+architecture contract, so the store is keyed by small integers rather than
+strings. The redb `samples` table maps a packed `(metric_id, tier, bucket_ts)`
+key (a `u128`) to a downsampled `f64`. A `Sample` is a plain
+`{ ts: i64 (ms), value: f64 }` record, and the `TelemetryValue → f64`
+projection lives in one place (`telemetry_to_f64`).
+
+**The ids are persisted.** A `metrics` table maps each interned path to its
+id, written in the same transaction as the samples that use it, and the
+interner is rebuilt from it on open — so an id means the same path in every
+process that opens the file. For a long time it did not: ids were minted in
+network-arrival order and never written, so every launch re-numbered every
+metric and a chart seeded "from history" read another metric's buckets. A
+`meta` table carries the schema version (`SCHEMA_VERSION`); a file without it
+that already holds samples is a pre-v2 file whose rows nobody can name, and it
+is moved aside (`metrics.redb.schema-v1`) rather than read, the same way an
+older redb file format already was.
+
+Without a database (`--demo`, a locked file, a read-only data dir) the store
+keeps only the hot rings: nothing is buffered for a flush that cannot happen.
 
 ## Log events
 

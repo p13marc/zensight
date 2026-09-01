@@ -40,6 +40,26 @@ pub const DEFAULT_HOT_CAPACITY: usize = 3_600;
 /// redb table: packed `(metric_id, tier, bucket_ts)` key -> downsampled value.
 const SAMPLES_TABLE: TableDefinition<u128, f64> = TableDefinition::new("samples");
 
+/// redb table: interned metric path -> its [`MetricId`]. The samples table
+/// is keyed by the id, so the id must mean the same path in every process
+/// that opens the file. It did not, for a long time: ids were minted in
+/// network-arrival order and never written down, so a restart re-numbered
+/// every metric and a chart seeded "from history" read back another metric's
+/// buckets — plausible numbers, wrong series, for up to 30 days.
+const METRICS_TABLE: TableDefinition<&str, u32> = TableDefinition::new("metrics");
+
+/// redb table: store-level metadata. One row, `schema` -> [`SCHEMA_VERSION`].
+const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
+
+/// The on-disk layout this code writes and can read. A file without a `meta`
+/// row that already holds samples is from before ids were persisted (v1);
+/// its rows are keyed by ids nobody can map back to a path, so it is moved
+/// aside rather than read (see [`MetricStore::with_default_persistence`]).
+///
+/// v2: `metrics` (path -> id) and `meta` tables; metric paths carry the
+/// publishing origin (`<protocol>/<origin>/<source>|<metric>`).
+pub const SCHEMA_VERSION: u64 = 2;
+
 /// redb table: log-event uid (time-sortable `<ts><seq>`) -> serialized
 /// [`StoredLog`] (#107, C9). Distinct from the numeric `samples` table — per-line
 /// log events are text and unbounded-cardinality, so they get their own keyed
@@ -77,6 +97,44 @@ pub const EVENT_STORE_MAX_ROWS: usize = 20_000;
 
 /// A single downsampled bucket queued for persistence: `(metric, tier, bucket_ts, value)`.
 pub type FlushRow = (MetricId, Tier, i64, f64);
+
+/// One flush: the downsampled rows, and the `(path, id)` pairs interned since
+/// the last flush, written in one transaction by [`PersistentStore::write_batch`].
+#[derive(Debug, Default)]
+pub struct FlushBatch {
+    pub rows: Vec<FlushRow>,
+    pub paths: Vec<(String, u32)>,
+}
+
+/// Why a store file could not be opened.
+#[derive(Debug)]
+pub enum StoreOpenError {
+    Redb(redb::Error),
+    /// The file's layout is not [`SCHEMA_VERSION`]; `found` is what it is.
+    Schema {
+        found: u64,
+    },
+}
+
+impl<E> From<E> for StoreOpenError
+where
+    redb::Error: From<E>,
+{
+    fn from(e: E) -> Self {
+        StoreOpenError::Redb(redb::Error::from(e))
+    }
+}
+
+impl std::fmt::Display for StoreOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreOpenError::Redb(e) => write!(f, "{e}"),
+            StoreOpenError::Schema { found } => {
+                write!(f, "metric store schema v{found} is not v{SCHEMA_VERSION}")
+            }
+        }
+    }
+}
 
 /// Interned identifier for a metric path. Compact key for the store, per Plan 05 §5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -182,11 +240,11 @@ fn key_range(metric: MetricId, tier: Tier) -> std::ops::RangeInclusive<u128> {
 
 /// Interns metric paths into compact [`MetricId`]s.
 ///
-/// Metric keys have the shape `"<protocol>/<source>|<metric>"` (see
+/// Metric keys have the shape `"<protocol>/<origin>/<source>|<metric>"` (see
 /// [`MetricStore::metric_key`]). `by_device` buckets ids under the
-/// `"<protocol>/<source>"` prefix (everything before the `|`) so per-device
-/// lookups are O(metrics-for-that-device) instead of a linear scan of every
-/// interned path — the hot path behind the dashboard render (#freeze).
+/// `"<protocol>/<origin>/<source>"` prefix (everything before the `|`) so
+/// per-device lookups are O(metrics-for-that-device) instead of a linear scan
+/// of every interned path — the hot path behind the dashboard render (#freeze).
 #[derive(Debug, Default)]
 pub struct MetricInterner {
     ids: HashMap<String, MetricId>,
@@ -198,6 +256,32 @@ impl MetricInterner {
     /// Create an empty interner.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuild from persisted `(path, id)` pairs, so an id means the same
+    /// path it meant in the process that wrote the samples. Ids are dense
+    /// ordinals; a gap (a flush that never landed) is kept as a hole so no
+    /// later mint can reuse an id that has rows on disk.
+    pub fn restore(entries: Vec<(String, u32)>) -> Self {
+        let mut me = Self::new();
+        let Some(max) = entries.iter().map(|(_, id)| *id).max() else {
+            return me;
+        };
+        me.paths = vec![String::new(); max as usize + 1];
+        for (path, id) in entries {
+            me.paths[id as usize] = path;
+        }
+        for (i, path) in me.paths.iter().enumerate() {
+            if path.is_empty() {
+                continue;
+            }
+            let id = MetricId(i as u32);
+            me.ids.insert(path.clone(), id);
+            if let Some((device, _)) = path.split_once('|') {
+                me.by_device.entry(device.to_string()).or_default().push(id);
+            }
+        }
+        me
     }
 
     /// Intern `path`, returning its (possibly new) id.
@@ -218,8 +302,9 @@ impl MetricInterner {
         id
     }
 
-    /// Ids + paths for a device, where `device` is `"<protocol>/<source>"`
-    /// (no trailing `|`). O(metrics-for-that-device) via the `by_device` index —
+    /// Ids + paths for a device, where `device` is
+    /// `"<protocol>/<origin>/<source>"` (no trailing `|`).
+    /// O(metrics-for-that-device) via the `by_device` index —
     /// this replaced a per-render linear scan of every interned path.
     pub fn device_ids<'a>(&'a self, device: &str) -> impl Iterator<Item = (MetricId, &'a str)> {
         self.by_device
@@ -340,25 +425,57 @@ impl PersistentStore {
     /// Open (creating if needed) the store database at `path`. The parent
     /// directory is created if missing. Returns an error rather than panicking
     /// so the caller can degrade gracefully to an in-memory-only store.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
+    ///
+    /// A file whose layout is not [`SCHEMA_VERSION`] is refused with
+    /// [`StoreOpenError::Schema`] rather than read: its sample rows are keyed
+    /// by ids this code cannot map to paths.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreOpenError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(redb::Error::from)?;
         }
         let db = Database::create(path)?;
-        // Ensure the table exists so reads on a fresh DB don't error.
+        // Ensure the tables exist so reads on a fresh DB don't error, and
+        // settle the schema question in the same transaction.
         let txn = db.begin_write()?;
-        {
-            let _ = txn.open_table(SAMPLES_TABLE)?;
+        let found = {
+            let samples = txn.open_table(SAMPLES_TABLE)?;
             // Ensure the logs table (#107, C9) exists too.
             let _ = txn.open_table(LOGS_TABLE)?;
             // Ensure the events table (#578) exists too.
             let _ = txn.open_table(EVENTS_TABLE)?;
             // Ensure the Tier-2 chunk store (#199) exists too.
             let _ = txn.open_table(CHUNKS_TABLE)?;
-        }
+            let _ = txn.open_table(METRICS_TABLE)?;
+            let mut meta = txn.open_table(META_TABLE)?;
+            let stamped = meta.get("schema")?.map(|v| v.value());
+            match stamped {
+                Some(v) => v,
+                // No marker: a fresh file, or a v1 file (samples, no ids).
+                None if samples.is_empty()? => {
+                    meta.insert("schema", SCHEMA_VERSION)?;
+                    SCHEMA_VERSION
+                }
+                None => 1,
+            }
+        };
         txn.commit()?;
+        if found != SCHEMA_VERSION {
+            return Err(StoreOpenError::Schema { found });
+        }
         Ok(Self { db: Arc::new(db) })
+    }
+
+    /// Every persisted `(path, id)` pair, for rebuilding the interner on open.
+    pub fn load_metric_paths(&self) -> Result<Vec<(String, u32)>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(METRICS_TABLE)?;
+        let mut out = Vec::new();
+        for row in table.iter()? {
+            let (k, v) = row?;
+            out.push((k.value().to_string(), v.value()));
+        }
+        Ok(out)
     }
 
     /// The default on-disk location: `~/.local/share/zensight/metrics.redb`.
@@ -366,18 +483,23 @@ impl PersistentStore {
         dirs::data_dir().map(|d| d.join("zensight").join("metrics.redb"))
     }
 
-    /// Persist a batch of downsampled buckets across all tiers. `batch` is a list
-    /// of `(metric_id, tier, bucket_ts, value)` tuples. Blocking I/O — call from
-    /// `spawn_blocking`.
-    pub fn write_batch(&self, batch: &[FlushRow]) -> Result<usize, redb::Error> {
-        if batch.is_empty() {
+    /// Persist a batch of downsampled buckets across all tiers, together with
+    /// the paths of any metric interned since the last flush — in ONE
+    /// transaction, so a sample row never lands without the path its id
+    /// means. Blocking I/O — call from `spawn_blocking`.
+    pub fn write_batch(&self, batch: &FlushBatch) -> Result<usize, redb::Error> {
+        if batch.rows.is_empty() && batch.paths.is_empty() {
             return Ok(0);
         }
         let txn = self.db.begin_write()?;
         let mut written = 0usize;
         {
+            let mut metrics = txn.open_table(METRICS_TABLE)?;
+            for (path, id) in &batch.paths {
+                metrics.insert(path.as_str(), *id)?;
+            }
             let mut table = txn.open_table(SAMPLES_TABLE)?;
-            for (metric, tier, bucket_ts, value) in batch {
+            for (metric, tier, bucket_ts, value) in &batch.rows {
                 table.insert(pack_key(*metric, *tier, *bucket_ts), *value)?;
                 written += 1;
             }
@@ -899,6 +1021,9 @@ pub struct MetricStore {
     series: HashMap<MetricId, MetricSeries>,
     hot_capacity: usize,
     persistent: Option<PersistentStore>,
+    /// `(path, id)` pairs interned since the last flush, written with it.
+    /// Empty (never appended) when there is no persistent store.
+    unsaved_paths: Vec<(String, u32)>,
     /// Log records buffered for the next flush to the cold store (#107, C9),
     /// post-sampling.
     log_pending: Vec<StoredLog>,
@@ -912,11 +1037,28 @@ impl MetricStore {
     /// Create a store. If `persistent` is `None` the store is in-memory only
     /// (graceful degradation when the DB can't be opened).
     pub fn new(hot_capacity: usize, persistent: Option<PersistentStore>) -> Self {
+        // The interner is rebuilt from the file, or the ids in the samples
+        // table mean nothing this process can name.
+        let interner = match persistent.as_ref().map(PersistentStore::load_metric_paths) {
+            Some(Ok(entries)) => MetricInterner::restore(entries),
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "Could not load persisted metric ids; history will be in-memory only");
+                MetricInterner::new()
+            }
+            None => MetricInterner::new(),
+        };
+        let persistent = match (&persistent, interner.is_empty()) {
+            // A load failure above must not leave a store whose new ids can
+            // collide with rows already on disk.
+            (Some(store), true) if store.load_metric_paths().is_err() => None,
+            _ => persistent,
+        };
         Self {
-            interner: MetricInterner::new(),
+            interner,
             series: HashMap::new(),
             hot_capacity: hot_capacity.max(1),
             persistent,
+            unsaved_paths: Vec::new(),
             log_pending: Vec::new(),
             log_retention: LogRetention::new(LOG_SAMPLE_EVERY),
             event_pending: Vec::new(),
@@ -938,12 +1080,27 @@ impl MetricStore {
                 // after the redb 2→4 bump). The store is a local history
                 // cache, so losing it beats silently running memory-only on
                 // every launch: move the old file aside and start fresh.
-                Err(redb::Error::UpgradeRequired(version)) => {
-                    let backup = path.with_extension(format!("redb.incompatible-v{version}"));
-                    tracing::warn!(path = %path.display(), backup = %backup.display(),
-                        "Metric store file format is from an older redb; moving it aside and starting fresh");
+                //
+                // The same move-aside covers our own schema (#SCHEMA_VERSION):
+                // a v1 file's sample rows are keyed by ids that were never
+                // written down, so nothing can read them back correctly —
+                // the history it holds was already mislabelled on every
+                // launch, and keeping it would only keep that going.
+                Err(e @ StoreOpenError::Redb(redb::Error::UpgradeRequired(_)))
+                | Err(e @ StoreOpenError::Schema { .. }) => {
+                    let backup = match &e {
+                        StoreOpenError::Redb(redb::Error::UpgradeRequired(v)) => {
+                            path.with_extension(format!("redb.incompatible-v{v}"))
+                        }
+                        StoreOpenError::Schema { found } => {
+                            path.with_extension(format!("redb.schema-v{found}"))
+                        }
+                        StoreOpenError::Redb(_) => unreachable!("matched above"),
+                    };
+                    tracing::warn!(path = %path.display(), backup = %backup.display(), error = %e,
+                        "Metric store file layout is not this build's; moving it aside and starting fresh");
                     match std::fs::rename(&path, &backup)
-                        .map_err(redb::Error::from)
+                        .map_err(|e| StoreOpenError::Redb(redb::Error::from(e)))
                         .and_then(|()| PersistentStore::open(&path))
                     {
                         Ok(store) => Some(store),
@@ -968,19 +1125,39 @@ impl MetricStore {
         Self::new(DEFAULT_HOT_CAPACITY, persistent)
     }
 
-    /// The interned key for a device metric: `"<protocol>/<source>|<metric>"`.
-    fn metric_key(point: &TelemetryPoint) -> String {
-        format!("{}/{}|{}", point.protocol, point.source, point.metric)
+    /// The interned key for a device metric:
+    /// `"<protocol>/<origin>/<source>|<metric>"`.
+    ///
+    /// The origin is part of it for the reason `DeviceId` carries one (#474):
+    /// two hosts reporting the same hostname (`localhost`, a cloned image,
+    /// two containers named alike) are two devices, and a key without the
+    /// origin interleaved their samples into one sawtooth series.
+    fn metric_key(origin: &str, point: &TelemetryPoint) -> String {
+        format!(
+            "{}/{}/{}|{}",
+            point.protocol, origin, point.source, point.metric
+        )
+    }
+
+    fn device_prefix(protocol: &str, origin: &str, source: &str) -> String {
+        format!("{protocol}/{origin}/{source}")
+    }
+
+    /// The interned key for one metric of a known device — the shape
+    /// [`Self::hot_samples`] takes.
+    pub fn device_metric_key(protocol: &str, origin: &str, source: &str, metric: &str) -> String {
+        format!("{}|{metric}", Self::device_prefix(protocol, origin, source))
     }
 
     /// Record a telemetry point. Interns its path, projects the value, and
     /// appends to the hot ring + pending buffer. Non-numeric values are ignored.
     /// O(1), safe to call inline on the UI thread.
-    pub fn record(&mut self, point: &TelemetryPoint) {
+    pub fn record(&mut self, origin: &str, point: &TelemetryPoint) {
         let Some(value) = telemetry_to_f64(&point.value) else {
             return;
         };
-        let key = Self::metric_key(point);
+        let key = Self::metric_key(origin, point);
+        let before = self.interner.len();
         let id = self.interner.intern(&key);
         let sample = Sample {
             ts: point.timestamp,
@@ -992,7 +1169,16 @@ impl MetricStore {
             pending: Vec::new(),
         });
         series.hot.push(sample);
-        series.pending.push(sample);
+        // Nothing is buffered for a flush that can never happen: with no
+        // redb handle `take_flush_batch` returns early, and `pending` used to
+        // grow by one sample per point forever — the demo's, and a degraded
+        // launch's, slow leak.
+        if self.persistent.is_some() {
+            series.pending.push(sample);
+            if self.interner.len() > before {
+                self.unsaved_paths.push((key, id.0));
+            }
+        }
     }
 
     /// Whether there are pending samples awaiting flush.
@@ -1004,9 +1190,9 @@ impl MetricStore {
     /// downsampling each metric's pending samples. Returns the batch and a clone
     /// of the persistent handle (so the caller can run [`PersistentStore::write_batch`]
     /// in `spawn_blocking`). Returns `None` if there's nothing to flush or no DB.
-    pub fn take_flush_batch(&mut self) -> Option<(PersistentStore, Vec<FlushRow>)> {
+    pub fn take_flush_batch(&mut self) -> Option<(PersistentStore, FlushBatch)> {
         let store = self.persistent.clone()?;
-        let mut batch = Vec::new();
+        let mut rows = Vec::new();
         for (id, series) in self.series.iter_mut() {
             if series.pending.is_empty() {
                 continue;
@@ -1014,14 +1200,15 @@ impl MetricStore {
             let pending = std::mem::take(&mut series.pending);
             for tier in Tier::ALL {
                 for (bucket, value) in downsample(&pending, tier) {
-                    batch.push((*id, tier, bucket, value));
+                    rows.push((*id, tier, bucket, value));
                 }
             }
         }
-        if batch.is_empty() {
+        if rows.is_empty() {
             return None;
         }
-        Some((store, batch))
+        let paths = std::mem::take(&mut self.unsaved_paths);
+        Some((store, FlushBatch { rows, paths }))
     }
 
     /// Offer a per-line log event to the cold store (#107, C9). Applies the
@@ -1072,6 +1259,24 @@ impl MetricStore {
         Some((store, std::mem::take(&mut self.event_pending)))
     }
 
+    /// Hot samples for one metric of a `(protocol, source)` whose origin the
+    /// caller does not know — the topology panel and the systemd services
+    /// table, which come from an entity or a hostname rather than a
+    /// `DeviceId`. When several origins report that source (the #474
+    /// collision) the series with the most recent sample wins; the two are
+    /// never mixed.
+    pub fn hot_samples_by_source(&self, protocol: &str, source: &str, metric: &str) -> Vec<Sample> {
+        let suffix = format!("/{source}|{metric}");
+        let prefix = format!("{protocol}/");
+        self.interner
+            .with_prefix(&prefix)
+            .filter(|(_, path)| path.ends_with(&suffix))
+            .filter_map(|(id, _)| self.series.get(&id))
+            .max_by_key(|s| s.hot.to_vec().last().map(|x| x.ts).unwrap_or(i64::MIN))
+            .map(|s| s.hot.to_vec())
+            .unwrap_or_default()
+    }
+
     /// Hot (in-memory) samples for a metric path, oldest-first.
     pub fn hot_samples(&self, metric_key: &str) -> Vec<Sample> {
         self.interner
@@ -1084,8 +1289,13 @@ impl MetricStore {
     /// Hot (in-memory) samples for every metric of a device, oldest-first.
     /// Returns `(metric_suffix, samples)` pairs. Reads only the in-memory ring
     /// (no disk), so it's cheap to call per dashboard render (#24 sparklines).
-    pub fn device_hot_samples(&self, protocol: &str, source: &str) -> Vec<(String, Vec<Sample>)> {
-        let device = format!("{protocol}/{source}");
+    pub fn device_hot_samples(
+        &self,
+        protocol: &str,
+        origin: &str,
+        source: &str,
+    ) -> Vec<(String, Vec<Sample>)> {
+        let device = Self::device_prefix(protocol, origin, source);
         self.interner
             .device_ids(&device)
             .filter_map(|(id, path)| {
@@ -1099,8 +1309,13 @@ impl MetricStore {
     /// Resolve the interned ids + paths for a device, for a history pre-load.
     /// Returns `(metric_suffix, metric_id)` pairs where `metric_suffix` is the
     /// metric name (the part after `|`).
-    pub fn device_metric_ids(&self, protocol: &str, source: &str) -> Vec<(String, MetricId)> {
-        let device = format!("{protocol}/{source}");
+    pub fn device_metric_ids(
+        &self,
+        protocol: &str,
+        origin: &str,
+        source: &str,
+    ) -> Vec<(String, MetricId)> {
+        let device = Self::device_prefix(protocol, origin, source);
         self.interner
             .device_ids(&device)
             .filter_map(|(id, path)| {
@@ -1121,6 +1336,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap as Map;
     use zensight_common::Protocol;
+
+    const ORIGIN: &str = "h-0123456789ab";
 
     fn point(metric: &str, value: f64, ts: i64) -> TelemetryPoint {
         TelemetryPoint {
@@ -1242,25 +1459,31 @@ mod tests {
     #[test]
     fn store_records_only_numeric() {
         let mut store = MetricStore::new(10, None);
-        store.record(&point("cpu", 50.0, 1_000));
+        store.record(ORIGIN, &point("cpu", 50.0, 1_000));
         let mut p = point("name", 0.0, 2_000);
         p.value = TelemetryValue::Text("hello".into());
-        store.record(&p);
+        store.record(ORIGIN, &p);
         // Only the numeric metric is tracked.
-        assert_eq!(store.hot_samples("sysinfo/dev1|cpu").len(), 1);
-        assert_eq!(store.hot_samples("sysinfo/dev1|name").len(), 0);
+        assert_eq!(
+            store.hot_samples("sysinfo/h-0123456789ab/dev1|cpu").len(),
+            1
+        );
+        assert_eq!(
+            store.hot_samples("sysinfo/h-0123456789ab/dev1|name").len(),
+            0
+        );
     }
 
     #[test]
     fn store_hot_samples_and_device_ids() {
         let mut store = MetricStore::new(10, None);
-        store.record(&point("cpu", 50.0, 1_000));
-        store.record(&point("cpu", 55.0, 2_000));
-        store.record(&point("mem", 10.0, 1_500));
-        let cpu = store.hot_samples("sysinfo/dev1|cpu");
+        store.record(ORIGIN, &point("cpu", 50.0, 1_000));
+        store.record(ORIGIN, &point("cpu", 55.0, 2_000));
+        store.record(ORIGIN, &point("mem", 10.0, 1_500));
+        let cpu = store.hot_samples("sysinfo/h-0123456789ab/dev1|cpu");
         assert_eq!(cpu.len(), 2);
         assert_eq!(cpu[1].value, 55.0);
-        let mut ids = store.device_metric_ids("sysinfo", "dev1");
+        let mut ids = store.device_metric_ids("sysinfo", ORIGIN, "dev1");
         ids.sort();
         let names: Vec<String> = ids.into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, vec!["cpu".to_string(), "mem".to_string()]);
@@ -1269,10 +1492,15 @@ mod tests {
     #[test]
     fn store_no_persistence_no_flush() {
         let mut store = MetricStore::new(10, None);
-        store.record(&point("cpu", 1.0, 1_000));
-        assert!(store.has_pending());
-        // No persistent handle => no flush batch.
+        store.record(ORIGIN, &point("cpu", 1.0, 1_000));
+        // No persistent handle => nothing buffered for a flush that can never
+        // happen (it used to buffer every sample forever), and no batch.
+        assert!(!store.has_pending());
         assert!(store.take_flush_batch().is_none());
+        assert_eq!(
+            store.hot_samples("sysinfo/h-0123456789ab/dev1|cpu").len(),
+            1
+        );
     }
 
     fn temp_db_path(tag: &str) -> PathBuf {
@@ -1295,6 +1523,10 @@ mod tests {
             (m, Tier::Minute, 120, 2.5),
             (m, Tier::Hour, 0, 9.0),
         ];
+        let batch = FlushBatch {
+            rows: batch,
+            paths: vec![],
+        };
         assert_eq!(store.write_batch(&batch).unwrap(), 3);
         // Minute tier within [60_000, 120_000] ms returns both buckets.
         let got = store.query(m, Tier::Minute, 0, 200_000).unwrap();
@@ -1347,7 +1579,12 @@ mod tests {
             (m, Tier::Second, 0, 5.0),            // ancient -> evicted
             (m, Tier::Second, fresh_second, 6.0), // fresh -> kept
         ];
-        store.write_batch(&batch).unwrap();
+        store
+            .write_batch(&FlushBatch {
+                rows: batch,
+                paths: vec![],
+            })
+            .unwrap();
 
         let removed = store.prune(now_ms).unwrap();
         assert_eq!(removed, 3, "the three ancient buckets are evicted");
@@ -1628,16 +1865,20 @@ mod tests {
         let path = temp_db_path("flush");
         let persistent = PersistentStore::open(&path).expect("open");
         let mut store = MetricStore::new(10, Some(persistent.clone()));
-        store.record(&point("cpu", 42.0, 60_000));
-        store.record(&point("cpu", 43.0, 90_000));
+        store.record(ORIGIN, &point("cpu", 42.0, 60_000));
+        store.record(ORIGIN, &point("cpu", 43.0, 90_000));
         let (handle, batch) = store.take_flush_batch().expect("batch");
-        assert!(!batch.is_empty());
+        assert!(!batch.rows.is_empty());
+        assert_eq!(
+            batch.paths,
+            vec![("sysinfo/h-0123456789ab/dev1|cpu".to_string(), 0)]
+        );
         handle.write_batch(&batch).unwrap();
         // Pending cleared after taking the batch.
         assert!(!store.has_pending());
         // Read back the minute tier for the cpu metric.
         let id = store
-            .device_metric_ids("sysinfo", "dev1")
+            .device_metric_ids("sysinfo", ORIGIN, "dev1")
             .into_iter()
             .find(|(n, _)| n == "cpu")
             .map(|(_, id)| id)
@@ -1651,6 +1892,78 @@ mod tests {
             }]
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The whole point of persisting ids: a second process that opens the
+    /// file must resolve the same path to the same id, whatever order the
+    /// network hands it metrics in. Before this, ids were minted in arrival
+    /// order and never written, so a restart read another metric's rows.
+    #[test]
+    fn a_restart_resolves_the_same_path_to_the_same_id() {
+        let path = temp_db_path("restart-ids");
+        let persistent = PersistentStore::open(&path).expect("open");
+        let mut first = MetricStore::new(10, Some(persistent.clone()));
+        first.record(ORIGIN, &point("cpu", 1.0, 60_000));
+        first.record(ORIGIN, &point("mem", 2.0, 60_000));
+        let (handle, batch) = first.take_flush_batch().expect("batch");
+        handle.write_batch(&batch).unwrap();
+        let cpu_id = first
+            .device_metric_ids("sysinfo", ORIGIN, "dev1")
+            .into_iter()
+            .find(|(n, _)| n == "cpu")
+            .map(|(_, id)| id)
+            .unwrap();
+
+        // Second launch, opposite arrival order.
+        let mut second = MetricStore::new(10, Some(persistent.clone()));
+        second.record(ORIGIN, &point("mem", 3.0, 120_000));
+        second.record(ORIGIN, &point("cpu", 4.0, 120_000));
+        let ids = second.device_metric_ids("sysinfo", ORIGIN, "dev1");
+        let cpu_again = ids
+            .iter()
+            .find(|(n, _)| n == "cpu")
+            .map(|(_, id)| *id)
+            .unwrap();
+        assert_eq!(cpu_again, cpu_id, "cpu keeps its id across a restart");
+        let got = persistent.query(cpu_id, Tier::Minute, 0, 200_000).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].value, 1.0, "and reads back its OWN history");
+        // A brand-new metric mints an id past every persisted one.
+        second.record(ORIGIN, &point("disk", 5.0, 120_000));
+        let (_, batch) = second.take_flush_batch().expect("batch");
+        assert_eq!(batch.paths.len(), 1);
+        assert!(batch.paths[0].1 >= 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A pre-v2 file — samples, no `metrics`/`meta` — is refused, not read:
+    /// its rows are keyed by ids nobody can name. (A fresh, empty file is
+    /// stamped with the current schema instead.)
+    #[test]
+    fn a_v1_file_with_samples_is_refused_as_schema_v1() {
+        let path = temp_db_path("schema-v1");
+        {
+            let db = Database::create(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(SAMPLES_TABLE).unwrap();
+                t.insert(pack_key(MetricId(0), Tier::Minute, 60), 1.0)
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        match PersistentStore::open(&path) {
+            Err(StoreOpenError::Schema { found: 1 }) => {}
+            Err(other) => panic!("expected a schema refusal, got {other}"),
+            Ok(_) => panic!("a v1 file must not open"),
+        }
+        let _ = std::fs::remove_file(&path);
+
+        let fresh = temp_db_path("schema-fresh");
+        let store = PersistentStore::open(&fresh).expect("a fresh file opens");
+        drop(store);
+        PersistentStore::open(&fresh).expect("and reopens: it was stamped");
+        let _ = std::fs::remove_file(&fresh);
     }
 
     /// The GC contract behind the periodic chunk-cache sweep (#131's chunk

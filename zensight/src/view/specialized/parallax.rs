@@ -216,7 +216,28 @@ fn catalogue_row<'a>(
         }
         buttons.into()
     } else {
-        Space::new().width(Length::Shrink).into()
+        // No H.264 decoder in this build: the JPEG preview path is the live
+        // view, and it needs a button — for a while this branch rendered
+        // nothing at all, so the shipped GUI could list a camera and offer
+        // no way to look at it.
+        let mut buttons = row![].spacing(space::XS);
+        if open {
+            buttons = buttons.push(button(text("Close").size(12)).on_press(
+                Message::ParallaxCloseTile {
+                    stream: stream.stream.clone(),
+                },
+            ));
+        } else {
+            buttons = buttons.push(action_tooltip(
+                button(text("Preview").size(12)).on_press(Message::ParallaxOpenTile {
+                    stream: stream.stream.clone(),
+                }),
+                "Open a live JPEG preview of this stream. Live H.264 video needs a \
+                 build with --features h264."
+                    .to_string(),
+            ));
+        }
+        buttons.into()
     };
     let mut cells = row![text(&stream.stream).size(14).width(Length::Fixed(140.0)),]
         .spacing(space::SM)
