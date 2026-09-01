@@ -31,12 +31,14 @@ name = "desired"
 origin = "@desired"
 description = "fleet desired-state author (#816): per-host runtime policy, target host first subject chunk; LWW, storage-backed, reconciled on (re)connect"
 
-# v1 carries the HOSTSPEC topic only. The systemd/netlink/logs sentinels have
-# the identical seam (SentinelHandle::replace) but their config types are
-# sensor-crate types with summary schemas, and a state-class subject needs a
-# real schemars-generated schema (#815's gate — it refused exactly this).
-# They join when their types migrate to zensight-common, tracked in the
-# follow-up issue this file's PR names.
+# Topics join as their config types migrate to zensight-common (#849): a
+# state-class subject needs a real schemars-generated schema, and a
+# sensor-crate type can never provide one — `zensight-common` cannot depend on
+# a sensor, so `describe` could only carry a summary stub. #815's gate refused
+# exactly that, correctly.
+#
+# hostspec (#816) and systemd (#849) have migrated. netlink and logs have the
+# identical seam (`SentinelHandle::replace`) and are the remainder.
 
 [[subject]]
 path = "{host}/hostspec/expectations"
@@ -46,3 +48,18 @@ cardinality = 10000
 ttl_s = 0
 since = "1.0"
 description = "desired hostspec assertion set for {host} (#821 — its natural fleet-wide author)"
+
+# The type name is `ExpectationsConfig` rather than a producer-prefixed
+# `SystemdExpectations`, unlike hostspec's above, for one reason: that is the
+# name `@rpc/systemd/expectations/set` has advertised since 1.0, nothing
+# collides with it (netlink's set takes `ExpectationCommand`, logs' takes
+# `LogRulesConfig`), and renaming it would be a breaking registry change to a
+# shipped path for a payload whose bytes do not change.
+[[subject]]
+path = "{host}/systemd/expectations"
+class = "state"
+type = "ExpectationsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.1"
+description = "desired systemd unit-expectation set for {host} (#277 — services/targets active, timer freshness and success, restart rates, forbid-failed)"

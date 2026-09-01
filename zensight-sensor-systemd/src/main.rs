@@ -151,10 +151,48 @@ async fn main() -> Result<()> {
                 .with_wake(sentinel_wake);
                 let handle = evaluator.handle();
                 runner.spawn(async move { evaluator.run().await });
+
+                // The @desired reconciler (#849): this sensor's expectation
+                // set is fleet-authorable, exactly as hostspec's is (#816).
+                // The reconciler and the RPC surface are the two writers to
+                // one handle; the shared marker says who won last.
+                let desired_cfg = runner.config().desired.clone();
+                let desired_key = {
+                    use zensight_common::registry::desired;
+                    desired::key(&desired::Subject::systemd_expectations(
+                        zensight_common::PROFILE.host_id(),
+                    ))
+                };
+                let apply_handle = handle.clone();
+                let seed = handle.snapshot().await;
+                let (marker, _reconcile_task) = zensight_sensor_core::desired::reconcile_topic(
+                    runner.session().clone(),
+                    runner.publisher(),
+                    zensight_sensor_core::desired::DesiredTopic {
+                        topic: "expectations",
+                        desired_key,
+                    },
+                    desired_cfg,
+                    seed,
+                    move |cfg: zensight_common::systemd::ExpectationsConfig| {
+                        let h = apply_handle.clone();
+                        async move {
+                            h.replace(cfg).await;
+                            Ok(())
+                        }
+                    },
+                );
+
                 let cmd_session = runner.session().clone();
                 let cmd_producer = "systemd".to_string();
                 runner.spawn(async move {
-                    zensight_sensor_systemd::command::run(cmd_session, cmd_producer, handle).await;
+                    zensight_sensor_systemd::command::run(
+                        cmd_session,
+                        cmd_producer,
+                        handle,
+                        marker,
+                    )
+                    .await;
                 });
                 tracing::info!("systemd sentinel enabled");
             }

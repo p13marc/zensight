@@ -28,6 +28,12 @@ pub struct SystemdSensorConfig {
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
+
+    /// `@desired` reconcile settings (#849): the kill switch and refresh
+    /// cadence. File config on purpose — the mechanism that could misbehave
+    /// must be disarmable from outside itself.
+    #[serde(default)]
+    pub desired: zensight_common::desired::DesiredConfig,
 }
 
 /// systemd protocol configuration.

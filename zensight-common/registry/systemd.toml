@@ -395,6 +395,15 @@ idempotent = true
 since = "1.0"
 description = "current expectations configuration (sentinel expectations hot-swap)"
 
+[[subject]]
+path = "applied/{topic}"
+class = "state"
+type = "AppliedConfig"
+cardinality = 8
+ttl_s = 900
+since = "1.1"
+description = "effective config actually in force for {topic} (#849): source file|desired|rpc, the effective doc, the last rejected desired doc"
+
 [[procedure]]
 path = "expectations/set"
 kind = "write"

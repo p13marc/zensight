@@ -103,11 +103,20 @@ subscription as the accelerator. A `Delete` reverts the target to its
 file-config baseline. This is convergence; durable pub/sub *commands* are
 the permanently forbidden alternative (RFC 12).
 
-What it carries in v1: the hostspec assertion set
-(`HostspecExpectations` — a real schemars type, which is what the RFC 08 §7
-schema gate requires of a state-class payload). The systemd/netlink/logs
-sentinels have the identical seam and join when their config types migrate
-to real schemas.
+What it carries: the hostspec assertion set (`HostspecExpectations`, #816)
+and the systemd unit-expectation set (`ExpectationsConfig`, #849) — both real
+schemars types, which is what the RFC 08 §7 schema gate requires of a
+state-class payload and what a sensor-crate type can never be (zensight-common
+cannot depend on a sensor, so `describe` could only carry a stub). Topics join
+as their config types migrate; the netlink and logs sentinels have the
+identical seam (`SentinelHandle::replace`) and are the remainder.
+
+systemd's type name is `ExpectationsConfig` rather than a producer-prefixed
+`SystemdExpectations` like hostspec's, and deliberately so: that is the name
+`@rpc/systemd/expectations/set` has advertised since 1.0, nothing collides
+with it (netlink's set takes `ExpectationCommand`, logs' takes
+`LogRulesConfig`), and renaming it would be a breaking registry change to a
+shipped path for a payload whose bytes do not move.
 
 **The never-list** (the most important constraint): nothing under `@desired`
 may carry secrets or anything a sensor needs to reach the bus — endpoints,

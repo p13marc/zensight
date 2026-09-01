@@ -32,7 +32,29 @@ publishes firing/resolved alerts on
 **hot-swappable at runtime** via a GET on `@rpc/systemd/expectations/set`
 (current config readable with a GET on `@rpc/systemd/expectations`).
 
-Expectation types (`src/sentinel.rs`):
+### Three writers, one honest marker (#849)
+
+The set can also be authored **fleet-wide** under
+`v1/@desired/state/<this-host>/systemd/expectations` — the same `@desired`
+seam hostspec has had since #816. LWW and storage-backed: a sensor that was
+offline during a change picks it up when it returns. That is convergence, not
+a command.
+
+`state/systemd/applied/expectations` (`AppliedConfig`) says which source is
+actually in force — `file`, `desired` or `rpc` — so drift between what was
+published and what is running is visible rather than assumed. An operator's
+`expectations/set` and a desired publish are two writers to one handle; the
+rule between them is LWW **by arrival**, and the marker is what says who won
+last. The kill switch (`desired.enabled: false`) stays in file config, so the
+mechanism is disarmable from outside itself.
+
+The `expectations/set` body is accepted in **either** shape: the plain
+expectation set, which is what the registry declares and what `@desired`
+carries, or the GUI's `{"type": "set_expectations", …}` envelope. Only the
+envelope used to be accepted, so a fleet tool that built its body from
+`describe` was refused by the very sensor that had told it what to send.
+
+Expectation types (`zensight-common::systemd`, checked in `src/sentinel.rs`):
 
 | Field | Rule | Satisfied when |
 |-------|------|----------------|

@@ -132,6 +132,19 @@
     },
   },
 
+  // `@desired` fleet reconcile (#849): this sensor's expectation set can be
+  // authored fleet-wide under v1/@desired/state/<this-host>/systemd/
+  // expectations (LWW, storage-backed; see docs/KEYSPACE.md) — the same seam
+  // hostspec has had since #816. The kill switch lives HERE, in file config,
+  // so the mechanism is disarmable from outside itself. The applied set is
+  // visible on state/systemd/applied/expectations (source: file|desired|rpc),
+  // which is also what says which writer won last when an operator's
+  // @rpc/systemd/expectations/set races a desired publish.
+  // desired: {
+  //   enabled: true,
+  //   refresh_secs: 300,   // storage re-GET cadence (the primary path)
+  // },
+
   // Logging
   logging: {
     level: "info",

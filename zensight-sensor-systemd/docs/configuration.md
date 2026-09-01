@@ -69,8 +69,21 @@ Absent block = sentinel disabled. Fields (see
 | `restart_rates` | `[]` | `[{ unit, max, window_secs }]` — restarts < max per window |
 | `forbid_failed` | false | alert if any unit is `failed` |
 
-Hot-swappable at runtime via a GET on `@rpc/systemd/expectations/set`; the
-current config is readable with a GET on `@rpc/systemd/expectations`.
+Hot-swappable at runtime via a GET on `@rpc/systemd/expectations/set` (the
+plain set, or the GUI's `{"type": "set_expectations", …}` envelope — both are
+accepted, #849); the current config is readable with a GET on
+`@rpc/systemd/expectations`.
+
+## `desired` (#849)
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `desired.enabled` | `true` | reconcile the expectation set from `v1/@desired/state/<this-host>/systemd/expectations` |
+| `desired.refresh_secs` | `300` | storage re-GET cadence — the level-triggered primary path |
+
+The kill switch lives here, in **file** config, on purpose: the mechanism that
+could misbehave must be disarmable from outside itself. What is actually in
+force is published on `state/systemd/applied/expectations`.
 
 ## `systemd.cgroup` (#280)
 

@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
 use tracing::warn;
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
@@ -27,72 +26,17 @@ pub const TIMER_SUCCEEDED_RULE: &str = "expect-timer-succeeded";
 pub const RESTART_RATE_RULE: &str = "expect-restart-rate";
 pub const FORBID_FAILED_RULE: &str = "forbid-failed";
 
-/// "expect service `<unit>` active".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServiceActiveExpectation {
-    pub unit: String,
-}
-
-/// "expect target `<target>` active".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TargetActiveExpectation {
-    pub target: String,
-}
-
-/// A timer expectation, in one of two strengths (#824):
-///
-/// - `within_secs` — "the timer **fired** within the window". Proves the
-///   schedule elapsed, and nothing else.
-/// - `succeeded_within_secs` — "the timer fired within the window **and its
-///   triggered service's last run succeeded**". The one-word difference that
-///   catches the failure `within_secs` cannot: a timer firing hourly, on
-///   schedule, whose service failed hourly for eight days.
-///
-/// Both may be set (both are checked, under their own rules); an expectation
-/// with neither is inert and warned about at sweep.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimerExpectation {
-    pub timer: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub within_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub succeeded_within_secs: Option<u64>,
-}
-
-/// "expect service `<unit>` restarts_rate < `<max>` per `<window_secs>`".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RestartRateExpectation {
-    pub unit: String,
-    pub max: u32,
-    pub window_secs: u64,
-}
-
-/// The full declarative expectation set (seeded from config, hot-swappable).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExpectationsConfig {
-    #[serde(default = "default_eval_interval_secs")]
-    pub eval_interval_secs: u64,
-    #[serde(default = "default_for_secs")]
-    pub for_secs: u64,
-    #[serde(default)]
-    pub services_active: Vec<ServiceActiveExpectation>,
-    #[serde(default)]
-    pub targets_active: Vec<TargetActiveExpectation>,
-    #[serde(default)]
-    pub timers: Vec<TimerExpectation>,
-    #[serde(default)]
-    pub restart_rates: Vec<RestartRateExpectation>,
-    /// "forbid any unit in state failed".
-    #[serde(default)]
-    pub forbid_failed: bool,
-}
-
-fn default_eval_interval_secs() -> u64 {
-    10
-}
-fn default_for_secs() -> u64 {
-    15
-}
+// The expectation vocabulary itself lives in `zensight-common::systemd`
+// (#849), for the same reason hostspec's does (#816): it is a WIRE CONTRACT
+// with three consumers — this sensor, the GUI that authors it, and the
+// `@desired` fleet author — and a state-class payload needs a real
+// schemars-generated schema, which a sensor-crate type can never provide.
+// Re-exported here so every existing `sentinel::ExpectationsConfig` path
+// keeps working; the checking below is what stayed.
+pub use zensight_common::systemd::{
+    ExpectationsConfig, RestartRateExpectation, ServiceActiveExpectation, TargetActiveExpectation,
+    TimerExpectation,
+};
 
 // ─── Pure checks (unit-testable) ─────────────────────────────────────────────
 
