@@ -200,7 +200,7 @@ mod tests {
         assert!(
             matches!(
                 msg,
-                Some(Message::AlertCleared { ref protocol, ref alert_key })
+                Some(Message::AlertCleared { ref protocol, ref alert_key, .. })
                     if protocol == "netlink" && alert_key == "9f2c81ab04d7e3f1"
             ),
             "expected AlertCleared, got {msg:?}"

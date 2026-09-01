@@ -78,12 +78,19 @@ pub enum Message {
     SensorInfoReceived(SensorInfo),
 
     /// A sensor-emitted alert was received (firing or resolved). Published on
-    /// `state/<producer>/alert/<alert_key>`.
-    AlertReceived(Alert),
+    /// `state/<producer>/alert/<alert_key>`. `origin` is the publishing
+    /// host's origin chunk read from the key (`None` for the demo feed) — the
+    /// one identifier a later Delete tombstone carries, since the tombstone
+    /// has no payload and so no `source`.
+    AlertReceived {
+        origin: Option<String>,
+        alert: Alert,
+    },
 
     /// A sensor alert key was deleted (resolve tombstone).
     AlertCleared {
         protocol: String,
+        origin: String,
         alert_key: String,
     },
 
@@ -91,7 +98,7 @@ pub enum Message {
     /// alert-state seed queryables on `state/<producer>/alert/*`
     /// (late-joiner recovery — populates without
     /// toasting, since these aren't newly-fired).
-    AlertsSeed(Vec<Alert>),
+    AlertsSeed(Vec<(Option<String>, Alert)>),
 
     /// Connect-time snapshot of the correlator's [`HostEntity`] docs, fetched
     /// from the entity seed (`zensight/v1/@catalog/state/entity/*`) (#306).

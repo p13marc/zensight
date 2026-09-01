@@ -136,7 +136,7 @@ pub fn build_device_sparks<'a>(
     for id in devices {
         let protocol = id.protocol.to_string();
         let mut metrics: Vec<MetricSpark> = store
-            .device_hot_samples(&protocol, &id.source)
+            .device_hot_samples(&protocol, &id.origin, &id.source)
             .into_iter()
             .filter(|(_, samples)| samples.len() >= 2)
             .map(|(metric, samples)| {
