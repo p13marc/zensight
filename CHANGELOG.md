@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`zensight-sensor-parallax` is packaged** (#512). It had a workspace member,
+  a config, a `just` recipe, a README entry and — since #411 — a hardened
+  systemd unit, and it shipped in **no release artifact at all**. The sharp end
+  of that: the `linux-amd64` tarball copies `packaging/systemd/` wholesale, so
+  every release since #411 has shipped
+  `zensight-sensor-parallax.service` with `ExecStart=/usr/bin/zensight-sensor-parallax`
+  next to fifteen binaries that do not include it. An operator installing that
+  unit got a service that fails at exec — an artifact promising a binary it
+  does not carry.
+
+  The release now builds it, stages it into the tarball, and publishes
+  `zensight-sensor-parallax` as a component image.
+
+  It stays **out** of the all-in-one `zensight-sensors` bundle, deliberately: it
+  is the only component that is not pure Rust (openh264 is compiled from C++
+  source, so it is the only one linking `libstdc++.so.6`) and the only one that
+  needs `/dev/video*`. Folding it in would put both on every host that wants the
+  six host sensors and has no camera. `libstdc++6` is now named explicitly in
+  `Dockerfile.runtime` rather than inherited by accident from `bookworm-slim`.
+
+  The concern that held this back — that adding a C++ build to the release
+  matrix was untested risk that would only surface *after* tagging — no longer
+  matches the workflow: there is one amd64 build job in `rust:1.97-bookworm`,
+  not the 4-distro × 2-arch matrix the issue was filed against. The whole leg
+  was reproduced locally before landing: release build (1m57s including
+  openh264), image build with the real `Dockerfile.runtime` under
+  `buildah --storage-driver vfs`, and the new smoke step run verbatim, in both
+  directions — it passes on a healthy image and fails the step on a sensor that
+  dies.
+
+  That smoke **starts** parallax rather than asking it for `--help`, following
+  #472's lesson: the shipped config's default source is a synthetic test
+  pattern, so the image can be exercised on hardware-free CI along the same
+  catalogue/encode/egress path a real camera uses. It is the one image with a
+  shared-library dependency no other component has, and the only one that had
+  never been built in CI at all.
+
 ### Fixed
 
 - **`sensor-pve`: a whole-job vzdump is one fact, not seven false criticals**
