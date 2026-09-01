@@ -47,6 +47,8 @@ fn every_registered_family_has_an_emitter() {
         "backup/140/age_secs",
         "backup/140/duration_secs",
         "backup/140/ok",
+        "backup/job/pve/ok",
+        "backup/job/pve/duration_secs",
         "cluster/quorate",
         "cluster/nodes_online",
         "cluster/nodes_total",

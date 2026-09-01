@@ -452,6 +452,9 @@ subject	probe	{target}/tls_chain_valid	telemetry	TelemetryPoint
 subject	probe	{target}/tls_days_to_expiry	telemetry	TelemetryPoint
 subject	probe	{target}/up	telemetry	TelemetryPoint
 subject	pve	alert/{alert_key}	state	Alert
+subject	pve	backup/job/{node}	state	PveBackupJob
+subject	pve	backup/job/{node}/duration_secs	telemetry	TelemetryPoint
+subject	pve	backup/job/{node}/ok	telemetry	TelemetryPoint
 subject	pve	backup/{vmid}	state	PveBackupSummary
 subject	pve	backup/{vmid}/age_secs	telemetry	TelemetryPoint
 subject	pve	backup/{vmid}/duration_secs	telemetry	TelemetryPoint

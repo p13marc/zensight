@@ -153,6 +153,26 @@ impl PveGuest {
 /// 990 GB provisioned on a 937 GB pool is not visible in `used`, does not
 /// change when nothing is reconfigured, and fills the pool on its own
 /// schedule.
+/// Where a pool's `allocated_bytes` came from.
+///
+/// PVE surfaces a per-volume size for LVM-thin and ZFS, and nothing for a
+/// `dir` storage — so on the storage type the reference deployment actually
+/// runs, the number that this sensor's headline finding depends on ("990 GB
+/// provisioned on a 937 GB pool") simply is not reported (#881). It can still
+/// be *derived*, because the sensor already reads every guest's disk lines and
+/// every disk names its storage. Labelling which is which is not pedantry: a
+/// derived total is a **floor**, because a volume no guest currently attaches
+/// (`unused<N>`) still occupies the pool and is deliberately not counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocationSource {
+    /// The storage plugin's own per-volume sizes, summed.
+    Reported,
+    /// Summed from the disks of the guests that live on this pool. A floor:
+    /// detached `unused<N>` volumes and disks with no `size=` are not counted.
+    DerivedFromGuests,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PveStoragePool {
     pub storage: String,
@@ -172,6 +192,11 @@ pub struct PveStoragePool {
     /// as "nothing provisioned" and is the one wrong answer here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocated_bytes: Option<u64>,
+    /// Where [`allocated_bytes`](Self::allocated_bytes) came from. `None` when
+    /// there is no number at all. The two sources are never conflated: a
+    /// derived total is a floor, not a measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocated_source: Option<AllocationSource>,
     /// `allocated_bytes / total_bytes`. Above 1.0 the pool is over-committed:
     /// it can fill with no configuration change whatsoever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,6 +241,28 @@ pub struct PveBackupVolume {
     pub protected: Option<bool>,
 }
 
+/// The outcome of one **whole-job** vzdump run — a job configured `all 1`,
+/// which covers every guest and therefore names none.
+///
+/// PVE records such a run as a single task with an empty `id`; the per-guest
+/// results exist only inside the task log, as free text. So this sensor grades
+/// the job as what it is — one fact, one alert — and answers "was *this guest*
+/// backed up?" from the stored volumes instead (#880). Seven false
+/// `backup-failed` criticals, one per guest, is the alternative.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PveBackupJob {
+    /// The node the job ran on.
+    pub node: String,
+    /// The newest completed whole-job run. `None` when the task window holds
+    /// none — which is a state, not a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_task: Option<PveBackupTask>,
+    /// Age of `last_task`, seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_secs: Option<u64>,
+    pub observed_at_ms: i64,
+}
+
 /// What is known about one guest's backups.
 ///
 /// "The job exited 0" is what the existing mail notification already says.
@@ -239,9 +286,13 @@ pub struct PveBackupSummary {
     /// Age of `latest`, seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub age_secs: Option<u64>,
-    /// How many stored volumes this guest has.
-    #[serde(default)]
-    pub volumes: u32,
+    /// How many stored volumes this guest has. `None` when no backup-capable
+    /// pool could be listed at all — the listing was refused, failed, or there
+    /// was nothing to ask. A `0` here says "this guest has no backups", which
+    /// is a very different claim from "we could not look", and the reference
+    /// deployment saw the second reported as the first (#880).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volumes: Option<u32>,
     pub observed_at_ms: i64,
 }
 
@@ -452,6 +503,7 @@ mod tests {
             used_bytes: 0,
             avail_bytes: 0,
             allocated_bytes: None,
+            allocated_source: None,
             overcommit_ratio: None,
             content: vec![],
             observed_at_ms: 0,

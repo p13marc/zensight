@@ -9,15 +9,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use zensight_sensor_core::{AlertReporter, SensorArgs, SensorConfig, SensorRunner, resolve_secret};
+use zensight_sensor_core::{AlertReporter, SensorConfig, SensorRunner, resolve_secret};
 
 use zensight_sensor_pve::api::PveClient;
+use zensight_sensor_pve::cli::PveArgs;
 use zensight_sensor_pve::config::PveSensorConfig;
 use zensight_sensor_pve::poller::Poller;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = SensorArgs::parse_with_default("pve.json5");
+    let args = PveArgs::parse_with_default("pve.json5");
+    let diagnose = args.diagnose;
+    let args = args.common;
 
     let config = PveSensorConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{e}"))?;
     let source = config.pve.resolved_source();
@@ -33,6 +36,22 @@ async fn main() -> Result<()> {
     };
 
     let pve = config.pve.clone();
+
+    // The one-shot diagnosis (#880) short-circuits HERE, before the runner,
+    // the session or any publisher exists. An operator debugging a token
+    // should not thereby join a fleet, and the way to guarantee that is to
+    // never build the thing that would.
+    if diagnose {
+        let client = PveClient::new(
+            pve.base_url(),
+            token,
+            Duration::from_secs(pve.timeout_secs),
+            pve.accept_invalid_certs,
+            pve.max_concurrent,
+        )?;
+        return zensight_sensor_pve::cli::diagnose(&client, &pve).await;
+    }
+
     let mut runner = SensorRunner::new_with_args("pve", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;

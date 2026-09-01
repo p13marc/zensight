@@ -9,6 +9,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sensor-pve`: a whole-job vzdump is one fact, not seven false criticals**
+  (#880). The reference fleet's backup job is a single job covering every guest
+  (`all 1`), so its tasks carry no per-guest id — PVE returns `id: ""` and the
+  per-guest results live only in the task log. `text()` refuses an empty
+  string, so every nightly task was silently discarded, and what survived the
+  200-row window was whatever one-off task happened to be tagged with each
+  vmid: for guest 120, a failure from six weeks earlier, reported as "the last
+  backup" and firing a permanent critical about a dump that had in fact
+  succeeded at 03:00 that morning. A template the job explicitly excludes fired
+  too.
+
+  Backups are now graded from the **stored volumes**, with the tasks as
+  corroboration:
+
+  - a whole-job run is kept as one job-scoped fact — new `state/pve/backup/job/{node}`
+    document and `backup-job-failed` rule — instead of being attributed to
+    guests PVE never named. Parsing the task log's free text for per-guest lines
+    is a deliberate non-goal;
+  - vzdump tasks have an age bound, `alerts.backup_task_max_age_secs`, default
+    48 h. The task query is bounded by rows, not time, so without it the oldest
+    surviving one-off wins forever;
+  - a failed task that a **newer volume** supersedes no longer fires;
+  - templates and `exempt_vmids` are skipped in the backup rules, as they always
+    were in the guest rules;
+  - `PveBackupSummary.volumes` is `Option<u32>`. `None` when no backup-capable
+    pool could be listed at all; `0` now means only "this guest has no backups".
+
+  Also fixed, and independent: `sweep()` **took** the backup cache while
+  refilling it only every `backup_interval_secs`, so with the shipped 60 s/900 s
+  cadences fourteen sweeps in fifteen carried an empty vec — no backup document
+  published, no backup rule graded, and `reconcile` reading that as "the
+  condition cleared". Every backup alert resolved and re-fired on a 15-minute
+  cycle. The e2e missed it because it swept two *different* pollers.
+
+- **`sensor-pve`: pool over-commitment is reportable on a `dir` storage** (#881).
+  PVE surfaces per-volume sizes for LVM-thin and ZFS and nothing for a `dir`
+  storage, and summing the empty set gave `Some(0)` — "nothing is provisioned",
+  the exact opposite of the truth — so the rule this sensor leads with ("990 GB
+  provisioned on a 937 GB pool") could never fire on the storage type the
+  reference deployment actually runs. `PveStoragePool`'s own doc comment already
+  said `None`, never zero.
+
+  Where the plugin reports nothing, `allocated` is now **derived from the
+  guests**: every disk line already names its storage and its declared size, and
+  the guests are joined before the pool loop. New `allocated_source` field and
+  gauge label distinguish `reported` from `derived_from_guests`, because a
+  derived total is a **floor** — a detached `unused<N>` volume still occupies the
+  pool and is deliberately not counted. On the reference fleet that yields
+  790 GiB against 936 GiB, ratio 0.84, matching that fleet's own records.
+
+- **`sensor-pve` says when the API refuses it** (#880). A 403/404/501 became
+  `Ok(None)` with **no log line at any level**, and every caller logged failures
+  at `debug` — so a token whose role is narrower than `PVEAuditor` produced
+  `volumes: 0` and no `allocated`, in silence, at the shipped `logging.level:
+  "info"`. Refusals and listing failures now warn once per endpoint per
+  transition, and say what the consequence is.
+
+### Added
+
+- **`zensight-sensor-pve --diagnose`** (#880): a one-shot that asks the
+  configured API everything the backup and storage rules depend on — which pools
+  will be listed, what each content listing returns, which volids name no guest
+  this sensor can read, how old each vzdump task is, and what the guest disks sum
+  to per pool — prints it in plain sentences and exits. Read-only, and it never
+  opens a Zenoh session: debugging a token should not join a fleet. Follows
+  `--discover` in the SNMP sensor (#825).
+
 - **pve, container and probe telemetry lands on a host card** (#883, #884,
   #885). Three sensors shipped in 0.13.0 filed every series under the *subject
   being described* rather than the *host doing the describing*: a VMID (`160`),

@@ -37,6 +37,7 @@
 
 pub mod alerts;
 pub mod api;
+pub mod cli;
 pub mod config;
 pub mod poller;
 mod telemetry_guard;

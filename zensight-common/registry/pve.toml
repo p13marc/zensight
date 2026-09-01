@@ -238,6 +238,24 @@ cardinality = 1
 since = "1.0"
 description = "replication jobs whose last run failed (0 where replication is unconfigured)"
 
+[[subject]]
+path = "backup/job/{node}/ok"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "1"
+cardinality = 32
+since = "1.1"
+description = "1 when the last whole-job vzdump on this node exited OK, 0 when it did not"
+
+[[subject]]
+path = "backup/job/{node}/duration_secs"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "s"
+cardinality = 32
+since = "1.1"
+description = "how long the last whole-job vzdump on this node took"
+
 # ── State documents ──────────────────────────────────────────────────────────
 
 [[subject]]
@@ -266,6 +284,15 @@ cardinality = 512
 ttl_s = 86400
 since = "1.0"
 description = "last vzdump task outcome plus the newest two stored volumes — the size comparison comes from the store, so a sensor restart does not reset the baseline"
+
+[[subject]]
+path = "backup/job/{node}"
+class = "state"
+type = "PveBackupJob"
+cardinality = 32
+ttl_s = 86400
+since = "1.1"
+description = "the last WHOLE-JOB vzdump run on this node — a job configured `all 1` covers every guest and names none, so PVE records it as one task with an empty id and the per-guest results live only in the task log; grading it once beats inventing a per-guest verdict (#880)"
 
 [[subject]]
 path = "cluster"

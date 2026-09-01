@@ -61,6 +61,21 @@ read.
 | `pve.accept_invalid_certs` | `false` | see below |
 | `pve.evidence` | `true` | third-party identity claims about guests |
 | `pve.alerts.*` | see [`assertions.md`](assertions.md) | |
+| `pve.alerts.backup_job_failed` | `true` | grade a whole-job vzdump (`all 1`) once, rather than as a failure of every guest it covered (#880) |
+| `pve.alerts.backup_task_max_age_secs` | `172800` (48 h) | how old a vzdump task may be and still be evidence about the last backup. The task query is bounded by rows, not time, so without this an ancient one-off wins forever. 0 disables |
+
+## One-shot diagnosis
+
+```bash
+zensight-sensor-pve --config /etc/zensight/pve.json5 --diagnose
+```
+
+Asks the configured API everything the backup and storage rules depend on —
+which pools will be listed, what each content listing returns, which volids
+name no guest this sensor can read, how old each vzdump task is, and what the
+guest disks sum to per pool — prints it in plain sentences, and exits. It is
+read-only and **never opens a Zenoh session**: debugging a token should not
+join a fleet.
 
 ### Three cadences, on purpose
 
