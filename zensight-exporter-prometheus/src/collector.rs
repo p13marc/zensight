@@ -320,8 +320,15 @@ impl MetricCollector {
     /// alerts are stored; resolved alerts clear their series. No-op unless
     /// alert export is enabled.
     pub fn record_alert(&self, alert: zensight_common::alert::Alert) {
+        self.record_alert_from(None, alert);
+    }
+
+    /// [`record_alert`](Self::record_alert) with the origin chunk of the key
+    /// the alert arrived on, so a vanished liveliness token — which names
+    /// the origin, not the hostname — can retire it.
+    pub fn record_alert_from(&self, origin: Option<String>, alert: zensight_common::alert::Alert) {
         if self.prometheus_config.export_alerts {
-            self.alerts.apply(alert);
+            self.alerts.apply_from(origin, alert);
         }
     }
 
@@ -455,15 +462,16 @@ impl MetricCollector {
         // and nothing changed" far more often than it means "gone" — and since
         // absence is the resolve signal, a sweep here silently closed live
         // incidents. A sensor that dies is caught by its liveliness token
-        // disappearing instead; see `AlertStore::drop_source`.
+        // disappearing instead; see `AlertStore::drop_origin`.
         removed
     }
 
-    /// Drop every firing alert from a source whose liveliness token vanished.
-    pub fn drop_source_alerts(&self, source: &str) -> usize {
-        let removed = self.alerts.drop_source(source);
+    /// Drop every firing alert that arrived under `origin`, because that
+    /// origin's liveliness token vanished.
+    pub fn drop_origin_alerts(&self, origin: &str) -> usize {
+        let removed = self.alerts.drop_origin(origin);
         if removed > 0 {
-            debug!(source, removed, "Dropped alerts for a departed sensor");
+            debug!(origin, removed, "Dropped alerts for a departed sensor");
         }
         removed
     }

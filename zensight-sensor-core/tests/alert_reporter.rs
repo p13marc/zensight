@@ -128,6 +128,81 @@ async fn debounce_suppresses_first_observe() {
     assert_eq!(reporter.active_count(), 0);
 }
 
+/// A condition that clears before its `for:` window elapses must be
+/// forgotten, not remembered: the next observation starts a fresh clock, and
+/// the tracked set stays bounded by what is violated *now*.
+///
+/// Both halves used to fail. An unpublished entry was never evicted, so
+/// `first_seen` was frozen at its first blip and a second blip an hour later
+/// published immediately ("continuously observed" was really "seen once
+/// ≥ N ago"); and a grader that put a per-sweep measurement in the labels
+/// (probe's `duration_ms`, systemd's `overdue_secs`) minted a new key every
+/// sweep — none of which fired, none of which could ever be dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cleared_condition_inside_its_window_is_forgotten() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let sub = session
+        .declare_subscriber("v1/*/state/netlink/alert/*")
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+    let source = unique_source();
+    let window = Some(Duration::from_millis(400));
+
+    // A per-sweep measurement in the labels: every sweep is a new key.
+    for sweep in 0..5 {
+        let a = sample_alert(&source).with_label("latency_ms", format!("{}", 100 + sweep));
+        reporter.observe(a.clone(), window).await.expect("observe");
+        reporter
+            .reconcile("ssh-listening", &[a.alert_key()])
+            .await
+            .expect("reconcile");
+        assert_eq!(
+            reporter.tracked_count(),
+            1,
+            "the previous sweep's key must be evicted, not accumulated"
+        );
+    }
+    assert_eq!(reporter.active_count(), 0, "nothing survived its window");
+
+    // Blip, clear, wait past the window, blip again: the second blip must
+    // NOT publish — its clock started at the second blip, not the first.
+    let a = sample_alert(&source);
+    reporter.observe(a.clone(), window).await.expect("observe");
+    reporter
+        .reconcile("ssh-listening", &[])
+        .await
+        .expect("reconcile clears it");
+    assert_eq!(reporter.tracked_count(), 0);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    reporter
+        .observe(a.clone(), window)
+        .await
+        .expect("observe again");
+    let res = tokio::time::timeout(Duration::from_millis(300), sub.recv_async()).await;
+    assert!(
+        res.is_err(),
+        "a fresh observation must not inherit the first blip's clock"
+    );
+
+    // Held continuously across the window: fires exactly once.
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    reporter
+        .observe(a.clone(), window)
+        .await
+        .expect("observe held");
+    let s = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+        .await
+        .expect("recv firing timed out")
+        .expect("recv firing");
+    let got: Alert = decode_auto(&s.payload().to_bytes()).expect("decode firing");
+    assert_eq!(got.state, AlertState::Firing);
+    assert_eq!(reporter.active_count(), 1);
+}
+
 /// `reconcile_labeled` resolves only alerts carrying the matching label —
 /// the proxy-sensor case (snmp/modbus/gnmi) where several observed devices
 /// share one reporter and each device sweeps independently.

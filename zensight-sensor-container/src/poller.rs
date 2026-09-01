@@ -33,9 +33,15 @@ pub struct Poller {
     reporter: Option<Arc<AlertReporter>>,
     health: Arc<SensorHealth>,
     upstream: Option<UpstreamChecker>,
-    /// `name -> (restart_count, oom_kills)` from the previous cycle.
+    /// `name -> (restart_count, oom_kills)` from the previous cycle — except
+    /// that the OOM half is held still for `alerts.oom_hold_secs` once a
+    /// burst begins (see `oom_burst_since`), so the delta rule sees the
+    /// kill on more than the one sweep it happened in.
     baseline: HashMap<String, (u64, u64)>,
     baseline_at: Option<Instant>,
+    /// `name -> when the current burst of new OOM kills was first seen`.
+    /// Present only while a burst is being held against the baseline.
+    oom_burst_since: HashMap<String, Instant>,
     /// Resolved upstream digests, refreshed on their own slow cadence because
     /// registries rate-limit and the answer changes on a release cadence.
     upstream_cache: HashMap<String, (Option<String>, Option<bool>)>,
@@ -69,6 +75,7 @@ impl Poller {
             upstream,
             baseline: HashMap::new(),
             baseline_at: None,
+            oom_burst_since: HashMap::new(),
             upstream_cache: HashMap::new(),
             upstream_at: None,
         }
@@ -360,16 +367,28 @@ impl Poller {
 
         // The baseline advances only after grading, so the delta rules always
         // compare against the PREVIOUS cycle rather than this one.
-        self.baseline = containers
-            .iter()
-            .map(|c| {
-                (
-                    c.name.clone(),
-                    (c.restart_count, c.resources.oom_kills.unwrap_or(0)),
-                )
-            })
-            .collect();
-        self.baseline_at = Some(Instant::now());
+        let now = Instant::now();
+        let hold = Duration::from_secs(self.cfg.alerts.oom_hold_secs);
+        let mut next = HashMap::with_capacity(containers.len());
+        for c in containers {
+            let kills = c.resources.oom_kills.unwrap_or(0);
+            let prev_kills = self.baseline.get(&c.name).map(|(_, k)| *k);
+            let burst = self.oom_burst_since.get(&c.name).copied();
+            let (held, burst) = next_oom_baseline(prev_kills, kills, burst, now, hold);
+            match burst {
+                Some(since) => {
+                    self.oom_burst_since.insert(c.name.clone(), since);
+                }
+                None => {
+                    self.oom_burst_since.remove(&c.name);
+                }
+            }
+            next.insert(c.name.clone(), (c.restart_count, held));
+        }
+        self.oom_burst_since
+            .retain(|name, _| next.contains_key(name));
+        self.baseline = next;
+        self.baseline_at = Some(now);
     }
 }
 
@@ -466,5 +485,79 @@ mod tests {
     #[test]
     fn a_container_with_no_ip_makes_no_claim() {
         assert!(evidence(&c("caddy", vec![])).is_none());
+    }
+}
+
+/// The OOM half of the next baseline, and the burst marker to keep.
+///
+/// Restarts advance every cycle. The OOM baseline is HELD while a burst of
+/// new kills is younger than `hold`: a kill is a one-sweep event against a
+/// cumulative counter, and an alert with a `for:` window needs to see the
+/// condition on more than one sweep. Advancing every cycle made it true for
+/// exactly one poll — never long enough — so `container-oom-killed` could not
+/// fire at all with the shipped cadences. Once the burst is older than `hold`
+/// the baseline catches up and the alert resolves on the next sweep.
+fn next_oom_baseline(
+    prev: Option<u64>,
+    kills: u64,
+    burst_since: Option<Instant>,
+    now: Instant,
+    hold: Duration,
+) -> (u64, Option<Instant>) {
+    match prev {
+        Some(prev) if kills > prev => {
+            let since = burst_since.unwrap_or(now);
+            if now.duration_since(since) < hold {
+                (prev, Some(since))
+            } else {
+                (kills, None)
+            }
+        }
+        _ => (kills, None),
+    }
+}
+
+#[cfg(test)]
+mod oom_hold_tests {
+    use super::*;
+
+    /// With the shipped 30 s poll and 60 s `for_secs`, a kill seen for one
+    /// sweep only could never fire. The baseline must stay put for the hold
+    /// window and then catch up, so the alert fires AND later resolves.
+    #[test]
+    fn a_burst_of_oom_kills_holds_the_baseline_for_the_window() {
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(600);
+
+        // First sweep after the kill: burst begins, baseline held at 3.
+        let (held, burst) = next_oom_baseline(Some(3), 4, None, t0, hold);
+        assert_eq!(held, 3);
+        assert_eq!(burst, Some(t0));
+
+        // Every sweep inside the window: still held, burst start unchanged.
+        let t1 = t0 + Duration::from_secs(90);
+        assert_eq!(
+            next_oom_baseline(Some(3), 4, burst, t1, hold),
+            (3, Some(t0))
+        );
+        // A second kill inside the window extends nothing; the delta grows.
+        assert_eq!(
+            next_oom_baseline(Some(3), 5, burst, t1, hold),
+            (3, Some(t0))
+        );
+
+        // Past the window: the baseline catches up and the burst is over.
+        let t2 = t0 + hold;
+        assert_eq!(next_oom_baseline(Some(3), 5, burst, t2, hold), (5, None));
+
+        // No kill, or no previous baseline: nothing is held.
+        assert_eq!(next_oom_baseline(Some(5), 5, None, t2, hold), (5, None));
+        assert_eq!(next_oom_baseline(None, 7, None, t2, hold), (7, None));
+
+        // A zero hold is the old behaviour: one sweep, then caught up.
+        assert_eq!(
+            next_oom_baseline(Some(3), 4, None, t0, Duration::ZERO),
+            (4, None)
+        );
     }
 }

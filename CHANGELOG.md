@@ -71,6 +71,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Alerts that could never fire, and a firing set that only grew.** Labels
+  are an alert's identity — `alert_key` hashes every non-`host.*` label — and
+  the reporter publishes only once the *same key* has been violated
+  continuously for `for_secs`. Three sensors put a per-sweep **measurement**
+  in the labels, so every sweep minted a fresh key with a fresh clock and the
+  debounce never elapsed:
+
+  - **probe** stamped `duration_ms` on every alert of all seven rules. With the
+    shipped 60 s interval and 120 s `for_secs`, **no probe alert has ever
+    fired** — a target down for a week paged nobody. The duration is a
+    telemetry point and, for a timeout, part of the summary; it is no longer a
+    label.
+  - **systemd** put `overdue_secs` on `systemd-timer-overdue` (it grows by one
+    poll every tick) and `mem_bytes` on `systemd-unit-mem`. Both ride the
+    summary now.
+  - **container** put `failing_streak` on `container-unhealthy` and
+    `oom_kills_total` on `container-oom-killed`. The OOM rule had a second
+    problem: a kill is a one-sweep event against a cumulative counter, and
+    with the 30 s poll and 60 s `for_secs` the condition was true for exactly
+    one sweep — never long enough. New `alerts.oom_hold_secs` (default 600)
+    holds the OOM baseline still after the first new kill, so the alert fires,
+    stays up for the hold window, and resolves on its own.
+
+  The enabling defect was in `zensight-sensor-core`: `reconcile` only evicted
+  *published* entries, so an entry still inside its `for:` window was never
+  dropped when its condition cleared. Two consequences: the tracked set grew
+  by one entry per sweep forever (the sensor watching for leaks leaked through
+  its own alerting), and `first_seen` was never reset, so "continuously
+  observed for N" really meant "seen once ≥ N ago" — a condition that blipped
+  once, cleared for an hour, and blipped again published immediately. A
+  cleared condition is now forgotten, published or not; the next observation
+  starts a fresh clock. `AlertReporter::tracked_count` exposes the bound and a
+  reporter-level test drives two sweeps with a changing measurement.
+
+  The label changes re-key those alerts. #882's adoption sweep retires the old
+  keys on each sensor's first restart; no manual sweep.
+
+- **The Prometheus exporter retires a dead sensor's alerts.** Its liveliness
+  handler dropped alerts whose `source` equalled the vanished token's origin
+  chunk (`h-<12hex>`) — but `Alert::source` is a *hostname*, so the two could
+  never be equal and a SIGKILLed or OOM-killed sensor's `zensight_alert` series
+  was exported forever (the staleness sweep deliberately does not touch
+  alerts, #758). Alerts now remember the origin chunk of the key they arrived
+  on and are dropped by that. The store test feeds a real origin, and asserts
+  that matching the hostname drops nothing.
+
+- **The OTel exporter seeds the firing set at startup**, as the Prometheus one
+  has since #758. Without it every alert already firing at an exporter restart
+  resolved without a span, because the span tracker never saw its firing edge
+  — and since #882 a restarted producer *adopts* its firing set rather than
+  re-publishing it, so nothing re-supplied the edge. The seed primes the
+  tracker only; no log record is re-emitted for a transition an earlier
+  incarnation already shipped.
+
+- **The OTel exporter refuses a kind conflict *before* storing the sample.**
+  The "keeping the first" guard ran after the observation had been written, so
+  a `Gauge` arriving under a name registered as a `Counter` was exported by
+  the registered instrument's callback as a monotonic Sum — the exact
+  contract violation the warning claimed to prevent.
+
+- **Prometheus remote-write watermarks are pruned with the series.** The
+  per-series `last_pushed` map was documented as "pruned alongside" the
+  collector's stale sweep and never was; it was bounded by lifetime label
+  churn, not `max_series`. A series that leaves the snapshot now takes its
+  watermark with it.
+
 - **`@rpc/systemd/expectations/set` accepts the shape it advertises** (#849).
   The registry has declared this request as `ExpectationsConfig` — the plain
   expectation set — since 1.0, which is what hostspec's equivalent accepts and

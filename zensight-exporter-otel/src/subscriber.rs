@@ -59,6 +59,43 @@ impl TelemetrySubscriber {
         self
     }
 
+    /// One GET on the alerts selector so a restarted exporter does not
+    /// start blind. Answered by a `latest` storage on `v1/*/state/**`, and by
+    /// nobody in a deployment without one — which is normal, not an error.
+    async fn seed_alerts(
+        session: &zenoh::Session,
+        exporter: &crate::exporter::OtelExporter,
+    ) -> usize {
+        const SEED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+        let replies = match session
+            .get(all_alerts_wildcard())
+            .target(zenoh::query::QueryTarget::All)
+            .timeout(SEED_TIMEOUT)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "Alert seed GET failed; starting with an empty firing set");
+                return 0;
+            }
+        };
+        let mut primed = 0usize;
+        while let Ok(reply) = replies.recv_async().await {
+            let Ok(sample) = reply.result() else { continue };
+            if sample.kind() == SampleKind::Delete {
+                continue;
+            }
+            if let Ok(alert) =
+                zensight_common::decode_auto::<zensight_common::Alert>(&sample.payload().to_bytes())
+                && alert.state == zensight_common::AlertState::Firing
+            {
+                exporter.prime_alert(&alert);
+                primed += 1;
+            }
+        }
+        primed
+    }
+
     /// Run the subscriber until the shutdown signal is received.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
         info!("Connecting to Zenoh...");
@@ -95,12 +132,16 @@ impl TelemetrySubscriber {
         let alert_subscriber = if self.exporter.wants_alert_stream() {
             let alerts_key = all_alerts_wildcard();
             info!(key_expr = %alerts_key, "Subscribing to sensor alerts");
-            Some(
-                session
-                    .declare_subscriber(&alerts_key)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to create alert subscriber: {}", e))?,
-            )
+            let sub = session
+                .declare_subscriber(&alerts_key)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create alert subscriber: {}", e))?;
+            // Seed the in-flight set, as the Prometheus exporter does: an
+            // alert firing before this process started must be known to the
+            // span tracker, or its eventual resolve completes nothing.
+            let primed = Self::seed_alerts(&session, &self.exporter).await;
+            info!(primed, "Seeded the firing alert set");
+            Some(sub)
         } else {
             None
         };
