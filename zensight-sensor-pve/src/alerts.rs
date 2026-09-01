@@ -11,7 +11,9 @@
 
 use std::collections::HashMap;
 
-use zensight_common::pve::{PveBackupSummary, PveClusterHealth, PveGuest, PveStoragePool};
+use zensight_common::pve::{
+    PveBackupJob, PveBackupSummary, PveClusterHealth, PveGuest, PveStoragePool,
+};
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
 
 use crate::config::PveAlertsConfig;
@@ -22,6 +24,7 @@ pub const RULE_NIC_FIREWALL: &str = "guest-nic-firewall-off";
 pub const RULE_POOL_USED: &str = "pool-usage";
 pub const RULE_POOL_OVERCOMMIT: &str = "pool-overcommitted";
 pub const RULE_BACKUP_FAILED: &str = "backup-failed";
+pub const RULE_BACKUP_JOB_FAILED: &str = "backup-job-failed";
 pub const RULE_BACKUP_STALE: &str = "backup-stale";
 pub const RULE_BACKUP_SHRUNK: &str = "backup-shrunk";
 pub const RULE_QUORUM: &str = "cluster-not-quorate";
@@ -37,6 +40,7 @@ pub const ALL_RULES: &[&str] = &[
     RULE_POOL_USED,
     RULE_POOL_OVERCOMMIT,
     RULE_BACKUP_FAILED,
+    RULE_BACKUP_JOB_FAILED,
     RULE_BACKUP_STALE,
     RULE_BACKUP_SHRUNK,
     RULE_QUORUM,
@@ -54,6 +58,8 @@ pub struct Observation<'a> {
     pub guests: &'a [PveGuest],
     pub pools: &'a [PveStoragePool],
     pub backups: &'a [PveBackupSummary],
+    /// Whole-job vzdump runs — the ones that name no guest (#880).
+    pub backup_jobs: &'a [PveBackupJob],
     pub cluster: Option<&'a PveClusterHealth>,
     /// Wall clock, seconds — injected so staleness is testable.
     pub now_secs: i64,
@@ -208,11 +214,31 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
     }
 
     for b in obs.backups {
+        // A template is a stamp, not a guest — and the reference fleet's job
+        // excludes 9000 explicitly, yet it fired `backup-failed` anyway,
+        // because this loop had neither guard the guest loop above has had
+        // all along (#880). A guest the operator has exempted is exempt here
+        // too: "I know, and I have decided" is an answer.
+        if obs.guests.iter().any(|g| g.vmid == b.vmid && g.template)
+            || cfg.exempt_vmids.contains(&b.vmid)
+        {
+            continue;
+        }
         let base = [("vmid", b.vmid.to_string())];
 
+        // A failed task is evidence about a backup that failed — unless a
+        // volume exists that is NEWER than the task, in which case the
+        // failure has already been superseded by a run that worked. Volumes
+        // are the ground truth; the task says why.
+        let superseded = |t: &zensight_common::pve::PveBackupTask| {
+            b.latest
+                .as_ref()
+                .is_some_and(|l| l.created_at > t.started_at)
+        };
         if cfg.backup_failed
             && let Some(t) = &b.last_task
             && !t.ok
+            && !superseded(t)
         {
             out.push(alert(
                 obs.source,
@@ -290,6 +316,35 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
         }
     }
 
+    // A whole-job run covers every guest and names none, so it is graded once
+    // (#880). Seven per-guest criticals for one job is not seven findings.
+    if cfg.backup_job_failed {
+        for j in obs.backup_jobs {
+            if let Some(t) = &j.last_task
+                && !t.ok
+            {
+                out.push(alert(
+                    obs.source,
+                    RULE_BACKUP_JOB_FAILED,
+                    AlertSeverity::Critical,
+                    format!(
+                        "the last whole-job vzdump on {} failed: {}",
+                        j.node,
+                        t.exit_status.as_deref().unwrap_or("no exit status")
+                    ),
+                    &[
+                        ("node", j.node.clone()),
+                        ("upid", t.upid.clone()),
+                        (
+                            "exit_status",
+                            t.exit_status.clone().unwrap_or_else(|| "unknown".into()),
+                        ),
+                    ],
+                ));
+            }
+        }
+    }
+
     if let Some(c) = obs.cluster {
         // `quorate: None` is a standalone node — no quorum to lose, so this
         // rule cannot fire there. Publishing "not quorate" for a single node
@@ -363,7 +418,8 @@ fn human_secs(s: u64) -> String {
 mod tests {
     use super::*;
     use zensight_common::pve::{
-        GuestKind, GuestNic, PveBackupTask, PveBackupVolume, PveNodeStatus, PveReplicationJob,
+        AllocationSource, GuestKind, GuestNic, PveBackupTask, PveBackupVolume, PveNodeStatus,
+        PveReplicationJob,
     };
 
     /// The reporting hypervisor: every alert is filed under it, never under
@@ -399,6 +455,7 @@ mod tests {
         Observation {
             source: HOST,
             guests,
+            backup_jobs: &[],
             pools: &[],
             backups: &[],
             cluster: None,
@@ -486,6 +543,7 @@ mod tests {
             used_bytes: 300 * 1024 * 1024 * 1024,
             avail_bytes: 637 * 1024 * 1024 * 1024,
             allocated_bytes: Some(990 * 1024 * 1024 * 1024),
+            allocated_source: Some(AllocationSource::Reported),
             overcommit_ratio: Some(990.0 / 937.0),
             content: vec![],
             observed_at_ms: 0,
@@ -538,7 +596,7 @@ mod tests {
             }),
             size_change_pct: change,
             age_secs: Some(age),
-            volumes: 2,
+            volumes: Some(2),
             observed_at_ms: 0,
         }
     }
@@ -705,6 +763,7 @@ mod tests {
             used_bytes: 99,
             avail_bytes: 1,
             allocated_bytes: Some(200),
+            allocated_source: Some(AllocationSource::Reported),
             overcommit_ratio: Some(2.0),
             content: vec![],
             observed_at_ms: 0,
@@ -731,9 +790,24 @@ mod tests {
             backup_stale_secs: 60,
             ..Default::default()
         };
+        // A whole-job run that failed: one job-scoped alert, not one per guest.
+        let jobs = [PveBackupJob {
+            node: "pve".into(),
+            last_task: Some(PveBackupTask {
+                upid: "UPID:pve:...:vzdump::root@pam:".into(),
+                node: "pve".into(),
+                exit_status: Some("job errors".into()),
+                ok: false,
+                started_at: 0,
+                duration_secs: Some(30),
+            }),
+            age_secs: Some(60),
+            observed_at_ms: 0,
+        }];
         let a = grade(
             &cfg,
             &Observation {
+                backup_jobs: &jobs,
                 source: "pve",
                 guests: &g,
                 pools: &pools,

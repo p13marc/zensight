@@ -244,6 +244,9 @@ kind = "json-schema"
 [types.PveBackupSummary]
 kind = "json-schema"
 
+[types.PveBackupJob]
+kind = "json-schema"
+
 [types.PveClusterHealth]
 kind = "json-schema"
 

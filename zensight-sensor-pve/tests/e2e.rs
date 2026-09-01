@@ -121,11 +121,12 @@ async fn storage_content(
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::Json<Value> {
     if q.get("content").map(String::as_str) == Some("backup") {
+        let (now, day) = (now(), 86400);
         return axum::Json(json!({"data": [
             {"volid": "local:backup/vzdump-qemu-140-2026_08_28-02_00_01.vma.zst",
-             "size": 5000000000u64, "ctime": 1788100000, "format": "vma.zst"},
+             "size": 5000000000u64, "ctime": now - day, "format": "vma.zst"},
             {"volid": "local:backup/vzdump-qemu-140-2026_08_27-02_00_01.vma.zst",
-             "size": 10000000000u64, "ctime": 1788013600, "format": "vma.zst"},
+             "size": 10000000000u64, "ctime": now - 2 * day, "format": "vma.zst"},
         ]}));
     }
     axum::Json(json!({"data": [
@@ -136,14 +137,39 @@ async fn storage_content(
     ]}))
 }
 
+/// Wall clock, so the fixture's ages are ages and not fixed epochs — the
+/// staleness bound (#880) is a real rule and the test must feel it.
+fn now() -> i64 {
+    zensight_common::current_timestamp_millis() / 1000
+}
+
+/// The reference fleet's task list, with the three shapes that produced
+/// permanently-firing false criticals (#880).
 async fn tasks(State(_): State<Fixture>) -> axum::Json<Value> {
+    let (now, hour, day) = (now(), 3600, 86400);
     axum::Json(json!({"data": [
-        {"upid": "UPID:pve:0001:vzdump::", "id": "140", "type": "vzdump",
-         "starttime": 1788100000, "endtime": 1788100240, "exitstatus": "OK",
-         "node": "pve", "status": "stopped"},
+        {"upid": "UPID:pve:0001:vzdump:140:", "id": "140", "type": "vzdump",
+         "starttime": now - 5 * hour, "endtime": now - 5 * hour + 240,
+         "exitstatus": "OK", "node": "pve", "status": "stopped"},
         // Still running: no verdict yet, and must not count as a failure.
-        {"upid": "UPID:pve:0002:vzdump::", "id": "201", "type": "vzdump",
-         "starttime": 1788100300, "node": "pve", "status": "running"},
+        {"upid": "UPID:pve:0002:vzdump:201:", "id": "201", "type": "vzdump",
+         "starttime": now - 300, "node": "pve", "status": "running"},
+        // A WHOLE-JOB run (`all 1`): PVE gives it an EMPTY id, because it
+        // covers every guest and names none. This row used to be dropped
+        // outright, which is what sent the sensor looking for a per-guest
+        // task and finding the July one below.
+        {"upid": "UPID:pve:0003:vzdump::", "id": "", "type": "vzdump",
+         "starttime": now - 6 * hour, "endtime": now - 6 * hour + 1800,
+         "exitstatus": "job errors", "node": "pve", "status": "stopped"},
+        // A one-off from six weeks ago that failed. It is the newest task
+        // TAGGED with 201, and it is not evidence about last night.
+        {"upid": "UPID:pve:0004:vzdump:201:", "id": "201", "type": "vzdump",
+         "starttime": now - 42 * day, "endtime": now - 42 * day + 14,
+         "exitstatus": "command failed", "node": "pve", "status": "stopped"},
+        // The same, for a TEMPLATE the job excludes. It fired a critical.
+        {"upid": "UPID:pve:0005:vzdump:9000:", "id": "9000", "type": "vzdump",
+         "starttime": now - 2 * hour, "endtime": now - 2 * hour + 9,
+         "exitstatus": "command failed", "node": "pve", "status": "stopped"},
     ]}))
 }
 
@@ -301,13 +327,30 @@ async fn the_hypervisor_contract_end_to_end() {
 
     // ── Contract 1: the audit's findings arrive as alerts ───────────────────
     let sweep = poller.sweep().await.expect("first sweep");
+
+    // #880, the cadence bug: `sweep()` used to TAKE the backup cache while
+    // refilling it only every `backup_interval_secs`, so with the shipped
+    // 60 s / 900 s cadences fourteen sweeps in fifteen carried no backups at
+    // all — no document published, no backup rule graded, and `reconcile`
+    // reading that as "the condition cleared". Every backup alert resolved
+    // and re-fired on a 15-minute cycle. Two sweeps of the SAME poller is all
+    // it takes to see it; the test below swept two different ones.
+    let again = poller.sweep().await.expect("second sweep, same poller");
+    assert_eq!(
+        again.backups.len(),
+        sweep.backups.len(),
+        "an off-cadence sweep must carry the cached backups, not an empty vec"
+    );
+    assert_eq!(again.backup_jobs.len(), sweep.backup_jobs.len());
     assert_eq!(sweep.guests.len(), 3, "two guests and a template");
     poller.publish(&sweep).await;
 
-    // Four assertions fire from this fixture: VM 140's onboot and its NIC, the
-    // over-committed pool, and the backup that succeeded while halving.
+    // Five assertions fire from this fixture: VM 140's onboot and its NIC, the
+    // over-committed pool, the backup that succeeded while halving, and the
+    // whole-job vzdump that failed. NOT firing is half the point — see the
+    // #880 block below.
     let mut fired: std::collections::HashMap<String, Alert> = Default::default();
-    for _ in 0..4 {
+    for _ in 0..5 {
         let (_, kind, alert) = recv::<Alert>(&alerts_sub, "alert").await;
         assert_eq!(kind, zenoh::sample::SampleKind::Put);
         let a = alert.unwrap();
@@ -327,6 +370,36 @@ async fn the_hypervisor_contract_end_to_end() {
         .get("guest-nic-firewall-off")
         .expect("VM 140's inert firewall file must fire");
     assert_eq!(fw.labels["nic"], "net0");
+
+    // #880: the three shapes that produced permanently-firing false criticals.
+    let job = fired
+        .get("backup-job-failed")
+        .expect("a failed whole-job vzdump must fire — once");
+    assert_eq!(job.labels["node"], "pve");
+    assert_eq!(job.labels["exit_status"], "job errors");
+    let per_guest_failures: Vec<&str> = fired
+        .get("backup-failed")
+        .map(|a| vec![a.labels["vmid"].as_str()])
+        .unwrap_or_default();
+    assert!(
+        !per_guest_failures.contains(&"201"),
+        "a six-week-old one-off is not evidence about last night"
+    );
+    assert!(
+        !per_guest_failures.contains(&"9000"),
+        "a template is excluded from the job and must not be graded on it"
+    );
+
+    // #880(b): a volume count is a measurement or it is `None`. Reporting a
+    // confident `0` for a listing that was refused, failed or never attempted
+    // is the same "silence is not evidence" mistake `HealthState::NeverRan`
+    // exists to avoid.
+    let b140 = sweep
+        .backups
+        .iter()
+        .find(|b| b.vmid == 140)
+        .expect("guest 140 has stored backups");
+    assert_eq!(b140.volumes, Some(2));
 
     let over = fired
         .get("pool-overcommitted")
@@ -531,7 +604,8 @@ async fn the_hypervisor_contract_end_to_end() {
     );
     assert_eq!(
         reporter.active_count(),
-        2,
-        "the over-commitment and the shrunk backup must keep firing"
+        3,
+        "the over-commitment, the shrunk backup and the failed whole-job run \
+         must keep firing"
     );
 }

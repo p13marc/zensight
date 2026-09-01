@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zensight_common::pve::{
-    PveBackupSummary, PveBackupVolume, PveClusterHealth, PveGuest, PveStoragePool,
+    AllocationSource, PveBackupJob, PveBackupSummary, PveBackupVolume, PveClusterHealth, PveGuest,
+    PveStoragePool,
 };
 use zensight_common::{HostEvidence, QosClass, TelemetryValue};
 use zensight_sensor_core::{AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth};
@@ -37,6 +38,8 @@ pub struct Sweep {
     pub metrics: Vec<GuestMetrics>,
     pub pools: Vec<PveStoragePool>,
     pub backups: Vec<PveBackupSummary>,
+    /// Whole-job vzdump runs, one per node that has any (#880).
+    pub backup_jobs: Vec<PveBackupJob>,
     pub cluster: Option<PveClusterHealth>,
 }
 
@@ -65,6 +68,7 @@ pub struct Poller {
     last_config_poll: Option<Instant>,
     last_backup_poll: Option<Instant>,
     backups: Vec<PveBackupSummary>,
+    backup_jobs: Vec<PveBackupJob>,
 }
 
 impl Poller {
@@ -92,6 +96,7 @@ impl Poller {
             last_config_poll: None,
             last_backup_poll: None,
             backups: Vec::new(),
+            backup_jobs: Vec::new(),
         }
     }
 
@@ -181,12 +186,27 @@ impl Poller {
         for rt in &pool_runtimes {
             // A shared pool is listed once per node; asking every node for the
             // same content listing is N times the work for one answer.
-            let allocated = match self.client.storage_allocated(&rt.node, &rt.storage).await {
+            let reported = match self.client.storage_allocated(&rt.node, &rt.storage).await {
                 Ok(a) => a,
                 Err(e) => {
-                    tracing::debug!(storage = %rt.storage, error = %e, "pve: content listing failed");
+                    tracing::warn!(
+                        storage = %rt.storage, node = %rt.node, error = %e,
+                        "pve: content listing failed — allocated will be derived or absent"
+                    );
                     None
                 }
+            };
+            // #881: PVE surfaces per-volume sizes for LVM-thin and ZFS and
+            // nothing for a `dir` storage, so the headline finding this
+            // sensor exists for — "990 GB provisioned on a 937 GB pool" —
+            // was unreportable on the storage type the reference deployment
+            // actually runs. Every input for the answer is already in hand:
+            // each guest disk names its storage and its declared size, and
+            // the guests are joined above, before this loop.
+            let allocated = match reported {
+                Some(bytes) => Some((bytes, AllocationSource::Reported)),
+                None => derive_allocated(&guests, &rt.storage)
+                    .map(|bytes| (bytes, AllocationSource::DerivedFromGuests)),
             };
             pools.push(build_pool(rt, allocated));
         }
@@ -198,7 +218,9 @@ impl Poller {
             .last_backup_poll
             .is_none_or(|t| t.elapsed() >= Duration::from_secs(self.cfg.backup_interval_secs));
         if refresh_backups {
-            self.backups = self.collect_backups(&pools).await;
+            let (summaries, jobs) = self.collect_backups(&pools).await;
+            self.backups = summaries;
+            self.backup_jobs = jobs;
             self.last_backup_poll = Some(Instant::now());
         }
 
@@ -223,47 +245,105 @@ impl Poller {
             guests,
             metrics,
             pools,
-            backups: std::mem::take(&mut self.backups),
+            // CLONED, not taken (#880). Taking emptied the cache on every
+            // sweep while it was refilled only every `backup_interval_secs`,
+            // so with the shipped 60 s / 900 s cadences fourteen sweeps in
+            // fifteen published no backup document and graded no backup rule
+            // — which `reconcile` reads as "the condition cleared". Every
+            // backup alert therefore resolved and re-fired on a 15-minute
+            // cycle. The e2e missed it because it swept two *different*
+            // pollers; a second sweep of the same one now covers it.
+            backups: self.backups.clone(),
+            backup_jobs: self.backup_jobs.clone(),
             cluster,
         })
     }
 
-    async fn collect_backups(&self, pools: &[PveStoragePool]) -> Vec<PveBackupSummary> {
+    /// Everything known about backups this cycle: one summary per guest, plus
+    /// the whole-job runs that name no guest at all (#880).
+    ///
+    /// The **stored volumes are the evidence**; the tasks are corroboration.
+    /// That order matters, because a task window is a fixed number of rows
+    /// with no time bound: before this, the newest task *tagged with a vmid*
+    /// could be an arbitrarily old one-off, and on the reference fleet a
+    /// failure from six weeks earlier became "the last backup" of six guests
+    /// permanently, firing a critical about a backup that had in fact
+    /// succeeded at 03:00 that morning.
+    async fn collect_backups(
+        &self,
+        pools: &[PveStoragePool],
+    ) -> (Vec<PveBackupSummary>, Vec<PveBackupJob>) {
         let mut volumes: HashMap<u32, Vec<PveBackupVolume>> = HashMap::new();
+        // Whether ANY backup-capable pool was successfully listed. Without
+        // this the count is indistinguishable from a refused listing, and a
+        // confident `0` is exactly the wrong answer.
+        let mut listed_any = false;
         for p in pools.iter().filter(|p| {
             p.enabled && (p.content.is_empty() || p.content.iter().any(|c| c == "backup"))
         }) {
             match self.client.backups(&p.node, &p.storage).await {
                 Ok(vols) => {
+                    listed_any = true;
                     for v in vols {
                         if let Some(vmid) = vmid_from_volid(&v.volid) {
                             volumes.entry(vmid).or_default().push(v);
+                        } else {
+                            tracing::warn!(
+                                volid = %v.volid,
+                                "pve: backup volume names no guest this sensor can read"
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::debug!(storage = %p.storage, error = %e, "pve: backup listing failed")
+                    tracing::warn!(
+                        storage = %p.storage, node = %p.node, error = %e,
+                        "pve: backup listing failed — this guest's volume count \
+                         will be reported as unknown, not as zero"
+                    )
                 }
             }
         }
 
+        let now = zensight_common::current_timestamp_millis() / 1000;
+        let max_age = self.cfg.alerts.backup_task_max_age_secs as i64;
+
         let mut tasks: HashMap<u32, zensight_common::pve::PveBackupTask> = HashMap::new();
+        let mut jobs: Vec<PveBackupJob> = Vec::new();
         let mut nodes: Vec<&str> = pools.iter().map(|p| p.node.as_str()).collect();
         nodes.sort_unstable();
         nodes.dedup();
         for node in nodes {
             match self.client.vzdump_tasks(node, 200).await {
                 Ok(rows) => {
-                    for (vmid, task) in rows {
+                    for (vmid, task) in rows.per_guest {
+                        // A stale task is not evidence about last night. The
+                        // window is rows, not time, so without this bound the
+                        // oldest surviving one-off wins forever.
+                        if max_age > 0 && now - task.started_at > max_age {
+                            continue;
+                        }
                         // Newest first from the client, so the first wins.
                         tasks.entry(vmid).or_insert(task);
                     }
+                    let last_task = rows
+                        .jobs
+                        .into_iter()
+                        .next()
+                        .filter(|t| max_age <= 0 || now - t.started_at <= max_age);
+                    if let Some(t) = &last_task {
+                        jobs.push(PveBackupJob {
+                            node: node.to_string(),
+                            age_secs: Some((now - t.started_at).max(0) as u64),
+                            last_task,
+                            observed_at_ms: zensight_common::current_timestamp_millis(),
+                        });
+                    }
                 }
-                Err(e) => tracing::debug!(node = %node, error = %e, "pve: task listing failed"),
+                Err(e) => tracing::warn!(node = %node, error = %e, "pve: task listing failed"),
             }
         }
 
-        let now = zensight_common::current_timestamp_millis() / 1000;
         let mut vmids: Vec<u32> = volumes
             .keys()
             .copied()
@@ -271,7 +351,7 @@ impl Poller {
             .collect();
         vmids.sort_unstable();
         vmids.dedup();
-        vmids
+        let summaries = vmids
             .into_iter()
             .map(|vmid| {
                 let mut vols = volumes.remove(&vmid).unwrap_or_default();
@@ -294,14 +374,15 @@ impl Poller {
                         .as_ref()
                         .filter(|l| l.created_at > 0)
                         .map(|l| (now - l.created_at).max(0) as u64),
-                    volumes: vols.len() as u32,
+                    volumes: listed_any.then_some(vols.len() as u32),
                     latest,
                     previous,
                     size_change_pct,
                     observed_at_ms: zensight_common::current_timestamp_millis(),
                 }
             })
-            .collect()
+            .collect();
+        (summaries, jobs)
     }
 
     async fn collect_cluster(
@@ -431,9 +512,22 @@ impl Poller {
                     ("overcommit_ratio", p.overcommit_ratio.unwrap_or(0.0)),
                 ] {
                     let metric = format!("{stem}/{suffix}");
-                    let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
-                        .with_label("storage", p.storage.clone())
-                        .with_label("node", p.node.clone());
+                    let mut point =
+                        checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
+                            .with_label("storage", p.storage.clone())
+                            .with_label("node", p.node.clone());
+                    // Reported vs derived rides on the series, not only in the
+                    // document: a derived total is a floor, and a dashboard
+                    // comparing two pools must be able to see which is which.
+                    if let Some(src) = p.allocated_source {
+                        point = point.with_label(
+                            "allocated_source",
+                            match src {
+                                AllocationSource::Reported => "reported",
+                                AllocationSource::DerivedFromGuests => "derived_from_guests",
+                            },
+                        );
+                    }
                     let _ = self.publisher.publish(&metric, &point).await;
                     published += 1;
                 }
@@ -482,6 +576,28 @@ impl Poller {
             }
         }
 
+        for j in &sweep.backup_jobs {
+            let slug = zenkey::Chunk::slug(&j.node);
+            if let Some(t) = &j.last_task {
+                for (suffix, value) in [
+                    ("ok", if t.ok { 1.0 } else { 0.0 }),
+                    ("duration_secs", t.duration_secs.unwrap_or(0) as f64),
+                ] {
+                    let metric = format!("backup/job/{slug}/{suffix}");
+                    let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
+                        .with_label("node", j.node.clone());
+                    if self.publisher.publish(&metric, &point).await.is_ok() {
+                        published += 1;
+                    }
+                }
+            }
+            if let Some(key) = state_key(&["backup", "job", &slug])
+                && let Err(e) = self.states.publish_serializable(&key, j).await
+            {
+                tracing::warn!(node = %j.node, error = %e, "pve: backup job doc publish failed");
+            }
+        }
+
         if let Some(c) = &sweep.cluster {
             let mut points = vec![
                 ("cluster/nodes_online".to_string(), c.nodes_online() as f64),
@@ -525,6 +641,7 @@ impl Poller {
         // ── Assertions ──────────────────────────────────────────────────────
         if let Some(reporter) = &self.reporter {
             let obs = Observation {
+                backup_jobs: &sweep.backup_jobs,
                 source: &self.source,
                 guests: &sweep.guests,
                 pools: &sweep.pools,
@@ -614,6 +731,27 @@ fn guest_evidence(g: &PveGuest) -> Option<HostEvidence> {
         cloud: None,
         last_updated: zensight_common::current_timestamp_millis(),
     })
+}
+
+/// Sum the declared sizes of every guest disk that lives on `storage`.
+///
+/// A **floor**, deliberately, and labelled as one on the wire
+/// ([`AllocationSource::DerivedFromGuests`]): a `unused<N>` volume still
+/// occupies the pool but is not attached to any slot, so `provisioned_bytes`
+/// excludes it and so does this; a disk with no `size=` (efidisk, TPM state)
+/// contributes nothing. Templates are counted — their disks occupy the pool
+/// exactly as a running guest's do.
+///
+/// `None` when no guest has a sized disk on this pool: that is "we cannot say",
+/// not "nothing is provisioned", and the difference is the whole of #881.
+fn derive_allocated(guests: &[PveGuest], storage: &str) -> Option<u64> {
+    let sizes: Vec<u64> = guests
+        .iter()
+        .flat_map(|g| g.disks.iter())
+        .filter(|d| d.storage.as_deref() == Some(storage))
+        .filter_map(|d| d.size_bytes)
+        .collect();
+    (!sizes.is_empty()).then(|| sizes.iter().sum())
 }
 
 /// `local:backup/vzdump-qemu-140-2026_08_28-02_00_01.vma.zst` → 140.
@@ -715,5 +853,59 @@ mod tests {
             observed_at_ms: 0,
         };
         assert!(guest_evidence(&g).is_none());
+    }
+
+    fn guest_on(vmid: u32, disks: &[(&str, Option<u64>)]) -> PveGuest {
+        PveGuest {
+            vmid,
+            name: None,
+            node: "pve".into(),
+            kind: GuestKind::Qemu,
+            status: "running".into(),
+            uptime_secs: None,
+            template: false,
+            onboot: true,
+            protection: false,
+            nics: vec![],
+            disks: disks
+                .iter()
+                .enumerate()
+                .map(|(i, (storage, size))| zensight_common::pve::GuestDisk {
+                    slot: format!("scsi{i}"),
+                    volid: format!("{storage}:vm-{vmid}-disk-{i}"),
+                    storage: Some((*storage).to_string()),
+                    size_bytes: *size,
+                    backup: true,
+                })
+                .collect(),
+            provisioned_bytes: None,
+            observed_at_ms: 0,
+        }
+    }
+
+    /// #881: the reference fleet's real numbers. 790 GiB of guest disks
+    /// against a 936 GiB `dir` pool the API reports no `allocated` for — a
+    /// ratio of 0.84, which the sensor could not produce at all and reported
+    /// as `0` instead.
+    #[test]
+    fn allocated_is_derived_from_the_guests_that_live_on_the_pool() {
+        const G: u64 = 1024 * 1024 * 1024;
+        let guests = [
+            guest_on(100, &[("local", Some(16 * G))]),
+            guest_on(110, &[("local", Some(66 * G))]),
+            guest_on(130, &[("local", Some(350 * G))]),
+            guest_on(160, &[("local", Some(290 * G))]),
+            // Another pool entirely: must not be counted here.
+            guest_on(170, &[("fast", Some(500 * G))]),
+            // A disk with no declared size (efidisk, TPM state) contributes
+            // nothing rather than a zero that looks like a measurement.
+            guest_on(180, &[("local", None)]),
+        ];
+        assert_eq!(derive_allocated(&guests, "local"), Some(722 * G));
+        assert_eq!(derive_allocated(&guests, "fast"), Some(500 * G));
+        // No sized disk anywhere on this pool is "we cannot say", not
+        // "nothing is provisioned" — the whole of #881.
+        assert_eq!(derive_allocated(&guests, "nvme"), None);
+        assert_eq!(derive_allocated(&[], "local"), None);
     }
 }

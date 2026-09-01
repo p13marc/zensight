@@ -111,7 +111,17 @@
       pool_used_pct: 85.0,          // 0 disables; >=95% grades critical
       pool_overcommit_ratio: 1.0,   // allocated/total; 1.0 = "more promised than exists"
 
-      backup_failed: true,          // the last vzdump task did not exit OK
+      backup_failed: true,          // the last per-guest vzdump task did not exit OK
+      // A job configured `all 1` covers every guest and therefore names none:
+      // PVE records it as ONE task with an empty id, and the per-guest results
+      // live only in the task log. So it is graded once, as one job — not as a
+      // failure of every guest it covered (#880).
+      backup_job_failed: true,
+      // How old a vzdump task may be and still count as evidence about the
+      // last backup. The task query is bounded by row count, not by time, so
+      // without this a guest whose only tagged task is an ancient one-off has
+      // that failure reported as "the last backup" forever. 0 disables.
+      backup_task_max_age_secs: 172800,   // 48 h — two nights
       // The newest dump is older than this. 0 = OFF, because backup cadence is
       // deployment policy and a wrong default here is a nightly false
       // positive. For a nightly job, 93600 (26 h) leaves room for a slow run.

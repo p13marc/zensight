@@ -16,15 +16,18 @@
 //! - **Concurrency is bounded by a semaphore**, because the API is a perl
 //!   daemon on the machine whose failure is total.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
 use zensight_common::pve::{
-    GuestDisk, GuestKind, GuestNic, PveBackupTask, PveBackupVolume, PveGuest, PveHaResource,
-    PveNodeStatus, PveReplicationJob, PveStoragePool, parse_flag, parse_kv_list, parse_size,
+    AllocationSource, GuestDisk, GuestKind, GuestNic, PveBackupTask, PveBackupVolume, PveGuest,
+    PveHaResource, PveNodeStatus, PveReplicationJob, PveStoragePool, parse_flag, parse_kv_list,
+    parse_size,
 };
 
 /// What the API could not answer, separated from what it answered with
@@ -68,6 +71,15 @@ pub struct GuestRuntime {
     pub maxdisk: Option<u64>,
 }
 
+/// One node's vzdump tasks, separated by scope.
+#[derive(Debug, Clone, Default)]
+pub struct VzdumpTasks {
+    /// Tasks that name a single guest, newest first.
+    pub per_guest: Vec<(u32, PveBackupTask)>,
+    /// Whole-job runs (`all 1`), which carry no guest id, newest first.
+    pub jobs: Vec<PveBackupTask>,
+}
+
 /// Capacity facts about one pool, from `/cluster/resources` / `/nodes/*/storage`.
 #[derive(Debug, Clone, Default)]
 pub struct StorageRuntime {
@@ -88,6 +100,9 @@ pub struct PveClient {
     base: String,
     token: String,
     limit: Arc<Semaphore>,
+    /// Paths currently answering 403/404/501, so the refusal is logged once
+    /// per transition rather than once per poll (#880).
+    refused: Arc<Mutex<HashSet<String>>>,
 }
 
 impl PveClient {
@@ -108,6 +123,7 @@ impl PveClient {
             base,
             token,
             limit: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            refused: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -117,6 +133,11 @@ impl PveClient {
     /// this deployment (HA on a standalone node) or not for this token. That
     /// is a fact about the install, and grading it as a failure would make a
     /// correctly-scoped read-only token look like a broken sensor.
+    ///
+    /// It is still **said out loud**, once per transition (#880). Until this,
+    /// a token that could not read a content listing produced `volumes: 0` and
+    /// no `allocated` with no log line at any level — a sensor reporting a
+    /// confident zero it had never been allowed to measure.
     pub async fn get(&self, path: &str) -> Result<Option<Value>> {
         let _permit = self
             .limit
@@ -133,7 +154,19 @@ impl PveClient {
             .map_err(|e| ApiError::Transport(e.to_string()))?;
         let status = resp.status();
         if matches!(status.as_u16(), 403 | 404 | 501) {
+            if self.refused.lock().unwrap().insert(path.to_string()) {
+                tracing::warn!(
+                    path = %path,
+                    status = status.as_u16(),
+                    "pve: the API refused this endpoint — the facts it carries will be \
+                     reported as unknown, not as zero. A 403 usually means the token's \
+                     role is narrower than PVEAuditor"
+                );
+            }
             return Ok(None);
+        }
+        if self.refused.lock().unwrap().remove(path) {
+            tracing::info!(path = %path, "pve: endpoint readable again");
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -245,24 +278,39 @@ impl PveClient {
     ///
     /// This is the *provisioned* number — invisible in `used`, unchanged by
     /// any configuration edit, and the reason a thin pool fills.
+    ///
+    /// `None` means **not measured**, and it is now returned for one more case
+    /// than before (#881): a listing that came back with rows, none of which
+    /// are volumes that occupy capacity. That is what a `dir` storage looks
+    /// like — PVE surfaces per-volume sizes for LVM-thin and ZFS, not for a
+    /// directory — and summing the empty set gave `Some(0)`, i.e. "nothing is
+    /// provisioned", on the storage type this sensor's headline finding was
+    /// written for. `Some(0)` now means only what it should: a listing that
+    /// came back genuinely empty, on a pool that holds nothing.
     pub async fn storage_allocated(&self, node: &str, storage: &str) -> Result<Option<u64>> {
         let path = format!("/nodes/{node}/storage/{storage}/content");
         let Some(rows) = self.get_array(&path).await? else {
             return Ok(None);
         };
-        Ok(Some(
-            rows.iter()
-                .filter(|v| {
-                    // Only volumes that occupy the pool's capacity. Backups
-                    // and ISOs are counted in `used`, not promised.
-                    matches!(
-                        text(v, "content").as_deref(),
-                        Some("images") | Some("rootdir") | None
-                    )
-                })
-                .filter_map(|v| num(v, "size").map(|s| s as u64))
-                .sum(),
-        ))
+        if rows.is_empty() {
+            return Ok(Some(0));
+        }
+        let sizes: Vec<u64> = rows
+            .iter()
+            .filter(|v| {
+                // Only volumes that occupy the pool's capacity. Backups and
+                // ISOs are counted in `used`, not promised.
+                matches!(
+                    text(v, "content").as_deref(),
+                    Some("images") | Some("rootdir") | None
+                )
+            })
+            .filter_map(|v| num(v, "size").map(|s| s as u64))
+            .collect();
+        if sizes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(sizes.iter().sum()))
     }
 
     /// Stored backup volumes, newest first, per guest.
@@ -285,11 +333,27 @@ impl PveClient {
         Ok(out)
     }
 
-    /// Recent vzdump task results on one node.
-    pub async fn vzdump_tasks(&self, node: &str, limit: u32) -> Result<Vec<(u32, PveBackupTask)>> {
+    /// Recent vzdump task results on one node, split by what they are evidence
+    /// *about*.
+    ///
+    /// A vzdump task names its guest in `id` — unless the job covers every
+    /// guest (`all 1` in `/etc/pve/jobs.cfg`), in which case PVE returns
+    /// `id: ""` and the per-guest outcomes exist only inside the task log.
+    /// Those rows used to be dropped on the floor (#880): `text()` refuses an
+    /// empty string, so `task_vmid` returned `None` and every nightly task
+    /// vanished. What survived the window was whatever one-off per-guest task
+    /// happened to be in it — on the reference fleet, a failure from six weeks
+    /// earlier, which became "the last backup" of six guests permanently.
+    ///
+    /// So a whole-job task is now kept as what it is: **one job-scoped fact**,
+    /// graded once. Attributing it per guest would mean parsing the task log's
+    /// free text, which this sensor deliberately does not do — the stored
+    /// volumes answer "was this guest backed up last night?" without guessing
+    /// at a log format.
+    pub async fn vzdump_tasks(&self, node: &str, limit: u32) -> Result<VzdumpTasks> {
         let path = format!("/nodes/{node}/tasks?typefilter=vzdump&limit={limit}");
         let rows = self.get_array(&path).await?.unwrap_or_default();
-        let mut out = Vec::new();
+        let mut out = VzdumpTasks::default();
         for r in rows {
             // A task still running has no endtime and no verdict yet; it is
             // not evidence either way, so it is skipped rather than counted
@@ -297,23 +361,25 @@ impl PveClient {
             let Some(end) = num(&r, "endtime").map(|v| v as i64) else {
                 continue;
             };
-            let Some(vmid) = task_vmid(&r) else { continue };
             let start = num(&r, "starttime").map(|v| v as i64).unwrap_or(end);
             let exit = text(&r, "exitstatus");
-            out.push((
-                vmid,
-                PveBackupTask {
-                    upid: text(&r, "upid").unwrap_or_default(),
-                    node: text(&r, "node").unwrap_or_else(|| node.to_string()),
-                    ok: exit.as_deref() == Some("OK"),
-                    exit_status: exit,
-                    started_at: start,
-                    duration_secs: Some((end - start).max(0) as u64),
-                },
-            ));
+            let task = PveBackupTask {
+                upid: text(&r, "upid").unwrap_or_default(),
+                node: text(&r, "node").unwrap_or_else(|| node.to_string()),
+                ok: exit.as_deref() == Some("OK"),
+                exit_status: exit,
+                started_at: start,
+                duration_secs: Some((end - start).max(0) as u64),
+            };
+            match task_vmid(&r) {
+                Some(vmid) => out.per_guest.push((vmid, task)),
+                None => out.jobs.push(task),
+            }
         }
         // Newest first, so the caller can take the first per vmid.
-        out.sort_by_key(|(_, t)| std::cmp::Reverse(t.started_at));
+        out.per_guest
+            .sort_by_key(|(_, t)| std::cmp::Reverse(t.started_at));
+        out.jobs.sort_by_key(|t| std::cmp::Reverse(t.started_at));
         Ok(out)
     }
 
@@ -424,8 +490,20 @@ fn flag(v: &Value, key: &str) -> bool {
 
 /// A vzdump task names its guest in `id`. On some releases that is the bare
 /// vmid, on others a `<type>/<vmid>`-shaped string.
+///
+/// `None` means the task is **not about one guest** — an empty `id`, which is
+/// what a whole-job (`all 1`) run returns, or a shape we cannot read. Either
+/// way the answer is "this row is not per-guest evidence", never "pick some
+/// other guest's row instead" (#880).
 fn task_vmid(r: &Value) -> Option<u32> {
-    let id = text(r, "id")?;
+    let id = match r.get("id") {
+        Some(Value::String(s)) => s.trim().to_string(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => return None,
+    };
+    if id.is_empty() {
+        return None;
+    }
     id.rsplit(['/', ':'])
         .next()
         .and_then(|s| s.trim().parse().ok())
@@ -552,7 +630,18 @@ fn is_disk_slot(key: &str) -> bool {
 }
 
 /// Fold a pool's runtime row and its allocated total into the state document.
-pub fn build_pool(rt: &StorageRuntime, allocated: Option<u64>) -> PveStoragePool {
+///
+/// `allocated` carries its own provenance: the API's own number where the
+/// storage plugin reports one, otherwise the sum of the guest disks that live
+/// on this pool. The two are never conflated — see [`AllocationSource`].
+pub fn build_pool(
+    rt: &StorageRuntime,
+    allocated: Option<(u64, AllocationSource)>,
+) -> PveStoragePool {
+    let (allocated_bytes, allocated_source) = match allocated {
+        Some((bytes, src)) => (Some(bytes), Some(src)),
+        None => (None, None),
+    };
     PveStoragePool {
         storage: rt.storage.clone(),
         node: rt.node.clone(),
@@ -563,8 +652,9 @@ pub fn build_pool(rt: &StorageRuntime, allocated: Option<u64>) -> PveStoragePool
         total_bytes: rt.total,
         used_bytes: rt.used,
         avail_bytes: rt.avail,
-        allocated_bytes: allocated,
-        overcommit_ratio: allocated
+        allocated_bytes,
+        allocated_source,
+        overcommit_ratio: allocated_bytes
             .filter(|_| rt.total > 0)
             .map(|a| a as f64 / rt.total as f64),
         content: rt.content.clone(),
@@ -673,7 +763,7 @@ mod tests {
             enabled: true,
             ..Default::default()
         };
-        let p = build_pool(&rt, Some(990));
+        let p = build_pool(&rt, Some((990, AllocationSource::Reported)));
         let ratio = p.overcommit_ratio.unwrap();
         assert!(
             ratio > 1.0,
@@ -702,6 +792,40 @@ mod tests {
         assert_eq!(task_vmid(&json!({"id": "140"})), Some(140));
         assert_eq!(task_vmid(&json!({"id": "qemu/140"})), Some(140));
         assert_eq!(task_vmid(&json!({"id": "nonsense"})), None);
+        assert_eq!(task_vmid(&json!({"id": 140})), Some(140));
+        // A WHOLE-JOB run (`all 1`) names no guest. This is the row that used
+        // to be dropped on the floor, sending the sensor looking for a
+        // per-guest task and finding an arbitrarily old one (#880).
+        assert_eq!(task_vmid(&json!({"id": ""})), None);
+        assert_eq!(task_vmid(&json!({"id": "   "})), None);
+        assert_eq!(task_vmid(&json!({})), None);
+    }
+
+    /// #881: on a `dir` storage PVE reports no per-volume size, so the sum of
+    /// the empty set used to become `Some(0)` — "nothing is provisioned",
+    /// which is the opposite of the truth and made the over-commitment rule
+    /// unable to fire on the storage type the feature was written for.
+    #[test]
+    fn an_unlistable_allocated_total_is_none_and_never_zero() {
+        let rt = StorageRuntime {
+            storage: "local".into(),
+            node: "pve".into(),
+            total: 1000,
+            ..Default::default()
+        };
+        let unknown = build_pool(&rt, None);
+        assert_eq!(unknown.allocated_bytes, None);
+        assert_eq!(unknown.allocated_source, None);
+        assert_eq!(unknown.overcommit_ratio, None);
+
+        let derived = build_pool(&rt, Some((900, AllocationSource::DerivedFromGuests)));
+        assert_eq!(derived.allocated_bytes, Some(900));
+        assert_eq!(
+            derived.allocated_source,
+            Some(AllocationSource::DerivedFromGuests),
+            "a derived total is a floor and says so"
+        );
+        assert_eq!(derived.overcommit_ratio, Some(0.9));
     }
 
     #[test]

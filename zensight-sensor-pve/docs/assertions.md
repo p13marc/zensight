@@ -53,13 +53,77 @@ When the content listing cannot be read, `allocated_bytes` is **`None`, never
 0**: zero would read as "nothing provisioned", which is the one wrong answer
 this family can give.
 
+### Reported vs derived (#881)
+
+PVE surfaces a per-volume size for LVM-thin and ZFS and **nothing for a `dir`
+storage** — so on the storage type the reference deployment actually runs, the
+number this rule exists for was not reported at all, and summing the empty set
+gave `Some(0)`: "nothing is provisioned", the exact opposite of the truth, and
+a rule that could never fire.
+
+It can still be *derived*, because the sensor already reads every guest's disk
+lines and every disk names its storage. Where the plugin reports nothing, the
+pool's `allocated` is the sum of the guest disks that live on it, and the
+document and the gauges both say which it is:
+
+| `allocated_source` | Meaning |
+|---|---|
+| `reported` | the plugin's own per-volume sizes, summed |
+| `derived_from_guests` | summed from the guests' disk lines — a **floor** |
+
+A derived total is a floor, not a measurement: a volume no guest currently
+attaches (`unused<N>`) still occupies the pool and is deliberately excluded
+from `provisioned_bytes`, and a disk with no `size=` (efidisk, TPM state)
+contributes nothing. Absent both, `allocated_bytes` stays `None`. The two are
+never conflated, and a dashboard comparing two pools can see which is which.
+
 ## Backups
 
 | Rule | Fires when | Severity |
 |---|---|---|
-| `backup-failed` | the last completed vzdump task did not exit `OK` | critical |
+| `backup-failed` | a **recent, per-guest** vzdump task did not exit `OK`, and no newer volume supersedes it | critical |
+| `backup-job-failed` | the last **whole-job** run (`all 1`) did not exit `OK` | critical |
 | `backup-stale` | the newest stored dump is older than `alerts.backup_stale_secs` | warning |
 | `backup-shrunk` | the newest dump is ≥ `alerts.backup_shrink_pct` smaller than the one before it | critical |
+
+### The volumes are the evidence; the tasks say why (#880)
+
+A job configured `all 1` covers every guest and therefore **names none**: PVE
+records it as one task with an empty `id`, and the per-guest results exist only
+inside the task log, as free text. The first deployment against a real API met
+exactly that, and three things went wrong at once — every nightly task was
+discarded, the sensor fell back to whatever one-off task happened to be tagged
+with each vmid (on that fleet, a failure from six weeks earlier), and a template
+the job explicitly excludes fired a critical about a backup it was never meant
+to have.
+
+So:
+
+- **A whole-job run is graded once**, as one job, under `backup-job-failed`.
+  Seven per-guest criticals for one job is not seven findings. Attributing it
+  per guest would mean parsing the task log's free text; this sensor
+  deliberately does not, because the stored volumes answer the question
+  ("was *this guest* backed up?") without guessing at a log format.
+- **Tasks have an age bound** — `alerts.backup_task_max_age_secs`, default 48 h.
+  The task query is bounded by row count, not by time, so without it the oldest
+  surviving one-off wins forever. A stale task is not evidence about last night.
+- **A newer volume supersedes a failed task.** If a dump exists that is newer
+  than the failure, the failure has already been overtaken by a run that worked.
+- **Templates and `exempt_vmids` are skipped**, exactly as in the guest rules.
+  A template is a stamp, not a guest.
+- **`volumes` is `Option<u32>`.** `None` when no backup-capable pool could be
+  listed at all — refused, failed, or nothing to ask. `0` says "this guest has
+  no backups", which is a very different claim from "we could not look", and
+  the reference deployment saw the second reported as the first.
+
+Every refusal on this path is now logged at `warn` on the transition, once per
+endpoint. Before, a 403 became an empty result with no log line at any level: a
+sensor reporting a confident zero it had never been allowed to measure.
+
+**`--diagnose`** asks the configured API everything these rules depend on —
+which pools will be listed, what the content listing returns, which volids name
+no guest, how old each task is, and what the guest disks sum to per pool — then
+prints it and exits. It never opens a Zenoh session.
 
 `backup-shrunk` is the rule that justifies reading backup *sizes* at all. "The
 job exited 0" is what the mail notification already says; a dump that succeeds

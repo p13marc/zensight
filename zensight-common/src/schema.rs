@@ -112,6 +112,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::pve::PveGuest>("PveGuest")
         .json::<crate::pve::PveStoragePool>("PveStoragePool")
         .json::<crate::pve::PveBackupSummary>("PveBackupSummary")
+        .json::<crate::pve::PveBackupJob>("PveBackupJob")
         .json::<crate::pve::PveClusterHealth>("PveClusterHealth")
         // container's state document (#819).
         .json::<crate::container::ContainerInfo>("ContainerInfo")

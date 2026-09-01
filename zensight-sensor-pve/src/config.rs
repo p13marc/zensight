@@ -37,6 +37,10 @@ fn default_pool_used_pct() -> f64 {
 fn default_overcommit_ratio() -> f64 {
     1.0
 }
+fn default_backup_task_max_age() -> u64 {
+    48 * 3600
+}
+
 fn default_backup_shrink_pct() -> f64 {
     40.0
 }
@@ -147,6 +151,22 @@ pub struct PveAlertsConfig {
     /// Fire when a guest's last vzdump task did not exit OK.
     #[serde(default = "default_true")]
     pub backup_failed: bool,
+    /// Fire when the last **whole-job** vzdump run (`all 1`, which names no
+    /// guest) did not exit OK. One alert for one job, rather than a false
+    /// `backup-failed` per guest (#880).
+    #[serde(default = "default_true")]
+    pub backup_job_failed: bool,
+    /// How old a vzdump task may be and still count as evidence about the
+    /// last backup, seconds. 0 disables the bound.
+    ///
+    /// The task query is bounded by row count, not by time, so without this a
+    /// guest whose only tagged task is an ancient one-off has that failure
+    /// reported as "the last backup" forever — which is what the reference
+    /// deployment saw: a critical, firing permanently, about a July task,
+    /// while the backup that morning had succeeded. Default 48 h: two nights,
+    /// so a single skipped run does not silently drop to no evidence.
+    #[serde(default = "default_backup_task_max_age")]
+    pub backup_task_max_age_secs: u64,
     /// Fire when the newest stored dump is older than this. 0 disables —
     /// backup cadence is deployment policy and a wrong default is noise. The
     /// shipped config suggests 93600 (26 h) for a nightly job.
@@ -179,6 +199,8 @@ impl Default for PveAlertsConfig {
             pool_used_pct: default_pool_used_pct(),
             pool_overcommit_ratio: default_overcommit_ratio(),
             backup_failed: true,
+            backup_job_failed: true,
+            backup_task_max_age_secs: default_backup_task_max_age(),
             backup_stale_secs: 0,
             backup_shrink_pct: default_backup_shrink_pct(),
             quorum: true,
