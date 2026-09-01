@@ -497,8 +497,12 @@ where
         ),
     }
     // A rest-var producer's leading variables are labels even though the rest
-    // variable itself became the name.
-    if REST_VAR_PRODUCERS.contains(&producer.as_str()) {
+    // variable itself became the name. Only when the semconv arm ran: the
+    // `None` arm above already offered exactly this set, and offering it
+    // twice counted every pattern variable as *shadowed* on every point of
+    // the four rest-var producers — the diagnostic that exists to make a
+    // dropped label visible read permanently non-zero and meant nothing.
+    if sc.is_some() && REST_VAR_PRODUCERS.contains(&producer.as_str()) {
         merger.offer_all(
             vars.iter()
                 .filter(|(n, _)| !pattern.contains(&format!("{{{n}...}}")))

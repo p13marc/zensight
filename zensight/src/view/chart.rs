@@ -1900,7 +1900,7 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for HeatmapWidget {
                         continue;
                     }
                     let alpha = (value / max).clamp(0.05, 1.0) as f32;
-                    let color = Color { a: alpha, ..base };
+                    let color = crate::view::tokens::with_alpha(base, alpha);
                     let top_left = Point::new(x as f32 * self.cell, y as f32 * self.cell);
                     let rect =
                         Path::rectangle(top_left, Size::new(self.cell - 1.0, self.cell - 1.0));
@@ -1970,7 +1970,7 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for StackedAreaWidget {
                     b.close();
                 });
                 let base = category_color(s);
-                frame.fill(&path, Color { a: 0.85, ..base });
+                frame.fill(&path, crate::view::tokens::with_alpha(base, 0.85));
                 below = above;
             }
         });

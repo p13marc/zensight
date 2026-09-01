@@ -11,8 +11,8 @@ use netflow_parser::{NetflowPacket, NetflowParser};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 // The wire types live in `zensight-common` (#469): `@rpc/netflow/flows` is the
@@ -56,47 +56,82 @@ async fn run_listener(
 
     let mut buf = vec![0u8; config.max_packet_size];
 
-    // Per-exporter parsers to avoid mutex contention between different exporters.
-    // NetFlow v9/IPFIX parsers maintain template state per exporter.
-    let parsers: Arc<Mutex<HashMap<IpAddr, Arc<Mutex<NetflowParser>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    // Per-exporter parsers: NetFlow v9/IPFIX parsers keep template state per
+    // exporter, so one parser per source address. BOUNDED. NetFlow is UDP
+    // with no handshake, the source address is whatever the datagram says,
+    // and this map used to grow by one parser — with its own template cache —
+    // per distinct address ever seen, forever: a /16 sweep was 65k parsers,
+    // a spoofing sender was unbounded. Past the cap the exporter seen least
+    // recently is evicted; a real exporter re-sends its templates and is
+    // back within its refresh interval, which is the protocol's own recovery.
+    let mut parsers: HashMap<IpAddr, (NetflowParser, Instant)> = HashMap::new();
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((len, addr)) => {
-                let data = buf[..len].to_vec();
-                let tx = tx.clone();
-                let names = exporter_names.clone();
+                consecutive_errors = 0;
+                let data = &buf[..len];
+                if !parsers.contains_key(&addr.ip())
+                    && parsers.len() >= MAX_EXPORTERS
+                    && let Some((&stale, _)) = parsers.iter().min_by_key(|(_, (_, seen))| *seen)
+                {
+                    tracing::warn!(
+                        evicted = %stale, arriving = %addr.ip(), cap = MAX_EXPORTERS,
+                        "NetFlow: exporter cap reached; evicting the least recently seen"
+                    );
+                    parsers.remove(&stale);
+                }
+                let (parser, seen) = parsers
+                    .entry(addr.ip())
+                    .or_insert_with(|| (NetflowParser::default(), Instant::now()));
+                *seen = Instant::now();
 
-                // Get or create a parser for this exporter
-                let parser = {
-                    let mut map = parsers.lock().await;
-                    map.entry(addr.ip())
-                        .or_insert_with(|| Arc::new(Mutex::new(NetflowParser::default())))
-                        .clone()
-                };
-
-                // Process in a separate task to not block the receiver
-                tokio::spawn(async move {
-                    if let Err(e) = process_packet(&data, addr, tx, names, parser).await {
-                        tracing::debug!("Failed to process NetFlow packet from {}: {}", addr, e);
-                    }
-                });
+                // Inline, on the receive loop. A task per datagram, each
+                // holding a copy of the payload and blocking on a bounded
+                // channel, piled up without limit under a burst; here the
+                // socket's own buffer is the backpressure, and a datagram
+                // that does not fit is dropped by the kernel — counted, and
+                // the honest outcome for a receiver that is behind.
+                if let Err(e) = process_packet(data, addr, &tx, &exporter_names, parser).await {
+                    tracing::debug!("Failed to process NetFlow packet from {}: {}", addr, e);
+                }
             }
             Err(e) => {
-                tracing::error!("UDP receive error: {}", e);
+                // A socket in a persistent error state re-looped at full
+                // speed: a log flood and a hot CPU. Back off, and give up on
+                // this listener after a bound — the supervisor restarts the
+                // process, which is the recovery that actually works.
+                consecutive_errors += 1;
+                tracing::error!(consecutive = consecutive_errors, "UDP receive error: {}", e);
+                if consecutive_errors >= MAX_CONSECUTIVE_RECV_ERRORS {
+                    anyhow::bail!(
+                        "NetFlow listener on {}: {consecutive_errors} consecutive receive errors, giving up",
+                        config.bind
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    (100u64 << consecutive_errors.min(6)).min(5_000),
+                ))
+                .await;
             }
         }
     }
 }
 
+/// Upper bound on distinct exporter addresses with live parser state.
+const MAX_EXPORTERS: usize = 256;
+/// Receive errors in a row before a listener gives up and lets the supervisor
+/// restart the process.
+const MAX_CONSECUTIVE_RECV_ERRORS: u32 = 50;
+
 /// Process a single NetFlow/IPFIX packet.
 async fn process_packet(
     data: &[u8],
     addr: SocketAddr,
-    tx: mpsc::Sender<FlowRecord>,
-    exporter_names: Arc<HashMap<String, String>>,
-    parser: Arc<Mutex<NetflowParser>>,
+    tx: &mpsc::Sender<FlowRecord>,
+    exporter_names: &HashMap<String, String>,
+    parser: &mut NetflowParser,
 ) -> Result<()> {
     let exporter_ip = addr.ip().to_string();
     let exporter_name = exporter_names
@@ -107,11 +142,10 @@ async fn process_packet(
     let timestamp = zensight_common::current_timestamp_millis();
 
     // Parse the packet
-    let mut parser_guard = parser.lock().await;
     // 1.0: `parse_bytes` returns a `ParseResult` — the packets parsed before
     // any error, plus the error that stopped parsing (the pre-1.0
     // `NetflowPacket::Error` variant is gone).
-    let result = parser_guard.parse_bytes(data);
+    let result = parser.parse_bytes(data);
     if let Some(e) = &result.error {
         tracing::debug!("NetFlow parse error: {:?}", e);
     }

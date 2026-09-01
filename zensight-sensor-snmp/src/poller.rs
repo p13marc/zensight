@@ -695,13 +695,23 @@ impl SnmpPoller {
             .context("SNMP WALK error")?;
 
         let mut results = Vec::new();
-        while let Some(varbind) = stream.next().await {
-            let varbind = varbind.context("SNMP WALK error")?;
-            let oid_string = oid_to_string(&varbind.oid);
-            results.push((oid_string, varbind.value));
-        }
+        let outcome = loop {
+            match stream.next().await {
+                Some(Ok(varbind)) => {
+                    let oid_string = oid_to_string(&varbind.oid);
+                    results.push((oid_string, varbind.value));
+                }
+                Some(Err(e)) => break Err(anyhow::Error::from(e).context("SNMP WALK error")),
+                None => break Ok(()),
+            }
+        };
         // Debited from the rows that were really returned, so a large table
-        // gives the device a rest proportional to the work it just did.
+        // gives the device a rest proportional to the work it just did — and
+        // debited on a walk that FAILED partway too. It was not, for a while
+        // (the `?` returned before the charge), and a walk that fails
+        // partway is exactly the state of the device the budget exists to
+        // protect: it had issued PDUs a timing-out switch had to answer,
+        // none were accounted, and the next cycle came back at full rate.
         self.budget
             .charge(crate::budget::walk_pdu_cost(
                 results.len(),
@@ -709,7 +719,7 @@ impl SnmpPoller {
                 !matches!(self.device.version, crate::config::SnmpVersion::V1),
             ))
             .await;
-        Ok(results)
+        outcome.map(|()| results)
     }
 
     /// Publish the raw point for a polled value and, for counters, a derived

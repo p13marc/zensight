@@ -39,6 +39,14 @@ pub mod space {
     pub const XL: f32 = 32.0;
 }
 
+/// `color` with its alpha replaced — the one sanctioned way to derive a
+/// translucent variant of a token colour outside this module. (The D2 guard
+/// refuses a `Color { .. }` literal anywhere else, and rightly: the two that
+/// existed were exactly this, spelled by hand.)
+pub fn with_alpha(color: iced::Color, alpha: f32) -> iced::Color {
+    iced::Color { a: alpha, ..color }
+}
+
 #[cfg(test)]
 mod tests {
     // These guard the ordering of compile-time design-token constants; the

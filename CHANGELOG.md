@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of that: the `linux-amd64` tarball copies `packaging/systemd/` wholesale, so
   every release since #411 has shipped
   `zensight-sensor-parallax.service` with `ExecStart=/usr/bin/zensight-sensor-parallax`
-  next to fifteen binaries that do not include it. An operator installing that
+  next to sixteen binaries that do not include it. An operator installing that
   unit got a service that fails at exec — an artifact promising a binary it
   does not carry.
 
@@ -68,78 +68,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExpectationsConfig` is systemd's alone. The belief came from a *description
   string* in the schema table, not from any binding. Both registry additions
   relocked as purely additive.
-
-### Fixed
-
-- **`@rpc/systemd/expectations/set` accepts the shape it advertises** (#849).
-  The registry has declared this request as `ExpectationsConfig` — the plain
-  expectation set — since 1.0, which is what hostspec's equivalent accepts and
-  what `@desired` carries. The sensor only ever accepted the tagged
-  `{"type": "set_expectations", …}` envelope the GUI happens to send, so a
-  fleet tool that built its body from `describe` was refused by the very sensor
-  that had told it what to send. Both shapes are now accepted, so no existing
-  caller moves and the registry's claim becomes true — rather than renaming the
-  declared type to match the accident, which would break a shipped path for a
-  payload whose bytes do not change.
-
-- **`sensor-pve`: a whole-job vzdump is one fact, not seven false criticals**
-  (#880). The reference fleet's backup job is a single job covering every guest
-  (`all 1`), so its tasks carry no per-guest id — PVE returns `id: ""` and the
-  per-guest results live only in the task log. `text()` refuses an empty
-  string, so every nightly task was silently discarded, and what survived the
-  200-row window was whatever one-off task happened to be tagged with each
-  vmid: for guest 120, a failure from six weeks earlier, reported as "the last
-  backup" and firing a permanent critical about a dump that had in fact
-  succeeded at 03:00 that morning. A template the job explicitly excludes fired
-  too.
-
-  Backups are now graded from the **stored volumes**, with the tasks as
-  corroboration:
-
-  - a whole-job run is kept as one job-scoped fact — new `state/pve/backup/job/{node}`
-    document and `backup-job-failed` rule — instead of being attributed to
-    guests PVE never named. Parsing the task log's free text for per-guest lines
-    is a deliberate non-goal;
-  - vzdump tasks have an age bound, `alerts.backup_task_max_age_secs`, default
-    48 h. The task query is bounded by rows, not time, so without it the oldest
-    surviving one-off wins forever;
-  - a failed task that a **newer volume** supersedes no longer fires;
-  - templates and `exempt_vmids` are skipped in the backup rules, as they always
-    were in the guest rules;
-  - `PveBackupSummary.volumes` is `Option<u32>`. `None` when no backup-capable
-    pool could be listed at all; `0` now means only "this guest has no backups".
-
-  Also fixed, and independent: `sweep()` **took** the backup cache while
-  refilling it only every `backup_interval_secs`, so with the shipped 60 s/900 s
-  cadences fourteen sweeps in fifteen carried an empty vec — no backup document
-  published, no backup rule graded, and `reconcile` reading that as "the
-  condition cleared". Every backup alert resolved and re-fired on a 15-minute
-  cycle. The e2e missed it because it swept two *different* pollers.
-
-- **`sensor-pve`: pool over-commitment is reportable on a `dir` storage** (#881).
-  PVE surfaces per-volume sizes for LVM-thin and ZFS and nothing for a `dir`
-  storage, and summing the empty set gave `Some(0)` — "nothing is provisioned",
-  the exact opposite of the truth — so the rule this sensor leads with ("990 GB
-  provisioned on a 937 GB pool") could never fire on the storage type the
-  reference deployment actually runs. `PveStoragePool`'s own doc comment already
-  said `None`, never zero.
-
-  Where the plugin reports nothing, `allocated` is now **derived from the
-  guests**: every disk line already names its storage and its declared size, and
-  the guests are joined before the pool loop. New `allocated_source` field and
-  gauge label distinguish `reported` from `derived_from_guests`, because a
-  derived total is a **floor** — a detached `unused<N>` volume still occupies the
-  pool and is deliberately not counted. On the reference fleet that yields
-  790 GiB against 936 GiB, ratio 0.84, matching that fleet's own records.
-
-- **`sensor-pve` says when the API refuses it** (#880). A 403/404/501 became
-  `Ok(None)` with **no log line at any level**, and every caller logged failures
-  at `debug` — so a token whose role is narrower than `PVEAuditor` produced
-  `volumes: 0` and no `allocated`, in silence, at the shipped `logging.level:
-  "info"`. Refusals and listing failures now warn once per endpoint per
-  transition, and say what the consequence is.
-
-### Added
 
 - **`zensight-sensor-pve --diagnose`** (#880): a one-shot that asks the
   configured API everything the backup and storage rules depend on — which pools
@@ -244,6 +172,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Handing the runner the reporter now also declares `serve_alerts_query`, so one
   registration replaces three rituals; the eleven per-sensor
   `runner.spawn(serve_alerts_query(…))` lines are gone.
+
+### Fixed
+
+- **The release image smoke test can see a sensor die again.** It judged the
+  bundle healthy when `timeout` had to kill the spawner (rc 124), on the
+  theory that `FAIL_FAST=1` made the spawner exit with the first dead child.
+  #813 removed `FAIL_FAST`: the spawner now supervises each child with 62 s
+  of backoff inside the step's 25 s window, so rc was *always* 124 and a
+  sensor exiting at startup passed the gate. The step now fails on the
+  supervisor's own `exited (rc=…)` line.
+
+- **`RELEASING.md`'s version-drift check could never fire.** Its grep for
+  `version.workspace = true` was unanchored and matched
+  `rust-version.workspace = true` — present in both manifests that hardcode
+  their version — so it reported the trap closed while it stood open.
+  Anchored; it now prints exactly the two eBPF manifests. The document's
+  artifact list (12 binaries, 13 images, a `.tar.gz.sha256`) is brought to
+  what `release.yml` produces (17, 18, an in-tarball `SHA256SUMS`), and its
+  "parallax ships in no artifact" note is retired with #512.
+
+- **The three 0.13.0 units (`pve`, `container`, `probe`) say `/usr/bin`**
+  like the other fourteen — installing to `/usr/bin` as the README suggests
+  gave three units that failed at exec — and carry the `TimeoutStopSec=20s`
+  the packaging README claims for all units. That README no longer says every
+  unit runs under `DynamicUser` (the container sensor runs as root on
+  purpose, and now says so where an operator reads about privileges).
+
+- `just stop` stops `zensight-sensor-hostspec`, which `just run` starts.
+
+- **NetFlow: the per-exporter parser map is bounded** (256, least recently
+  seen evicted — a real exporter re-sends its templates), datagrams are
+  processed on the receive loop instead of one spawned task per packet piling
+  up behind a bounded channel, and a socket stuck in an error state backs off
+  and gives up after 50 consecutive errors rather than spinning and flooding
+  the log. NetFlow is UDP with no handshake: the map grew by one parser per
+  source address ever seen, forever.
+
+- **SNMP: a walk that fails partway is charged to the PDU budget** (#825). The
+  charge came after the row loop's `?`, so a timing-out device — exactly what
+  the budget protects — had its PDUs go unaccounted and the next cycle came
+  back at full rate.
+
+- **`labels_shadowed` means something again** for snmp/modbus/gnmi/netflow:
+  `exposition::identify` offered every pattern variable twice when there was
+  no semconv entry, so the shadow counter — the signal that exists to make a
+  dropped label visible — was permanently non-zero on those four producers.
+
+- Root README drift: `zenoh-blob/` and
+  `zensight-keyspace` are gone (external `zblob` and `zenkey`), `docs/rfcs/`
+  never existed here, parallax has a row, and the `Protocol` list names all
+  fifteen variants. `configs/correlator.json5` lists the `cloud_instance` rule
+  (default on, confidence 0.95) it omitted, and no longer cites a 420 s
+  refresh cadence — sensors refresh evidence every 60 s. An orphaned doc
+  comment in the correlator config is gone. `zensight-sensor-logs` defaults
+  to `logs.json5`, the file the units and the tarball ship.
+
+- **The design-system colour guard matches every `Color { … }` literal**, not
+  only one whose first field is `r`; the three `Color { a: …, ..base }` that
+  walked past it use a new `tokens::with_alpha`.
+
+- **`@rpc/systemd/expectations/set` accepts the shape it advertises** (#849).
+  The registry has declared this request as `ExpectationsConfig` — the plain
+  expectation set — since 1.0, which is what hostspec's equivalent accepts and
+  what `@desired` carries. The sensor only ever accepted the tagged
+  `{"type": "set_expectations", …}` envelope the GUI happens to send, so a
+  fleet tool that built its body from `describe` was refused by the very sensor
+  that had told it what to send. Both shapes are now accepted, so no existing
+  caller moves and the registry's claim becomes true — rather than renaming the
+  declared type to match the accident, which would break a shipped path for a
+  payload whose bytes do not change.
+
+- **`sensor-pve`: a whole-job vzdump is one fact, not seven false criticals**
+  (#880). The reference fleet's backup job is a single job covering every guest
+  (`all 1`), so its tasks carry no per-guest id — PVE returns `id: ""` and the
+  per-guest results live only in the task log. `text()` refuses an empty
+  string, so every nightly task was silently discarded, and what survived the
+  200-row window was whatever one-off task happened to be tagged with each
+  vmid: for guest 120, a failure from six weeks earlier, reported as "the last
+  backup" and firing a permanent critical about a dump that had in fact
+  succeeded at 03:00 that morning. A template the job explicitly excludes fired
+  too.
+
+  Backups are now graded from the **stored volumes**, with the tasks as
+  corroboration:
+
+  - a whole-job run is kept as one job-scoped fact — new `state/pve/backup/job/{node}`
+    document and `backup-job-failed` rule — instead of being attributed to
+    guests PVE never named. Parsing the task log's free text for per-guest lines
+    is a deliberate non-goal;
+  - vzdump tasks have an age bound, `alerts.backup_task_max_age_secs`, default
+    48 h. The task query is bounded by rows, not time, so without it the oldest
+    surviving one-off wins forever;
+  - a failed task that a **newer volume** supersedes no longer fires;
+  - templates and `exempt_vmids` are skipped in the backup rules, as they always
+    were in the guest rules;
+  - `PveBackupSummary.volumes` is `Option<u32>`. `None` when no backup-capable
+    pool could be listed at all; `0` now means only "this guest has no backups".
+
+  Also fixed, and independent: `sweep()` **took** the backup cache while
+  refilling it only every `backup_interval_secs`, so with the shipped 60 s/900 s
+  cadences fourteen sweeps in fifteen carried an empty vec — no backup document
+  published, no backup rule graded, and `reconcile` reading that as "the
+  condition cleared". Every backup alert resolved and re-fired on a 15-minute
+  cycle. The e2e missed it because it swept two *different* pollers.
+
+- **`sensor-pve`: pool over-commitment is reportable on a `dir` storage** (#881).
+  PVE surfaces per-volume sizes for LVM-thin and ZFS and nothing for a `dir`
+  storage, and summing the empty set gave `Some(0)` — "nothing is provisioned",
+  the exact opposite of the truth — so the rule this sensor leads with ("990 GB
+  provisioned on a 937 GB pool") could never fire on the storage type the
+  reference deployment actually runs. `PveStoragePool`'s own doc comment already
+  said `None`, never zero.
+
+  Where the plugin reports nothing, `allocated` is now **derived from the
+  guests**: every disk line already names its storage and its declared size, and
+  the guests are joined before the pool loop. New `allocated_source` field and
+  gauge label distinguish `reported` from `derived_from_guests`, because a
+  derived total is a **floor** — a detached `unused<N>` volume still occupies the
+  pool and is deliberately not counted. On the reference fleet that yields
+  790 GiB against 936 GiB, ratio 0.84, matching that fleet's own records.
+
+- **`sensor-pve` says when the API refuses it** (#880). A 403/404/501 became
+  `Ok(None)` with **no log line at any level**, and every caller logged failures
+  at `debug` — so a token whose role is narrower than `PVEAuditor` produced
+  `volumes: 0` and no `allocated`, in silence, at the shipped `logging.level:
+  "info"`. Refusals and listing failures now warn once per endpoint per
+  transition, and say what the consequence is.
 
 ## [0.13.0] - 2026-08-31
 
