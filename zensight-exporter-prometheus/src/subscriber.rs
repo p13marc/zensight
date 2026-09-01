@@ -92,7 +92,8 @@ impl TelemetrySubscriber {
                 continue;
             }
             if let Ok(alert) = zensight_common::decode_auto::<Alert>(&sample.payload().to_bytes()) {
-                collector.record_alert(alert);
+                let origin = Self::origin_of(sample.key_expr().as_str());
+                collector.record_alert_from(origin, alert);
                 seeded += 1;
             }
         }
@@ -220,15 +221,17 @@ impl TelemetrySubscriber {
                     match sample {
                         Ok(sample) => {
                             if sample.kind() == SampleKind::Delete {
-                                // `…/state/<producer>/alive` — the source is the
-                                // ORIGIN chunk, which is what alerts carry as
-                                // `source`. Parse it rather than splitting by
-                                // hand (#475).
-                                if let Some(parsed) =
-                                    zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
+                                // `…/state/<producer>/alive` — the token names
+                                // the ORIGIN chunk (`h-<12hex>`), and so does
+                                // every alert key, which is what the store
+                                // matches on. NOT `Alert::source`: that is a
+                                // hostname, and comparing the two dropped
+                                // nothing, ever. Parse it rather than
+                                // splitting by hand (#475).
+                                if let Some(origin) =
+                                    Self::origin_of(sample.key_expr().as_str())
                                 {
-                                    let origin = parsed.origin.to_string();
-                                    let dropped = self.collector.drop_source_alerts(&origin);
+                                    let dropped = self.collector.drop_origin_alerts(&origin);
                                     if dropped > 0 {
                                         info!(
                                             origin = %origin,
@@ -321,6 +324,12 @@ impl TelemetrySubscriber {
         Ok(())
     }
 
+    /// The origin chunk of a v1 key — the one identifier an alert key and a
+    /// liveliness token share.
+    fn origin_of(key: &str) -> Option<String> {
+        zensight_common::keyexpr::parse_key(key).map(|parsed| parsed.origin.to_string())
+    }
+
     /// Decode an alert sample and feed it to the collector. A `Delete` tombstone
     /// clears the firing alert keyed by the final key-expression segment.
     fn handle_alert_sample(&self, sample: &Sample) {
@@ -347,7 +356,8 @@ impl TelemetrySubscriber {
         match alert {
             Some(alert) => {
                 trace!(source = %alert.source, rule = %alert.rule, "Received alert");
-                self.collector.record_alert(alert);
+                self.collector
+                    .record_alert_from(Self::origin_of(key), alert);
             }
             None => {
                 warn!(key = %key, payload_len = payload.len(), "Failed to decode alert");

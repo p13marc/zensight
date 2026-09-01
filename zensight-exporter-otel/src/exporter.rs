@@ -775,6 +775,24 @@ impl OtelExporter {
         // that adds to it. A delta cache would be the wrong shape too: it would
         // have to invent reset semantics it cannot observe.
         let series_key = build_series_key(&metric_name, &attributes);
+
+        // The kind gate runs BEFORE the observation is stored. It used to run
+        // after, so the "keeping the first" refusal below was already false:
+        // the wrong-kind value sat in the store the registered instrument's
+        // callback reads, and a level arrived on the wire as a monotonic Sum
+        // — the exact contract violation the warning claims to prevent.
+        if let Some(existing) = self.registered.read().get(&store_key).copied()
+            && existing != kind
+        {
+            warn!(
+                metric = %metric_name,
+                ?existing,
+                attempted = ?kind,
+                "Metric changed value kind mid-flight; keeping the first"
+            );
+            self.stats.write().metrics_failed += 1;
+            return;
+        }
         {
             let mut store = self.observations.write();
             let series = store.entry(store_key.clone()).or_default();
@@ -813,20 +831,8 @@ impl OtelExporter {
         // lookup on the Zenoh receive path for no gain.
         let already = self.registered.read().get(&store_key).copied();
         match already {
-            Some(existing) if existing == kind => {}
-            Some(existing) => {
-                // Two value variants under one metric name. Reporting a level
-                // as a monotonic Sum is a contract violation, so say so rather
-                // than silently picking one.
-                warn!(
-                    metric = %metric_name,
-                    ?existing,
-                    attempted = ?kind,
-                    "Metric changed value kind mid-flight; keeping the first"
-                );
-                self.stats.write().metrics_failed += 1;
-                return;
-            }
+            // A conflicting kind was refused above, before the store.
+            Some(_) => {}
             None => {
                 self.register_instrument(
                     &meter,
@@ -1172,6 +1178,20 @@ impl OtelExporter {
     /// `h-<12hex>` origin chunk — so routing from the payload would mean
     /// re-deriving the chunk outside the grammar crate, which is the
     /// hand-rolling #475 exists to prevent. The key already has it.
+    /// Prime the alert-lifecycle state from a startup seed — an alert that
+    /// was already firing before this exporter started. Only the span
+    /// tracker learns of it: the firing *transition* happened in the past,
+    /// and a log record for it now would be a duplicate of one an earlier
+    /// incarnation already shipped. Without this, every alert in flight at
+    /// restart resolved without a span, because the tracker never saw its
+    /// firing edge — and since #882 a restarted producer adopts its firing
+    /// set rather than re-publishing it, so nothing re-supplied the edge.
+    pub fn prime_alert(&self, alert: &Alert) {
+        if let Some(tracker) = &self.alert_spans {
+            tracker.lock().on_alert(alert);
+        }
+    }
+
     pub fn record_alert(&self, key: &str, alert: &Alert) {
         // Traces signal: fold the lifecycle into a span (independent of logs).
         if let Some(tracker) = &self.alert_spans {

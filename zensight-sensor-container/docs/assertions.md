@@ -34,7 +34,7 @@ tells every dashboard the service is down.
 | Rule | Fires when | Severity |
 |---|---|---|
 | `container-restart-loop` | more than `restart_max` restarts within `restart_window_secs` | critical |
-| `container-oom-killed` | the cgroup's `oom_kill` counter advanced since the previous sweep | critical |
+| `container-oom-killed` | the cgroup's `oom_kill` counter advanced; held for `oom_hold_secs` (default 600) | critical |
 | `container-exited-nonzero` | the container is not running and its last exit code is non-zero | critical |
 
 **The first two are delta rules.** `restart_count` and `oom_kill` are
@@ -44,7 +44,18 @@ worth stating:
 
 - nothing delta-shaped fires on the first sweep after a sensor restart, and
 - a restart-loop alert only fires while the baseline is younger than the
-  configured window — the same total spread over a day is not a loop.
+  configured window — the same total spread over a day is not a loop;
+- the OOM half of the baseline is **held still for `oom_hold_secs`** once a
+  burst of new kills begins. A kill is a one-sweep event, and the alert has a
+  `for_secs` debounce that must see the condition on more than one sweep; with
+  the shipped 30 s poll and 60 s debounce the condition used to be true for
+  exactly one sweep, and the rule could never fire. The alert now stays up for
+  the hold window and resolves on its own afterwards.
+
+Labels are an alert's identity (`alert_key` hashes them), so **no rule puts a
+measurement in a label**: the failing-check streak and the kill count ride in
+the summary sentence. A label that changed every sweep re-keyed the alert every
+sweep, which is another way to never fire.
 
 The OOM alert names the container **and its `memory.max`**. On 2026-08-17 five
 sensors shared one cgroup and one `MemoryMax`, so per-container memory did not

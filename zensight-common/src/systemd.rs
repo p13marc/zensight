@@ -64,7 +64,11 @@ pub struct RestartRateExpectation {
 }
 
 /// The full declarative expectation set (seeded from config, hot-swappable).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// `Default` is the EMPTY set with the same cadence serde would fill in for
+/// `{}` — not the derived all-zeros, which would make `eval_interval_secs: 0`
+/// the stock install's set and fail the sentinel's own validation at startup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ExpectationsConfig {
     #[serde(default = "default_eval_interval_secs")]
     pub eval_interval_secs: u64,
@@ -81,6 +85,20 @@ pub struct ExpectationsConfig {
     /// "forbid any unit in state failed".
     #[serde(default)]
     pub forbid_failed: bool,
+}
+
+impl Default for ExpectationsConfig {
+    fn default() -> Self {
+        ExpectationsConfig {
+            eval_interval_secs: default_eval_interval_secs(),
+            for_secs: default_for_secs(),
+            services_active: Vec::new(),
+            targets_active: Vec::new(),
+            timers: Vec::new(),
+            restart_rates: Vec::new(),
+            forbid_failed: false,
+        }
+    }
 }
 
 #[cfg(test)]

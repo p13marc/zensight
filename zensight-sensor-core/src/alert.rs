@@ -204,25 +204,49 @@ impl AlertReporter {
     pub async fn reconcile(&self, rule: &str, still_firing: &[String]) -> Result<()> {
         let action = {
             let mut active = self.active.lock().unwrap();
-            let to_resolve: Vec<String> = active
-                .iter()
-                .filter(|(k, a)| a.rule == rule && a.published && !still_firing.contains(k))
-                .map(|(k, _)| k.clone())
-                .collect();
-            let mut payloads = Vec::new();
-            for k in to_resolve {
-                if let Some(a) = active.remove(&k) {
-                    payloads.push(a.last.resolved());
-                }
-            }
-            if payloads.is_empty() {
-                Action::None
-            } else {
-                Action::Resolve(payloads)
-            }
+            Self::retire(&mut active, |k, a| {
+                a.rule == rule && !still_firing.iter().any(|s| s == k)
+            })
         };
         // `apply` keys off the alert itself for Resolve; key arg unused there.
         self.apply("", action).await
+    }
+
+    /// Drop every entry `no_longer_violated` selects. A **published** entry
+    /// yields a `Resolved` payload; an **unpublished** one — still inside its
+    /// `for:` window — is simply forgotten, so the next observation starts a
+    /// fresh debounce clock.
+    ///
+    /// Forgetting the unpublished ones is what makes "continuously observed
+    /// for N" true rather than "seen once ≥ N ago": before this, an entry that
+    /// blipped for one sweep kept its `first_seen` forever and the next blip
+    /// an hour later published immediately. It is also what bounds `active`:
+    /// a grader that (wrongly, but it happened — probe's `duration_ms`,
+    /// systemd's `overdue_secs`) put a per-sweep measurement into the labels
+    /// minted a new key every sweep, none of which could ever be evicted, so
+    /// the sensor watching for leaks leaked through its own alerting.
+    fn retire(
+        active: &mut HashMap<String, ActiveAlert>,
+        no_longer_violated: impl Fn(&str, &ActiveAlert) -> bool,
+    ) -> Action {
+        let to_drop: Vec<String> = active
+            .iter()
+            .filter(|(k, a)| no_longer_violated(k, a))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut payloads = Vec::new();
+        for k in to_drop {
+            if let Some(a) = active.remove(&k)
+                && a.published
+            {
+                payloads.push(a.last.resolved());
+            }
+        }
+        if payloads.is_empty() {
+            Action::None
+        } else {
+            Action::Resolve(payloads)
+        }
     }
 
     /// Like [`reconcile`](Self::reconcile), but scoped to alerts carrying
@@ -238,27 +262,11 @@ impl AlertReporter {
     ) -> Result<()> {
         let action = {
             let mut active = self.active.lock().unwrap();
-            let to_resolve: Vec<String> = active
-                .iter()
-                .filter(|(k, a)| {
-                    a.rule == rule
-                        && a.published
-                        && a.last.labels.get(label_key).map(String::as_str) == Some(label_value)
-                        && !still_firing.contains(k)
-                })
-                .map(|(k, _)| k.clone())
-                .collect();
-            let mut payloads = Vec::new();
-            for k in to_resolve {
-                if let Some(a) = active.remove(&k) {
-                    payloads.push(a.last.resolved());
-                }
-            }
-            if payloads.is_empty() {
-                Action::None
-            } else {
-                Action::Resolve(payloads)
-            }
+            Self::retire(&mut active, |k, a| {
+                a.rule == rule
+                    && a.last.labels.get(label_key).map(String::as_str) == Some(label_value)
+                    && !still_firing.iter().any(|s| s == k)
+            })
         };
         self.apply("", action).await
     }
@@ -283,7 +291,6 @@ impl AlertReporter {
                 .iter()
                 .filter(|(_, a)| {
                     a.rule == rule
-                        && a.published
                         && labels
                             .iter()
                             .all(|(k, v)| a.last.labels.get(*k).map(String::as_str) == Some(*v))
@@ -292,7 +299,12 @@ impl AlertReporter {
                 .collect();
             let mut payloads = Vec::new();
             for k in to_resolve {
-                if let Some(a) = active.remove(&k) {
+                // A matching entry still inside its debounce window is
+                // dropped without a payload: the clear says the condition
+                // is gone, and nothing was ever published to retract.
+                if let Some(a) = active.remove(&k)
+                    && a.published
+                {
                     payloads.push(a.last.resolved());
                     resolved.push(k);
                 }
@@ -457,6 +469,13 @@ impl AlertReporter {
             .values()
             .filter(|a| a.published)
             .count()
+    }
+
+    /// Every entry the reporter is tracking, published or still inside its
+    /// `for:` window. The debounce bookkeeping must stay bounded by what is
+    /// currently violated — this is the number that proves it.
+    pub fn tracked_count(&self) -> usize {
+        self.active.lock().unwrap().len()
     }
 
     /// The current set of firing (published) alerts.

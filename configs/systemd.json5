@@ -68,7 +68,10 @@
     cgroup: { root: "system.slice", max_depth: 6, max_children: 64, max_pids: 32 },
 
     // Embedded sentinel (#277) — declarative expectations → state/systemd/alert/*,
-    // hot-swappable via @rpc/systemd/expectations/set. Omit to disable.
+    // hot-swappable via @rpc/systemd/expectations/set. This block SEEDS the set;
+    // the sentinel itself runs whenever alerting is on, so a host with no block
+    // still receives a set authored fleet-wide on @desired (#849). Omit it to
+    // start empty; `alerts.enabled: false` turns the sentinel off.
     // expectations: {
     //   eval_interval_secs: 10,
     //   for_secs: 15,

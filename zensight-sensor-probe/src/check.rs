@@ -46,7 +46,7 @@ pub async fn run(
     client: &reqwest::Client,
 ) -> ProbeResult {
     match t.kind {
-        ProbeKind::Http => http(t, vantage, client).await,
+        ProbeKind::Http => http(t, vantage, timeout, client).await,
         ProbeKind::Tls => tls(t, vantage, timeout).await,
         ProbeKind::Tcp => tcp(t, vantage, timeout).await,
         ProbeKind::Dns => dns(t, vantage, timeout).await,
@@ -55,7 +55,20 @@ pub async fn run(
     }
 }
 
-async fn http(t: &Target, vantage: &str, client: &reqwest::Client) -> ProbeResult {
+/// How much of a response body is read when `expect_body` asks for a
+/// substring. A probe is a client that pokes operator-supplied URLs; one
+/// pointed at a log endpoint or an artifact must not buffer the lot inside a
+/// `MemoryMax=64M` unit. A needle that only appears past this point is
+/// reported as "not present" with a truncation note, which is a config
+/// problem to surface, not a body to keep reading.
+const MAX_BODY_BYTES: usize = 256 * 1024;
+
+async fn http(
+    t: &Target,
+    vantage: &str,
+    timeout: Duration,
+    client: &reqwest::Client,
+) -> ProbeResult {
     let started = Instant::now();
     let method = t.method.as_deref().unwrap_or("GET");
     let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
@@ -63,7 +76,11 @@ async fn http(t: &Target, vantage: &str, client: &reqwest::Client) -> ProbeResul
         r.error = Some(format!("{:?} is not an HTTP method", t.method));
         return r;
     };
-    let mut req = client.request(method, &t.target);
+    // Per request, not per client: the shared client carries the GLOBAL
+    // timeout, and a target's own `timeout_secs` — documented, validated
+    // against its interval, and computed by the poller — reached every kind
+    // but this one for a while.
+    let mut req = client.request(method, &t.target).timeout(timeout);
     for (k, v) in &t.headers {
         req = req.header(k, v);
     }
@@ -91,14 +108,31 @@ async fn http(t: &Target, vantage: &str, client: &reqwest::Client) -> ProbeResul
     let ttfb = started.elapsed().as_secs_f64() * 1000.0;
     let status = resp.status().as_u16();
     let final_url = resp.url().to_string();
-    let body = resp.text().await.unwrap_or_default();
 
     let status_matched = if t.expect_status.is_empty() {
         (200..300).contains(&status)
     } else {
         t.expect_status.contains(&status)
     };
-    let body_matched = t.expect_body.as_ref().map(|needle| body.contains(needle));
+    // The body is read only when something will look at it, and then only
+    // up to `MAX_BODY_BYTES`. A plain up/down check used to buffer the whole
+    // response — uncapped, on data from the network — for nothing.
+    // `bytes` is the server's declared length when the body is not read
+    // (the common case), and the bytes actually read when it is — which is
+    // the smaller of the body and the cap.
+    let mut bytes = resp.content_length();
+    let mut body_truncated = false;
+    let body_matched = match &t.expect_body {
+        None => None,
+        Some(needle) => {
+            let (body, truncated) = read_body_capped(resp, MAX_BODY_BYTES).await;
+            body_truncated = truncated;
+            if !truncated {
+                bytes = Some(body.len() as u64);
+            }
+            Some(body.contains(needle.as_str()))
+        }
+    };
 
     // A redirect chain that leaves the configured host means the probe is
     // checking something other than what it was asked about.
@@ -132,7 +166,15 @@ async fn http(t: &Target, vantage: &str, client: &reqwest::Client) -> ProbeResul
     } else if !status_matched {
         r.error = Some(format!("unexpected status {status}"));
     } else if body_matched == Some(false) {
-        r.error = Some("the expected body text was not present".to_string());
+        r.error = Some(if body_truncated {
+            format!(
+                "the expected body text was not present in the first {} KiB (the body \
+                 was larger and was not read further)",
+                MAX_BODY_BYTES / 1024
+            )
+        } else {
+            "the expected body text was not present".to_string()
+        });
     }
     r.http = Some(HttpResult {
         status: Some(status),
@@ -140,9 +182,26 @@ async fn http(t: &Target, vantage: &str, client: &reqwest::Client) -> ProbeResul
         body_matched,
         ttfb_ms: Some(ttfb),
         redirects,
-        bytes: Some(body.len() as u64),
+        bytes,
     });
     r
+}
+
+/// Read at most `cap` bytes of a response body, lossily as UTF-8. Returns
+/// the text and whether the body went on past the cap.
+async fn read_body_capped(mut resp: reqwest::Response, cap: usize) -> (String, bool) {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let room = cap.saturating_sub(buf.len());
+        if chunk.len() > room {
+            buf.extend_from_slice(&chunk[..room]);
+            truncated = true;
+            break;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    (String::from_utf8_lossy(&buf).into_owned(), truncated)
 }
 
 async fn tls(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
