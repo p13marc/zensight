@@ -101,6 +101,12 @@ tracing backend (Tempo/Jaeger) with no sensor-side changes.
   duplicate spans. This is *synthesis, not propagation* — the ids correlate
   replays of the same lifecycle; they do not link to any sensor-side trace.
 - A refresh `Put` of an already-firing alert does not move the span start.
+- At startup the exporter GETs the alerts selector once and **primes** the
+  tracker with every alert already firing (no log record is re-emitted for
+  those — that transition was shipped by an earlier incarnation). Without the
+  seed an alert in flight across an exporter restart would resolve without a
+  span, and since #882 a restarted *producer* adopts its firing set rather
+  than re-publishing it, so nothing else re-supplies the firing edge.
 - Pending firings are bounded (`MAX_PENDING`); new firings past the bound are
   dropped with a warning.
 - Artifact-transfer spans are intentionally **not** synthesized — the exporter

@@ -139,10 +139,7 @@ impl Evaluator {
     /// Run the sentinel until the session closes: sweep on a slow poll and on any
     /// event-stream nudge.
     pub async fn run(self) {
-        let interval_secs = {
-            let e = self.expectations.read().await;
-            e.eval_interval_secs.max(1)
-        };
+        let mut interval_secs = self.eval_interval_secs().await;
         let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
         let wake = self.wake.clone();
         tracing::info!("systemd sentinel ready (interval {interval_secs}s)");
@@ -159,7 +156,27 @@ impl Evaluator {
                 }
             }
             self.sweep().await;
+            // The interval is part of the hot-swappable set (`@rpc/…/set`,
+            // `@desired`). It used to be read once at startup, so a swapped
+            // set was stamped "applied" on the marker while the sensor kept
+            // sweeping at the old cadence — the marker asserting something
+            // false about the one thing it exists to be honest about.
+            let wanted = self.eval_interval_secs().await;
+            if wanted != interval_secs {
+                tracing::info!(
+                    from = interval_secs,
+                    to = wanted,
+                    "systemd sentinel: eval interval changed by a hot-swapped set"
+                );
+                interval_secs = wanted;
+                let period = Duration::from_secs(interval_secs);
+                tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            }
         }
+    }
+
+    async fn eval_interval_secs(&self) -> u64 {
+        self.expectations.read().await.eval_interval_secs.max(1)
     }
 
     /// Current wall-clock µs.
@@ -274,13 +291,17 @@ impl Evaluator {
         let mut rate_keys = Vec::new();
         for e in &exp.restart_rates {
             let restarts = self.n_restarts(&manager, &e.unit).await.unwrap_or(0);
-            if self.restart_delta(&e.unit, restarts, e.window_secs) > e.max {
+            // The expectation is "restarts < max per window" (the type's own
+            // doc, and configuration.md), so `max` itself is the first
+            // violation — `>`, which this read for a while, let exactly `max`
+            // restarts through in silence.
+            if self.restart_delta(&e.unit, restarts, e.window_secs) >= e.max {
                 let a = self.alert(
                     RESTART_RATE_RULE,
                     AlertSeverity::Warning,
                     &e.unit,
                     format!(
-                        "service {} restart rate exceeded {}/{}s",
+                        "service {} restart rate reached {}/{}s",
                         e.unit, e.max, e.window_secs
                     ),
                 );
@@ -424,9 +445,120 @@ impl Evaluator {
     }
 }
 
+/// The gate both writers run — the RPC `expectations/set` and the `@desired`
+/// reconciler — before a set reaches the handle. An invalid set is refused
+/// with a reason a caller (or the `applied/expectations` marker's
+/// `last_rejected`) can show; the previous good set keeps running. Mirrors
+/// hostspec's `validate` (#816). Before it existed the systemd apply closure
+/// was `Ok(())` unconditionally, so `eval_interval_secs: 0`, a timer with no
+/// window and a restart rate over a zero window were all accepted and
+/// stamped `source: desired`.
+pub fn validate(cfg: &ExpectationsConfig) -> Result<(), String> {
+    let mut errs: Vec<String> = Vec::new();
+    if cfg.eval_interval_secs == 0 {
+        errs.push("eval_interval_secs must be >= 1".into());
+    }
+    let mut seen: std::collections::HashSet<(&'static str, String)> = Default::default();
+    let mut name = |kind: &'static str, n: &str, errs: &mut Vec<String>| {
+        if n.trim().is_empty() {
+            errs.push(format!("{kind}: an expectation has an empty unit name"));
+        } else if !seen.insert((kind, n.to_string())) {
+            errs.push(format!(
+                "{kind}:{n}: duplicate — two expectations on one unit would cross-resolve"
+            ));
+        }
+    };
+    for e in &cfg.services_active {
+        name("services_active", &e.unit, &mut errs);
+    }
+    for e in &cfg.targets_active {
+        name("targets_active", &e.target, &mut errs);
+    }
+    for t in &cfg.timers {
+        name("timers", &t.timer, &mut errs);
+        if t.within_secs.is_none() && t.succeeded_within_secs.is_none() {
+            errs.push(format!(
+                "timers:{}: neither within_secs nor succeeded_within_secs — the expectation \
+                 would be inert",
+                t.timer
+            ));
+        }
+        if t.within_secs == Some(0) || t.succeeded_within_secs == Some(0) {
+            errs.push(format!(
+                "timers:{}: a window of 0 seconds can never be met",
+                t.timer
+            ));
+        }
+    }
+    for r in &cfg.restart_rates {
+        name("restart_rates", &r.unit, &mut errs);
+        if r.window_secs == 0 {
+            errs.push(format!(
+                "restart_rates:{}: window_secs must be >= 1",
+                r.unit
+            ));
+        }
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs.join("; "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate both writers share. Each refusal names the expectation, so an
+    /// operator reading `last_rejected` on the marker knows which line to fix.
+    #[test]
+    fn validate_refuses_an_inert_or_impossible_set() {
+        let mut cfg = ExpectationsConfig::default();
+        assert!(
+            validate(&cfg).is_ok(),
+            "the empty set is valid — and the stock install"
+        );
+
+        cfg.eval_interval_secs = 0;
+        cfg.timers.push(TimerExpectation {
+            timer: "backup.timer".into(),
+            within_secs: None,
+            succeeded_within_secs: None,
+        });
+        cfg.restart_rates.push(RestartRateExpectation {
+            unit: "nginx.service".into(),
+            max: 5,
+            window_secs: 0,
+        });
+        cfg.services_active
+            .push(ServiceActiveExpectation { unit: " ".into() });
+        cfg.services_active.push(ServiceActiveExpectation {
+            unit: "sshd.service".into(),
+        });
+        cfg.services_active.push(ServiceActiveExpectation {
+            unit: "sshd.service".into(),
+        });
+        let err = validate(&cfg).expect_err("every one of these is a refusal");
+        for needle in [
+            "eval_interval_secs",
+            "backup.timer",
+            "inert",
+            "nginx.service",
+            "window_secs",
+            "empty unit name",
+            "duplicate",
+        ] {
+            assert!(err.contains(needle), "missing {needle:?} in: {err}");
+        }
+
+        cfg.eval_interval_secs = 10;
+        cfg.timers[0].within_secs = Some(3600);
+        cfg.restart_rates[0].window_secs = 600;
+        cfg.services_active.remove(0);
+        cfg.services_active.pop();
+        assert!(validate(&cfg).is_ok(), "{:?}", validate(&cfg));
+    }
 
     #[test]
     fn active_ok_only_for_active() {

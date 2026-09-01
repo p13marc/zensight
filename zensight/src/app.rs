@@ -2122,11 +2122,11 @@ impl ZenSight {
                     .insert(format!("{}@{}", info.name, info.source), info);
             }
 
-            Message::AlertReceived(alert) => {
+            Message::AlertReceived { origin, alert } => {
                 use crate::view::alerts::ExternalAlertOutcome;
                 let summary = alert.summary.clone();
                 let severity = alert.severity;
-                match self.alerts.ingest_external(alert) {
+                match self.alerts.ingest_external_from(origin, alert) {
                     ExternalAlertOutcome::New => {
                         self.toasts
                             .push(alert_toast_severity(severity), summary.clone());
@@ -2149,8 +2149,10 @@ impl ZenSight {
                 self.refresh_netring_anomalies();
             }
 
-            Message::AlertCleared { alert_key, .. } => {
-                if let Some(alert) = self.alerts.clear_external(&alert_key) {
+            Message::AlertCleared {
+                origin, alert_key, ..
+            } => {
+                if let Some(alert) = self.alerts.clear_external_from(&origin, &alert_key) {
                     self.toasts.push(
                         ToastSeverity::Success,
                         format!("Resolved: {}", alert.summary),
@@ -2165,8 +2167,8 @@ impl ZenSight {
             Message::AlertsSeed(alerts) => {
                 // Late-joiner seed: populate the firing set without toasting (these
                 // alerts fired before we connected).
-                for alert in alerts {
-                    self.alerts.ingest_external(alert);
+                for (origin, alert) in alerts {
+                    self.alerts.ingest_external_from(origin, alert);
                 }
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
@@ -6370,7 +6372,12 @@ impl ZenSight {
                     Some(SysSubject::NetworkTxBytes { .. }) => false,
                     _ => continue,
                 };
-                let key = format!("{}/{}|{}", device_id.protocol, device_id.source, metric);
+                let key = crate::store::MetricStore::device_metric_key(
+                    &device_id.protocol.to_string(),
+                    &device_id.origin,
+                    &device_id.source,
+                    metric,
+                );
                 if let Some(rate) =
                     crate::view::topology::counter_rate(&self.store.hot_samples(&key))
                 {
@@ -7424,7 +7431,7 @@ impl ZenSight {
             for (unit, (tx, rx)) in units {
                 let spark = self
                     .store
-                    .hot_samples(&format!("systemd/{host}|unit/{unit}/ip_ingress_bps"))
+                    .hot_samples_by_source("systemd", &host, &format!("unit/{unit}/ip_ingress_bps"))
                     .into_iter()
                     .map(|s| s.value)
                     .collect();
@@ -8209,7 +8216,7 @@ impl ZenSight {
         let Reading { point, origin } = reading;
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
-        self.store.record(&point);
+        self.store.record(&origin, &point);
 
         // Keep the bandwidth monitor's Services table live while it is open: a
         // systemd `ip_*_bps` point changes the derived rows (#319). Recomputed at
@@ -8408,7 +8415,9 @@ impl ZenSight {
                 break 'history Task::none();
             };
             let protocol = device_id.protocol.to_string();
-            let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
+            let metric_ids =
+                self.store
+                    .device_metric_ids(&protocol, &device_id.origin, &device_id.source);
             if metric_ids.is_empty() {
                 break 'history Task::none();
             }
@@ -8453,7 +8462,9 @@ impl ZenSight {
             return Task::none();
         };
         let protocol = device_id.protocol.to_string();
-        let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
+        let metric_ids =
+            self.store
+                .device_metric_ids(&protocol, &device_id.origin, &device_id.source);
         if metric_ids.is_empty() {
             return Task::none();
         }

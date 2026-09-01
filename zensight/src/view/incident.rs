@@ -96,7 +96,10 @@ pub fn group_incidents(
         let mut keys: Vec<String> = Vec::new();
         let mut events: Vec<IncidentEvent> = Vec::new();
         for a in &alerts {
-            let key = a.alert_key();
+            // The in-GUI key, `<source>/<hash>` — what the ack set and the
+            // timelines are indexed by. The bare hash was passed for a
+            // while, so no incident card ever saw an ack or a timeline.
+            let key = crate::view::alerts::AlertsState::external_key(a);
             for (state, at) in timeline_of(&key) {
                 events.push(IncidentEvent {
                     at,
@@ -390,7 +393,7 @@ mod tests {
     fn unacked_count_and_timeline_merge() {
         let a1 = alert("h", "r1", AlertSeverity::Warning, &[]);
         let a2 = alert("h", "r2", AlertSeverity::Warning, &[]);
-        let k1 = a1.alert_key();
+        let k1 = crate::view::alerts::AlertsState::external_key(&a1);
         let firing = vec![&a1, &a2];
 
         // a1 acked; a1 has two transitions, a2 has one.

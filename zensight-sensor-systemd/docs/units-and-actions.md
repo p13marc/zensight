@@ -54,6 +54,22 @@ carries, or the GUI's `{"type": "set_expectations", …}` envelope. Only the
 envelope used to be accepted, so a fleet tool that built its body from
 `describe` was refused by the very sensor that had told it what to send.
 
+The sentinel runs whenever alerting is on, **with or without** a file-config
+`expectations` block: the block seeds the set, and a host with no local set is
+the primary `@desired` case — the controller supplies it. (For a while the
+reconciler was only built when the file block existed, so a stock install —
+the shipped config comments it out — never subscribed and never published the
+marker at all.) An empty set evaluates to nothing.
+
+Every set, from any writer, passes `sentinel::validate` before it reaches the
+handle — the file block at startup (a bad one is a startup error), the RPC body
+(refused with `error/invalid-args` and the reason), and a desired document
+(kept off the handle; the reason rides the marker's `last_rejected` while the
+previous good set keeps running). Refused: `eval_interval_secs: 0`, an empty
+or duplicated unit name, a timer with neither window, a window of 0, a restart
+rate over a zero window. A hot-swapped `eval_interval_secs` takes effect on the
+next sweep; the marker never claims a cadence the sensor is not running.
+
 Expectation types (`zensight-common::systemd`, checked in `src/sentinel.rs`):
 
 | Field | Rule | Satisfied when |

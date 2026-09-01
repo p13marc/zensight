@@ -221,10 +221,18 @@ async fn the_probe_contract_end_to_end() {
     let timeouts = fired.get("probe-timeout").expect("the hairpin must fire");
     assert_eq!(timeouts.len(), 1);
     assert_eq!(timeouts[0].labels["vantage"], "vm-apps");
+    // The duration is a measurement, so it rides the SUMMARY — never a
+    // label, which is identity: a per-check wall-clock in the labels re-keyed
+    // the alert every sweep and no probe alert could outlive its own `for:`.
     assert!(
-        timeouts[0].labels["duration_ms"].parse::<f64>().unwrap() >= 900.0,
-        "the duration rides on the alert: {:?}",
+        !timeouts[0].labels.contains_key("duration_ms"),
+        "a measurement must not be part of the alert's identity: {:?}",
         timeouts[0].labels
+    );
+    assert!(
+        timeouts[0].summary.contains("timed out after"),
+        "the duration rides in the summary: {}",
+        timeouts[0].summary
     );
 
     let downs = fired.get("probe-down").expect("refused + teapot");

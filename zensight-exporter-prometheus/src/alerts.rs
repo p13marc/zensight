@@ -31,7 +31,7 @@
 //!
 //! 1. a `Resolved` put from the sensor,
 //! 2. a Zenoh `Delete` tombstone,
-//! 3. the sensor's **liveliness token vanishing** ([`AlertStore::drop_source`])
+//! 3. the sensor's **liveliness token vanishing** ([`AlertStore::drop_origin`])
 //!    — the actual "the sensor died" signal, which a 300 s timer was only ever
 //!    standing in for.
 //!
@@ -77,6 +77,11 @@ const RESERVED: &[&str] = &[
 /// edge-triggered publisher.
 struct StoredAlert {
     alert: Alert,
+    /// The origin chunk (`h-<12hex>`) of the key the alert arrived on —
+    /// the same chunk a liveliness token carries, which is what makes
+    /// [`AlertStore::drop_origin`] able to match one against the other.
+    /// `Alert::source` is a *hostname* and can never equal it.
+    origin: Option<String>,
     #[allow(dead_code)]
     received: Instant,
 }
@@ -95,6 +100,12 @@ impl AlertStore {
     /// Apply an alert update. A firing alert is inserted/updated; a resolved
     /// alert clears its series.
     pub fn apply(&self, alert: Alert) {
+        self.apply_from(None, alert);
+    }
+
+    /// [`apply`](Self::apply), recording the origin chunk of the key the
+    /// alert arrived on so a departed sensor's alerts can be found again.
+    pub fn apply_from(&self, origin: Option<String>, alert: Alert) {
         let key = alert.alert_key();
         let mut map = self.alerts.write();
         if alert.state == AlertState::Resolved {
@@ -104,6 +115,7 @@ impl AlertStore {
                 key,
                 StoredAlert {
                     alert,
+                    origin,
                     received: Instant::now(),
                 },
             );
@@ -134,10 +146,16 @@ impl AlertStore {
     /// for a sensor that is alive and simply had nothing new to say.
     ///
     /// Returns the number removed.
-    pub fn drop_source(&self, source: &str) -> usize {
+    ///
+    /// `origin` is the token's origin chunk (`h-<12hex>`), matched against
+    /// the chunk each alert *arrived under* — never against `Alert::source`,
+    /// which is a hostname. The two were compared for a while and could not
+    /// be equal, so a SIGKILLed sensor's `zensight_alert` series was exported
+    /// forever, with the staleness sweep deliberately not touching alerts.
+    pub fn drop_origin(&self, origin: &str) -> usize {
         let mut map = self.alerts.write();
         let before = map.len();
-        map.retain(|_, a| a.alert.source != source);
+        map.retain(|_, a| a.origin.as_deref() != Some(origin));
         before - map.len()
     }
 
@@ -305,15 +323,22 @@ mod tests {
     #[test]
     fn a_departed_source_loses_its_alerts() {
         let store = AlertStore::new();
-        store.apply(firing());
+        // The alert arrives on a key whose origin chunk is the host id's
+        // — NOT its hostname, which is what `Alert::source` carries.
+        store.apply_from(Some("h-0123456789ab".into()), firing());
         assert_eq!(store.len(), 1);
 
         // A different host going away must not touch it.
-        assert_eq!(store.drop_source("some-other-host"), 0);
+        assert_eq!(store.drop_origin("h-ffffffffffff"), 0);
         assert_eq!(store.len(), 1, "another host's death is not evidence");
 
+        // The hostname is not the origin; a liveliness token never carries
+        // it, so matching on it would drop nothing — which is the bug this
+        // guards against.
         let source = firing().source;
-        assert_eq!(store.drop_source(&source), 1);
+        assert_eq!(store.drop_origin(&source), 0);
+
+        assert_eq!(store.drop_origin("h-0123456789ab"), 1);
         assert_eq!(store.len(), 0);
     }
 
@@ -328,7 +353,7 @@ mod tests {
         // The only public ways out are a resolve, a tombstone, or a departed
         // source. There is deliberately no timer-based entry point at all.
         assert_eq!(store.len(), 1);
-        assert_eq!(store.drop_source("unrelated"), 0);
+        assert_eq!(store.drop_origin("unrelated"), 0);
         assert_eq!(store.len(), 1);
     }
 }

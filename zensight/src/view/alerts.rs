@@ -281,6 +281,11 @@ pub struct AlertsState {
     /// `alert_key`s of external alerts the user has acknowledged. Acknowledged
     /// alerts stay visible (dimmed) but drop out of the active count / badge.
     acknowledged_external: HashSet<String>,
+    /// The publishing origin chunk (`h-<12hex>`) of each firing external
+    /// alert, by its in-GUI key — read from the key the alert arrived on.
+    /// A Delete tombstone carries no payload, so the origin and the hash are
+    /// all it has; this is what lets it find the `(source, hash)` entry.
+    external_origins: HashMap<String, String>,
     /// Silenced sources (#26, Alertmanager model): `source` -> expiry epoch ms.
     /// While silenced, that source's incidents are hidden and excluded from the
     /// active count, with a muted-count chip surfaced instead.
@@ -368,6 +373,7 @@ impl AlertsState {
             test_result: None,
             external: HashMap::new(),
             acknowledged_external: HashSet::new(),
+            external_origins: HashMap::new(),
             silenced_sources: HashMap::new(),
             timelines: HashMap::new(),
             external_severity_filter: None,
@@ -389,6 +395,17 @@ impl AlertsState {
     }
 
     pub fn ingest_external(&mut self, alert: SensorAlert) -> ExternalAlertOutcome {
+        self.ingest_external_from(None, alert)
+    }
+
+    /// [`ingest_external`](Self::ingest_external), remembering the origin
+    /// chunk of the key the alert arrived on (when the caller has it) so a
+    /// later tombstone from that origin can find the entry.
+    pub fn ingest_external_from(
+        &mut self,
+        origin: Option<String>,
+        alert: SensorAlert,
+    ) -> ExternalAlertOutcome {
         // v1 (epic #453): the alert_key hash no longer includes the source —
         // the wire key's origin chunk scopes it. Keep the in-GUI map keyed by
         // (source, hash) so distinct hosts' alerts never collide here.
@@ -396,6 +413,12 @@ impl AlertsState {
         match alert.state {
             SensorAlertState::Resolved => {
                 if self.external.remove(&key).is_some() {
+                    // An acknowledgement is of THIS firing. Leaving it behind
+                    // made the next firing of the same condition arrive
+                    // pre-acked — dimmed, no badge, a re-fired critical that
+                    // nobody saw.
+                    self.acknowledged_external.remove(&key);
+                    self.external_origins.remove(&key);
                     self.record_transition(&key, SensorAlertState::Resolved, alert.timestamp);
                     ExternalAlertOutcome::Resolved
                 } else {
@@ -403,6 +426,9 @@ impl AlertsState {
                 }
             }
             SensorAlertState::Firing => {
+                if let Some(o) = origin {
+                    self.external_origins.insert(key.clone(), o);
+                }
                 let outcome = if self.external.contains_key(&key) {
                     ExternalAlertOutcome::Updated
                 } else {
@@ -470,11 +496,57 @@ impl AlertsState {
             .count()
     }
 
-    /// Clear an external alert by its key (resolve tombstone / Delete). Returns
+    /// Clear an external alert by its in-GUI key (`<source>/<hash>`). Returns
     /// the removed alert, if any.
-    pub fn clear_external(&mut self, alert_key: &str) -> Option<SensorAlert> {
-        self.acknowledged_external.remove(alert_key);
-        self.external.remove(alert_key)
+    pub fn clear_external(&mut self, key: &str) -> Option<SensorAlert> {
+        self.acknowledged_external.remove(key);
+        self.external_origins.remove(key);
+        self.external.remove(key)
+    }
+
+    /// Clear the external alert a Delete tombstone names. A tombstone has no
+    /// payload, so it carries the origin chunk and the hash — never the
+    /// `source` the in-GUI key is scoped by. For a while the bare hash was
+    /// looked up directly and matched nothing, so every tombstone was a
+    /// no-op and a stale Firing retired by #882's adoption sweep stayed on
+    /// screen for good.
+    ///
+    /// The entry is the one under that hash whose recorded origin matches;
+    /// when no entry recorded an origin (the demo feed, or an alert seeded
+    /// before the origin was kept) a *unique* hash is enough. Two hosts
+    /// firing the same rule with the same labels share a hash, and one's
+    /// tombstone must not clear the other's — so an ambiguous hash with no
+    /// origin to break the tie clears nothing.
+    pub fn clear_external_from(&mut self, origin: &str, alert_key: &str) -> Option<SensorAlert> {
+        let suffix = format!("/{alert_key}");
+        let candidates: Vec<String> = self
+            .external
+            .keys()
+            .filter(|k| k.ends_with(&suffix))
+            .cloned()
+            .collect();
+        let key = match candidates.as_slice() {
+            [] => return None,
+            [only] if self.external_origins.get(only).is_none_or(|o| o == origin) => only.clone(),
+            many => many
+                .iter()
+                .find(|k| self.external_origins.get(*k).is_some_and(|o| o == origin))?
+                .clone(),
+        };
+        self.clear_external(&key)
+    }
+
+    /// The sources currently silenced at `now_ms`, sorted — so the mute can
+    /// be lifted from the UI, one source at a time.
+    pub fn silenced_sources_at(&self, now_ms: i64) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .silenced_sources
+            .iter()
+            .filter(|(_, e)| **e > now_ms)
+            .map(|(s, _)| s.clone())
+            .collect();
+        out.sort();
+        out
     }
 
     /// Iterate currently-firing sensor-pushed alerts, severity-then-recency order.
@@ -1190,11 +1262,33 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
     } else {
         None
     };
-    let muted = state.silenced_count(now_ms());
+    let now = now_ms();
+    let muted_sources = state.silenced_sources_at(now);
+    let muted = muted_sources.len();
     let title = if muted > 0 {
         format!("Anomalies & Expectations ({total}) · {muted} muted")
     } else {
         format!("Anomalies & Expectations ({total})")
+    };
+    // A mute must be liftable from where it is shown. "Mute 24h" used to be
+    // undoable only by waiting: the count was text, and nothing emitted
+    // `UnsilenceSource`.
+    let actions: Option<Element<'_, Message>> = if muted_sources.is_empty() {
+        actions
+    } else {
+        let mut row = row![].spacing(space::XS).align_y(Alignment::Center);
+        for source in muted_sources {
+            row = row.push(
+                button(text(format!("Unmute {source}")).size(font::CAPTION))
+                    .on_press(Message::UnsilenceSource(source.clone()))
+                    .padding([space::XS, space::SM])
+                    .style(iced::widget::button::secondary),
+            );
+        }
+        if let Some(a) = actions {
+            row = row.push(a);
+        }
+        Some(row.into())
     };
     let section_title = section_header(title, actions);
 
@@ -1950,6 +2044,72 @@ mod tests {
         assert_eq!(state.ingest_external(b), ExternalAlertOutcome::Unknown);
         // clear_external by key is a no-op now.
         assert!(state.clear_external(&key).is_none());
+    }
+
+    /// A Delete tombstone carries the origin chunk and the hash, never the
+    /// `source` the in-GUI key is scoped by. It must still find its entry —
+    /// and must not clear another host's alert that happens to share the
+    /// hash (same rule, same labels).
+    #[test]
+    fn a_tombstone_finds_its_entry_by_origin_and_hash() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        let a = ext_alert("ssh-listening", AlertSeverity::Critical);
+        let hash = a.alert_key();
+        assert_eq!(
+            state.ingest_external_from(Some("h-aaaaaaaaaaaa".into()), a.clone()),
+            ExternalAlertOutcome::New
+        );
+        // Another host, same rule and labels: same hash, different key.
+        let mut b = a.clone();
+        b.source = "host2".into();
+        assert_eq!(b.alert_key(), hash);
+        assert_eq!(
+            state.ingest_external_from(Some("h-bbbbbbbbbbbb".into()), b),
+            ExternalAlertOutcome::New
+        );
+        assert_eq!(state.external_count(), 2);
+
+        // The bare hash matches nothing directly (the old, dead lookup).
+        assert!(state.clear_external(&hash).is_none());
+        // A tombstone from an origin nobody recorded clears nothing.
+        assert!(state.clear_external_from("h-cccccccccccc", &hash).is_none());
+        assert_eq!(state.external_count(), 2);
+        // The right origin clears exactly its own entry.
+        let cleared = state
+            .clear_external_from("h-bbbbbbbbbbbb", &hash)
+            .expect("host2's");
+        assert_eq!(cleared.source, "host2");
+        assert_eq!(state.external_count(), 1);
+        // With one candidate left and its origin recorded, only that origin
+        // may clear it.
+        assert!(state.clear_external_from("h-bbbbbbbbbbbb", &hash).is_none());
+        assert!(state.clear_external_from("h-aaaaaaaaaaaa", &hash).is_some());
+        assert_eq!(state.external_count(), 0);
+
+        // An entry ingested without an origin (demo feed) is cleared by a
+        // unique hash alone.
+        state.ingest_external(ext_alert("ssh-listening", AlertSeverity::Critical));
+        assert!(state.clear_external_from("h-dddddddddddd", &hash).is_some());
+    }
+
+    /// An ack is of one firing. It must not survive the resolve and greet the
+    /// next firing of the same condition pre-acked.
+    #[test]
+    fn an_ack_does_not_outlive_its_firing() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        let a = ext_alert("ssh-listening", AlertSeverity::Critical);
+        let key = AlertsState::external_key(&a);
+        state.ingest_external(a.clone());
+        state.acknowledge_external_source("host1");
+        assert!(state.is_external_acked(&key));
+        state.ingest_external(a.clone().resolved());
+        state.ingest_external(a);
+        assert!(
+            !state.is_external_acked(&key),
+            "a re-fired alert is a new incident, not a pre-acked one"
+        );
     }
 
     #[test]

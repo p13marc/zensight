@@ -192,6 +192,13 @@ pub fn build_write_request_since(
         })
         .collect();
 
+    // A series the collector has aged out stops appearing in the snapshot;
+    // its watermark goes with it, or the map is bounded by lifetime label
+    // churn rather than by `max_series` — a slow, monotonic leak on a fleet
+    // with per-container or per-target labels.
+    let live: std::collections::HashSet<&SeriesKey> = metrics.iter().map(|m| &m.key).collect();
+    last_pushed.retain(|k, _| live.contains(k));
+
     // Deterministic batch order (stable pushes, stable tests).
     timeseries.sort_by(|a, b| {
         let key = |ts: &TimeSeries| {

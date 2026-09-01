@@ -518,7 +518,9 @@ fn vitals_sparkline_values(
                 .map(|m| m.source.clone())
         })
         .unwrap_or_else(|| node.id.clone());
-    let samples = store.hot_samples(&format!("sysinfo/{source}|cpu/usage"));
+    // An entity member names a source, not an origin; the store picks the
+    // freshest origin reporting it rather than mixing two.
+    let samples = store.hot_samples_by_source("sysinfo", &source, "cpu/usage");
     if samples.len() < 2 {
         return None;
     }

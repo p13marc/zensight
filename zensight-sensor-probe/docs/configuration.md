@@ -26,7 +26,7 @@ looking broken — and is what CI runs.
 | `kind` | all | `http` · `tls` · `dns` · `tcp` · `icmp` · `certfile` |
 | `target` | all | a URL, `host:port`, a name, or an absolute path — checked against the kind at startup |
 | `expect_status` | http | empty = any 2xx |
-| `expect_body` | http | a literal substring |
+| `expect_body` | http | a literal substring, looked for in the first 256 KiB of the body. Without it the body is not read at all — a plain up/down check on an endpoint serving a large response must not buffer it inside a `MemoryMax=64M` unit |
 | `allow_offhost_redirect` | http | **false** by default |
 | `server_name` | tls, certfile | SNI, and the name matched against SANs |
 | `inspect_untrusted` | tls | true by default — report a bad certificate instead of erroring |

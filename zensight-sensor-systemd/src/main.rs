@@ -139,7 +139,20 @@ async fn main() -> Result<()> {
     // Embedded sentinel (#277): declarative expectations → alerts, hot-swappable
     // via @rpc/systemd/expectations/set (+ read on …/expectations). Needs its own D-Bus
     // connection for per-expectation state reads.
-    if let (Some(exp_cfg), Some(reporter)) = (expectations, reporter) {
+    //
+    // It runs whenever alerting is on, with or without a file-config
+    // `expectations` block: since #849 the set is fleet-authorable on
+    // `@desired`, and the primary case for that is a host with NO local set
+    // that is supposed to receive one. Gating the reconciler on the file
+    // block — as this did for a while — meant a stock install (the shipped
+    // config comments the block out) never subscribed, never seeded, and
+    // never published `applied/expectations` at all. An empty set evaluates
+    // to nothing and costs one D-Bus round trip per sweep.
+    if let Some(reporter) = reporter {
+        let exp_cfg = expectations.unwrap_or_default();
+        if let Err(e) = zensight_sensor_systemd::sentinel::validate(&exp_cfg) {
+            anyhow::bail!("systemd.expectations is invalid: {e}");
+        }
         match zbus::Connection::system().await {
             Ok(conn) => {
                 let evaluator = zensight_sensor_systemd::sentinel::Evaluator::new(
@@ -177,6 +190,10 @@ async fn main() -> Result<()> {
                     move |cfg: zensight_common::systemd::ExpectationsConfig| {
                         let h = apply_handle.clone();
                         async move {
+                            // The SAME gate the RPC path runs: an invalid
+                            // desired doc is refused (kept off the handle)
+                            // and rides the marker's `last_rejected`.
+                            zensight_sensor_systemd::sentinel::validate(&cfg)?;
                             h.replace(cfg).await;
                             Ok(())
                         }
@@ -207,7 +224,7 @@ async fn main() -> Result<()> {
     } else {
         declare_sentinel_unavailable(
             &mut runner,
-            "no `expectations` are configured for this systemd sensor, or alerting is off",
+            "alerting is off for this systemd sensor (`alerts.enabled: false`)",
         );
     }
 

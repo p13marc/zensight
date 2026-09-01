@@ -5,10 +5,16 @@ every target — not only the ones checked this tick. Without that, a target on 
 slow interval would have its alerts resolved and re-fired every time a faster
 one ran.
 
-Every alert carries `target`, `kind`, `duration_ms` and — the one that makes
-them actionable — **`vantage`**: where the check looked from. Two hosts
-reporting different results for the same URL is not a contradiction to resolve;
-it is the finding.
+Every alert carries `probe`, `target`, `kind` and — the one that makes them
+actionable — **`vantage`**: where the check looked from. Two hosts reporting
+different results for the same URL is not a contradiction to resolve; it is the
+finding.
+
+Not `duration_ms`. Labels are an alert's identity (`alert_key` hashes them), and
+a per-check wall-clock in the labels re-keyed every alert every sweep, so none
+ever stayed on one key long enough for `for_secs` to elapse — a target that was
+down for a week paged nobody. The measurement is a telemetry point
+(`{target}/duration_ms`) and, for a timeout, part of the summary sentence.
 
 ## Reachability
 

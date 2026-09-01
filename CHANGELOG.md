@@ -69,6 +69,256 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string* in the schema table, not from any binding. Both registry additions
   relocked as purely additive.
 
+### Fixed
+
+- **Alerts that could never fire, and a firing set that only grew.** Labels
+  are an alert's identity — `alert_key` hashes every non-`host.*` label — and
+  the reporter publishes only once the *same key* has been violated
+  continuously for `for_secs`. Three sensors put a per-sweep **measurement**
+  in the labels, so every sweep minted a fresh key with a fresh clock and the
+  debounce never elapsed:
+
+  - **probe** stamped `duration_ms` on every alert of all seven rules. With the
+    shipped 60 s interval and 120 s `for_secs`, **no probe alert has ever
+    fired** — a target down for a week paged nobody. The duration is a
+    telemetry point and, for a timeout, part of the summary; it is no longer a
+    label.
+  - **systemd** put `overdue_secs` on `systemd-timer-overdue` (it grows by one
+    poll every tick) and `mem_bytes` on `systemd-unit-mem`. Both ride the
+    summary now.
+  - **container** put `failing_streak` on `container-unhealthy` and
+    `oom_kills_total` on `container-oom-killed`. The OOM rule had a second
+    problem: a kill is a one-sweep event against a cumulative counter, and
+    with the 30 s poll and 60 s `for_secs` the condition was true for exactly
+    one sweep — never long enough. New `alerts.oom_hold_secs` (default 600)
+    holds the OOM baseline still after the first new kill, so the alert fires,
+    stays up for the hold window, and resolves on its own.
+
+  The enabling defect was in `zensight-sensor-core`: `reconcile` only evicted
+  *published* entries, so an entry still inside its `for:` window was never
+  dropped when its condition cleared. Two consequences: the tracked set grew
+  by one entry per sweep forever (the sensor watching for leaks leaked through
+  its own alerting), and `first_seen` was never reset, so "continuously
+  observed for N" really meant "seen once ≥ N ago" — a condition that blipped
+  once, cleared for an hour, and blipped again published immediately. A
+  cleared condition is now forgotten, published or not; the next observation
+  starts a fresh clock. `AlertReporter::tracked_count` exposes the bound and a
+  reporter-level test drives two sweeps with a changing measurement.
+
+  The label changes re-key those alerts. #882's adoption sweep retires the old
+  keys on each sensor's first restart; no manual sweep.
+
+- **The Prometheus exporter retires a dead sensor's alerts.** Its liveliness
+  handler dropped alerts whose `source` equalled the vanished token's origin
+  chunk (`h-<12hex>`) — but `Alert::source` is a *hostname*, so the two could
+  never be equal and a SIGKILLed or OOM-killed sensor's `zensight_alert` series
+  was exported forever (the staleness sweep deliberately does not touch
+  alerts, #758). Alerts now remember the origin chunk of the key they arrived
+  on and are dropped by that. The store test feeds a real origin, and asserts
+  that matching the hostname drops nothing.
+
+- **The OTel exporter seeds the firing set at startup**, as the Prometheus one
+  has since #758. Without it every alert already firing at an exporter restart
+  resolved without a span, because the span tracker never saw its firing edge
+  — and since #882 a restarted producer *adopts* its firing set rather than
+  re-publishing it, so nothing re-supplied the edge. The seed primes the
+  tracker only; no log record is re-emitted for a transition an earlier
+  incarnation already shipped.
+
+- **The OTel exporter refuses a kind conflict *before* storing the sample.**
+  The "keeping the first" guard ran after the observation had been written, so
+  a `Gauge` arriving under a name registered as a `Counter` was exported by
+  the registered instrument's callback as a monotonic Sum — the exact
+  contract violation the warning claimed to prevent.
+
+- **Prometheus remote-write watermarks are pruned with the series.** The
+  per-series `last_pushed` map was documented as "pruned alongside" the
+  collector's stale sweep and never was; it was bounded by lifetime label
+  churn, not `max_series`. A series that leaves the snapshot now takes its
+  watermark with it.
+
+- **The systemd sentinel and its `@desired` reconciler run on a stock
+  install.** Both were built only inside the branch that requires a file-config
+  `expectations` block, and the shipped `configs/systemd.json5` comments that
+  block out — so on a host with no local set, which is the *primary* case for
+  a fleet-authored one, nothing subscribed to `@desired`, nothing seeded, and
+  `state/systemd/applied/expectations` was never published at all. The
+  sentinel now runs whenever alerting is on; the file block seeds the set, and
+  an empty set evaluates to nothing. (`ExpectationsConfig::default()` is now
+  that empty set with the serde cadence, `eval_interval_secs: 10`; the derived
+  `Default` gave `0`, which the new validation would have refused on every
+  stock install.)
+
+- **The systemd sentinel validates every writer's set** — file at startup (a
+  bad one is a startup error), `@rpc/…/expectations/set` (refused with the
+  reason) and `@desired` (kept off the handle, reason on the marker's
+  `last_rejected`). Its desired apply closure was `Ok(())` unconditionally, so
+  `eval_interval_secs: 0`, a timer with no window and a restart rate over a
+  zero window were all accepted and stamped `source: desired`. Same gate as
+  hostspec's (#816).
+
+- **A hot-swapped `eval_interval_secs` takes effect.** The sentinel read it
+  once at startup, so a set that changed it was stamped "applied" on the
+  marker while the sweep cadence stayed what the file said — the marker
+  asserting something false about the one thing it exists to be honest about.
+
+- **The `applied/<topic>` marker restates what the last writer put there.**
+  After an operator's RPC `set`, a later *refused* desired document made the
+  reconciler republish the marker with the document it had applied before the
+  RPC write — the pre-RPC set, as "in force". The marker now owns the
+  effective state and both writers update it. systemd and hostspec both.
+
+- **`expect-restart-rate` fires at `max`, as its own doc says** ("restarts
+  `< max` per window"); it fired only above it, so exactly `max` restarts in a
+  window passed in silence.
+
+- **probe: a target's own `timeout_secs` applies to HTTP.** The override is
+  documented, validated against the target's interval and computed by the
+  poller — and reached every kind except HTTP, which used the shared client's
+  global timeout. Now per request.
+
+- **probe: the response body is read only when `expect_body` will look at it,
+  and then at most 256 KiB.** A plain up/down check buffered the whole body,
+  uncapped, on data from the network, inside a `MemoryMax=64M` unit. A needle
+  past the cap is reported as not present, with a truncation note.
+
+- **pve on a cluster: a non-shared pool is one pool per node.** Pools were
+  deduplicated on the name alone, but `local`/`local-lvm` exist on *every*
+  node as distinct pools; a three-node cluster kept one and dropped two, the
+  vzdump node list was derived from the survivors so backup tasks on the other
+  nodes were invisible (defeating #880's `backup-job-failed`), and #881's
+  derived allocation summed every node's guest disks into the one surviving
+  pool — roughly N× too high, and a false `pool-overcommitted`. Now only
+  `shared` pools collapse (asked once, as the code's own comment claimed); the
+  derived total for a non-shared pool counts that node's guests; a non-shared
+  pool whose name is not unique across the cluster carries the node in its key
+  chunk (`storage/<node>-<name>`), while a unique name — every pool on a
+  standalone node — keeps the chunk it has always had.
+
+- **pve: `cluster/nodes_total` and `nodes_online` are absent, not `0`, when
+  `/cluster/status` could not be asked** — the same rule `quorate` already
+  followed; `0` read as "every node is down". A failed pool-gauge publish is
+  no longer counted as published. `backup-stale`'s sentence no longer renders a
+  49 h age and a 48 h limit both as "2 d". The dead `Observation::now_secs` is
+  gone.
+
+- hostspec's `validate` no longer routes borrowed names through a
+  `transmute` to `'static`; it allocates the handful of strings instead.
+
+- **GUI: history read back after a restart belonged to another metric.** The
+  local store keyed its redb sample rows by a `MetricId` minted in *network
+  arrival order* and never written down, so every launch re-numbered every
+  metric and a chart seeded "from history" read another metric's buckets —
+  plausible numbers, wrong series, for up to the minute tier's 30 days. The
+  ids are now persisted (`metrics` table, written in the same transaction as
+  the samples) and rebuilt on open, with a `meta` schema marker; a pre-v2
+  file is moved aside as `metrics.redb.schema-v1` rather than read, the way an
+  older redb format already was. Its rows were mislabelled on every launch,
+  so nothing correct is lost. The metric key also carries the publishing
+  origin now, the collision `DeviceId` closed in #474: two hosts reporting
+  one hostname were interleaved into a single sawtooth series.
+
+- **GUI: an alert `Delete` tombstone actually clears the alert.** The
+  tombstone handler looked the bare 16-hex hash up in a map keyed by
+  `<source>/<hash>`, so it matched nothing, ever — a stale Firing seeded from
+  storage and retired by #882's adoption sweep stayed on screen for good. The
+  origin chunk now rides with every received and seeded alert, and the
+  tombstone — which has no payload, so the origin and the hash are all it
+  carries — finds its entry by them. Two hosts firing the same rule with the
+  same labels share a hash; one's tombstone does not clear the other's.
+
+- **GUI: incident cards see acks and timelines.** They looked both up by the
+  bare hash while the maps are keyed by `<source>/<hash>`, so the "N unacked"
+  badge never dropped after Ack and every timeline was empty (since #453).
+
+- **GUI: an acknowledgement does not outlive its firing.** Resolving an alert
+  left its ack behind, so the next firing of the same condition arrived
+  pre-acked — dimmed, off the badge, invisible.
+
+- **GUI: the metric store no longer buffers every sample forever when there
+  is no database** (`--demo`, a locked file, a read-only data dir): the flush
+  that would drain the buffer can never run without one.
+
+- **GUI: the default build can open a parallax stream.** Without
+  `--features h264` the catalogue row rendered no controls at all, and the
+  JPEG preview path — the documented default — was reachable from nowhere.
+  A "Preview" button opens it.
+
+- **GUI: a muted alert source can be un-muted.** "Mute 24h" was undoable only
+  by waiting: the muted count was text, and nothing emitted the unsilence
+  message the app already handled. Each muted source now has an "Unmute"
+  button in the section header.
+
+- **`@rpc/systemd/expectations/set` accepts the shape it advertises** (#849).
+  The registry has declared this request as `ExpectationsConfig` — the plain
+  expectation set — since 1.0, which is what hostspec's equivalent accepts and
+  what `@desired` carries. The sensor only ever accepted the tagged
+  `{"type": "set_expectations", …}` envelope the GUI happens to send, so a
+  fleet tool that built its body from `describe` was refused by the very sensor
+  that had told it what to send. Both shapes are now accepted, so no existing
+  caller moves and the registry's claim becomes true — rather than renaming the
+  declared type to match the accident, which would break a shipped path for a
+  payload whose bytes do not change.
+
+- **`sensor-pve`: a whole-job vzdump is one fact, not seven false criticals**
+  (#880). The reference fleet's backup job is a single job covering every guest
+  (`all 1`), so its tasks carry no per-guest id — PVE returns `id: ""` and the
+  per-guest results live only in the task log. `text()` refuses an empty
+  string, so every nightly task was silently discarded, and what survived the
+  200-row window was whatever one-off task happened to be tagged with each
+  vmid: for guest 120, a failure from six weeks earlier, reported as "the last
+  backup" and firing a permanent critical about a dump that had in fact
+  succeeded at 03:00 that morning. A template the job explicitly excludes fired
+  too.
+
+  Backups are now graded from the **stored volumes**, with the tasks as
+  corroboration:
+
+  - a whole-job run is kept as one job-scoped fact — new `state/pve/backup/job/{node}`
+    document and `backup-job-failed` rule — instead of being attributed to
+    guests PVE never named. Parsing the task log's free text for per-guest lines
+    is a deliberate non-goal;
+  - vzdump tasks have an age bound, `alerts.backup_task_max_age_secs`, default
+    48 h. The task query is bounded by rows, not time, so without it the oldest
+    surviving one-off wins forever;
+  - a failed task that a **newer volume** supersedes no longer fires;
+  - templates and `exempt_vmids` are skipped in the backup rules, as they always
+    were in the guest rules;
+  - `PveBackupSummary.volumes` is `Option<u32>`. `None` when no backup-capable
+    pool could be listed at all; `0` now means only "this guest has no backups".
+
+  Also fixed, and independent: `sweep()` **took** the backup cache while
+  refilling it only every `backup_interval_secs`, so with the shipped 60 s/900 s
+  cadences fourteen sweeps in fifteen carried an empty vec — no backup document
+  published, no backup rule graded, and `reconcile` reading that as "the
+  condition cleared". Every backup alert resolved and re-fired on a 15-minute
+  cycle. The e2e missed it because it swept two *different* pollers.
+
+- **`sensor-pve`: pool over-commitment is reportable on a `dir` storage** (#881).
+  PVE surfaces per-volume sizes for LVM-thin and ZFS and nothing for a `dir`
+  storage, and summing the empty set gave `Some(0)` — "nothing is provisioned",
+  the exact opposite of the truth — so the rule this sensor leads with ("990 GB
+  provisioned on a 937 GB pool") could never fire on the storage type the
+  reference deployment actually runs. `PveStoragePool`'s own doc comment already
+  said `None`, never zero.
+
+  Where the plugin reports nothing, `allocated` is now **derived from the
+  guests**: every disk line already names its storage and its declared size, and
+  the guests are joined before the pool loop. New `allocated_source` field and
+  gauge label distinguish `reported` from `derived_from_guests`, because a
+  derived total is a **floor** — a detached `unused<N>` volume still occupies the
+  pool and is deliberately not counted. On the reference fleet that yields
+  790 GiB against 936 GiB, ratio 0.84, matching that fleet's own records.
+
+- **`sensor-pve` says when the API refuses it** (#880). A 403/404/501 became
+  `Ok(None)` with **no log line at any level**, and every caller logged failures
+  at `debug` — so a token whose role is narrower than `PVEAuditor` produced
+  `volumes: 0` and no `allocated`, in silence, at the shipped `logging.level:
+  "info"`. Refusals and listing failures now warn once per endpoint per
+  transition, and say what the consequence is.
+
+### Added
+
 - **`zensight-sensor-pve --diagnose`** (#880): a one-shot that asks the
   configured API everything the backup and storage rules depend on — which pools
   will be listed, what each content listing returns, which volids name no guest
