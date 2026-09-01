@@ -44,6 +44,22 @@ fn parse_set_body(payload: &[u8]) -> Result<ExpectationsConfig, serde_json::Erro
     }
 }
 
+/// Parse, then run the same gate the `@desired` reconciler runs
+/// (`sentinel::validate`): a body that decodes but describes an inert or
+/// impossible set is refused with the reason, and the previous good set keeps
+/// running.
+trait AndThenValidated {
+    fn and_then_validated(self) -> Result<ExpectationsConfig, String>;
+}
+
+impl AndThenValidated for Result<ExpectationsConfig, serde_json::Error> {
+    fn and_then_validated(self) -> Result<ExpectationsConfig, String> {
+        let cfg = self.map_err(|e| e.to_string())?;
+        crate::sentinel::validate(&cfg)?;
+        Ok(cfg)
+    }
+}
+
 /// Run the sentinel command/status channel until the session closes.
 ///
 /// `marker` is the shared `applied/<topic>` marker (#849): the `@desired`
@@ -83,7 +99,7 @@ pub async fn run(
                             .payload()
                             .map(|p| p.to_bytes().to_vec())
                             .unwrap_or_default();
-                        match parse_set_body(&payload) {
+                        match parse_set_body(&payload).and_then_validated() {
                             Ok(cfg) => {
                                 tracing::info!("sentinel: expectation set replaced");
                                 handle.replace(cfg.clone()).await;
@@ -101,7 +117,7 @@ pub async fn run(
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "sentinel: bad expectation command");
-                                let err = zensight_sensor_core::rpc::RpcError::invalid_args(e.to_string());
+                                let err = zensight_sensor_core::rpc::RpcError::invalid_args(e);
                                 let _ = query
                                     .reply_err(serde_json::to_vec(&err).unwrap_or_default())
                                     .await;

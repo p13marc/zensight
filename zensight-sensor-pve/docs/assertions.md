@@ -53,6 +53,26 @@ When the content listing cannot be read, `allocated_bytes` is **`None`, never
 0**: zero would read as "nothing provisioned", which is the one wrong answer
 this family can give.
 
+### On a cluster: two kinds of pool
+
+`/cluster/resources` lists a **shared** pool (NFS, Ceph, PBS) once per node —
+every row is the same bytes, so it is asked once and kept once. A
+**non-shared** pool (`local`, `local-lvm`: every node has them) is a
+*different* pool on every node that happens to carry the same name, with its
+own capacity, its own volumes and its own over-commitment. For a while the
+sensor collapsed pools on the name alone: a three-node cluster kept one
+`local-lvm` and dropped the other two, and the derived total then summed
+*every* node's guest disks into the survivor — roughly N× too high, and a
+false `pool-overcommitted` on a pool that was half empty.
+
+Now the derived total for a non-shared pool counts only the guests on that
+pool's node, and a non-shared pool whose name is not unique across the
+cluster carries the node in its key chunk (`storage/<node>-<name>`), so two
+pools do not take turns overwriting one document. A name that *is* unique —
+every pool on a single node — keeps the bare chunk it has always had, so
+nothing moves on a standalone deployment. vzdump tasks are asked of every
+node, not only the nodes the (deduplicated) pool list happened to keep.
+
 ### Reported vs derived (#881)
 
 PVE surfaces a per-volume size for LVM-thin and ZFS and **nothing for a `dir`

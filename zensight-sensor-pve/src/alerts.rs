@@ -60,9 +60,9 @@ pub struct Observation<'a> {
     pub backups: &'a [PveBackupSummary],
     /// Whole-job vzdump runs — the ones that name no guest (#880).
     pub backup_jobs: &'a [PveBackupJob],
+    /// Staleness is graded from each summary's own `age_secs`, computed by
+    /// the poller against its clock — there is no second clock here.
     pub cluster: Option<&'a PveClusterHealth>,
-    /// Wall clock, seconds — injected so staleness is testable.
-    pub now_secs: i64,
 }
 
 fn alert(
@@ -387,7 +387,6 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             }
         }
     }
-    let _ = obs.now_secs;
     out
 }
 
@@ -406,11 +405,20 @@ fn human_bytes(b: u64) -> String {
     }
 }
 
+/// Coarse, but never so coarse that an age and its limit read alike: "2 d
+/// old (limit 2 d)" was the sentence for a 49 h backup against a 48 h limit.
 fn human_secs(s: u64) -> String {
     match s {
         0..=3599 => format!("{} min", s / 60),
         3600..=172_799 => format!("{} h", s / 3600),
-        _ => format!("{} d", s / 86400),
+        _ => {
+            let days = s as f64 / 86_400.0;
+            if (days - days.round()).abs() < 0.05 {
+                format!("{} d", days.round() as u64)
+            } else {
+                format!("{days:.1} d")
+            }
+        }
     }
 }
 
@@ -459,7 +467,6 @@ mod tests {
             pools: &[],
             backups: &[],
             cluster: None,
-            now_secs: 1_000_000,
         }
     }
 
@@ -813,7 +820,6 @@ mod tests {
                 pools: &pools,
                 backups: &b,
                 cluster: Some(&c),
-                now_secs: 0,
             },
         );
         let fired: std::collections::HashSet<&str> = a.iter().map(|x| x.rule.as_str()).collect();

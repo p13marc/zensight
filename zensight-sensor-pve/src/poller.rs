@@ -182,10 +182,25 @@ impl Poller {
             .collect();
 
         // ── Pools, with the allocated total the audit needed ────────────────
+        //
+        // Two kinds of pool come out of `/cluster/resources`, and they must
+        // not be treated alike. A SHARED pool (NFS, Ceph, PBS) is one pool
+        // listed once per node; every row describes the same bytes, so it is
+        // asked once and kept once. A NON-shared pool (`local`, `local-lvm`
+        // — the ones every PVE node has) is a different pool on every node
+        // that happens to carry the same name; each has its own capacity,
+        // its own volumes and its own over-commitment. Collapsing on the
+        // name alone — which this did for a while — kept one `local-lvm` of
+        // a three-node cluster and dropped the other two, and then summed
+        // every node's guest disks into the survivor (see
+        // `derive_allocated`) for an allocated total roughly N× too high and
+        // a false `pool-overcommitted`.
         let mut pools = Vec::new();
+        let mut shared_seen: std::collections::HashSet<&str> = Default::default();
         for rt in &pool_runtimes {
-            // A shared pool is listed once per node; asking every node for the
-            // same content listing is N times the work for one answer.
+            if rt.shared && !shared_seen.insert(rt.storage.as_str()) {
+                continue; // the same shared pool, seen through another node
+            }
             let reported = match self.client.storage_allocated(&rt.node, &rt.storage).await {
                 Ok(a) => a,
                 Err(e) => {
@@ -205,20 +220,22 @@ impl Poller {
             // the guests are joined above, before this loop.
             let allocated = match reported {
                 Some(bytes) => Some((bytes, AllocationSource::Reported)),
-                None => derive_allocated(&guests, &rt.storage)
+                None => derive_allocated(&guests, &rt.storage, (!rt.shared).then_some(&rt.node))
                     .map(|bytes| (bytes, AllocationSource::DerivedFromGuests)),
             };
             pools.push(build_pool(rt, allocated));
         }
-        pools.sort_by(|a, b| a.storage.cmp(&b.storage));
-        pools.dedup_by(|a, b| a.storage == b.storage);
+        pools.sort_by(|a, b| (&a.storage, &a.node).cmp(&(&b.storage, &b.node)));
 
         // ── Backups, on the slowest cadence ─────────────────────────────────
         let refresh_backups = self
             .last_backup_poll
             .is_none_or(|t| t.elapsed() >= Duration::from_secs(self.cfg.backup_interval_secs));
         if refresh_backups {
-            let (summaries, jobs) = self.collect_backups(&pools).await;
+            let mut nodes: Vec<&str> = pool_runtimes.iter().map(|p| p.node.as_str()).collect();
+            nodes.sort_unstable();
+            nodes.dedup();
+            let (summaries, jobs) = self.collect_backups(&pools, &nodes).await;
             self.backups = summaries;
             self.backup_jobs = jobs;
             self.last_backup_poll = Some(Instant::now());
@@ -269,9 +286,14 @@ impl Poller {
     /// failure from six weeks earlier became "the last backup" of six guests
     /// permanently, firing a critical about a backup that had in fact
     /// succeeded at 03:00 that morning.
+    /// `nodes` is every node the runtime rows named — not the nodes of the
+    /// (deduplicated) pool list, which keeps a shared pool through one node
+    /// only: vzdump runs on the node that hosts the guest, and a job on any
+    /// other node was invisible.
     async fn collect_backups(
         &self,
         pools: &[PveStoragePool],
+        nodes: &[&str],
     ) -> (Vec<PveBackupSummary>, Vec<PveBackupJob>) {
         let mut volumes: HashMap<u32, Vec<PveBackupVolume>> = HashMap::new();
         // Whether ANY backup-capable pool was successfully listed. Without
@@ -310,10 +332,7 @@ impl Poller {
 
         let mut tasks: HashMap<u32, zensight_common::pve::PveBackupTask> = HashMap::new();
         let mut jobs: Vec<PveBackupJob> = Vec::new();
-        let mut nodes: Vec<&str> = pools.iter().map(|p| p.node.as_str()).collect();
-        nodes.sort_unstable();
-        nodes.dedup();
-        for node in nodes {
+        for &node in nodes {
             match self.client.vzdump_tasks(node, 200).await {
                 Ok(rows) => {
                     for (vmid, task) in rows.per_guest {
@@ -487,7 +506,23 @@ impl Poller {
         for p in &sweep.pools {
             // Operator-chosen, so it must be slugged before it can reach a key
             // — the same foreign-value boundary #843 established for units.
-            let slug = zenkey::Chunk::slug(&p.storage);
+            // A non-shared pool that shares its NAME with one on another
+            // node (`local`, `local-lvm` — every cluster) gets the node in
+            // its key chunk, or two pools would take turns overwriting one
+            // `storage/local` document. A name that is unique across the
+            // cluster keeps the bare chunk it has always had, so a
+            // single-node deployment's keys do not move.
+            let slug = if sweep
+                .pools
+                .iter()
+                .filter(|q| q.storage == p.storage)
+                .count()
+                > 1
+            {
+                zenkey::Chunk::slug(format!("{}-{}", p.node, p.storage))
+            } else {
+                zenkey::Chunk::slug(&p.storage)
+            };
             let stem = format!("storage/{slug}");
             for (suffix, value) in [
                 ("total_bytes", p.total_bytes as f64),
@@ -528,8 +563,9 @@ impl Poller {
                             },
                         );
                     }
-                    let _ = self.publisher.publish(&metric, &point).await;
-                    published += 1;
+                    if self.publisher.publish(&metric, &point).await.is_ok() {
+                        published += 1;
+                    }
                 }
             }
             if let Some(key) = state_key(&["storage", &slug])
@@ -600,8 +636,6 @@ impl Poller {
 
         if let Some(c) = &sweep.cluster {
             let mut points = vec![
-                ("cluster/nodes_online".to_string(), c.nodes_online() as f64),
-                ("cluster/nodes_total".to_string(), c.nodes.len() as f64),
                 ("cluster/guests_total".to_string(), c.guests_total as f64),
                 (
                     "cluster/guests_running".to_string(),
@@ -612,6 +646,14 @@ impl Poller {
                     c.replication.iter().filter(|j| j.failed).count() as f64,
                 ),
             ];
+            // Absent, not 0, when `/cluster/status` answered nothing (refused,
+            // or failed): a standalone node still lists itself there, so an
+            // empty node list is "could not ask", and `nodes_online = 0`
+            // would read as "every node is down".
+            if !c.nodes.is_empty() {
+                points.push(("cluster/nodes_online".to_string(), c.nodes_online() as f64));
+                points.push(("cluster/nodes_total".to_string(), c.nodes.len() as f64));
+            }
             // Absent, not 0, on a standalone node: there is no quorum to
             // report, and 0 would read as "lost".
             if let Some(q) = c.quorate {
@@ -647,7 +689,6 @@ impl Poller {
                 pools: &sweep.pools,
                 backups: &sweep.backups,
                 cluster: sweep.cluster.as_ref(),
-                now_secs: zensight_common::current_timestamp_millis() / 1000,
             };
             let firing = alerts::grade(&self.cfg.alerts, &obs);
             let mut by_rule: HashMap<&str, Vec<String>> = HashMap::new();
@@ -744,9 +785,15 @@ fn guest_evidence(g: &PveGuest) -> Option<HostEvidence> {
 ///
 /// `None` when no guest has a sized disk on this pool: that is "we cannot say",
 /// not "nothing is provisioned", and the difference is the whole of #881.
-fn derive_allocated(guests: &[PveGuest], storage: &str) -> Option<u64> {
+///
+/// `node` scopes the sum to the guests on one node — for a NON-shared pool,
+/// where `local-lvm` on node A and `local-lvm` on node B are two pools with
+/// one name, and a guest on B occupies nothing on A. A shared pool passes
+/// `None`: every node's guests occupy the same bytes.
+fn derive_allocated(guests: &[PveGuest], storage: &str, node: Option<&str>) -> Option<u64> {
     let sizes: Vec<u64> = guests
         .iter()
+        .filter(|g| node.is_none_or(|n| g.node == n))
         .flat_map(|g| g.disks.iter())
         .filter(|d| d.storage.as_deref() == Some(storage))
         .filter_map(|d| d.size_bytes)
@@ -901,11 +948,38 @@ mod tests {
             // nothing rather than a zero that looks like a measurement.
             guest_on(180, &[("local", None)]),
         ];
-        assert_eq!(derive_allocated(&guests, "local"), Some(722 * G));
-        assert_eq!(derive_allocated(&guests, "fast"), Some(500 * G));
+        assert_eq!(derive_allocated(&guests, "local", None), Some(722 * G));
+        assert_eq!(derive_allocated(&guests, "fast", None), Some(500 * G));
         // No sized disk anywhere on this pool is "we cannot say", not
         // "nothing is provisioned" — the whole of #881.
-        assert_eq!(derive_allocated(&guests, "nvme"), None);
-        assert_eq!(derive_allocated(&[], "local"), None);
+        assert_eq!(derive_allocated(&guests, "nvme", None), None);
+        assert_eq!(derive_allocated(&[], "local", None), None);
+    }
+
+    /// A cluster: `local` on every node is a different pool with one name,
+    /// so the derived total for node A's `local` counts node A's guests only.
+    /// Summing the cluster-wide list — which this did for a while — put every
+    /// node's disks on whichever `local` survived the dedup, roughly N× too
+    /// high, and fired `pool-overcommitted` on a pool that was half empty.
+    #[test]
+    fn derived_allocation_is_scoped_to_the_node_for_a_local_pool() {
+        const G: u64 = 1 << 30;
+        let mut on_a = guest_on(110, &[("local", Some(100 * G))]);
+        on_a.node = "pve-a".into();
+        let mut on_b = guest_on(120, &[("local", Some(300 * G))]);
+        on_b.node = "pve-b".into();
+        let guests = vec![on_a, on_b];
+        assert_eq!(
+            derive_allocated(&guests, "local", Some("pve-a")),
+            Some(100 * G)
+        );
+        assert_eq!(
+            derive_allocated(&guests, "local", Some("pve-b")),
+            Some(300 * G)
+        );
+        // A node with no guest on the pool: "cannot say", not zero.
+        assert_eq!(derive_allocated(&guests, "local", Some("pve-c")), None);
+        // A shared pool: every node's guests occupy the same bytes.
+        assert_eq!(derive_allocated(&guests, "local", None), Some(400 * G));
     }
 }
