@@ -29,9 +29,10 @@ loads config, builds a `SensorRunner`, spawns protocol workers that publish
    the identity task (if enabled), then waits for **SIGINT or SIGTERM** —
    catching SIGTERM matters because systemd/docker `stop` send it, and a
    Ctrl+C-only handler would be SIGKILLed after the stop timeout, skipping the
-   graceful path (undeclared liveliness token + alert tombstones). On signal it
-   aborts tasks and closes the session. `run_with_metadata(meta)` additionally
-   carries free-form metadata on the registration doc (`SensorInfo.metadata`).
+   graceful path (alert tombstones + a clean liveliness close). On signal it
+   aborts tasks, **retracts and tombstones every alert still firing**, and only
+   then closes the session. `run_with_metadata(meta)` additionally carries
+   free-form metadata on the registration doc (`SensorInfo.metadata`).
 
 ```mermaid
 stateDiagram-v2
@@ -400,6 +401,37 @@ raise/update, then `Put(Resolved)` + a `Delete` tombstone to clear).
   one reply per firing alert on its concrete key — exactly the storage-shaped
   answer a router latest-value store would give, so seeding works with or
   without one.
+
+### The firing set outlives the process (#882)
+
+A firing alert is a claim this producer is making, at a key only this producer
+writes. `reconcile` retracts it when the condition clears — but only while the
+process that raised it is still running. A restart begins with an empty set, so
+an alert that was firing beforehand and is no longer true is never fired again
+*and therefore never resolved*: the `Firing` document is abandoned. Without a
+storage nobody notices; with a `latest` storage on `v1/*/state/**` it is
+durable and served to every late joiner forever.
+
+So the reporter owns both ends of its own lifetime, and the runner drives both
+for any reporter handed to it with **`with_alert_reporter`** — which is also
+what declares `serve_alerts_query`, so one registration replaces three rituals:
+
+| End | What happens | Covers |
+|---|---|---|
+| start | `adopt_persisted` GETs this producer's own alert selector and takes ownership of what it finds | SIGKILL, OOM, panic, and a restart whose config no longer defines the target |
+| stop | `resolve_all` retracts and tombstones everything still firing, before the session closes | `systemctl stop`, `docker stop`, Ctrl+C |
+
+Adopted alerts enter the active set **already published**, which is the truth —
+they *are* published, by us, at that key. From there the ordinary sweep finishes
+the job: the first `reconcile` of each rule retracts what is no longer violated,
+and re-`observe`ing what still is publishes nothing, because key and severity are
+unchanged. There is no new lifecycle state, and no storage means an empty answer
+and today's behaviour exactly.
+
+Two shapes are retired on the spot rather than adopted, because no sweep can
+ever reach them: a `Resolved` document whose `Delete` was lost, and a document
+whose key does not match the `alert_key` its own payload derives — the #737
+re-key stranding, which a producer can now clear for itself.
 
 ## Liveness
 

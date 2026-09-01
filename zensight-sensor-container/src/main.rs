@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use zensight_sensor_core::{
-    AlertReporter, SensorArgs, SensorConfig, SensorRunner, serve_alerts_query,
-};
+use zensight_sensor_core::{AlertReporter, SensorArgs, SensorConfig, SensorRunner};
 
 use zensight_sensor_container::config::ContainerSensorConfig;
 use zensight_sensor_container::poller::Poller;
@@ -66,12 +64,14 @@ async fn main() -> Result<()> {
             zensight_common::Protocol::Container,
             format,
         )
-        .with_debounce(Duration::from_secs(cc.alerts.for_secs));
+        .with_debounce(Duration::from_secs(cc.alerts.for_secs))
+        // The rule table this build can still raise, so a restart retires an
+        // inherited alert for a rule that no longer exists (#882).
+        .with_known_rules(zensight_sensor_container::alerts::ALL_RULES.iter().copied());
         if let Some(id) = runner.identity() {
             r = r.with_identity(id);
         }
         let r = Arc::new(r);
-        runner.spawn(serve_alerts_query(r.clone()));
         Some(r)
     } else {
         None

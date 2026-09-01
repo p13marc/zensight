@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
 
     use std::sync::Arc;
     use std::time::Duration;
-    use zensight_sensor_core::{AlertReporter, serve_alerts_query};
+    use zensight_sensor_core::AlertReporter;
 
     // Sentinel wake (#277): the event stream nudges the sentinel for instant
     // re-eval on watched control-plane changes.
@@ -107,10 +107,11 @@ async fn main() -> Result<()> {
         if let Some(id) = runner.identity() {
             reporter = reporter.with_identity(id);
         }
-        let r = Arc::new(reporter);
-        runner.spawn(serve_alerts_query(r.clone()));
-        r
+        Arc::new(reporter)
     });
+    if let Some(r) = &reporter {
+        runner = runner.with_alert_reporter(r.clone());
+    }
 
     let mut collector = SystemdCollector::new(
         source.clone(),

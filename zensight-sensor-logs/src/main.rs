@@ -34,9 +34,7 @@ use sentinel::LogSentinel;
 use std::sync::Arc;
 use zensight_common::serialization::encode;
 use zensight_common::telemetry::Protocol;
-use zensight_sensor_core::{
-    AlertReporter, SensorArgs, SensorConfig, SensorRunner, serve_alerts_query,
-};
+use zensight_sensor_core::{AlertReporter, SensorArgs, SensorConfig, SensorRunner};
 
 /// Process-wide monotonic sequence that disambiguates per-line log event uids
 /// (#104) when multiple lines share a millisecond timestamp.
@@ -195,7 +193,7 @@ async fn main() -> Result<()> {
     // Shared alert reporter for all sensor-emitted alerts: journald known-events
     // (#61) and per-unit error budgets (#105). One reporter per protocol — the
     // two alert families are namespaced by `rule` and reconcile independently —
-    // so `serve_alerts_query` is declared exactly once.
+    // so the runner registration below happens exactly once.
     let journald_events_on =
         matches!(&syslog_config.journald, Some(j) if j.enabled && j.detect_events);
     let budget_alerts_on = syslog_config.derived && syslog_config.error_budget.enabled;
@@ -215,8 +213,9 @@ async fn main() -> Result<()> {
                 None => reporter,
             };
             let reporter = Arc::new(reporter);
-            // Seed late-joining consumers (e.g. the GUI) with the firing set.
-            runner.spawn(serve_alerts_query(reporter.clone()));
+            // Handing the reporter to the runner seeds late-joining consumers
+            // (e.g. the GUI) and makes the firing set survive a restart (#882).
+            runner = runner.with_alert_reporter(reporter.clone());
             Some(reporter)
         } else {
             None

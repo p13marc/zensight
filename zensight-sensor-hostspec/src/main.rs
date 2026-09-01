@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
         reporter = reporter.with_identity(id);
     }
     let reporter = Arc::new(reporter);
-    runner.spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
+    runner = runner.with_alert_reporter(reporter.clone());
 
     tracing::info!(
         assertions = %if expectations.is_empty() { "empty set".to_string() } else {

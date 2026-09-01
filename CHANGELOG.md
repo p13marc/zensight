@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Alerts are retracted, not abandoned — a firing set that outlives its
+  process** (#882). When a condition cleared, `reconcile` published
+  `Put(Resolved)` + a `Delete` tombstone, and always had. What no build did was
+  survive its own restart: a new process starts with an empty firing set, so an
+  alert that was firing beforehand and is no longer true is never fired again
+  *and therefore never resolved*. Without a storage nobody noticed — the sample
+  aged out of the network. The reference fleet deployed `zensight-latest` on
+  `v1/*/state/**` on 2026-09-01 and the same afternoon watched three alerts sit
+  `firing` for good: a `swap_thrash` still reading 2052 pages/s sixteen minutes
+  after `si/so` went to zero, a `pressure_io` reading 50.9% against a live
+  1.61%, and two `probe-down`s for targets that had been deleted from the
+  config.
+
+  Sensors now own both ends of their own lifetime, and `SensorRunner` drives
+  both for any reporter handed to it with `with_alert_reporter`:
+
+  - **on start**, `AlertReporter::adopt_persisted` GETs the producer's own alert
+    selector and takes ownership of whatever the previous incarnation left
+    there. Adopted alerts enter the active set already `published`, which is the
+    truth, so the existing sweep finishes the job with no new lifecycle state:
+    the first `reconcile` of each rule retracts what is no longer violated, and
+    re-observing what still is publishes nothing. This is the half that covers
+    SIGKILL, an OOM kill, and the common case of a restart whose config no
+    longer defines the target.
+  - **on stop**, `resolve_all` — written for this and wired to nothing until now
+    — retracts and tombstones everything still firing, before the session
+    closes. Three docs, `RELEASING.md` included, had claimed this already
+    happened.
+
+  Three shapes are retired on the spot rather than adopted, because no sweep can
+  reach them: a `Resolved` whose `Delete` was lost, a document whose key does
+  not match the `alert_key` its own payload derives (the #737 re-key stranding,
+  which producers now clear for themselves — see `RELEASING.md`), and a rule the
+  build no longer has, for producers that declare their rule table with
+  `with_known_rules`. A deployment with no storage answers the GET with nothing
+  and behaves exactly as before.
+
+  Handing the runner the reporter now also declares `serve_alerts_query`, so one
+  registration replaces three rituals; the eleven per-sensor
+  `runner.spawn(serve_alerts_query(…))` lines are gone.
+
 ## [0.13.0] - 2026-08-31
 
 **The fleet release** (epic #810). The sensors ZenSight shipped were excellent

@@ -23,6 +23,22 @@ use crate::publisher::Publisher;
 /// `declare_queryable` and short enough not to delay liveliness noticeably.
 const DECLARATION_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long the startup alert adoption GET waits for the bus to answer (#882).
+///
+/// Only a storage replies, and only with keys this producer itself wrote, so
+/// the answer is small and local-ish. Three seconds matches the exporters'
+/// own alert-seed GET; a slower bus simply means starting with an empty firing
+/// set, which is what every build before this one did.
+const ALERT_ADOPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long shutdown waits for the firing set to be retracted and tombstoned.
+///
+/// Two writes per firing alert on an express, reliable publisher. The bound
+/// exists so a wedged session cannot hold a `systemctl stop` open until its
+/// own timeout turns into a SIGKILL — which would strand the very alerts this
+/// drain is here to clear.
+const ALERT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Sensor runner that manages the lifecycle of a protocol sensor.
 ///
 /// Handles:
@@ -414,6 +430,29 @@ impl<C: SensorConfig> SensorRunner<C> {
                 .await;
         }
 
+        // Alerts are state, and state outlives the process that wrote it
+        // (#882). Before anything else claims a firing set, take ownership of
+        // the one a previous incarnation of this producer left on the bus:
+        // adopt what is still ours to retract, tombstone what no sweep could
+        // ever reach. Ordered before `serve_alerts_query` so the only answers
+        // are the bus's — a storage's, in practice — and not our own empty
+        // set. In a deployment with no storage on `v1/*/state/**` nobody
+        // answers and this is a no-op, which is exactly right.
+        //
+        // A sensor's own evaluation tasks are spawned before `run()`, so a
+        // first sweep can race ahead of this. That is harmless and bounded:
+        // adoption never overwrites an alert this process has already
+        // observed, and anything adopted late is retracted by the *next*
+        // sweep of its rule rather than the first.
+        if let Some(reporter) = self.alert_reporter.clone() {
+            reporter.adopt_persisted(ALERT_ADOPTION_TIMEOUT).await;
+            // The late-joiner seed (RFC 05 §4) rides the same registration, so
+            // a sensor declares it by handing the runner its reporter rather
+            // than by remembering to spawn this itself.
+            self.tasks
+                .push(tokio::spawn(crate::alert::serve_alerts_query(reporter)));
+        }
+
         // Presence is not optional: declare the sensor-level liveliness token
         // (`state/<producer>/alive`) unless [`Self::with_liveliness`] already
         // did. The frontend flips this sensor's card Offline when the token
@@ -610,7 +649,7 @@ impl<C: SensorConfig> SensorRunner<C> {
         // Wait for a shutdown signal. Catch both Ctrl+C (SIGINT) and SIGTERM:
         // systemd `stop` and `docker stop` send SIGTERM, and if we only awaited
         // Ctrl+C we'd be SIGKILLed after the stop timeout — never reaching the
-        // graceful path below (offline status + alert tombstones).
+        // graceful path below (alert tombstones + a clean liveliness close).
         wait_for_shutdown().await;
 
         tracing::info!(sensor = %self.name, "Received shutdown signal");
@@ -622,6 +661,30 @@ impl<C: SensorConfig> SensorRunner<C> {
 
         // Wait briefly for tasks to clean up
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Retract every alert this sensor is still asserting, and tombstone
+        // its key (#882). A stopped sensor asserts nothing; leaving the
+        // `Firing` documents behind would have a `latest` storage serve them
+        // to every late joiner for as long as the storage lives.
+        //
+        // Ordered *after* the task aborts, so nothing can raise a new alert
+        // into the set we are draining, and *before* `session.close()`,
+        // because a closed session publishes nothing. Awaited rather than
+        // raced against the sleep above, for the same reason.
+        if let Some(reporter) = &self.alert_reporter {
+            let pending = reporter.active_count();
+            match tokio::time::timeout(ALERT_DRAIN_TIMEOUT, reporter.resolve_all()).await {
+                Ok(Ok(())) if pending > 0 => {
+                    tracing::info!(sensor = %self.name, alerts = pending, "retracted firing alerts")
+                }
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "failed to retract firing alerts"),
+                Err(_) => tracing::warn!(
+                    alerts = pending,
+                    "timed out retracting firing alerts; some may be left firing on the bus"
+                ),
+            }
+        }
 
         // Close Zenoh session
         if let Err(e) = self.session.close().await {
@@ -691,7 +754,7 @@ async fn grade_budget(
 ///
 /// systemd and Docker stop a process with SIGTERM, so handling only Ctrl+C
 /// would let the orchestrator SIGKILL the sensor after its stop timeout,
-/// skipping the graceful shutdown (offline status + alert tombstones).
+/// skipping the graceful shutdown (alert tombstones + a clean liveliness close).
 async fn wait_for_shutdown() {
     #[cfg(unix)]
     {
