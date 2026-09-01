@@ -58,9 +58,13 @@ fn alert(
     // Half the answer. Two hosts probing the same URL and disagreeing is not a
     // contradiction — it is the finding.
     labels.insert("vantage".to_string(), r.vantage.clone());
-    if let Some(d) = r.duration_ms {
-        labels.insert("duration_ms".to_string(), format!("{d:.0}"));
-    }
+    // NOT `duration_ms`. Labels are the alert's identity (`alert_key` hashes
+    // every non-`host.*` label), and a fresh wall-clock measurement on every
+    // check minted a new key every sweep — so no probe alert ever stayed on
+    // one key long enough for the `for:` debounce to elapse, and a target
+    // that was down for a week never paged anyone. The measurement is a
+    // telemetry point (`{target}/duration_ms`) and rides the summary where
+    // it is a diagnosis.
     for (k, v) in extra {
         labels.insert((*k).to_string(), v.clone());
     }

@@ -25,6 +25,9 @@ fn default_restart_window_secs() -> u64 {
 fn default_restart_max() -> u64 {
     3
 }
+fn default_oom_hold_secs() -> u64 {
+    600
+}
 fn default_upstream_interval() -> u64 {
     21_600
 }
@@ -151,6 +154,15 @@ pub struct ContainerAlertsConfig {
     /// The kernel OOM-killed something in this container's cgroup.
     #[serde(default = "default_true")]
     pub oom_killed: bool,
+    /// How long a burst of new OOM kills stays alertable, in seconds. The
+    /// kill is a one-sweep event against a cumulative counter; the alert
+    /// has a `for_secs` debounce that needs to see the condition on more
+    /// than one sweep. Holding the OOM baseline still for this long after
+    /// the first new kill is what lets the two meet — before it, with the
+    /// shipped 30 s poll and 60 s `for_secs`, the condition was true for
+    /// exactly one sweep and `container-oom-killed` could never fire.
+    #[serde(default = "default_oom_hold_secs")]
+    pub oom_hold_secs: u64,
     /// A container exited non-zero and is not running.
     #[serde(default = "default_true")]
     pub exited_nonzero: bool,
@@ -177,6 +189,7 @@ impl Default for ContainerAlertsConfig {
             restart_max: default_restart_max(),
             restart_window_secs: default_restart_window_secs(),
             oom_killed: true,
+            oom_hold_secs: default_oom_hold_secs(),
             exited_nonzero: true,
             image_behind: true,
             unsigned: true,
