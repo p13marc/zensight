@@ -6,12 +6,15 @@
 # 2026-08-28 audit found by hand: a guest with onboot=0, a NIC with
 # firewall=0 that made a whole firewall file inert, 990 GB provisioned on a
 # 937 GB pool. None of those is a metric that spikes, so the real output is
-# the state documents plus the alert set; the gauges exist so the guests have
-# device cards, Prometheus has series, and the family-coverage audit has
-# families to cover.
+# the state documents plus the alert set; the gauges exist so the hypervisor's
+# card carries its guests and pools, Prometheus has series, and the
+# family-coverage audit has families to cover.
 #
-# Guests are the <device>s (per-guest DeviceLiveness, the SNMP/gNMI shape);
-# the origin stays the polling host's.
+# Guests are the <device>s in the KEY PATH (per-guest DeviceLiveness, the
+# SNMP/gNMI shape) and in the identity evidence; the origin stays the polling
+# host's. The payload `source` is the reporting host on every series and
+# alert (#883) — a guest is a facet of this hypervisor, not a machine that
+# publishes for itself — with the vmid, storage and node in the labels.
 #
 # THERE IS NO ACTION SURFACE, deliberately, and no procedure below can
 # acquire one: a monitor that can stop a VM is a different threat model and

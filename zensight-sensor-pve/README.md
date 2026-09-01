@@ -20,9 +20,9 @@ late. Each is now a continuous assertion:
 **None of those is a metric that spikes.** They are configuration facts that
 stopped matching intent — invisible to every threshold on every dashboard, and
 visible to a poller that checks them on every cycle. That is what this sensor
-is for. The gauges exist so guests get device cards, Prometheus gets series and
-the family-coverage audit has families; the *output* is the state documents and
-the alert set.
+is for. The gauges exist so the hypervisor's card carries its guests and pools,
+Prometheus gets series and the family-coverage audit has families; the *output*
+is the state documents and the alert set.
 
 ## There is no action surface
 
@@ -55,8 +55,16 @@ sensor restart does not quietly make the shrunk size the new normal.
 ## Shape
 
 - **A polling sensor over an HTTP API with per-device liveness** — the same
-  shape the SNMP and gNMI sensors already are. Guests are the `<device>`s; the
-  origin stays the polling host's.
+  shape the SNMP and gNMI sensors already are. Guests are the `<device>`s in the
+  key path and in the identity evidence, and the origin stays the polling
+  host's.
+- **Everything is filed under the reporting host** (#883). `source` — on every
+  gauge, every alert and the `evidence/self` claim — is the machine running this
+  sensor, never the guest, pool or node being described. Those are facets of
+  this hypervisor, not separate machines that publish for themselves: a guest's
+  `onboot` comes from the hypervisor's config, read by the sensor on that
+  hypervisor. The vmid, storage and node ride in the key path and in the labels,
+  where a rename costs nothing and where `alert_key` cannot see them.
 - **Three cadences**, because runtime status, guest configuration and backups
   move at three speeds and polling all of them at the fastest would be a
   monitoring sensor hammering the machine whose failure is total.

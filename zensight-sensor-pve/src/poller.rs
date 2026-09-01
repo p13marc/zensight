@@ -344,7 +344,6 @@ impl Poller {
         let mut published = 0u64;
 
         for g in &sweep.guests {
-            let src = alerts::guest_source(g.vmid);
             let labels = guest_labels(g);
             let mut points = Vec::new();
             if let Some(m) = sweep.metrics.iter().find(|m| m.vmid == g.vmid) {
@@ -375,8 +374,12 @@ impl Poller {
                 points.push((format!("guest/{}/provisioned_bytes", g.vmid), p as f64));
             }
             for (metric, value) in points {
-                let mut point = checked_point(&src, &metric, TelemetryValue::Gauge(value));
-                point.labels = labels.clone();
+                // `source` is the host doing the reporting, never the guest
+                // being reported on (#883). The vmid is in the key and in the
+                // labels; a guest is a facet of this hypervisor, not a
+                // separate machine that publishes for itself.
+                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
+                    .with_labels(labels.clone());
                 if let Err(e) = self.publisher.publish(&metric, &point).await {
                     tracing::debug!(error = %e, "pve: telemetry publish failed");
                 } else {
@@ -412,11 +415,9 @@ impl Poller {
                 ("used_ratio", p.used_ratio()),
             ] {
                 let metric = format!("{stem}/{suffix}");
-                let mut point = checked_point(&p.storage, &metric, TelemetryValue::Gauge(value));
-                point
-                    .labels
-                    .insert("storage".to_string(), p.storage.clone());
-                point.labels.insert("node".to_string(), p.node.clone());
+                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
+                    .with_label("storage", p.storage.clone())
+                    .with_label("node", p.node.clone());
                 if self.publisher.publish(&metric, &point).await.is_ok() {
                     published += 1;
                 }
@@ -430,11 +431,9 @@ impl Poller {
                     ("overcommit_ratio", p.overcommit_ratio.unwrap_or(0.0)),
                 ] {
                     let metric = format!("{stem}/{suffix}");
-                    let mut point =
-                        checked_point(&p.storage, &metric, TelemetryValue::Gauge(value));
-                    point
-                        .labels
-                        .insert("storage".to_string(), p.storage.clone());
+                    let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
+                        .with_label("storage", p.storage.clone())
+                        .with_label("node", p.node.clone());
                     let _ = self.publisher.publish(&metric, &point).await;
                     published += 1;
                 }
@@ -447,7 +446,6 @@ impl Poller {
         }
 
         for b in &sweep.backups {
-            let src = alerts::guest_source(b.vmid);
             let mut points = Vec::new();
             if let Some(l) = &b.latest {
                 points.push((format!("backup/{}/size_bytes", b.vmid), l.size_bytes as f64));
@@ -468,7 +466,11 @@ impl Poller {
                 }
             }
             for (metric, value) in points {
-                let point = checked_point(&src, &metric, TelemetryValue::Gauge(value));
+                // Named its subject for the first time: these points carried
+                // no labels at all, so a consumer holding one as a value had
+                // no idea which guest it was about (#883).
+                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
+                    .with_label("vmid", b.vmid.to_string());
                 if self.publisher.publish(&metric, &point).await.is_ok() {
                     published += 1;
                 }
@@ -500,7 +502,13 @@ impl Poller {
                 points.push(("cluster/quorate".to_string(), if q { 1.0 } else { 0.0 }));
             }
             for (metric, value) in points {
-                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value));
+                let mut point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value));
+                // The node this cluster view was read from. Not the identity
+                // of the series — that is the reporting host — but the fact a
+                // reader needs when two hypervisors are polled from one place.
+                if let Some(local) = c.nodes.iter().find(|n| n.local) {
+                    point = point.with_label("node", local.name.clone());
+                }
                 if self.publisher.publish(&metric, &point).await.is_ok() {
                     published += 1;
                 }

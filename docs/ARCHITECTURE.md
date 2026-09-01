@@ -135,7 +135,9 @@ publishing:
 ```rust
 TelemetryPoint {
     timestamp: 1704412800000,        // Unix epoch ms
-    source: "router01",              // Device identifier
+    source: "router01",              // WHO the series belongs to: the polled
+                                     // device for a proxy sensor (snmp, gnmi),
+                                     // the reporting host for everything else
     protocol: Protocol::Snmp,        // Origin protocol
     metric: "system/uptime",         // Metric path
     value: TelemetryValue::Counter(123456),

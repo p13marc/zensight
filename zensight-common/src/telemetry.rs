@@ -8,7 +8,15 @@ pub struct TelemetryPoint {
     /// Unix epoch milliseconds when the measurement was taken.
     pub timestamp: i64,
 
-    /// Device/host identifier (e.g., "router01", "192.168.1.1").
+    /// Who this series belongs to.
+    ///
+    /// For a **proxy** sensor — snmp, gnmi, modbus — the polled device, which
+    /// really is a separate machine no sensor runs on. For **every other**
+    /// sensor, the reporting host, including when the point describes one of
+    /// its facets: a VM guest, a container or a probe target is not a machine
+    /// that publishes for itself, and filing its series under the subject
+    /// puts it on no host's card at all (#883). The subject belongs in the key
+    /// path and in the labels, both of which already carry it.
     pub source: String,
 
     /// Origin protocol.

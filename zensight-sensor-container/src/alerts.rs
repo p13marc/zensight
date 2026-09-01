@@ -32,6 +32,10 @@ pub const ALL_RULES: &[&str] = &[
 /// their counters (restarts and OOM kills are cumulative, so a rule about
 /// *rate* needs the delta, not the total).
 pub struct Observation<'a> {
+    /// The reporting host — the `source` of every alert, as of #883. A
+    /// container name is unique per host, not globally; the name, image and
+    /// owning unit ride in the labels.
+    pub source: &'a str,
     pub containers: &'a [ContainerInfo],
     /// `name -> (restart_count, oom_kills)` as of `baseline_age_secs` ago.
     pub baseline: &'a HashMap<String, (u64, u64)>,
@@ -40,6 +44,7 @@ pub struct Observation<'a> {
 }
 
 fn alert(
+    source: &str,
     c: &ContainerInfo,
     rule: &str,
     severity: AlertSeverity,
@@ -47,7 +52,7 @@ fn alert(
     extra: &[(&str, String)],
 ) -> Alert {
     let mut a = Alert::new(
-        &c.name,
+        source,
         Protocol::Container,
         AlertKind::Expectation,
         rule,
@@ -81,6 +86,7 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
 
         match c.health {
             HealthState::Unhealthy if cfg.unhealthy => out.push(alert(
+                obs.source,
                 c,
                 RULE_UNHEALTHY,
                 AlertSeverity::Warning,
@@ -102,6 +108,7 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             // telling an operator their service is unhealthy sends them to
             // debug the wrong thing — for weeks, as it turned out.
             HealthState::NeverRan if cfg.health_never_ran => out.push(alert(
+                obs.source,
                 c,
                 RULE_HEALTH_NEVER_RAN,
                 AlertSeverity::Warning,
@@ -123,6 +130,7 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             let delta = c.restart_count.saturating_sub(*prev_restarts);
             if delta > cfg.restart_max {
                 out.push(alert(
+                    obs.source,
                     c,
                     RULE_RESTART_LOOP,
                     AlertSeverity::Critical,
@@ -147,6 +155,7 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             && kills > *prev_kills
         {
             out.push(alert(
+                obs.source,
                 c,
                 RULE_OOM,
                 AlertSeverity::Critical,
@@ -175,6 +184,7 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             && code != 0
         {
             out.push(alert(
+                obs.source,
                 c,
                 RULE_EXITED,
                 AlertSeverity::Critical,
@@ -185,6 +195,7 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
 
         if cfg.image_behind && c.image.is_behind_upstream() {
             out.push(alert(
+                obs.source,
                 c,
                 RULE_IMAGE_BEHIND,
                 AlertSeverity::Info,
@@ -208,6 +219,7 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
         // without the egress collector look like a supply-chain failure.
         if cfg.unsigned && c.image.signature == SignatureState::Absent {
             out.push(alert(
+                obs.source,
                 c,
                 RULE_UNSIGNED,
                 AlertSeverity::Warning,
@@ -238,6 +250,10 @@ fn human_bytes(b: u64) -> String {
 mod tests {
     use super::*;
     use zensight_common::container::{ContainerImage, ContainerResources};
+
+    /// The reporting host: every alert is filed under it, never under the
+    /// container being reported on (#883).
+    const HOST: &str = "vm-apps-01";
 
     fn container(name: &str) -> ContainerInfo {
         ContainerInfo {
@@ -270,6 +286,7 @@ mod tests {
 
     fn obs<'a>(cs: &'a [ContainerInfo], base: &'a HashMap<String, (u64, u64)>) -> Observation<'a> {
         Observation {
+            source: HOST,
             containers: cs,
             baseline: base,
             baseline_age_secs: 60,
@@ -354,6 +371,7 @@ mod tests {
 
         // Same total, but the baseline is older than the window: not a rate.
         let o = Observation {
+            source: HOST,
             containers: std::slice::from_ref(&c),
             baseline: &base,
             baseline_age_secs: 100_000,

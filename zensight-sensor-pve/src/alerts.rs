@@ -45,7 +45,11 @@ pub const ALL_RULES: &[&str] = &[
 
 /// One sweep's inputs.
 pub struct Observation<'a> {
-    /// Hypervisor-scoped `source` (pools, cluster).
+    /// The reporting host — the `source` of **every** series and alert this
+    /// sensor emits (#883). A guest, a pool and a cluster are facets of this
+    /// hypervisor, not separate machines that publish for themselves; the
+    /// vmid, the storage name and the node ride in the labels, where a rename
+    /// costs nothing and where `alert_key` cannot see them.
     pub source: &'a str,
     pub guests: &'a [PveGuest],
     pub pools: &'a [PveStoragePool],
@@ -78,16 +82,6 @@ fn alert(
     a
 }
 
-/// A guest's `source`: the vmid, deliberately, not the name.
-///
-/// A rename would otherwise fork every series and every alert key, handing
-/// the operator a fresh device card with no history at the exact moment they
-/// are trying to compare against it. The name rides in the labels, where
-/// changing it costs nothing.
-pub fn guest_source(vmid: u32) -> String {
-    vmid.to_string()
-}
-
 /// Grade one sweep. Returns every currently-firing alert; the caller
 /// reconciles per rule, so anything absent here resolves.
 pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
@@ -102,7 +96,6 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
         if g.template || cfg.exempt_vmids.contains(&g.vmid) {
             continue;
         }
-        let src = guest_source(g.vmid);
         let name = g.name.clone().unwrap_or_else(|| format!("vm-{}", g.vmid));
         let base = [
             ("vmid", g.vmid.to_string()),
@@ -113,7 +106,7 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
 
         if cfg.guest_onboot && !g.onboot {
             out.push(alert(
-                &src,
+                obs.source,
                 RULE_ONBOOT,
                 AlertSeverity::Warning,
                 format!(
@@ -128,7 +121,7 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
         // machine-readable statement of that intent Proxmox has.
         if cfg.guest_not_running && g.onboot && !g.is_running() {
             out.push(alert(
-                &src,
+                obs.source,
                 RULE_NOT_RUNNING,
                 AlertSeverity::Critical,
                 format!(
@@ -141,7 +134,7 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
         if cfg.nic_firewall {
             for slot in g.nics_without_firewall() {
                 out.push(alert(
-                    &src,
+                    obs.source,
                     RULE_NIC_FIREWALL,
                     AlertSeverity::Warning,
                     format!(
@@ -164,7 +157,7 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             let pct = p.used_ratio() * 100.0;
             if pct >= cfg.pool_used_pct {
                 out.push(alert(
-                    &p.storage,
+                    obs.source,
                     RULE_POOL_USED,
                     if pct >= 95.0 {
                         AlertSeverity::Critical
@@ -188,7 +181,7 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             && ratio >= cfg.pool_overcommit_ratio
         {
             out.push(alert(
-                &p.storage,
+                obs.source,
                 RULE_POOL_OVERCOMMIT,
                 AlertSeverity::Warning,
                 format!(
@@ -215,7 +208,6 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
     }
 
     for b in obs.backups {
-        let src = guest_source(b.vmid);
         let base = [("vmid", b.vmid.to_string())];
 
         if cfg.backup_failed
@@ -223,7 +215,7 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             && !t.ok
         {
             out.push(alert(
-                &src,
+                obs.source,
                 RULE_BACKUP_FAILED,
                 AlertSeverity::Critical,
                 format!(
@@ -249,7 +241,7 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             && age > cfg.backup_stale_secs
         {
             out.push(alert(
-                &src,
+                obs.source,
                 RULE_BACKUP_STALE,
                 AlertSeverity::Warning,
                 format!(
@@ -275,7 +267,7 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             && change <= -cfg.backup_shrink_pct
         {
             out.push(alert(
-                &src,
+                obs.source,
                 RULE_BACKUP_SHRUNK,
                 AlertSeverity::Critical,
                 format!(
@@ -374,6 +366,10 @@ mod tests {
         GuestKind, GuestNic, PveBackupTask, PveBackupVolume, PveNodeStatus, PveReplicationJob,
     };
 
+    /// The reporting hypervisor: every alert is filed under it, never under
+    /// the guest or pool being reported on (#883).
+    const HOST: &str = "sd-189169";
+
     fn guest(vmid: u32, onboot: bool, running: bool, fw: bool) -> PveGuest {
         PveGuest {
             vmid,
@@ -401,7 +397,7 @@ mod tests {
 
     fn obs<'a>(guests: &'a [PveGuest]) -> Observation<'a> {
         Observation {
-            source: "pve",
+            source: HOST,
             guests,
             pools: &[],
             backups: &[],
@@ -427,7 +423,11 @@ mod tests {
         let fw = a.iter().find(|x| x.rule == RULE_NIC_FIREWALL).unwrap();
         assert_eq!(fw.labels["nic"], "net0");
         assert_eq!(fw.labels["vmid"], "140");
-        assert_eq!(fw.source, "140", "the vmid is the device, not the name");
+        assert_eq!(fw.labels["name"], "vm-140");
+        assert_eq!(
+            fw.source, HOST,
+            "the reporting hypervisor is the source; the vmid is a label (#883)"
+        );
     }
 
     #[test]
@@ -497,7 +497,11 @@ mod tests {
         let a = grade(&PveAlertsConfig::default(), &o);
         assert_eq!(rules(&a), vec![RULE_POOL_OVERCOMMIT], "usage is only 32%");
         assert_eq!(a[0].labels["ratio"], "1.057");
-        assert_eq!(a[0].source, "local-lvm");
+        assert_eq!(a[0].labels["storage"], "local-lvm");
+        assert_eq!(
+            a[0].source, HOST,
+            "the reporting hypervisor is the source; the pool is a label (#883)"
+        );
     }
 
     fn backup(

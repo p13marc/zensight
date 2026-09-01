@@ -11,6 +11,7 @@ looking broken — and is what CI runs.
 | Key | Default | Note |
 |---|---|---|
 | `probe.vantage` | the hostname | **where this sensor looks from.** Rides on every result and every alert |
+| `probe.source` | `vantage` | the reporting host every series and alert is filed under. A result is an observation made *from somewhere*: filing it under the target would make two hosts probing the same URL collide on one identity (#883). The target rides in the key path and in the `probe`/`target`/`kind` labels |
 | `probe.interval_secs` | `60` | per-target override; floored at 5 s |
 | `probe.timeout_secs` | `10` | per-target override; **must be shorter than that target's interval** |
 | `probe.max_concurrent` | `8` | checks in flight at once, across all targets |

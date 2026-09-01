@@ -279,8 +279,13 @@ impl Poller {
             }
 
             for (metric, value) in points {
-                let mut p = checked_point(&c.name, &metric, TelemetryValue::Gauge(value));
-                p.labels = labels.clone();
+                // `source` is the host running the container, never the
+                // container (#883/#884). A container's memory comes from this
+                // host's cgroup tree; its name is unique per host, not
+                // globally, so filing the series under it made four machines
+                // running `zensight-sensor-logs` collide on one identity.
+                let p = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
+                    .with_labels(labels.clone());
                 if self.publisher.publish(&metric, &p).await.is_ok() {
                     published += 1;
                 }
@@ -327,6 +332,7 @@ impl Poller {
             let firing = alerts::grade(
                 &self.cfg.alerts,
                 &Observation {
+                    source: &self.source,
                     containers,
                     baseline: &self.baseline,
                     baseline_age_secs: age,

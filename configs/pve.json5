@@ -56,9 +56,16 @@
     // a standalone install is the one node.
     nodes: [],
 
-    // `source` for the hypervisor-scoped series (pools, cluster). Guests carry
-    // their own — the VMID, deliberately, so a rename does not fork every
-    // series and every alert key; the name rides in the labels.
+    // This sensor's `source` — the reporting host every series, alert and
+    // evidence claim is filed under. Default: this machine's hostname, which
+    // on the deployment below (a native binary ON the PVE node) is the node
+    // name you type into Proxmox's UI. It used to default to `host` above,
+    // which meant every hypervisor-scoped series was labelled `127.0.0.1`
+    // (#885) — an address is an endpoint, not an identity.
+    //
+    // The subjects are NOT the source: the vmid, the storage and the node
+    // ride in the key path and in the labels, so a guest's metrics land on
+    // the card of the hypervisor that reported them (#883).
     // source: "pve01",
 
     // Three cadences, because the three things move at three speeds and

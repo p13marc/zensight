@@ -228,8 +228,9 @@ async fn the_probe_contract_end_to_end() {
     );
 
     let downs = fired.get("probe-down").expect("refused + teapot");
+    // Which target, from the labels — `source` is the vantage point now (#883).
     let down_names: std::collections::HashSet<&str> =
-        downs.iter().map(|a| a.source.as_str()).collect();
+        downs.iter().map(|a| a.labels["probe"].as_str()).collect();
     assert_eq!(
         down_names,
         ["refused", "teapot"].into_iter().collect(),
@@ -254,19 +255,41 @@ async fn the_probe_contract_end_to_end() {
     assert_eq!(docs, 5);
 
     let mut seen: std::collections::HashMap<String, f64> = Default::default();
+    let mut points: Vec<(String, TelemetryPoint)> = Vec::new();
     while let Ok(Ok(s)) =
         tokio::time::timeout(Duration::from_millis(500), telemetry_sub.recv_async()).await
     {
-        if let Ok(p) = decode_auto::<TelemetryPoint>(&s.payload().to_bytes())
-            && let zensight_common::TelemetryValue::Gauge(v) = p.value
-        {
+        if let Ok(p) = decode_auto::<TelemetryPoint>(&s.payload().to_bytes()) {
             let key = s.key_expr().as_str();
-            seen.insert(
-                key.split("/telemetry/probe/").nth(1).unwrap().to_string(),
-                v,
-            );
+            let subject = key.split("/telemetry/probe/").nth(1).unwrap().to_string();
+            if let zensight_common::TelemetryValue::Gauge(v) = p.value {
+                seen.insert(subject.clone(), v);
+            }
+            points.push((subject, p));
         }
     }
+
+    // #883: a probe result is an observation made from somewhere, so every
+    // point is filed under the VANTAGE POINT and never under the target. Two
+    // hosts probing the same URL used to collide on one `source`, which is
+    // precisely the comparison this sensor exists to make possible.
+    assert!(!points.is_empty());
+    for (subject, p) in &points {
+        assert_eq!(
+            p.source, "vm-apps",
+            "{subject} is filed under {} rather than the vantage point",
+            p.source
+        );
+    }
+    let site = points
+        .iter()
+        .find(|(k, _)| k == "site/up")
+        .expect("site/up")
+        .1
+        .clone();
+    assert_eq!(site.labels["vantage"], "vm-apps");
+    assert!(site.labels.contains_key("target"));
+    assert!(site.labels.contains_key("kind"));
     assert_eq!(seen.get("site/up"), Some(&1.0));
     assert_eq!(seen.get("site/http_status"), Some(&200.0));
     assert_eq!(seen.get("hairpin/up"), Some(&0.0));
