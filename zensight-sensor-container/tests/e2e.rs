@@ -161,6 +161,10 @@ fn cfg(cgroup_root: &Path) -> ContainerConfig {
         timeout_secs: 5,
         alerts: ContainerAlertsConfig {
             for_secs: 0,
+            // No hold: this test drives three sweeps back to back and wants
+            // the kill to fire on the second and resolve on the third. The
+            // hold window itself is unit-tested in `poller.rs`.
+            oom_hold_secs: 0,
             ..Default::default()
         },
         ..Default::default()

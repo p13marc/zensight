@@ -246,8 +246,11 @@ pub fn evaluate(host: &str, cfg: &AlertsConfig, inputs: &AlertInputs) -> Vec<Rul
                     AlertSeverity::Warning,
                     format!("timer {} overdue by {overdue_secs}s", t.name),
                 )
+                // The overdue figure lives in the summary, not a label: a
+                // label is identity, and one that grows by a poll interval
+                // every tick re-keyed the alert every tick — so it never
+                // survived its own `for:` window and never fired.
                 .with_label("unit", t.name.clone())
-                .with_label("overdue_secs", overdue_secs.to_string())
             })
             .collect();
         out.push(RuleAlerts {
@@ -298,8 +301,9 @@ pub fn evaluate(host: &str, cfg: &AlertsConfig, inputs: &AlertInputs) -> Vec<Rul
                     AlertSeverity::Warning,
                     format!("unit {} memory {m} bytes over ceiling {ceiling}", u.name),
                 )
+                // Same rule as the timer above: the byte count is a
+                // measurement, so it rides the summary, not the key.
                 .with_label("unit", u.name.clone())
-                .with_label("mem_bytes", m.to_string())
             })
             .collect();
         out.push(RuleAlerts {

@@ -98,10 +98,10 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
                         _ => String::new(),
                     }
                 ),
-                &[(
-                    "failing_streak",
-                    c.health_failing_streak.unwrap_or(0).to_string(),
-                )],
+                // The streak is in the sentence, not the labels: a label is
+                // identity, and a count that grows on every failed check
+                // re-keyed the alert faster than its `for:` window.
+                &[],
             )),
             // The garage case. A separate rule, and deliberately a separate
             // sentence: "the probe cannot run" is a defect in the check, and
@@ -168,13 +168,12 @@ pub fn grade(cfg: &ContainerAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
                         None => String::new(),
                     }
                 ),
-                &[
-                    ("oom_kills_total", kills.to_string()),
-                    (
-                        "memory_max_bytes",
-                        c.resources.memory_max_bytes.unwrap_or(0).to_string(),
-                    ),
-                ],
+                // `oom_kills_total` is a counter and deliberately not a
+                // label — see the streak note above; it is a telemetry point.
+                &[(
+                    "memory_max_bytes",
+                    c.resources.memory_max_bytes.unwrap_or(0).to_string(),
+                )],
             ));
         }
 
@@ -326,7 +325,11 @@ mod tests {
         let base = HashMap::new();
         let a = grade(&ContainerAlertsConfig::default(), &obs(&[c], &base));
         assert_eq!(rules(&a), vec![RULE_UNHEALTHY]);
-        assert_eq!(a[0].labels["failing_streak"], "5");
+        // The streak is in the sentence, never a label: a label is identity,
+        // and one that grew on every failed check re-keyed the alert faster
+        // than its `for:` window could elapse.
+        assert!(a[0].summary.contains("(5 consecutive)"), "{}", a[0].summary);
+        assert!(!a[0].labels.contains_key("failing_streak"));
     }
 
     #[test]

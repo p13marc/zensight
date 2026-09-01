@@ -58,9 +58,13 @@ fn alert(
     // Half the answer. Two hosts probing the same URL and disagreeing is not a
     // contradiction — it is the finding.
     labels.insert("vantage".to_string(), r.vantage.clone());
-    if let Some(d) = r.duration_ms {
-        labels.insert("duration_ms".to_string(), format!("{d:.0}"));
-    }
+    // NOT `duration_ms`. Labels are the alert's identity (`alert_key` hashes
+    // every non-`host.*` label), and a fresh wall-clock measurement on every
+    // check minted a new key every sweep — so no probe alert ever stayed on
+    // one key long enough for the `for:` debounce to elapse, and a target
+    // that was down for a week never paged anyone. The measurement is a
+    // telemetry point (`{target}/duration_ms`) and rides the summary where
+    // it is a diagnosis.
     for (k, v) in extra {
         labels.insert((*k).to_string(), v.clone());
     }
@@ -256,7 +260,15 @@ mod tests {
         r.error = Some("operation timed out".into());
         let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
         assert_eq!(rules(&a), vec![RULE_TIMEOUT], "and NOT also probe-down");
-        assert_eq!(a[0].labels["duration_ms"], "20000");
+        // The duration is in the sentence, never a label: a label is
+        // identity, and a per-check wall-clock re-keyed every alert every
+        // sweep, so none ever outlived its `for:` window.
+        assert!(
+            a[0].summary.contains("timed out after 20000 ms"),
+            "{}",
+            a[0].summary
+        );
+        assert!(!a[0].labels.contains_key("duration_ms"));
         assert_eq!(a[0].labels["vantage"], "vm-apps");
         assert!(
             a[0].summary.contains("not the same as being refused"),

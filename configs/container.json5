@@ -100,6 +100,9 @@
       // the DELTA — the counter is cumulative, and firing on the total would
       // alert forever about a kill from last year.
       oom_killed: true,
+      // A burst of new OOM kills stays alertable for this long, so the
+      // one-sweep event can outlive for_secs and actually fire.
+      oom_hold_secs: 600,
 
       // Exited non-zero and not running.
       exited_nonzero: true,
