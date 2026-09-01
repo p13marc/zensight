@@ -176,13 +176,27 @@ again. If a Zenoh storage is holding that key, it holds it forever — a phantom
 alert in every GUI that seeds from the storage, with nothing logged anywhere
 to explain it.
 
+**Since #882, the producers do this for themselves.** On startup every sensor
+GETs its own `state/<producer>/alert/*` selector and takes ownership of what it
+finds: it adopts what it can still claim, and tombstones what it cannot — a
+document whose key does not match the `alert_key` its own payload derives (this
+migration, exactly), a `Resolved` whose tombstone was lost, and a rule the build
+no longer has. So the ordinary rollout clears the phantoms as each producer
+restarts, and it logs a line saying how many.
+
+The manual sweep below remains the answer for what a running producer cannot
+reach: **keys whose producer will never start again** — a sensor retired from
+the fleet, or one whose `origin` changed. Run it after the rollout, on whatever
+`zenctl` still finds.
+
 **Who needs this.**
 
 | Deployment | Sweep needed? |
 |---|---|
 | `just run`, `just demo-*`, the e2e suites | **No.** No storage, no persistence — state lives only in the publishers, which restart. |
 | A fleet with **no** Zenoh storage on `v1/*/state/**` | **No.** Same reason: the only copy of an alert is its live publisher. |
-| A fleet with a storage pointed at `v1/*/state/**` (`configs/router-*.json5`) | **Yes.** |
+| A fleet with a storage on `v1/*/state/**` (`configs/router-*.json5`) whose producers all come back | **Rarely.** Each producer clears its own on restart; sweep only to verify. |
+| The same, with a producer that is being **retired** | **Yes.** Nothing will ever reclaim its keys. |
 
 **Order matters: sweep *after* every publisher is upgraded.** A single sensor
 still on the old build re-publishes its firing alerts on old-shaped keys within

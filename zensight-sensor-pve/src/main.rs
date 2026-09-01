@@ -9,9 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use zensight_sensor_core::{
-    AlertReporter, SensorArgs, SensorConfig, SensorRunner, resolve_secret, serve_alerts_query,
-};
+use zensight_sensor_core::{AlertReporter, SensorArgs, SensorConfig, SensorRunner, resolve_secret};
 
 use zensight_sensor_pve::api::PveClient;
 use zensight_sensor_pve::config::PveSensorConfig;
@@ -60,12 +58,14 @@ async fn main() -> Result<()> {
 
     let reporter = if pve.alerts.enabled {
         let mut r = AlertReporter::new(runner.publisher(), zensight_common::Protocol::Pve, format)
-            .with_debounce(Duration::from_secs(pve.alerts.for_secs));
+            .with_debounce(Duration::from_secs(pve.alerts.for_secs))
+            // The rule table this build can still raise, so a restart retires
+            // an inherited alert for a rule that no longer exists (#882).
+            .with_known_rules(zensight_sensor_pve::alerts::ALL_RULES.iter().copied());
         if let Some(id) = runner.identity() {
             r = r.with_identity(id);
         }
         let r = Arc::new(r);
-        runner.spawn(serve_alerts_query(r.clone()));
         Some(r)
     } else {
         tracing::warn!("pve: alerts are disabled — telemetry only, nothing is asserted");

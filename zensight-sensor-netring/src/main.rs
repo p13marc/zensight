@@ -315,7 +315,6 @@ async fn main() -> Result<()> {
 
     // Late-joiner seed: serve the current firing set to consumers that connect
     // after an anomaly fired.
-    runner.spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
 
     // Runtime detection-tuning channel (#121): the GUI tunes allowlist /
     // thresholds / per-detector mute without a restart.

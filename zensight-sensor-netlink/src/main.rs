@@ -229,11 +229,10 @@ async fn main() -> Result<()> {
     // accept runtime expectation commands from the GUI (always on, so the GUI
     // can author expectations even when none are configured on disk).
     {
-        use zensight_sensor_core::serve_alerts_query;
         // `reporter` + `exp_cfg` were built above (shared with the XFRM sentinel).
-        // Late-joiner seed: serve the current firing set to consumers that connect
-        // after an alert fired.
-        runner.spawn(serve_alerts_query(reporter.clone()));
+        // Handing the reporter to the runner is what serves the late-joiner
+        // seed and what makes this sensor's firing set survive a restart (#882).
+        runner = runner.with_alert_reporter(reporter.clone());
         let evaluator = zensight_sensor_netlink::Evaluator::new(
             source.clone(),
             exp_cfg,

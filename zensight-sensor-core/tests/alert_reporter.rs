@@ -435,3 +435,336 @@ async fn a_seed_batch_never_out_stamps_a_later_put() {
 
     seed.abort();
 }
+
+// ===========================================================================
+// #882 — the firing set outlives the process
+// ===========================================================================
+
+/// A stand-in for a `latest` storage on `v1/*/state/**`: answers a GET on the
+/// alert selector with the documents a previous incarnation left behind.
+///
+/// A plain `declare_queryable` is fine here and only here — the #484 guard
+/// covers `zensight*/src`, and what this fakes is a router plugin, not a
+/// producer surface this build claims to serve.
+async fn stranded_storage(
+    session: &Arc<zenoh::Session>,
+    selector: &str,
+    stored: Vec<(String, Vec<u8>)>,
+) -> zenoh::query::Queryable<zenoh::handlers::FifoChannelHandler<zenoh::query::Query>> {
+    let queryable = session
+        .declare_queryable(selector)
+        .await
+        .expect("fake storage queryable");
+    let stored = Arc::new(stored);
+    let q = queryable.clone();
+    tokio::spawn(async move {
+        while let Ok(query) = q.recv_async().await {
+            for (key, payload) in stored.iter() {
+                let _ = query.reply(key.clone(), payload.clone()).await;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    queryable
+}
+
+fn concrete_alert_key(reporter: &AlertReporter, alert: &Alert) -> String {
+    let selector = reporter.alert_selector();
+    format!(
+        "{}{}",
+        selector.strip_suffix('*').expect("selector ends in *"),
+        alert.alert_key()
+    )
+}
+
+/// The #882 regression. A sensor fires an alert, then dies without resolving
+/// it — SIGKILL, OOM, or a restart whose new config no longer defines the
+/// target. The successor must not leave that document `firing` forever: it
+/// adopts the claim, finds it no longer true on its first sweep, and retracts
+/// it exactly as if it had raised it itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_does_not_strand_a_firing_alert() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+    let alert = sample_alert(&source);
+    let key = concrete_alert_key(&reporter, &alert);
+    let payload = zensight_common::encode(&alert, Format::Json).expect("encode");
+
+    let _storage = stranded_storage(
+        &session,
+        &reporter.alert_selector(),
+        vec![(key.clone(), payload)],
+    )
+    .await;
+
+    let sub = session
+        .declare_subscriber(key.clone())
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(reporter.adopt_persisted(Duration::from_secs(3)).await, 1);
+    assert_eq!(
+        reporter.active_count(),
+        1,
+        "an adopted alert is firing until a sweep says otherwise"
+    );
+
+    // The successor's first sweep: the condition is not violated any more.
+    reporter
+        .reconcile("ssh-listening", &[])
+        .await
+        .expect("reconcile");
+
+    let mut saw_resolved = false;
+    let mut saw_delete = false;
+    for _ in 0..2 {
+        let s = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+            .await
+            .expect("recv timed out")
+            .expect("recv");
+        match s.kind() {
+            zenoh::sample::SampleKind::Put => {
+                let got: Alert = decode_auto(&s.payload().to_bytes()).expect("decode");
+                assert_eq!(got.state, AlertState::Resolved);
+                assert_eq!(got.rule, "ssh-listening");
+                saw_resolved = true;
+            }
+            zenoh::sample::SampleKind::Delete => saw_delete = true,
+        }
+    }
+    assert!(saw_resolved, "the inherited alert was never retracted");
+    assert!(saw_delete, "the inherited key was never tombstoned");
+    assert_eq!(reporter.active_count(), 0);
+}
+
+/// Adoption must be silent when the condition is still true: the document on
+/// the bus already says exactly what this process would say, so re-observing
+/// it publishes nothing. Without this, every restart of every sensor would
+/// re-put its whole firing set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adopted_alert_that_is_still_true_is_not_republished() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+    let alert = sample_alert(&source);
+    let key = concrete_alert_key(&reporter, &alert);
+    let payload = zensight_common::encode(&alert, Format::Json).expect("encode");
+
+    let _storage = stranded_storage(
+        &session,
+        &reporter.alert_selector(),
+        vec![(key.clone(), payload)],
+    )
+    .await;
+
+    let sub = session
+        .declare_subscriber(key.clone())
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(reporter.adopt_persisted(Duration::from_secs(3)).await, 1);
+
+    // The successor's first sweep finds the same violation.
+    reporter
+        .observe(alert.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    reporter
+        .reconcile("ssh-listening", &[alert.alert_key()])
+        .await
+        .expect("reconcile");
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(600), sub.recv_async())
+            .await
+            .is_err(),
+        "an adopted, still-true alert must not be republished"
+    );
+    assert_eq!(reporter.active_count(), 1);
+}
+
+/// Two shapes no sweep can ever reach, because this build will never write
+/// their key again: a `Resolved` document whose tombstone was lost, and a
+/// document whose key does not match the `alert_key` its own payload derives
+/// (the #737 re-key stranding). Adoption retires both on the spot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adoption_tombstones_documents_no_sweep_can_reach() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+    let resolved = sample_alert(&source).resolved();
+    let resolved_key = concrete_alert_key(&reporter, &resolved);
+    // Same payload, a key from an older derivation — nothing this build emits
+    // will ever land here again.
+    let phantom = sample_alert(&source);
+    let phantom_key = format!(
+        "{}0000000000000000",
+        reporter
+            .alert_selector()
+            .strip_suffix('*')
+            .expect("selector ends in *")
+    );
+
+    let _storage = stranded_storage(
+        &session,
+        &reporter.alert_selector(),
+        vec![
+            (
+                resolved_key.clone(),
+                zensight_common::encode(&resolved, Format::Json).expect("encode"),
+            ),
+            (
+                phantom_key.clone(),
+                zensight_common::encode(&phantom, Format::Json).expect("encode"),
+            ),
+        ],
+    )
+    .await;
+
+    let sub = session
+        .declare_subscriber(reporter.alert_selector())
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(
+        reporter.adopt_persisted(Duration::from_secs(3)).await,
+        0,
+        "neither document is a claim this build can still make"
+    );
+    assert_eq!(reporter.active_count(), 0);
+
+    let mut tombstoned = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let s = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+            .await
+            .expect("recv timed out")
+            .expect("recv");
+        assert_eq!(s.kind(), zenoh::sample::SampleKind::Delete);
+        tombstoned.insert(s.key_expr().to_string());
+    }
+    assert!(tombstoned.contains(&resolved_key), "{tombstoned:?}");
+    assert!(tombstoned.contains(&phantom_key), "{tombstoned:?}");
+}
+
+/// A clean stop retracts everything, so the graceful path leaves nothing
+/// behind at all — the half `resolve_all` was written for and never wired to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_all_retracts_and_tombstones_the_whole_firing_set() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let sub = session
+        .declare_subscriber("v1/*/state/netlink/alert/*")
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+    for port in ["22", "443"] {
+        let alert = sample_alert(&source).with_label("port", port);
+        reporter
+            .observe(alert, Some(Duration::ZERO))
+            .await
+            .expect("observe");
+    }
+    assert_eq!(reporter.active_count(), 2);
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+            .await
+            .expect("recv firing timed out")
+            .expect("recv firing");
+    }
+
+    reporter.resolve_all().await.expect("resolve_all");
+    assert_eq!(reporter.active_count(), 0);
+
+    let (mut resolved, mut deleted) = (0, 0);
+    for _ in 0..4 {
+        let s = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+            .await
+            .expect("recv timed out")
+            .expect("recv");
+        match s.kind() {
+            zenoh::sample::SampleKind::Put => {
+                let got: Alert = decode_auto(&s.payload().to_bytes()).expect("decode");
+                assert_eq!(got.state, AlertState::Resolved);
+                resolved += 1;
+            }
+            zenoh::sample::SampleKind::Delete => deleted += 1,
+        }
+    }
+    assert_eq!((resolved, deleted), (2, 2));
+}
+
+/// A rule *deleted from the build* is the one case adoption alone cannot fix:
+/// the inherited alert would be adopted and then never reconciled, because no
+/// sweep of that rule will ever run again. A producer that declares its rule
+/// table lets adoption retire it — and a producer that declares nothing keeps
+/// everything, because silence is not a licence to delete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rule_this_build_no_longer_has_is_retired_not_adopted() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let source = unique_source();
+
+    let gone = Alert::new(
+        &source,
+        Protocol::Netlink,
+        AlertKind::Expectation,
+        "a-rule-that-was-deleted",
+        AlertSeverity::Warning,
+        "raised by a build that no longer exists",
+    );
+    let kept = sample_alert(&source);
+
+    let plain = AlertReporter::new(
+        Publisher::new(session.clone(), "netlink", Format::Json),
+        Protocol::Netlink,
+        Format::Json,
+    );
+    let stored = vec![
+        (
+            concrete_alert_key(&plain, &gone),
+            zensight_common::encode(&gone, Format::Json).expect("encode"),
+        ),
+        (
+            concrete_alert_key(&plain, &kept),
+            zensight_common::encode(&kept, Format::Json).expect("encode"),
+        ),
+    ];
+    let gone_key = stored[0].0.clone();
+    let _storage = stranded_storage(&session, &plain.alert_selector(), stored).await;
+
+    // A producer that has not declared its rules keeps both.
+    assert_eq!(plain.adopt_persisted(Duration::from_secs(3)).await, 2);
+
+    let declared = AlertReporter::new(
+        Publisher::new(session.clone(), "netlink", Format::Json),
+        Protocol::Netlink,
+        Format::Json,
+    )
+    .with_known_rules(["ssh-listening"]);
+    let sub = session
+        .declare_subscriber(declared.alert_selector())
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(declared.adopt_persisted(Duration::from_secs(3)).await, 1);
+    let s = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+        .await
+        .expect("recv timed out")
+        .expect("recv");
+    assert_eq!(s.kind(), zenoh::sample::SampleKind::Delete);
+    assert_eq!(s.key_expr().to_string(), gone_key);
+}

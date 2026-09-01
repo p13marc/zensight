@@ -77,7 +77,8 @@ async fn main() -> Result<()> {
 
     // Threshold-based alerting: drive an AlertReporter → state/sysinfo/alert/*
     // for OOM / PSI / disk / FD / thermal / swap saturation (mirrors the other
-    // sensors). Late-joining GUIs seed their firing set via serve_alerts_query.
+    // sensors). Handing the reporter to the runner seeds late-joining GUIs and
+    // makes the firing set survive a restart (#882).
     let mut collector = SystemCollector::new(
         source.clone(),
         sysinfo_config.clone(),
@@ -88,14 +89,14 @@ async fn main() -> Result<()> {
     if sysinfo_config.alerts.enabled {
         use std::sync::Arc;
         use std::time::Duration;
-        use zensight_sensor_core::{AlertReporter, serve_alerts_query};
+        use zensight_sensor_core::AlertReporter;
         let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Sysinfo, Format::Json)
             .with_debounce(Duration::from_secs(sysinfo_config.alerts.for_secs));
         if let Some(id) = runner.identity() {
             reporter = reporter.with_identity(id);
         }
         let reporter = Arc::new(reporter);
-        runner.spawn(serve_alerts_query(reporter.clone()));
+        runner = runner.with_alert_reporter(reporter.clone());
         let evaluator = zensight_sensor_sysinfo::alerts::AlertEvaluator::new(
             source.clone(),
             sysinfo_config.alerts.clone(),

@@ -165,14 +165,14 @@ async fn main() -> Result<()> {
     // device (rules/thresholds per device via `devices[].alerts` override).
     let alert_reporter = if snmp_config.alerts.enabled {
         use zensight_common::Protocol;
-        use zensight_sensor_core::{AlertReporter, serve_alerts_query};
+        use zensight_sensor_core::AlertReporter;
         let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Snmp, serialization)
             .with_debounce(std::time::Duration::from_secs(snmp_config.alerts.for_secs));
         if let Some(id) = runner.identity() {
             reporter = reporter.with_identity(id);
         }
         let reporter = Arc::new(reporter);
-        runner.spawn(serve_alerts_query(reporter.clone()));
+        runner = runner.with_alert_reporter(reporter.clone());
         tracing::info!("SNMP threshold alerting enabled");
         Some(reporter)
     } else {
