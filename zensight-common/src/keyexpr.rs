@@ -97,6 +97,23 @@ pub fn is_telemetry_key(key: &str) -> bool {
     })
 }
 
+/// Whether a base-relative key is in the **events** class (RFC 04 §3).
+///
+/// The structural counterpart to [`is_telemetry_key`] for the class that
+/// carries [`crate::EventRecord`]s. Like the telemetry gate it pins the origin
+/// to a host: an events record is something a *host* observed, and unlike
+/// state there is no service-origin events family to exempt.
+///
+/// The guard exists for the same reason the telemetry one does: a subscription
+/// selector is a pattern, an operator can widen it, and a widened one must not
+/// smuggle state or `@media` keys into a store that will serve them back as
+/// events.
+pub fn is_events_key(key: &str) -> bool {
+    parse_key(key).is_some_and(|k| {
+        matches!(k.class, ClassOrPlane::Class(Class::Events)) && matches!(k.origin, Origin::Host(_))
+    })
+}
+
 /// Whether a base-relative key is in the **state** class (RFC 04 §3).
 ///
 /// Unlike [`is_telemetry_key`] this does *not* pin the origin to a host: the

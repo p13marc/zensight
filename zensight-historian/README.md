@@ -71,14 +71,34 @@ query-time join, not a storage key.
 | `stats` | **served** | `HistorianStats` |
 | `range` | **served** — see [`docs/range-api.md`](docs/range-api.md) | `RangeReply` |
 | `series` | **served** | `Vec<SeriesInfo>` |
-| `timeline` | `error/unsupported` until #908 | `TimelineReply` |
+| `timeline` | **served** | `TimelineReply` |
 
-A declared-but-unbuilt procedure answers `error/unsupported` rather than going
-undeclared. RFC 08 §6.1 requires a build to serve what it advertises, and the
-reason is the caller's: an undeclared key **times out**, and a timeout is
+Every declared procedure is served. RFC 08 §6.1 requires a build to serve what
+it advertises, and `check_registry_coverage` fails the startup when it does
+not — which is worth having: an undeclared key **times out**, and a timeout is
 indistinguishable from a slow fleet, a dropped reply, or a wrong key.
-`error/unsupported` is the third answer — *declared, not built* — and it arrives
-immediately.
+
+## What it remembers besides numbers
+
+The tiers answer *what was this number*; the **timeline** answers *what
+happened* (#908). Two subscribers feed it — `v1/*/events/**` for event records
+and `v1/*/state/*/alert/*` for alert transitions — into a table read by
+`@rpc/historian/timeline`: newest-first, windowed, filtered by kind and origin,
+paged by `after_uid`. The `@rpc/logs/events` contract, because a timeline and a
+log tail are the same shape of question and there is no reason for a caller to
+learn two.
+
+An alert stops in two ways and both are recorded: a `Resolved` document and a
+tombstone. A timeline that understood only one would show half the incidents as
+permanent — which half depending on which producer published them.
+
+**The row's key is derived, not minted**, from `(ts, kind, key, active)`. An
+AdvancedSubscriber replays what is currently firing on every reconnect, and a
+fresh id per replay would turn one firing into one row per restart, all stamped
+with the original time, with nothing downstream able to tell them apart.
+Deriving it makes the replay overwrite the row it already wrote. The digest is
+a hand-written FNV-1a rather than `DefaultHasher`, because the value is on disk
+and `DefaultHasher`'s output is explicitly not stable across Rust releases.
 
 ## Running it
 

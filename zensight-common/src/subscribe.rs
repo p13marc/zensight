@@ -82,6 +82,53 @@ pub fn decode_telemetry(sample: &Sample) -> Result<TelemetryPoint, DecodeReject>
         .ok_or(DecodeReject::Undecodable)
 }
 
+/// The fleet events selector, base-relative like [`DEFAULT_TELEMETRY_KEY_EXPR`].
+pub const DEFAULT_EVENTS_KEY_EXPR: &str = "v1/*/events/**";
+
+/// Declare the events subscriber, with history and recovery.
+///
+/// # Why an advanced subscriber here too
+///
+/// An `events`-class record is a rare, deliberate statement that something
+/// happened — a trap, a unit failing. Missing one is not a gap in a chart, it
+/// is an event that never existed as far as every later reader is concerned,
+/// and unlike a telemetry sample nothing will restate it a second later.
+///
+/// `detect_late_publishers` covers the sensor that comes up after the
+/// subscriber; `recovery` covers the record that went missing between them.
+/// Both matter more for this class than for telemetry, not less.
+///
+/// The events plane is append-only with immutable ULID keys
+/// (`docs/KEYSPACE.md`), so a replay is idempotent for any consumer that keys
+/// by the record's own id — which is what makes history safe to ask for.
+pub async fn declare_events_subscriber(
+    session: &Session,
+    key_expr: &str,
+) -> zenoh::Result<zenoh_ext::AdvancedSubscriber<zenoh::handlers::FifoChannelHandler<Sample>>> {
+    session
+        .declare_subscriber(key_expr)
+        .history(HistoryConfig::default().detect_late_publishers())
+        .recovery(RecoveryConfig::default())
+        .subscriber_detection()
+        .await
+}
+
+/// Decode an events-class sample, rejecting anything outside the class.
+///
+/// The structural guard is the same one [`decode_telemetry`] uses and for the
+/// same reason: the selector is a pattern, an operator may widen it, and a
+/// widened one must not smuggle state or `@media` keys into the event store.
+pub fn decode_event(sample: &Sample) -> Result<crate::EventRecord, DecodeReject> {
+    if !crate::keyexpr::is_events_key(sample.key_expr().as_str()) {
+        return Err(DecodeReject::NotTelemetry);
+    }
+    let payload = sample.payload().to_bytes();
+    serde_json::from_slice(&payload)
+        .ok()
+        .or_else(|| ciborium::from_reader(&payload[..]).ok())
+        .ok_or(DecodeReject::Undecodable)
+}
+
 /// Why a telemetry sample was not turned into a point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeReject {
