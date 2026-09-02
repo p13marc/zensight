@@ -36,10 +36,9 @@ fn the_slice_declares_no_write_surface() {
 /// registry side so a procedure added to the TOML without a server is caught
 /// by `cargo test` and not only by a running deployment.
 ///
-/// `range`, `series` and `timeline` are served as `error/unsupported` until
-/// #907 and #908 build them, which counts: a declared key that answers
-/// immediately is an answer, where an undeclared one is a timeout that looks
-/// like a slow fleet.
+/// `timeline` is served as `error/unsupported` until #908 builds it, which
+/// counts: a declared key that answers immediately is an answer, where an
+/// undeclared one is a timeout that looks like a slow fleet.
 #[test]
 fn every_declared_procedure_is_accounted_for() {
     let toml = zensight_common::registry::historian::REGISTRY_TOML;
@@ -58,8 +57,8 @@ fn every_declared_procedure_is_accounted_for() {
     }
     // Implemented here; the rest are `serve_unavailable` until their issues
     // land. If this list grows, `query::serve_unimplemented` must shrink.
-    let implemented = ["stats"];
-    let unimplemented = ["range", "series", "timeline"];
+    let implemented = ["stats", "range", "series"];
+    let unimplemented = ["timeline"];
     assert_eq!(
         implemented.len() + unimplemented.len() + 2, // + introspect/describe
         6,

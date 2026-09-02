@@ -1,10 +1,9 @@
 //! The historian's read procedures.
 //!
-//! `stats` is served here, because it describes the ingest this crate performs
-//! and #911 needs it to say whether the retention defaults survive a real
-//! fleet. `range`, `series` and `timeline` are **declared** by the registry
-//! (#905) and not yet built (#907, #908), so they are served as
-//! `error/unsupported` through [`zensight_common::served::serve_unavailable`].
+//! `stats` is served here and `range`/`series` in [`range`]. `timeline` is
+//! **declared** by the registry (#905) and not yet built (#908), so it is
+//! served as `error/unsupported` through
+//! [`zensight_common::served::serve_unavailable`].
 //!
 //! That is not a formality. RFC 08 §6.1 says a build must serve what it
 //! advertises, and `check_registry_coverage` debug-panics when it does not —
@@ -12,6 +11,8 @@
 //! out, and a timeout is indistinguishable from a slow fleet, a dropped
 //! sample, or a wrong key. `error/unsupported` is the third answer that says
 //! *declared, not built* rather than *no data*, and it arrives immediately.
+
+pub mod range;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,8 +110,7 @@ fn tier_name(t: Tier) -> &'static str {
 
 /// The procedures this build declares but does not implement yet, with the
 /// issue that will.
-pub const UNIMPLEMENTED: &[(&str, &str)] =
-    &[("range", "#907"), ("series", "#907"), ("timeline", "#908")];
+pub const UNIMPLEMENTED: &[(&str, &str)] = &[("timeline", "#908")];
 
 /// Declare one not-yet-implemented procedure, so that "not built" is an answer
 /// rather than a timeout.

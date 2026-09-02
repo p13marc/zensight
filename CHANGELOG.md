@@ -248,6 +248,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`@rpc/historian/range` and `/series`** (#907). The read half: a range query
+  is three decisions the server makes and the reply states — **which** series
+  (`origin`/`producer`/`subject` compose one key-expression pattern, so `*` and
+  `**` mean what they mean everywhere else on this bus), **at what resolution**
+  (`step` clamps to a tier, and the reply says the `step_s` actually served),
+  and **reduced how** (`agg` defaults by kind, per series, and the reply names
+  the aggregate applied). Plus two bounds, because an unbounded query against a
+  year of history is a denial of service with extra steps: `limit` caps points
+  across all series, `truncated` and `next_cursor` say when it bit, and a short
+  page or a null cursor is the end — the `@rpc/logs/events` contract.
+
+  `rate` is computed on the underlying series and **then** averaged into the
+  step, not the reverse: a rate of an average of a counter is not a rate of
+  anything, and the two differ whenever a step holds more than one bucket —
+  which is every coarse query. A reset restarts from zero, so no step reports a
+  negative rate. `min`/`max` read the bucket's own range, which is what #904
+  kept it for.
+
+  Malformed parameters default, matching the logs sensor — except the two where
+  a default would be a silent wrong answer: an unrecognised `agg`, and a `to`
+  that precedes its `from`. Both are `error/invalid-args`.
+
+  Verified live: a counter's default `rate` reads a plausible 5 934 context
+  switches/sec off a real host, `agg=max` reads the raw counter, and following
+  the cursor across **14 pages reassembles the unpaged answer exactly** — 67
+  points, no gap, no repeat.
+
 - **`zensight-historian`, the fleet's telemetry history as a service** (#906).
   A headless Zenoh application on `SensorRunner`: it subscribes
   `v1/*/telemetry/**` through the shared AdvancedSubscriber (history, recovery,
@@ -322,13 +349,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The GUI's metric cache is rebuilt on first launch after this** (#904).
   Schema v3 re-types two tables and changes what a series is called, so a v2
-  file cannot be read and is moved aside to `metrics.redb.schema-v2` with a
+  file cannot be read and is moved aside to `metrics.redb.schema-v<n>` with a
   logged warning, exactly as a pre-v2 file and an older redb file format
   already were. Nothing else is affected: it is a per-viewer cache of a stream
   the bus still carries, and the durable fleet history it shadows is moving to
   a service (#898) that this makes possible.
 
-  What changed in it:
+  What changed in it (v3 and v4 together — the cache is rebuilt once):
 
   - **A series is `<origin>/<producer>/<subject>`** — the wire key minus the
     class chunk — where it was
@@ -342,6 +369,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     carries neither, and recovering them from it would mean un-slugging a
     proxy producer's device chunk — a guess, in the code that decides which
     host a chart belongs to.
+  - **`metrics` rows also carry the series' `unit`** (v4, #907). A `range`
+    reply declares a `unit` field, and a declared field that is structurally
+    always absent is a lie in the schema. The caller that cannot supply it from
+    elsewhere is exactly the one that matters: a chart opening on a fleet whose
+    sensors are quiet has no live sample to read it from. Absent still means
+    *unknown*, never *dimensionless* — today only the SNMP sensor declares
+    units on its telemetry points.
   - **`samples` values are `{last, min, max}` buckets.** `last` is still the
     value and the tier semantics are unchanged; the range is there so a coarse
     tier can say a spike happened. An hour bucket that reported only its
