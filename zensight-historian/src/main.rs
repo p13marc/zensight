@@ -151,6 +151,17 @@ async fn main() -> Result<()> {
     query::serve_stats(runner.session().clone(), &ctx, stats_ctx)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    query::range::serve_range(
+        runner.session().clone(),
+        ctx.clone(),
+        store.clone(),
+        ctx.origin().chunk().to_string(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    query::range::serve_series(runner.session().clone(), ctx.clone(), store.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     // `serve_unavailable` owns its reply loops and runs until the session
     // closes, so it is spawned rather than awaited — the netring pattern
     // (`main.rs:468`). The declaration itself happens on the first poll, well

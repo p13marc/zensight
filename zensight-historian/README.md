@@ -69,8 +69,8 @@ query-time join, not a storage key.
 |---|---|---|
 | `introspect`, `describe` | served (framework) | `RegistrySlice`, `SchemaSet` |
 | `stats` | **served** | `HistorianStats` |
-| `range` | `error/unsupported` until #907 | `RangeReply` |
-| `series` | `error/unsupported` until #907 | `Vec<SeriesInfo>` |
+| `range` | **served** — see [`docs/range-api.md`](docs/range-api.md) | `RangeReply` |
+| `series` | **served** | `Vec<SeriesInfo>` |
 | `timeline` | `error/unsupported` until #908 | `TimelineReply` |
 
 A declared-but-unbuilt procedure answers `error/unsupported` rather than going
@@ -125,6 +125,8 @@ a producer on a format nobody expected, and a text value is normal.
 
 ## Documents
 
+- [`docs/range-api.md`](docs/range-api.md) — the read contract: parameters,
+  tiers, aggregates, paging, and what each error means.
 - [`docs/configuration.md`](docs/configuration.md) — every knob and what it costs.
 - [`docs/storage.md`](docs/storage.md) — tiers, retention, and the measured
   numbers (#911).

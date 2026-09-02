@@ -84,6 +84,10 @@ const SAMPLES_TABLE: TableDefinition<u128, (f64, f32, f32)> = TableDefinition::n
 ///   in the GUI each re-inferred resets by hand. The store threw the
 ///   distinction away at ingest; now it keeps it, and the rate is computed
 ///   once where the kind is known.
+/// - **unit** — UCUM-style (`"By"`, `"By/s"`, `"%"`), empty when the producer
+///   declared none. A `range` reply promises one, and the caller that cannot
+///   supply it from elsewhere is exactly the one that matters: a chart opening
+///   on a fleet whose sensors are quiet has no live sample to read it from.
 /// - **source** and **metric** — the series path is
 ///   `<origin>/<producer>/<subject>`, the wire key minus the class chunk, so
 ///   that a reader holding only a sample can name its series. Neither the
@@ -91,7 +95,8 @@ const SAMPLES_TABLE: TableDefinition<u128, (f64, f32, f32)> = TableDefinition::n
 ///   proxy producer's subject is `{device}/{metric...}`, so recovering either
 ///   would mean un-slugging a device chunk — a guess, in the one place that
 ///   must not guess. Both are free at ingest, so both are written down.
-const METRICS_TABLE: TableDefinition<&str, (u32, u8, &str, &str)> = TableDefinition::new("metrics");
+const METRICS_TABLE: TableDefinition<&str, (u32, u8, &str, &str, &str)> =
+    TableDefinition::new("metrics");
 
 /// redb table: store-level metadata. One row, `schema` -> [`SCHEMA_VERSION`].
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
@@ -111,7 +116,13 @@ const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// those re-types a table, so a v2 file is not readable by this code and is
 /// moved aside rather than migrated (it is a cache; the fleet history it
 /// shadows outlives it).
-pub const SCHEMA_VERSION: u64 = 3;
+///
+/// v4 (#907): the `metrics` row also carries the series' **unit**. The
+/// historian's `range` and `series` replies declare a `unit` field, and a
+/// declared field that is structurally always absent is a lie in the schema —
+/// a chart opening on a fleet whose sensors are quiet has no live sample to
+/// take the unit from, so the store is where it has to survive.
+pub const SCHEMA_VERSION: u64 = 4;
 
 use crate::logs::LOGS_TABLE;
 
@@ -319,6 +330,9 @@ impl Bucket {
 pub struct MetricMeta {
     /// Counter, gauge or bool — see [`MetricKind`].
     pub kind: MetricKind,
+    /// UCUM-style unit (`"By"`, `"By/s"`, `"%"`, `"s"`), when the producer
+    /// declared one. Absent is *unknown*, never *dimensionless*.
+    pub unit: Option<String>,
     /// The observed device: [`TelemetryPoint::source`]. The publishing host
     /// for a host sensor, the polled device for a proxy sensor.
     pub source: String,
@@ -791,12 +805,15 @@ impl PersistentStore {
         let mut out = Vec::new();
         for row in table.iter()? {
             let (k, v) = row?;
-            let (id, kind, source, metric) = v.value();
+            let (id, kind, source, metric, unit) = v.value();
             out.push((
                 k.value().to_string(),
                 id,
                 MetricMeta {
                     kind: kind_from_code(kind),
+                    // The empty string is how "no unit" rides a fixed-arity
+                    // row; `Option` is how it reads in Rust.
+                    unit: (!unit.is_empty()).then(|| unit.to_string()),
                     source: source.to_string(),
                     metric: metric.to_string(),
                 },
@@ -830,6 +847,7 @@ impl PersistentStore {
                         kind_code(meta.kind),
                         meta.source.as_str(),
                         meta.metric.as_str(),
+                        meta.unit.as_deref().unwrap_or(""),
                     ),
                 )?;
             }
@@ -1572,6 +1590,7 @@ impl MetricStore {
         let before = self.interner.len();
         let meta = MetricMeta {
             kind: value.kind(),
+            unit: point.unit.clone(),
             source: point.source.clone(),
             metric: point.metric.clone(),
         };
@@ -1696,6 +1715,18 @@ impl MetricStore {
             .unwrap_or_default()
     }
 
+    /// Hot (in-memory) samples for an interned id, oldest-first.
+    ///
+    /// The path-keyed form is for a caller holding a name; this one is for a
+    /// caller that already walked the interner and holds the id — the range
+    /// procedure, which would otherwise re-resolve a path it just came from.
+    pub fn hot_samples_by_id(&self, id: MetricId) -> Vec<Sample> {
+        self.series
+            .get(&id)
+            .map(|s| s.hot.to_vec())
+            .unwrap_or_default()
+    }
+
     /// Hot (in-memory) samples for a series path, oldest-first.
     pub fn hot_samples(&self, metric_key: &str) -> Vec<Sample> {
         self.interner
@@ -1797,6 +1828,7 @@ mod tests {
     fn meta(metric: &str) -> MetricMeta {
         MetricMeta {
             kind: MetricKind::Gauge,
+            unit: None,
             source: "dev1".to_string(),
             metric: metric.to_string(),
         }
@@ -2377,6 +2409,7 @@ mod tests {
                 0,
                 MetricMeta {
                     kind: MetricKind::Gauge,
+                    unit: None,
                     source: "dev1".to_string(),
                     metric: "cpu".to_string(),
                 }
@@ -2508,6 +2541,7 @@ mod tests {
             let mut m = MetricStore::new(10, Some(store));
             let mut counter = point("if/eth0/rx_bytes", 0.0, 60_000);
             counter.value = TelemetryValue::Counter(1_000);
+            counter.unit = Some("By".to_string());
             m.record(ORIGIN, "if/eth0/rx_bytes", &counter);
             m.record(ORIGIN, "cpu", &point("cpu", 42.0, 60_000));
             let (handle, batch) = m.take_flush_batch().expect("batch");
@@ -2530,6 +2564,19 @@ mod tests {
         assert_eq!(
             i.meta(counter_id).map(|x| x.metric.as_str()),
             Some("if/eth0/rx_bytes"),
+        );
+        // The unit too (#907): a `range` reply promises one, and a chart
+        // opening on a quiet fleet has no live sample to take it from.
+        assert_eq!(
+            i.meta(counter_id).and_then(|x| x.unit.as_deref()),
+            Some("By")
+        );
+        // …and a series whose producer declared none reads back as unknown,
+        // not as dimensionless.
+        assert_eq!(
+            i.meta(i.get(&series("cpu")).unwrap())
+                .and_then(|x| x.unit.as_deref()),
+            None
         );
         assert_eq!(
             i.meta(i.get(&series("cpu")).unwrap()).map(|x| x.kind),
