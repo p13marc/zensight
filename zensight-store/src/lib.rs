@@ -355,6 +355,21 @@ pub struct MetricMeta {
     pub metric: String,
 }
 
+impl std::error::Error for StoreOpenError {
+    /// The redb error underneath, when there is one.
+    ///
+    /// [`StoreOpenError::Schema`] has no source: nothing failed, the file is
+    /// simply another version's. That distinction is the point of the variant,
+    /// and it is what [`MetricStore::with_default_persistence`] branches on to
+    /// move a file aside rather than degrade to memory-only.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StoreOpenError::Redb(e) => Some(e),
+            StoreOpenError::Schema { .. } => None,
+        }
+    }
+}
+
 /// Interned identifier for a metric path. Compact key for the store, per Plan 05 §5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MetricId(pub u32);
@@ -1502,6 +1517,9 @@ pub struct MetricStore {
     series: HashMap<MetricId, MetricSeries>,
     hot_capacity: usize,
     persistent: Option<PersistentStore>,
+    /// Which tiers a flush writes to disk. See
+    /// [`persist_tiers`](Self::persist_tiers).
+    persist_tiers: Vec<Tier>,
     /// `(path, id)` pairs interned since the last flush, written with it.
     /// Empty (never appended) when there is no persistent store.
     unsaved_paths: Vec<(String, u32, MetricMeta)>,
@@ -1540,6 +1558,7 @@ impl MetricStore {
             series: HashMap::new(),
             hot_capacity: hot_capacity.max(1),
             persistent,
+            persist_tiers: Tier::ALL.to_vec(),
             unsaved_paths: Vec::new(),
             log_pending: Vec::new(),
             log_retention: LogRetention::new(LOG_SAMPLE_EVERY),
@@ -1684,7 +1703,7 @@ impl MetricStore {
                 continue;
             }
             let pending = std::mem::take(&mut series.pending);
-            for tier in Tier::ALL {
+            for tier in self.persist_tiers.iter().copied() {
                 for (bucket, value) in downsample(&pending, tier) {
                     rows.push((*id, tier, bucket, value));
                 }
@@ -1842,6 +1861,34 @@ impl MetricStore {
             .device_ids(&device)
             .map(|(id, metric)| (metric.to_string(), id))
             .collect()
+    }
+
+    /// Choose which tiers a flush writes to disk.
+    ///
+    /// Defaults to all three, which is right for the GUI's cache: it is one
+    /// viewer's file, and the per-second tier is what lets a chart survive a
+    /// restart with its live resolution intact.
+    ///
+    /// It is **not** right at fleet scale, and #911's bench is what showed it.
+    /// A per-second bucket per series per second is, for ten thousand series,
+    /// roughly sixty times the row count of the minute tier — half the rows in
+    /// the file and most of its bytes — to answer questions the hot ring
+    /// already answers, since a sub-minute `step` reads the ring and not the
+    /// disk. Measured: 10 000 series over two simulated hours wrote 1.2 M
+    /// second buckets alongside 1.2 M minute buckets, and a prune had to walk
+    /// all of them.
+    ///
+    /// The historian sets `[Minute, Hour]`. Its own config and documentation
+    /// already said the per-second tier "is not persisted — it is the ring
+    /// above"; this makes that true.
+    pub fn persist_tiers(mut self, tiers: &[Tier]) -> Self {
+        self.persist_tiers = tiers.to_vec();
+        self
+    }
+
+    /// The tiers this store flushes.
+    pub fn persisted_tiers(&self) -> &[Tier] {
+        &self.persist_tiers
     }
 
     /// Total samples held across every series' hot ring.
@@ -2807,6 +2854,76 @@ mod tests {
         assert_eq!(store.tier_rows(Tier::Minute).unwrap(), 0);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&empty);
+    }
+
+    /// What a flush actually writes, tier by tier, read back from the file.
+    ///
+    /// Added while chasing a #911 bench that reported 120 000 minute buckets
+    /// in a file an independent reader found none in. One of the two was
+    /// wrong and nothing in the suite could say which.
+    #[test]
+    fn a_flush_writes_every_persisted_tier_and_the_counts_agree() {
+        let path = temp_db_path("tier-counts");
+        let persistent = PersistentStore::open(&path).expect("open");
+        let mut store = MetricStore::new(64, Some(persistent.clone()));
+
+        // Three samples, one per minute, flushed after each — the historian's
+        // pattern, and the bench's.
+        for minute in 0..3i64 {
+            let ts = 1_700_000_000_000 + minute * 60_000;
+            store.record(ORIGIN, "cpu", &point("cpu", minute as f64, ts));
+            let (handle, batch) = store.take_flush_batch().expect("a batch");
+            handle.write_batch(&batch).unwrap();
+        }
+
+        // Three distinct minute buckets, one hour bucket (all three fall in
+        // the same hour), and three second buckets.
+        assert_eq!(persistent.tier_rows(Tier::Second).unwrap(), 3);
+        assert_eq!(persistent.tier_rows(Tier::Minute).unwrap(), 3);
+        assert_eq!(persistent.tier_rows(Tier::Hour).unwrap(), 1);
+
+        // And the same counts by walking the table directly, which is the
+        // check that would have caught the disagreement: `tier_rows` bounds
+        // its range per (metric, tier), and a bound that was wrong would
+        // over-count without any per-tier assertion noticing.
+        let txn = persistent.db.begin_read().unwrap();
+        let table = txn.open_table(SAMPLES_TABLE).unwrap();
+        let mut by_tier = [0u64; 3];
+        for entry in table.range(0u128..=u128::MAX).unwrap() {
+            let (k, _) = entry.unwrap();
+            let code = ((k.value() >> 64) & 0xFF) as u8;
+            by_tier[code as usize] += 1;
+        }
+        assert_eq!(
+            by_tier,
+            [3, 3, 1],
+            "a direct walk must agree with tier_rows"
+        );
+        drop(table);
+        drop(txn);
+
+        // With the historian's tier set, the second tier is not written at all
+        // — and the others are unchanged.
+        let path2 = temp_db_path("tier-counts-minute-hour");
+        let p2 = PersistentStore::open(&path2).expect("open");
+        let mut store2 =
+            MetricStore::new(64, Some(p2.clone())).persist_tiers(&[Tier::Minute, Tier::Hour]);
+        for minute in 0..3i64 {
+            let ts = 1_700_000_000_000 + minute * 60_000;
+            store2.record(ORIGIN, "cpu", &point("cpu", minute as f64, ts));
+            let (handle, batch) = store2.take_flush_batch().expect("a batch");
+            handle.write_batch(&batch).unwrap();
+        }
+        assert_eq!(
+            p2.tier_rows(Tier::Second).unwrap(),
+            0,
+            "the ring is not flushed"
+        );
+        assert_eq!(p2.tier_rows(Tier::Minute).unwrap(), 3);
+        assert_eq!(p2.tier_rows(Tier::Hour).unwrap(), 1);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     /// A pre-v2 file — samples, no `metrics`/`meta` — is refused, not read:

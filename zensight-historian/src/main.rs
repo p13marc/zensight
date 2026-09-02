@@ -56,7 +56,14 @@ async fn main() -> Result<()> {
         }
     };
     let store: ingest::SharedStore = Arc::new(std::sync::Mutex::new(
-        zensight_store::MetricStore::new(hc.store.hot_secs, persistent),
+        // Minute and hour only. The per-second resolution is the hot ring's,
+        // and a sub-minute `step` reads it rather than the disk — so writing
+        // a per-second bucket per series would be, at ten thousand series,
+        // half the rows in the file and most of its bytes to answer a question
+        // nothing asks of them (#911). The config and the docs have said this
+        // since #906; measuring is what made it true.
+        zensight_store::MetricStore::new(hc.store.hot_secs, persistent)
+            .persist_tiers(&[zensight_store::Tier::Minute, zensight_store::Tier::Hour]),
     ));
 
     let counters = Arc::new(ingest::IngestCounters::default());

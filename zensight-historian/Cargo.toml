@@ -21,6 +21,8 @@ tokio = { workspace = true, features = ["full", "sync", "time"] }
 zenoh.workspace = true
 # `declare_telemetry_subscriber` returns an AdvancedSubscriber.
 zenoh-ext.workspace = true
+# The bench measures the file redb writes, so it opens one directly.
+redb.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true
@@ -38,3 +40,10 @@ serde.workspace = true
 [[example]]
 name = "historian-query"
 path = "examples/historian-query.rs"
+
+# The storage bench behind #911's acceptance numbers. An example for the same
+# reason `historian-query` is: it is a measurement tool, not something an
+# operator installs.
+[[example]]
+name = "historian-bench"
+path = "examples/historian-bench.rs"
