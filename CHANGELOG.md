@@ -173,6 +173,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registration replaces three rituals; the eleven per-sensor
   `runner.spawn(serve_alerts_query(…))` lines are gone.
 
+### Changed
+
+- **Dependencies (Renovate #852–#855):** `ulid` 1 → 3 (`Ulid::new` became
+  `Ulid::generate`), `ctor` 0.10 → 1.0 (the three pre-main WGPU guards are
+  `#[ctor(unsafe)]`, which is what 1.0 calls a constructor that runs before
+  `main`), `rustix` 0.38 → 1 in the systemd sensor (sysinfo was already on 1;
+  one fewer copy in the tree). `fastcdc` is dropped from the workspace
+  dependencies rather than bumped: no crate has used it since zblob went
+  external, so the bump PR was for a line nothing read.
+
 ### Fixed
 
 - **Alerts that could never fire, and a firing set that only grew.** Labels

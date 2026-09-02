@@ -752,7 +752,7 @@ async fn finalize_recording(
 /// bytes — the manifest is the result of registering, not an input to it.
 async fn register_blob(blob: &BlobServer, path: &Path, filename: &str) -> anyhow::Result<Manifest> {
     blob.register_file(
-        BlobSpec::new(ulid::Ulid::new().to_string())
+        BlobSpec::new(ulid::Ulid::generate().to_string())
             .filename(filename.to_string())
             .chunk_size(BLOB_CHUNK_SIZE)
             .created_ms(now_ms()),

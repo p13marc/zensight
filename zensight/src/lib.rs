@@ -31,7 +31,7 @@ pub use message::{DeviceId, Message};
 /// `WGPU_BACKEND` from the caller still wins. The same guard sits at the top
 /// of `tests/ui_tests.rs`; each test binary needs its own.
 #[cfg(test)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn force_gl_backend_for_tests() {
     if std::env::var_os("WGPU_BACKEND").is_none() {
         // SAFETY: `ctor` runs before `main`, while the process is still

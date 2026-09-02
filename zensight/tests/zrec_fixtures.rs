@@ -22,7 +22,7 @@ use zensight::replay;
 /// own; see `docs/testing.md`, "If the `zensight` tests segfault". This
 /// target never builds a simulator today, but the rule is per-binary so a
 /// later simulator test cannot re-open the coin flip.
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn force_gl_backend_for_tests() {
     if std::env::var_os("WGPU_BACKEND").is_none() {
         // SAFETY: `ctor` runs before `main`, single-threaded — the condition

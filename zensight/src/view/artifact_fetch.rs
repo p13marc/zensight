@@ -344,7 +344,7 @@ impl ArtifactJob {
         ArtifactJob {
             producer,
             kind,
-            id: Ulid::new(),
+            id: Ulid::generate(),
             delivery: None,
             filename: None,
             note: None,

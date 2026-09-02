@@ -14,7 +14,7 @@ use iced_test::simulator;
 /// loader with no output. Mirrors the guard in `src/lib.rs` — each test binary
 /// needs its own — and an explicit `WGPU_BACKEND` from the caller still wins.
 /// The measurements and the full story: `docs/testing.md`.
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn force_gl_backend_for_tests() {
     if std::env::var_os("WGPU_BACKEND").is_none() {
         // SAFETY: pre-main, single-threaded — no concurrent env reader yet.
