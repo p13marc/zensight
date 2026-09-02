@@ -245,6 +245,58 @@ impl Resolver {
     }
 }
 
+/// Derive `L2Adjacent` claims from observed-device evidence (#917).
+///
+/// A third-party identity claim — `state/<sensor>/evidence/device/{device}`,
+/// `observer` set — says "the sensor on **this** host saw **that** device".
+/// The sensor learned that from an ARP/NDP neighbour table, which is a
+/// statement about a link-layer segment: the two are adjacent at L2. That is
+/// exactly the inference the GUI used to make for itself from the netlink
+/// neighbour table, and moving it here is what lets an exporter, a notifier or
+/// a second console see the same segment map.
+///
+/// Expressed as synthetic [`RelationshipEvidence`] rather than as edges
+/// directly, so it flows through the *same* [`resolve`] as every real claim
+/// and inherits its determinism, its self-edge rule and its `External`
+/// fallback. A second construction path here would be a second place for the
+/// edge id to be computed differently.
+///
+/// Self-reports are skipped: `observer == None` means "this is me", which is
+/// identity, not adjacency, and would make every host adjacent to itself.
+pub fn l2_claims(
+    evidence: &[(String, zensight_common::HostEvidence)],
+    now_ms: i64,
+) -> Vec<(String, RelationshipEvidence)> {
+    let mut out = Vec::new();
+    for (origin, ev) in evidence {
+        if ev.observer.is_none() {
+            continue;
+        }
+        if origin.is_empty() {
+            continue;
+        }
+        out.push((
+            origin.clone(),
+            RelationshipEvidence {
+                sensor: ev.sensor.clone(),
+                source: origin.clone(),
+                kind: zensight_common::relation::RelationKind::L2Adjacent,
+                from: EndpointClaim::host(origin.clone()),
+                to: EndpointClaim {
+                    device: Some(ev.source.clone()),
+                    ips: ev.ips.clone(),
+                    macs: ev.macs.clone(),
+                    name: ev.hostname.clone(),
+                    ..Default::default()
+                },
+                attrs: BTreeMap::new(),
+                last_updated: now_ms,
+            },
+        ));
+    }
+    out
+}
+
 /// Resolve every live claim into the current edge set.
 ///
 /// Claims that resolve to the same `(kind, from, to)` merge into one edge with
@@ -713,6 +765,67 @@ mod tests {
         let edges = resolve(&claims, &entities, 100);
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].to.entity_id(), Some("h-guest"));
+    }
+
+    fn observed(sensor: &str, source: &str, ips: &[&str]) -> zensight_common::HostEvidence {
+        zensight_common::HostEvidence {
+            sensor: sensor.into(),
+            source: source.into(),
+            observer: Some(sensor.into()),
+            host_id: None,
+            boot_id: None,
+            hostname: Some(source.into()),
+            fqdn: None,
+            ips: ips.iter().map(|s| s.to_string()).collect(),
+            macs: Vec::new(),
+            vendor: None,
+            platform: None,
+            container_id: None,
+            cloud: None,
+            last_updated: 1,
+        }
+    }
+
+    /// An observed-device claim becomes an `L2Adjacent` edge between the
+    /// observing host and the device it saw.
+    #[test]
+    fn observed_device_evidence_derives_l2_adjacency() {
+        let seen = entity("h-seen", None, &["10.0.0.9"], &[]);
+        let entities = vec![entity("h-obs", Some("h-obs"), &["10.0.0.1"], &[]), seen];
+        let ev = vec![(
+            "h-obs".to_string(),
+            observed("netlink", "dev1", &["10.0.0.9"]),
+        )];
+        let claims = l2_claims(&ev, 100);
+        assert_eq!(claims.len(), 1);
+        let edges = resolve(&claims, &entities, 100);
+        assert_eq!(edges.len(), 1, "{edges:#?}");
+        assert_eq!(edges[0].kind, RelationKind::L2Adjacent);
+        assert_eq!(edges[0].from.entity_id(), Some("h-obs"));
+        assert_eq!(edges[0].to.entity_id(), Some("h-seen"));
+    }
+
+    /// A self-report is identity, not adjacency.
+    #[test]
+    fn a_self_report_derives_no_adjacency() {
+        // `observer == None` means "this is me". Deriving adjacency from it
+        // would make every host adjacent to itself and put a loop on every
+        // node of the map.
+        let mut ev = observed("sysinfo", "hostA", &["10.0.0.1"]);
+        ev.observer = None;
+        assert!(l2_claims(&[("h-obs".to_string(), ev)], 100).is_empty());
+    }
+
+    /// An observation whose device resolves back to the observer is not an
+    /// edge — the self-edge rule in `resolve` catches it.
+    #[test]
+    fn observing_your_own_address_is_not_adjacency() {
+        let entities = vec![entity("h-obs", Some("h-obs"), &["10.0.0.1"], &[])];
+        let ev = vec![(
+            "h-obs".to_string(),
+            observed("netlink", "self", &["10.0.0.1"]),
+        )];
+        assert!(resolve(&l2_claims(&ev, 100), &entities, 100).is_empty());
     }
 
     /// `merge.rs` never learns about relationships.

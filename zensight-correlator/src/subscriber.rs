@@ -267,9 +267,20 @@ async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
         }
         return;
     }
+    // The origin comes from the key, not the payload: only the key says which
+    // host the publishing sensor ran on, and the topology graph needs it to
+    // attribute an observed-device claim to a segment (#917).
+    let origin = zensight_common::keyexpr::refine_key(key)
+        .map(|(parsed, _, _)| parsed.origin.to_string())
+        .unwrap_or_default();
     match decode::<HostEvidence>(&sample.payload().to_bytes()) {
         Some(ev) => {
-            let _ = tx.send(EvidenceMsg::Host(Box::new(ev))).await;
+            let _ = tx
+                .send(EvidenceMsg::Host {
+                    origin,
+                    ev: Box::new(ev),
+                })
+                .await;
         }
         None => warn!(key = %key, "failed to decode HostEvidence"),
     }

@@ -153,7 +153,17 @@ pub async fn feed(tx: mpsc::Sender<EvidenceMsg>, mut shutdown: watch::Receiver<b
         let (evidence, names) = synthetic();
         for mut ev in evidence {
             ev.last_updated = now;
-            if tx.send(EvidenceMsg::Host(Box::new(ev))).await.is_err() {
+            // The demo's synthetic claims are self-reports, so the origin a
+            // real one would arrive on is the host it is about.
+            let origin = ev.host_id.clone().unwrap_or_else(|| ev.source.clone());
+            if tx
+                .send(EvidenceMsg::Host {
+                    origin,
+                    ev: Box::new(ev),
+                })
+                .await
+                .is_err()
+            {
                 return;
             }
         }
@@ -184,7 +194,10 @@ mod tests {
     ) -> Vec<zensight_common::HostEntity> {
         let mut state = CorrelatorState::new(CorrelatorConfig::default());
         for ev in evidence {
-            state.apply(EvidenceMsg::Host(Box::new(ev.clone())));
+            state.apply(EvidenceMsg::Host {
+                origin: "h-demo".into(),
+                ev: Box::new(ev.clone()),
+            });
         }
         for obs in names {
             state.apply(EvidenceMsg::Name(obs.clone()));
@@ -246,7 +259,10 @@ mod tests {
         let (evidence, names) = synthetic();
         let mut state = CorrelatorState::new(CorrelatorConfig::default());
         for ev in &evidence {
-            state.apply(EvidenceMsg::Host(Box::new(ev.clone())));
+            state.apply(EvidenceMsg::Host {
+                origin: "h-demo".into(),
+                ev: Box::new(ev.clone()),
+            });
         }
         for obs in &names {
             state.apply(EvidenceMsg::Name(obs.clone()));

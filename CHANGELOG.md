@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Link-layer adjacency is derived in the catalog, not the GUI** (completes
+  #917). A third-party identity claim — `evidence/device/{device}` with
+  `observer` set — says "the sensor on *this* host saw *that* device", learned
+  from an ARP/NDP neighbour table. That is a statement about a link-layer
+  segment, and it is exactly the inference the GUI has been making privately
+  from netlink's neighbour table since #391. It now produces
+  `L2Adjacent` edges on `@catalog/state/edge/*`, where an exporter, a notifier
+  or a second console can see the same segment map.
+
+  Deriving it needed the **publishing origin of a host-evidence claim**, which
+  the correlator was discarding: the payload says which *sensor* made a claim,
+  only the key says which *host* that sensor ran on. `EvidenceMsg::Host` and
+  `EvidenceStore` now carry it. Identity does not use it and the merge is
+  unchanged — an observation's origin is not evidence about who the observed
+  machine *is*.
+
+  The derivation is expressed as synthetic `RelationshipEvidence` and pushed
+  through the same resolver as every real claim, rather than constructing edges
+  directly: a second construction path is a second place for `edge_id` to be
+  computed differently, and the self-edge rule, the `External` fallback and the
+  sorted-iteration determinism all come for free. Self-reports are skipped —
+  `observer == None` means "this is me", which is identity, not adjacency, and
+  would put a loop on every node of the map.
+
+  This was in #917's scope and I did not deliver it there; #919's L2 lens needs
+  it, which is how it surfaced.
+
 - **The catalog resolves relationship claims into edges** (#917, part of #899).
   `@catalog/state/edge/{edge_id}` is now published, tombstoned and seeded, with
   the same lifecycle as `entity/{entity_id}`: a declared publisher per key,
