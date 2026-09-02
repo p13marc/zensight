@@ -248,6 +248,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Docs for the history service** (#913). `docs/ARCHITECTURE.md` gains the
+  historian in the system overview and a section on why history became a
+  service; `docs/KEYSPACE.md` loses the phantom `timeseries` storage recipe —
+  it named a config file that never existed — and gains a rule that telemetry
+  history is *pulled*, not seeded. The per-crate documents
+  (`zensight-historian/README.md` + `docs/{configuration,range-api,storage}.md`,
+  `zensight-store/README.md`, the rewritten `zensight/docs/local-store.md`) and
+  the CLAUDE.md crate map landed with the changes they describe.
+
+  The RFC amendment behind all of this — RFC 04 §4 maps telemetry history to an
+  influx-class *storage*, and this ships it as an *application* — is
+  [zenkey#415](https://github.com/p13marc/zenkey/issues/415) and is **still
+  open**. The historian's README says so rather than leaving a reader to
+  discover that the RFC and the crate disagree; the upstream issue now carries
+  what the implementation turned out to be, so the amendment can describe
+  something that exists.
+
 - **The historian stops persisting the per-second tier** (#911), which halves
   its database and cuts a prune pass by two-thirds. The hot ring already
   answers sub-minute questions — a `step` under 60 s reads memory, not disk —
