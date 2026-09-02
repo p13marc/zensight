@@ -847,7 +847,6 @@ impl ZenSight {
                 // clearing the canvas cache in turn.
                 tracing::debug!(
                     flows = batch.flows.is_some(),
-                    neighbors = batch.neighbors.is_some(),
                     matrix = batch.matrix.is_some(),
                     assets = batch.assets.is_some(),
                     "Topology batch received"
@@ -2213,6 +2212,31 @@ impl ZenSight {
             Message::EntityRemoved(entity_id) => {
                 self.entities.remove(&entity_id);
                 self.rederive_entities();
+            }
+
+            Message::EdgeSeed(edges) => {
+                let mut changed = false;
+                for edge in edges {
+                    changed |= self.topology.apply_edge_document(edge);
+                }
+                if changed {
+                    self.rebuild_topology_edges();
+                }
+            }
+
+            Message::EdgeReceived(edge) => {
+                // Change-gated: this runs on every sample, and an
+                // unconditional rebuild would clear the canvas cache and drop
+                // the edge selection each time an edge merely refreshed.
+                if self.topology.apply_edge_document(edge) {
+                    self.rebuild_topology_edges();
+                }
+            }
+
+            Message::EdgeRemoved(edge_id) => {
+                if self.topology.remove_edge_document(&edge_id) {
+                    self.rebuild_topology_edges();
+                }
             }
 
             Message::AliasReceived(alias) => {
@@ -6314,8 +6338,8 @@ impl ZenSight {
             .collect()
     }
 
-    /// The full topology data-refresh batch (#391): flows + neighbors +
-    /// matrix + assets, fetched concurrently and landed as ONE
+    /// The full topology data-refresh batch: flows + matrix + assets, fetched
+    /// concurrently and landed as ONE
     /// `TopologyBatchReceived` so the edge set rebuilds once per batch
     /// (#440). Issued on view entry and re-issued periodically while the
     /// view is open. Demo serves no queryables (session is None), so the
@@ -6330,29 +6354,23 @@ impl ZenSight {
                 ..Default::default()
             }));
         }
-        use crate::view::specialized::netlink_detail::fetch_records_all;
         use crate::view::specialized::netring_detail::{fetch_assets, fetch_flows, fetch_matrix};
         let Some(session) = self.session.clone() else {
             // Not connected: leave edges as-is, no error toast.
             return Task::none();
         };
-        let neighbors_key = zensight_common::fleet_rpc_key("netlink", "neighbors");
+        // The neighbour fan-in that used to ride here is gone (#919): L2
+        // adjacency is a catalog edge document now, derived once by the
+        // correlator from observed-device evidence instead of by every open
+        // GUI from a fleet-wide `@rpc` fan-out on a 10 s timer.
         Task::future(async move {
-            let (flows, neighbors, matrix, assets) = tokio::join!(
+            let (flows, matrix, assets) = tokio::join!(
                 fetch_flows(session.clone(), None),
-                // Fleet fan-in (RFC 05 §2.1): every netlink host's neighbours,
-                // not whichever one answered first — the map draws edges from
-                // all of them.
-                fetch_records_all::<zensight_common::NeighborRecord>(
-                    session.clone(),
-                    neighbors_key,
-                ),
                 fetch_matrix(session.clone(), None),
                 fetch_assets(session, None),
             );
             Message::TopologyBatchReceived(TopologyBatch {
                 flows,
-                neighbors,
                 matrix,
                 assets,
             })
@@ -6436,9 +6454,20 @@ impl ZenSight {
         self.refresh_topology_nodes();
     }
 
-    /// Refresh topology nodes from device/entity state, then apply any changed
-    /// default-gateway edges (#391). Gateway application is change-gated inside
-    /// [`TopologyState::apply_gateway_edges`], so calling this at 1 Hz is cheap.
+    /// Rebuild the topology edge set after a catalog edge document changed
+    /// (#919).
+    ///
+    /// Goes through `refresh_topology_nodes` rather than poking the edge
+    /// builder directly, because an edge can name an entity the map has no
+    /// node for yet — and a rebuild that ran before the node pass would drop
+    /// the edge and then never revisit it.
+    fn rebuild_topology_edges(&mut self) {
+        self.refresh_topology_nodes();
+    }
+
+    /// Refresh topology nodes from device/entity state and rebuild the edge
+    /// set. Cheap at 1 Hz: the edge rebuild is change-gated by its callers and
+    /// the layout pass is itself change-gated (#442).
     fn refresh_topology_nodes(&mut self) {
         // Device-group labels per node (#392): first assigned group wins,
         // resolved through the same device→entity mapping as node keying.
@@ -6466,8 +6495,6 @@ impl ZenSight {
             &self.sensor_health,
             now_ms(),
         );
-        let ip_to_node = self.topology_ip_to_node();
-        self.topology.apply_gateway_edges(&ip_to_node, now_ms());
         // Live node rx/tx rates from hot-ring counter deltas (#391) — only
         // worth the store scan while the map is on screen.
         if self.current_view == CurrentView::Topology {

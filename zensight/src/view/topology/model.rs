@@ -6,7 +6,7 @@
 //! derivation logic is unit-testable in isolation. Stateful orchestration
 //! (caches, selection, layout) lives in [`super::TopologyState`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,18 +21,52 @@ pub struct NodeAlert {
     pub summary: String,
 }
 
-/// What kind of observation an edge represents (#391). Drives line style and
-/// which lenses show it (P2).
+/// What kind of observation an edge represents. Drives line style and which
+/// lenses show it.
+///
+/// Since #919 every variant but [`EdgeKind::Flow`] comes from a
+/// `@catalog/state/edge/*` document rather than from a derivation this view
+/// runs privately: the graph is fleet state, and an exporter or a second
+/// console reads the same edges the map draws. `Flow` stays local because it
+/// is the *overlay* — per-observed-peer, unbounded, and rebuilt from the
+/// traffic matrix on every refresh (see `docs/KEYSPACE.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum EdgeKind {
     /// Observed traffic (netring matrix/flows) — carries a rate when the
-    /// traffic matrix supplied one.
+    /// traffic matrix supplied one. The one kind still derived here.
     #[default]
     Flow,
-    /// L2 adjacency from a netlink neighbor (ARP/NDP) table entry.
-    L2Adjacency,
-    /// Host → its default gateway, from the `routes/default_v4_gw` metric.
-    Gateway,
+    /// A hypervisor node hosts a guest.
+    Hosts,
+    /// A host runs a container.
+    Runs,
+    /// `from` is the gateway for `to`.
+    GatewayOf,
+    /// `from` is a vantage point that checks `to`.
+    Probes,
+    /// Link-layer adjacency (ARP/NDP), derived by the catalog from
+    /// observed-device evidence.
+    L2Adjacent,
+}
+
+impl EdgeKind {
+    /// The catalog kind this view's kind mirrors, or `None` for
+    /// [`EdgeKind::Flow`], which the catalog deliberately does not carry.
+    pub fn from_relation(k: zensight_common::relation::RelationKind) -> EdgeKind {
+        use zensight_common::relation::RelationKind as R;
+        match k {
+            R::Hosts => EdgeKind::Hosts,
+            R::Runs => EdgeKind::Runs,
+            R::GatewayOf => EdgeKind::GatewayOf,
+            R::Probes => EdgeKind::Probes,
+            R::L2Adjacent => EdgeKind::L2Adjacent,
+        }
+    }
+
+    /// Whether this kind comes from the catalog rather than local derivation.
+    pub fn is_structural(self) -> bool {
+        !matches!(self, EdgeKind::Flow)
+    }
 }
 
 /// What a node *is* on the network (#391). From the netring passive-asset
@@ -286,7 +320,7 @@ impl Node {
 #[derive(Debug, Clone, Default)]
 pub struct Edge {
     /// Source node ID. For rated [`EdgeKind::Flow`] edges this is the heavier
-    /// direction's initiator; for [`EdgeKind::Gateway`] the host.
+    /// direction's initiator; for [`EdgeKind::GatewayOf`] the host.
     pub from: NodeId,
     /// Destination node ID.
     pub to: NodeId,
@@ -473,63 +507,6 @@ pub fn merge_flow_stats(mut rate_edges: Vec<Edge>, flow_edges: Vec<Edge>) -> Vec
     rate_edges
 }
 
-/// Extract a host's default IPv4 gateway from its netlink telemetry (#391):
-/// the `routes/default_v4_gw` Text metric, honored only while
-/// `routes/default_v4_present` is true (the sensor keeps publishing the last
-/// gateway string across a flap). Pure.
-pub fn gateway_from_metrics(
-    metrics: &HashMap<String, zensight_common::TelemetryPoint>,
-) -> Option<String> {
-    use zensight_common::TelemetryValue;
-    let present = matches!(
-        metrics.get("routes/default_v4_present").map(|p| &p.value),
-        Some(TelemetryValue::Boolean(true))
-    );
-    if !present {
-        return None;
-    }
-    match metrics.get("routes/default_v4_gw").map(|p| &p.value) {
-        Some(TelemetryValue::Text(gw)) if !gw.is_empty() => Some(gw.clone()),
-        _ => None,
-    }
-}
-
-/// Derive host → default-gateway edges (#391). The gateway resolves through
-/// `ip_to_node` (an entity may own the address); unresolved gateway IPs are
-/// returned so the caller can create wire-only router nodes for them, and
-/// their edges target the bare IP as node id. Deterministic order. Pure.
-pub fn edges_from_gateways(
-    gateways: &HashMap<NodeId, String>,
-    ip_to_node: &HashMap<String, NodeId>,
-    now_ms: i64,
-) -> (Vec<Edge>, Vec<String>) {
-    use std::collections::BTreeSet;
-    let mut missing: BTreeSet<String> = BTreeSet::new();
-    let mut sorted: Vec<(&NodeId, &String)> = gateways.iter().collect();
-    sorted.sort();
-    let mut edges = Vec::new();
-    for (host, gw_ip) in sorted {
-        let target = match ip_to_node.get(gw_ip.as_str()) {
-            Some(t) => t.clone(),
-            None => {
-                missing.insert(gw_ip.clone());
-                gw_ip.clone()
-            }
-        };
-        if &target == host {
-            continue; // the host is its own gateway (or NATs for itself)
-        }
-        edges.push(Edge {
-            from: host.clone(),
-            to: target,
-            kind: EdgeKind::Gateway,
-            last_seen: now_ms,
-            ..Default::default()
-        });
-    }
-    (edges, missing.into_iter().collect())
-}
-
 /// Join the netring passive-asset inventory onto topology nodes (#391):
 /// MAC-keyed assets resolve via `mac_to_node` (normalized MACs) first, then
 /// via their IPv4/IPv6 addresses through `ip_to_node`. Returns per node the
@@ -703,28 +680,53 @@ impl Lens {
     pub fn spec(self) -> LensSpec {
         match self {
             Lens::Traffic => LensSpec {
-                edge_kinds: &[EdgeKind::Flow, EdgeKind::L2Adjacency, EdgeKind::Gateway],
+                edge_kinds: &[
+                    EdgeKind::Flow,
+                    EdgeKind::L2Adjacent,
+                    EdgeKind::GatewayOf,
+                    EdgeKind::Hosts,
+                    EdgeKind::Runs,
+                    EdgeKind::Probes,
+                ],
                 tint: TintSource::Role,
                 emphasize_passive: false,
                 dim_unalerted: false,
                 l2_labels: false,
             },
             Lens::Security => LensSpec {
-                edge_kinds: &[EdgeKind::Flow, EdgeKind::L2Adjacency, EdgeKind::Gateway],
+                edge_kinds: &[
+                    EdgeKind::Flow,
+                    EdgeKind::L2Adjacent,
+                    EdgeKind::GatewayOf,
+                    EdgeKind::Hosts,
+                    EdgeKind::Runs,
+                    EdgeKind::Probes,
+                ],
                 tint: TintSource::Alert,
                 emphasize_passive: true,
                 dim_unalerted: true,
                 l2_labels: false,
             },
+            // The L2 lens is deliberately narrow: link-layer structure only.
+            // Containment (a guest on a hypervisor, a container on a host) is
+            // not a link-layer fact, and including it would turn the one view
+            // that answers "what is on this segment" into another general map.
             Lens::L2 => LensSpec {
-                edge_kinds: &[EdgeKind::L2Adjacency, EdgeKind::Gateway],
+                edge_kinds: &[EdgeKind::L2Adjacent, EdgeKind::GatewayOf],
                 tint: TintSource::Role,
                 emphasize_passive: false,
                 dim_unalerted: false,
                 l2_labels: true,
             },
             Lens::Health => LensSpec {
-                edge_kinds: &[EdgeKind::Flow, EdgeKind::L2Adjacency, EdgeKind::Gateway],
+                edge_kinds: &[
+                    EdgeKind::Flow,
+                    EdgeKind::L2Adjacent,
+                    EdgeKind::GatewayOf,
+                    EdgeKind::Hosts,
+                    EdgeKind::Runs,
+                    EdgeKind::Probes,
+                ],
                 tint: TintSource::Health,
                 emphasize_passive: false,
                 dim_unalerted: false,
@@ -1547,48 +1549,78 @@ pub(crate) fn ordered_pair(a: &NodeId, b: &NodeId) -> (NodeId, NodeId) {
 /// becomes a zero-bandwidth link from its owning `host_nodes` entry — so a host
 /// and its directly-attached gateway/peer connect even when netring observes no
 /// flow between them. Neighbors flagged `is_router` are returned as the set of
-/// node ids to classify [`NodeRole::Router`]. Pure — the unit of testing.
-pub fn edges_from_neighbors(
-    host_nodes: &[NodeId],
-    neighbors: &[zensight_common::NeighborRecord],
-    ip_to_node: &HashMap<String, NodeId>,
+/// Build the structural edge set from the catalog's `@catalog/state/edge/*`
+/// documents (#919).
+///
+/// Returns the edges, the nodes a catalog document says are **routers**, and
+/// the endpoints that have no node yet and need a synthesized one.
+///
+/// Those last two are why this returns a triple rather than a `Vec`. Deleting
+/// the GUI-side derivation removed three things that are not edges, and each
+/// of them failed *silently* when it went:
+///
+/// 1. **Router classification.** `NodeRole::Router` came from the neighbour
+///    table's `is_router` flag and from every gateway edge's target. The
+///    tiered layout keys its Infrastructure tier on `Router|Switch|AccessPoint`
+///    (`tiered.rs`), so losing role empties that tier and the layout silently
+///    collapses to two bands. It is re-sourced here: **a `GatewayOf` edge's
+///    `from` is a router by construction** — being somebody's default gateway
+///    is what the word means.
+/// 2. **Passive router nodes.** An unresolved gateway address used to become a
+///    synthesized wire-only node so the physical topology read even on quiet
+///    networks. The catalog's `Endpoint::External` is the same thing, and
+///    without synthesizing for it a gateway known only by IP vanishes from the
+///    map entirely.
+/// 3. The **L2 lens**, which shows exactly `[L2Adjacent, GatewayOf]` and now
+///    gets both from here.
+pub fn edges_from_catalog(
+    structural: &BTreeMap<String, zensight_common::relation::Edge>,
+    node_for: &dyn Fn(&zensight_common::relation::Endpoint) -> Option<NodeId>,
     now_ms: i64,
-) -> (Vec<Edge>, std::collections::BTreeSet<NodeId>) {
-    use std::collections::{BTreeMap, BTreeSet};
+) -> (
+    Vec<Edge>,
+    std::collections::BTreeSet<NodeId>,
+    Vec<(NodeId, String)>,
+) {
+    use std::collections::BTreeSet;
+    use zensight_common::relation::Endpoint;
 
-    let mut pairs: BTreeSet<(NodeId, NodeId)> = BTreeSet::new();
+    let mut edges = Vec::new();
     let mut routers: BTreeSet<NodeId> = BTreeSet::new();
-    // Deterministic order: BTreeMap keyed by ordered pair.
-    let mut acc: BTreeMap<(NodeId, NodeId), ()> = BTreeMap::new();
-    for host in host_nodes {
-        for nb in neighbors {
-            let Some(ip) = nb.ip.as_deref() else { continue };
-            let Some(target) = ip_to_node.get(ip) else {
-                continue;
-            };
-            if target == host {
-                continue; // the host's own address
-            }
-            if nb.is_router {
-                routers.insert(target.clone());
-            }
-            let key = ordered_pair(host, target);
-            if pairs.insert(key.clone()) {
-                acc.insert(key, ());
+    let mut missing: Vec<(NodeId, String)> = Vec::new();
+
+    // `structural` is a BTreeMap, so this walks in edge-id order: the drawn
+    // set is a function of the documents, never of arrival order.
+    for doc in structural.values() {
+        let (Some(from), Some(to)) = (node_for(&doc.from), node_for(&doc.to)) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        // A catalog end with no node is a thing the fleet can see and does not
+        // monitor — the upstream router, a probed host on the internet.
+        for (endpoint, id) in [(&doc.from, &from), (&doc.to, &to)] {
+            if let Endpoint::External { ip, name, .. } = endpoint {
+                let label = name
+                    .clone()
+                    .or_else(|| ip.clone())
+                    .unwrap_or_else(|| id.clone());
+                missing.push((id.clone(), label));
             }
         }
-    }
-    let edges = acc
-        .into_keys()
-        .map(|(from, to)| Edge {
+        if doc.kind == zensight_common::relation::RelationKind::GatewayOf {
+            routers.insert(from.clone());
+        }
+        edges.push(Edge {
             from,
             to,
-            kind: EdgeKind::L2Adjacency,
-            last_seen: now_ms,
+            kind: EdgeKind::from_relation(doc.kind),
+            last_seen: now_ms.max(doc.last_updated),
             ..Default::default()
-        })
-        .collect();
-    (edges, routers)
+        });
+    }
+    (edges, routers, missing)
 }
 
 /// Whether a protocol's `source` represents a physical host/device that should be
@@ -1719,43 +1751,6 @@ mod tests {
         let edges = edges_from_flows(&flows, &map, 0);
         assert_eq!(edges[0].bytes, 5000);
         assert_eq!(edges[1].bytes, 100);
-    }
-
-    fn neighbor(ip: &str, is_router: bool) -> zensight_common::NeighborRecord {
-        zensight_common::NeighborRecord {
-            family: 2,
-            ip: Some(ip.to_string()),
-            mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
-            ifindex: 2,
-            state: "reachable".to_string(),
-            is_router,
-        }
-    }
-
-    #[test]
-    fn edges_from_neighbors_builds_adjacency_and_routers() {
-        let mut map = HashMap::new();
-        map.insert("10.0.0.1".to_string(), "hostA".to_string()); // the netlink host
-        map.insert("10.0.0.254".to_string(), "gw".to_string());
-        map.insert("10.0.0.2".to_string(), "hostB".to_string());
-        let hosts = vec!["hostA".to_string()];
-        let neighbors = vec![
-            neighbor("10.0.0.254", true), // gateway -> Router + edge
-            neighbor("10.0.0.2", false),  // peer -> edge
-            neighbor("10.0.0.1", false),  // host's own addr -> skipped
-            neighbor("8.8.8.8", true),    // unknown node -> skipped
-        ];
-        let (edges, routers) = edges_from_neighbors(&hosts, &neighbors, &map, 7);
-        assert_eq!(edges.len(), 2);
-        assert!(edges.iter().all(|e| e.bytes == 0 && e.last_seen == 7));
-        let pairs: std::collections::BTreeSet<_> =
-            edges.iter().map(|e| ordered_pair(&e.from, &e.to)).collect();
-        assert!(pairs.contains(&("gw".to_string(), "hostA".to_string())));
-        assert!(pairs.contains(&("hostA".to_string(), "hostB".to_string())));
-        assert_eq!(
-            routers,
-            std::collections::BTreeSet::from(["gw".to_string()])
-        );
     }
 
     #[test]
@@ -1932,67 +1927,6 @@ mod tests {
         // Flow-only pair appended, unrated.
         assert_eq!(merged[1].bytes, 700);
         assert_eq!(merged[1].rate, 0.0);
-    }
-
-    #[test]
-    fn gateway_from_metrics_needs_present_flag() {
-        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
-        let mk = |metric: &str, v: TelemetryValue| TelemetryPoint {
-            timestamp: 0,
-            source: "h".to_string(),
-            protocol: Protocol::Netlink,
-            metric: metric.to_string(),
-            value: v,
-            labels: HashMap::new(),
-            unit: None,
-        };
-        let mut m = HashMap::new();
-        m.insert(
-            "routes/default_v4_gw".to_string(),
-            mk(
-                "routes/default_v4_gw",
-                TelemetryValue::Text("10.0.0.254".into()),
-            ),
-        );
-        // Gateway string alone is not enough — the present flag gates it.
-        assert_eq!(gateway_from_metrics(&m), None);
-        m.insert(
-            "routes/default_v4_present".to_string(),
-            mk("routes/default_v4_present", TelemetryValue::Boolean(true)),
-        );
-        assert_eq!(gateway_from_metrics(&m), Some("10.0.0.254".to_string()));
-        m.insert(
-            "routes/default_v4_present".to_string(),
-            mk("routes/default_v4_present", TelemetryValue::Boolean(false)),
-        );
-        assert_eq!(gateway_from_metrics(&m), None);
-    }
-
-    #[test]
-    fn edges_from_gateways_resolves_and_reports_missing() {
-        let mut gateways = HashMap::new();
-        gateways.insert("hostA".to_string(), "10.0.0.254".to_string());
-        gateways.insert("hostB".to_string(), "192.168.1.1".to_string());
-        gateways.insert("gw-self".to_string(), "10.0.0.254".to_string());
-        let mut map = HashMap::new();
-        map.insert("10.0.0.254".to_string(), "gw-self".to_string()); // entity-owned
-        let (edges, missing) = edges_from_gateways(&gateways, &map, 9);
-
-        // hostA → resolved node; hostB → the bare IP (reported missing);
-        // gw-self skipped (it is its own gateway).
-        assert_eq!(edges.len(), 2);
-        assert!(
-            edges
-                .iter()
-                .all(|e| e.kind == EdgeKind::Gateway && e.last_seen == 9)
-        );
-        assert!(edges.iter().any(|e| e.from == "hostA" && e.to == "gw-self"));
-        assert!(
-            edges
-                .iter()
-                .any(|e| e.from == "hostB" && e.to == "192.168.1.1")
-        );
-        assert_eq!(missing, vec!["192.168.1.1".to_string()]);
     }
 
     #[test]
@@ -2247,7 +2181,7 @@ mod tests {
         };
         let edges = vec![
             mk_edge("alpha", "beta", EdgeKind::Flow, 1000.0, 0),
-            mk_edge("alpha", "ghost", EdgeKind::L2Adjacency, 0.0, 0),
+            mk_edge("alpha", "ghost", EdgeKind::L2Adjacent, 0.0, 0),
             mk_edge("alpha", INTERNET_NODE_ID, EdgeKind::Flow, 50.0, 0),
         ];
         (nodes, edges)
@@ -2385,7 +2319,7 @@ mod tests {
             .collect();
         assert_eq!(flows.len(), 1);
         assert_eq!(flows[0].rate, 1000.0);
-        assert!(render.edges.iter().any(|e| e.kind == EdgeKind::L2Adjacency));
+        assert!(render.edges.iter().any(|e| e.kind == EdgeKind::L2Adjacent));
     }
 
     #[test]
@@ -2642,9 +2576,68 @@ mod tests {
         let flows = vec![flow("10.0.0.1:1", "10.0.0.2:2", 10, 1, "tcp")];
         assert_eq!(edges_from_flows(&flows, &map, 0)[0].kind, EdgeKind::Flow);
 
-        let hosts = vec!["a".to_string()];
-        let (edges, _) = edges_from_neighbors(&hosts, &[neighbor("10.0.0.2", false)], &map, 0);
-        assert_eq!(edges[0].kind, EdgeKind::L2Adjacency);
+        // Structural kinds mirror the catalog's vocabulary one for one, so a
+        // relation kind added there cannot silently render as a flow.
+        use zensight_common::relation::RelationKind as R;
+        for (r, e) in [
+            (R::Hosts, EdgeKind::Hosts),
+            (R::Runs, EdgeKind::Runs),
+            (R::GatewayOf, EdgeKind::GatewayOf),
+            (R::Probes, EdgeKind::Probes),
+            (R::L2Adjacent, EdgeKind::L2Adjacent),
+        ] {
+            assert_eq!(EdgeKind::from_relation(r), e);
+            assert!(e.is_structural());
+        }
+        assert!(!EdgeKind::Flow.is_structural());
+    }
+
+    /// The persisted topology prefs survive the #919 `EdgeKind` change.
+    ///
+    /// They survive by construction, not by a migration: `TopoFilters` holds
+    /// three booleans and a count, and `Lens` names a view, not a kind. This
+    /// pins that — the moment a persisted field starts naming an `EdgeKind`,
+    /// renaming a variant becomes a silent data migration and this test is the
+    /// thing that says so.
+    #[test]
+    fn persisted_topo_prefs_name_no_edge_kind() {
+        // The persisted pieces are the serde-deriving ones: the lens, the
+        // label/grouping/layout modes and the filters. `TopoPrefs` itself is
+        // in-memory.
+        let json = format!(
+            "{} {} {} {}",
+            serde_json::to_string(&Lens::default()).unwrap(),
+            serde_json::to_string(&EdgeLabelMode::default()).unwrap(),
+            serde_json::to_string(&GroupingMode::default()).unwrap(),
+            serde_json::to_string(&TopoFilters::default()).unwrap(),
+        );
+        for kind in [
+            "Flow",
+            "L2Adjacent",
+            "GatewayOf",
+            "Hosts",
+            "Runs",
+            "Probes",
+            "L2Adjacency",
+            "Gateway",
+        ] {
+            assert!(
+                !json.contains(&format!("\"{kind}\"")),
+                "prefs serialize an EdgeKind name ({kind}): {json}"
+            );
+        }
+        // And a filter set written before the rename still loads.
+        let old: TopoFilters = serde_json::from_str(
+            r#"{"hide_passive":true,"hide_idle":false,"hide_external":false,"top_n":25}"#,
+        )
+        .expect("a pre-#919 filter set still deserializes");
+        assert!(old.hide_passive);
+        assert_eq!(old.top_n, 25);
+        assert_eq!(
+            serde_json::from_str::<Lens>("\"l2\"").unwrap(),
+            Lens::L2,
+            "the L2 lens is named by the view, not by an edge kind"
+        );
     }
 
     #[test]

@@ -2425,6 +2425,12 @@ impl DemoSimulator {
         crate::mock::host_entities_at(now)
     }
 
+    /// Generate the demo catalog edges (#919). Without these the demo map
+    /// shows the flow-only degraded path rather than the product.
+    pub fn generate_edges(&self, now: i64) -> Vec<zensight_common::relation::Edge> {
+        crate::mock::catalog_edges_at(now)
+    }
+
     pub fn generate_liveness_updates(&self) -> Vec<(String, DeviceLiveness)> {
         let mut updates = Vec::new();
 

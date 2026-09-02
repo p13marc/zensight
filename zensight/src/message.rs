@@ -136,6 +136,23 @@ pub enum Message {
     /// parsed from the last key chunk (#306).
     EntityRemoved(String),
 
+    /// Connect-time snapshot of the catalog's resolved topology graph, from
+    /// the edge seed (`zensight/v1/@catalog/state/edge/*`) (#919).
+    ///
+    /// Without it the map is blank until something in the fleet's topology
+    /// *changes* — and the catalog's change gate means that may be a long
+    /// time, deliberately. Absent catalog ⇒ no replies ⇒ flow-only graph,
+    /// which is the documented degraded path.
+    EdgeSeed(Vec<zensight_common::relation::Edge>),
+
+    /// A single resolved edge was published/updated on
+    /// `zensight/v1/@catalog/state/edge/<edge_id>` (#919).
+    EdgeReceived(zensight_common::relation::Edge),
+
+    /// An edge was tombstoned (Delete). Payload is the `edge_id` parsed from
+    /// the last key chunk (#919).
+    EdgeRemoved(String),
+
     /// An alias record: an entity id that has been retired, and the id it now
     /// points at (`@catalog/state/alias/<old_id>`, RFC 06 §5.1 step 1).
     ///

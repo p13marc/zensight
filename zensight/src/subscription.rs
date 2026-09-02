@@ -225,6 +225,20 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 tracing::warn!("Failed to create entity subscriber (host entities)");
             }
 
+            // Edge subscriber (#919): the catalog's resolved topology graph on
+            // `zensight/v1/@catalog/state/edge/*`. Same shape as the entity
+            // subscriber for the same reason — one verbatim service origin, a
+            // plain unbounded subscriber, puts are documents and deletes are
+            // tombstones.
+            let edge_sub = session
+                .declare_subscriber(&zensight_common::keyexpr::all_edge_wildcard())
+                .with(flume::unbounded())
+                .await
+                .ok();
+            if edge_sub.is_none() {
+                tracing::warn!("Failed to create edge subscriber (topology graph)");
+            }
+
             let (sensor_liveliness_expr, device_liveliness_expr) = liveliness_exprs(&config);
 
             // Subscribe to sensor liveliness tokens. `history(true)` delivers
@@ -316,6 +330,32 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
                 if !seeded.is_empty() {
                     yield Message::EntitySeed(seeded);
+                }
+            }
+
+            // Late-joiner edge seed (#919). Without it the map is blank until
+            // something in the fleet's topology *changes* — and the catalog's
+            // change gate means that may be a long time, deliberately. Absent
+            // catalog ⇒ no replies ⇒ flow-only graph, which is the documented
+            // degraded path.
+            if let Ok(replies) = session
+                .get(zensight_common::keyexpr::edges_query_key())
+                .target(zenoh::query::QueryTarget::All)
+                .timeout(seed_timeout)
+                .await
+            {
+                let mut seeded = Vec::new();
+                while let Ok(reply) = replies.recv_async().await {
+                    if let Ok(sample) = reply.result()
+                        && let Ok(edge) = zensight_common::decode_auto::<
+                            zensight_common::relation::Edge,
+                        >(&sample.payload().to_bytes())
+                    {
+                        seeded.push(edge);
+                    }
+                }
+                if !seeded.is_empty() {
+                    yield Message::EdgeSeed(seeded);
                 }
             }
 
@@ -520,6 +560,29 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         }
                     }
 
+                    // Edge plane (#919): the catalog's topology graph. Delete
+                    // = tombstone → EdgeRemoved; Put = Edge doc → EdgeReceived.
+                    result = async {
+                        match &edge_sub {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let key = sample.key_expr().as_str();
+                            if sample.kind() == SampleKind::Delete {
+                                if let Some(msg) = parse_tombstone(key) {
+                                    yield msg;
+                                }
+                            } else {
+                                let payload = sample.payload().to_bytes();
+                                if let Some(msg) = decode_sample(key, &payload) {
+                                    yield msg;
+                                }
+                            }
+                        }
+                    }
+
                     // Entity plane (#306): host-entity docs. Delete = tombstone
                     // → EntityRemoved; Put = HostEntity doc → EntityReceived.
                     result = async {
@@ -647,6 +710,13 @@ pub(crate) fn parse_tombstone(key: &str) -> Option<Message> {
     let (parsed, protocol, subject) = refine_key(key)?;
     if !matches!(parsed.class, ClassOrPlane::Class(Class::State)) {
         return None;
+    }
+    // `edge/{edge_id}` carries no `common =` key (zenkey#416), so it refines
+    // app-side and never appears in `common_state()`.
+    if let Some(zensight_common::state::ZensightState::CatalogEdge { edge_id }) =
+        zensight_common::state::ZensightState::of(&subject)
+    {
+        return Some(Message::EdgeRemoved(edge_id.to_string()));
     }
     match subject.common_state()? {
         CommonState::Alert { alert_key } => Some(Message::AlertCleared {
@@ -810,12 +880,12 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         | ZensightState::Artifact { .. }
         | ZensightState::CatalogAssertion { .. }
         | ZensightState::EvidenceRelation { .. } => None,
-        // #919 wires this to the topology view, replacing the GUI-side edge
-        // derivation. Listed explicitly rather than swept into the arm above:
-        // an edge document IS for the GUI, and a `_ => None` here would have
-        // let the family land silently and look like a catalog that publishes
-        // nothing.
-        ZensightState::CatalogEdge { .. } => None,
+        // The catalog's resolved topology graph (#919). Replaces the edge
+        // derivation the topology view used to run privately from the netlink
+        // neighbour table and the gateway metric.
+        ZensightState::CatalogEdge { .. } => {
+            decode!(zensight_common::relation::Edge, Message::EdgeReceived)
+        }
     }
 }
 
@@ -971,6 +1041,9 @@ pub fn demo_subscription() -> Subscription<Message> {
                     for entity in simulator.generate_entities(now) {
                         yield Message::EntityReceived(entity);
                     }
+                    // The catalog's edges ride the same cadence: the topology
+                    // view draws its structure from these (#919).
+                    yield Message::EdgeSeed(simulator.generate_edges(now));
                 }
 
                 tick_count += 1;

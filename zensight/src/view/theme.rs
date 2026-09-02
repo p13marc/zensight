@@ -324,6 +324,19 @@ impl<'a> ThemeColors<'a> {
         }
     }
 
+    /// Containment edge — hypervisor→guest, host→container, vantage→target
+    /// (#919). One colour for all three because they say the same thing about
+    /// the fleet ("this depends on that", the relation impact propagates
+    /// along); the dash pattern is what tells them apart, which keeps the
+    /// legend readable and the map from becoming a colour-matching exercise.
+    pub fn topology_edge_containment(&self) -> Color {
+        if self.is_dark() {
+            Color::from_rgb(0.5, 0.65, 0.5)
+        } else {
+            Color::from_rgb(0.35, 0.55, 0.4)
+        }
+    }
+
     /// Degraded-health node ring (#391) — amber, theme-independent like the
     /// severity palette so health reads the same in both themes.
     pub fn topology_node_degraded(&self) -> Color {

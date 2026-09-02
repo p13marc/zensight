@@ -317,8 +317,11 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
 
     let kind_label = match edge.kind {
         EdgeKind::Flow => "Observed traffic",
-        EdgeKind::L2Adjacency => "L2 adjacency (ARP/NDP)",
-        EdgeKind::Gateway => "Default gateway",
+        EdgeKind::L2Adjacent => "L2 adjacency (ARP/NDP)",
+        EdgeKind::GatewayOf => "Default gateway",
+        EdgeKind::Hosts => "Hosts this guest",
+        EdgeKind::Runs => "Runs this container",
+        EdgeKind::Probes => "Checks this target",
     };
 
     let mut items = column![header, rule::horizontal(1), section(kind_label)].spacing(8);

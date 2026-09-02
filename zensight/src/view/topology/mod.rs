@@ -28,10 +28,9 @@ pub use layout::{
 pub use model::{
     Edge, EdgeKind, EdgeLabelMode, FocusState, GroupingMode, INTERNET_NODE_ID, LayoutMode, Lens,
     Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, RenderEdge, RenderGraph, RenderNode,
-    RenderSource, TintSource, TopoFilters, TopoPrefs, edges_from_flows, edges_from_gateways,
-    edges_from_matrix, edges_from_neighbors, endpoint_ip, external_edges_from_matrix, format_rate,
-    gateway_from_metrics, is_public_ip, merge_flow_stats, node_health, render_node_position,
-    roles_from_assets,
+    RenderSource, TintSource, TopoFilters, TopoPrefs, edges_from_catalog, edges_from_flows,
+    edges_from_matrix, endpoint_ip, external_edges_from_matrix, format_rate, is_public_ip,
+    merge_flow_stats, node_health, render_node_position, roles_from_assets,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -74,16 +73,17 @@ pub struct TopologyState {
     last_flows: Vec<zensight_common::FlowRecord>,
     /// Last netlink neighbor (ARP/NDP) table fetched, merged into the edge set
     /// as adjacency links (#49).
-    last_neighbors: Vec<zensight_common::NeighborRecord>,
+    /// The catalog's `@catalog/state/edge/*` documents, by edge id (#919).
+    ///
+    /// A `BTreeMap`, so the drawn edge set is a function of the documents and
+    /// never of the order they happened to arrive in — the same reason the
+    /// catalog sorts before hashing them.
+    structural_edges: std::collections::BTreeMap<String, zensight_common::relation::Edge>,
     /// Last netring traffic matrix fetched (#391): the primary, rate-weighted
     /// edge source. Flows remain the fallback + cumulative-stat enrichment.
     last_matrix: Vec<zensight_common::MatrixRecord>,
     /// Default gateway per node (#391), freshly collected from netlink
-    /// telemetry on every [`Self::update_from_devices`] pass.
-    pending_gateways: HashMap<NodeId, String>,
     /// The gateway map the current edge set was built from (#391); compared
-    /// against `pending_gateways` so rebuilds only happen on change.
-    last_gateways: HashMap<NodeId, String>,
     /// Asset-derived role + vendor per node (#391), from the netring passive
     /// inventory; reapplied on every edge rebuild (strongest role evidence).
     asset_roles: HashMap<NodeId, (NodeRole, Option<String>)>,
@@ -131,7 +131,6 @@ pub struct TopologyState {
 #[derive(Debug, Clone, Default)]
 pub struct TopologyBatch {
     pub flows: Option<Vec<zensight_common::FlowRecord>>,
-    pub neighbors: Option<Vec<zensight_common::NeighborRecord>>,
     pub matrix: Option<Vec<zensight_common::MatrixRecord>>,
     pub assets: Option<Vec<zensight_common::AssetRecord>>,
 }
@@ -169,10 +168,8 @@ impl Default for TopologyState {
             layout_stable: true,
             layout_alpha: 1.0,
             last_flows: Vec::new(),
-            last_neighbors: Vec::new(),
+            structural_edges: std::collections::BTreeMap::new(),
             last_matrix: Vec::new(),
-            pending_gateways: HashMap::new(),
-            last_gateways: HashMap::new(),
             asset_roles: HashMap::new(),
             prefs: TopoPrefs::default(),
             group_labels: HashMap::new(),
@@ -247,7 +244,6 @@ impl TopologyState {
         // Freshly collect each netlink host's default gateway (#391); applied
         // as Gateway edges by `apply_gateway_edges` once the caller has an
         // ip_to_node map in hand.
-        let mut gateways: HashMap<NodeId, String> = HashMap::new();
 
         // Per-node facet health inputs (#391): each device facet contributes
         // its liveness status + whether its telemetry is fresh.
@@ -311,12 +307,6 @@ impl TopologyState {
                 );
             }
 
-            if device_id.protocol == zensight_common::Protocol::Netlink
-                && let Some(gw) = model::gateway_from_metrics(&device_state.metrics)
-            {
-                gateways.insert(node_id.clone(), gw);
-            }
-
             facet_health
                 .entry(node_id.clone())
                 .or_default()
@@ -341,8 +331,6 @@ impl TopologyState {
                 node.update_from_metrics(&device_state.metrics);
             }
         }
-
-        self.pending_gateways = gateways;
 
         // Entity-derived overlays: passive wire-only nodes + sensor-count badge.
         self.apply_entities(entities);
@@ -530,30 +518,40 @@ impl TopologyState {
         self.rebuild_edges(ip_to_node, now_ms);
     }
 
-    /// Apply the gateway map collected by the last [`Self::update_from_devices`]
-    /// pass (#391), rebuilding edges only when it actually changed — this runs
-    /// on the 1 Hz tick, and an unconditional rebuild would clear the canvas
-    /// cache and drop the edge selection every second.
-    pub fn apply_gateway_edges(&mut self, ip_to_node: &HashMap<String, NodeId>, now_ms: i64) {
-        if self.pending_gateways == self.last_gateways {
-            return;
+    /// A catalog edge document arrived (#919): store it and rebuild.
+    ///
+    /// Returns whether anything changed, so the caller can skip a rebuild —
+    /// this runs on every sample, and an unconditional rebuild would clear the
+    /// canvas cache and drop the edge selection each time.
+    pub fn apply_edge_document(&mut self, edge: zensight_common::relation::Edge) -> bool {
+        match self.structural_edges.get(&edge.edge_id) {
+            // Only `last_updated` moved: a refresh, not a change. The catalog
+            // already gates on content, but a re-emit does reach here.
+            Some(prev)
+                if prev.kind == edge.kind
+                    && prev.from == edge.from
+                    && prev.to == edge.to
+                    && prev.attrs == edge.attrs
+                    && prev.observers == edge.observers =>
+            {
+                false
+            }
+            _ => {
+                self.structural_edges.insert(edge.edge_id.clone(), edge);
+                true
+            }
         }
-        self.last_gateways = self.pending_gateways.clone();
-        self.rebuild_edges(ip_to_node, now_ms);
     }
 
-    /// Merge the netlink neighbor (ARP/NDP) table into the topology (#49):
-    /// remembers it and rebuilds the edge set so direct L2/L3 adjacencies appear
-    /// as links even when netring sees no traffic, and `is_router` neighbors are
-    /// classified as [`NodeRole::Router`].
-    pub fn apply_neighbor_edges(
-        &mut self,
-        neighbors: &[zensight_common::NeighborRecord],
-        ip_to_node: &HashMap<String, NodeId>,
-        now_ms: i64,
-    ) {
-        self.last_neighbors = neighbors.to_vec();
-        self.rebuild_edges(ip_to_node, now_ms);
+    /// A catalog edge was tombstoned (#919).
+    pub fn remove_edge_document(&mut self, edge_id: &str) -> bool {
+        self.structural_edges.remove(edge_id).is_some()
+    }
+
+    /// How many catalog edge documents are held — the degradation signal a
+    /// caller uses to tell "the catalog is quiet" from "there is no catalog".
+    pub fn structural_edge_count(&self) -> usize {
+        self.structural_edges.len()
     }
 
     /// Apply one topology data-refresh batch (#440): store every reply that
@@ -569,9 +567,6 @@ impl TopologyState {
     ) {
         if let Some(flows) = batch.flows {
             self.last_flows = flows;
-        }
-        if let Some(neighbors) = batch.neighbors {
-            self.last_neighbors = neighbors;
         }
         if let Some(matrix) = batch.matrix {
             self.last_matrix = matrix;
@@ -592,7 +587,6 @@ impl TopologyState {
     /// + `ip_to_node`.
     fn rebuild_edges(&mut self, ip_to_node: &HashMap<String, NodeId>, now_ms: i64) {
         use std::collections::BTreeSet;
-        use zensight_common::Protocol;
 
         let flow_edges = edges_from_flows(&self.last_flows, ip_to_node, now_ms);
         let mut edges = if self.last_matrix.is_empty() {
@@ -606,47 +600,69 @@ impl TopologyState {
         let mut pairs: BTreeSet<(NodeId, NodeId)> =
             edges.iter().map(|e| ordered_pair(&e.from, &e.to)).collect();
 
-        // Neighbor tables belong to the netlink host(s); the app treats the
-        // netlink detail queryable as the local sensor (a single global key),
-        // so attribute the table to every netlink node present.
-        let host_nodes: Vec<NodeId> = self
-            .nodes
-            .iter()
-            .filter(|(_, n)| n.protocols.contains(&Protocol::Netlink))
-            .map(|(id, _)| id.clone())
-            .collect();
-        let (neighbor_edges, mut routers) =
-            edges_from_neighbors(&host_nodes, &self.last_neighbors, ip_to_node, now_ms);
-        for edge in neighbor_edges {
-            if pairs.insert(ordered_pair(&edge.from, &edge.to)) {
-                edges.push(edge);
+        // Structural edges (#919): the catalog's `@catalog/state/edge/*`
+        // documents, not a derivation this view runs privately. Everything
+        // this used to compute from the netlink neighbour table and the
+        // `routes/default_v4_gw` metric now arrives as fleet state that an
+        // exporter or a second console reads too.
+        let node_for = |ep: &zensight_common::relation::Endpoint| -> Option<NodeId> {
+            use zensight_common::relation::Endpoint;
+            match ep {
+                // Node ids ARE entity ids once a device maps into an entity
+                // (`update_from_devices`), so this is usually a direct hit.
+                // The IP fallback catches an entity the map knows only by a
+                // device-keyed node.
+                // Node ids ARE entity ids once a device maps into an entity
+                // (`update_from_devices`), and `apply_entities` creates one
+                // for every entity with members — both of which run before
+                // this in every path that reaches here. An entity with no node
+                // at all is one the map does not know yet: the edge is dropped
+                // and picked up on the next refresh, rather than drawn to a
+                // node that is not there.
+                Endpoint::Entity { entity_id } => self
+                    .nodes
+                    .contains_key(entity_id)
+                    .then(|| entity_id.clone()),
+                // Prefer a node that already owns the address: the upstream
+                // router is often also a monitored host, and drawing to a
+                // second synthetic node would split one machine in two.
+                Endpoint::External { ip, mac, name } => ip
+                    .as_ref()
+                    .and_then(|i| ip_to_node.get(i).cloned())
+                    .or_else(|| ip.clone())
+                    .or_else(|| mac.clone())
+                    .or_else(|| name.clone()),
             }
-        }
+        };
+        let (structural, routers, missing) =
+            edges_from_catalog(&self.structural_edges, &node_for, now_ms);
 
-        // Gateway edges (#391): host → default gw for pairs nothing covered.
-        // Unresolved gateway addresses get a wire-only router node so the
-        // physical topology reads even on quiet networks. Being somebody's
-        // default gateway is router evidence, resolved or not.
-        let (gateway_edges, missing_gws) =
-            edges_from_gateways(&self.last_gateways, ip_to_node, now_ms);
-        for gw_ip in missing_gws {
-            if !self.nodes.contains_key(&gw_ip) {
+        // Endpoints the catalog names and the map has no node for: the
+        // upstream router, a probed host on the internet. Synthesized as
+        // wire-only nodes, exactly as unresolved gateway addresses used to be
+        // — without this a gateway known only by IP vanishes from the map.
+        for (id, label) in missing {
+            if !self.nodes.contains_key(&id) {
                 self.nodes.insert(
-                    gw_ip.clone(),
+                    id.clone(),
                     Node {
-                        id: gw_ip.clone(),
-                        label: gw_ip.clone(),
-                        role: NodeRole::Router,
+                        id: id.clone(),
+                        label,
+                        role: NodeRole::Unknown,
                         provenance: Provenance::Passive,
-                        position: seed_position(&gw_ip),
+                        position: self
+                            .saved_positions
+                            .get(&id)
+                            .copied()
+                            .unwrap_or_else(|| seed_position(&id)),
+                        pinned: self.saved_pins.contains(&id),
                         ..Default::default()
                     },
                 );
                 self.wake_layout();
             }
         }
-        for edge in gateway_edges {
-            routers.insert(edge.to.clone());
+        for edge in structural {
             if pairs.insert(ordered_pair(&edge.from, &edge.to)) {
                 edges.push(edge);
             }
@@ -1556,30 +1572,44 @@ mod tests {
         }
     }
 
-    fn neighbor(ip: &str, is_router: bool) -> zensight_common::NeighborRecord {
-        zensight_common::NeighborRecord {
-            family: 2,
-            ip: Some(ip.to_string()),
-            mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
-            ifindex: 2,
-            state: "reachable".to_string(),
-            is_router,
+    use zensight_common::Protocol;
+
+    /// A catalog edge document, the shape the correlator publishes (#919).
+    fn doc(
+        kind: zensight_common::relation::RelationKind,
+        from: &str,
+        to: &str,
+    ) -> zensight_common::relation::Edge {
+        use zensight_common::relation::{Edge as CatalogEdge, Endpoint};
+        let f = Endpoint::Entity {
+            entity_id: from.into(),
+        };
+        let t = Endpoint::Entity {
+            entity_id: to.into(),
+        };
+        CatalogEdge {
+            edge_id: CatalogEdge::edge_id(kind, &f, &t),
+            kind,
+            from: f,
+            to: t,
+            attrs: Default::default(),
+            observers: Vec::new(),
+            last_updated: 5,
         }
     }
 
     #[test]
-    fn rebuild_edges_flow_precedence_and_router_classification() {
-        use zensight_common::Protocol;
+    fn catalog_edges_are_drawn_and_a_gateway_source_is_a_router() {
+        use zensight_common::relation::RelationKind;
         let mut state = TopologyState::default();
         for id in ["hostA", "gw", "hostB"] {
-            let mut node = Node {
-                id: id.to_string(),
-                ..Default::default()
-            };
-            if id == "hostA" {
-                node.protocols.insert(Protocol::Netlink);
-            }
-            state.nodes.insert(id.to_string(), node);
+            state.nodes.insert(
+                id.to_string(),
+                Node {
+                    id: id.to_string(),
+                    ..Default::default()
+                },
+            );
         }
         let mut map = HashMap::new();
         for id in ["hostA", "gw", "hostB"] {
@@ -1588,11 +1618,14 @@ mod tests {
 
         // A flow already covers hostA<->hostB with real bandwidth.
         state.apply_flow_edges(&[flow("hostA:1", "hostB:2", 1000, 10, "tcp")], &map, 1);
-        // Neighbors add the gateway adjacency and re-cover hostA<->hostB.
-        state.apply_neighbor_edges(&[neighbor("gw", true), neighbor("hostB", false)], &map, 2);
+        // The catalog says gw is hostA's gateway, and hostA<->hostB are L2
+        // adjacent — the second re-covers a pair the flow already has.
+        state.apply_edge_document(doc(RelationKind::GatewayOf, "gw", "hostA"));
+        state.apply_edge_document(doc(RelationKind::L2Adjacent, "hostA", "hostB"));
+        state.rebuild_edges(&map, 2);
 
-        // hostA<->hostB keeps its flow bytes (not overwritten by the 0-byte
-        // neighbor edge); a new hostA<->gw adjacency edge is added.
+        // hostA<->hostB keeps its flow bytes: a structural edge never
+        // overwrites an observation that carries bandwidth.
         assert_eq!(state.edges.len(), 2);
         let ab = state
             .edges
@@ -1606,9 +1639,104 @@ mod tests {
                 .iter()
                 .any(|e| ordered_pair(&e.from, &e.to) == ("gw".to_string(), "hostA".to_string()))
         );
-        // The is_router gateway is classified Router; plain hosts stay Host.
+        // Re-sourced role (#919): the `from` of a GatewayOf edge is a router
+        // by construction. Without this the tiered layout's Infrastructure
+        // tier empties and the map silently collapses to two bands.
         assert_eq!(state.nodes["gw"].role, NodeRole::Router);
-        assert_eq!(state.nodes["hostA"].role, NodeRole::Host);
+        // A monitored host with no structural role stays a plain Host.
+        assert_eq!(state.nodes["hostB"].role, NodeRole::Host);
+    }
+
+    #[test]
+    fn an_external_endpoint_becomes_a_passive_node() {
+        use zensight_common::relation::{Edge as CatalogEdge, Endpoint, RelationKind};
+        // The upstream router: the catalog can see it and no sensor runs on
+        // it. Before #919 an unresolved gateway address got a synthesized
+        // wire-only node; without re-sourcing that, a gateway known only by IP
+        // vanishes from the map entirely.
+        let mut state = TopologyState::default();
+        state.nodes.insert(
+            "hostA".to_string(),
+            Node {
+                id: "hostA".to_string(),
+                ..Default::default()
+            },
+        );
+        let from = Endpoint::External {
+            ip: Some("192.168.1.1".into()),
+            mac: None,
+            name: None,
+        };
+        let to = Endpoint::Entity {
+            entity_id: "hostA".into(),
+        };
+        state.apply_edge_document(CatalogEdge {
+            edge_id: CatalogEdge::edge_id(RelationKind::GatewayOf, &from, &to),
+            kind: RelationKind::GatewayOf,
+            from,
+            to,
+            attrs: Default::default(),
+            observers: Vec::new(),
+            last_updated: 5,
+        });
+        let mut map = HashMap::new();
+        map.insert("hostA".to_string(), "hostA".to_string());
+        state.rebuild_edges(&map, 6);
+
+        let gw = state
+            .nodes
+            .get("192.168.1.1")
+            .expect("the external gateway got a node");
+        assert_eq!(gw.provenance, Provenance::Passive);
+        assert_eq!(
+            gw.role,
+            NodeRole::Router,
+            "being a gateway is what router means"
+        );
+        assert_eq!(state.edges.len(), 1);
+    }
+
+    #[test]
+    fn no_catalog_means_a_flow_only_graph() {
+        // The documented degraded path: no correlator, no edge documents, and
+        // the map still draws what netring observed.
+        let mut state = TopologyState::default();
+        for id in ["a", "b"] {
+            state.nodes.insert(
+                id.to_string(),
+                Node {
+                    id: id.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), "a".to_string());
+        map.insert("b".to_string(), "b".to_string());
+        state.apply_flow_edges(&[flow("a:1", "b:2", 500, 5, "tcp")], &map, 1);
+        assert_eq!(state.structural_edge_count(), 0);
+        assert_eq!(state.edges.len(), 1);
+        assert_eq!(state.edges[0].kind, EdgeKind::Flow);
+    }
+
+    #[test]
+    fn a_refreshed_edge_document_is_not_a_change() {
+        use zensight_common::relation::RelationKind;
+        // The catalog gates on content, but a re-emit still reaches here. An
+        // unconditional rebuild would clear the canvas cache and drop the edge
+        // selection every re-emit interval.
+        let mut state = TopologyState::default();
+        let mut d = doc(RelationKind::Runs, "hostA", "c1");
+        assert!(state.apply_edge_document(d.clone()));
+        d.last_updated = 9_999;
+        assert!(
+            !state.apply_edge_document(d.clone()),
+            "only the timestamp moved"
+        );
+        d.attrs.insert("unit".into(), "web.service".into());
+        assert!(state.apply_edge_document(d), "content changed");
+        assert!(state.remove_edge_document(&doc(RelationKind::Runs, "hostA", "c1").edge_id));
+        assert_eq!(state.structural_edge_count(), 0);
     }
 
     #[test]
@@ -1712,7 +1840,6 @@ mod tests {
             state
         };
         let flows = vec![flow("a:1", "b:2", 1000, 10, "tcp")];
-        let neighbors = vec![neighbor("gw", true)];
         let matrix = vec![zensight_common::MatrixRecord {
             src: "a".to_string(),
             dst: "b".to_string(),
@@ -1722,14 +1849,12 @@ mod tests {
 
         let mut sequential = make_state();
         sequential.apply_flow_edges(&flows, &map, 1);
-        sequential.apply_neighbor_edges(&neighbors, &map, 1);
         sequential.apply_matrix_edges(&matrix, &map, 1);
 
         let mut batched = make_state();
         batched.apply_batch(
             TopologyBatch {
                 flows: Some(flows),
-                neighbors: Some(neighbors),
                 matrix: Some(matrix),
                 assets: None,
             },
@@ -1750,7 +1875,10 @@ mod tests {
                 edge.to
             );
         }
-        assert_eq!(batched.nodes["gw"].role, NodeRole::Router);
+        // Role no longer comes from a neighbour flag in the batch (#919): it
+        // comes from catalog edge documents, which a batch does not carry. The
+        // batch's job is the flow/matrix/asset overlay, and this test is about
+        // it rebuilding once rather than three times.
         // A partial batch keeps the remembered inputs: dropping the matrix
         // reply must not wipe the rated edges.
         batched.apply_batch(TopologyBatch::default(), &HashMap::new(), &map, 2);
@@ -1759,8 +1887,6 @@ mod tests {
 
     #[test]
     fn new_node_does_not_reshuffle_existing_layout() {
-        use zensight_common::Protocol;
-
         let device = |source: &str| {
             let id = DeviceId::fixture(Protocol::Sysinfo, source);
             (id.clone(), DeviceState::new(id))
@@ -2054,7 +2180,6 @@ mod tests {
     #[test]
     fn test_node_sourcing_widened_excludes_overlays() {
         use std::collections::HashMap;
-        use zensight_common::Protocol;
 
         let mut devices: HashMap<DeviceId, DeviceState> = HashMap::new();
         let mut add = |proto: Protocol, source: &str, metrics: usize| {
