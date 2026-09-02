@@ -58,3 +58,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+# `governor_ladder` pins the allocator's mmap threshold so its ballast is
+# memory the kernel actually reclaims on free — see the note at the top of
+# that test. Measuring RSS means controlling what RSS reflects.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"

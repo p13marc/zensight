@@ -642,6 +642,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`governor_ladder` failed about 1 run in 12 and reddened unrelated PRs** (#968).
+  It is in `cargo test --workspace`, so the cost landed on whatever was being
+  reviewed at the time. Two things were wrong with the test, and neither was
+  the governor.
+
+  The ladder aims eviction at *exactly* the clear line (`rss − 0.75 × budget`)
+  and stops there, by design. The test's "relief" phase merely stopped
+  re-inflating the ballast, so RSS parked **on** that line while the assertion
+  demanded six consecutive ticks strictly **below** it. Instrumented, the
+  margin was 9160 KiB against a 9216 KiB line — 56 KiB, about 0.6%. Relief now
+  drops the ballast, which is what a workload going away actually looks like,
+  and the margin becomes the whole 24 MiB.
+
+  That alone did not fix it (measured: 3 failures in 48, against master's 2 in
+  24 — indistinguishable). The rest was the ballast itself. At 64 KiB per chunk
+  every allocation came off the heap arena, and freeing one in an
+  already-fragmented heap returns nothing to the kernel: RSS did not move when
+  the ballast was released, so a test that measures RSS could not observe its
+  own relief. The chunk is now 256 KiB, above glibc's mmap threshold, with
+  `M_MMAP_THRESHOLD` pinned so glibc's dynamic raising cannot undo it mid-run —
+  each chunk is its own mapping and `free` is a `munmap`. The file's header has
+  always claimed the ballast is "real memory ... what the kernel would OOM on";
+  it is now true rather than approximately true.
+
+  Diagnosis rested on the reproduction condition, which is what made it
+  tractable: the failure needs the sibling test sharing the process (0 failures
+  in 24 with `--test-threads=1`, 2 in 24 with the default), and it vanished
+  under `MALLOC_MMAP_THRESHOLD_=65536`, which named the cause. Verified after
+  the fix: **100 consecutive passes** — 60 at default threads, 40 under 6-way
+  CPU load.
+
+  The headroom now also scales as `max(8 MiB, baseline/2)`. That is not this
+  flake — the binary's baseline measures 3–5 MiB — but a flat 8 MiB puts the
+  clear line at `0.75·baseline + 6 MiB`, which drops **below the baseline
+  itself** once the baseline passes 24 MiB, making recovery arithmetically
+  impossible. It is the trap this flake would have become, silently, the first
+  time `sensor-core` got heavier. The recovery assertion now also reports the
+  RSS, clear line, budget and baseline it ended at, because "recovery must
+  restore the degradable" said nothing about how close it had come.
+
 - **The `#911` storage bench pruned the file it claimed it had not, and the
   store took the blame.** `historian-bench --ingest-only` — the flag whose only
   purpose is to hand another process the file *as ingest left it* — returned
