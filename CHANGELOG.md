@@ -302,6 +302,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the GUI, `"4.1.0"` in the logs sensor), which stops being tenable with a
   third crate opening the same file formats.
 
+- **One `logs` table** (#904). The GUI cache and the logs sensor each declared
+  the same redb table, keyed it the same way, and walked it with their own copy
+  of the same reverse range walk and oldest-first eviction. The table, the uid
+  keying, the paginating query and the age-then-size prune now live once in
+  `zensight_store::logs`, generic over a `LogRow` trait.
+
+  The **records** stay two: `StoredLog` lifts `unit` and `template_id` into
+  typed fields, `LogRecord` has neither and carries `pid` plus a `labels`
+  catch-all instead, and `LogRecord` is the lossless one. They are in different
+  files in different directories and neither reads the other's rows, so there
+  is nothing to migrate and no reason to make either lossy.
+
+  `PersistentStore` also sets an explicit redb page-cache budget now
+  (`DEFAULT_CACHE_BYTES`, 64 MiB). redb's own default is 1 GiB; the logs sensor
+  has set a budget since #625 because on a 1–2 GB VM the default reads as a
+  slow multi-day RSS climb toward OOM, and this store never did — fine while
+  its only caller was a desktop GUI, not fine now that a headless service on
+  those same VMs will open it.
+
 - **One `counter_rate`** (#904). The GUI carried three copies of the same
   `last - prev` arithmetic — `view/topology/model.rs`,
   `view/specialized/netlink.rs`, and a near-relative in `parallax_health.rs`.

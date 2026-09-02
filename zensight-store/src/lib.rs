@@ -30,6 +30,7 @@
 // is the natural, allocation-free API here, so we accept the size.
 #![allow(clippy::result_large_err)]
 
+pub mod logs;
 pub mod rate;
 
 use std::collections::HashMap;
@@ -47,6 +48,16 @@ use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// Default hot-ring capacity: one hour of per-second samples.
 pub const DEFAULT_HOT_CAPACITY: usize = 3_600;
+
+/// Default redb page-cache budget, used by [`PersistentStore::open`].
+///
+/// redb's own default is **1 GiB** (#625). The logs sensor has set an explicit
+/// budget since that issue, because on a 1–2 GB VM the default reads as a slow
+/// multi-day RSS climb toward OOM as the database grows; this store never did,
+/// which was fine while its only caller was a desktop GUI and is not fine now
+/// that a headless service on those same VMs opens it. 64 MiB is ample for a
+/// file whose hot path is a bounded range walk.
+pub const DEFAULT_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// redb table: packed `(metric_id, tier, bucket_ts)` key -> downsampled
 /// [`Bucket`], stored as `(last, min, max)`.
@@ -102,11 +113,7 @@ const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// shadows outlives it).
 pub const SCHEMA_VERSION: u64 = 3;
 
-/// redb table: log-event uid (time-sortable `<ts><seq>`) -> serialized
-/// [`StoredLog`] (#107, C9). Distinct from the numeric `samples` table — per-line
-/// log events are text and unbounded-cardinality, so they get their own keyed
-/// store with template-aware sampling rather than the downsampled tiers.
-const LOGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("logs");
+use crate::logs::LOGS_TABLE;
 
 /// redb table: event ULID -> serialized [`zensight_common::EventRecord`]
 /// (#578). Events are the `events` class's durable records (SNMP traps
@@ -685,11 +692,23 @@ impl PersistentStore {
     /// bump kept the types; it would have turned the first one that did not
     /// into a GUI that silently ran memory-only on every launch.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreOpenError> {
+        Self::open_with_cache(path, DEFAULT_CACHE_BYTES)
+    }
+
+    /// [`open`](Self::open) with an explicit redb page-cache budget. A
+    /// headless caller on a small host sets its own; see
+    /// [`DEFAULT_CACHE_BYTES`] for why leaving it to redb is not an option.
+    pub fn open_with_cache(
+        path: impl AsRef<Path>,
+        cache_bytes: usize,
+    ) -> Result<Self, StoreOpenError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(redb::Error::from)?;
         }
-        let db = Database::create(path)?;
+        let db = redb::Builder::new()
+            .set_cache_size(cache_bytes)
+            .create(path)?;
 
         // Phase 1: the schema marker alone. `meta` is `<&str, u64>` in every
         // version, so this open cannot type-mismatch.
@@ -934,88 +953,31 @@ impl PersistentStore {
     /// Persist a batch of log records keyed by uid. Blocking I/O — call from
     /// `spawn_blocking`. Records with an empty uid are skipped (no stable key).
     pub fn write_logs(&self, logs: &[StoredLog]) -> Result<usize, redb::Error> {
-        if logs.is_empty() {
-            return Ok(0);
-        }
-        let txn = self.db.begin_write()?;
-        let mut written = 0usize;
-        {
-            let mut table = txn.open_table(LOGS_TABLE)?;
-            for log in logs {
-                if log.uid.is_empty() {
-                    continue;
-                }
-                // serde_json can't fail on this plain struct; skip on the off
-                // chance rather than abort the whole batch.
-                let Ok(bytes) = serde_json::to_vec(log) else {
-                    continue;
-                };
-                table.insert(log.uid.as_str(), bytes.as_slice())?;
-                written += 1;
-            }
-        }
-        txn.commit()?;
-        Ok(written)
+        crate::logs::write_batch(&self.db, logs)
     }
 
-    /// Read persisted log records whose uid timestamp prefix falls in
-    /// `[from_ms, to_ms]`, newest-first, capped at `limit`. Because the uid is
-    /// `<13-digit ts_ms><12-digit seq>`, the table is time-sorted and the scan is
-    /// a bounded range walk. Blocking I/O.
+    /// Read persisted log records whose `ts` falls in `[from_ms, to_ms]`,
+    /// newest-first, capped at `limit`. Blocking I/O.
+    ///
+    /// The cursor form is [`crate::logs::query`]; this cache has no paginating
+    /// reader, because the Logs view paginates against the *sensor's* durable
+    /// store, which is authoritative and unsampled (#603).
     pub fn query_logs(
         &self,
         from_ms: i64,
         to_ms: i64,
         limit: usize,
     ) -> Result<Vec<StoredLog>, redb::Error> {
-        let txn = self.db.begin_read()?;
-        let table = txn.open_table(LOGS_TABLE)?;
-        let mut out = Vec::new();
-        // Walk newest-first and stop once we've filled `limit` or fallen out of
-        // the window (older than `from_ms`).
-        for entry in table.range::<&str>(..)?.rev() {
-            let (_key, value) = entry?;
-            let Ok(log) = serde_json::from_slice::<StoredLog>(value.value()) else {
-                continue;
-            };
-            if log.ts > to_ms {
-                continue;
-            }
-            if log.ts < from_ms {
-                break;
-            }
-            out.push(log);
-            if out.len() >= limit {
-                break;
-            }
-        }
-        Ok(out)
+        crate::logs::query(&self.db, from_ms, to_ms, None, limit)
     }
 
     /// Evict the oldest log rows beyond `keep_max`, bounding on-disk growth.
     /// Returns the number removed. Blocking I/O.
+    ///
+    /// Size-only: this is a per-viewer cache whose rows are template-sampled
+    /// already, and the age bound that matters is the sensor's.
     pub fn prune_logs(&self, keep_max: usize) -> Result<usize, redb::Error> {
-        let txn = self.db.begin_write()?;
-        let mut removed = 0usize;
-        {
-            let mut table = txn.open_table(LOGS_TABLE)?;
-            let total = table.len()? as usize;
-            if total > keep_max {
-                let to_remove = total - keep_max;
-                // The oldest rows are at the front of the key order.
-                let oldest: Vec<String> = table
-                    .range::<&str>(..)?
-                    .take(to_remove)
-                    .filter_map(|e| e.ok().map(|(k, _)| k.value().to_string()))
-                    .collect();
-                for key in oldest {
-                    table.remove(key.as_str())?;
-                    removed += 1;
-                }
-            }
-        }
-        txn.commit()?;
-        Ok(removed)
+        crate::logs::prune::<StoredLog>(&self.db, 0, i64::MAX, keep_max)
     }
 
     // ---- Event records (#578) ----------------------------------------------
