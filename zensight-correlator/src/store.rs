@@ -9,16 +9,28 @@ use std::collections::HashMap;
 
 use zensight_common::{HostEvidence, NameObservation, NameVal};
 
-/// Store of the latest [`HostEvidence`] per `(sensor, source)`.
+/// How a claim is keyed: `(sensor, source)`.
+type StoreKey = (String, String);
+
+/// Store of the latest [`HostEvidence`] per [`StoreKey`].
 #[derive(Debug, Default)]
 pub struct EvidenceStore {
-    map: HashMap<(String, String), HostEvidence>,
+    map: HashMap<StoreKey, (String, HostEvidence)>,
 }
 
 impl EvidenceStore {
-    /// Insert or replace the claim for its `(sensor, source)` key.
-    pub fn upsert(&mut self, ev: HostEvidence) {
-        self.map.insert((ev.sensor.clone(), ev.source.clone()), ev);
+    /// Insert or replace the claim for its `(sensor, source)` key, recording
+    /// the **origin the claim was published from**.
+    ///
+    /// The origin is not in the payload and cannot be derived from it: a claim
+    /// says which *sensor* made it, only the key says which *host* that sensor
+    /// ran on. Identity does not need it — the merge is a function of the
+    /// claim's content — but the topology graph does: "netlink on host A sees
+    /// device D" is a statement about A's link-layer segment, and without A
+    /// the observation is unattributable (#917).
+    pub fn upsert(&mut self, origin: String, ev: HostEvidence) {
+        self.map
+            .insert((ev.sensor.clone(), ev.source.clone()), (origin, ev));
     }
 
     /// Drop the claim for `(sensor, source)` (evidence tombstone). Returns
@@ -32,7 +44,7 @@ impl EvidenceStore {
     /// Remove claims whose `last_updated` is older than `now_ms - ttl_ms`.
     pub fn sweep(&mut self, now_ms: i64, ttl_ms: i64) {
         let cutoff = now_ms - ttl_ms;
-        self.map.retain(|_, ev| ev.last_updated >= cutoff);
+        self.map.retain(|_, (_, ev)| ev.last_updated >= cutoff);
     }
 
     /// Snapshot the TTL-live evidence (`last_updated >= now_ms - ttl_ms`).
@@ -40,9 +52,28 @@ impl EvidenceStore {
         let cutoff = now_ms - ttl_ms;
         self.map
             .values()
-            .filter(|ev| ev.last_updated >= cutoff)
-            .cloned()
+            .filter(|(_, ev)| ev.last_updated >= cutoff)
+            .map(|(_, ev)| ev.clone())
             .collect()
+    }
+
+    /// The TTL-live evidence with the origin each claim was published from, in
+    /// a **deterministic order**.
+    ///
+    /// Sorted by the store key, because this feeds edge derivation and
+    /// therefore a content hash: a `HashMap`'s iteration order is not stable
+    /// between runs of the same binary, never mind across restarts, and an
+    /// unstable order here would churn the entire edge set forever.
+    pub fn live_with_origin(&self, now_ms: i64, ttl_ms: i64) -> Vec<(String, HostEvidence)> {
+        let cutoff = now_ms - ttl_ms;
+        let mut v: Vec<(StoreKey, String, HostEvidence)> = self
+            .map
+            .iter()
+            .filter(|(_, (_, ev))| ev.last_updated >= cutoff)
+            .map(|(k, (origin, ev))| (k.clone(), origin.clone(), ev.clone()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v.into_iter().map(|(_, origin, ev)| (origin, ev)).collect()
     }
 
     /// Number of stored claims.
@@ -226,10 +257,10 @@ mod tests {
             cloud: None,
             last_updated: 1000,
         };
-        s.upsert(fresh.clone());
+        s.upsert("h-test".into(), fresh.clone());
         fresh.source = "b".into();
         fresh.last_updated = 100;
-        s.upsert(fresh);
+        s.upsert("h-test".into(), fresh);
         // now=1500, ttl=600 → cutoff 900: only "a" is live.
         let live = s.live(1500, 600);
         assert_eq!(live.len(), 1);

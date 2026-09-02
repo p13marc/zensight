@@ -93,11 +93,10 @@ fn self_report(sensor: &str, source: &str, host_id: &str) -> HostEvidence {
 /// A state with one correlated entity in it, ready to be seeded.
 fn state_with_one_entity() -> zensight_correlator::engine::SharedState {
     let mut s = CorrelatorState::new(Default::default());
-    s.apply(EvidenceMsg::Host(Box::new(self_report(
-        "sysinfo",
-        "host1",
-        &"ab".repeat(32),
-    ))));
+    s.apply(EvidenceMsg::Host {
+        origin: "h-test".into(),
+        ev: Box::new(self_report("sysinfo", "host1", &"ab".repeat(32))),
+    });
     let ops = s.recompute(2000);
     assert!(
         !ops.is_empty(),
