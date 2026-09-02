@@ -6206,7 +6206,7 @@ impl ZenSight {
                 ..Default::default()
             }));
         }
-        use crate::view::specialized::netlink_detail::fetch_records;
+        use crate::view::specialized::netlink_detail::fetch_records_all;
         use crate::view::specialized::netring_detail::{fetch_assets, fetch_flows, fetch_matrix};
         let Some(session) = self.session.clone() else {
             // Not connected: leave edges as-is, no error toast.
@@ -6216,7 +6216,13 @@ impl ZenSight {
         Task::future(async move {
             let (flows, neighbors, matrix, assets) = tokio::join!(
                 fetch_flows(session.clone(), None),
-                fetch_records::<zensight_common::NeighborRecord>(session.clone(), neighbors_key),
+                // Fleet fan-in (RFC 05 §2.1): every netlink host's neighbours,
+                // not whichever one answered first — the map draws edges from
+                // all of them.
+                fetch_records_all::<zensight_common::NeighborRecord>(
+                    session.clone(),
+                    neighbors_key,
+                ),
                 fetch_matrix(session.clone(), None),
                 fetch_assets(session, None),
             );

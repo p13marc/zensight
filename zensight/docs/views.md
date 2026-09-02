@@ -529,6 +529,28 @@ UP/DOWN, erroring, total throughput). The old lifetime-counter rankings and
   resolver is called out, because that is what a DNS tunnel looks like from the
   wire.
 
+### Who is allowed to answer a pulled record
+
+Two helpers back every pulled record, and the difference is *how many producers
+the question has*:
+
+- **`fetch_records`** — one origin-scoped key
+  (`v1/<origin>/@rpc/<producer>/<procedure>`), which by RFC 05 §2.1 names one
+  producer instance. It targets `All` with consolidation off, decodes every
+  reply, and keeps the one carrying the most records.
+- **`fetch_records_all`** — a fleet selector (`v1/*/@rpc/…`), where every host
+  is expected to answer and the rows are concatenated (#309).
+
+`fetch_records` takes every reply rather than the first because nothing on the
+wire enforces "one origin, one instance". Two processes minting the same host
+origin — a stray second sensor, or two hosts cloned from one `machine-id` —
+both declare the same `@rpc` key and both answer. First-reply-wins then made
+*every* on-demand panel flap: the live sensor's rows on one fetch, the idle
+twin's empty ring on the next, which reads in the UI as "the Fetch button
+briefly shows data, then empties". Keeping the fullest reply makes the panel
+deterministic, and a `warn` naming the key and the answer count says the
+deployment has a duplicate instead of leaving it as a UI mystery.
+
 ## Zero, absent, and unreadable are three different things
 
 The latency panel above can say `available: false` because it *asks* a question

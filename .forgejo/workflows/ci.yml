@@ -229,8 +229,19 @@ jobs:
       # every later run ON THAT LANE as `advisories FAILED` — intermittent by
       # lane, indistinguishable from a real advisory without logs. A fresh
       # shallow clone costs seconds; a wedged lane costs an afternoon.
+      #
+      # BOTH spellings, because cargo-deny changed the directory under us and
+      # this step went quietly dead: 0.18 and earlier cached in
+      # `advisory-dbs`, 0.20 caches in `advisory-db`. install-action installs
+      # the latest, so since that bump the self-heal has been removing a
+      # directory nothing writes to any more while the clone that actually
+      # gets fetched — the singular one — kept whatever state it was in. A
+      # wedged lane then stayed wedged, which is the exact failure this step
+      # was added to end (seen on #948: `deny` red at a commit that changes no
+      # dependency, green everywhere else, and `cargo deny check` clean
+      # locally against the same advisory-db HEAD).
       - name: reset the advisory-db cache (self-heal)
-        run: rm -rf ~/.cargo/advisory-dbs
+        run: rm -rf ~/.cargo/advisory-db ~/.cargo/advisory-dbs
       - run: cargo deny check
 
   lint:
