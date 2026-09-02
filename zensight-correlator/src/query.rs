@@ -82,6 +82,60 @@ pub async fn serve_entities(
     Ok(())
 }
 
+/// Serve the edge seed queryable until shutdown (#917).
+///
+/// The edge-side twin of [`serve_entities`], and it exists for the same
+/// reason: a GUI joining a running fleet must see the graph that is already
+/// there, not wait for something to change. Without it a late joiner shows an
+/// empty map until the next re-emit — which, with the change gate doing its
+/// job, may be minutes away and is *supposed* to be.
+pub async fn serve_edges(
+    session: Arc<Session>,
+    state: SharedState,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::edges_query_key();
+    let queryable = zensight_common::served::serve_state_queryable(&session, &key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare edges queryable: {e}"))?;
+    info!(key = %key, "edges seed queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                // Storage-shaped, stamped inside the lock — see the long note
+                // in `serve_entities`. The hazard is identical here: an edge
+                // the engine updates mid-loop would have its live `put`
+                // stamped earlier than this loop's stale copy, and LWW would
+                // keep the stale one.
+                let (edges, stamp) = {
+                    let guard = state.lock().unwrap();
+                    (
+                        guard.current_edges(),
+                        zensight_common::served::seed_stamp(&session),
+                    )
+                };
+                for edge in edges {
+                    let key = zensight_common::keyexpr::edge_key(&edge.edge_id);
+                    match serde_json::to_vec(&edge) {
+                        Ok(payload) => {
+                            if let Err(e) = query.reply_state(&key, payload, stamp).await {
+                                warn!(error = %e, "edges seed reply failed");
+                            }
+                        }
+                        Err(e) => warn!(error = %e, "serialize edge failed"),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Serve the on-demand names queryable until shutdown.
 pub async fn serve_names(
     session: Arc<Session>,

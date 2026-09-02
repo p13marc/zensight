@@ -84,7 +84,11 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(CorrelatorState::new(config.clone())));
 
     // Engine.
-    let engine = Engine::new(state.clone(), rx, op_tx).with_pdns(pdns_tx);
+    let (edge_tx, edge_rx) =
+        mpsc::channel::<zensight_correlator::edges::EdgeOp>(ENGINE_CHANNEL_CAP);
+    let engine = Engine::new(state.clone(), rx, op_tx)
+        .with_pdns(pdns_tx)
+        .with_edges(edge_tx);
     let engine_shutdown = shutdown_rx.clone();
     let engine_task = tokio::spawn(async move {
         if let Err(e) = engine.run(engine_shutdown).await {
@@ -101,6 +105,18 @@ async fn main() -> anyhow::Result<()> {
             error!(error = %e, "publisher error");
         }
     });
+
+    // Edge publisher (#917): the catalog's resolved relationship graph on
+    // @catalog/state/edge/*, with the same lifecycle as entities.
+    let edge_task = {
+        let s = session.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = publisher::run_edges(s, serialization, edge_rx, sh).await {
+                error!(error = %e, "edge publisher error");
+            }
+        })
+    };
 
     // Historical passive-DNS publisher: durable IP↔name records on
     // @catalog/state/pdns (#310), meant to be captured by a router-hosted
@@ -123,6 +139,16 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             if let Err(e) = query::serve_entities(s, st, sh).await {
                 error!(error = %e, "entities queryable error");
+            }
+        })
+    };
+    let edges_query_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_edges(s, st, sh).await {
+                error!(error = %e, "edges queryable error");
             }
         })
     };
@@ -246,9 +272,11 @@ async fn main() -> anyhow::Result<()> {
         let _ = input_task.await;
         let _ = engine_task.await;
         let _ = publish_task.await;
+        let _ = edge_task.await;
         let _ = pdns_task.await;
         let _ = entities_task.await;
         let _ = names_task.await;
+        let _ = edges_query_task.await;
         let _ = introspect_task.await;
         let _ = describe_task.await;
         let _ = assertion_task.await;

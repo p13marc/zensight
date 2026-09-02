@@ -51,6 +51,22 @@ pub enum EvidenceMsg {
     Assert(OperatorAssertion),
     /// An assertion was retired (a `Delete` on its key).
     RemoveAssertion { id: String },
+    /// A relationship claim (`state/<sensor>/evidence/relation/<id>`, #917).
+    ///
+    /// Carries the **publishing origin from the key**, which the payload does
+    /// not have: a claim says which sensor made it, only the key says which
+    /// host that sensor ran on, and an edge's observer set needs both. Boxed
+    /// for the same reason as `Host`.
+    Relation {
+        origin: String,
+        ev: Box<zensight_common::relation::RelationshipEvidence>,
+    },
+    /// A relationship claim was retired (a `Delete` on its key).
+    RemoveRelation {
+        sensor: String,
+        origin: String,
+        relation_id: String,
+    },
 }
 
 /// A change to publish on the entity keyspace.
@@ -82,6 +98,13 @@ pub struct CorrelatorState {
     /// Operator assertions by id (#473) — an input to the merge, held exactly as
     /// it arrived off the bus.
     assertions: HashMap<String, OperatorAssertion>,
+    /// Relationship claims (#917). Deliberately **not** an input to
+    /// `merge::correlate`: an edge cannot make two machines the same machine,
+    /// and a claim that could would be an identity claim wearing a different
+    /// hat. Resolution runs after the merge and reads its finished answer.
+    relations: crate::edges::RelationStore,
+    /// The published edge set and its change gate.
+    edges: crate::edges::EdgeState,
 }
 
 impl CorrelatorState {
@@ -93,6 +116,8 @@ impl CorrelatorState {
             names: NameStore::default(),
             last: HashMap::new(),
             assertions: HashMap::new(),
+            relations: crate::edges::RelationStore::default(),
+            edges: crate::edges::EdgeState::default(),
         }
     }
 
@@ -106,6 +131,14 @@ impl CorrelatorState {
             }
             EvidenceMsg::Assert(a) => {
                 self.assertions.insert(a.id.clone(), a);
+            }
+            EvidenceMsg::Relation { origin, ev } => self.relations.upsert(origin, *ev),
+            EvidenceMsg::RemoveRelation {
+                sensor,
+                origin,
+                relation_id,
+            } => {
+                self.relations.remove(&sensor, &origin, &relation_id);
             }
             EvidenceMsg::RemoveAssertion { id } => {
                 self.assertions.remove(&id);
@@ -173,6 +206,38 @@ impl CorrelatorState {
 
         self.last = next_last;
         ops
+    }
+
+    /// Recompute the **edge** set at `now_ms` and return the ops to publish.
+    ///
+    /// Called straight after [`CorrelatorState::recompute`], and separately
+    /// rather than folded into it: the two outputs go to two key families with
+    /// two lifecycles, and an edge pass that could fail or lag must not be able
+    /// to delay an entity publish. It reads `self.last`, so it sees exactly the
+    /// entity set that was just published — never a half-updated one.
+    pub fn recompute_edges(&mut self, now_ms: i64) -> Vec<crate::edges::EdgeOp> {
+        let ttl_ms = self.config.evidence_ttl_secs as i64 * 1000;
+        self.relations.sweep(now_ms, ttl_ms);
+        let live = self.relations.live(now_ms, ttl_ms);
+        let entities: Vec<HostEntity> = self.last.values().map(|r| r.entity.clone()).collect();
+        self.edges
+            .diff(crate::edges::resolve(&live, &entities, now_ms))
+    }
+
+    /// Re-publish every current edge with a refreshed `last_updated`, the
+    /// edge-side twin of [`CorrelatorState::reemit`].
+    pub fn reemit_edges(&mut self, now_ms: i64) -> Vec<crate::edges::EdgeOp> {
+        self.edges.reemit(now_ms)
+    }
+
+    /// The current published edge set (serves the edges queryable).
+    pub fn current_edges(&self) -> Vec<zensight_common::relation::Edge> {
+        self.edges.current()
+    }
+
+    /// Number of stored relationship claims, for health reporting.
+    pub fn relation_claims(&self) -> usize {
+        self.relations.len()
     }
 
     /// Re-publish every current entity with a refreshed `last_updated` (liveness
@@ -288,6 +353,14 @@ pub struct Engine {
     /// Fed on every name-store update so a storage backend can capture the full
     /// IP↔name history. `None` disables the historical tier.
     pdns_out: Option<mpsc::Sender<PdnsRecord>>,
+    /// Optional sink for resolved edges (`@catalog/state/edge/*`, #917).
+    ///
+    /// A second output channel rather than a second message on the entity one:
+    /// the two families have two lifecycles and two subscribers, and an edge
+    /// pass that lags or fails must not be able to delay an entity publish.
+    /// `None` disables edge publishing entirely, which is what the demo feed
+    /// and every entity-only test use.
+    edge_out: Option<mpsc::Sender<crate::edges::EdgeOp>>,
     debounce: Duration,
     reemit: Duration,
 }
@@ -312,6 +385,7 @@ impl Engine {
             rx,
             out,
             pdns_out: None,
+            edge_out: None,
             debounce,
             reemit,
         }
@@ -322,6 +396,15 @@ impl Engine {
     /// IP's full accumulated name set onto this channel for the pdns publisher.
     pub fn with_pdns(mut self, pdns_out: mpsc::Sender<PdnsRecord>) -> Self {
         self.pdns_out = Some(pdns_out);
+        self
+    }
+
+    /// Attach the resolved-edge sink (`@catalog/state/edge/*`, #917).
+    ///
+    /// Opt-in, like [`Engine::with_pdns`]: an engine without it computes no
+    /// edges and publishes none, which is what the `--demo` feed wants.
+    pub fn with_edges(mut self, edge_out: mpsc::Sender<crate::edges::EdgeOp>) -> Self {
+        self.edge_out = Some(edge_out);
         self
     }
 
@@ -381,19 +464,47 @@ impl Engine {
                 }
                 _ = async { sleep_until(deadline.unwrap()).await }, if deadline.is_some() => {
                     deadline = None;
-                    let ops = self.state.lock().unwrap().recompute(current_timestamp_millis());
-                    debug!(ops = ops.len(), "recompute produced ops");
+                    let now = current_timestamp_millis();
+                    let (ops, edge_ops) = {
+                        let mut st = self.state.lock().unwrap();
+                        // Entities first, then edges: resolution reads the
+                        // entity set the merge just produced, so this ordering
+                        // is what stops an edge referring to an entity id that
+                        // was retired in the same pass.
+                        let ops = st.recompute(now);
+                        let edge_ops = st.recompute_edges(now);
+                        (ops, edge_ops)
+                    };
+                    debug!(ops = ops.len(), edges = edge_ops.len(), "recompute produced ops");
                     self.forward(ops).await;
+                    self.forward_edges(edge_ops).await;
                 }
                 _ = reemit.tick() => {
-                    let ops = self.state.lock().unwrap().reemit(current_timestamp_millis());
-                    debug!(ops = ops.len(), "re-emit");
+                    let now = current_timestamp_millis();
+                    let (ops, edge_ops) = {
+                        let mut st = self.state.lock().unwrap();
+                        (st.reemit(now), st.reemit_edges(now))
+                    };
+                    debug!(ops = ops.len(), edges = edge_ops.len(), "re-emit");
                     self.forward(ops).await;
+                    self.forward_edges(edge_ops).await;
                 }
             }
         }
         info!("correlation engine stopped");
         Ok(())
+    }
+
+    async fn forward_edges(&self, ops: Vec<crate::edges::EdgeOp>) {
+        let Some(out) = &self.edge_out else {
+            return;
+        };
+        for op in ops {
+            if out.send(op).await.is_err() {
+                debug!("edge-op channel closed");
+                return;
+            }
+        }
     }
 
     async fn forward(&self, ops: Vec<EntityOp>) {

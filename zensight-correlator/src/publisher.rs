@@ -119,6 +119,101 @@ impl EntityPublisher {
     }
 }
 
+/// Manages the per-edge plain declared publishers (#917).
+///
+/// Deliberately the same shape as [`EntityPublisher`] — a cached publisher per
+/// key, `delete()` as the tombstone, `QosClass::Entity` — because an edge has
+/// the same lifecycle as an entity: materialized fleet state that must arrive,
+/// seeded for late joiners by a queryable rather than a publisher cache.
+struct EdgePublisher {
+    session: Arc<Session>,
+    format: Format,
+    publishers: HashMap<String, Publisher<'static>>,
+}
+
+impl EdgePublisher {
+    fn new(session: Arc<Session>, format: Format) -> Self {
+        Self {
+            session,
+            format,
+            publishers: HashMap::new(),
+        }
+    }
+
+    async fn publisher_for(&mut self, edge_id: &str) -> anyhow::Result<&Publisher<'static>> {
+        if !self.publishers.contains_key(edge_id) {
+            let key = zensight_common::keyexpr::edge_key(edge_id);
+            let q = zensight_common::QosClass::Entity;
+            let pubr = self
+                .session
+                .declare_publisher(key.clone())
+                .congestion_control(q.congestion_control())
+                .priority(q.priority())
+                .express(q.express())
+                .reliability(q.reliability())
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to declare edge publisher {key}: {e}"))?;
+            self.publishers.insert(edge_id.to_string(), pubr);
+        }
+        Ok(self.publishers.get(edge_id).unwrap())
+    }
+
+    async fn upsert(&mut self, edge: &zensight_common::relation::Edge) -> anyhow::Result<()> {
+        let payload = encode(edge, self.format).map_err(|e| anyhow::anyhow!("encode edge: {e}"))?;
+        let encoding = self.format.encoding();
+        let pubr = self.publisher_for(&edge.edge_id).await?;
+        pubr.put(payload)
+            .encoding(encoding)
+            .await
+            .map_err(|e| anyhow::anyhow!("put edge {}: {e}", edge.edge_id))?;
+        Ok(())
+    }
+
+    async fn tombstone(&mut self, edge_id: &str) -> anyhow::Result<()> {
+        let pubr = self.publisher_for(edge_id).await?;
+        pubr.delete()
+            .await
+            .map_err(|e| anyhow::anyhow!("delete edge {edge_id}: {e}"))?;
+        self.publishers.remove(edge_id); // drop -> undeclare
+        Ok(())
+    }
+}
+
+/// Run the edge publisher: drain `op_rx`, apply each op, until shutdown.
+pub async fn run_edges(
+    session: Arc<Session>,
+    format: Format,
+    mut op_rx: mpsc::Receiver<crate::edges::EdgeOp>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut publisher = EdgePublisher::new(session, format);
+    info!("edge publisher ready");
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            op = op_rx.recv() => {
+                match op {
+                    Some(crate::edges::EdgeOp::Upsert(edge)) => {
+                        if let Err(e) = publisher.upsert(&edge).await {
+                            warn!(error = %e, "edge upsert failed");
+                        }
+                    }
+                    Some(crate::edges::EdgeOp::Tombstone(id)) => {
+                        if let Err(e) = publisher.tombstone(&id).await {
+                            warn!(error = %e, "edge tombstone failed");
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    debug!("edge publisher stopped");
+    Ok(())
+}
+
 /// Run the publisher: drain `op_rx`, apply each op, until shutdown.
 pub async fn run(
     session: Arc<Session>,
