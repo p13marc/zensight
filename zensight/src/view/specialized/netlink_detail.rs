@@ -395,8 +395,18 @@ pub async fn fetch_records_all<T: DeserializeOwned>(
     any.then_some(out)
 }
 
-/// Fetch + decode the first reply on `key` into `Vec<T>`. Returns `None` if no
-/// sensor replied or the payload didn't decode. Iced-independent (testable).
+/// Fetch + decode every reply on `key`, keeping the fullest one, into `Vec<T>`.
+/// Returns `None` if no sensor replied or nothing decoded. Iced-independent
+/// (testable).
+///
+/// One origin-scoped procedure key names ONE producer instance (RFC 05 §2.1),
+/// so this is a single-answer read — but nothing on the wire enforces that.
+/// Two processes minting the same host origin (a stray instance, or two hosts
+/// cloned from one machine-id) both declare the same `@rpc` key and both
+/// answer. Taking the *first* reply then makes every detail panel flap: the
+/// live sensor's rows on one fetch, the idle twin's empty ring on the next.
+/// So: target All, consolidation off, keep the reply that carries the most
+/// records, and say out loud that the deployment has a duplicate.
 ///
 /// Each failure path logs a `warn` naming the key, so a silently-empty detail
 /// table (netring/netlink on-demand tabs) is diagnosable from the log instead of
@@ -405,34 +415,53 @@ pub async fn fetch_records<T: DeserializeOwned>(
     session: Arc<zenoh::Session>,
     key: String,
 ) -> Option<Vec<T>> {
-    let replies = match session.get(&key).await {
+    let replies = match session
+        .get(&key)
+        .target(zenoh::query::QueryTarget::All)
+        .consolidation(zenoh::query::ConsolidationMode::None)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(key = %key, error = %e, "query get failed");
             return None;
         }
     };
-    let Ok(reply) = replies.recv_async().await else {
-        tracing::warn!(key = %key, "query: no sensor replied");
-        return None;
-    };
-    let sample = match reply.result() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(key = %key, error = ?e, "query reply was an error");
-            return None;
-        }
-    };
-    match zensight_common::decode_auto(&sample.payload().to_bytes()) {
-        Ok(records) => Some(records),
-        Err(e) => {
-            tracing::warn!(
+    let mut best: Option<Vec<T>> = None;
+    let mut answered = 0usize;
+    while let Ok(reply) = replies.recv_async().await {
+        let sample = match reply.result() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(key = %key, error = ?e, "query reply was an error");
+                continue;
+            }
+        };
+        match zensight_common::decode_auto::<Vec<T>>(&sample.payload().to_bytes()) {
+            Ok(records) => {
+                answered += 1;
+                if best.as_ref().is_none_or(|b| records.len() > b.len()) {
+                    best = Some(records);
+                }
+            }
+            Err(e) => tracing::warn!(
                 key = %key, error = %e, bytes = sample.payload().len(),
                 "query reply failed to decode"
-            );
-            None
+            ),
         }
     }
+    if answered > 1 {
+        tracing::warn!(
+            key = %key, answered,
+            "more than one producer answered a single-origin procedure — \
+             duplicate sensor instances share this origin (one host id, two \
+             processes); showing the fullest reply"
+        );
+    }
+    if answered == 0 {
+        tracing::warn!(key = %key, "query: no sensor replied");
+    }
+    best
 }
 
 #[cfg(test)]
@@ -605,6 +634,50 @@ mod tests {
         assert_eq!(got[0].process.as_deref(), Some("sshd"));
         assert_eq!(got[0].proc_start_time, Some(987654));
         assert_eq!(got[0].cgroup.as_deref(), Some("system.slice/sshd.service"));
+
+        session.close().await.unwrap();
+    }
+
+    /// Regression: an origin-scoped procedure answered by TWO producers — a
+    /// stray second sensor instance minting the same host origin, or two hosts
+    /// cloned from one machine-id. First-reply-wins made every detail panel
+    /// flap (rows on one fetch, the idle twin's empty ring on the next); the
+    /// fetch must be deterministic and keep the fullest reply.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_records_survives_a_duplicate_origin_instance() {
+        let key = "v1/h-decafbad0001/@rpc/netlink/sockets";
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .unwrap();
+        config
+            .insert_json5("scouting/gossip/enabled", "false")
+            .unwrap();
+        let session = Arc::new(zenoh::open(config).await.unwrap());
+
+        // The live instance: one socket. The twin: an empty ring.
+        let full =
+            serde_json::to_vec(&vec![sock("10.0.0.1:22", "1.1.1.1:443", "listen", 1, 0)]).unwrap();
+        let empty = serde_json::to_vec(&Vec::<SocketRecord>::new()).unwrap();
+        for payload in [full, empty] {
+            let q = session.declare_queryable(key).await.unwrap();
+            tokio::spawn(async move {
+                while let Ok(query) = q.recv_async().await {
+                    let _ = query.reply(query.key_expr().clone(), payload.clone()).await;
+                }
+            });
+        }
+
+        // Every fetch sees the same thing — no flapping between the two.
+        for _ in 0..10 {
+            let got: Option<Vec<SocketRecord>> =
+                fetch_records(session.clone(), key.to_string()).await;
+            assert_eq!(
+                got.as_ref().map(|v| v.len()),
+                Some(1),
+                "the fullest reply wins on every fetch, not whichever answered first"
+            );
+        }
 
         session.close().await.unwrap();
     }

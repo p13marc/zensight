@@ -248,6 +248,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On-demand detail panels flapped between the sensor's rows and an empty
+  table** when two producers answered one origin-scoped `@rpc` key. Every
+  netring "Fetch" button (flows, elephants, talkers, matrix, DNS, HTTP/TLS,
+  QUIC, SSH, JA4H, assets, captures), and the netlink / systemd / sysinfo
+  detail channels with them, read the record set with `fetch_records`, which
+  took the **first** reply. One origin names one producer instance (RFC 05
+  §2.1) — but nothing on the wire enforces it: two processes minting the same
+  host origin (a stray second sensor, or two hosts cloned from one
+  `machine-id`) both declare the key and both answer, so each fetch landed on
+  whichever won the race. In the UI that read as the panel showing data and
+  then immediately emptying, and coming back on the next click.
+
+  `fetch_records` now targets `All` with consolidation off, decodes every
+  reply and keeps the one carrying the most records — deterministic whatever
+  the race does — and logs a `warn` naming the key and the answer count, so a
+  duplicate instance is diagnosable instead of being a UI mystery. An error
+  reply no longer discards a good one from another answerer either.
+
+  Reproduced with two netring sensors on one host: 15 successive fetches
+  returned `0 0 0 0 0 0 0 0 0 0 0 0 1 0 0` before, `1 1 1 …` after.
+
+- **The topology map drew neighbours from one host.** `query_topology_batch`
+  passed the *fleet* selector `v1/*/@rpc/netlink/neighbors` to the
+  single-producer `fetch_records`, so the ARP-derived edges came from
+  whichever netlink sensor replied first. It uses the fleet fan-in
+  (`fetch_records_all`) now, like the listen-socket query beside it.
+
 - **Alerts that could never fire, and a firing set that only grew.** Labels
   are an alert's identity — `alert_key` hashes every non-`host.*` label — and
   the reporter publishes only once the *same key* has been violated
