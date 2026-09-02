@@ -313,6 +313,13 @@ cp -f "$configs_dir/probe.json5" "$outdir/probe.json5"
 # host. Machine-agnostic; the example config already has every merge rule on.
 cp -f "$configs_dir/correlator.json5" "$outdir/correlator.json5"
 
+# historian: the fleet's telemetry history. Machine-agnostic — the defaults
+# ingest the whole telemetry class and hold two days of minute buckets and a
+# quarter of hour buckets under a 256 MiB budget. Its store path is null in
+# the shipped config, which resolves $STATE_DIRECTORY under systemd and
+# ~/.local/state/zensight otherwise, so a generated config needs no rewriting.
+cp -f "$configs_dir/historian.json5" "$outdir/historian.json5"
+
 # ── Exporters (--exporters; the `just demo-prometheus` / `demo-otel` stacks) ──
 #
 # Off by default so the sensors container image — which runs neither exporter —
@@ -419,4 +426,4 @@ notes=""
 [[ "$exclude_chips" != "[]" ]]  && notes+=" hwmon-exclude=$exclude_chips"
 detectors="detectors on"
 [[ "$profile" == "production" ]] && detectors="detectors OFF, sized down (halved tables)"
-echo "Configured ($profile): netring iface='$iface' (L7 on, $detectors), netlink, logs=journald, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator$notes  (configs in $outdir/)"
+echo "Configured ($profile): netring iface='$iface' (L7 on, $detectors), netlink, logs=journald, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator, historian$notes  (configs in $outdir/)"

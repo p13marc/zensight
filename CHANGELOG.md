@@ -248,6 +248,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-historian`, the fleet's telemetry history as a service** (#906).
+  A headless Zenoh application on `SensorRunner`: it subscribes
+  `v1/*/telemetry/**` through the shared AdvancedSubscriber (history, recovery,
+  late-publisher detection), writes the same tiers the GUI's cache does, and
+  answers `@rpc/historian/stats`. `range`, `series` and `timeline` are declared
+  and answer `error/unsupported` until #907 and #908 build them — an answer
+  that arrives immediately, where an undeclared key gives a timeout
+  indistinguishable from a slow fleet.
+
+  The series name comes from the **key**, not the payload, and has to: for a
+  proxy producer the wire subject is `{device}/{metric...}` while
+  `TelemetryPoint::metric` is only the second half, so a service that rebuilt
+  the name from the payload would file every polled device's counters under one
+  another's.
+
+  It takes all three governor steps (#811/#812), because it is the component
+  that holds a database on a 1–2 GB VM. The hot ring is the evictable table —
+  halved under pressure, which is the only thing a per-series ring can give
+  back — and ingest is the degradable work, shedding booleans first because a
+  0/1 step series is the cheapest history to lose and the alert that made it
+  interesting is on the bus anyway. Everything dropped is counted, by reason,
+  and reported at zero: "nothing was dropped" and "nobody asked" are different
+  states.
+
+  `zensight-store` gains what `stats` needs — `tier_rows`, `db_bytes`,
+  `oldest_bucket_ms`, `hot_sample_count` and `halve_hot_capacity` — and
+  `PersistentStore` now remembers its path, because what matters to an operator
+  with a 2 GiB budget is what `df` says.
+
+  Verified against a live bus: RFC 08 §6.1 coverage passes, liveliness appears
+  on `state/historian/alive`, 318 series ingested from one sysinfo sensor
+  across all three tiers, `stats` answers, the unbuilt procedures answer
+  `error/unsupported`, `zenctl node list` and `service list` show the producer
+  and its six procedures, the conformance judges report **no gated findings**,
+  and the history reopens intact after a restart.
+
 - **The `historian` producer is declared** (#905). `zensight-common/registry/historian.toml`,
   four read procedures (`range`, `series`, `timeline`, `stats`) on top of the
   mandatory `introspect`/`describe`, their reply types in a new

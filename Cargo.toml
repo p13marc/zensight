@@ -11,6 +11,13 @@ members = [
     # concern with no caller-specific types, now shared by the frontend cache
     # and the headless historian.
     "zensight-store",
+    # The fleet's telemetry history as a service (#906, epic #898). A headless
+    # Zenoh application on SensorRunner: it subscribes the telemetry class,
+    # writes zensight-store's tiers, and serves bounded range queries over
+    # them. A host-origin PRODUCER, not a service origin — it writes no
+    # single-writer fleet state, so two of them are ordinary RFC 05 §2.1
+    # fan-in. It must not link zenkey-fleet (see the note on that dependency).
+    "zensight-historian",
     "zensight-correlator",
     "zensight-sensor-core",
     "zensight-exporter-prometheus",

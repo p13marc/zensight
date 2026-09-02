@@ -1,0 +1,85 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",
+    // namespace: "my-deployment",  // OPTIONAL — the deployment base (#466),
+                                    // empty by default. All participants of one
+                                    // deployment must agree on it.
+    connect: [],                    // Endpoints to connect to (for client mode)
+    // listen: ["tcp/0.0.0.0:7451"],
+  },
+
+  // Serialization format for its own state documents. It does NOT re-encode
+  // the telemetry it ingests: what arrives is decoded, tiered and forgotten.
+  serialization: "cbor",
+
+  historian: {
+    // The class selector it subscribes. Base-RELATIVE (#466): the session
+    // applies the deployment namespace, so a selector that spells the base
+    // matches nothing — with a healthy session and an empty database, which is
+    // the failure this default exists to avoid restating wrongly.
+    //
+    // Narrow it to one origin (`v1/h-…/telemetry/**`) for a per-site historian
+    // that should not ingest the whole fleet.
+    key_expr: "v1/*/telemetry/**",
+
+    store: {
+      // Where the tiers live. null → $STATE_DIRECTORY (systemd sets it from
+      // StateDirectory=zensight-historian), else $XDG_STATE_HOME/zensight,
+      // else ~/.local/state/zensight.
+      path: null,
+
+      // Seconds of per-second samples held in memory per series. 600 is ten
+      // minutes: enough for a live chart to be served from the ring, small
+      // enough that ten thousand series is not a gigabyte. The governor halves
+      // this first when the budget tightens.
+      hot_secs: 600,
+
+      retention: {
+        // Days kept per tier. The per-second tier is not persisted at all —
+        // it is the ring above. These are the two that hit the disk.
+        //
+        // 90 days of hour buckets rather than the GUI cache's 365: a year of
+        // hour buckets for a fleet's worth of series is the single biggest
+        // term in the file size, and nobody has yet asked this service a
+        // question a quarter could not answer. #911 measures it; raise it
+        // when a measurement says to, not before.
+        minute_days: 2,
+        hour_days: 90,
+      },
+
+      // Hard ceiling on the database file. When it is passed, prune runs
+      // early and takes the oldest buckets of the coarsest tier first. 0
+      // disables the ceiling and leaves only the per-tier retention.
+      max_db_bytes: 2147483648,   // 2 GiB
+
+      // redb's page cache. Its own default is 1 GiB (#625), which on a 1–2 GB
+      // VM reads as a slow multi-day RSS climb toward OOM.
+      cache_bytes: 67108864,      // 64 MiB
+
+      // Samples buffered before a flush, and the interval that flushes them
+      // regardless. The flush is one transaction, off the runtime.
+      batch_size: 4096,
+      flush_interval_secs: 10,
+
+      // How often retention runs. Not every flush: in steady state each pass
+      // only finds the buckets that aged out since the last one.
+      prune_interval_secs: 300,
+    },
+
+    resources: {
+      // RSS the governor holds this process to (#811/#812). Absent means no
+      // budget and no ladder — which reads as *undeclared*, never as fine.
+      //
+      // A history service is the component that most needs this: it is the one
+      // that holds a database, and the reference fleet is where the sensor
+      // bundle OOM-killed a VM on 2026-08-17.
+      budget_rss_mb: 256,
+    },
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",
+  },
+}

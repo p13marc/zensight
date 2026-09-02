@@ -161,6 +161,7 @@ build:
         -p zensight-sensor-probe \
         -p zensight-sensor-parallax \
         -p zensight-correlator \
+        -p zensight-historian \
         {{ebpf_features}}
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
@@ -351,6 +352,12 @@ parallax: build configure
 # Run the identity correlator (fuses sensor evidence into one HostEntity per host).
 correlator: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-correlator --config {{rundir}}/correlator.json5
+
+# Run the historian (the fleet's telemetry history: ingest + range queries).
+# Its store lands in ~/.local/state/zensight/history.redb unless the config
+# names a path, so it survives a restart of this recipe.
+historian: build configure
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-historian --config {{rundir}}/historian.json5
 
 # Optional Rerun sidecar (evaluation prototype, epic #415), standalone — or add
 # it to the full stack with `just run rerun=live|record|both`.
