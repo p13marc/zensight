@@ -1523,7 +1523,7 @@ pub fn node_health(
 /// Bytes/sec from the last two samples of a monotonic counter series (#391).
 /// `None` on short series, non-advancing clocks, or counter resets (negative
 /// delta) — a reset yields one missing reading, not a bogus spike. Pure.
-pub fn counter_rate(samples: &[crate::store::Sample]) -> Option<f64> {
+pub fn counter_rate(samples: &[zensight_store::Sample]) -> Option<f64> {
     let [.., prev, last] = samples else {
         return None;
     };
@@ -2117,7 +2117,7 @@ mod tests {
 
     #[test]
     fn counter_rate_deltas_and_resets() {
-        use crate::store::Sample;
+        use zensight_store::Sample;
         let s = |ts, value| Sample { ts, value };
         // 1000 bytes over 2 s → 500 B/s (uses the last two samples).
         assert_eq!(

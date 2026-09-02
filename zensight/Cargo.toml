@@ -19,6 +19,9 @@ zenkey = { workspace = true }
 # The fleet engine behind the Fleet view (#745) — GUI only, never a sensor dep.
 zenkey-fleet = { workspace = true }
 zensight-common.workspace = true
+# The tiered metric/log/event store, extracted from this binary in #904.
+# `blob` adds the zblob content-store adapter the debug-report download uses.
+zensight-store = { workspace = true, features = ["blob"] }
 zenoh.workspace = true
 zenoh-ext.workspace = true
 # Large-data (debug-report) download client (#197).
@@ -60,9 +63,6 @@ rfd.workspace = true
 notify-rust.workspace = true
 # Date/time parsing for the absolute chart range picker (#36).
 chrono = "0.4"
-
-# Local tiered time-series store (Plan v3-04 §A): pure-Rust, ACID, zero-copy.
-redb = "4"
 
 # H.264 decode for the opt-in live view (#409); `h264` feature only.
 parallax-pipeline = { workspace = true, features = ["h264"], optional = true }

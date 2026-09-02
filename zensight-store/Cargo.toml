@@ -1,0 +1,35 @@
+[package]
+name = "zensight-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ZenSight tiered time-series store — hot ring, minute/hour redb tiers, log and event tables"
+
+[dependencies]
+zensight-common.workspace = true
+
+# The store itself: pure-Rust, ACID, zero-copy. Pinned at the workspace so the
+# GUI, the logs sensor and this crate can never disagree about the on-disk
+# format they all open.
+redb.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# `PersistentStore::default_path()` — the GUI's `~/.local/share/zensight`
+# location. A headless caller passes its own path and never reaches this.
+dirs.workspace = true
+
+# Content-addressed chunk store (#199, Tier-2). OPTIONAL, and the only part of
+# this crate that is not a time series: `RedbContentStore` exists to give
+# zblob's resumable transfer a place to put chunks, so a consumer that only
+# wants history does not pull the blob stack. The GUI enables it.
+zblob = { workspace = true, optional = true }
+
+[features]
+default = []
+blob = ["dep:zblob"]
+
+[dev-dependencies]
+tempfile.workspace = true

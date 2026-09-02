@@ -42,15 +42,15 @@ fn topo_view(state: &TopologyState, theme: AppTheme) -> iced::Element<'_, Messag
     thread_local! {
         static ENTITIES: std::cell::OnceCell<&'static zensight::entity::EntityStore> =
             const { std::cell::OnceCell::new() };
-        static STORE: std::cell::OnceCell<&'static zensight::store::MetricStore> =
+        static STORE: std::cell::OnceCell<&'static zensight_store::MetricStore> =
             const { std::cell::OnceCell::new() };
     }
     let entities = ENTITIES
         .with(|c| *c.get_or_init(|| Box::leak(Box::new(zensight::entity::EntityStore::default()))));
     let store = STORE.with(|c| {
         *c.get_or_init(|| {
-            Box::leak(Box::new(zensight::store::MetricStore::new(
-                zensight::store::DEFAULT_HOT_CAPACITY,
+            Box::leak(Box::new(zensight_store::MetricStore::new(
+                zensight_store::DEFAULT_HOT_CAPACITY,
                 None,
             )))
         })
@@ -180,8 +180,8 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
 /// provided. The badge text ("+50.0%") is searchable in the simulator (#24).
 #[test]
 fn test_dashboard_card_shows_trend_badge() {
-    use zensight::store::Sample;
     use zensight::view::trend::{self, DeviceSparks, MetricSpark};
+    use zensight_store::Sample;
 
     let mut state = DashboardState::default();
     state.connected = true;

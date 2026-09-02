@@ -74,7 +74,7 @@ pub struct DeviceDetailState {
     /// Pre-restart history seeded from the local tiered store (#22), keyed by
     /// metric name. Merged ahead of live `history` when a chart is opened so a
     /// device view opens pre-populated with trends that survived restart.
-    pub seeded_history: HashMap<String, Vec<crate::store::Sample>>,
+    pub seeded_history: HashMap<String, Vec<zensight_store::Sample>>,
     /// Maximum history size per metric.
     pub max_history: usize,
     /// Currently selected metric for the chart (if any).
@@ -324,7 +324,7 @@ impl DeviceDetailState {
 
     /// Seed restart-survived history loaded from the store (#22). Stored per
     /// metric; merged into a chart when that metric is selected.
-    pub fn seed_history(&mut self, series: Vec<(String, Vec<crate::store::Sample>)>) {
+    pub fn seed_history(&mut self, series: Vec<(String, Vec<zensight_store::Sample>)>) {
         for (metric, samples) in series {
             if samples.is_empty() {
                 continue;
@@ -1955,11 +1955,11 @@ mod tests {
         state.seed_history(vec![(
             "cpu".to_string(),
             vec![
-                crate::store::Sample {
+                zensight_store::Sample {
                     ts: 1_000,
                     value: 10.0,
                 },
-                crate::store::Sample {
+                zensight_store::Sample {
                     ts: 2_000,
                     value: 20.0,
                 },
@@ -1983,15 +1983,15 @@ mod tests {
         state.seed_history(vec![(
             "cpu".to_string(),
             vec![
-                crate::store::Sample {
+                zensight_store::Sample {
                     ts: 1_000,
                     value: 10.0,
                 },
-                crate::store::Sample {
+                zensight_store::Sample {
                     ts: 2_000,
                     value: 99.0,
                 },
-                crate::store::Sample {
+                zensight_store::Sample {
                     ts: 3_000,
                     value: 99.0,
                 },
@@ -2015,7 +2015,7 @@ mod tests {
         // Seeding after the chart is open refreshes it in place.
         state.seed_history(vec![(
             "cpu".to_string(),
-            vec![crate::store::Sample {
+            vec![zensight_store::Sample {
                 ts: 1_000,
                 value: 10.0,
             }],

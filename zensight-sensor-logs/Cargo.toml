@@ -45,7 +45,7 @@ hostname = { workspace = true }
 systemd = { version = "0.10", optional = true, features = ["systemd_v245"] }
 serde_ignored = "0.1.14"
 chrono-tz = "0.10.4"
-redb = "4.1.0"
+redb.workspace = true
 glob = "0.3.4"
 # TLS syslog listener (#550, RFC 5425). Pin the `ring` crypto provider (no
 # aws-lc C build) — matches the rest of the stack's pure-Rust stance.

@@ -14260,7 +14260,6 @@ dependencies = [
  "notify-rust",
  "parallax-pipeline",
  "rand 0.10.2",
- "redb",
  "regex",
  "rfd 0.17.2",
  "serde",
@@ -14276,6 +14275,7 @@ dependencies = [
  "zenoh",
  "zenoh-ext",
  "zensight-common",
+ "zensight-store",
  "zstd",
 ]
 
@@ -14846,6 +14846,20 @@ dependencies = [
  "zenoh",
  "zensight-common",
  "zensight-sensor-core",
+]
+
+[[package]]
+name = "zensight-store"
+version = "0.13.0"
+dependencies = [
+ "dirs",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "zblob",
+ "zensight-common",
 ]
 
 [[package]]

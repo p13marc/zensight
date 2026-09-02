@@ -1,12 +1,16 @@
-//! Local tiered time-series store (Plan v3-04 §A, Plan v3-05 §5).
+//! The tiered time-series store: hot ring, minute/hour redb tiers, and the
+//! log, event and chunk tables that ride the same file.
 //!
-//! Metric history used to live only in an in-memory `VecDeque` (max 500/metric),
-//! lost on restart. This module adds a Netdata-style tiered store:
+//! This was `zensight::store` — a module inside the Iced binary, writing
+//! `~/.local/share/zensight/metrics.redb`, readable by nothing but the GUI
+//! that wrote it (#904). On a fleet that GUI is open for minutes a week, so
+//! the history it holds is mostly gaps. It is a crate now so a headless
+//! service can write the same tiers and serve them to everyone.
 //!
-//! - **Hot tier:** a fixed-size in-memory [`RingBuffer`] of per-second [`Sample`]s
-//!   per metric — O(1) append, bounded, read directly by charts.
-//! - **Warm/cold tiers:** periodic downsample to per-minute / per-hour buckets,
-//!   flushed to a [`redb`]-backed [`PersistentStore`] keyed by
+//! - **Hot tier:** a fixed-size in-memory [`RingBuffer`] of per-second
+//!   [`Sample`]s per metric — O(1) append, bounded, read directly by charts.
+//! - **Warm/cold tiers:** periodic downsample to per-minute / per-hour
+//!   buckets, flushed to a [`redb`]-backed [`PersistentStore`] keyed by
 //!   `(metric_id, tier, bucket_ts)` so trends survive restart.
 //!
 //! Strong typing per the architecture contract: metric paths are interned to a
@@ -14,14 +18,19 @@
 //! record; the `TelemetryValue` → `f64` projection lives in one place
 //! ([`telemetry_to_f64`]).
 //!
-//! **Async discipline:** the in-memory ring append is O(1) and runs inline on the
-//! Iced update thread, but every `redb` read/write is performed off the UI thread
-//! via `Task::future` + `spawn_blocking` (see [`PersistentStore`] which is `Send +
-//! Sync` and cloned behind an `Arc`). The UI thread never blocks on disk I/O.
+//! **Async discipline:** the in-memory ring append is O(1) and runs inline on
+//! the caller's thread (the Iced update thread, in the GUI), but every `redb`
+//! read/write is meant to run off it via `spawn_blocking` — [`PersistentStore`]
+//! is `Send + Sync` and cloned behind an `Arc` precisely so it can. The
+//! batching seam is explicit in the API: `record` / `record_log` /
+//! `record_event` accumulate, `take_*_flush_batch` hand off
+//! `(PersistentStore, rows)`.
 
 // `redb::Error` is a large enum (~160 bytes); propagating it by value in `Result`
 // is the natural, allocation-free API here, so we accept the size.
 #![allow(clippy::result_large_err)]
+
+pub mod rate;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -796,6 +805,12 @@ impl PersistentStore {
     }
 }
 
+// The one part of this crate that is not a time series: the zblob adapter.
+// Gated so a consumer that only wants history (the historian) does not pull
+// the blob stack. The `chunks` TABLE and `PersistentStore`'s chunk methods
+// stay unconditional, so the on-disk file is identical either way and a GUI
+// can open a file a feature-off writer made.
+#[cfg(feature = "blob")]
 /// A redb-backed [`zblob::ContentStore`] (#199): the durable, dedup-and-resume
 /// substrate for Tier-2 directory sync. Wraps a [`PersistentStore`] so chunks share
 /// the one metrics/logs database. The trait is sync; each call is a short blocking
@@ -805,6 +820,12 @@ pub struct RedbContentStore {
     store: PersistentStore,
 }
 
+// The one part of this crate that is not a time series: the zblob adapter.
+// Gated so a consumer that only wants history (the historian) does not pull
+// the blob stack. The `chunks` TABLE and `PersistentStore`'s chunk methods
+// stay unconditional, so the on-disk file is identical either way and a GUI
+// can open a file a feature-off writer made.
+#[cfg(feature = "blob")]
 impl RedbContentStore {
     /// Wrap a [`PersistentStore`] as a content store.
     pub fn new(store: PersistentStore) -> Self {
@@ -817,8 +838,15 @@ impl RedbContentStore {
 /// with the 0.2 bump: dedup is per-algorithm, so keys minted under the old
 /// digest name a different address space and are simply cold — the store
 /// refills on the next fetch rather than pretending they still resolve.
+#[cfg(feature = "blob")]
 const CHUNK_ALGO: &str = "blake3";
 
+// The one part of this crate that is not a time series: the zblob adapter.
+// Gated so a consumer that only wants history (the historian) does not pull
+// the blob stack. The `chunks` TABLE and `PersistentStore`'s chunk methods
+// stay unconditional, so the on-disk file is identical either way and a GUI
+// can open a file a feature-off writer made.
+#[cfg(feature = "blob")]
 impl zblob::ContentStore for RedbContentStore {
     // 0.3's trait returns `io::Result` from the read paths too, so a failing
     // redb read is a reported error rather than a silent "not cached" that
@@ -1966,6 +1994,8 @@ mod tests {
         let _ = std::fs::remove_file(&fresh);
     }
 
+    // Needs the zblob adapter (#904 gated it behind `blob`).
+    #[cfg(feature = "blob")]
     /// The GC contract behind the periodic chunk-cache sweep (#131's chunk
     /// half): chunks referenced by a snapshot tag survive, orphans go, and a
     /// temp-tagged chunk (an in-flight download's) is protected.
@@ -2016,6 +2046,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // Needs the zblob adapter (#904 gated it behind `blob`).
+    #[cfg(feature = "blob")]
     #[test]
     fn chunk_store_round_trip_and_persists() {
         use zblob::ContentStore;

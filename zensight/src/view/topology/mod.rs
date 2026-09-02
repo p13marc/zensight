@@ -1155,7 +1155,7 @@ impl TopologyState {
 pub fn topology_view<'a>(
     state: &'a TopologyState,
     entities: &'a crate::entity::EntityStore,
-    store: &'a crate::store::MetricStore,
+    store: &'a zensight_store::MetricStore,
     theme: AppTheme,
 ) -> Element<'a, Message> {
     let is_dark = matches!(theme, AppTheme::Dark);

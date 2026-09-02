@@ -53,11 +53,11 @@ pub enum Message {
 
     /// Off-thread history pre-load for a device finished (#22): metric name ->
     /// merged (warm/cold) samples to seed the device detail chart on open.
-    DeviceHistoryLoaded(DeviceId, Vec<(String, Vec<crate::store::Sample>)>),
+    DeviceHistoryLoaded(DeviceId, Vec<(String, Vec<zensight_store::Sample>)>),
 
     /// Off-thread log cold-store search-back finished (#107, C9): persisted log
     /// records (newest-first) to merge into the rolling buffer on Logs-view open.
-    LogHistoryLoaded(Vec<crate::store::StoredLog>),
+    LogHistoryLoaded(Vec<zensight_store::StoredLog>),
 
     /// On-demand `@rpc/logs/events` fetch finished (#358): per-line log events
     /// pulled from the logs sensors' rings (all repliers concatenated), to
