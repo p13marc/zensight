@@ -5,12 +5,13 @@
 //! — restarts and OOM kills — are cumulative, so the previous cycle's values
 //! are kept as a baseline and the *rate* rules read the delta.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zensight_common::container::{ContainerInfo, HealthState, SignatureState};
+use zensight_common::relation::{EndpointClaim, RelationKind, RelationshipEvidence};
 use zensight_common::{HostEvidence, QosClass, TelemetryValue};
 use zensight_sensor_core::{AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth};
 
@@ -46,6 +47,11 @@ pub struct Poller {
     /// registries rate-limit and the answer changes on a release cadence.
     upstream_cache: HashMap<String, (Option<String>, Option<bool>)>,
     upstream_at: Option<Instant>,
+    /// The `Runs` claims published last cycle (#916), so a container that
+    /// disappears is *retired* rather than left to age out of the map over the
+    /// family's fifteen-minute TTL — which is exactly the window in which an
+    /// operator looks at the topology after a migration or a redeploy.
+    relations: zensight_sensor_core::relation::RelationSet,
 }
 
 impl Poller {
@@ -60,6 +66,7 @@ impl Poller {
         reporter: Option<Arc<AlertReporter>>,
         health: Arc<SensorHealth>,
         upstream: Option<UpstreamChecker>,
+        relations: zensight_sensor_core::relation::RelationSet,
     ) -> Self {
         let cgroup_root = PathBuf::from(&cfg.cgroup_root);
         Self {
@@ -78,6 +85,7 @@ impl Poller {
             oom_burst_since: HashMap::new(),
             upstream_cache: HashMap::new(),
             upstream_at: None,
+            relations,
         }
     }
 
@@ -313,6 +321,30 @@ impl Poller {
             }
         }
 
+        // One `Runs` claim per container, published as the complete current
+        // set: `sync` retires whatever it stopped seeing in the same pass, so
+        // a removed container leaves the map now rather than in fifteen
+        // minutes' time.
+        {
+            let host_id = zensight_sensor_core::v1::host_id().as_str().to_string();
+            let now_ms = zensight_common::current_timestamp_millis();
+            let claims: Vec<RelationshipEvidence> = containers
+                .iter()
+                .filter(|c| c.is_running())
+                .map(|c| relation(&host_id, c, now_ms))
+                .collect();
+            let out = self.relations.sync(&claims).await;
+            if out.retired > 0 || out.failed > 0 || out.dropped > 0 {
+                tracing::debug!(
+                    published = out.published,
+                    retired = out.retired,
+                    dropped = out.dropped,
+                    failed = out.failed,
+                    "container: relation evidence sync"
+                );
+            }
+        }
+
         for (metric, value) in [
             ("containers/total", containers.len() as f64),
             (
@@ -399,6 +431,41 @@ fn state_key(chunks: &[&str]) -> Option<String> {
             tracing::warn!(chunks = ?chunks, error = %e, "container: not a legal state subject");
             None
         }
+    }
+}
+
+/// A `Runs` claim: this host runs this container (#916).
+///
+/// `from` is a **self-claim by `host_id`** — the strongest end available, and
+/// the reason the catalog can resolve this edge to a real entity rather than
+/// an `External` node. `to` is the observed-device slug plus whatever IPs were
+/// seen, deliberately the same vocabulary as the `evidence/device/{device}`
+/// claim published beside it: a relation claim and an identity claim about one
+/// container then join on the catalog's side without a second naming scheme.
+///
+/// The owning systemd unit rides along as an attr rather than a second edge.
+/// It is a property of *this* containment ("podman started it for
+/// caddy.service"), not an independent relationship, and modelling it as an
+/// edge would double the family's cardinality to say something a tooltip
+/// renders.
+fn relation(host_id: &str, c: &ContainerInfo, now_ms: i64) -> RelationshipEvidence {
+    let mut attrs = BTreeMap::new();
+    if let Some(unit) = &c.unit {
+        attrs.insert("unit".to_string(), unit.clone());
+    }
+    RelationshipEvidence {
+        sensor: "container".to_string(),
+        source: c.name.clone(),
+        kind: RelationKind::Runs,
+        from: EndpointClaim::host(host_id),
+        to: EndpointClaim {
+            device: Some(zenkey::Chunk::slug(&c.name).to_string()),
+            ips: c.ips.clone(),
+            name: Some(c.name.clone()),
+            ..Default::default()
+        },
+        attrs,
+        last_updated: now_ms,
     }
 }
 

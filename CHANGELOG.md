@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Four sensors publish relationship evidence** (#916, part of #899). The
+  graph now has inputs: **pve** a `Hosts` claim per guest, **container** a
+  `Runs` claim per running container, **probe** a `Probes` claim per checked
+  target, **netlink** a `GatewayOf` claim for the default route.
+
+  The bookkeeping around a claim is identical in all four and easy to get
+  subtly wrong in each, so it lives once in
+  `zensight_sensor_core::relation::RelationSet`. Its `sync` takes **the
+  complete current set**, not a delta — a sensor that recomputes its relations
+  each poll then cannot forget to retire something, whereas a delta API makes
+  forgetting the default.
+
+  Three decisions inside it worth naming:
+
+  **It tombstones rather than waiting for the TTL.** The family declares
+  `ttl_s = 900`, so a stale claim does eventually vanish. Relying on that alone
+  would leave a migrated guest on the old node for fifteen minutes — and
+  showing on *both* nodes while the claims overlap. A migration is exactly when
+  someone looks at the map.
+
+  **It owns its publisher, at `QosClass::Evidence`.** Every sensor's
+  `STATE_QOS` is `HealthLiveness` — best-effort, congestion-drop — which is
+  right for a document republished every few seconds and wrong for a tombstone,
+  published exactly once and whose loss produces the stale edge the retire
+  exists to prevent. The alternative, reusing the identity-`evidence` registry,
+  would have tied the topology graph to a flag about *identity* republishing
+  (`container.evidence`, `netlink.evidence.enabled`): an operator turning that
+  off for privacy has no reason to expect the map to empty.
+
+  **It refuses to publish past the declared cardinality**, keeping a
+  deterministic prefix and warning. `cardinality` in the registry is a
+  declaration the conformance judge checks *afterwards*, on someone else's CI
+  run, naming a number rather than a cause; refusing at the seam makes it a
+  bounded, logged, local event. A test asserts the constant and all four TOMLs
+  agree.
+
+  Modelling notes: `pve`'s claim carries the guest's **MACs**, which is the
+  only thing that lets the catalog join the hypervisor's view of a guest to the
+  guest's own sensor — without it the map shows two unrelated machines.
+  `netlink`'s `GatewayOf` runs `from` = gateway → `to` = this host, the
+  opposite of the intuition, because impact flows container → contained and it
+  is the host behind a dead gateway that is unreachable; its gateway end is a
+  bare ip/mac claim, never a `host_id`, so the catalog resolves it to an entity
+  or honestly to `External`. `probe` publishes claims for **failing** targets
+  too: retiring on failure would delete the graph exactly when #918 needs it.
+  `container` puts the owning systemd unit in `attrs` rather than as a second
+  edge — it is a property of that containment, not an independent
+  relationship, and an edge would double the family's cardinality to say what a
+  tooltip renders.
+
+  The pve, container and probe e2e suites assert the new keys on a real bus:
+  that the key chunk **is** the payload's derived `relation_id` (which is what
+  makes a refresh an LWW overwrite rather than a new document), that the near
+  end is a self-claim, and that the far end carries what makes it resolvable.
+  Container asserts three claims for four containers — the exited one is not
+  *run* by this host any more.
+
 - **Impact attribution: which alert is a cause and which forty are symptoms**
   (#918, part of #899). `zensight_common::impact::attribute(edges, firing, down)
   -> Impact` walks the containment graph and returns, per firing alert, what it

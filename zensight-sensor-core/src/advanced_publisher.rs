@@ -239,6 +239,37 @@ impl AdvancedPublisherRegistry {
         self.put_raw(key, payload).await
     }
 
+    /// Tombstone a full key through its cached advanced publisher.
+    ///
+    /// The publisher matters: a `Delete` sent through the session would not
+    /// enter this key's advanced-publisher cache, so a late joiner replaying
+    /// the cache would receive the last `Put` and never learn the document was
+    /// retired. Retiring through the same publisher that wrote it is what
+    /// makes the tombstone as durable as the value it retires.
+    pub async fn tombstone(&self, key: &str) -> Result<()> {
+        {
+            let publishers = self.publishers.read().await;
+            if let Some(publisher) = publishers.get(key) {
+                return publisher.delete().await.map_err(|e| SensorError::Publish {
+                    key: key.to_string(),
+                    message: e.to_string(),
+                });
+            }
+        }
+        self.get_or_create_publisher(key).await?;
+        let publishers = self.publishers.read().await;
+        match publishers.get(key) {
+            Some(publisher) => publisher.delete().await.map_err(|e| SensorError::Publish {
+                key: key.to_string(),
+                message: e.to_string(),
+            }),
+            None => Err(SensorError::Publish {
+                key: key.to_string(),
+                message: "publisher vanished between create and use".into(),
+            }),
+        }
+    }
+
     /// Publish any serializable document to a full key (bypassing the prefix),
     /// via an advanced publisher created on first use for that key.
     ///

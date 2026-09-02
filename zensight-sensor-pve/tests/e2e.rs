@@ -26,6 +26,7 @@ use axum::{Router, extract::State, routing::get};
 use serde_json::{Value, json};
 
 use zensight_common::pve::{PveClusterHealth, PveGuest, PveStoragePool};
+use zensight_common::relation::{RelationKind, RelationshipEvidence};
 use zensight_common::{Alert, AlertState, TelemetryPoint, decode_auto};
 use zensight_sensor_core::{AlertReporter, Publisher};
 
@@ -295,6 +296,10 @@ async fn the_hypervisor_contract_end_to_end() {
         .declare_subscriber("v1/*/telemetry/pve/**")
         .await
         .unwrap();
+    let relations_sub = session
+        .declare_subscriber("v1/*/state/pve/evidence/relation/*")
+        .await
+        .unwrap();
 
     let format = zensight_common::Format::Json;
     let publisher = Publisher::new(session.clone(), "pve", format);
@@ -323,6 +328,7 @@ async fn the_hypervisor_contract_end_to_end() {
         None,
         Some(reporter.clone()),
         health.clone(),
+        zensight_sensor_core::relation::RelationSet::new("pve", session.clone(), format),
     );
 
     // ── Contract 1: the audit's findings arrive as alerts ───────────────────
@@ -446,6 +452,63 @@ async fn the_hypervisor_contract_end_to_end() {
         "an LXC line carries its MAC in hwaddr, not positionally"
     );
     assert_eq!(g201.disks_excluded_from_backup(), vec!["mp0"]);
+
+    // ── The relationship graph (#916) ───────────────────────────────────────
+    //
+    // Three guests, three `Hosts` claims, on the registered key family — and
+    // the far end has to be *resolvable*, which is what the MAC is for. A
+    // claim whose `to` is a bare vmid produces an edge to a node the catalog
+    // can never join to the guest's own sensor, which looks on the map like
+    // two unrelated machines.
+    let mut relations: std::collections::HashMap<u32, RelationshipEvidence> = Default::default();
+    for _ in 0..3 {
+        let (key, _, r) = recv::<RelationshipEvidence>(&relations_sub, "relation claim").await;
+        let r = r.unwrap();
+        assert!(
+            key.contains("/state/pve/evidence/relation/"),
+            "relation claims ride the registered family: {key}"
+        );
+        // The key chunk is the payload's own derived id — that identity is
+        // what makes a refresh an LWW overwrite instead of a new document.
+        assert!(
+            key.ends_with(&r.relation_id()),
+            "key chunk must be the derived relation_id: {key} vs {}",
+            r.relation_id()
+        );
+        assert_eq!(r.kind, RelationKind::Hosts);
+        // `from` is a self-claim by host_id: the strongest end available, and
+        // what lets the catalog resolve this to a real entity.
+        assert!(
+            r.from.host_id.is_some(),
+            "the node end must be a self-claim: {:?}",
+            r.from
+        );
+        let vmid: u32 = r.to.device.as_deref().unwrap().parse().unwrap();
+        relations.insert(vmid, r);
+    }
+    let r140 = &relations[&140];
+    assert_eq!(
+        r140.to.macs,
+        vec!["AA:BB:CC:DD:EE:FF".to_string()],
+        "the guest end carries the MAC, which is the only thing that lets the \
+         catalog join the hypervisor's view of this guest to the guest's own"
+    );
+    assert_eq!(
+        r140.attrs.get("bridge").map(String::as_str),
+        Some("vmbr1"),
+        "the NIC's bridge rides as an attr"
+    );
+    assert_eq!(
+        r140.attrs.get("vlan").map(String::as_str),
+        Some("30"),
+        "and its VLAN tag, which is what makes two guests on one bridge \
+         distinguishable on the map"
+    );
+    assert!(
+        relations.contains_key(&201),
+        "an LXC guest is hosted too: {:?}",
+        relations.keys().collect::<Vec<_>>()
+    );
 
     let mut pools: std::collections::HashMap<String, PveStoragePool> = Default::default();
     for _ in 0..2 {
@@ -573,6 +636,7 @@ async fn the_hypervisor_contract_end_to_end() {
         None,
         Some(reporter.clone()),
         health.clone(),
+        zensight_sensor_core::relation::RelationSet::new("pve", session.clone(), format),
     );
     let sweep2 = poller2.sweep().await.expect("second sweep");
     let g140 = sweep2.guests.iter().find(|g| g.vmid == 140).unwrap();
