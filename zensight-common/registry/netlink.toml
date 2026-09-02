@@ -4,7 +4,7 @@
 # src/map.rs (every metric name), src/events.rs, src/route_history.rs.
 
 [registry]
-version = "1.3"
+version = "1.4"
 app = "zensight"
 convention = 1
 
@@ -840,6 +840,15 @@ type = "SensorInfo"
 ttl_s = 900
 since = "1.0"
 description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/relation/{relation_id}"
+class = "state"
+type = "RelationshipEvidence"
+cardinality = 1024
+ttl_s = 900
+since = "1.4"
+description = "a GatewayOf claim: this gateway serves this host (#915); the catalog resolves both ends into an @catalog edge"
 
 [[subject]]
 path = "evidence/device/{device}"

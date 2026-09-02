@@ -398,6 +398,61 @@ pub fn all_assertion_wildcard() -> String {
     registry::catalog::Family::Assertion.selector().into()
 }
 
+/// Build the edge key (#915): one resolved relationship, published by the
+/// catalog as ordinary catalog state.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::edge_key;
+///
+/// assert_eq!(
+///     edge_key("e-0123456789abcdef"),
+///     "v1/@catalog/state/edge/e-0123456789abcdef"
+/// );
+/// ```
+pub fn edge_key(edge_id: &str) -> String {
+    // Ids are `e-<16hex>` from `Edge::edge_id` — already chunk-legal, so the
+    // generated constructor's slug is a no-op.
+    registry::catalog::key(&registry::catalog::Subject::edge(edge_id)).into()
+}
+
+/// Wildcard over the edge family — what the GUI subscribes to, and what the
+/// catalog re-seeds from.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_edge_wildcard;
+///
+/// assert_eq!(all_edge_wildcard(), "v1/@catalog/state/edge/*");
+/// ```
+pub fn all_edge_wildcard() -> String {
+    registry::catalog::Family::Edge.selector().into()
+}
+
+/// The key a late joiner GETs to seed the full current edge set.
+///
+/// Identical to [`all_edge_wildcard`] and separate on purpose, matching
+/// [`entities_query_key`]: RFC 05 §4 says the seed IS the state selector, and
+/// naming the two uses apart is what keeps a later change to one from silently
+/// changing the other.
+pub fn edges_query_key() -> String {
+    registry::catalog::Family::Edge.selector().into()
+}
+
+/// Build a relationship-evidence key (#915) for a producer's claim.
+///
+/// Fallible, and deliberately so: the subject must be registered for the
+/// producer publishing it. A sensor that has not declared the family in its
+/// registry TOML cannot publish into it, which is the same rule
+/// `v1::for_producer(..).state_key(..)` enforces at the sensor seam — the
+/// ordering between #915 and #916 is held by the code, not only by the plan.
+pub fn relation_evidence_key(producer: &str, relation_id: &str) -> Option<String> {
+    crate::v1::for_producer(producer)
+        .state_key(&["evidence", "relation", relation_id])
+        .ok()
+        .map(Into::into)
+}
+
 /// Build a wildcard key expression for the whole entity keyspace — the
 /// correlator's single-writer materialized view (#305).
 ///

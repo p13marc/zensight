@@ -45,6 +45,9 @@ kind = "json-schema"
 [types.DetectorConfig]
 kind = "json-schema"
 
+[types.Edge]
+kind = "json-schema"
+
 [types.ErrorReport]
 kind = "json-schema"
 
@@ -100,6 +103,9 @@ kind = "json-schema"
 kind = "json-schema"
 
 [types.RegistrySlice]
+kind = "json-schema"
+
+[types.RelationshipEvidence]
 kind = "json-schema"
 
 [types.SensorInfo]

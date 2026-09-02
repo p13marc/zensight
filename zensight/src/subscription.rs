@@ -804,8 +804,18 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
             | CommonState::EvidenceNames { .. }
             | CommonState::CatalogPdns { .. },
         )
+        // A relation claim is likewise the catalog's input: the GUI reads the
+        // resolved `edge/{edge_id}` documents, never the raw claims, for the
+        // same reason it reads entities rather than identity evidence.
         | ZensightState::Artifact { .. }
-        | ZensightState::CatalogAssertion { .. } => None,
+        | ZensightState::CatalogAssertion { .. }
+        | ZensightState::EvidenceRelation { .. } => None,
+        // #919 wires this to the topology view, replacing the GUI-side edge
+        // derivation. Listed explicitly rather than swept into the arm above:
+        // an edge document IS for the GUI, and a `_ => None` here would have
+        // let the family land silently and look like a catalog that publishes
+        // nothing.
+        ZensightState::CatalogEdge { .. } => None,
     }
 }
 

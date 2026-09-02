@@ -20,6 +20,18 @@ pub enum ZensightState<'a> {
     Artifact { kind: &'a str },
     /// Catalog `state/assertion/{id}` — operator identity assertion.
     CatalogAssertion { id: &'a str },
+    /// Catalog `state/edge/{edge_id}` — a resolved relationship (#915).
+    ///
+    /// Refined here rather than through `zenkey::CommonState` for the same
+    /// reason as [`ZensightState::CatalogAssertion`]: `CommonState` is a
+    /// closed RFC enum in an external crate, so a new variant costs a zenkey
+    /// release. If the RFC decides the family is genuinely cross-producer
+    /// (zenkey#416), this moves; until then the code and the RFC disagree, on
+    /// purpose and in writing.
+    CatalogEdge { edge_id: &'a str },
+    /// Per-sensor `state/<producer>/evidence/relation/{relation_id}` — one
+    /// sensor's claim that two things are related (#915).
+    EvidenceRelation { relation_id: &'a str },
     /// SNMP `state/snmp/{device}/interfaces` — joined interface table (#529).
     SnmpInterfaces { device: &'a str },
     /// SNMP `state/snmp/discovery` — subnet-discovery report (#541/#579).
@@ -38,6 +50,17 @@ impl<'a> ZensightState<'a> {
             }
             AnySubject::Catalog(registry::catalog::Subject::Assertion { id }) => {
                 Some(ZensightState::CatalogAssertion { id })
+            }
+            AnySubject::Catalog(registry::catalog::Subject::Edge { edge_id }) => {
+                Some(ZensightState::CatalogEdge { edge_id })
+            }
+            AnySubject::Container(registry::container::Subject::EvidenceRelation {
+                relation_id,
+            })
+            | AnySubject::Netlink(registry::netlink::Subject::EvidenceRelation { relation_id })
+            | AnySubject::Probe(registry::probe::Subject::EvidenceRelation { relation_id })
+            | AnySubject::Pve(registry::pve::Subject::EvidenceRelation { relation_id }) => {
+                Some(ZensightState::EvidenceRelation { relation_id })
             }
             AnySubject::Snmp(registry::snmp::Subject::Interfaces { device }) => {
                 Some(ZensightState::SnmpInterfaces { device })

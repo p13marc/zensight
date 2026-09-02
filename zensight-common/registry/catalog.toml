@@ -10,7 +10,7 @@
 # nothing serves — the mirror image of the advertised-but-unserved finding in #467.
 
 [registry]
-version = "1.2"
+version = "1.3"
 app = "zensight"
 convention = 1
 
@@ -48,6 +48,15 @@ cardinality = 100000
 ttl_s = 86400
 since = "1.0"
 description = "accumulated IP<->name record; history = storage capture (RFC 06 §5.2; population-budgeted)"
+
+[[subject]]
+path = "edge/{edge_id}"
+class = "state"
+type = "Edge"
+cardinality = 50000
+ttl_s = 900
+since = "1.3"
+description = "resolved relationship between two endpoints (#915); the catalog's conclusion from evidence/relation claims, tombstoned when the last observer stops claiming it"
 
 [[subject]]
 path = "assertion/{id}"

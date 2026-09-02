@@ -18,7 +18,7 @@
 # different threat model, the same argument the pve slice makes (#818).
 
 [registry]
-version = "1.0"
+version = "1.1"
 app = "zensight"
 convention = 1
 
@@ -208,6 +208,15 @@ cardinality = 512
 ttl_s = 900
 since = "1.0"
 description = "the container as the runtime and the kernel jointly know it: image ref + digest, healthcheck state (incl. never-ran), restart count, exit code, ports, mounts, restart policy, cgroup resources, and the systemd unit that owns it"
+
+[[subject]]
+path = "evidence/relation/{relation_id}"
+class = "state"
+type = "RelationshipEvidence"
+cardinality = 1024
+ttl_s = 900
+since = "1.1"
+description = "a Runs claim: this host runs this container (#915); the catalog resolves both ends into an @catalog edge"
 
 [[subject]]
 path = "evidence/device/{device}"

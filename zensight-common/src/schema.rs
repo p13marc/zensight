@@ -64,6 +64,12 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::HostEntity>("HostEntity")
         .json::<crate::AliasRecord>("AliasRecord")
         .json::<crate::OperatorAssertion>("OperatorAssertion")
+        // The relationship model (#915): the claim a sensor publishes and the
+        // conclusion the catalog publishes from it. Both fully derived — they
+        // are defined in this crate precisely so every consumer of the graph
+        // reads one schema rather than re-deriving the shape.
+        .json::<crate::RelationshipEvidence>("RelationshipEvidence")
+        .json::<crate::Edge>("Edge")
         .json::<crate::PdnsRecord>("PdnsRecord")
         .json::<crate::StreamStatus>("StreamStatus")
         .json::<crate::stream::FrameMeta>("FrameMeta")

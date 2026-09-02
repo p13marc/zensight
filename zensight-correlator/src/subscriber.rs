@@ -139,10 +139,44 @@ fn parse_host_evidence_key(key: &str) -> Option<(String, String)> {
     }
 }
 
+/// Whether a key under `evidence/**` is a *host identity* claim — the only
+/// thing [`handle_host`] may decode.
+///
+/// Dispatches on the refined subject, not on a substring of the key. That
+/// distinction is load-bearing. The selector this subscriber uses is
+/// `all_evidence_wildcard()` = `v1/*/state/*/evidence/**` (a hand-spelled
+/// union of three families), so **every** evidence subject reaches here,
+/// including ones that are not host identity at all. The previous filter
+/// excluded exactly one subtree by substring and fed everything else to
+/// `decode::<HostEvidence>`.
+///
+/// `HostEvidence` carries no `deny_unknown_fields` and requires only `sensor`
+/// and `source`, both of which a relationship claim naturally has (#915). So
+/// the moment relation evidence started publishing, every one of those
+/// documents would have decoded cleanly as a host-identity claim and been
+/// inserted into the `EvidenceStore` — where it becomes input to the
+/// union-find that decides which machines are the same machine. No error, no
+/// warning: entities silently fusing or splitting, in the one component whose
+/// entire job is being deterministic.
+///
+/// An allow-list of subjects makes the next family added under `evidence/**`
+/// inert here by default, which is the safe direction to fail.
+fn is_host_identity_subject(key: &str) -> bool {
+    let Some((_, _, subject)) = zensight_common::keyexpr::refine_key(key) else {
+        return false;
+    };
+    matches!(
+        subject.common_state(),
+        Some(zenkey::CommonState::EvidenceSelf) | Some(zenkey::CommonState::EvidenceDevice { .. })
+    )
+}
+
 async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
     let key = sample.key_expr().as_str();
-    // The names subtree is handled by its own subscriber.
-    if key.contains("/evidence/names/") {
+    // Only `evidence/self` and `evidence/device/{device}` are host identity.
+    // `evidence/names/**` has its own subscriber; `evidence/relation/**` is
+    // the catalog's graph input and must never reach the identity store.
+    if !is_host_identity_subject(key) {
         return;
     }
     if !is_put(sample) {
@@ -198,7 +232,74 @@ async fn handle_name(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_host_evidence_key;
+    use super::{is_host_identity_subject, parse_host_evidence_key};
+
+    /// The identity handler accepts exactly the two host-identity subjects and
+    /// nothing else under `evidence/**`.
+    ///
+    /// This is the guard on a silent-corruption path, so it is worth stating
+    /// what it prevents. The subscriber's selector is
+    /// `v1/*/state/*/evidence/**`, so every evidence subject arrives here.
+    /// `HostEvidence` has no `deny_unknown_fields` and requires only `sensor`
+    /// and `source` — which a `RelationshipEvidence` document also has. Fed to
+    /// `decode::<HostEvidence>`, a relation claim would deserialize cleanly and
+    /// be inserted into the store that feeds the identity union-find: entities
+    /// fusing or splitting with no error and no log line. The old filter
+    /// excluded one subtree by substring, so this held only for as long as
+    /// `evidence/**` had exactly three families in it.
+    #[test]
+    fn only_self_and_device_evidence_reach_the_identity_store() {
+        for k in [
+            "v1/h-3fa9c2d41b7e/state/netlink/evidence/self",
+            "v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1",
+            "v1/h-3fa9c2d41b7e/state/netring/evidence/device/aa-bb-cc-00-00-02",
+        ] {
+            assert!(is_host_identity_subject(k), "must be accepted: {k}");
+        }
+        for k in [
+            // Its own subscriber owns this one.
+            "v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-5",
+            // #915: graph input, never identity input. The whole point.
+            "v1/h-3fa9c2d41b7e/state/pve/evidence/relation/r-0123456789abcdef",
+            "v1/h-3fa9c2d41b7e/state/container/evidence/relation/r-0123456789abcdef",
+            "v1/h-3fa9c2d41b7e/state/probe/evidence/relation/r-0123456789abcdef",
+            "v1/h-3fa9c2d41b7e/state/netlink/evidence/relation/r-0123456789abcdef",
+            // Not a subject at all.
+            "v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1/extra",
+            "not/a/key",
+        ] {
+            assert!(!is_host_identity_subject(k), "must be rejected: {k}");
+        }
+    }
+
+    /// The trap this guards, demonstrated rather than asserted in the abstract:
+    /// a real relation document really does decode as `HostEvidence`.
+    ///
+    /// If this ever fails because `RelationshipEvidence` stopped carrying
+    /// `sensor`/`source`, the guard above is still correct and this test should
+    /// be deleted, not "fixed" — but until then it is the reason the guard is
+    /// structural instead of a field check.
+    #[test]
+    fn a_relation_document_would_have_decoded_as_host_evidence() {
+        use zensight_common::relation::{EndpointClaim, RelationKind, RelationshipEvidence};
+        let ev = RelationshipEvidence {
+            sensor: "pve".into(),
+            source: "node1".into(),
+            kind: RelationKind::Hosts,
+            from: EndpointClaim::host("h-0123456789ab"),
+            to: EndpointClaim::device("101"),
+            attrs: Default::default(),
+            last_updated: 1,
+        };
+        let bytes = serde_json::to_vec(&ev).unwrap();
+        let as_host: Result<zensight_common::HostEvidence, _> = serde_json::from_slice(&bytes);
+        assert!(
+            as_host.is_ok(),
+            "the premise of the guard: a relation claim IS a structurally valid \
+             HostEvidence, so only the subject can tell them apart"
+        );
+        assert_eq!(as_host.unwrap().sensor, "pve");
+    }
 
     #[test]
     fn parses_host_evidence_key() {
