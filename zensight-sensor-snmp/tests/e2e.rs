@@ -522,7 +522,7 @@ fn v3_security(
 async fn v3_no_auth_no_priv() {
     let ok = v3_roundtrip(
         v3_security(AuthProtocol::None, None, PrivProtocol::None, None),
-        |b| b.usm_user("monitor", |u| u),
+        |b| b.usm_user("monitor", Ok).expect("noAuthNoPriv user"),
     )
     .await;
     assert!(ok);
@@ -537,7 +537,10 @@ async fn v3_auth_no_priv_sha1() {
             PrivProtocol::None,
             None,
         ),
-        |b| b.usm_user("monitor", |u| u.auth(AgentAuth::Sha1, b"authpass123")),
+        |b| {
+            b.usm_user("monitor", |u| u.auth(AgentAuth::Sha1, b"authpass123"))
+                .expect("v3 user")
+        },
     )
     .await;
     assert!(ok);
@@ -552,7 +555,10 @@ async fn v3_auth_no_priv_sha256() {
             PrivProtocol::None,
             None,
         ),
-        |b| b.usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123")),
+        |b| {
+            b.usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123"))
+                .expect("v3 user")
+        },
     )
     .await;
     assert!(ok);
@@ -576,6 +582,7 @@ async fn v3_auth_priv_sha1_aes128() {
                     b"privpass123",
                 )
             })
+            .expect("v3 user")
         },
     )
     .await;
@@ -600,6 +607,7 @@ async fn v3_auth_priv_sha256_aes128() {
                     b"privpass123",
                 )
             })
+            .expect("v3 user")
         },
     )
     .await;
@@ -620,10 +628,11 @@ async fn v3_auth_priv_sha256_aes256() {
                 u.auth_priv(
                     AgentAuth::Sha256,
                     b"authpass123",
-                    AgentPriv::Aes256,
+                    AgentPriv::Aes256Blumenthal,
                     b"privpass123",
                 )
             })
+            .expect("v3 user")
         },
     )
     .await;
@@ -639,7 +648,10 @@ async fn v3_wrong_auth_password_yields_nothing() {
             PrivProtocol::None,
             None,
         ),
-        |b| b.usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123")),
+        |b| {
+            b.usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123"))
+                .expect("v3 user")
+        },
     )
     .await;
     assert!(!ok, "wrong auth password must not produce telemetry");
@@ -663,6 +675,7 @@ async fn v3_wrong_priv_password_yields_nothing() {
                     b"privpass123",
                 )
             })
+            .expect("v3 user")
         },
     )
     .await;
@@ -671,12 +684,18 @@ async fn v3_wrong_priv_password_yields_nothing() {
 
 /// Engine re-discovery after the agent restarts with a fresh engine identity.
 /// The snmp2 persistent v3 session could not resynchronize; async-snmp can.
+/// 0.18: a notification sink carries an operator-facing id.
+fn sink_id() -> async_snmp::agent::NotificationSinkId {
+    async_snmp::agent::NotificationSinkId::try_from(b"zensight-test-sink").expect("a valid sink id")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v3_engine_rediscovery_after_agent_restart() {
     let provision = |engine: &'static [u8]| {
         move |b: async_snmp::AgentBuilder| {
             b.authoritative_engine(test_engine(engine.to_vec()))
                 .usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123"))
+                .expect("v3 user")
         }
     };
 
@@ -733,6 +752,7 @@ async fn v3_configured_engine_id_polls() {
     let ok = v3_roundtrip(security, |b| {
         b.authoritative_engine(test_engine(ENGINE.to_vec()))
             .usm_user("monitor", |u| u.auth(AgentAuth::Sha256, b"authpass123"))
+            .expect("v3 user")
     })
     .await;
     assert!(ok, "pre-seeded engine id must poll successfully");
@@ -1286,7 +1306,11 @@ async fn vendor_mib_dir_names_enums_and_units() {
     mib.set("1.3.6.1.4.1.4242.1.0", Value::Integer(42));
     mib.set("1.3.6.1.4.1.4242.2.1.2.7", Value::Integer(3));
     mib.set("1.3.6.1.4.1.4242.2.1.3.7", Value::Counter64(1_000));
-    let agent = SimAgent::start_with(mib.clone(), |b| {
+    // 0.18 validates GETNEXT/GETBULK candidates against the handler that
+    // produced them: the mib-2 slot must not answer with enterprise OIDs, so
+    // the vendor MIB is registered under its own prefix only and the mib-2
+    // slot stays empty.
+    let agent = SimAgent::start_with(SimMib::new(), |b| {
         b.community(b"public").handler(
             harness::oid("1.3.6.1.4.1"),
             std::sync::Arc::new(mib.clone()),
@@ -1451,8 +1475,11 @@ async fn trap_v2c_event_alert_lifecycle() {
 
     // A sim agent that sends notifications at our listener.
     let agent = SimAgent::start_with(SimMib::new(), |b| {
-        b.community(b"public")
-            .trap_sink(rig.addr.to_string(), async_snmp::Auth::v2c("public"))
+        b.community(b"public").trap_sink(
+            sink_id(),
+            rig.addr.to_string(),
+            async_snmp::Auth::v2c("public"),
+        )
     })
     .await;
 
@@ -1460,11 +1487,15 @@ async fn trap_v2c_event_alert_lifecycle() {
         harness::oid(IF_INDEX_1),
         Value::Integer(1),
     )];
-    agent
+    let outcome = agent
         .agent()
         .send_trap(&harness::oid(LINK_DOWN), 4200, varbinds.clone())
-        .await
-        .expect("send linkDown");
+        .await;
+    assert!(
+        outcome.all_succeeded(),
+        "trap send failed: {:?}",
+        outcome.failures().collect::<Vec<_>>()
+    );
 
     let (key, event) = next_event(&rig).await;
     assert!(key.contains("/events/snmp/127-0-0-1/trap/"), "{key}");
@@ -1496,11 +1527,15 @@ async fn trap_v2c_event_alert_lifecycle() {
     );
 
     // linkUp resolves exactly that alert.
-    agent
+    let outcome = agent
         .agent()
         .send_trap(&harness::oid(LINK_UP), 4300, varbinds)
-        .await
-        .expect("send linkUp");
+        .await;
+    assert!(
+        outcome.all_succeeded(),
+        "trap send failed: {:?}",
+        outcome.failures().collect::<Vec<_>>()
+    );
     let (_, up_event) = next_event(&rig).await;
     assert_eq!(up_event.kind, "trap/1.3.6.1.6.3.1.1.5.4");
     // #651: the clearing trap links to the SAME alert it cleared, so an
@@ -1551,7 +1586,11 @@ async fn inform_v2c_is_acknowledged() {
 
     let agent = SimAgent::start_with(SimMib::new(), |b| {
         b.community(b"public")
-            .trap_sink(rig.addr.to_string(), async_snmp::Auth::v2c("public"))
+            .trap_sink(
+                sink_id(),
+                rig.addr.to_string(),
+                async_snmp::Auth::v2c("public"),
+            )
             .inform_timeout(Duration::from_secs(2))
     })
     .await;
@@ -1561,7 +1600,7 @@ async fn inform_v2c_is_acknowledged() {
     // one that asserts the acknowledgement came back — #663.
     let outcome = agent
         .agent()
-        .send_inform_detailed(&harness::oid(LINK_DOWN), 100, Vec::new())
+        .send_inform(&harness::oid(LINK_DOWN), 100, Vec::new())
         .await;
     let failures: Vec<_> = outcome.failures().collect();
     assert!(
@@ -1592,27 +1631,33 @@ async fn trap_v3_authpriv_end_to_end() {
     })
     .await;
 
-    let sink_auth: async_snmp::Auth = async_snmp::Auth::usm("trapuser")
+    let sink_auth: async_snmp::Auth = async_snmp::v3::UsmConfig::new(b"trapuser".to_vec())
         .auth_priv(
             AgentAuth::Sha256,
             "authpass123",
             AgentPriv::Aes128,
             "privpass123",
         )
+        .expect("sink credentials")
         .into();
     let agent = SimAgent::start_with(SimMib::new(), |b| {
         // 0.17: a v3 trap sink makes the agent authoritative — engine required.
         b.community(b"public")
             .authoritative_engine(test_engine(b"\x80\x00\x00\x00\x01trapsend".to_vec()))
-            .trap_sink(rig.addr.to_string(), sink_auth)
+            .trap_sink(sink_id(), rig.addr.to_string(), sink_auth)
     })
     .await;
 
-    agent
+    let outcome = agent
         .agent()
         .send_trap(&harness::oid(LINK_DOWN), 7, Vec::new())
-        .await
-        .expect("send v3 trap");
+        .await;
+
+    assert!(
+        outcome.all_succeeded(),
+        "trap send failed: {:?}",
+        outcome.failures().collect::<Vec<_>>()
+    );
 
     let (_, event) = next_event(&rig).await;
     assert_eq!(event.fields["trap_oid"], LINK_DOWN);
@@ -1663,18 +1708,19 @@ async fn trap_v3_engine_identity_survives_a_restart() {
         "a v3 receiver has an authoritative engine id"
     );
 
-    let sink_auth: async_snmp::Auth = async_snmp::Auth::usm("trapuser")
+    let sink_auth: async_snmp::Auth = async_snmp::v3::UsmConfig::new(b"trapuser".to_vec())
         .auth_priv(
             AgentAuth::Sha256,
             "authpass123",
             AgentPriv::Aes128,
             "privpass123",
         )
+        .expect("sink credentials")
         .into();
     let agent = SimAgent::start_with(SimMib::new(), |b| {
         b.community(b"public")
             .authoritative_engine(test_engine(b"\x80\x00\x00\x00\x01informer".to_vec()))
-            .trap_sink(addr.to_string(), sink_auth)
+            .trap_sink(sink_id(), addr.to_string(), sink_auth)
             .inform_timeout(Duration::from_secs(3))
     })
     .await;
@@ -1684,7 +1730,7 @@ async fn trap_v3_engine_identity_survives_a_restart() {
     // the detailed form is the only one that asserts anything.
     let outcome = agent
         .agent()
-        .send_inform_detailed(&harness::oid(LINK_DOWN), 11, Vec::new())
+        .send_inform(&harness::oid(LINK_DOWN), 11, Vec::new())
         .await;
     let failures: Vec<_> = outcome.failures().collect();
     assert!(
@@ -1712,7 +1758,7 @@ async fn trap_v3_engine_identity_survives_a_restart() {
     // Second inform from the SAME sender, still holding the cached engine id.
     let outcome = agent
         .agent()
-        .send_inform_detailed(&harness::oid(LINK_DOWN), 12, Vec::new())
+        .send_inform(&harness::oid(LINK_DOWN), 12, Vec::new())
         .await;
     let failures: Vec<_> = outcome.failures().collect();
     assert!(
@@ -1737,15 +1783,22 @@ async fn trap_community_filter_rejects() {
     .await;
 
     let agent = SimAgent::start_with(SimMib::new(), |b| {
-        b.community(b"public")
-            .trap_sink(rig.addr.to_string(), async_snmp::Auth::v2c("wrong"))
+        b.community(b"public").trap_sink(
+            sink_id(),
+            rig.addr.to_string(),
+            async_snmp::Auth::v2c("wrong"),
+        )
     })
     .await;
-    agent
+    let outcome = agent
         .agent()
         .send_trap(&harness::oid(LINK_DOWN), 1, Vec::new())
-        .await
-        .expect("send");
+        .await;
+    assert!(
+        outcome.all_succeeded(),
+        "trap send failed: {:?}",
+        outcome.failures().collect::<Vec<_>>()
+    );
 
     let got = tokio::time::timeout(Duration::from_secs(2), rig.event_sub.recv_async()).await;
     assert!(got.is_err(), "mismatched community must not publish");

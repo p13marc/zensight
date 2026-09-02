@@ -105,8 +105,32 @@ impl TrapReceiver {
                     engine_state = Some((hex_encode(engine.engine_id()), engine.engine_boots()));
                     builder = builder.authoritative_engine(engine);
                     for user in &self.config.users {
-                        builder = usm_user(builder, user);
+                        builder = usm_user(builder, user)?;
                     }
+                    // 0.18 asks for an explicit acceptance policy once a USM
+                    // user exists, because a keyed user also *accepts* lower
+                    // levels — down to noAuthNoPriv, where the username and
+                    // the content are unverified claims. The policy here: a
+                    // v3 notification must arrive at least at the level its
+                    // user is configured for (an authPriv user's traps must
+                    // be authPriv), an unknown user is refused, and v1/v2c
+                    // are what the community filter already admitted.
+                    let minimum: HashMap<Vec<u8>, async_snmp::SecurityLevel> = self
+                        .config
+                        .users
+                        .iter()
+                        .map(|u| (u.username.clone().into_bytes(), required_level(u)))
+                        .collect();
+                    builder = builder.acceptance_policy(move |n| {
+                        use async_snmp::notification::NotificationAcceptance;
+                        let Some(received) = n.security_level else {
+                            return NotificationAcceptance::Accept; // v1/v2c
+                        };
+                        match n.username.and_then(|name| minimum.get(name)) {
+                            Some(min) if received >= *min => NotificationAcceptance::Accept,
+                            _ => NotificationAcceptance::Reject,
+                        }
+                    });
                 }
                 None => {
                     // The USM users are dropped with the engine on purpose:
@@ -145,46 +169,56 @@ impl TrapReceiver {
     }
 }
 
+/// The security level a configured user's notifications must carry: what
+/// the credentials say, never less.
+fn required_level(user: &SnmpV3Security) -> async_snmp::SecurityLevel {
+    use async_snmp::SecurityLevel;
+    match (user.auth_protocol, user.priv_protocol) {
+        (AuthProtocol::None, _) => SecurityLevel::NoAuthNoPriv,
+        (_, PrivProtocol::None) => SecurityLevel::AuthNoPriv,
+        _ => SecurityLevel::AuthPriv,
+    }
+}
+
 /// Map a config v3 user onto the receiver builder.
 fn usm_user(
     builder: async_snmp::notification::NotificationReceiverBuilder,
     user: &SnmpV3Security,
-) -> async_snmp::notification::NotificationReceiverBuilder {
+) -> Result<async_snmp::notification::NotificationReceiverBuilder> {
     let auth_password = user.auth_password.clone().unwrap_or_default();
     let priv_password = user.priv_password.clone().unwrap_or_default();
     let auth_protocol = user.auth_protocol;
     let priv_protocol = user.priv_protocol;
-    builder.usm_user(user.username.clone(), move |mut u| {
-        let auth = match auth_protocol {
-            AuthProtocol::None => None,
-            AuthProtocol::Md5 => Some(async_snmp::AuthProtocol::Md5),
-            AuthProtocol::Sha1 => Some(async_snmp::AuthProtocol::Sha1),
-            AuthProtocol::Sha224 => Some(async_snmp::AuthProtocol::Sha224),
-            AuthProtocol::Sha256 => Some(async_snmp::AuthProtocol::Sha256),
-            AuthProtocol::Sha384 => Some(async_snmp::AuthProtocol::Sha384),
-            AuthProtocol::Sha512 => Some(async_snmp::AuthProtocol::Sha512),
-        };
-        if let Some(proto) = auth {
-            let privacy = match priv_protocol {
-                PrivProtocol::None => None,
-                PrivProtocol::Des => Some(async_snmp::PrivProtocol::Des),
-                PrivProtocol::Aes128 => Some(async_snmp::PrivProtocol::Aes128),
-                PrivProtocol::Aes192 => Some(async_snmp::PrivProtocol::Aes192),
-                PrivProtocol::Aes256 => Some(async_snmp::PrivProtocol::Aes256),
+    let username = user.username.clone();
+    // 0.18: credentials are validated against the compiled crypto backend as
+    // they are set, so a user this build cannot serve is refused here — at
+    // bind, with the name — rather than failing every inform later.
+    builder
+        .usm_user(user.username.clone(), move |mut u| {
+            let auth = match auth_protocol {
+                AuthProtocol::None => None,
+                AuthProtocol::Md5 => Some(async_snmp::AuthProtocol::Md5),
+                AuthProtocol::Sha1 => Some(async_snmp::AuthProtocol::Sha1),
+                AuthProtocol::Sha224 => Some(async_snmp::AuthProtocol::Sha224),
+                AuthProtocol::Sha256 => Some(async_snmp::AuthProtocol::Sha256),
+                AuthProtocol::Sha384 => Some(async_snmp::AuthProtocol::Sha384),
+                AuthProtocol::Sha512 => Some(async_snmp::AuthProtocol::Sha512),
             };
-            // 0.17: authPriv is one constructor — `.privacy()` is gone.
-            u = match privacy {
-                Some(cipher) => u.auth_priv(
-                    proto,
-                    auth_password.as_bytes(),
-                    cipher,
-                    priv_password.as_bytes(),
-                ),
-                None => u.auth(proto, auth_password.as_bytes()),
-            };
-        }
-        u
-    })
+            if let Some(proto) = auth {
+                // authPriv is one constructor — `.privacy()` is gone (0.17).
+                u = match crate::poller::priv_cipher(priv_protocol) {
+                    Some(cipher) => u.auth_priv(
+                        proto,
+                        auth_password.as_bytes(),
+                        cipher,
+                        priv_password.as_bytes(),
+                    )?,
+                    None => u.auth(proto, auth_password.as_bytes())?,
+                };
+            }
+            Ok(u)
+        })
+        .map_err(|e| anyhow::anyhow!("trap listener: v3 user {username}: {e}"))
 }
 
 /// A bound trap listener, ready to run.
@@ -230,8 +264,16 @@ impl BoundTrapReceiver {
     pub async fn run(self) -> Result<()> {
         loop {
             match self.receiver.recv().await {
-                Ok((notification, source)) => {
-                    self.inner.handle(notification, source).await;
+                // 0.18: an owning record — the notification, its source, and
+                // for an inform the acknowledgement outcome. A failed ack is
+                // the sender's problem to retry; the event is still ours.
+                Ok(received) => {
+                    if let Some(ack) = &received.inform_ack {
+                        tracing::trace!(source = %received.source, ?ack, "inform acknowledged");
+                    }
+                    self.inner
+                        .handle(received.notification, received.source)
+                        .await;
                 }
                 Err(e) => {
                     // Malformed/unauthenticated datagrams are logged, not fatal.
@@ -555,11 +597,12 @@ fn authoritative_engine(path: Option<&Path>) -> Result<Option<async_snmp::Author
              using a per-start identity. Every inform sender will re-handshake after a \
              restart of this sensor."
         );
-        let engine =
-            async_snmp::AuthoritativeEngine::install(async_snmp::generate_engine_id(), |_| {
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .map_err(|e| anyhow::anyhow!("v3 receiver engine setup failed: {e}"))?;
+        let engine_id = async_snmp::generate_engine_id()
+            .map_err(|e| anyhow::anyhow!("v3 receiver engine id: {e}"))?;
+        let engine = async_snmp::AuthoritativeEngine::install(engine_id, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map_err(|e| anyhow::anyhow!("v3 receiver engine setup failed: {e}"))?;
         return Ok(Some(engine));
     };
 
@@ -578,7 +621,11 @@ fn authoritative_engine(path: Option<&Path>) -> Result<Option<async_snmp::Author
     // by a sender months later.
     let built = match load_engine_state(path) {
         Some(previous) => async_snmp::AuthoritativeEngine::restart(previous, persist),
-        None => async_snmp::AuthoritativeEngine::install(async_snmp::generate_engine_id(), persist),
+        None => {
+            let engine_id = async_snmp::generate_engine_id()
+                .map_err(|e| anyhow::anyhow!("v3 receiver engine id: {e}"))?;
+            async_snmp::AuthoritativeEngine::install(engine_id, persist)
+        }
     };
     match built {
         Ok(engine) => Ok(Some(engine)),

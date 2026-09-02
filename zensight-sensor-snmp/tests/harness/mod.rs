@@ -187,8 +187,11 @@ impl SimAgent {
         let builder = Agent::builder()
             .bind("127.0.0.1:0")
             .handler(oid("1.3.6.1.2.1"), Arc::new(mib));
+        // 0.18: an agent with inbound identities must say what they may
+        // read — VACM, or everything. A simulator answers everything.
         let agent = Arc::new(
             configure(builder)
+                .allow_all_access()
                 .build()
                 .await
                 .expect("failed to start sim agent"),
@@ -212,7 +215,9 @@ impl SimAgent {
     }
 
     pub fn shutdown(&self) {
-        self.agent.cancel().cancel();
+        // 0.18: `cancel()` initiates cancellation itself; the token is
+        // `cancellation_token()` for callers that want to await it.
+        self.agent.cancel();
         self.task.abort();
     }
 }

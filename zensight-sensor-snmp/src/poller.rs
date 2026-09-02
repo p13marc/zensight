@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use async_snmp::{Auth, Client, EngineCache, Retry, UdpHandle, Value, v3::EngineState};
+use async_snmp::v3::{DiscoveredEngine, UsmConfig};
+use async_snmp::{Auth, Client, EngineCache, MessageSize, Retry, UdpHandle, Value, WalkOptions};
 use bytes::Bytes;
 use zenoh::Session as ZenohSession;
 
@@ -247,12 +248,19 @@ impl SnmpPoller {
     async fn build_client(&self) -> Result<Client<UdpHandle>> {
         let auth = build_auth(&self.device)?;
 
+        // 0.18: `Retry::fixed` refuses more than `MAX_RETRIES` (16) rather
+        // than silently clamping — a config error, surfaced at connect.
+        let retry = Retry::fixed(self.device.retries, Duration::ZERO)
+            .map_err(|e| anyhow!("device {}: retries: {e}", self.device.name))?;
         let mut builder = Client::builder(self.device.address.as_str(), auth)
-            .timeout(Duration::from_secs(self.device.timeout_secs))
+            .request_timeout(Duration::from_secs(self.device.timeout_secs))
             // Each attempt already waits out the full request timeout, so
             // retransmit immediately (classic SNMP retry behavior).
-            .retry(Retry::fixed(self.device.retries, Duration::ZERO))
-            .max_repetitions(self.device.max_repetitions);
+            .retry(retry)
+            .walk_options(WalkOptions {
+                max_repetitions: self.device.max_repetitions,
+                ..WalkOptions::default()
+            });
 
         // Honor a configured v3 `engine_id`. If the device's identity ever
         // changes underneath it, `rediscover_engine` replaces it in place.
@@ -441,15 +449,32 @@ impl SnmpPoller {
             evaluator.lock().await.tick(&observation).await;
         }
 
-        // A whole v3 cycle failing authentication usually means the device's
-        // engine identity changed (agent replaced/reset). async-snmp 0.17
-        // provides explicit engine replacement for exactly this (#577) — no
-        // more full client rebuild. A configured `engine_id` seed is
-        // deliberately not re-applied: the live peer is the authority now.
-        if self.device.version == SnmpVersion::V3 && requests > 0 && auth_failures == requests {
+        // A whole v3 cycle failing usually means the device's engine identity
+        // changed (agent replaced/reset). async-snmp provides explicit engine
+        // replacement for exactly this (#577) — no full client rebuild. A
+        // configured `engine_id` seed is deliberately not re-applied: the
+        // live peer is the authority now.
+        //
+        // Two shapes of "the whole cycle failed" count. Authentication
+        // failures are the obvious one. Since async-snmp 0.18 a Report from an
+        // engine the client does not know cannot pass USM processing on an
+        // authenticated request, so it is dropped rather than surfaced — and
+        // a replaced agent looks like a device that stopped answering. A v3
+        // device whose every request timed out therefore gets one discovery
+        // probe per cycle too; for a device that is really down that is one
+        // unauthenticated exchange against a peer that will not answer it
+        // either, which is cheap, and for a replaced one it is the recovery.
+        let all_transport_failed =
+            requests > 0 && failures == requests && transport_failures == failures;
+        if self.device.version == SnmpVersion::V3
+            && requests > 0
+            && (auth_failures == requests || all_transport_failed)
+        {
             tracing::warn!(
                 device = %self.device.name,
-                "all requests failed authentication — rediscovering engine identity"
+                auth_failures,
+                transport_failures,
+                "every request failed — rediscovering engine identity"
             );
             if let Ok(client) = self.client().await
                 && let Err(e) = client.rediscover_engine().await
@@ -641,8 +666,8 @@ impl SnmpPoller {
     async fn fetch_uptime_ticks(&self) -> Option<u32> {
         let oid = parse_oid(SYS_UPTIME_OID).ok()?;
         match self.client().await.ok()?.get(&oid).await {
-            Ok(varbind) => match varbind.value {
-                Value::TimeTicks(ticks) => Some(ticks),
+            Ok(resp) => match resp.single().map(|vb| &vb.value) {
+                Some(Value::TimeTicks(ticks)) => Some(*ticks),
                 _ => None,
             },
             Err(e) => {
@@ -659,12 +684,18 @@ impl SnmpPoller {
         // knowable in advance, unlike a walk's.
         self.budget.charge(1.0).await;
         let _slot = self.budget.slot().await;
-        let varbind = self
+        let resp = self
             .client()
             .await?
             .get(&oid)
             .await
             .context("SNMP GET error")?;
+        // 0.18: a GET answers with the response's shape — the one binding
+        // asked for, or an anomaly the crate has already classified. No
+        // binding is "no value", the same answer a NoSuchObject gives.
+        let Some(varbind) = resp.single() else {
+            return Ok(None);
+        };
 
         if matches!(
             varbind.value,
@@ -673,7 +704,7 @@ impl SnmpPoller {
             return Ok(None);
         }
         let oid_string = oid_to_string(&varbind.oid);
-        Ok(Some((oid_string, varbind.value)))
+        Ok(Some((oid_string, varbind.value.clone())))
     }
 
     /// Walk an OID subtree.
@@ -917,7 +948,7 @@ fn rate_unit_for(metric_name: &str) -> &'static str {
 pub(crate) async fn build_probe_client(device: &DeviceConfig) -> Result<Client<UdpHandle>> {
     let auth = build_auth(device)?;
     Client::builder(device.address.as_str(), auth)
-        .timeout(Duration::from_secs(device.timeout_secs))
+        .request_timeout(Duration::from_secs(device.timeout_secs))
         .retry(Retry::none())
         .connect()
         .await
@@ -935,8 +966,27 @@ fn backoff_multiplier(consecutive_failures: u32, cap: u32) -> u32 {
 /// Whether an error from the SNMP client is an authentication failure
 /// (wrong credentials, engine identity mismatch, time-window rejection).
 fn is_auth_error(err: &anyhow::Error) -> bool {
+    use async_snmp::v3::ReportStatus;
     err.downcast_ref::<Box<async_snmp::Error>>()
-        .is_some_and(|e| matches!(e.as_ref(), async_snmp::Error::Auth { .. }))
+        .is_some_and(|e| match e.as_ref() {
+            async_snmp::Error::Auth { .. } => true,
+            // 0.18 surfaces a USM Report the client could not correct as
+            // its own error, status attached. Every USM statistic is a
+            // security failure — and `UnknownEngineId` is exactly the
+            // "agent replaced, identity changed" case the rediscovery below
+            // exists for; before this arm it was counted as a plain SNMP
+            // error and the poller never rediscovered.
+            async_snmp::Error::Report { status, .. } => matches!(
+                status.as_ref(),
+                ReportStatus::UnknownEngineId { .. }
+                    | ReportStatus::NotInTimeWindow { .. }
+                    | ReportStatus::UnknownUserName { .. }
+                    | ReportStatus::WrongDigest { .. }
+                    | ReportStatus::DecryptionError { .. }
+                    | ReportStatus::UnsupportedSecurityLevel { .. }
+            ),
+            _ => false,
+        })
 }
 
 /// Whether an error is transport-level (device not answering at all) as
@@ -1010,7 +1060,7 @@ fn build_auth(device: &DeviceConfig) -> Result<Auth> {
                 AuthProtocol::Sha512 => Some(async_snmp::AuthProtocol::Sha512),
             };
 
-            let mut usm = Auth::usm(config.username.clone());
+            let mut usm = UsmConfig::new(Bytes::from(config.username.clone()));
             match (auth_protocol, config.priv_protocol) {
                 // noAuthNoPriv
                 (None, PrivProtocol::None) => {}
@@ -1028,27 +1078,47 @@ fn build_auth(device: &DeviceConfig) -> Result<Auth> {
                         let priv_password = config.priv_password.as_ref().ok_or_else(|| {
                             anyhow!("Privacy password required for privacy protocol")
                         })?;
-                        let cipher = match priv_proto {
-                            PrivProtocol::None => unreachable!("guarded above"),
-                            PrivProtocol::Des => async_snmp::PrivProtocol::Des,
-                            PrivProtocol::Aes128 => async_snmp::PrivProtocol::Aes128,
-                            PrivProtocol::Aes192 => async_snmp::PrivProtocol::Aes192,
-                            PrivProtocol::Aes256 => async_snmp::PrivProtocol::Aes256,
-                        };
-                        usm = usm.auth_priv(
-                            auth_proto,
-                            auth_password.clone(),
-                            cipher,
-                            priv_password.clone(),
-                        );
+                        let cipher = priv_cipher(priv_proto).expect("guarded above");
+                        usm = usm
+                            .auth_priv(
+                                auth_proto,
+                                auth_password.as_bytes(),
+                                cipher,
+                                priv_password.as_bytes(),
+                            )
+                            .map_err(|e| {
+                                anyhow!("device {}: SNMPv3 credentials: {e}", device.name)
+                            })?;
                     } else {
-                        usm = usm.auth(auth_proto, auth_password.clone());
+                        usm = usm
+                            .auth(auth_proto, auth_password.as_bytes())
+                            .map_err(|e| {
+                                anyhow!("device {}: SNMPv3 credentials: {e}", device.name)
+                            })?;
                     }
                 }
             }
-            Ok(usm.into())
+            Ok(Auth::from(usm))
         }
     }
+}
+
+/// The wire cipher for a configured privacy protocol; `None` for noPriv.
+///
+/// 0.18 splits AES-192/256 by how a too-short localized key is extended.
+/// `AES192`/`AES256` keep the Blumenthal extension this sensor has always
+/// used (0.17 applied it implicitly); the Reeder/Cisco form is its own name.
+pub(crate) fn priv_cipher(p: PrivProtocol) -> Option<async_snmp::PrivProtocol> {
+    Some(match p {
+        PrivProtocol::None => return None,
+        PrivProtocol::Des => async_snmp::PrivProtocol::Des,
+        PrivProtocol::Des3 => async_snmp::PrivProtocol::Des3,
+        PrivProtocol::Aes128 => async_snmp::PrivProtocol::Aes128,
+        PrivProtocol::Aes192 => async_snmp::PrivProtocol::Aes192Blumenthal,
+        PrivProtocol::Aes256 => async_snmp::PrivProtocol::Aes256Blumenthal,
+        PrivProtocol::Aes192Reeder => async_snmp::PrivProtocol::Aes192Reeder,
+        PrivProtocol::Aes256Reeder => async_snmp::PrivProtocol::Aes256Reeder,
+    })
 }
 
 /// Pre-seed an engine cache with a configured engine ID (hex), skipping the
@@ -1077,8 +1147,28 @@ fn seeded_engine_cache(device: &DeviceConfig) -> Option<Arc<EngineCache>> {
         return None;
     };
 
+    // 0.18: a seeded entry is a DISCOVERED engine (identity + advertised
+    // message size); boots/time are learned through the first authenticated
+    // exchange's report flow, as before. The crate validates the id.
+    let msg_max_size = MessageSize::new(async_snmp::MAX_UDP_PAYLOAD).expect("a constant in range");
+    let discovered = match DiscoveredEngine::new(engine_id, msg_max_size) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                device = %device.name,
+                engine_id = %hex,
+                error = %e,
+                "Configured engine_id is not a valid SNMPv3 engine id — falling back to discovery"
+            );
+            return None;
+        }
+    };
     let cache = Arc::new(EngineCache::new());
-    cache.insert(target, EngineState::new(Bytes::from(engine_id), 0, 0));
+    if let Err(e) = cache.insert_discovered(target, discovered) {
+        tracing::warn!(device = %device.name, error = %e,
+            "Could not seed the engine cache — falling back to discovery");
+        return None;
+    }
     Some(cache)
 }
 

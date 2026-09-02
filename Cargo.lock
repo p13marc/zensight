@@ -675,9 +675,9 @@ dependencies = [
 
 [[package]]
 name = "async-snmp"
-version = "0.17.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fd3487ec298e057a28fb92858046936ccd40dadd07dfb63bc6255208920d394"
+checksum = "62c73521f81d79ffef8d7b3d4ece05c5d46f30729526a71af422aa0399cdc0b4"
 dependencies = [
  "aes 0.9.1",
  "bytes",
@@ -686,11 +686,13 @@ dependencies = [
  "des",
  "digest 0.11.3",
  "futures-core",
+ "futures-util",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "libc",
  "md-5 0.11.0",
  "mib-rs",
- "quinn-udp 0.6.1",
+ "nix 0.31.3",
  "sha1 0.11.0",
  "sha2 0.11.0",
  "smallvec",
@@ -700,6 +702,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -2468,20 +2471,6 @@ dependencies = [
  "darling_core 0.23.0",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "dashmap"
-version = "6.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
-dependencies = [
- "cfg-if",
- "crossbeam-utils",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
 ]
 
 [[package]]
@@ -5549,21 +5538,17 @@ dependencies = [
 
 [[package]]
 name = "mib-rs"
-version = "0.8.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa54954dd17bd3c2d86df5f1f4e2f01c6ce97daaedf2591b76abccb5e1885ccf"
+checksum = "704b8ac3b57fd40ce21a0acf5491097f406ad37a682ccdc5c14394cf8119a798"
 dependencies = [
- "clap",
- "dashmap",
  "dirs",
  "petgraph",
- "rayon",
  "serde",
  "serde_json",
  "smallvec",
  "thiserror 2.0.19",
  "tracing",
- "tracing-subscriber",
  "walkdir",
 ]
 
@@ -7742,7 +7727,7 @@ dependencies = [
  "cfg_aliases",
  "pin-project-lite",
  "quinn-proto",
- "quinn-udp 0.5.15",
+ "quinn-udp",
  "rustc-hash 2.1.3",
  "rustls",
  "socket2 0.6.5",
@@ -7786,19 +7771,6 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "quinn-udp"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76150b617afc75e6e21ac5f39bc196e80b65415ae48d62dbef8e2519d040ce42"
-dependencies = [
- "cfg_aliases",
- "libc",
  "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
