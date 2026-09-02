@@ -70,7 +70,7 @@ serde_json = "1"
 ciborium = "0.2"
 
 # Hashing (blob integrity — promoted from a transitive pin)
-sha2 = "0.11"
+sha2 = "0.10"
 
 # Debug-report bundling + ids (zblob adapter, #196)
 ulid = { version = "3", features = ["serde"] }
@@ -122,7 +122,7 @@ dirs = "6"
 # async-std features are mutually exclusive, so feature unification with our
 # own rfd dep must agree. The dialog futures are executor-agnostic — awaiting
 # them from the tokio runtime is fine; only ashpd's internal reactor changes.
-rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "async-std"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # Desktop notifications for CRITICAL alert transitions (#26, opt-in). On Linux it
 # uses the freedesktop notification spec over D-Bus (zbus, already pulled by rfd).
 notify-rust = "4"
@@ -170,7 +170,7 @@ zenkey-fleet = { version = "0.11", default-features = false }
 schemars = "1"
 # Draft-2020-12 payload conformance, behind zensight-common's `validate-json`
 # feature (#741). `default-features = false` keeps the format/regex extras out.
-jsonschema = { version = "0.52", default-features = false }
+jsonschema = { version = "0.49", default-features = false }
 zensight-sensor-core = { path = "zensight-sensor-core" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # graduated from in-tree `zenoh-blob/` — epic #193; renamed on extraction).

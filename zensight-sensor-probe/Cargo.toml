@@ -29,7 +29,7 @@ zenoh.workspace = true
 
 # HTTP. rustls only — the same stack zensight-exporter-prometheus already
 # ships, so no OpenSSL enters the tree.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "stream"] }
 
 # The TLS half is deliberately NOT reqwest: reading a certificate's expiry,
 # issuer and SANs means holding the peer's chain, and an HTTP client's job is

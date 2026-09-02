@@ -175,6 +175,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dependencies (Renovate weekly, #610)** — the batch, minus what the tree
+  cannot take yet: `tonic`/`prost` 0.14 (gnmi moves to `tonic-prost` /
+  `tonic-prost-build`, the split 0.14 made; the proto's `FloatVal`,
+  `DecimalVal` and `Response::Error` are deprecated upstream and prost now
+  says so, but devices still send them, so the decoder keeps its arms),
+  `reqwest` 0.13 in all four users at once (`rustls-tls` became `rustls` +
+  `webpki-roots`), `rand` 0.10 (`Rng` is `RngExt`, `from_os_rng` is
+  `make_rng`), `rerun` 0.36 (ids are non-empty new types; an empty
+  `application_id` is now a config error), `rfd` 0.17 (no `async-std`
+  feature to pick any more), `tokio-modbus` 0.17, `sysinfo` 0.39, `procfs`
+  0.18, `if-addrs` 0.15, `aya` 0.14 / `aya-ebpf` 0.2 (opt-in eBPF, checked by
+  the out-of-band nightly workflow), and the demo's `otel-lgtm` digest.
+
+  Held back, each for a reason the bump PR could not see: `jsonschema` 0.52
+  (zenkey 0.7 hands `zensight-common` a 0.49 value), `flume` 0.12 (zenoh
+  1.10's handler traits are implemented for 0.11), `sha2` 0.11 (zblob and
+  zenoh pin 0.10; a second copy for one digest), `flowscope` 0.24 (the
+  external netring 0.29 pins 0.22 and its types flow through), and
+  `async-snmp` 0.18 / `mib-rs` 0.10 (a rewrite of the SNMPv3 auth, walk, trap
+  and engine-cache surfaces — its own change). The `rust-toolchain` bump to
+  1.98 is excluded too: the version is pinned in five places and described
+  as cluster-wide, so it moves as one deliberate change.
+
 - **Dependencies (Renovate #852–#855):** `ulid` 1 → 3 (`Ulid::new` became
   `Ulid::generate`), `ctor` 0.10 → 1.0 (the three pre-main WGPU guards are
   `#[ctor(unsafe)]`, which is what 1.0 calls a constructor that runs before

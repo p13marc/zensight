@@ -31,7 +31,11 @@ pub struct RerunSink {
 impl RerunSink {
     /// Build the recording stream for the configured mode.
     pub fn new(config: &RerunSinkConfig) -> anyhow::Result<Self> {
-        let mut builder = rerun::RecordingStreamBuilder::new(config.application_id.as_str());
+        // 0.36: ids are non-empty new types; an empty `application_id` is a
+        // config error to refuse here, not an "unknown" recording to create.
+        let app_id = rerun::ApplicationId::try_new(&config.application_id)
+            .map_err(|e| anyhow::anyhow!("rerun.application_id: {e}"))?;
+        let mut builder = rerun::RecordingStreamBuilder::new(app_id);
         if let Some(recording_id) = &config.recording_id {
             builder = builder.recording_id(recording_id.clone());
         }
@@ -77,7 +81,14 @@ impl RerunSink {
         fields
             .into_iter()
             .fold(rerun::AnyValues::default(), |acc, (key, value)| {
-                acc.with_component::<rerun::components::Text>(key, [value.to_string()])
+                // An empty field name is not a component; skip it rather
+                // than panic inside a log sink.
+                match rerun::ComponentIdentifier::try_new(key) {
+                    Ok(field) => {
+                        acc.with_component::<rerun::components::Text>(field, [value.to_string()])
+                    }
+                    Err(_) => acc,
+                }
             })
     }
 
