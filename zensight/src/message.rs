@@ -69,7 +69,13 @@ pub enum Message {
 
     /// Off-thread history pre-load for a device finished (#22): metric name ->
     /// merged (warm/cold) samples to seed the device detail chart on open.
-    DeviceHistoryLoaded(DeviceId, Vec<(String, Vec<zensight_store::Sample>)>),
+    /// Seeded history for a device, and whether the reply was capped.
+    ///
+    /// Truncation rides with the data rather than being inferred: only the
+    /// replier knows whether it stopped at its limit, and a chart drawing a
+    /// partial window without saying so is a claim about a period it was not
+    /// given (#910).
+    DeviceHistoryLoaded(DeviceId, Vec<(String, Vec<zensight_store::Sample>)>, bool),
 
     /// Off-thread log cold-store search-back finished (#107, C9): persisted log
     /// records (newest-first) to merge into the rolling buffer on Logs-view open.
@@ -916,6 +922,25 @@ pub enum Message {
     /// re-keys the Zenoh subscription, so Iced tears the session down and
     /// re-declares — same mechanism as a settings change.
     SetFocusHost(Option<String>),
+
+    // ── The time cursor (#910) ──────────────────────────────────────────────
+    /// The scrubber moved to this instant (epoch ms). Fires per pixel of
+    /// travel, so it only records the position — the query is debounced.
+    ScrubTo(i64),
+    /// The debounce elapsed for this generation: query if it is still current.
+    ///
+    /// A generation rather than a timestamp, because what has to be compared
+    /// is "is this still the gesture in progress", and two scrubs to the same
+    /// instant are two gestures.
+    ScrubCommit(crate::history::ScrubGeneration),
+    /// Return to following the feed.
+    ScrubLive,
+    /// Timeline markers for the scrubbed window, tagged with the generation
+    /// that asked — a reply for an abandoned cursor position is dropped.
+    ScrubMarkersLoaded(
+        crate::history::ScrubGeneration,
+        Vec<zensight_common::history::TimelineEntry>,
+    ),
 
     /// User toggled protocol filter.
     ToggleProtocolFilter(Protocol),

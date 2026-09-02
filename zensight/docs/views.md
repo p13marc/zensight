@@ -561,6 +561,30 @@ clamps `step` to a tier regardless, so a caller asking for seconds across a
 month reads hour buckets as if they were seconds unless it looks at the
 `step_s` the reply states.
 
+### Scrubbing back through time
+
+A slider in the shell pins "now" to an instant (#910). The open chart
+re-queries `range` for a window ending there, and `timeline` supplies the
+markers — alerts and events around the moment — which is what makes a scrub an
+investigation rather than a slider over some numbers.
+
+**Debounced, with stale answers dropped.** A slider emits a message per pixel
+of travel. Each gesture carries a generation, and a reply tagged with an
+abandoned one is discarded: cancellation without cancelling, since a GET
+already on the wire cannot be recalled but its answer can be ignored. Without
+it a fast drag would end wherever the slowest reply came back from rather than
+where the user let go.
+
+**The mode is announced.** A scrubbed page and a live one look identical — same
+charts, same numbers, same layout — and every value on the scrubbed one is from
+the past. The strip names how far back it reads from, says the feed is not being
+followed, and carries a "Return to live" button. It is called that, and not
+"Live", because the top bar's freshness indicator already reads "Live": two
+controls with one label is a control nobody can describe over a phone.
+
+Returning to live needs no reload. The feed has been filling the hot ring the
+whole time, so it is dropping the pin, not fetching anything.
+
 ### Who is allowed to answer a pulled record
 
 Two helpers back every pulled record, and the difference is *how many producers

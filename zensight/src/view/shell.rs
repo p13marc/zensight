@@ -285,6 +285,10 @@ pub fn app_shell<'a>(
     last_update_ms: Option<i64>,
     now_ms: i64,
     focused_host: Option<String>,
+    // The scrubbed instant, when the time cursor is pinned, and whether the
+    // historian capped the last reply for it (#910).
+    as_of_ms: Option<i64>,
+    scrub_truncated: bool,
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let mut stack = column![top_bar(
@@ -298,8 +302,80 @@ pub fn app_shell<'a>(
     if let Some(host) = focused_host {
         stack = stack.push(focus_banner(host));
     }
+    if let Some(as_of) = as_of_ms {
+        stack = stack.push(time_cursor_strip(as_of, now_ms, scrub_truncated));
+    }
     stack = stack.push(container(content).width(Length::Fill).height(Length::Fill));
     row![nav_rail(current), stack.width(Length::Fill)].into()
+}
+
+/// The time-cursor strip (#910).
+///
+/// Shown only while scrubbing. Like [`focus_banner`] above it, this is a mode
+/// the rest of the UI does not otherwise announce: every number on the page is
+/// a past value, the feed is not being followed, and both look exactly like
+/// the live view. A mode you cannot see is a mode you cannot leave, so it says
+/// what it is and is one click to undo.
+fn time_cursor_strip<'a>(as_of_ms: i64, now_ms: i64, truncated: bool) -> Element<'a, Message> {
+    let behind = (now_ms - as_of_ms).max(0);
+    let ago = crate::view::formatting::format_time_offset(behind);
+    let mut line = row![
+        text(format!("As of {ago}")).size(font::CAPTION),
+        text("— every value on this page is from then; the feed is not being followed")
+            .size(font::CAPTION)
+            .style(dim),
+    ]
+    .spacing(space::SM)
+    .align_y(Alignment::Center);
+
+    if truncated {
+        // The historian capped the reply. A chart that drew a partial window
+        // without saying so would be a claim about a period it was not given.
+        line = line.push(
+            text("(partial window — the historian capped this reply)")
+                .size(font::CAPTION)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).status_warning()),
+                }),
+        );
+    }
+
+    line = line.push(container(text("")).width(Length::Fill));
+    line = line.push(
+        // A slider over the scrub span, newest on the right, so dragging right
+        // moves forward in time the way every other timeline does.
+        // Seconds, not milliseconds: the slider's value type wants a float,
+        // and a span of six hours in ms is more precision than a 280-pixel
+        // control can express anyway.
+        iced::widget::slider(
+            0.0..=(crate::history::SCRUB_SPAN_MS / 1_000) as f32,
+            ((crate::history::SCRUB_SPAN_MS - behind.min(crate::history::SCRUB_SPAN_MS)) / 1_000)
+                as f32,
+            move |v| {
+                let back_ms = crate::history::SCRUB_SPAN_MS - (v as i64) * 1_000;
+                Message::ScrubTo(now_ms - back_ms)
+            },
+        )
+        .width(Length::Fixed(280.0)),
+    );
+    line = line.push(
+        // "Return to live", not "Live": the top bar's freshness indicator
+        // already reads "Live" when the feed is fresh, and two controls with
+        // one label is a control nobody can describe over a phone.
+        button(text("Return to live").size(font::CAPTION))
+            .on_press(Message::ScrubLive)
+            .padding([2, 10])
+            .style(iced::widget::button::primary),
+    );
+
+    container(line)
+        .width(Length::Fill)
+        .padding([space::XS, space::MD])
+        .style(|theme: &Theme| container::Style {
+            background: Some(Background::Color(theme::colors(theme).background_strong())),
+            ..Default::default()
+        })
+        .into()
 }
 
 /// Focus-mode banner (#476).

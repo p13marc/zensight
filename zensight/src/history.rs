@@ -156,6 +156,24 @@ pub fn series_for_device(series: Vec<RangeSeries>, source: &str) -> Vec<(String,
         .collect()
 }
 
+/// Collapse markers several historians reported, newest first.
+///
+/// Two historians that saw the same alert produce the **same uid**: the
+/// timeline's key is derived from the transition itself (#908), not minted per
+/// observer. So the duplicate is removable without guessing which report is
+/// authoritative — which is the same property that lets a subscriber's replay
+/// be idempotent, used here for a different reason.
+///
+/// Sorted newest-first because that is how the markers read against a scrubbed
+/// chart: the thing that just happened is the thing being investigated.
+pub fn dedup_markers(
+    mut markers: Vec<zensight_common::history::TimelineEntry>,
+) -> Vec<zensight_common::history::TimelineEntry> {
+    markers.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.uid.cmp(&b.uid)));
+    markers.dedup_by(|a, b| a.uid == b.uid);
+    markers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +295,186 @@ mod tests {
         assert!(HistorySource::Fleet.caveat().is_none());
         assert!(HistorySource::Local.caveat().is_some());
         assert_eq!(HistorySource::default(), HistorySource::Local);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The time cursor (#910)
+// ---------------------------------------------------------------------------
+
+/// Where "now" is, for every widget that shows a value.
+///
+/// `docs/plans/rerun/DECISION.md` §6 recorded scrubbing backwards through a
+/// correlated incident on one time axis as the single most valuable thing the
+/// Rerun evaluation demonstrated, and as "a native feature waiting to be
+/// specified". This is it: the samples were always there, and until #907 there
+/// was no way to ask for them as of a moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeCursor {
+    /// Following the feed. The only state in which live samples are appended.
+    #[default]
+    Live,
+    /// Pinned to an instant (epoch ms). Every widget reads as of it.
+    At(i64),
+}
+
+impl TimeCursor {
+    /// The instant to read as of, given what the clock says now.
+    pub fn as_of(self, now_ms: i64) -> i64 {
+        match self {
+            TimeCursor::Live => now_ms,
+            TimeCursor::At(ts) => ts,
+        }
+    }
+
+    /// Whether live samples should still be appended to what is on screen.
+    ///
+    /// The reason this is not simply `self == Live`: a scrubbed view that kept
+    /// appending would grow a right-hand edge from the present while claiming
+    /// to be a past moment, which is worse than either honest state.
+    pub fn follows_live(self) -> bool {
+        matches!(self, TimeCursor::Live)
+    }
+}
+
+/// How far back the scrubber can reach, and the window it shows at the cursor.
+///
+/// Six hours because that is #910's acceptance ("scrub back six hours on the
+/// demo profile") and because it is inside the minute tier's two-day retention
+/// on the shipped defaults — a scrubber whose left half read from a tier that
+/// had aged out would be a control that lies at one end.
+pub const SCRUB_SPAN_MS: i64 = 6 * 3_600_000;
+
+/// The window a scrubbed chart shows: one hour ending at the cursor.
+pub const SCRUB_WINDOW_MS: i64 = 3_600_000;
+
+/// Debounce before a scrub becomes a query.
+///
+/// A slider emits a message per pixel of travel. Firing a fleet GET for each
+/// would put dozens of queries on the wire for one gesture and render the
+/// answers out of order; 200 ms is below the threshold where a control feels
+/// laggy and above the rate a drag generates.
+pub const SCRUB_DEBOUNCE_MS: u64 = 200;
+
+/// A generation counter for in-flight scrub queries.
+///
+/// Cancellation, without cancelling: a query started for an older cursor
+/// position cannot be recalled once it is on the wire, but its answer can be
+/// dropped when it arrives. Comparing generations is what makes a fast drag
+/// end on the position the user released at rather than on whichever reply
+/// happened to come back last.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScrubGeneration(pub u64);
+
+impl ScrubGeneration {
+    /// Bump, returning the new value to tag a query with.
+    ///
+    /// Not `next`: clippy is right that a `next` taking `&mut self` and
+    /// returning a value reads as an iterator, and this is a counter.
+    pub fn bump(&mut self) -> ScrubGeneration {
+        self.0 = self.0.wrapping_add(1);
+        *self
+    }
+
+    /// Whether a reply tagged `tag` is still the one being waited for.
+    pub fn is_current(self, tag: ScrubGeneration) -> bool {
+        self == tag
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn live_reads_as_of_now_and_a_pin_reads_as_of_itself() {
+        assert_eq!(TimeCursor::Live.as_of(1_000), 1_000);
+        assert_eq!(TimeCursor::At(500).as_of(1_000), 500);
+        assert_eq!(TimeCursor::default(), TimeCursor::Live);
+    }
+
+    /// A scrubbed view must stop appending. One that kept doing so would grow
+    /// a right-hand edge from the present while claiming to be a past moment —
+    /// worse than either honest state.
+    #[test]
+    fn only_live_follows_the_feed() {
+        assert!(TimeCursor::Live.follows_live());
+        assert!(!TimeCursor::At(1).follows_live());
+    }
+
+    /// The point of the generation counter: a fast drag ends on the position
+    /// the user released at, not on whichever reply came back last.
+    #[test]
+    fn a_stale_reply_is_not_the_one_being_waited_for() {
+        let mut generation = ScrubGeneration::default();
+        let first = generation.bump();
+        let second = generation.bump();
+        assert!(generation.is_current(second));
+        assert!(
+            !generation.is_current(first),
+            "the reply for an abandoned cursor position must be dropped"
+        );
+        // And the newest is current however many were abandoned.
+        let third = generation.bump();
+        assert!(generation.is_current(third));
+        assert!(!generation.is_current(second));
+    }
+
+    /// Wrapping is not a correctness question — only equality matters, and a
+    /// generation that wrapped onto an outstanding one would need u64 requests
+    /// in flight.
+    #[test]
+    fn the_generation_wraps_rather_than_panicking() {
+        let mut generation = ScrubGeneration(u64::MAX);
+        assert_eq!(generation.bump(), ScrubGeneration(0));
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+    use zensight_common::history::{TimelineEntry, TimelineKind};
+
+    fn entry(uid: &str, ts: i64) -> TimelineEntry {
+        TimelineEntry {
+            uid: uid.into(),
+            ts,
+            kind: TimelineKind::Alert,
+            origin: "h-0123456789ab".into(),
+            key: "v1/h-0123456789ab/state/sysinfo/alert/cpu".into(),
+            active: true,
+            summary: None,
+        }
+    }
+
+    /// Two historians reporting the same transition report the *same uid* —
+    /// the key is derived from the transition, not minted per observer (#908)
+    /// — so the duplicate collapses without anyone deciding which report is
+    /// authoritative.
+    #[test]
+    fn the_same_transition_seen_twice_is_one_marker() {
+        let out = dedup_markers(vec![
+            entry("a", 1_000),
+            entry("a", 1_000),
+            entry("b", 2_000),
+        ]);
+        assert_eq!(out.len(), 2);
+        // Newest first: the thing that just happened is the thing being
+        // investigated.
+        assert_eq!(out[0].uid, "b");
+        assert_eq!(out[1].uid, "a");
+    }
+
+    /// Two different transitions in the same millisecond both survive — they
+    /// are two things that happened, not one seen twice.
+    #[test]
+    fn distinct_transitions_at_one_instant_both_survive() {
+        let out = dedup_markers(vec![entry("a", 1_000), entry("b", 1_000)]);
+        assert_eq!(out.len(), 2, "same instant, different transitions");
+    }
+
+    #[test]
+    fn an_empty_fleet_reply_is_empty_not_a_panic() {
+        assert!(dedup_markers(vec![]).is_empty());
     }
 }
