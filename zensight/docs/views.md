@@ -529,6 +529,38 @@ UP/DOWN, erroring, total throughput). The old lifetime-counter rankings and
   resolver is called out, because that is what a DNS tunnel looks like from the
   wire.
 
+### Where a chart's history comes from
+
+Two sources answer the same question, and the device view says which did.
+
+- **The fleet historian** (#898), when one holds a live liveliness token *and*
+  there is a session to ask over. `v1/*/@rpc/historian/range` with target `All`
+  and consolidation off — several historians may answer, one per site being the
+  expected deployment, and `BestMatching` would take whichever replied first
+  and silently drop the rest of the fleet's history.
+- **This viewer's local cache** otherwise, which holds only what this GUI saw
+  while it was running.
+
+Where two historians hold the same series the **first reply wins and the
+disagreement is logged**. Interleaving two versions of one series would draw a
+chart that is neither, and preferring one means inventing a rule about which
+historian is more trustworthy — nothing on the wire supports that, and the two
+ingested the same bus, so a disagreement is a deployment fact worth reading
+(a shorter retention, a later start, a narrowed `key_expr`) rather than a tie
+to break.
+
+The local source draws a caveat above the content: *"Fleet history unavailable
+— showing this viewer's local cache only"*. It is on the page rather than in a
+log because the two charts are otherwise indistinguishable — same axes, same
+shape — and the difference is whether the window is minutes or the retention
+the operator configured.
+
+The requested `step` is the coarser of two bounds: what the chart's pixels can
+draw, and what the tier holds. The second is the one that bites — the historian
+clamps `step` to a tier regardless, so a caller asking for seconds across a
+month reads hour buckets as if they were seconds unless it looks at the
+`step_s` the reply states.
+
 ### Who is allowed to answer a pulled record
 
 Two helpers back every pulled record, and the difference is *how many producers

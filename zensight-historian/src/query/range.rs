@@ -153,6 +153,7 @@ struct Selected {
     subject: String,
     kind: SeriesKind,
     source: Option<String>,
+    metric: Option<String>,
     unit: Option<String>,
 }
 
@@ -189,6 +190,7 @@ fn select(store: &SharedStore, pattern: &str) -> Result<Vec<Selected>, RpcError>
             subject: subject.to_string(),
             kind: meta.kind,
             source: Some(meta.source.clone()),
+            metric: Some(meta.metric.clone()),
             unit: meta.unit.clone(),
         });
     }
@@ -371,6 +373,7 @@ async fn answer_range(req: &RpcRequest, store: &SharedStore, historian: String) 
             unit: sel.unit.clone(),
             agg,
             source: sel.source.clone(),
+            metric: sel.metric.clone(),
             points,
         });
         if next_cursor.is_some() {
@@ -414,7 +417,7 @@ fn answer_series(req: &RpcRequest, store: &SharedStore) -> RpcResult {
             subject: s.subject,
             kind: s.kind,
             source: s.source,
-            metric: None,
+            metric: s.metric,
             unit: s.unit,
         })
         .collect();

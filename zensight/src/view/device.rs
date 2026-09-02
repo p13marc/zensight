@@ -779,6 +779,10 @@ pub struct DeviceViewCtx<'a, 'b> {
     /// e.g. the capture form on the netring Capture tab. `None` (tests, bare
     /// paths) renders those views without the in-context controls.
     pub artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
+    /// Where the seeded history came from (#909). A `Local` source draws a
+    /// caveat: the window on screen is one viewer's, and might be far shorter
+    /// than the retention an operator has configured.
+    pub history_source: crate::history::HistorySource,
 }
 
 /// Render the host-detail view (#133, single-bar since #350): ONE merged nav
@@ -800,6 +804,17 @@ pub fn host_detail_view<'a>(ctx: DeviceViewCtx<'a, '_>) -> Element<'a, Message> 
     }
     if let Some(strip) = facet_tab_strip(ctx.facets) {
         col = col.push(strip);
+    }
+    // The caveat goes above the content, not inside a chart: it is true of
+    // every series on the page, and a reader who scrolled past it would be
+    // reading a five-minute window as five minutes of history.
+    if let Some(caveat) = ctx.history_source.caveat() {
+        col = col.push(
+            container(text(caveat).size(12).style(|t: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(t).status_warning()),
+            }))
+            .padding([4, 20]),
+        );
     }
     col = col.push(rule::horizontal(1));
     col = col.push(device_content(

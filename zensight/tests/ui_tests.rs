@@ -497,6 +497,7 @@ fn test_host_detail_facet_tabs() {
         entity: None,
         identity_expanded: false,
         artifact: None,
+        history_source: Default::default(),
     }));
 
     // Both sensor facets are shown as tabs.
@@ -535,6 +536,7 @@ fn test_host_detail_single_facet_has_no_strip() {
         entity: None,
         identity_expanded: false,
         artifact: None,
+        history_source: Default::default(),
     }));
 
     // No "Facets" strip for a lone sensor; the detail still renders.
@@ -665,6 +667,7 @@ fn test_forget_button_only_for_offline_facet() {
         entity: None,
         identity_expanded: false,
         artifact: None,
+        history_source: Default::default(),
     }));
     assert!(ui.find("Forget").is_ok());
     // Duplicated-protocol tabs carry their source suffix.
@@ -688,6 +691,7 @@ fn test_forget_button_only_for_offline_facet() {
         entity: None,
         identity_expanded: false,
         artifact: None,
+        history_source: Default::default(),
     }));
     assert!(ui.find("Forget").is_err());
 }
@@ -4809,6 +4813,7 @@ fn test_host_detail_resolution_group() {
         entity: Some(&entity),
         identity_expanded: true,
         artifact: None,
+        history_source: Default::default(),
     }));
 
     assert!(ui.find("Resolution group").is_ok());
@@ -4857,6 +4862,7 @@ fn test_host_detail_entity_facet_tabs() {
         entity: Some(&entity),
         identity_expanded: true,
         artifact: None,
+        history_source: Default::default(),
     }));
 
     assert!(ui.find("Facets").is_ok());
@@ -4894,6 +4900,7 @@ fn test_host_identity_collapsed_by_default() {
         entity: Some(&entity),
         identity_expanded: false,
         artifact: None,
+        history_source: Default::default(),
     }));
 
     // Summary present, details hidden.
@@ -4938,6 +4945,7 @@ fn test_syslog_drilldown_single_back() {
         entity: None,
         identity_expanded: false,
         artifact: None,
+        history_source: Default::default(),
     }));
     assert!(ui.find("Back").is_ok());
     let _ = ui.click("Back");
@@ -7322,4 +7330,50 @@ mod hostspec_expectations_ui {
         assert!(ui.find("@rpc/hostspec/spec answers:").is_ok());
         assert!(ui.find("Press Refresh to load the current set.").is_err());
     }
+}
+
+/// #909: the device view says whose history it is showing.
+///
+/// A chart seeded from this viewer's cache and one seeded from the fleet look
+/// identical — same axes, same shape, and a window that may be minutes rather
+/// than the retention an operator configured. The caveat is the only thing
+/// that distinguishes them, so it has to be on the page and not in a log.
+#[test]
+fn test_local_history_draws_a_caveat_and_fleet_history_does_not() {
+    use zensight::history::HistorySource;
+    use zensight_common::DeviceStatus;
+
+    let id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
+    let mut state = DeviceDetailState::new(id.clone());
+    for point in mock::sysinfo::host("server01") {
+        state.update(point);
+    }
+    let facets = vec![FacetTab::live(id.clone(), DeviceStatus::Online, true)];
+    let syslog_filter = SyslogFilterState::default();
+
+    let render = |source: HistorySource| {
+        let mut ui = simulator(host_detail_view(DeviceViewCtx {
+            state: &state,
+            syslog_filter: &syslog_filter,
+            host_logs: &[],
+            facets: &facets,
+            entity: None,
+            identity_expanded: false,
+            artifact: None,
+            history_source: source,
+        }));
+        // `find` returns Ok when the text is on screen.
+        ui.find(zensight::history::HistorySource::Local.caveat().unwrap())
+            .is_ok()
+    };
+
+    assert!(
+        render(HistorySource::Local),
+        "a locally-sourced chart must say so — otherwise a five-minute window reads \
+         as five minutes of history"
+    );
+    assert!(
+        !render(HistorySource::Fleet),
+        "a fleet-sourced chart carries no caveat: there is nothing to caveat"
+    );
 }

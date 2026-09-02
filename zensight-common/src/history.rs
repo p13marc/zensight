@@ -27,6 +27,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The `limit` a caller should ask for when it has no reason to ask for less.
+///
+/// Named here rather than left to each caller, because it is half of a
+/// contract: the server's default and ceiling live in the historian, and a
+/// caller that hard-coded a different number would silently disagree with the
+/// documentation both sides point at.
+pub const RANGE_LIMIT_DEFAULT: usize = 5_000;
+
 /// What a series is: counter, gauge, or bool.
 ///
 /// **The one kind vocabulary in the tree.** `zensight-store` introduced this
@@ -157,6 +165,17 @@ pub struct RangeSeries {
     /// `subject` without un-slugging a device chunk, so it is carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The display metric name — the subject minus a proxy producer's leading
+    /// device chunk.
+    ///
+    /// Carried for the same reason `source` is, and for one caller in
+    /// particular: a chart labels its series by metric, and reconstructing
+    /// that from `subject` means knowing which producers are proxies and how
+    /// their device chunks are slugged. That is a rule the store already
+    /// recorded at ingest; making every consumer re-derive it is how two
+    /// consumers come to disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
     /// `(epoch_ms, value)` pairs, oldest first.
     pub points: Vec<(i64, f64)>,
 }
