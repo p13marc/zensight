@@ -205,6 +205,17 @@ pub enum Protocol {
     /// a guest and from a workstation gives three different, equally true
     /// answers, so every result carries its vantage point.
     Probe,
+    /// Durable fleet telemetry history (#898) — the first producer here that
+    /// is not a sensor. It measures nothing and publishes no telemetry; it
+    /// ingests everyone else's and answers range queries over it.
+    ///
+    /// It is a `Protocol` because the framework's identity of a producer runs
+    /// through this enum: `AlertReporter::new` takes one, and `SensorRunner`
+    /// derives the `sensor-budget` rule by parsing its own name as one. A
+    /// history service that holds a database on a 1–2 GB VM is exactly the
+    /// component that must be able to say it is approaching its budget, so
+    /// "not a sensor" is not a reason to leave it outside.
+    Historian,
 }
 
 impl Protocol {
@@ -226,6 +237,7 @@ impl Protocol {
             Protocol::Pve => "pve",
             Protocol::Container => "container",
             Protocol::Probe => "probe",
+            Protocol::Historian => "historian",
         }
     }
 
@@ -266,6 +278,7 @@ impl std::str::FromStr for Protocol {
             "pve" => Ok(Protocol::Pve),
             "container" => Ok(Protocol::Container),
             "probe" => Ok(Protocol::Probe),
+            "historian" => Ok(Protocol::Historian),
             _ => Err(()),
         }
     }

@@ -246,6 +246,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependencies rather than bumped: no crate has used it since zblob went
   external, so the bump PR was for a line nothing read.
 
+### Added
+
+- **The `historian` producer is declared** (#905). `zensight-common/registry/historian.toml`,
+  four read procedures (`range`, `series`, `timeline`, `stats`) on top of the
+  mandatory `introspect`/`describe`, their reply types in a new
+  `zensight_common::history`, and fan-in-aware key builders
+  (`historian_range_selector`, `historian_series_selector`, `historian_key`).
+
+  It is a **host-origin producer**, not a service origin: service origins exist
+  for single-writer fleet state — `@catalog`, `@desired` — and a history
+  service writes none, it only answers RPC. Two historians, one per site, are
+  then ordinary RFC 05 §2.1 fan-in with no claim protocol to get wrong. The
+  named selectors exist to carry that rule with the key: callers must target
+  `All`, because `BestMatching` short-circuits to whichever replied first and
+  silently drops the rest of the fleet's history.
+
+  It declares the five framework state subjects, and could not do otherwise —
+  the issue said "framework state only", but `SensorRunner` emits `health`,
+  `errors`, `sensor`, `evidence/self` and `alert/{alert_key}` unconditionally,
+  so declaring fewer would be an RFC 08 §6.1 lie about what the build serves.
+  It declares **no telemetry**: a history service that re-published what it
+  ingested would be a loop with a database in it (RFC 04 §1.1).
+
+  `Protocol::Historian` joins the enum — the first entry that is not a sensor.
+  The framework's identity of a producer runs through it (`AlertReporter::new`
+  takes one; `SensorRunner` derives the `sensor-budget` rule by parsing its own
+  name as one), and a service holding a database on a 1–2 GB VM is exactly the
+  component that must be able to say it is approaching its budget. Its GUI
+  surfaces are deliberately the generic ones: it measures nothing, so it
+  borrows no sensor's iconography and gets no specialized tab.
+
+  `zensight_store::MetricKind` becomes an alias of the new
+  `zensight_common::history::SeriesKind`, so the on-disk kind code and the wire
+  token are two encodings of one vocabulary rather than two enums to keep in
+  step.
+
 ### Changed — BREAKING
 
 - **The GUI's metric cache is rebuilt on first launch after this** (#904).

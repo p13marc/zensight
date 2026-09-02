@@ -195,34 +195,35 @@ impl std::fmt::Display for StoreOpenError {
 /// that goes backwards fell. Flattening both to a number is why three callers
 /// in the GUI each had to re-infer resets from a negative delta, and why none
 /// of them could be sure it was the same rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MetricKind {
-    /// Monotonic until whatever counts it restarts.
-    Counter,
-    /// A level: it may fall, and falling means it fell.
-    Gauge,
-    /// A 0/1 step series (#126) — iface up/carrier, route present, wg up.
-    Bool,
+///
+/// **The same type the wire uses.** It is
+/// [`zensight_common::history::SeriesKind`] under an alias, not a parallel
+/// enum: the on-disk code below and the lowercase wire token are two encodings
+/// of one vocabulary, and two enums would be two things to keep in step for no
+/// gain. The historian reads a kind out of this store and puts it in a
+/// `RangeReply` without a conversion, which is the point.
+pub type MetricKind = zensight_common::history::SeriesKind;
+
+/// On-disk code for a [`MetricKind`], and back.
+///
+/// A free function pair rather than inherent methods, because the type is
+/// `zensight-common`'s and the *storage* encoding is this crate's business.
+/// Unknown codes read back as `Gauge`, the interpretation that invents
+/// nothing: it never claims a reset.
+pub const fn kind_code(kind: MetricKind) -> u8 {
+    match kind {
+        MetricKind::Gauge => 0,
+        MetricKind::Counter => 1,
+        MetricKind::Bool => 2,
+    }
 }
 
-impl MetricKind {
-    /// Stable on-disk code. Unknown codes read back as `Gauge`, which is the
-    /// interpretation that invents nothing: it never claims a reset.
-    pub const fn code(self) -> u8 {
-        match self {
-            MetricKind::Gauge => 0,
-            MetricKind::Counter => 1,
-            MetricKind::Bool => 2,
-        }
-    }
-
-    /// Decode a kind from its on-disk [`code`](Self::code).
-    pub const fn from_code(code: u8) -> MetricKind {
-        match code {
-            1 => MetricKind::Counter,
-            2 => MetricKind::Bool,
-            _ => MetricKind::Gauge,
-        }
+/// Decode a [`MetricKind`] from its on-disk [`kind_code`].
+pub const fn kind_from_code(code: u8) -> MetricKind {
+    match code {
+        1 => MetricKind::Counter,
+        2 => MetricKind::Bool,
+        _ => MetricKind::Gauge,
     }
 }
 
@@ -774,7 +775,7 @@ impl PersistentStore {
                 k.value().to_string(),
                 id,
                 MetricMeta {
-                    kind: MetricKind::from_code(kind),
+                    kind: kind_from_code(kind),
                     source: source.to_string(),
                     metric: metric.to_string(),
                 },
@@ -805,7 +806,7 @@ impl PersistentStore {
                     path.as_str(),
                     (
                         *id,
-                        meta.kind.code(),
+                        kind_code(meta.kind),
                         meta.source.as_str(),
                         meta.metric.as_str(),
                     ),

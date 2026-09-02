@@ -233,6 +233,7 @@ mod tests {
             Protocol::Pve,
             Protocol::Container,
             Protocol::Probe,
+            Protocol::Historian,
         ] {
             let m = member(p.as_str(), "host1");
             let key = member_key(&m).expect("known protocol maps");

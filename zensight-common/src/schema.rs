@@ -74,6 +74,11 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::action::ActionStatus>("ActionStatus")
         .json::<crate::action::ServiceAction>("ServiceAction")
         .json::<Vec<crate::action::ActionStatus>>("Vec<ActionStatus>")
+        // ── historian replies (this crate, fully derived) ─────────────────
+        .json::<crate::history::RangeReply>("RangeReply")
+        .json::<Vec<crate::history::SeriesInfo>>("Vec<SeriesInfo>")
+        .json::<crate::history::TimelineReply>("TimelineReply")
+        .json::<crate::history::HistorianStats>("HistorianStats")
         // ── query-detail records (this crate, fully derived) ──────────────
         .json::<crate::query_detail::LatencyReport>("LatencyReport")
         .json::<crate::query_detail::UnitDetail>("UnitDetail")

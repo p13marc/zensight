@@ -291,9 +291,11 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Container => protocol_generic(size),
         // #820: the generic mark; a probe's identity is its vantage point, not
         // a protocol logo.
-        // #820: the generic mark; a probe's identity is its vantage point, not
-        // a protocol logo.
         zensight_common::Protocol::Probe => protocol_generic(size),
+        // #898: the historian measures nothing, so it has no protocol to
+        // depict — the generic mark, deliberately, rather than borrowing a
+        // sensor's iconography for a service.
+        zensight_common::Protocol::Historian => protocol_generic(size),
     }
 }
 

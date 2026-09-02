@@ -1,0 +1,142 @@
+# Subject registry: historian (durable fleet telemetry history). RFC 08 §2;
+# issues #905, #898.
+#
+# Telemetry is the only wire class with no history path for a second process.
+# Logs have `@rpc/logs/events` over a durable redb store; events have a router
+# `fs` storage plus a startup GET; state has seed storages. Telemetry has the
+# AdvancedPublisher's 10-sample-per-key cache, and the GUI's private redb file
+# — which on the reference fleet is written by a process that is open for
+# minutes a week, so the history it holds is mostly gaps.
+#
+# The historian closes that: an ordinary Zenoh application that subscribes
+# `v1/*/telemetry/**`, writes the same tiers the GUI's cache does (the shared
+# `zensight-store` crate, #904), and serves one typed, bounded,
+# cursor-paginated range procedure — the logs sensor's pattern, applied to the
+# class that never had it.
+#
+# A HOST-ORIGIN PRODUCER, not a service origin. It writes no single-writer
+# fleet state — the reason `@catalog` and `@desired` exist — it only answers
+# RPC. Two historians (one per site) are then ordinary RFC 05 §2.1 fan-in, with
+# no claim protocol to get wrong.
+#
+# It never publishes on a telemetry key (RFC 04 §1.1). A history service that
+# re-emitted what it ingested would be a loop with a database in it; its own
+# numbers ride the health document and `@rpc/historian/stats`.
+#
+# Series identity is `(origin, producer, subject)` — the wire key minus the
+# class chunk, derivable from a sample alone, stable across catalog merges and
+# correlator outages. Entity resolution is a query-time join, not a storage
+# key.
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "historian"
+description = "durable fleet telemetry history (#898): ingests `v1/*/telemetry/**` into per-second/minute/hour tiers under a resource budget and serves bounded, aggregated, cursor-paginated range queries over them"
+
+# ── Framework subjects ───────────────────────────────────────────────────────
+#
+# There is no state-free producer and there cannot be: SensorRunner emits all
+# five of these unconditionally, so declaring fewer would be an RFC 08 §6.1
+# lie about what this build serves.
+
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework); its self_stats carry series count, rows per tier, database bytes and dropped samples, which is what says whether the retention defaults hold on this fleet"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim of the host running the historian (framework, RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 32
+ttl_s = 900
+since = "1.0"
+description = "historian assertions: the resource budget is being approached or exceeded (framework `sensor-budget`), and ingest is shedding"
+
+# ── Procedures ───────────────────────────────────────────────────────────────
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.0"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
+
+[[procedure]]
+path = "range"
+kind = "read"
+reply = "RangeReply"
+idempotent = true
+since = "1.0"
+description = "bounded telemetry history for a set of series. ?origin=<h-… or *>;producer=;subject=<key expression within the producer, ** allowed>;from=<epoch_ms>;to=<epoch_ms>;step=<seconds, clamped to a tier: <60 the per-second ring, <3600 the minute tier, else the hour tier>;agg=raw|avg|min|max|last|rate (default by kind: gauge→avg, counter→rate, bool→max);limit=<points, default 5000, max 20000>;cursor=<opaque>. A short page or a null next_cursor means the end; bad parameters are error/invalid-args. Several historians answer on their own concrete keys (RFC 05 §2.1) and the caller merges per series"
+
+[[procedure]]
+path = "series"
+kind = "read"
+reply = "Vec<SeriesInfo>"
+idempotent = true
+since = "1.0"
+description = "what series this historian holds, for an origin/producer prefix. ?origin=;producer=;limit=;cursor= — the listing a caller needs before it can ask a sensible range question, and the cardinality number #911 measures"
+
+[[procedure]]
+path = "timeline"
+kind = "read"
+reply = "TimelineReply"
+idempotent = true
+since = "1.0"
+description = "durable events and alert transitions, newest first. ?from=;to=;kinds=alert,event;origin=;after_uid=;limit= — cursor is after_uid, the logs pattern (#908). Served as error/unsupported until that lands: a procedure this build declares but cannot answer would be an RFC 08 §6.1 lie, and error/unsupported is the third state that says 'declared, not built' rather than 'no data'"
+
+[[procedure]]
+path = "stats"
+kind = "read"
+reply = "HistorianStats"
+idempotent = true
+since = "1.0"
+description = "store metrics: series count, rows per tier, database bytes, dropped samples, last prune duration. The measurement surface #911 reads to say whether the retention defaults survive a real fleet"

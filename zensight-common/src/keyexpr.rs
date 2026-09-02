@@ -208,6 +208,57 @@ pub fn origin_rpc_key(origin: &RemoteOrigin, producer: &str, procedure: &str) ->
     selector::rpc_at(origin, producer, &proc_chunks(procedure)).into()
 }
 
+/// Caller-side fleet selector for the historian's `range` procedure:
+/// `<base>/v1/*/@rpc/historian/range`.
+///
+/// A named wrapper over [`fleet_rpc_key`] rather than a new spelling, because
+/// the fan-in rule is the point and a `format!` at the call site would carry
+/// the key without it: several historians may answer (one per site is the
+/// expected deployment), each on its own concrete key, so the caller MUST use
+/// query target `All` (RFC 05 §2.1) and merge per series. `BestMatching` would
+/// short-circuit to whichever replied first and silently drop the rest of the
+/// fleet's history.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::historian_range_selector;
+///
+/// assert_eq!(historian_range_selector(), "v1/*/@rpc/historian/range");
+/// ```
+pub fn historian_range_selector() -> String {
+    fleet_rpc_key("historian", "range")
+}
+
+/// Caller-side fleet selector for `@rpc/historian/series`, the listing a
+/// caller needs before it can ask a sensible range question. Same fan-in rule
+/// as [`historian_range_selector`].
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::historian_series_selector;
+///
+/// assert_eq!(historian_series_selector(), "v1/*/@rpc/historian/series");
+/// ```
+pub fn historian_series_selector() -> String {
+    fleet_rpc_key("historian", "series")
+}
+
+/// Caller-side single-historian procedure key, when the origin is known —
+/// following a `series` listing, or pinning a chart to the historian that
+/// actually holds the range.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::historian_key;
+/// use zenkey::origin::RemoteOrigin;
+///
+/// let o = RemoteOrigin::parse("h-0123456789ab").unwrap();
+/// assert_eq!(historian_key(&o, "range"), "v1/h-0123456789ab/@rpc/historian/range");
+/// ```
+pub fn historian_key(origin: &RemoteOrigin, procedure: &str) -> String {
+    origin_rpc_key(origin, "historian", procedure)
+}
+
 /// Build a wildcard key expression for the whole fleet state plane.
 pub fn all_state_wildcard() -> String {
     // v1 (RFC 04): the whole fleet state plane, one selector.
@@ -932,6 +983,18 @@ mod tests {
             assert_eq!(catalog_rpc_key("names"), "v1/@catalog/@rpc/names");
             assert_eq!(catalog_rpc_key("link"), "v1/@catalog/@rpc/link");
             assert_eq!(names_query_key(), "v1/@catalog/@rpc/names");
+
+            // The historian is a HOST-origin producer (#898), so its fleet
+            // selector carries a `*` origin and a producer chunk — not the
+            // service shape `catalog_rpc_key` builds. The two are one chunk
+            // apart and the wrong one matches nothing, which is a timeout at
+            // runtime in one view rather than an error anywhere.
+            assert_eq!(historian_range_selector(), "v1/*/@rpc/historian/range");
+            assert_eq!(historian_series_selector(), "v1/*/@rpc/historian/series");
+            assert_eq!(
+                historian_key(&RemoteOrigin::parse(ORIGIN).expect("valid origin"), "stats"),
+                "v1/h-3fa9c2d41b7e/@rpc/historian/stats"
+            );
         }
 
         #[test]

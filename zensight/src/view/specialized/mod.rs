@@ -167,9 +167,12 @@ pub fn specialized_view<'a>(
         Protocol::Container => None,
         // #820: the surfaces are the per-target device cards, the Alerts view
         // and the result documents in the Bus explorer.
-        // #820: the surfaces are the per-target device cards, the Alerts view
-        // and the result documents in the Bus explorer.
         Protocol::Probe => None,
+        // #898: the historian's surface is every other view — the charts that
+        // read `@rpc/historian/range` (#909) and the timeline that scrubs it
+        // (#910). A tab of its own would show its health document, which the
+        // Sensors card already does.
+        Protocol::Historian => None,
     }
 }
 
@@ -194,5 +197,6 @@ pub fn has_specialized_view(protocol: Protocol) -> bool {
             | Protocol::Pve
             | Protocol::Container
             | Protocol::Probe
+            | Protocol::Historian
     )
 }

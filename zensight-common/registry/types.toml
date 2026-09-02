@@ -266,3 +266,15 @@ kind = "json-schema"
 # schema'd payload.
 [types.toml]
 kind = "raw"
+
+[types.RangeReply]
+kind = "json-schema"
+
+[types."Vec<SeriesInfo>"]
+kind = "json-schema"
+
+[types.TimelineReply]
+kind = "json-schema"
+
+[types.HistorianStats]
+kind = "json-schema"
