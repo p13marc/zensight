@@ -279,7 +279,7 @@ impl SnmpPoller {
     /// cycle, exponential backoff while the device fails, probe-only cycles
     /// while the breaker is open.
     pub async fn run(self) {
-        use rand::Rng;
+        use rand::RngExt;
 
         let base = Duration::from_secs(self.device.poll_interval_secs.max(1));
 

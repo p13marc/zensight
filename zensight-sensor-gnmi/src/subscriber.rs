@@ -86,6 +86,11 @@ impl GnmiSubscriber {
         }
     }
 
+    // The gNMI proto marks `FloatVal`, `DecimalVal` and `Response::Error` as
+    // deprecated (prost 0.14 forwards the annotation; 0.13 did not). Devices in
+    // the field still send them, and a collector that stopped decoding a value
+    // a switch emits would be the regression — the arms stay.
+    #[allow(deprecated)]
     async fn subscribe_loop(
         &self,
         registry: &zensight_common::PublisherRegistry,
@@ -334,6 +339,11 @@ impl GnmiSubscriber {
         }
     }
 
+    // The gNMI proto marks `FloatVal`, `DecimalVal` and `Response::Error` as
+    // deprecated (prost 0.14 forwards the annotation; 0.13 did not). Devices in
+    // the field still send them, and a collector that stopped decoding a value
+    // a switch emits would be the regression — the arms stay.
+    #[allow(deprecated)]
     fn typed_value_to_telemetry(&self, val: &gnmi::TypedValue) -> TelemetryValue {
         use gnmi::typed_value::Value;
 
@@ -368,6 +378,11 @@ impl GnmiSubscriber {
         }
     }
 
+    // The gNMI proto marks `FloatVal`, `DecimalVal` and `Response::Error` as
+    // deprecated (prost 0.14 forwards the annotation; 0.13 did not). Devices in
+    // the field still send them, and a collector that stopped decoding a value
+    // a switch emits would be the regression — the arms stay.
+    #[allow(deprecated)]
     fn typed_value_to_string(&self, val: &gnmi::TypedValue) -> String {
         use gnmi::typed_value::Value;
 
@@ -384,6 +399,7 @@ impl GnmiSubscriber {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // the fixtures build the same legacy variants the decoder must accept
 mod tests {
     use super::*;
     use crate::config::GnmiEncoding;

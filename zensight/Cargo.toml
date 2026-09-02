@@ -52,7 +52,7 @@ async-stream = "0.3"
 flume = "0.11"
 
 # Random number generation (for demo mode)
-rand = "0.9"
+rand = "0.10"
 
 # Platform utilities
 dirs.workspace = true

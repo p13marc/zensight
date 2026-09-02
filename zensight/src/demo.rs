@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::f64::consts::PI;
 
+use rand::RngExt;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
 
 use zensight_common::{
     Alert, AlertKind, AlertSeverity, DeviceLiveness, DeviceStatus, HealthSnapshot, HealthStatus,
@@ -162,7 +162,7 @@ impl DemoSimulator {
     /// Create a new demo simulator.
     pub fn new() -> Self {
         let mut sim = Self {
-            rng: SmallRng::from_os_rng(),
+            rng: rand::make_rng::<SmallRng>(),
             tick: 0,
             counters: HashMap::new(),
             base_values: HashMap::new(),

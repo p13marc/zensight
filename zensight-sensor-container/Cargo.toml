@@ -28,7 +28,7 @@ http-body-util = "0.1"
 
 # The OPTIONAL, explicitly-egressing upstream-digest and signature checks —
 # the only part of this sensor that talks to the internet, and off by default.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "json"] }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
