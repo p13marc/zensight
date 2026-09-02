@@ -639,12 +639,27 @@ pub enum PrivProtocol {
     /// AES-128 encryption (RFC 3826).
     #[serde(rename = "AES")]
     Aes128,
-    /// AES-192 encryption (non-standard).
+    /// AES-192 (non-standard). The localized key is extended with the
+    /// Blumenthal algorithm (draft-blumenthal-aes-usm-04) when the auth
+    /// digest is too short — what net-snmp does, and what this sensor has
+    /// always done. Cisco gear extends the Reeder way: `AES192-REEDER`.
     #[serde(rename = "AES192")]
     Aes192,
-    /// AES-256 encryption (non-standard).
+    /// AES-256 (non-standard), Blumenthal key extension — see `AES192`.
     #[serde(rename = "AES256")]
     Aes256,
+    /// AES-192 with the Reeder (Cisco) key extension. `AES192-CISCO` is
+    /// accepted as a synonym.
+    #[serde(rename = "AES192-REEDER", alias = "AES192-CISCO")]
+    Aes192Reeder,
+    /// AES-256 with the Reeder (Cisco) key extension. `AES256-CISCO` is
+    /// accepted as a synonym.
+    #[serde(rename = "AES256-REEDER", alias = "AES256-CISCO")]
+    Aes256Reeder,
+    /// 3DES-EDE (draft-reeder-snmpv3-usm-3desede-00). Slow, no hardware
+    /// acceleration; for gear that offers nothing better.
+    #[serde(rename = "3DES")]
+    Des3,
 }
 
 /// A group of OIDs that can be referenced by devices.

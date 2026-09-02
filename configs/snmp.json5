@@ -84,7 +84,8 @@
           username: "zensight-ro",
           auth_protocol: "SHA256",     // "MD5" | "SHA" | "SHA224".."SHA512"
           auth_password: "file:/run/credentials/snmp/router01.auth",
-          priv_protocol: "AES",        // "DES" | "AES" | "AES192" | "AES256"
+          priv_protocol: "AES",        // "DES" | "3DES" | "AES" | "AES192" | "AES256"
+                                       // | "AES192-REEDER" | "AES256-REEDER" (Cisco)
           priv_password: "file:/run/credentials/snmp/router01.priv",
         },
         poll_interval_secs: 30,        // Polling interval

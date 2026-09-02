@@ -175,6 +175,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`async-snmp` 0.17 → 0.18.1 and `mib-rs` 0.10** (the half of Renovate #610
+  that was an API rewrite). What an operator can see:
+
+  - `priv_protocol` gains `3DES`, `AES192-REEDER` and `AES256-REEDER` (also
+    spelled `-CISCO`). 0.18 distinguishes how a too-short localized key is
+    extended for AES-192/256; `AES192`/`AES256` keep the Blumenthal extension
+    this sensor has always applied, so an existing config behaves as before,
+    and Cisco gear — which extends the Reeder way — is reachable at last.
+  - a v3 credential this build's crypto backend cannot serve, or more than 16
+    retries, is refused at connect/bind with the device or user named, rather
+    than failing every exchange later.
+  - a configured `engine_id` is seeded as a *discovered* engine (identity and
+    message size; boots/time still come from the first authenticated
+    exchange), and one that is not a valid SNMPv3 engine id falls back to
+    discovery with a warning instead of being accepted.
+  - inform acknowledgement outcomes ride each received notification and are
+    traced; a failed ack is the sender's to retry.
+  - **the trap listener enforces a security level per v3 user.** 0.18 makes
+    a receiver with USM users declare an acceptance policy, because a keyed
+    user also *accepts* lower levels — down to noAuthNoPriv, where the
+    username and the content are unverified claims. The policy shipped: a v3
+    notification must arrive at least at the level its user is configured for
+    (an authPriv user's traps must be authPriv), an unknown user is refused,
+    and v1/v2c are what the community filter already admitted.
+  - **a replaced v3 agent is rediscovered again.** 0.18 drops a Report from
+    an engine the client does not know rather than surfacing it on an
+    authenticated request, so an agent that came back with a new engine
+    identity looked like a device that stopped answering, and the poller —
+    which rediscovered only after *authentication* failures — never
+    recovered. A v3 device whose whole cycle times out now gets one discovery
+    probe per cycle as well (cheap for a device that is really down, the
+    recovery for a replaced one). USM Reports the client could not correct
+    (unknown engine, unknown user, wrong digest, decryption error, not in
+    time window, unsupported level) count as authentication failures too.
+
+  Internally: `Auth` is built from a `UsmConfig`, a GET answers with a shaped
+  response (`single()`), walk repetitions are a `WalkOptions`, timeouts are
+  `request_timeout`, and the e2e sim-agent moved with the crate (sink ids,
+  fallible `usm_user`, outcome-shaped `send_trap`/`send_inform`).
+
 - **Dependencies (Renovate weekly, #610)** — the batch, minus what the tree
   cannot take yet: `tonic`/`prost` 0.14 (gnmi moves to `tonic-prost` /
   `tonic-prost-build`, the split 0.14 made; the proto's `FloatVal`,

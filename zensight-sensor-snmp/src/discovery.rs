@@ -266,7 +266,7 @@ async fn probe(
             let client = client.clone();
             async move {
                 let oid = async_snmp::Oid::parse(oid).ok()?;
-                match client.get(&oid).await.ok()?.value {
+                match client.get(&oid).await.ok()?.single()?.value.clone() {
                     async_snmp::Value::OctetString(s) => String::from_utf8(s.to_vec()).ok(),
                     async_snmp::Value::ObjectIdentifier(o) => Some(o.to_string()),
                     _ => None,

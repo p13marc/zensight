@@ -297,7 +297,10 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 ### `security` (SNMPv3)
 
 `username`, `auth_protocol` (`MD5`/`SHA`/`SHA224`/`SHA256`/`SHA384`/`SHA512`),
-`auth_password`, `priv_protocol` (`DES`/`AES`/`AES192`/`AES256`),
+`auth_password`, `priv_protocol` (`DES`/`3DES`/`AES`/`AES192`/`AES256`/
+`AES192-REEDER`/`AES256-REEDER` — `AES192`/`AES256` extend a short localized
+key the Blumenthal way, as net-snmp does; Cisco gear wants the `-REEDER` form,
+also spelled `-CISCO`),
 `priv_password`, optional `engine_id`.
 
 A configured `engine_id` (hex, `0x`/`:` tolerated) pre-seeds the engine cache
