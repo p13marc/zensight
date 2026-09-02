@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The catalog resolves relationship claims into edges** (#917, part of #899).
+  `@catalog/state/edge/{edge_id}` is now published, tombstoned and seeded, with
+  the same lifecycle as `entity/{entity_id}`: a declared publisher per key,
+  `delete()` as the retire, `QosClass::Entity`, and a storage-shaped seed
+  queryable so a GUI joining a running fleet sees the graph that is already
+  there rather than waiting for something to change.
+
+  **No new subscription.** `all_evidence_wildcard()` is
+  `v1/*/state/*/evidence/**`, so relation claims already arrived at the
+  correlator; the subscriber routes them on the refined subject. The origin is
+  carried through **from the key**, which the payload does not have: a claim
+  says which sensor made it, only the key says which host that sensor ran on,
+  and an edge's observer set needs both to know whether an edge still has an
+  observer when one host goes quiet.
+
+  **`merge.rs` never learns about any of this**, and a test greps to keep it
+  that way. The identity merge is a pure function of host evidence and its
+  determinism is what everything else rests on; an edge cannot make two
+  machines the same machine, and a claim that could would be an identity claim
+  wearing a different hat. Resolution runs strictly after `recompute` and reads
+  the union-find's finished answer.
+
+  **Determinism is the acceptance, and it is tested as such.** `edge_id` is
+  hashed *after* resolution, so anything unstable in the resolver — a `HashMap`
+  iteration order reaching the hash — produces different ids across restarts
+  and an endless churn of tombstones and upserts against a fleet that never
+  changed. Every table is consulted by sorted iteration, entities are ranked by
+  id before indexing so a cloned MAC always resolves to the same one of two
+  claimants, and the test compares **serialized bytes** of the whole edge set
+  across shuffled claims and shuffled entities. A restart with unchanged
+  evidence publishes nothing; so does a refresh that moved only a timestamp.
+
+  Resolution ranks signals the way the identity merge does — `host_id`, then
+  device slug through the entity's member sources, then IP, then MAC, then name
+  — because a weaker signal must not override a stronger one. An end that
+  resolves to nothing *known* becomes `Endpoint::External`, which is the honest
+  answer for an upstream router. An end that named **nothing at all** drops the
+  edge: half an edge is worse than none, because it looks like a discovery. A
+  claim whose ends resolve to the same entity is dropped too — legitimately
+  reachable (a host that is its own gateway) and, if drawn, would loop the map
+  and make an entity its own containment ancestor in #918.
+
+  Two sensors seeing one relationship produce **one** edge with two observers,
+  and one of them going quiet does not retire it.
+
 - **Four sensors publish relationship evidence** (#916, part of #899). The
   graph now has inputs: **pve** a `Hosts` claim per guest, **container** a
   `Runs` claim per running container, **probe** a `Probes` claim per checked

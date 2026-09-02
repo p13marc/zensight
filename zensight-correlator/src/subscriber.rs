@@ -90,7 +90,7 @@ pub async fn run(
             }
             sample = host_sub.recv_async() => {
                 match sample {
-                    Ok(sample) => handle_host(&sample, &tx).await,
+                    Ok(sample) => handle_evidence(&sample, &tx).await,
                     Err(e) => warn!(error = %e, "host-evidence recv error"),
                 }
             }
@@ -171,11 +171,89 @@ fn is_host_identity_subject(key: &str) -> bool {
     )
 }
 
+/// Route one sample from the `evidence/**` subscription to the handler for
+/// its subject.
+///
+/// One subscription, several families: `all_evidence_wildcard()` is a
+/// hand-spelled union (`v1/*/state/*/evidence/**`), so identity claims, name
+/// observations and relationship claims all arrive here. Routing on the
+/// refined subject — never on a key substring — is what keeps a family added
+/// later inert rather than silently mis-decoded (#915).
+async fn handle_evidence(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
+    let key = sample.key_expr().as_str();
+    if is_relation_subject(key) {
+        handle_relation(sample, tx).await;
+        return;
+    }
+    handle_host(sample, tx).await;
+}
+
+/// Whether a key is a relationship claim (`evidence/relation/{relation_id}`).
+///
+/// Refined app-side through `ZensightState`, because the family carries no
+/// `common =` key: `zenkey::CommonState` is a closed RFC enum in an external
+/// crate (zenkey#416).
+fn is_relation_subject(key: &str) -> bool {
+    let Some((_, _, subject)) = zensight_common::keyexpr::refine_key(key) else {
+        return false;
+    };
+    matches!(
+        zensight_common::state::ZensightState::of(&subject),
+        Some(zensight_common::state::ZensightState::EvidenceRelation { .. })
+    )
+}
+
+/// Extract `(origin, sensor, relation_id)` from a relationship-claim key.
+fn parse_relation_key(key: &str) -> Option<(String, String, String)> {
+    let (parsed, sensor, subject) = zensight_common::keyexpr::refine_key(key)?;
+    match zensight_common::state::ZensightState::of(&subject)? {
+        zensight_common::state::ZensightState::EvidenceRelation { relation_id } => {
+            Some((parsed.origin.to_string(), sensor, relation_id.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// A relationship claim, or its tombstone.
+///
+/// The **origin is carried through** from the key, not read from the payload.
+/// A claim says which sensor made it; only the key says which host that sensor
+/// was running on, and the catalog needs both to decide whether an edge still
+/// has an observer when one host goes quiet.
+async fn handle_relation(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
+    let key = sample.key_expr().as_str();
+    let Some((origin, sensor, relation_id)) = parse_relation_key(key) else {
+        trace!(key = %key, "ignoring malformed relation-evidence key");
+        return;
+    };
+    if !is_put(sample) {
+        let _ = tx
+            .send(EvidenceMsg::RemoveRelation {
+                sensor,
+                origin,
+                relation_id,
+            })
+            .await;
+        return;
+    }
+    match decode::<zensight_common::relation::RelationshipEvidence>(&sample.payload().to_bytes()) {
+        Some(ev) => {
+            let _ = tx
+                .send(EvidenceMsg::Relation {
+                    origin,
+                    ev: Box::new(ev),
+                })
+                .await;
+        }
+        None => warn!(key = %key, "failed to decode RelationshipEvidence"),
+    }
+}
+
 async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
     let key = sample.key_expr().as_str();
     // Only `evidence/self` and `evidence/device/{device}` are host identity.
-    // `evidence/names/**` has its own subscriber; `evidence/relation/**` is
-    // the catalog's graph input and must never reach the identity store.
+    // `evidence/names/**` has its own subscriber; `evidence/relation/**` went
+    // to `handle_relation` above and must never reach the identity store.
     if !is_host_identity_subject(key) {
         return;
     }
