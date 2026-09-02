@@ -248,6 +248,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A durable timeline: events and alert transitions** (#908). The tiers answer
+  *what was this number*; this answers *what happened*, and they are different
+  questions that want different storage — downsampling a transition would be
+  meaningless. Two subscribers (`v1/*/events/**` and `v1/*/state/*/alert/*`)
+  feed a `timeline` table read by `@rpc/historian/timeline`: newest-first,
+  windowed, filtered by kind and origin, paged by `after_uid` — the
+  `@rpc/logs/events` contract, because a timeline and a log tail are the same
+  shape of question.
+
+  **An alert stops in two ways and both are recorded**: a `Resolved` document
+  and a tombstone. A timeline that understood only one would show half the
+  incidents as permanent, and which half would depend on which producer
+  published them.
+
+  **The row's key is derived, not minted** — from `(ts, kind, key, active)`. An
+  AdvancedSubscriber replays what is currently firing on every reconnect, and a
+  fresh id per replay would turn one firing into one row per restart, all
+  stamped with the original time and indistinguishable downstream. Deriving it
+  makes the replay overwrite the row it already wrote. `active` is part of the
+  identity because a fire and a clear in the same millisecond are two
+  transitions. The digest is a hand-written FNV-1a: the value is on disk, so it
+  has to mean the same thing in the next build, and `DefaultHasher` makes no
+  such promise.
+
+  A new table is additive — redb creates it on first open and every existing
+  row keeps its meaning — so this needs **no schema bump**.
+
+  `timeline` was the last declared-but-unbuilt procedure. Nothing is
+  `serve_unavailable` any more and the list that tracked what was is gone with
+  it, which is the point: a list of exceptions is a thing to forget to shrink,
+  and RFC 08 §6.1's coverage check does the job without one.
+
+  Writing the acceptance test found a real gap: `record_event` buffered and
+  nothing drained it, so events reached the store, sat in memory and vanished
+  on restart. "Events survive a historian restart" is the issue's first
+  acceptance and it did not, until the test said so. `flush_once` now takes
+  every buffered batch.
+
+  Verified live: an alert published and then retired appears as a fire and a
+  clear in one page, newest-first, with the summary on the fire; all three
+  transitions are still there after a `SIGTERM` and a restart, and the
+  subscriber's replay does not duplicate them.
+
 - **The historian is packaged** (#912). Release workflow (all four lists plus
   an in-image smoke — it links redb, which the correlator does not, so a linker
   skew in the store crate would otherwise reach the fleet before anything

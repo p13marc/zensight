@@ -50,6 +50,7 @@
 pub mod config;
 pub mod ingest;
 pub mod query;
+pub mod timeline;
 
 /// The producer chunk this service publishes and serves under.
 pub const PRODUCER: &str = "historian";

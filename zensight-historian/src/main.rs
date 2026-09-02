@@ -162,18 +162,22 @@ async fn main() -> Result<()> {
     query::range::serve_series(runner.session().clone(), ctx.clone(), store.clone())
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    query::timeline::serve_timeline(
+        runner.session().clone(),
+        ctx.clone(),
+        store.clone(),
+        ctx.origin().chunk().to_string(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     // `serve_unavailable` owns its reply loops and runs until the session
     // closes, so it is spawned rather than awaited — the netring pattern
     // (`main.rs:468`). The declaration itself happens on the first poll, well
     // inside `DECLARATION_GRACE`, so registry coverage still sees the keys.
-    for (procedure, issue) in query::UNIMPLEMENTED {
-        runner.spawn(query::serve_unimplemented(
-            runner.session().clone(),
-            ctx.clone(),
-            procedure,
-            issue,
-        ));
-    }
+    // Every declared procedure is served now (#908 was the last). If one is
+    // added to the registry without a server, `await_registry_coverage` below
+    // fails the startup — which is the whole point of that check, and why
+    // there is no longer a `serve_unimplemented` list to forget to shrink.
 
     // ── the loops ────────────────────────────────────────────────────────
     runner.spawn(ingest::run(
@@ -182,6 +186,20 @@ async fn main() -> Result<()> {
         store.clone(),
         counters.clone(),
         shedding.clone(),
+        shutdown_rx.clone(),
+    ));
+    let timeline_counters = Arc::new(zensight_historian::timeline::TimelineCounters::default());
+    runner.spawn(zensight_historian::timeline::run_events(
+        runner.session().clone(),
+        zensight_common::subscribe::DEFAULT_EVENTS_KEY_EXPR.to_string(),
+        store.clone(),
+        timeline_counters.clone(),
+        shutdown_rx.clone(),
+    ));
+    runner.spawn(zensight_historian::timeline::run_alerts(
+        runner.session().clone(),
+        store.clone(),
+        timeline_counters.clone(),
         shutdown_rx.clone(),
     ));
     runner.spawn(ingest::flush_loop(

@@ -32,6 +32,12 @@
 
 pub mod logs;
 pub mod rate;
+pub mod timeline;
+
+// Re-exported so a caller can name the error type its store operations return
+// without taking a direct dependency on redb — and without the version of
+// redb it pinned mattering to whether that name resolves.
+pub use redb;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -154,6 +160,14 @@ pub const LOG_STORE_MAX_ROWS: usize = 200_000;
 /// Cap on persisted event rows (#578). Two orders below the log cap: traps are
 /// rare by nature, and a trap storm should not evict a week of history.
 pub const EVENT_STORE_MAX_ROWS: usize = 20_000;
+
+/// Rows kept in the `timeline` table (#908).
+///
+/// Between the log cap and the event cap: a transition is rarer than a log
+/// line and more common than a trap, and unlike either it is what a reader
+/// scrubs back through — so the bound is set by "how far back can I scroll",
+/// not by "how much can I afford".
+pub const TIMELINE_STORE_MAX_ROWS: usize = 100_000;
 
 /// A single downsampled bucket queued for persistence: `(metric, tier, bucket_ts, value)`.
 pub type FlushRow = (MetricId, Tier, i64, Bucket);
@@ -787,6 +801,11 @@ impl PersistentStore {
             // on-disk file is the same either way.
             let _ = txn.open_table(CHUNKS_TABLE)?;
             let _ = txn.open_table(METRICS_TABLE)?;
+            // The timeline (#908). A NEW table is additive — redb creates it
+            // on first open and every existing row keeps meaning what it
+            // meant — so this needs no SCHEMA_VERSION bump. Only re-typing an
+            // existing table does.
+            let _ = txn.open_table(crate::timeline::TIMELINE_TABLE)?;
             let mut meta = txn.open_table(META_TABLE)?;
             meta.insert("schema", SCHEMA_VERSION)?;
         }
@@ -1072,6 +1091,35 @@ impl PersistentStore {
     /// already, and the age bound that matters is the sensor's.
     pub fn prune_logs(&self, keep_max: usize) -> Result<usize, redb::Error> {
         crate::logs::prune::<StoredLog>(&self.db, 0, i64::MAX, keep_max)
+    }
+
+    // ---- Timeline: events and alert transitions (#908) ---------------------
+
+    /// Persist timeline rows. Idempotent by their derived uid, which is what
+    /// makes a subscriber's history replay safe — see [`crate::timeline`].
+    pub fn write_timeline(
+        &self,
+        rows: &[crate::timeline::TimelineRow],
+    ) -> Result<usize, redb::Error> {
+        crate::timeline::write_batch(&self.db, rows)
+    }
+
+    /// Read timeline rows newest-first in one bounded page.
+    pub fn query_timeline(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        kinds: &[crate::timeline::TimelineKind],
+        origin: Option<&str>,
+        after_uid: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::timeline::TimelineRow>, redb::Error> {
+        crate::timeline::query(&self.db, from_ms, to_ms, kinds, origin, after_uid, limit)
+    }
+
+    /// Evict the oldest timeline rows beyond `keep_max`.
+    pub fn prune_timeline(&self, keep_max: usize) -> Result<usize, redb::Error> {
+        crate::timeline::prune(&self.db, keep_max)
     }
 
     // ---- Event records (#578) ----------------------------------------------
@@ -1464,6 +1512,7 @@ pub struct MetricStore {
     log_retention: LogRetention,
     /// Event records buffered for the next flush to the cold store (#578).
     event_pending: Vec<zensight_common::EventRecord>,
+    timeline_pending: Vec<crate::timeline::TimelineRow>,
 }
 
 impl MetricStore {
@@ -1495,6 +1544,7 @@ impl MetricStore {
             log_pending: Vec::new(),
             log_retention: LogRetention::new(LOG_SAMPLE_EVERY),
             event_pending: Vec::new(),
+            timeline_pending: Vec::new(),
         }
     }
 
@@ -1713,6 +1763,30 @@ impl MetricStore {
             .max_by_key(|s| s.hot.to_vec().last().map(|x| x.ts).unwrap_or(i64::MIN))
             .map(|s| s.hot.to_vec())
             .unwrap_or_default()
+    }
+
+    /// Buffer a timeline row for the next flush (#908).
+    ///
+    /// The same seam as [`record_event`](Self::record_event): accumulate
+    /// inline, hand the batch off to `spawn_blocking`. Nothing is buffered
+    /// without a database to flush it to — a memory-only historian has no
+    /// timeline, and holding rows for a write that can never happen is the
+    /// slow leak `record` already learned not to have.
+    pub fn record_timeline(&mut self, row: crate::timeline::TimelineRow) {
+        if self.persistent.is_some() {
+            self.timeline_pending.push(row);
+        }
+    }
+
+    /// Drain buffered timeline rows and the persistent handle.
+    pub fn take_timeline_flush_batch(
+        &mut self,
+    ) -> Option<(PersistentStore, Vec<crate::timeline::TimelineRow>)> {
+        let store = self.persistent.clone()?;
+        if self.timeline_pending.is_empty() {
+            return None;
+        }
+        Some((store, std::mem::take(&mut self.timeline_pending)))
     }
 
     /// Hot (in-memory) samples for an interned id, oldest-first.

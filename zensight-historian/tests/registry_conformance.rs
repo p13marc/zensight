@@ -31,17 +31,28 @@ fn the_slice_declares_no_write_surface() {
     );
 }
 
-/// Every procedure the slice advertises must be one this build actually
-/// declares a queryable for — the RFC 08 §6.1 rule, checked here from the
-/// registry side so a procedure added to the TOML without a server is caught
-/// by `cargo test` and not only by a running deployment.
+/// Every procedure the slice advertises is served by this build (#908 was the
+/// last to be built), checked from the registry side so a procedure added to
+/// the TOML without a server is caught by `cargo test` and not only by a
+/// running deployment.
 ///
-/// `timeline` is served as `error/unsupported` until #908 builds it, which
-/// counts: a declared key that answers immediately is an answer, where an
-/// undeclared one is a timeout that looks like a slow fleet.
+/// There is no `serve_unavailable` list any more, and that is the point: the
+/// list existed while `range`, `series` and `timeline` were declared and
+/// unbuilt, and a list of exceptions is a thing to forget to shrink. What
+/// remains is the RFC 08 §6.1 check itself, which fails the startup two
+/// seconds after the mistake rather than the first time someone GETs a key
+/// that was never there.
 #[test]
-fn every_declared_procedure_is_accounted_for() {
+fn every_declared_procedure_is_served() {
     let toml = zensight_common::registry::historian::REGISTRY_TOML;
+    // `introspect` and `describe` come from the framework; the rest are this
+    // crate's. If the registry grows a seventh, this fails until someone says
+    // where it is served.
+    let declared: Vec<&str> = toml
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("path = \""))
+        .filter_map(|l| l.strip_suffix('"'))
+        .collect();
     for procedure in [
         "introspect",
         "describe",
@@ -51,17 +62,8 @@ fn every_declared_procedure_is_accounted_for() {
         "stats",
     ] {
         assert!(
-            toml.contains(&format!("path = \"{procedure}\"")),
+            declared.contains(&procedure),
             "the slice must declare {procedure}"
         );
     }
-    // Implemented here; the rest are `serve_unavailable` until their issues
-    // land. If this list grows, `query::serve_unimplemented` must shrink.
-    let implemented = ["stats", "range", "series"];
-    let unimplemented = ["timeline"];
-    assert_eq!(
-        implemented.len() + unimplemented.len() + 2, // + introspect/describe
-        6,
-        "every declared procedure is either implemented or explicitly unimplemented"
-    );
 }

@@ -146,6 +146,19 @@ fn ladder_evicts_names_the_table_degrades_and_never_exits() {
     );
 
     // Relief: stop re-inflating, let the ladder drain and walk down.
+    //
+    // The pause is load-bearing, not politeness. Recovery is measured from
+    // *self-reported RSS*, and RSS is what the kernel currently attributes to
+    // the process — not what the allocator has released. `malloc_trim` hands
+    // pages back, but the accounting catches up on its own schedule, so a
+    // tight spin of 30 snapshots can complete in a few milliseconds and never
+    // observe the drop it is waiting for. That made the assertion depend on
+    // machine load rather than on the ladder: it passed on an idle box and
+    // failed under a parallel `cargo test --workspace`, which is the run that
+    // matters.
+    //
+    // 20 ms × 30 is 600 ms of patience for a property that takes RECOVER_TICKS
+    // ticks to establish, and the loop still exits the moment it sees step 0.
     for _ in 0..30 {
         let snap = governed_snapshot(&health, &governor);
         if snap
@@ -156,6 +169,7 @@ fn ladder_evicts_names_the_table_degrades_and_never_exits() {
         {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(
         !degraded_flag.load(Ordering::SeqCst),

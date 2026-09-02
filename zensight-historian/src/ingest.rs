@@ -217,20 +217,55 @@ pub async fn flush_loop(
     }
 }
 
-/// Take whatever is pending and write it in one transaction.
+/// Take everything pending — samples, event records and timeline rows — and
+/// write it.
+///
+/// Three transactions, not one: they are different tables answering different
+/// questions, and a sample batch that failed should not take an alert
+/// transition down with it. The transitions and the events are the rarer and
+/// less replaceable of the three — a telemetry sample will be restated a
+/// second later, and a trap will not.
+///
+/// Every batch that is buffered must be taken here. `record_event` buffers,
+/// and for a while nothing drained it: the events reached the store, sat in
+/// memory, and vanished on restart — which the timeline's own restart test
+/// caught, because "events survive a historian restart" is #908's first
+/// acceptance and it did not.
 pub async fn flush_once(store: &SharedStore) {
-    let batch = {
+    let (samples, events, timeline) = {
         let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
-        s.take_flush_batch()
+        (
+            s.take_flush_batch(),
+            s.take_event_flush_batch(),
+            s.take_timeline_flush_batch(),
+        )
     };
-    let Some((handle, batch)) = batch else {
-        return;
-    };
-    let rows = batch.rows.len();
-    match tokio::task::spawn_blocking(move || handle.write_batch(&batch)).await {
-        Ok(Ok(written)) => tracing::debug!(written, rows, "historian: flushed"),
-        Ok(Err(e)) => tracing::warn!(error = %e, rows, "historian: flush failed"),
-        Err(e) => tracing::warn!(error = %e, "historian: flush task panicked"),
+
+    if let Some((handle, batch)) = samples {
+        let rows = batch.rows.len();
+        match tokio::task::spawn_blocking(move || handle.write_batch(&batch)).await {
+            Ok(Ok(written)) => tracing::debug!(written, rows, "historian: flushed samples"),
+            Ok(Err(e)) => tracing::warn!(error = %e, rows, "historian: sample flush failed"),
+            Err(e) => tracing::warn!(error = %e, "historian: sample flush task panicked"),
+        }
+    }
+
+    if let Some((handle, records)) = events {
+        let n = records.len();
+        match tokio::task::spawn_blocking(move || handle.write_events(&records)).await {
+            Ok(Ok(written)) => tracing::debug!(written, "historian: flushed events"),
+            Ok(Err(e)) => tracing::warn!(error = %e, n, "historian: event flush failed"),
+            Err(e) => tracing::warn!(error = %e, "historian: event flush task panicked"),
+        }
+    }
+
+    if let Some((handle, rows)) = timeline {
+        let n = rows.len();
+        match tokio::task::spawn_blocking(move || handle.write_timeline(&rows)).await {
+            Ok(Ok(written)) => tracing::debug!(written, "historian: flushed timeline"),
+            Ok(Err(e)) => tracing::warn!(error = %e, n, "historian: timeline flush failed"),
+            Err(e) => tracing::warn!(error = %e, "historian: timeline flush task panicked"),
+        }
     }
 }
 
@@ -259,7 +294,15 @@ pub async fn prune_loop(
                 let started = std::time::Instant::now();
                 match tokio::task::spawn_blocking(move || {
                     let now_ms = zensight_common::telemetry::current_timestamp_millis();
-                    handle.prune(now_ms)
+                    let tiers = handle.prune(now_ms)?;
+                    // The timeline is bounded by row count, not by age: how
+                    // far back a reader can scrub is the question it answers,
+                    // and a transition does not become less interesting for
+                    // being old.
+                    let timeline =
+                        handle.prune_timeline(zensight_store::TIMELINE_STORE_MAX_ROWS)?;
+                    let events = handle.prune_events(zensight_store::EVENT_STORE_MAX_ROWS)?;
+                    Ok::<_, zensight_store::redb::Error>(tiers + timeline + events)
                 })
                 .await
                 {
