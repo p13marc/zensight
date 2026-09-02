@@ -16,8 +16,35 @@ use zensight_common::TableStats;
 use zensight_sensor_core::governor::governed_snapshot;
 use zensight_sensor_core::{EvictOutcome, MemoryGovernor, SensorHealth, TableHandle};
 
-const CHUNK: usize = 64 * 1024;
+/// Ballast chunk size, deliberately **above** glibc's 128 KiB mmap threshold.
+///
+/// At the previous 64 KiB every chunk came off the heap arena, and freeing one
+/// in an already-fragmented heap returns nothing to the kernel — so RSS did
+/// not move when the ballast was released, and a test that measures RSS could
+/// not see its own relief. That was #968: the run failed roughly 1 in 12 with
+/// the sibling test sharing the process, and passed 30/30 under
+/// `MALLOC_MMAP_THRESHOLD_=65536`, which is what identified the cause.
+///
+/// At 256 KiB each chunk is its own mapping and `free` is a `munmap`: RSS
+/// tracks the ballast exactly, which is what this file's header claims and
+/// what every assertion below assumes.
+const CHUNK: usize = 256 * 1024;
 const MIB: u64 = 1024 * 1024;
+
+/// Pin the allocator's mmap threshold for the life of the process.
+///
+/// glibc raises the threshold dynamically as mmap'd blocks are freed (up to
+/// 32 MiB), so a 256 KiB chunk that is mapped early would come off the heap
+/// later and the guarantee above would decay mid-test. Setting
+/// `M_MMAP_THRESHOLD` explicitly disables that adaptation — the documented
+/// behaviour, and the reason this is a call rather than a constant.
+fn pin_mmap_threshold() {
+    #[cfg(target_env = "gnu")]
+    // SAFETY: `mallopt` is thread-safe and only adjusts allocator policy.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, (CHUNK / 2) as libc::c_int);
+    }
+}
 
 /// RSS is process-global: two ladder tests reading `/proc/self/status`
 /// concurrently shift each other's ratios (one test's allocations are the
@@ -74,6 +101,7 @@ fn register_ballast(governor: &MemoryGovernor, ballast: &Ballast) {
 #[test]
 fn ladder_evicts_names_the_table_degrades_and_never_exits() {
     let _rss = RSS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    pin_mmap_threshold();
     let health = SensorHealth::new("test");
     let governor = MemoryGovernor::default();
     let ballast: Ballast = Arc::default();
@@ -93,7 +121,16 @@ fn ladder_evicts_names_the_table_degrades_and_never_exits() {
         .self_stats
         .and_then(|s| s.rss_bytes)
         .expect("self-measured RSS on Linux");
-    health.set_budget_bytes(baseline + 8 * MIB);
+    // Headroom scales with the baseline, not a flat 8 MiB. The ladder clears
+    // at 0.75 x budget, so a flat headroom puts the clear line at
+    // `0.75*baseline + 6 MiB` — which is BELOW the baseline itself once the
+    // baseline passes 24 MiB, making recovery arithmetically impossible for
+    // any test binary that grows past that. It has not yet (this one measures
+    // 3-4 MiB), so this is not the flake below; it is the trap the flake would
+    // have turned into, silently, the first time sensor-core got heavier.
+    let headroom = (8 * MIB).max(baseline / 2);
+    let budget = baseline + headroom;
+    health.set_budget_bytes(budget);
     inflate(&ballast, 24 * MIB);
 
     let mut saw_evict_of_ballast = false;
@@ -145,35 +182,57 @@ fn ladder_evicts_names_the_table_degrades_and_never_exits() {
         "sustained pressure never reached Degrade"
     );
 
-    // Relief: stop re-inflating, let the ladder drain and walk down.
+    // Relief: the workload goes away, and the ladder must walk all the way
+    // back down — de-applying the degradable on the 2 -> 1 transition.
     //
-    // The pause is load-bearing, not politeness. Recovery is measured from
-    // *self-reported RSS*, and RSS is what the kernel currently attributes to
-    // the process — not what the allocator has released. `malloc_trim` hands
-    // pages back, but the accounting catches up on its own schedule, so a
-    // tight spin of 30 snapshots can complete in a few milliseconds and never
-    // observe the drop it is waiting for. That made the assertion depend on
-    // machine load rather than on the ladder: it passed on an idle box and
-    // failed under a parallel `cargo test --workspace`, which is the run that
-    // matters.
+    // The ballast is DROPPED here rather than merely left un-re-inflated, and
+    // that is the whole point. The ladder aims eviction at exactly the clear
+    // line (`rss - 0.75 x budget`) and stops there by design; leaving the
+    // workload in place therefore parks RSS *on* the line, and recovery needs
+    // six consecutive ticks *strictly below* it. Measured, that margin was
+    // 9160 KiB against a 9216 KiB line — 56 KiB, about 0.6%. The test passed
+    // or failed on allocator rounding, roughly one run in four (#968), and
+    // being in `cargo test --workspace` it reddened unrelated PRs.
     //
-    // 20 ms × 30 is 600 ms of patience for a property that takes RECOVER_TICKS
-    // ticks to establish, and the loop still exits the moment it sees step 0.
-    for _ in 0..30 {
+    // Parking at a threshold and then asserting you are past it is not a
+    // property of the ladder; it is a coin flip. Real relief is the pressure
+    // source going away, so that is what this models — and the margin becomes
+    // the whole 24 MiB rather than 56 KiB.
+    ballast.lock().unwrap().clear();
+    ballast.lock().unwrap().shrink_to_fit();
+
+    // The pause is still load-bearing. Recovery is measured from self-reported
+    // RSS, which is what the kernel currently attributes to the process, not
+    // what the allocator has released. A tight spin of 30 snapshots can finish
+    // in a few milliseconds and never observe the drop it waits for.
+    //
+    // 20 ms x 40 is 800 ms of patience for a walk that needs RECOVER_TICKS
+    // ticks at each of steps 3->2->1, and the loop still exits the moment it
+    // sees step 0.
+    let mut last = String::new();
+    for _ in 0..40 {
         let snap = governed_snapshot(&health, &governor);
-        if snap
-            .self_stats
-            .as_ref()
-            .and_then(|s| s.ladder.as_ref())
-            .is_some_and(|l| l.step == 0)
-        {
+        let stats = snap.self_stats.as_ref().expect("measured");
+        let ladder = stats.ladder.as_ref().expect("budget set => ladder armed");
+        last = format!(
+            "step {} at rss {} KiB against a clear line of {} KiB (budget {} KiB, baseline {} KiB)",
+            ladder.step,
+            stats.rss_bytes.unwrap_or(0) / 1024,
+            (budget as f64 * 0.75) as u64 / 1024,
+            budget / 1024,
+            baseline / 1024,
+        );
+        if ladder.step == 0 {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    // The numbers go in the message: the last diagnosis of this assertion cost
+    // an afternoon precisely because "recovery must restore the degradable"
+    // said nothing about how far off recovery had been.
     assert!(
         !degraded_flag.load(Ordering::SeqCst),
-        "recovery must restore the degradable"
+        "recovery must restore the degradable — ended at {last}"
     );
     // Reaching this line IS the final assertion: the process never exited.
 }
