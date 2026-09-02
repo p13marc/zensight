@@ -83,9 +83,22 @@ immediately.
 ## Running it
 
 ```bash
-just historian                     # alongside the local stack
+just run                           # the whole local stack, historian included
+just historian                     # just this one, against a running hub
 cargo run -p zensight-historian -- --config configs/historian.json5
 ```
+
+Ask it something, without needing `zenctl`:
+
+```bash
+cargo run -p zensight-historian --example historian-query -- \
+    -c tcp/127.0.0.1:7447 'v1/*/@rpc/historian/series?producer=sysinfo'
+```
+
+That example is what `scripts/demo-verify.sh` queries with. It exits 0 on a
+value reply, 1 on an error reply and 2 on silence, because those are three
+different things and a script that collapsed them would report a dead historian
+as an empty one.
 
 Its store lands in `$STATE_DIRECTORY` under systemd, else
 `$XDG_STATE_HOME/zensight`, else `~/.local/state/zensight/history.redb`. If it
@@ -94,11 +107,14 @@ historian that answers live questions from the hot ring is more useful than one
 that refuses to start, but an operator who wanted durable history and got a ring
 must be able to find that out without reading the source.
 
-Ask it what it holds:
+## Deployment
 
-```bash
-zenctl get -c tcp/127.0.0.1:7447 'v1/*/@rpc/historian/stats'
-```
+| | Where |
+|---|---|
+| systemd | `packaging/systemd/zensight-historian.service` — hardened like the correlator's, plus `StateDirectory=zensight-historian`, which is where the shipped config's `store.path: null` resolves to |
+| Quadlet | `packaging/quadlet/zensight-historian.container` — `MemoryMax=320M` against a 256 MiB budget, so the governor has room to shed and evict before the OOM killer decides for it |
+| Release | one binary in the tarball, one container image. **Not** in the all-in-one `zensight-sensors` bundle: that is the six host sensors, and this is a fleet service you want one of per site, not one per host |
+| CI | `demo-smoke` starts it and **queries** it; `conformance` judges its slice alongside the sensors' |
 
 ## Resource budget
 

@@ -8,7 +8,7 @@
 #   just gui            # run just the GUI    (just gui listen=tcp/0.0.0.0:7447 for remote sensors)
 #   just sensors        # run just the 6 sensors, no GUI/correlator (Ctrl-C stops them)
 #                       # (just sensors connect=tcp/<gui-host>:7447 to feed a remote GUI)
-#   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | hostspec | parallax | correlator)
+#   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | hostspec | parallax | correlator | historian)
 #   just container      # the container sensor (#819) — needs a runtime socket
 #   just probe          # the outside-in probe sensor (#820) — needs targets
 #   just pve            # the Proxmox VE sensor (#818) — needs a PVE endpoint
@@ -399,11 +399,12 @@ run rerun="": setup configure
     if [[ -n "$rerun_mode" ]]; then
         cargo build {{relflag}} -p zensight-rerun
     fi
-    # Sensors + correlator via the shared spawner (same process group, so the
+    # Sensors + correlator + historian via the shared spawner (same process
+    # group, so the
     # trap below reaps them when the GUI exits or on Ctrl-C). They connect to
     # the GUI's loopback rendezvous (no multicast needed); logs in {{rundir}}/.
     BINDIR="{{bindir}}" CONFDIR="{{rundir}}" LOGDIR="{{rundir}}" \
-    CONNECT="{{hub}}" WITH_CORRELATOR=1 scripts/run-sensors.sh &
+    CONNECT="{{hub}}" WITH_CORRELATOR=1 WITH_HISTORIAN=1 scripts/run-sensors.sh &
     # Stop all sensors when the GUI exits (or on Ctrl-C).
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
     if [[ -n "$rerun_mode" ]]; then

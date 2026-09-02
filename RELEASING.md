@@ -138,13 +138,13 @@ git push origin X.Y.Z
 Watch the run in the Actions tab. `release.yml` produces, all amd64-only:
 
 - **source tarball** + `SHA256SUMS` (release assets);
-- **`zensight-<ver>-linux-amd64.tar.gz`**: all 17 binaries (14 sensors, 2 exporters,
-  correlator) with an internal `SHA256SUMS`, the `packaging/systemd/` units, and the
+- **`zensight-<ver>-linux-amd64.tar.gz`**: all 18 binaries (14 sensors, 2 exporters,
+  correlator, historian) with an internal `SHA256SUMS`, the `packaging/systemd/` units, and the
   example configs — the native-install path. There is no separate `.tar.gz.sha256`
   asset; the `checksums` job publishes one release-wide `SHA256SUMS`;
-- **18 container images** at `git.marcpardo.eu/marcpardo/<name>:{<ver>,latest}`:
+- **19 container images** at `git.marcpardo.eu/marcpardo/<name>:{<ver>,latest}`:
   `zensight-sensor-{logs,sysinfo,snmp,gnmi,modbus,netflow,netlink,netring,systemd,hostspec,pve,container,probe,parallax}`,
-  `zensight-exporter-{prometheus,otel}`, `zensight-correlator`, and the all-in-one
+  `zensight-exporter-{prometheus,otel}`, `zensight-correlator`, `zensight-historian`, and the all-in-one
   `zensight-sensors` bundle (the six host sensors; parallax stays out of it on purpose —
   see the 0.14.0 changelog);
 - **flatpak**: an unsigned `zensight-<ver>.flatpak` bundle on the release, plus a

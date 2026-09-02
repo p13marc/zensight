@@ -20,6 +20,7 @@
 #   CONNECT          Zenoh endpoint the sensors connect to
 #                                                       (default tcp/127.0.0.1:7447)
 #   WITH_CORRELATOR  1 = also run zensight-correlator   (default 0)
+#   WITH_HISTORIAN   1 = also run zensight-historian    (default 0)
 #   ZENSIGHT_SENSORS comma/space-separated subset to run (#813) — e.g.
 #                    "sysinfo,systemd,logs" on a box where netring holds
 #                    319 MB to watch no traffic. Default: all present.
@@ -38,6 +39,7 @@ CONFDIR="${CONFDIR:-.run}"
 LOGDIR="${LOGDIR:-.run}"
 CONNECT="${CONNECT:-tcp/127.0.0.1:7447}"
 WITH_CORRELATOR="${WITH_CORRELATOR:-0}"
+WITH_HISTORIAN="${WITH_HISTORIAN:-0}"
 ZENSIGHT_SENSORS="${ZENSIGHT_SENSORS:-}"
 MAX_RESTARTS="${MAX_RESTARTS:-5}"
 
@@ -112,6 +114,7 @@ trap 'trap - TERM INT EXIT; kill 0 2>/dev/null' TERM INT EXIT
 
 extra=""
 [[ "$WITH_CORRELATOR" == 1 ]] && extra=" + correlator"
+[[ "$WITH_HISTORIAN" == 1 ]] && extra="$extra + historian"
 sel="${ZENSIGHT_SENSORS:-all}"
 echo "Starting sensors [$sel]$extra (connecting to $CONNECT)…"
 spawn zensight-sensor-sysinfo sysinfo.json5
@@ -130,6 +133,12 @@ if [[ "$WITH_CORRELATOR" == 1 ]]; then
     # The correlator fuses the sensors' identity evidence into HostEntity docs
     # (needs no capabilities). netring/netlink evidence feeds are on by default.
     spawn zensight-correlator correlator.json5
+fi
+if [[ "$WITH_HISTORIAN" == 1 ]]; then
+    # The historian holds the fleet's telemetry history and answers range
+    # queries over it (#898). Its database lands under ~/.local/state/zensight,
+    # so it survives a restart of this script — which is the point of it.
+    spawn zensight-historian historian.json5
 fi
 
 # Each child is supervised individually; the script itself only ends on

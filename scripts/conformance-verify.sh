@@ -67,6 +67,14 @@ SENSORS="${SENSORS:-sysinfo logs systemd hostspec probe}"
 # key (RFC 08 §6, property D4), so running both covers both halves of the slice
 # diff.
 CORRELATOR="${CORRELATOR:-1}"
+
+# The historian (#898/#912). Not a `zensight-sensor-*`, so it is started
+# separately like the correlator — but unlike the correlator it is a HOST-origin
+# producer, which is exactly what makes it worth judging here: its slice, its
+# `alive => callable` and its schemas go through the same RFC 08 judges every
+# sensor's do, and nothing else in the tree exercises that path for a
+# non-sensor producer.
+HISTORIAN="${HISTORIAN:-1}"
 # The passive listening window: how long the doctor watches the data planes
 # before judging what rode. Shorter in CI than a human would use — every
 # second here is a second of a 2-lane runner.
@@ -122,6 +130,7 @@ die() {
 pkgs=(-p zensight-conformance)
 for s in $SENSORS; do pkgs+=(-p "zensight-sensor-$s"); done
 [[ "$CORRELATOR" == "1" ]] && pkgs+=(-p zensight-correlator)
+[[ "$HISTORIAN" == "1" ]] && pkgs+=(-p zensight-historian)
 
 echo "==> building ${pkgs[*]}"
 cargo build $relflag --locked "${pkgs[@]}" >/dev/null
@@ -130,6 +139,7 @@ cargo build $relflag --locked "${pkgs[@]}" >/dev/null
 required=("$BIN/zensight-conformance")
 for s in $SENSORS; do required+=("$BIN/zensight-sensor-$s"); done
 [[ "$CORRELATOR" == "1" ]] && required+=("$BIN/zensight-correlator")
+[[ "$HISTORIAN" == "1" ]] && required+=("$BIN/zensight-historian")
 require_bins "${required[@]}"
 
 tmp="$(mktemp -d)"
@@ -174,8 +184,21 @@ if [[ "$CORRELATOR" == "1" ]]; then
     pids+=($!)
 fi
 
+if [[ "$HISTORIAN" == "1" ]]; then
+    echo "==> starting historian (a host-origin producer, not a service origin)"
+    # STATE_DIRECTORY so its database lands in the run's temp dir and not in
+    # the invoking user's state home — a conformance run must not leave a file
+    # behind, and must not read one an earlier run left.
+    ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
+        STATE_DIRECTORY="$tmp" \
+        "$BIN/zensight-historian" --config "$tmp/historian.json5" \
+        >"$tmp/historian.log" 2>&1 &
+    pids+=($!)
+fi
+
 expected=$(wc -w <<<"$SENSORS")
 [[ "$CORRELATOR" == "1" ]] && expected=$((expected + 1))
+[[ "$HISTORIAN" == "1" ]] && expected=$((expected + 1))
 
 # ---------------------------------------------------------------------------
 # Wait for the roster, not for a fixed sleep. The judge itself is the probe:

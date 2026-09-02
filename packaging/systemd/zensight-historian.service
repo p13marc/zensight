@@ -1,0 +1,33 @@
+[Unit]
+Description=ZenSight historian — the fleet's telemetry history, ingest and range queries
+Documentation=https://github.com/p13marc/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-historian --config /etc/zensight/historian.json5
+Restart=on-failure
+RestartSec=5s
+# Graceful stop: SIGTERM lets the process take one last flush before exit, so
+# the samples it has already accepted are not thrown away by a restart.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+# Run unprivileged under a transient system user, with a minimal sandbox.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/zensight
+# The one thing the correlator does not need and this does: somewhere to put
+# the database. systemd creates /var/lib/zensight-historian, chowns it to the
+# transient user, and exports it as $STATE_DIRECTORY — which is where the
+# config's `store.path: null` resolves to, so the unit and the shipped config
+# agree without either naming a path.
+StateDirectory=zensight-historian
+# Needs no capabilities: a pure bus client — it subscribes telemetry, answers
+# queries, binds nothing and makes no privileged syscall.
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
