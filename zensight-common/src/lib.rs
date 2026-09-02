@@ -27,6 +27,7 @@ pub mod exposition;
 pub mod health;
 pub mod history;
 pub mod hostspec;
+pub mod impact;
 pub mod interfaces;
 pub mod keyexpr;
 pub mod media;

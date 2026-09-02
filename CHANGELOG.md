@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Impact attribution: which alert is a cause and which forty are symptoms**
+  (#918, part of #899). `zensight_common::impact::attribute(edges, firing, down)
+  -> Impact` walks the containment graph and returns, per firing alert, what it
+  is a symptom *of*, and per root, everything downstream of it.
+
+  When a hypervisor dies, every guest goes down, every container on every guest
+  goes down, and every probe run from any of them starts failing. Without the
+  graph an operator gets forty pages and works out from timestamps which one to
+  act on. With it, one is the cause and thirty-nine are symptoms — and saying
+  which is arithmetic, not judgement.
+
+  Pure, clock-free and deterministic: no I/O, no state, no clock, and a test
+  pins that reversing the edge list changes nothing. **"Down" stays the
+  caller's decision** — lost liveliness, `status == "offline"`, an operator
+  marking maintenance are all legitimate and differ per deployment, so encoding
+  one would bury a policy choice inside a graph walk. Only containment kinds
+  propagate; `l2_adjacent` is inert, because two hosts on one switch are peers
+  and treating adjacency as containment would blame an arbitrary neighbour.
+
+  Bounded at depth 4 with a visited set on every walk, in both directions. The
+  graph is built from evidence published by independent sensors that have no
+  way to agree there is no cycle — two hosts can each claim to be the other's
+  gateway from a stale neighbour table — and an unguarded walk would hang the
+  caller, which in the GUI is the render thread. A test builds exactly that
+  cycle.
+
+  Fourteen tests: the hypervisor, gateway and vantage cases; the
+  hypervisor → guest → container chain attributing to the top rather than the
+  nearest parent; two roots resolving to the nearer one; edge-order
+  independence; the depth cap; `l2_adjacent` propagating nothing; nothing down
+  giving empty impact; and an `External` endpoint neither rooting nor acting as
+  a path between two hosts.
+
+  One deviation from the issue, flagged in the code: it asks for `Cause::Alert`
+  "when the root has a firing **availability** alert", but the alert model has
+  no availability classification (`AlertKind` is
+  `Anomaly`/`Expectation`/`SensorHealth`) and inventing one is a larger design
+  decision than this function should make alone. The root's most severe own
+  alert is used instead, ties broken by `alert_key` ascending so the pick is
+  deterministic — with a test, since an undertested tie-break shows up as a
+  cause that changes between renders for no visible reason.
+
 - **The relationship graph gets a wire model** (#915, part of #899). Two new
   state families, and between them the whole graph:
   `state/<producer>/evidence/relation/{relation_id}` — what a sensor *claims* —
