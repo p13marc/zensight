@@ -1520,24 +1520,6 @@ pub fn node_health(
     NodeHealth::Healthy
 }
 
-/// Bytes/sec from the last two samples of a monotonic counter series (#391).
-/// `None` on short series, non-advancing clocks, or counter resets (negative
-/// delta) — a reset yields one missing reading, not a bogus spike. Pure.
-pub fn counter_rate(samples: &[zensight_store::Sample]) -> Option<f64> {
-    let [.., prev, last] = samples else {
-        return None;
-    };
-    let dt_ms = last.ts - prev.ts;
-    if dt_ms <= 0 {
-        return None;
-    }
-    let dv = last.value - prev.value;
-    if dv < 0.0 {
-        return None; // counter reset
-    }
-    Some(dv / (dt_ms as f64 / 1000.0))
-}
-
 /// Format a bytes/sec rate for display ("2.1 MB/s"). Pure.
 pub fn format_rate(bytes_per_sec: f64) -> String {
     if bytes_per_sec >= 1_000_000_000.0 {
@@ -2113,23 +2095,6 @@ mod tests {
         );
         // Passive node with a live entity is healthy, not stale.
         assert_eq!(node_health(&[], &[], false), NodeHealth::Healthy);
-    }
-
-    #[test]
-    fn counter_rate_deltas_and_resets() {
-        use zensight_store::Sample;
-        let s = |ts, value| Sample { ts, value };
-        // 1000 bytes over 2 s → 500 B/s (uses the last two samples).
-        assert_eq!(
-            counter_rate(&[s(0, 0.0), s(1_000, 100.0), s(3_000, 1_100.0)]),
-            Some(500.0)
-        );
-        // Counter reset → None, not a negative spike.
-        assert_eq!(counter_rate(&[s(0, 5_000.0), s(1_000, 10.0)]), None);
-        // Too short / non-advancing clock.
-        assert_eq!(counter_rate(&[s(0, 1.0)]), None);
-        assert_eq!(counter_rate(&[]), None);
-        assert_eq!(counter_rate(&[s(5, 1.0), s(5, 2.0)]), None);
     }
 
     #[test]

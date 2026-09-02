@@ -22,13 +22,29 @@ pub struct Reading {
     pub point: TelemetryPoint,
     /// The publishing host's origin (`h-<12hex>`), read from the key.
     pub origin: String,
+    /// The key's subject tail, `/`-joined — everything after the producer
+    /// chunk.
+    ///
+    /// Carried for the same reason as `origin`, and it is not derivable from
+    /// the payload either: for a proxy producer the wire subject is
+    /// `{device}/{metric...}` while [`TelemetryPoint::metric`] is only the
+    /// `{metric...}` half. `(origin, producer, subject)` is what names a
+    /// series to the store and to the fleet historian (#904), so a cache that
+    /// rebuilt it from the payload would name the same series differently from
+    /// the service it is a cache of.
+    pub subject: String,
 }
 
 impl Reading {
-    pub fn new(point: TelemetryPoint, origin: impl Into<String>) -> Self {
+    pub fn new(
+        point: TelemetryPoint,
+        origin: impl Into<String>,
+        subject: impl Into<String>,
+    ) -> Self {
         Self {
             point,
             origin: origin.into(),
+            subject: subject.into(),
         }
     }
 

@@ -23,6 +23,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 |-------|-----------|
 | `zensight/` | Iced 0.14 frontend — views/state, testing, design system, local store |
 | [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) | bus explorer CLI (RFC 08 §6) — external, in the zenkey repo |
+| `zensight-store/` | tiered time-series store (hot ring + redb minute/hour tiers, logs/events/chunks) — extracted from the GUI binary (#904), shared with the historian |
 | `zensight-common/` | shared model: telemetry, alert/command, identity/evidence/entity, artifact, QoS, keyexpr, payload type table |
 | [`zenkey`](https://github.com/p13marc/zenkey) | v1 key grammar (`V1Context`, `AppProfile`, origin minting) — external repo (crates.io dep, like `zblob`), was in-tree `zensight-keyspace/`; registry TOMLs live in `zensight-common/registry/`, compiled by `zenkey-build` |
 | `zensight-sensor-core/` | sensor framework: runner, publishers (declared, QoS), health, alerting, identity, artifacts |

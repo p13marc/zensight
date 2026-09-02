@@ -223,6 +223,15 @@ fn stat_growth(state: &DeviceDetailState, stream: &str, metric: &str) -> Option<
 /// The wire counters are cumulative — that is what makes a resend idempotent —
 /// so one report cannot answer "how many arrived in the last three seconds".
 /// Two can, over the newer one's `interval_ms`.
+///
+/// **Not** [`zensight_store::rate::counter_rate`], and deliberately so (#904).
+/// That function derives `dt` from the gap between two sample timestamps; this
+/// one is told the interval by the producer, in the report itself, because a
+/// receiver report is a summary *of a window* rather than an observation at an
+/// instant — the two timestamps here would measure when the reports arrived,
+/// not the window they describe. The shared rule the two do agree on is the
+/// only one that generalises: a counter that went backwards is a new
+/// subscription's counters, so say nothing rather than something wrong.
 fn rate(
     last: &MediaReceiverReport,
     prev: Option<&MediaReceiverReport>,

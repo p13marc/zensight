@@ -3025,7 +3025,7 @@ impl ZenSight {
                     .flat_map(|device| {
                         device.metrics.iter().filter_map(|(name, point)| {
                             // Extract numeric value from TelemetryPoint
-                            let value = telemetry_to_f64(&point.value)?;
+                            let value = alert_value_f64(&point.value)?;
                             Some((device.id.source.clone(), name.clone(), value))
                         })
                     })
@@ -6371,6 +6371,20 @@ impl ZenSight {
             let mut rx = 0.0f64;
             let mut tx = 0.0f64;
             let mut saw = false;
+            // One device lookup, then a map by metric name. A v3 series path is
+            // `<origin>/<producer>/<subject>` and a proxy producer's subject
+            // leads with its device chunk, so a metric name alone no longer
+            // spells a key (#904) — the device index is what resolves it, and
+            // it is also one hash lookup instead of one per metric.
+            let hot: std::collections::HashMap<String, Vec<zensight_store::Sample>> = self
+                .store
+                .device_hot_samples(
+                    &device_id.protocol.to_string(),
+                    &device_id.origin,
+                    &device_id.source,
+                )
+                .into_iter()
+                .collect();
             for metric in device_state.metrics.keys() {
                 // sysinfo `network/{iface}/{rx,tx}_bytes`, via the registry (#475).
                 use zensight_common::registry::sysinfo::Subject as SysSubject;
@@ -6379,15 +6393,10 @@ impl ZenSight {
                     Some(SysSubject::NetworkTxBytes { .. }) => false,
                     _ => continue,
                 };
-                let key = zensight_store::MetricStore::device_metric_key(
-                    &device_id.protocol.to_string(),
-                    &device_id.origin,
-                    &device_id.source,
-                    metric,
-                );
-                if let Some(rate) =
-                    crate::view::topology::counter_rate(&self.store.hot_samples(&key))
-                {
+                let Some(samples) = hot.get(metric) else {
+                    continue;
+                };
+                if let Some(rate) = zensight_store::rate::counter_rate(samples) {
                     saw = true;
                     if is_rx {
                         rx += rate;
@@ -8220,10 +8229,14 @@ impl ZenSight {
 
     /// Handle incoming telemetry.
     fn handle_telemetry(&mut self, reading: Reading) {
-        let Reading { point, origin } = reading;
+        let Reading {
+            point,
+            origin,
+            subject,
+        } = reading;
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
-        self.store.record(&origin, &point);
+        self.store.record(&origin, &subject, &point);
 
         // Keep the bandwidth monitor's Services table live while it is open: a
         // systemd `ip_*_bps` point changes the derived rows (#319). Recomputed at
@@ -8298,7 +8311,7 @@ impl ZenSight {
         device_state.metric_count = device_state.metrics.len();
 
         // Check alert rules for numeric values
-        if let Some(numeric_value) = telemetry_to_f64(&point.value)
+        if let Some(numeric_value) = alert_value_f64(&point.value)
             && let Some(alert) =
                 self.alerts
                     .check_metric(&device_id, &point.metric, numeric_value, point.timestamp)
@@ -8887,8 +8900,17 @@ fn fmt_duration_ms(ms: i64) -> String {
     }
 }
 
-/// Convert a telemetry value to f64 for alert checking.
-fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
+/// Convert a telemetry value to an f64 **for alert checking**.
+///
+/// Deliberately not [`zensight_store::telemetry_to_f64`], which this looked
+/// like a duplicate of and is not (#904): the store maps `Boolean` to a 0/1
+/// step series so flap-prone signals get history and a trend line (#126).
+/// Folding the two would silently make every boolean telemetry value
+/// comparable against a numeric threshold — a `> 0.5` rule firing on an
+/// interface going down is not a rule anyone wrote, and not a change to make
+/// while moving code. A boolean that should raise an alert has an alert rule
+/// of its own.
+fn alert_value_f64(value: &TelemetryValue) -> Option<f64> {
     match value {
         TelemetryValue::Counter(v) => Some(*v as f64),
         TelemetryValue::Gauge(v) => Some(*v),
@@ -9644,6 +9666,7 @@ mod origin_tests {
                 TelemetryValue::Counter(1),
             ),
             origin,
+            metric,
         )
     }
 
@@ -9893,6 +9916,8 @@ mod tier2_app_fold_tests {
                     unit: None,
                 },
                 "h-5e5e5e5e5e5e",
+                // sysinfo is a host producer: its subject is the metric name.
+                metric,
             )
         };
 

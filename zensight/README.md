@@ -55,7 +55,8 @@ command palette (Ctrl+P), fuzzy global search (Ctrl+K), keyboard-help (`?`).
 - [`docs/views.md`](docs/views.md) — view/state pattern, the shell, overlays, per-view tour.
 - [`docs/testing.md`](docs/testing.md) — UI testing with Iced's `Simulator`, the F12 tester recorder, mock data.
 - [`docs/design-system.md`](docs/design-system.md) — the D2 design system (colors, tokens) and the CI color guard.
-- [`docs/local-store.md`](docs/local-store.md) — the redb-backed tiered telemetry + log store.
+- [`docs/local-store.md`](docs/local-store.md) — what the GUI does with its local cache.
+  The store itself is [`zensight-store`](../zensight-store/README.md) (#904).
 - [`docs/media-receiver.md`](docs/media-receiver.md) — the parallax tiles' receiver half: the frame-age deadline, the bounded decode queue, the drop taxonomy, the report they send their producer, and the stream health panel.
 - [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) — the authoritative key-expression contract the frontend subscribes to.
 - [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — platform-wide architecture.
