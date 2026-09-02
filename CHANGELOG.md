@@ -642,6 +642,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `#911` storage bench pruned the file it claimed it had not, and the
+  store took the blame.** `historian-bench --ingest-only` — the flag whose only
+  purpose is to hand another process the file *as ingest left it* — returned
+  **after** the prune rather than before it, and the `removed:` line that would
+  have exposed it was skipped by that same late return. `prune_at` is chosen so
+  every minute bucket ages out at once, so the file announced as "closed and
+  consistent" had just lost its entire minute tier.
+
+  What followed was published as a store defect: an "unexplained disagreement"
+  between `tier_rows` and an external reader, written into
+  `zensight-historian/docs/storage.md`, onto #911 and into #969's body, with
+  `@rpc/historian/stats` named as possibly over-reporting to operators. **It was
+  not.** `tier_rows` was correct throughout. The counts reconcile exactly —
+  2 000 series × 120 minutes = 240 000 minute buckets, and a 7 200 s span from
+  a `base_ms` 800 s into an hour touches 3 hour boundaries, 2 000 × 3 = 6 000 —
+  and an independent reader of the fixed file now reports precisely those.
+
+  The bench returns before the prune, prints `removed:` on every path that
+  prunes, and asserts compaction leaves the row count unchanged: the check that
+  would have caught this, since dividing one file's size by another file's
+  contents is exactly the arithmetic that hid it.
+
+  With the ordering fixed, the compaction measurement is worth having and
+  changes what #911's bytes-per-bucket miss means: 269 MB → 109 MB in 340 ms,
+  **219 → 89 bytes per bucket**. Roughly 60% of the per-bucket cost is
+  reclaimable slack, not schema, so the first lever is a compaction pass on a
+  timer rather than a retention default. (The withdrawn 44× figure was
+  `compact()` reclaiming a file that had just had 1.2 M rows deleted.) 89 B
+  still misses the ≤ 48 target by 1.9×; defaults remain unchanged.
+
+- **A pre-1970 sample timestamp created a row that could never be deleted.**
+  `pack_key` reinterpreted `bucket_ts as u64`, so a negative timestamp landed
+  above `i64::MAX` — inside the tier's 64-bit slot, but outside every range in
+  the module, all of which are bounded `pack_key(.., 0) ..= pack_key(.., i64::MAX)`.
+  Such a row was invisible to `tier_rows` and `oldest_bucket_ms`, unreadable
+  through `query_buckets`, and — the part that matters — invisible to `prune`,
+  the only thing that bounds the file. It would have sat there for the life of
+  the database. `pack_key` now clamps to bucket 0, where the row is wrong but
+  visible and prunable, and a test pins it (it counts 1 of 2 rows without the
+  clamp). Found while diagnosing the bench bug above, not by it.
+
+  `sample_metric_ids` also gained a `debug_assert` that nothing occupies key
+  bits ≥ 104. The invariant holds because `MetricId` is a `u32`; if it ever
+  widens, `(key >> 72) as u32` truncates silently, distinct metrics collapse to
+  one id, and every count built on that scan multiplies — which is precisely
+  the failure that was wrongly suspected above.
+
 - **On-demand detail panels flapped between the sensor's rows and an empty
   table** when two producers answered one origin-scoped `@rpc` key. Every
   netring "Fetch" button (flows, elephants, talkers, matrix, DNS, HTTP/TLS,

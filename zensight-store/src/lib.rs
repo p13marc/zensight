@@ -462,8 +462,19 @@ pub fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
 /// `(metric, tier)` contiguous and time-ordered: `metric_id` (32 bits) | `tier`
 /// (8 bits) | `bucket_ts` seconds (64 bits). Bucket timestamps are non-negative,
 /// so the `i64 -> u64` reinterpretation preserves ordering.
+///
+/// **A negative `bucket_ts` is clamped to 0** rather than reinterpreted. Every
+/// range in this module is bounded by `pack_key(.., 0) ..= pack_key(.., i64::MAX)`,
+/// so a negative timestamp cast straight to `u64` would land *above*
+/// `i64::MAX` — still inside the tier's 64-bit slot, but outside every range
+/// that scans it. Such a row would be invisible to `tier_rows`,
+/// `oldest_bucket_ms` and `query_buckets`, and — the part that matters —
+/// invisible to [`prune`](PersistentStore::prune), which is the only thing
+/// that bounds the file. One pre-1970 sample timestamp would be enough, and
+/// the row would never be removed. Clamping puts it in bucket 0, where it is
+/// wrong but visible and prunable.
 pub fn pack_key(metric: MetricId, tier: Tier, bucket_ts: i64) -> u128 {
-    ((metric.0 as u128) << 72) | ((tier.code() as u128) << 64) | (bucket_ts as u64 as u128)
+    ((metric.0 as u128) << 72) | ((tier.code() as u128) << 64) | (bucket_ts.max(0) as u128)
 }
 
 /// Interns metric paths into compact [`MetricId`]s, and holds the per-metric
@@ -965,6 +976,11 @@ impl PersistentStore {
                 break;
             };
             let key = entry?.0.value();
+            // The id occupies bits 72..104 and nothing sits above it. If
+            // `MetricId` ever widens past u32 this truncates silently, two
+            // distinct metrics collapse to one id, and every count built on
+            // this scan multiplies. Cheap to assert, expensive to debug.
+            debug_assert_eq!(key >> 104, 0, "packed key has bits above the metric id");
             let id = (key >> 72) as u32;
             ids.push(MetricId(id));
             // The first key any higher id could hold. `id` is a u32, so this
@@ -2117,6 +2133,14 @@ mod tests {
         assert!(pack_key(m0, Tier::Second, i64::MAX) < pack_key(m0, Tier::Minute, 0));
         // Metric ordering dominates.
         assert!(pack_key(m0, Tier::Hour, i64::MAX) < pack_key(m1, Tier::Second, 0));
+        // A negative timestamp clamps into the tier's scannable range instead
+        // of landing above `i64::MAX`, where no range in this module reaches
+        // and `prune` could never remove it.
+        assert_eq!(
+            pack_key(m0, Tier::Minute, -1),
+            pack_key(m0, Tier::Minute, 0)
+        );
+        assert!(pack_key(m0, Tier::Minute, i64::MIN) <= pack_key(m0, Tier::Minute, i64::MAX));
     }
 
     #[test]
@@ -2854,6 +2878,44 @@ mod tests {
         assert_eq!(store.tier_rows(Tier::Minute).unwrap(), 0);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&empty);
+    }
+
+    /// A pre-1970 bucket stays visible and, above all, prunable.
+    ///
+    /// Before `pack_key` clamped, a negative `bucket_ts` reinterpreted `as u64`
+    /// landed above `i64::MAX` — inside the tier's slot but outside every
+    /// range that scans it. The row could not be counted, could not be read,
+    /// and could not be deleted: `prune` bounds its scan the same way, so the
+    /// one thing that keeps the file from growing without limit would step
+    /// straight over it, for the life of the database.
+    #[test]
+    fn a_pre_epoch_bucket_is_countable_and_prunable() {
+        let path = temp_db_path("pre-epoch");
+        let store = PersistentStore::open(&path).expect("open");
+        let id = MetricId(7);
+        store
+            .write_batch(&FlushBatch {
+                rows: vec![
+                    (id, Tier::Minute, -86_400, Bucket::point(1.0)),
+                    (id, Tier::Minute, 60, Bucket::point(2.0)),
+                ],
+                paths: vec![],
+            })
+            .expect("write");
+
+        // Visible: both rows counted, and the older of the two is the one
+        // reported as oldest.
+        assert_eq!(store.tier_rows(Tier::Minute).unwrap(), 2);
+        assert_eq!(store.oldest_bucket_ms().unwrap(), Some(0));
+
+        // Prunable: a `now` past the tier's retention ages both out, and both
+        // are actually deleted. This is the assertion that matters — an
+        // uncounted row is a cosmetic bug, an undeletable one grows the file
+        // forever.
+        let now_ms = (Tier::Minute.retention_secs() + 120) * 1_000;
+        assert_eq!(store.prune(now_ms).unwrap(), 2);
+        assert_eq!(store.tier_rows(Tier::Minute).unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// What a flush actually writes, tier by tier, read back from the file.
