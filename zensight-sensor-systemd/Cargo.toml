@@ -49,7 +49,7 @@ glob.workspace = true
 futures-util = "0.3"
 
 # Journal-store filesystem free space via statvfs (#279, opt-in journal health)
-rustix = { version = "0.38", features = ["fs"] }
+rustix = { version = "1", features = ["fs"] }
 
 [[bin]]
 name = "zensight-sensor-systemd"

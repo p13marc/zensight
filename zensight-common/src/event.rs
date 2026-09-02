@@ -71,7 +71,7 @@ impl EventRecord {
         summary: impl Into<String>,
     ) -> Self {
         Self {
-            id: ulid::Ulid::new().to_string().to_ascii_lowercase(),
+            id: ulid::Ulid::generate().to_string().to_ascii_lowercase(),
             timestamp: current_timestamp_millis(),
             source: source.into(),
             protocol,

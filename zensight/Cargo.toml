@@ -88,7 +88,7 @@ iced_test = "0.14"
 tempfile = { workspace = true }
 # Pre-main WGPU_BACKEND=gl guard in the test binaries (#687, #829): parallel
 # tests each creating a Vulkan/lavapipe device segfault on GPU-less hosts.
-ctor = "0.10"
+ctor = "1.0"
 
 # =============================================================================
 # Package metadata for cargo-deb
