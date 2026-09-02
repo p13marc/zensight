@@ -146,6 +146,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("ingest wall time:    {ingest_s:.1}s");
     println!();
 
+    // STOP HERE when asked to — BEFORE the prune below.
+    //
+    // This return used to sit *after* the prune, which made the flag a lie:
+    // `prune_at` is chosen so every minute bucket ages out at once, so the
+    // file handed to "another process" had just had its entire minute tier
+    // deleted, and the `removed:` line that would have shown it was skipped by
+    // the early return. An external reader then found no minute buckets and
+    // `tier_rows` was blamed for over-reporting. Both readers were right about
+    // the file each looked at; the message was wrong about which file that was.
+    if args.ingest_only {
+        // Close both handles so the file is consistent for another process to
+        // open. Copying an OPEN redb file is not a snapshot either.
+        drop(store);
+        drop(persistent);
+        println!(
+            "(stopped after ingest, BEFORE any prune; {} is closed and consistent)",
+            args.path.display()
+        );
+        return Ok(());
+    }
+
+    // Compaction, measured on the file AS INGEST LEFT IT — before the prune
+    // below, which is the whole point. An earlier version of this bench
+    // measured it after a prune that had removed every minute bucket and
+    // reported a 44x reclaim as though it were a property of the schema. It
+    // was a property of having just deleted 1.2 M rows.
+    //
+    // The number matters: bytes-per-bucket misses #911's target by ~4.6x, and
+    // whether that is schema cost or reclaimable slack decides whether the
+    // answer is a schema change or a compaction pass on a timer.
+    let compacted = {
+        let rows_before = total_rows;
+        // Both handles must go: redb refuses a second opener, and compaction
+        // needs the file to itself.
+        drop(store);
+        drop(persistent);
+        let mut db = redb::Database::open(&args.path)?;
+        let t = Instant::now();
+        let did = db.compact()?;
+        let ms = t.elapsed().as_millis();
+        drop(db);
+        let after_bytes = std::fs::metadata(&args.path).map(|m| m.len()).unwrap_or(0);
+
+        // Re-count from a fresh handle. A bytes-per-bucket figure computed
+        // from the pre-compaction row count would be one file's size over
+        // another file's contents — and if compaction ever lost a row, that
+        // arithmetic is exactly what would hide it.
+        let persistent = PersistentStore::open(&args.path)?;
+        let rows_after = persistent.tier_rows(Tier::Second)?
+            + persistent.tier_rows(Tier::Minute)?
+            + persistent.tier_rows(Tier::Hour)?;
+
+        println!("## Compaction (on the file as ingest left it)");
+        println!("compacted:           {did} in {ms}ms");
+        println!("database bytes:      {after_bytes}");
+        println!("buckets after:       {rows_after}  (was {rows_before})");
+        assert_eq!(
+            rows_after, rows_before,
+            "compaction must not change the row count — if this ever trips, every \
+             size figure around it is measuring a different database"
+        );
+        if rows_after > 0 {
+            println!(
+                "bytes per bucket:    {:.1}",
+                after_bytes as f64 / rows_after as f64
+            );
+        }
+        println!();
+        persistent
+    };
+    let persistent = compacted;
+
     // Prune: the pass that keeps the file bounded. `now` far enough ahead that
     // everything written has aged past the minute tier's retention, so this is
     // the worst case rather than the steady-state handful.
@@ -153,26 +225,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pruned = Instant::now();
     let removed = persistent.prune(prune_at)?;
     let prune_ms = pruned.elapsed().as_millis();
-    if args.ingest_only {
-        // Close both handles so the file is consistent for another process to
-        // open. Copying an OPEN redb file is not a snapshot — the first
-        // attempt at this read one and concluded the minute tier was missing,
-        // which it was not.
-        drop(store);
-        drop(persistent);
-        println!(
-            "(stopped after ingest; {} is closed and consistent)",
-            args.path.display()
-        );
-        return Ok(());
-    }
-
-    // NOT MEASURED: compaction. `redb::Database::compact` reclaims slack and
-    // the difference looked dramatic — but the figure could not be reconciled
-    // with an independent reader of the same file, and a number nobody can
-    // reconcile is not a measurement. See the note in docs/storage.md; it
-    // needs settling before anyone tunes a retention default on the strength
-    // of a bytes-per-bucket figure.
 
     println!("## Prune (worst case: every minute bucket aged out at once)");
     println!("removed:             {removed}");

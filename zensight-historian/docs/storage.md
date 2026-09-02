@@ -57,7 +57,8 @@ included.
 | Minute buckets | 1 200 000 | — | |
 | Hour buckets | 30 000 | — | |
 | Database | 269 MB | — | |
-| Bytes per bucket | **219** | ≤ 48 | **4.6× over** |
+| Bytes per bucket, as written | **219** | ≤ 48 | **4.6× over** |
+| Bytes per bucket, after `compact()` | **89** | ≤ 48 | **1.9× over** |
 | Prune, worst case | **7.0 s** | ≤ 2 s | **3.5× over** |
 | Range GET p95 | 0.01 ms | ≤ 200 ms | far inside |
 
@@ -93,20 +94,54 @@ minute, every series active every minute) is the densest possible case. A real
 fleet's series are sparser and arrive unevenly. Changing a retention default on
 the strength of a synthetic worst case would be tuning for a load nobody runs.
 
-### One measurement withdrawn
+### One measurement withdrawn, and why it should not have been
 
 An earlier version of this page reported that `redb::Database::compact` took
-the file from 269 MB to 6 MB. **That figure is withdrawn.** It could not be
-reconciled with an independent reader of the same file: `tier_rows` and an
-ad-hoc external scan of the same database disagree about how many minute
-buckets it contains, and the disagreement is not explained. A test now pins the
-store's own behaviour at small scale (`a_flush_writes_every_persisted_tier_and_the_counts_agree`,
-which checks `tier_rows` against a direct table walk) and it passes — so the
-discrepancy appears only at bench scale and is not understood.
+the file from 269 MB to 6 MB, then withdrew the figure because `tier_rows` and
+an ad-hoc external scan of the same file disagreed about how many minute
+buckets it held. The disagreement was described here, and on #911, as
+unexplained, and `tier_rows` was named as a possible cause.
 
-Until it is, treat the bytes-per-bucket figure above as provisional, and do not
-tune a retention default on it. The compaction step has been removed from the
-bench rather than left printing a number nobody can defend.
+**That was wrong, and the cause was a bug in the bench.** `--ingest-only`, the
+flag whose whole purpose is to hand an external reader a file as ingest left
+it, returned *after* the prune rather than before it. `prune_at` is chosen so
+that every minute bucket ages out at once, so the file being called "closed and
+consistent" had just had its entire minute tier deleted — and the `removed:`
+line that would have shown it was skipped by the very return that came too
+late. Both readers were right about the file each looked at. The message was
+wrong about which file that was.
+
+The numbers reconcile exactly, which is the proof: 2 000 series × 120 minutes =
+240 000 minute buckets, and `base_ms` sits 800 s into an hour so a 7 200 s span
+touches 3 hour boundaries — 2 000 × 3 = 6 000. Post-fix, an independent reader
+of the same file reports precisely those two numbers. **`tier_rows` was correct
+throughout, and `@rpc/historian/stats` was not over-reporting to anyone.**
+
+The bench now returns before the prune, prints `removed:` on every path that
+prunes, and asserts that compaction leaves the row count unchanged — the check
+that would have caught the original mistake, since it is exactly the arithmetic
+that hides a file whose contents changed underneath a size measurement.
+
+### Compaction reclaims more than half the gap
+
+With the ordering fixed the measurement is worth having, and it changes what
+the 4.6× miss means:
+
+| | Database | Bytes per bucket |
+|---|---|---|
+| As ingest leaves it | 269 MB | 219 |
+| After `compact()` (340 ms) | 109 MB | **89** |
+
+So roughly 60% of the per-bucket cost is reclaimable slack, not schema. The
+original 44× figure was `compact()` reclaiming a file that had just had 1.2 M
+rows deleted — an ordinary post-mass-delete reclaim, and not a property of the
+schema at all.
+
+This does not clear the target: 89 B/bucket still misses ≤ 48 by 1.9×, so a
+schema change is not off the table. But it does say that the first lever to
+reach for is a compaction pass on a timer — 340 ms to halve the file — rather
+than a retention default. The defaults are still not changed here, for the
+reason in the section above: the bench's series are the densest possible case.
 
 ## Outstanding
 
@@ -114,7 +149,9 @@ bench rather than left printing a number nobody can defend.
   against it — in particular the steady RSS under the governor's ladder, which
   no bench reproduces: it depends on how many series are *active* at once and
   how fast they arrive, not on how many exist.
-- The `tier_rows` / direct-scan disagreement at bench scale.
+- Whether a periodic `compact()` belongs in the prune timer, and at what
+  interval — it halves the file in 340 ms at bench scale, but it takes an
+  exclusive handle, so the cost is a pause in ingest rather than CPU.
 - Whether the two failing numbers survive a real fleet's cardinality, and which
   default to move if they do.
 
