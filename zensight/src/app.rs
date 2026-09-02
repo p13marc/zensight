@@ -274,6 +274,18 @@ pub struct ZenSight {
     /// one a log line wants answered is "which". Empty means this viewer's
     /// cache is all there is.
     live_historians: std::collections::BTreeSet<String>,
+    /// Where "now" is for every widget that shows a value (#910).
+    time_cursor: crate::history::TimeCursor,
+    /// The gesture currently in progress, for dropping stale replies.
+    scrub_generation: crate::history::ScrubGeneration,
+    /// Timeline markers for the scrubbed window — alerts and events that
+    /// happened around the instant on screen, which is what makes a scrub an
+    /// investigation rather than a slider over some numbers.
+    scrub_markers: Vec<zensight_common::history::TimelineEntry>,
+    /// Whether the historian capped the last scrubbed reply. A chart drawing a
+    /// partial window without saying so is a claim about a period it was not
+    /// given.
+    scrub_truncated: bool,
     /// Ticks counted toward the next periodic store flush (flush every N ticks).
     ticks_since_flush: u32,
     /// Ticks since the last topology query refresh (#391).
@@ -518,6 +530,10 @@ impl ZenSight {
                 zensight_store::MetricStore::with_default_persistence()
             },
             live_historians: std::collections::BTreeSet::new(),
+            time_cursor: crate::history::TimeCursor::Live,
+            scrub_generation: crate::history::ScrubGeneration::default(),
+            scrub_markers: Vec::new(),
+            scrub_truncated: false,
             ticks_since_flush: 0,
             topology_refresh_ticks: 0,
             topology_prefs_dirty: false,
@@ -2449,6 +2465,80 @@ impl ZenSight {
                 return teardown;
             }
 
+            // ── The time cursor (#910) ─────────────────────────────────
+            Message::ScrubTo(ts) => {
+                // Record the position and start a debounce. A slider emits a
+                // message per pixel of travel; firing a fleet GET for each
+                // would put dozens of queries on the wire for one gesture and
+                // render the answers out of order.
+                self.time_cursor = crate::history::TimeCursor::At(ts);
+                let tag = self.scrub_generation.bump();
+                return Task::future(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        crate::history::SCRUB_DEBOUNCE_MS,
+                    ))
+                    .await;
+                    Message::ScrubCommit(tag)
+                });
+            }
+
+            Message::ScrubCommit(tag) => {
+                // Cancellation, without cancelling: a query already on the
+                // wire cannot be recalled, but a debounce for an abandoned
+                // position can simply not become one.
+                if !self.scrub_generation.is_current(tag) {
+                    return Task::none();
+                }
+                let crate::history::TimeCursor::At(as_of) = self.time_cursor else {
+                    return Task::none();
+                };
+                let from = as_of - crate::history::SCRUB_WINDOW_MS;
+                let mut tasks = Vec::new();
+                // The open device's chart, as of the cursor.
+                if let Some(selected) = self.selected_device.as_ref() {
+                    tasks.push(self.load_history(selected.device_id.clone(), from, as_of));
+                }
+                // …and what happened around then, which is what makes a scrub
+                // an investigation rather than a slider over some numbers.
+                if let Some(session) = self.session.clone() {
+                    let selector = format!(
+                        "{}?from={from};to={as_of};limit=200",
+                        zensight_common::keyexpr::fleet_rpc_key("historian", "timeline"),
+                    );
+                    tasks.push(Task::future(async move {
+                        let markers = fetch_timeline_markers(&session, &selector).await;
+                        Message::ScrubMarkersLoaded(tag, markers)
+                    }));
+                }
+                return Task::batch(tasks);
+            }
+
+            Message::ScrubMarkersLoaded(tag, markers) => {
+                if self.scrub_generation.is_current(tag) {
+                    self.scrub_markers = markers;
+                }
+            }
+
+            Message::ScrubLive => {
+                // Releasing must not need a reload: the live feed has been
+                // filling the hot ring the whole time, so returning to it is
+                // dropping the pin, not fetching anything.
+                self.time_cursor = crate::history::TimeCursor::Live;
+                self.scrub_markers.clear();
+                self.scrub_truncated = false;
+                // Bump so any debounce still in flight for a scrubbed position
+                // finds itself stale and does nothing.
+                let _ = self.scrub_generation.bump();
+                if let Some(selected) = self.selected_device.as_ref() {
+                    let now = now_ms();
+                    return self.load_history(
+                        selected.device_id.clone(),
+                        now - 24 * 3_600_000,
+                        now,
+                    );
+                }
+            }
+
             Message::SetFocusHost(origin) => {
                 // Re-keying `self.link` is the whole mechanism: Iced hashes it,
                 // so the subscription tears the Zenoh session down and
@@ -2665,7 +2755,8 @@ impl ZenSight {
                 Err(e) => tracing::warn!(error = %e, "Metric store flush failed"),
             },
 
-            Message::DeviceHistoryLoaded(device_id, series) => {
+            Message::DeviceHistoryLoaded(device_id, series, truncated) => {
+                self.scrub_truncated = truncated;
                 if let Some(ref mut selected) = self.selected_device
                     && selected.device_id == device_id
                 {
@@ -7861,6 +7952,11 @@ impl ZenSight {
             self.last_telemetry_ms,
             now_ms(),
             focused_host,
+            match self.time_cursor {
+                crate::history::TimeCursor::At(ts) => Some(ts),
+                crate::history::TimeCursor::Live => None,
+            },
+            self.scrub_truncated,
             main_view,
         );
 
@@ -8525,8 +8621,9 @@ impl ZenSight {
             );
             let device = device_id.clone();
             return Task::future(async move {
-                let series = fetch_fleet_history(&session, &selector, &device.source).await;
-                Message::DeviceHistoryLoaded(device, series)
+                let (series, truncated) =
+                    fetch_fleet_history(&session, &selector, &device.source).await;
+                Message::DeviceHistoryLoaded(device, series, truncated)
             });
         }
 
@@ -8565,7 +8662,8 @@ impl ZenSight {
             })
             .await
             .unwrap_or_default();
-            Message::DeviceHistoryLoaded(device_id, series)
+            // The local cache never truncates: it returns what it has.
+            Message::DeviceHistoryLoaded(device_id, series, false)
         })
     }
 
@@ -9553,6 +9651,73 @@ mod sensor_liveliness_tests {
         }
     }
 
+    /// #910: a drag emits a message per pixel, and only the last one becomes a
+    /// query. The generation is what makes the gesture end where the user let
+    /// go rather than wherever the slowest reply came back from.
+    #[test]
+    fn a_drag_commits_once_and_stale_positions_are_dropped() {
+        let mut a = app();
+        assert_eq!(a.time_cursor, crate::history::TimeCursor::Live);
+
+        // Three positions, as a drag produces.
+        let _ = a.update(Message::ScrubTo(1_000));
+        let first = a.scrub_generation;
+        let _ = a.update(Message::ScrubTo(2_000));
+        let _ = a.update(Message::ScrubTo(3_000));
+        let last = a.scrub_generation;
+        assert_eq!(a.time_cursor, crate::history::TimeCursor::At(3_000));
+        assert_ne!(first, last);
+
+        // The debounce for an abandoned position does nothing.
+        let _ = a.update(Message::ScrubCommit(first));
+        // …and markers tagged with it are dropped rather than shown.
+        let _ = a.update(Message::ScrubMarkersLoaded(first, vec![marker(1)]));
+        assert!(
+            a.scrub_markers.is_empty(),
+            "a reply for a cursor position the user has already left must not land"
+        );
+
+        // The current one lands.
+        let _ = a.update(Message::ScrubMarkersLoaded(last, vec![marker(2)]));
+        assert_eq!(a.scrub_markers.len(), 1);
+    }
+
+    /// Releasing returns to live without a reload of anything but the chart —
+    /// the feed has been filling the hot ring the whole time.
+    #[test]
+    fn returning_to_live_clears_the_pin_and_its_markers() {
+        let mut a = app();
+        let _ = a.update(Message::ScrubTo(1_000));
+        let _ = a.update(Message::ScrubMarkersLoaded(
+            a.scrub_generation,
+            vec![marker(1)],
+        ));
+        a.scrub_truncated = true;
+        assert_eq!(a.scrub_markers.len(), 1);
+
+        let pinned = a.scrub_generation;
+        let _ = a.update(Message::ScrubLive);
+        assert_eq!(a.time_cursor, crate::history::TimeCursor::Live);
+        assert!(a.scrub_markers.is_empty());
+        assert!(!a.scrub_truncated);
+        // A debounce still in flight for the scrubbed position finds itself
+        // stale — otherwise it would yank the page back into the past a
+        // fraction of a second after the user asked to leave it.
+        assert!(!a.scrub_generation.is_current(pinned));
+    }
+
+    fn marker(ts: i64) -> zensight_common::history::TimelineEntry {
+        zensight_common::history::TimelineEntry {
+            uid: format!("{ts:013}0000000000000000"),
+            ts,
+            kind: zensight_common::history::TimelineKind::Alert,
+            origin: "h-0123456789ab".into(),
+            key: "v1/h-0123456789ab/state/sysinfo/alert/cpu".into(),
+            active: true,
+            summary: None,
+        }
+    }
+
     /// #909: the roster is what decides where a chart's history comes from.
     ///
     /// Probing instead — a GET that times out when nobody answers — would cost
@@ -10336,7 +10501,7 @@ async fn fetch_fleet_history(
     session: &zenoh::Session,
     selector: &str,
     source: &str,
-) -> Vec<(String, Vec<zensight_store::Sample>)> {
+) -> (Vec<(String, Vec<zensight_store::Sample>)>, bool) {
     let replies = match session
         .get(selector)
         .target(zenoh::query::QueryTarget::All)
@@ -10346,7 +10511,7 @@ async fn fetch_fleet_history(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(selector = %selector, error = %e, "historian range GET failed");
-            return Vec::new();
+            return (Vec::new(), false);
         }
     };
 
@@ -10389,5 +10554,54 @@ async fn fetch_fleet_history(
              than falling back — the fleet answered, and what it said was no"
         );
     }
-    crate::history::series_for_device(crate::history::merge_replies(collected), source)
+    // Truncation is the reply's, not a guess: if any historian capped its
+    // answer the window on screen is partial, and the strip says so.
+    let truncated = collected.iter().any(|r| r.truncated);
+    (
+        crate::history::series_for_device(crate::history::merge_replies(collected), source),
+        truncated,
+    )
+}
+
+/// GET `@rpc/historian/timeline` across the fleet for the scrubbed window.
+///
+/// Same fan-in discipline as the range fetch: target `All`, consolidation off.
+/// Markers from several historians are concatenated and sorted rather than
+/// de-duplicated — the timeline's uid is derived from the transition itself
+/// (#908), so two historians that saw the same alert produce the same uid and
+/// the duplicate is removable without guessing.
+async fn fetch_timeline_markers(
+    session: &zenoh::Session,
+    selector: &str,
+) -> Vec<zensight_common::history::TimelineEntry> {
+    let replies = match session
+        .get(selector)
+        .target(zenoh::query::QueryTarget::All)
+        .consolidation(zenoh::query::ConsolidationMode::None)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(selector = %selector, error = %e, "historian timeline GET failed");
+            return Vec::new();
+        }
+    };
+    let mut out: Vec<zensight_common::history::TimelineEntry> = Vec::new();
+    while let Ok(reply) = replies.recv_async().await {
+        match reply.result() {
+            Ok(sample) => {
+                match serde_json::from_slice::<zensight_common::history::TimelineReply>(
+                    &sample.payload().to_bytes(),
+                ) {
+                    Ok(r) => out.extend(r.entries),
+                    Err(e) => tracing::warn!(error = %e, "timeline reply did not decode"),
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %String::from_utf8_lossy(&e.payload().to_bytes()),
+                "a historian answered the timeline with an error"
+            ),
+        }
+    }
+    crate::history::dedup_markers(out)
 }

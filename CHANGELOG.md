@@ -248,6 +248,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Timeline scrubbing: a shell-level time cursor** (#910).
+  `docs/plans/rerun/DECISION.md` §6 recorded scrubbing backwards through a
+  correlated incident on one time axis as the single most valuable thing the
+  Rerun evaluation demonstrated, and as "a native feature waiting to be
+  specified". The samples were always there; until #907 there was no way to
+  ask for them as of a moment.
+
+  A slider in the shell pins "now" to an instant. The open chart re-queries
+  `range` for a window ending there, and `timeline` supplies the markers —
+  which is what makes a scrub an investigation rather than a slider over some
+  numbers.
+
+  **Debounced, and stale answers dropped.** A slider emits a message per pixel
+  of travel; firing a fleet GET for each would put dozens of queries on the
+  wire for one gesture and render the answers out of order. Each gesture
+  carries a generation, and a reply tagged with an abandoned one is discarded
+  — cancellation without cancelling, since a GET already on the wire cannot be
+  recalled but its answer can be ignored. That is what makes a fast drag end
+  where the user let go rather than wherever the slowest reply came back from.
+
+  **The mode is visible and one click to leave.** A scrubbed page and a live
+  one look identical — same charts, same numbers, same layout — and every
+  value on the scrubbed one is from the past. The strip says how far back it
+  is reading from, that the feed is not being followed, and carries a "Return
+  to live" button. Returning needs no reload: the feed has been filling the
+  hot ring the whole time, so it is dropping the pin, not fetching anything.
+
+  **Truncation rides with the data.** Only the replier knows whether it
+  stopped at its limit, so `DeviceHistoryLoaded` carries the flag and the
+  strip says "partial window" rather than letting a chart make a claim about a
+  period it was not given.
+
+  Markers from several historians collapse by uid without anyone deciding
+  which report is authoritative — the timeline's key is derived from the
+  transition itself (#908), so two historians that saw the same alert produce
+  the same uid. The same property that makes a subscriber's replay idempotent,
+  used here for a different reason.
+
 - **Device charts read the fleet's history when a historian is alive** (#909).
   The local cache holds what *this* viewer saw while it was running, and on
   the reference fleet the GUI is open for minutes a week — so a cold start

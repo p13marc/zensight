@@ -279,6 +279,8 @@ fn shell_ui() -> iced_test::Simulator<'static, Message> {
         Some(10_000),
         12_000,
         None,
+        None,
+        false,
         content,
     ))
 }
@@ -296,6 +298,8 @@ fn test_shell_shows_freshness_live() {
         Some(10_000),
         12_000, // 2s after last point => Live
         None,
+        None,
+        false,
         content,
     ));
     assert!(ui.find("Live").is_ok());
@@ -312,6 +316,8 @@ fn test_shell_shows_freshness_paused() {
         None,
         12_000,
         None,
+        None,
+        false,
         content,
     ));
     assert!(ui.find("Paused").is_ok());
@@ -458,6 +464,8 @@ fn test_focus_mode_offers_a_way_out() {
         Some(10_000),
         12_000,
         Some("server01".to_string()),
+        None,
+        false,
         content,
     ));
     assert!(shell.find("Focused on server01").is_ok());
@@ -4192,6 +4200,8 @@ fn test_nav_opens_logs() {
         None,
         0,
         None,
+        None,
+        false,
         inner.into(),
     ));
     let _ = ui.click("Logs");
@@ -4213,6 +4223,8 @@ fn test_nav_opens_incidents() {
         None,
         0,
         None,
+        None,
+        false,
         inner.into(),
     ));
     let _ = ui.click("Incidents");
@@ -4234,6 +4246,8 @@ fn test_nav_opens_inventory() {
         None,
         0,
         None,
+        None,
+        false,
         inner.into(),
     ));
     let _ = ui.click("Inventory");
@@ -7375,5 +7389,91 @@ fn test_local_history_draws_a_caveat_and_fleet_history_does_not() {
     assert!(
         !render(HistorySource::Fleet),
         "a fleet-sourced chart carries no caveat: there is nothing to caveat"
+    );
+}
+
+/// #910: while scrubbed, the shell says so and offers one click back to live.
+///
+/// A scrubbed page and a live one look identical — same charts, same numbers,
+/// same layout — and every value on the scrubbed one is from the past. A mode
+/// you cannot see is a mode you cannot leave.
+#[test]
+fn test_time_cursor_strip_announces_the_mode_and_returns_to_live() {
+    let content = iced::widget::text("content").into();
+    let now = 1_700_000_000_000i64;
+    let mut ui = simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        Some(now),
+        now,
+        None,
+        Some(now - 2 * 3_600_000), // two hours back
+        false,
+        content,
+    ));
+    assert!(
+        ui.find("As of -2h").is_ok(),
+        "the strip names how far back the page is reading from"
+    );
+    assert!(
+        ui.find("— every value on this page is from then; the feed is not being followed")
+            .is_ok(),
+        "and says that live samples are not being appended"
+    );
+
+    let _ = ui.click("Return to live");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter().any(|m| matches!(m, Message::ScrubLive)),
+        "one click returns to live"
+    );
+}
+
+/// A live shell shows no strip at all: there is nothing to announce, and a
+/// permanent control for a mode nobody is in is clutter.
+#[test]
+fn test_no_time_cursor_strip_when_live() {
+    let content = iced::widget::text("content").into();
+    let mut ui = simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        Some(10_000),
+        12_000,
+        None,
+        None,
+        false,
+        content,
+    ));
+    assert!(
+        ui.find("— every value on this page is from then; the feed is not being followed")
+            .is_err()
+    );
+}
+
+/// A truncated reply is said out loud. A chart that drew a partial window
+/// without saying so would be making a claim about a period it was not given.
+#[test]
+fn test_a_truncated_scrub_window_says_so() {
+    let content = iced::widget::text("content").into();
+    let now = 1_700_000_000_000i64;
+    let mut ui = simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        Some(now),
+        now,
+        None,
+        Some(now - 3_600_000),
+        true,
+        content,
+    ));
+    assert!(
+        ui.find("(partial window — the historian capped this reply)")
+            .is_ok()
     );
 }
