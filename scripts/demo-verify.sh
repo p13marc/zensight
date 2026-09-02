@@ -80,10 +80,17 @@ die() {
 }
 
 echo "==> building"
-cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-exporter-otel -p zensight-sensor-sysinfo >/dev/null
+cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-exporter-otel \
+    -p zensight-sensor-sysinfo -p zensight-historian >/dev/null
+# The one-shot @rpc client the historian phase queries with (#912). An
+# example, not a binary: it is a test fixture with a `main`, and shipping it
+# in the release tarball would suggest otherwise.
+cargo build $relflag --locked -p zensight-historian --example historian-query >/dev/null
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
-require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" "$BIN/zensight-sensor-sysinfo"
+require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" \
+    "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-historian" \
+    "$BIN/examples/historian-query"
 
 tmp="$(mktemp -d)"
 echo "==> generating configs into $tmp"
@@ -243,6 +250,93 @@ echo
 echo "OK — sysinfo -> Zenoh -> exporter -> /metrics"
 echo "     $accepted points accepted, $series exported lines, all TYPE tokens legal,"
 echo "     no duplicate label names."
+
+# ---------------------------------------------------------------------------
+# Phase 1b (#912): the historian, EXECUTED and ASKED A QUESTION.
+#
+# The same lesson as the exporters (#845): compiling a query path proves
+# nothing about it. `cargo test` covers the aggregation and the paging as pure
+# functions, and the crate's own round trips use an in-process session — the
+# right shape for a unit test and the wrong one for a smoke test, because it
+# never starts the real binary, never crosses a real socket and never reads a
+# config.
+#
+# It joins the bus the exporters are already on, so the sysinfo sensor that is
+# still publishing feeds it too.
+# ---------------------------------------------------------------------------
+echo
+echo "==> starting historian (ingest + range queries)"
+# STATE_DIRECTORY keeps the database inside this run's temp dir: a smoke test
+# must not leave a file behind, and must not read one an earlier run left.
+ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
+    STATE_DIRECTORY="$tmp" \
+    "$BIN/zensight-historian" --config "$tmp/historian.json5" \
+    >"$tmp/historian.log" 2>&1 &
+pids+=($!)
+
+# Poll the RANGE query, not `series`.
+#
+# `series` answers from the interner as soon as the first sample is recorded,
+# which is within a second — but the default `step=60` selects the MINUTE tier,
+# and that lives in redb, so it holds nothing until a flush has run. Polling
+# `series` and then querying `range` once looked like a smoke test and was a
+# race: it passed on a warm store and failed on a cold one, which is exactly
+# backwards from what a smoke test should do.
+#
+# Polling the range instead exercises the whole chain this phase exists for —
+# wire, ingest, downsample, flush, redb, query — and its failure message can
+# say which link is missing, because `series` answering while `range` does not
+# is a specific, diagnosable state.
+echo "==> asking the historian for a range over its own ingest window"
+range_json=""
+for _ in $(seq 1 60); do
+    still_running "${pids[@]}" || die "a process exited while waiting for the historian.\
+$(logs_note "$tmp" "$tmp/historian.log" "$tmp/sysinfo.log")"
+    now_ms=$(( $(date +%s) * 1000 ))
+    # `agg` is left unset on purpose so the server picks by kind — the default
+    # path is the one every caller takes, and a smoke test that always named an
+    # aggregate would never exercise it.
+    if range_json=$("$BIN/examples/historian-query" -c "$HUB" --timeout 3 \
+        "v1/*/@rpc/historian/range?producer=sysinfo;from=$((now_ms - 600000));to=$now_ms;step=60" \
+        2>>"$tmp/historian-query.log"); then
+        grep -q '"points"' <<<"$range_json" && break
+    fi
+    sleep 1
+done
+
+if ! grep -q '"points"' <<<"$range_json"; then
+    # Ask the other two procedures so the failure names the link that broke
+    # rather than only the one that was asked.
+    series_json=$("$BIN/examples/historian-query" -c "$HUB" --timeout 3 \
+        'v1/*/@rpc/historian/series?producer=sysinfo' 2>/dev/null || echo "<no reply>")
+    stats_json=$("$BIN/examples/historian-query" -c "$HUB" --timeout 3 \
+        'v1/*/@rpc/historian/stats' 2>/dev/null || echo "<no reply>")
+    die "the historian returned no range points over its own ingest window after 60s.
+  series: $(head -c 200 <<<"$series_json")
+  stats:  $(head -c 300 <<<"$stats_json")
+A non-empty series list with an empty range means ingest reached the store but the
+minute tier did not — a flush that is not running, or a downsample that produced
+nothing.$(logs_note "$tmp" "$tmp/historian.log" "$tmp/sysinfo.log")"
+fi
+
+# The reply must say what it did, not only what it holds: `step_s` is the
+# resolution actually served after the tier clamp, and a caller that cannot
+# read it back cannot tell a coarse chart from a wrong one.
+grep -q '"step_s":60' <<<"$range_json" \
+    || die "the range reply did not state the step it served: $range_json"
+
+# And `series` must agree that those points belong to something it holds.
+series_json=$("$BIN/examples/historian-query" -c "$HUB" --timeout 5 \
+    'v1/*/@rpc/historian/series?producer=sysinfo') \
+    || die "the historian answered a range but not a series listing.\
+$(logs_note "$tmp" "$tmp/historian.log")"
+series_count=$(grep -o '"subject"' <<<"$series_json" | wc -l)
+[[ "$series_count" -gt 0 ]] || die "series reply parsed to zero subjects: $series_json"
+
+points=$(grep -o '\[[0-9]\{13\},' <<<"$range_json" | wc -l)
+echo
+echo "OK — sysinfo -> Zenoh -> historian -> @rpc/historian/range"
+echo "     $series_count series held, $points point(s) returned over a 10-minute window."
 
 # ---------------------------------------------------------------------------
 # Phase 2 (#845): the OTLP exporter, executed. Nothing anywhere had ever run

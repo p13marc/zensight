@@ -248,6 +248,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The historian is packaged** (#912). Release workflow (all four lists plus
+  an in-image smoke — it links redb, which the correlator does not, so a linker
+  skew in the store crate would otherwise reach the fleet before anything
+  noticed), a hardened systemd unit with `StateDirectory=zensight-historian`, a
+  Quadlet with `MemoryMax=320M` against the 256 MiB budget so the governor can
+  shed and evict before the OOM killer decides for it, `just run` and `just
+  historian`, and the `gen-configs.sh` entry.
+
+  It stays **out** of the all-in-one `zensight-sensors` bundle, like the
+  correlator: that image is the six host sensors, and this is a fleet service
+  you want one of per site, not one per host.
+
+  **CI executes it rather than compiling it.** `demo-smoke` starts the real
+  binary against the real bus, lets the real sysinfo sensor fill it, and then
+  **asks it a range query** — 318 series and 233 points in the run that landed
+  this. `conformance` judges its slice alongside the sensors': 7 producers, no
+  gated findings.
+
+  The query goes through a new `historian-query` **example**, not `zenctl`:
+  `zenctl` lives in another repository, so a CI job depending on it would be
+  testing whether that tool was installed. The example exits 0 on a value
+  reply, 1 on an error reply and 2 on silence, because RFC 05 §3.1 is right
+  that those are three different things.
+
+  Writing that phase caught a race in the test itself, which is worth recording
+  because it is the shape a real caller will hit: `series` answers from the
+  interner within a second of the first sample, but `range` at the default
+  `step=60` reads the **minute tier**, which holds nothing until a flush has
+  run. Polling `series` and then querying `range` once passed on a warm store
+  and failed on a cold one — exactly backwards for a smoke test. It polls the
+  range now, and when that fails it asks `series` and `stats` too, so the
+  message names which link broke instead of only which query was asked.
+
 - **`@rpc/historian/range` and `/series`** (#907). The read half: a range query
   is three decisions the server makes and the reply states — **which** series
   (`origin`/`producer`/`subject` compose one key-expression pattern, so `*` and

@@ -31,3 +31,10 @@ tracing.workspace = true
 tempfile.workspace = true
 # The live round trips decode replies straight off the wire.
 serde.workspace = true
+
+# A one-shot @rpc client, so scripts/demo-verify.sh can ASK the historian
+# rather than only start it (#912). Not a binary: it is a test fixture with a
+# `main`, and shipping it in the release tarball would suggest otherwise.
+[[example]]
+name = "historian-query"
+path = "examples/historian-query.rs"

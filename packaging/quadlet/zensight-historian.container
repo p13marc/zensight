@@ -1,0 +1,43 @@
+# ZenSight historian — one container, one cgroup, its own budget (#813).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via the
+# service's health doc self_stats and `@rpc/historian/stats`, and adjust. See
+# README.md beside this.
+#
+# LARGER THAN A SENSOR ON PURPOSE. A sensor holds a poll cycle; this holds the
+# fleet's history — a hot ring per series plus redb's page cache. 320M pairs
+# with the shipped config's `resources.budget_rss_mb: 256`, leaving the
+# governor room to act before the cgroup limit does: the ladder's job is to
+# shed and evict, and a MemoryMax equal to the budget would let the OOM killer
+# win that race.
+#
+# ONE PER SITE, not one per host (#898). It ingests `v1/*/telemetry/**`, so a
+# second one on the same bus stores the same samples twice and answers the same
+# questions twice. Two are ordinary RFC 05 §2.1 fan-in and legal; two by
+# accident are just cost.
+[Unit]
+Description=ZenSight historian
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-historian:latest
+ContainerName=zensight-historian
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+# The history itself. Without this the database lives in the container's
+# writable layer and every image pull is a fleet amnesia.
+Volume=zensight-historian-state:/var/lib/zensight-historian:Z
+
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Environment=STATE_DIRECTORY=/var/lib/zensight-historian
+Exec=--config /etc/zensight/historian.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=320M
+
+[Install]
+WantedBy=multi-user.target
