@@ -14399,6 +14399,7 @@ version = "0.13.0"
 dependencies = [
  "anyhow",
  "hostname",
+ "redb",
  "serde",
  "serde_json",
  "tempfile",

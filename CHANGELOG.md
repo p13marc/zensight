@@ -248,6 +248,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The historian stops persisting the per-second tier** (#911), which halves
+  its database and cuts a prune pass by two-thirds. The hot ring already
+  answers sub-minute questions — a `step` under 60 s reads memory, not disk —
+  so a per-second bucket per series was half the rows in the file for a
+  resolution nothing asked the disk for. The config and the docs had said
+  since #906 that the ring "is not persisted"; measuring is what made it true.
+  `MetricStore::persist_tiers` chooses the set, and the GUI's cache keeps all
+  three.
+
+  Measured with a new `historian-bench` example (10 000 series, 120 simulated
+  minutes, through the real ingest seam): 539 MB → 269 MB, prune 22.4 s →
+  7.0 s. Two of #911's six numbers still miss — 219 bytes per bucket against a
+  target of 48, and a worst-case prune of 7.0 s against 2 s — and the defaults
+  are deliberately **not** changed on the strength of a synthetic worst case
+  where every series is active every minute. `zensight-historian/docs/storage.md`
+  records the numbers, the conditions, and which lever to consider.
+
+  It also records a measurement **withdrawn**: a compaction figure that could
+  not be reconciled with an independent reader of the same file. A new store
+  test pins `tier_rows` against a direct table walk and passes, so the
+  disagreement appears only at bench scale and is not understood — and a number
+  nobody can reconcile is not a measurement. The compaction step was removed
+  from the bench rather than left printing it.
+
+  `StoreOpenError` implements `std::error::Error` now, so `?` can box it
+  instead of every caller mapping it by hand.
+
 - **Timeline scrubbing: a shell-level time cursor** (#910).
   `docs/plans/rerun/DECISION.md` §6 recorded scrubbing backwards through a
   correlated incident on one time axis as the single most valuable thing the
