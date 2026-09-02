@@ -39,6 +39,7 @@ pub mod qos;
 pub mod query_detail;
 pub mod registry;
 pub mod registry_audit;
+pub mod relation;
 pub mod rpc;
 pub mod schema;
 pub mod semconv;
@@ -104,6 +105,7 @@ pub use query_detail::{
     NetflowFieldValue, NetflowRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord,
     SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };
+pub use relation::{Edge, EndpointClaim, Observer, RelationKind, RelationshipEvidence};
 pub use rpc::{
     ERR_BUSY, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED, ERR_UNSUPPORTED,
     RpcError, RpcRequest, RpcResult,

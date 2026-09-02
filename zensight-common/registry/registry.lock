@@ -140,6 +140,7 @@ procedure	systemd	unit/file	read	-	UnitFile
 procedure	systemd	units	read	-	Vec<UnitRecord>
 subject	catalog	alias/{old_id}	state	AliasRecord
 subject	catalog	assertion/{id}	state	OperatorAssertion
+subject	catalog	edge/{edge_id}	state	Edge
 subject	catalog	entity/{entity_id}	state	HostEntity
 subject	catalog	pdns/{ip_slug}	state	PdnsRecord
 subject	container	alert/{alert_key}	state	Alert
@@ -149,6 +150,7 @@ subject	container	containers/total	telemetry	TelemetryPoint
 subject	container	containers/unhealthy	telemetry	TelemetryPoint
 subject	container	errors	state	ErrorReport
 subject	container	evidence/device/{device}	state	HostEvidence
+subject	container	evidence/relation/{relation_id}	state	RelationshipEvidence
 subject	container	evidence/self	state	HostEvidence
 subject	container	health	state	HealthSnapshot
 subject	container	sensor	state	SensorInfo
@@ -267,6 +269,7 @@ subject	netlink	ethtool/{iface}/rings/tx_max	telemetry	TelemetryPoint
 subject	netlink	ethtool/{iface}/speed_mbps	telemetry	TelemetryPoint
 subject	netlink	events/{family}/{action}	telemetry	TelemetryPoint
 subject	netlink	evidence/device/{device}	state	HostEvidence
+subject	netlink	evidence/relation/{relation_id}	state	RelationshipEvidence
 subject	netlink	evidence/self	state	HostEvidence
 subject	netlink	health	state	HealthSnapshot
 subject	netlink	iface/{iface}/carrier	telemetry	TelemetryPoint
@@ -449,6 +452,7 @@ subject	parallax	{stream}/stats/sink_queue	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/viewers	telemetry	TelemetryPoint
 subject	probe	alert/{alert_key}	state	Alert
 subject	probe	errors	state	ErrorReport
+subject	probe	evidence/relation/{relation_id}	state	RelationshipEvidence
 subject	probe	evidence/self	state	HostEvidence
 subject	probe	health	state	HealthSnapshot
 subject	probe	sensor	state	SensorInfo
@@ -482,6 +486,7 @@ subject	pve	cluster/quorate	telemetry	TelemetryPoint
 subject	pve	cluster/replication_failed	telemetry	TelemetryPoint
 subject	pve	errors	state	ErrorReport
 subject	pve	evidence/device/{device}	state	HostEvidence
+subject	pve	evidence/relation/{relation_id}	state	RelationshipEvidence
 subject	pve	evidence/self	state	HostEvidence
 subject	pve	guest/{vmid}	state	PveGuest
 subject	pve	guest/{vmid}/cpu_ratio	telemetry	TelemetryPoint

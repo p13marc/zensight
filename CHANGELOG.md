@@ -9,6 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The relationship graph gets a wire model** (#915, part of #899). Two new
+  state families, and between them the whole graph:
+  `state/<producer>/evidence/relation/{relation_id}` — what a sensor *claims* —
+  and `@catalog/state/edge/{edge_id}` — what the catalog *concludes*.
+
+  `zensight-common/src/relation.rs`: `RelationKind` (`hosts`, `runs`,
+  `gateway_of`, `probes`, `l2_adjacent`), `EndpointClaim`,
+  `RelationshipEvidence`, `Endpoint`, `Observer`, `Edge`. Claims and
+  conclusions are separate types on purpose: a sensor knows a vmid, a MAC, a
+  gateway address, a target name — never an entity id, because resolving a
+  claim to an entity needs the union-find and only the catalog has run it.
+  Collapsing them would make every consumer ask "is this resolved yet?" on
+  every read, and would let an unresolved claim reach a UI as a conclusion.
+  `Endpoint::External` is not a failure mode but the honest answer for
+  something the fleet can see and runs no sensor on — an upstream router, a
+  probe target on the internet.
+
+  `relation_id` and `edge_id` derive from `(kind, from, to)` and nothing else:
+  no timestamp, no publisher, no observer set. A refresh is therefore an
+  idempotent LWW overwrite on one key rather than a document per observation,
+  and two sensors seeing one relationship land on one key instead of counting
+  twice against a budget. Both hash a `\u{1f}`-joined representation — a `-`
+  join lets `("a-b","c")` and `("a","b-c")` collide, and the endpoint variant
+  prefix stops an entity named after an IP sharing a key with the external
+  endpoint at that IP. Tests pin all of it, plus round-trips in JSON and CBOR.
+
+  Registry: `edge/{edge_id}` (cardinality 50 000, ttl 900) in `catalog.toml`;
+  `evidence/relation/{relation_id}` (1 024, 900) in `container`, `pve`,
+  `probe` and `netlink`. Neither carries a `common =` key — `zenkey::CommonState`
+  is a closed RFC enum in an external crate, so both refine app-side through
+  `ZensightState`, the escape hatch `catalog/assertion/{id}` already uses.
+  **The RFC (zenkey#416) and the code disagree until that releases**, on
+  purpose and in writing. Both types are fully derived schemas, so
+  `every_state_family_serves_a_generated_schema` (#815) passes with real
+  structure.
+
+  Flow adjacency is deliberately not a kind: per-observed-peer and unbounded,
+  it stays an `@rpc` overlay rather than entering a budgeted state family.
+
+### Fixed
+
+- **The correlator would have fed relationship claims into the identity
+  union-find** (#915). Its host-evidence handler subscribes
+  `all_evidence_wildcard()` = `v1/*/state/*/evidence/**` — every evidence
+  subject — and excluded exactly one subtree, `evidence/names/`, **by
+  substring**; everything else went to `decode::<HostEvidence>`.
+  `HostEvidence` carries no `deny_unknown_fields` and requires only `sensor`
+  and `source`, both of which a relationship claim naturally has. So the moment
+  #916 starts publishing, every relation document would have deserialized
+  cleanly as a host-identity claim and been inserted into the `EvidenceStore`,
+  where it becomes input to the union-find deciding which machines are the same
+  machine. No error and no log line — entities fusing or splitting for no
+  visible reason, in the one component whose entire job is determinism.
+
+  The handler now dispatches on the refined subject and accepts only
+  `evidence/self` and `evidence/device/{device}`, so any family added under
+  `evidence/**` is inert to identity by default — the safe direction to fail.
+  Two tests pin it, and one of them *demonstrates* the trap by round-tripping a
+  real `RelationshipEvidence` document through `HostEvidence` successfully,
+  which is why the guard is structural rather than a field check.
+
+  Nothing shipped broken: the family that would have triggered it is introduced
+  by this same change. It is recorded as fixed because the defect was in code
+  that has been on master since evidence had three families, and the next one
+  added would have found it whether or not it was this one.
+
 - **`zensight-sensor-parallax` is packaged** (#512). It had a workspace member,
   a config, a `just` recipe, a README entry and — since #411 — a hardened
   systemd unit, and it shipped in **no release artifact at all**. The sharp end

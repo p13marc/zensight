@@ -92,6 +92,53 @@ zensight/v1/@desired/state/<host>/<producer>/<topic>     fleet desired state (#8
   the raw lifetime counter — a dot-suffix on the leaf chunk, not an extra
   subject chunk, so it stays inside the registered `{metric...}` family.
 
+## The relationship graph rides the bus (#899/#915)
+
+Two new state families, and between them the whole graph:
+
+```
+zensight/v1/<origin>/state/<producer>/evidence/relation/{relation_id}   a sensor's CLAIM
+zensight/v1/@catalog/state/edge/{edge_id}                               the catalog's CONCLUSION
+```
+
+Sensors publish `RelationshipEvidence` — a `kind` (`hosts`, `runs`,
+`gateway_of`, `probes`, `l2_adjacent`) and two `EndpointClaim`s, which carry
+what was *observed* (a vmid, a MAC, a gateway address, a target name) and
+never an entity id: resolving a claim to an entity is the catalog's job,
+because the catalog is the only participant that has run the union-find. The
+catalog publishes `Edge`, whose ends are resolved — an entity id, or an honest
+`External` for something the fleet can see but runs no sensor on (an upstream
+router, a probe target on the internet).
+
+`relation_id` and `edge_id` are both derived from `(kind, from, to)` and
+nothing else — no timestamp, no publisher, no observer set — so a refresh is an
+idempotent LWW overwrite on one key rather than a new document per observation,
+and two sensors that see the same relationship land on the same key instead of
+counting twice against the cardinality budget. Both hash over a `\u{1f}`-joined
+representation, which cannot be forged by field values the way a `-` join can.
+
+**`evidence/relation/**` already falls inside `all_evidence_wildcard()`**
+(`v1/*/state/*/evidence/**`), so the correlator's input contract is unchanged
+and no new subscription was needed. That is also what made it dangerous: the
+correlator's host-identity handler excluded exactly one subtree by substring
+and decoded everything else as `HostEvidence`, which has no
+`deny_unknown_fields` and requires only `sensor` and `source` — both of which a
+relation claim carries. It now dispatches on the refined subject and accepts
+only `evidence/self` and `evidence/device/{device}`, so a family added under
+`evidence/**` is inert to identity by default. Two tests pin it, one of which
+demonstrates that a real relation document does decode as `HostEvidence`.
+
+Neither family carries a `common =` key: `zenkey::CommonState` is a closed RFC
+enum in an external crate, so both refine app-side through
+`zensight_common::state::ZensightState` — the same escape hatch
+`catalog/assertion/{id}` uses. **The RFC (zenkey#416) and the code disagree
+until that releases**, deliberately and in writing.
+
+Flow adjacency is deliberately *not* a relation kind. It is per-observed-peer
+and unbounded, so it stays an `@rpc` overlay rather than entering a
+cardinality-budgeted state family — `edge/{edge_id}` declares 50 000, and a
+resolver emitting an edge per observed peer would breach it.
+
 ## `@desired` — fleet configuration as desired state (#816)
 
 A controller publishes per-host runtime POLICY under the `@desired` service

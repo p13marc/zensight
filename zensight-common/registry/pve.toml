@@ -22,7 +22,7 @@
 # block is the precedent for how that would have to look).
 
 [registry]
-version = "1.0"
+version = "1.1"
 app = "zensight"
 convention = 1
 
@@ -302,6 +302,15 @@ cardinality = 1
 ttl_s = 900
 since = "1.0"
 description = "quorum, members, HA resources and replication results; quorate is absent on a standalone node rather than false"
+
+[[subject]]
+path = "evidence/relation/{relation_id}"
+class = "state"
+type = "RelationshipEvidence"
+cardinality = 1024
+ttl_s = 900
+since = "1.1"
+description = "a Hosts claim: this node hosts this guest (#915); the catalog resolves both ends into an @catalog edge"
 
 [[subject]]
 path = "evidence/device/{device}"
