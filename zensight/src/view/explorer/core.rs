@@ -112,6 +112,7 @@ pub fn declared_of(
     match subject {
         S::Catalog(s) => (s.qos(), s.payload_type()),
         S::Gnmi(s) => (s.qos(), s.payload_type()),
+        S::Historian(s) => (s.qos(), s.payload_type()),
         S::Hostspec(s) => (s.qos(), s.payload_type()),
         S::Desired(s) => (s.qos(), s.payload_type()),
         S::Logs(s) => (s.qos(), s.payload_type()),

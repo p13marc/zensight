@@ -160,8 +160,14 @@ pub fn overview_section<'a>(
             // history) is a follow-up, not a blocker.
             Protocol::Container => generic_overview(&protocol_devices, "containers"),
             // #820: one device per configured target.
-            // #820: one device per configured target.
             Protocol::Probe => generic_overview(&protocol_devices, "probe targets"),
+            // #898: the historian is one device per running instance, and what
+            // it has to say about itself is its health document and its store
+            // statistics — not a device table. The generic view renders the
+            // gauges it does publish; the history it holds is read through
+            // `@rpc/historian/range` from the charts that need it, not from a
+            // tab of its own.
+            Protocol::Historian => generic_overview(&protocol_devices, "historians"),
         };
         column![alert_tile, body].spacing(8).into()
     } else {
@@ -310,6 +316,7 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
         Protocol::Pve => "PVE",
         Protocol::Container => "Containers",
         Protocol::Probe => "Probes",
+        Protocol::Historian => "History",
     }
 }
 
