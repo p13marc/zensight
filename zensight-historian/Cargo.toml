@@ -1,0 +1,31 @@
+[package]
+name = "zensight-historian"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Durable fleet telemetry history for ZenSight — ingests v1/*/telemetry/** into tiered storage under a resource budget and serves bounded range queries over it."
+
+[dependencies]
+zenkey = { workspace = true }
+zensight-common.workspace = true
+zensight-sensor-core.workspace = true
+# The tiers themselves — the same crate the GUI's local cache uses (#904), so
+# the two name a series the same way and a chart can fall back between them.
+# WITHOUT the `blob` feature: a history service has no use for the chunk store.
+zensight-store.workspace = true
+
+hostname = "0.4"
+tokio = { workspace = true, features = ["full", "sync", "time"] }
+zenoh.workspace = true
+# `declare_telemetry_subscriber` returns an AdvancedSubscriber.
+zenoh-ext.workspace = true
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

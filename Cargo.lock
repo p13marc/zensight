@@ -14394,6 +14394,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "zensight-historian"
+version = "0.13.0"
+dependencies = [
+ "anyhow",
+ "hostname",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "zenkey",
+ "zenoh",
+ "zenoh-ext",
+ "zensight-common",
+ "zensight-sensor-core",
+ "zensight-store",
+]
+
+[[package]]
 name = "zensight-rerun"
 version = "0.13.0"
 dependencies = [

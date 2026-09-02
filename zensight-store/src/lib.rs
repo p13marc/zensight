@@ -609,6 +609,20 @@ impl RingBuffer {
         self.buf.push_back(sample);
     }
 
+    /// Shrink to a smaller capacity, dropping the oldest samples that no
+    /// longer fit. A no-op if the ring is already at or below `capacity`.
+    /// Floors at 1 for the same reason [`new`](Self::new) does.
+    pub fn shrink_to(&mut self, capacity: usize) {
+        let capacity = capacity.max(1);
+        if capacity >= self.capacity {
+            return;
+        }
+        self.capacity = capacity;
+        while self.buf.len() > capacity {
+            self.buf.pop_front();
+        }
+    }
+
     /// Number of buffered samples.
     pub fn len(&self) -> usize {
         self.buf.len()
@@ -671,6 +685,10 @@ pub fn downsample(samples: &[Sample], tier: Tier) -> Vec<(i64, Bucket)> {
 #[derive(Clone)]
 pub struct PersistentStore {
     db: Arc<Database>,
+    /// The file this store opened. Kept so [`db_bytes`](Self::db_bytes) can
+    /// stat it: what matters to an operator with a budget is what `df` says,
+    /// and redb's allocated-but-unused pages are part of that.
+    path: PathBuf,
 }
 
 impl PersistentStore {
@@ -759,7 +777,10 @@ impl PersistentStore {
             meta.insert("schema", SCHEMA_VERSION)?;
         }
         txn.commit()?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            path: path.to_path_buf(),
+        })
     }
 
     /// Every persisted `(path, id, meta)` row, for rebuilding the interner on
@@ -899,6 +920,60 @@ impl PersistentStore {
             cursor = ((id as u128) + 1) << 72;
         }
         Ok(ids)
+    }
+
+    /// Buckets stored in one tier, across every metric.
+    ///
+    /// Skip-scans by metric like [`prune`](Self::prune), then counts one
+    /// bounded range per `(metric, tier)`: the packed key sorts by metric
+    /// first, so a tier's rows are scattered through the table and counting
+    /// them naively means reading all of it. This is the number #911 measures
+    /// retention against, so it has to stay cheap enough to ask for on every
+    /// `stats` call.
+    pub fn tier_rows(&self, tier: Tier) -> Result<u64, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(SAMPLES_TABLE)?;
+        let mut total = 0u64;
+        for id in self.sample_metric_ids()? {
+            let lo = pack_key(id, tier, 0);
+            let hi = pack_key(id, tier, i64::MAX);
+            total += table.range(lo..=hi)?.count() as u64;
+        }
+        Ok(total)
+    }
+
+    /// The database file's size on disk, in bytes. `0` when it cannot be
+    /// stated — an unreadable size is not a small one, but a caller charting
+    /// a budget needs a number, and the file's absence is itself visible in
+    /// the row counts beside it.
+    pub fn db_bytes(&self) -> u64 {
+        self.path.metadata().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// The oldest bucket held, in epoch milliseconds; `None` for an empty
+    /// store.
+    ///
+    /// The honest answer to "how far back can I ask", which retention makes a
+    /// moving target: a caller that assumes its configured retention is
+    /// available will draw an empty left-hand half of a chart and call it an
+    /// outage. One seek per `(metric, tier)`.
+    pub fn oldest_bucket_ms(&self) -> Result<Option<i64>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(SAMPLES_TABLE)?;
+        let mut oldest: Option<i64> = None;
+        for id in self.sample_metric_ids()? {
+            for tier in Tier::ALL {
+                let lo = pack_key(id, tier, 0);
+                let hi = pack_key(id, tier, i64::MAX);
+                if let Some(entry) = table.range(lo..=hi)?.next() {
+                    let key = entry?.0.value();
+                    let secs = (key & u64::MAX as u128) as u64 as i64;
+                    let ms = secs * 1_000;
+                    oldest = Some(oldest.map_or(ms, |o: i64| o.min(ms)));
+                }
+            }
+        }
+        Ok(oldest)
     }
 
     /// Evict buckets older than each tier's [retention](Tier::retention_secs)
@@ -1662,6 +1737,39 @@ impl MetricStore {
             .device_ids(&device)
             .map(|(id, metric)| (metric.to_string(), id))
             .collect()
+    }
+
+    /// Total samples held across every series' hot ring.
+    ///
+    /// What the memory governor accounts for (#811/#812): the ring is the one
+    /// structure here that grows with the fleet rather than with the disk.
+    pub fn hot_sample_count(&self) -> usize {
+        self.series.values().map(|s| s.hot.len()).sum()
+    }
+
+    /// Halve the hot ring's capacity, dropping the oldest samples of every
+    /// series to fit. Returns the new capacity.
+    ///
+    /// The governor's evict hook asks for a number of bytes freed, and this is
+    /// the honest translation: the ring is per-series and bounded by capacity,
+    /// so the only thing a caller can actually give back is *seconds held*.
+    /// Halving rather than trimming to a target keeps the operation O(series)
+    /// and its effect legible in a log line — "ten minutes became five" is a
+    /// sentence an operator can act on, where "freed 3.7 MiB" is not.
+    ///
+    /// Floors at 1: a ring of zero would silently stop answering live
+    /// questions, which is a worse failure than holding one sample.
+    pub fn halve_hot_capacity(&mut self) -> usize {
+        self.hot_capacity = (self.hot_capacity / 2).max(1);
+        for series in self.series.values_mut() {
+            series.hot.shrink_to(self.hot_capacity);
+        }
+        self.hot_capacity
+    }
+
+    /// The hot ring's current per-series capacity.
+    pub fn hot_capacity(&self) -> usize {
+        self.hot_capacity
     }
 
     /// The interner, for a reader that needs to enumerate series (the
@@ -2504,6 +2612,80 @@ mod tests {
             2
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The governor's evict hook (#906): halving the ring must actually drop
+    /// the oldest samples of every series, not merely lower a number that
+    /// nothing enforces — an eviction that frees nothing is worse than none,
+    /// because the ladder reads it as relief and stops escalating.
+    #[test]
+    fn halving_the_hot_ring_drops_the_oldest_samples_of_every_series() {
+        let mut store = MetricStore::new(8, None);
+        for ts in 0..8 {
+            store.record(ORIGIN, "cpu", &point("cpu", ts as f64, ts * 1_000));
+            store.record(ORIGIN, "mem", &point("mem", ts as f64, ts * 1_000));
+        }
+        assert_eq!(store.hot_sample_count(), 16);
+        assert_eq!(store.hot_capacity(), 8);
+
+        assert_eq!(store.halve_hot_capacity(), 4);
+        assert_eq!(
+            store.hot_sample_count(),
+            8,
+            "both series shrank, not just one"
+        );
+        // The samples kept are the NEWEST: history is a window on now, and
+        // dropping the recent half would leave a live chart empty.
+        let cpu = store.hot_samples(&series("cpu"));
+        assert_eq!(cpu.len(), 4);
+        assert_eq!(cpu.first().map(|s| s.ts), Some(4_000));
+        assert_eq!(cpu.last().map(|s| s.ts), Some(7_000));
+
+        // New capacity applies to a series interned afterwards too.
+        store.record(ORIGIN, "disk", &point("disk", 1.0, 9_000));
+        assert_eq!(store.hot_samples(&series("disk")).len(), 1);
+
+        // It floors at 1 rather than 0: a ring of zero silently stops
+        // answering live questions, which is worse than holding one sample.
+        for _ in 0..8 {
+            store.halve_hot_capacity();
+        }
+        assert_eq!(store.hot_capacity(), 1);
+        assert_eq!(store.hot_samples(&series("cpu")).len(), 1);
+    }
+
+    /// `stats` reports what the tiers hold and how far back they go (#906) —
+    /// the numbers #911 measures retention against.
+    #[test]
+    fn the_store_reports_its_rows_size_and_oldest_bucket() {
+        let path = temp_db_path("stats");
+        let store = PersistentStore::open(&path).expect("open");
+        let m = MetricId(1);
+        store
+            .write_batch(&FlushBatch {
+                rows: vec![
+                    (m, Tier::Minute, 60, Bucket::point(1.0)),
+                    (m, Tier::Minute, 120, Bucket::point(2.0)),
+                    (m, Tier::Hour, 3_600, Bucket::point(3.0)),
+                ],
+                paths: vec![],
+            })
+            .unwrap();
+
+        assert_eq!(store.tier_rows(Tier::Minute).unwrap(), 2);
+        assert_eq!(store.tier_rows(Tier::Hour).unwrap(), 1);
+        assert_eq!(store.tier_rows(Tier::Second).unwrap(), 0);
+        assert!(store.db_bytes() > 0, "the file is on disk and has a size");
+        // The oldest bucket across every tier, in milliseconds — the honest
+        // answer to "how far back can I ask", which retention keeps moving.
+        assert_eq!(store.oldest_bucket_ms().unwrap(), Some(60_000));
+
+        let empty = temp_db_path("stats-empty");
+        let store = PersistentStore::open(&empty).expect("open");
+        assert_eq!(store.oldest_bucket_ms().unwrap(), None);
+        assert_eq!(store.tier_rows(Tier::Minute).unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&empty);
     }
 
     /// A pre-v2 file — samples, no `metrics`/`meta` — is refused, not read:
