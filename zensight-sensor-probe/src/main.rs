@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
         states,
         reporter.clone(),
         runner.health(),
+        zensight_sensor_core::relation::RelationSet::new("probe", runner.session().clone(), format),
     )?;
     runner.spawn(poller.run());
     if let Some(r) = reporter {

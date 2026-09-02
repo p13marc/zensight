@@ -167,6 +167,14 @@ pub struct Collector {
     /// Per-source dedup/refresh bookkeeping for the neighbor host-evidence feed
     /// (#307). `poll_neighbors` is `&self`, so this needs interior mutability.
     evidence_state: std::sync::Mutex<crate::evidence::EvidenceState>,
+    /// The default gateway seen by the most recent route poll, so the
+    /// `GatewayOf` claim published from the neighbour poll can name it. The
+    /// two facts arrive from different netlink families and neither poll has
+    /// both: routes know the address, neighbours know its MAC.
+    default_gw: std::sync::Mutex<Option<String>>,
+    /// The `GatewayOf` claim published last tick (#916). A `tokio` mutex, not a
+    /// `std` one: `sync` publishes, so the guard is held across `.await`.
+    relations: tokio::sync::Mutex<zensight_sensor_core::relation::RelationSet>,
 }
 
 impl Collector {
@@ -176,6 +184,8 @@ impl Collector {
         session: Arc<zenoh::Session>,
         format: Format,
     ) -> Self {
+        let relations =
+            zensight_sensor_core::relation::RelationSet::new("netlink", session.clone(), format);
         let registry = AdvancedPublisherRegistry::new(
             session,
             zensight_sensor_core::v1::for_producer("netlink").telemetry_prefix(),
@@ -202,6 +212,8 @@ impl Collector {
             #[cfg(feature = "ebpf")]
             ebpf: None,
             evidence_state: std::sync::Mutex::new(crate::evidence::EvidenceState::default()),
+            default_gw: std::sync::Mutex::new(None),
+            relations: tokio::sync::Mutex::new(relations),
         }
     }
 
@@ -573,6 +585,9 @@ impl Collector {
         // last, historize any transition, and stream the flap counter.
         self.route_history
             .observe(summary.default_v4_present, summary.default_v4_gw.as_deref());
+        if let Ok(mut gw) = self.default_gw.lock() {
+            *gw = summary.default_v4_gw.clone();
+        }
         for point in self.route_history.flap_points(&self.host) {
             self.publish(&point).await;
         }
@@ -599,6 +614,48 @@ impl Collector {
         // floor keeps a fast poll from spamming the evidence bus.
         if self.config.evidence.enabled {
             self.publish_neighbor_evidence(&neighbors).await;
+            self.publish_gateway_relation(&neighbors).await;
+        }
+    }
+
+    /// Publish the `GatewayOf` claim: this gateway serves this host (#916).
+    ///
+    /// Direction matters and is the opposite of the intuition: `from` is the
+    /// **gateway** and `to` is this host, because impact flows from the thing
+    /// that contains to the thing contained — a host behind a dead gateway is
+    /// unreachable, not the other way round (#918).
+    ///
+    /// The gateway end is a bare `ip`/`mac` claim, never a `host_id`: the
+    /// default gateway is usually a router that runs no sensor, and the
+    /// catalog resolves it to an entity if one of its addresses happens to
+    /// match a host it knows, or to an `External` node if not. Guessing here
+    /// would put an unresolved address on the map dressed as an entity.
+    ///
+    /// The MAC comes from the neighbour table, which is why this runs from the
+    /// neighbour poll: routes know the gateway's address and neighbours know
+    /// its MAC, and neither poll has both.
+    async fn publish_gateway_relation(&self, neighbors: &[NeighborMessage]) {
+        let gw = match self.default_gw.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return,
+        };
+        let now = zensight_common::current_timestamp_millis();
+        let claims: Vec<zensight_common::relation::RelationshipEvidence> = match gw {
+            // No default route is not an error and not a gap in the graph: a
+            // host on an isolated segment genuinely has no gateway. Syncing
+            // the empty set retires yesterday's claim, which is the whole
+            // reason this is a sync rather than a publish.
+            None => Vec::new(),
+            Some(addr) => vec![gateway_relation(&addr, neighbors, now)],
+        };
+        let out = self.relations.lock().await.sync(&claims).await;
+        if out.retired > 0 || out.failed > 0 {
+            tracing::debug!(
+                published = out.published,
+                retired = out.retired,
+                failed = out.failed,
+                "netlink: gateway relation sync"
+            );
         }
     }
 
@@ -1534,6 +1591,41 @@ pub fn aggregate_diagnostics(
         d.bottleneck_drop_rate = b.drop_rate;
     }
     d
+}
+
+/// Build the `GatewayOf` claim for `addr`, taking its MAC from the neighbour
+/// table when the entry is valid.
+///
+/// A gateway with no resolvable neighbour entry still produces a claim — the
+/// address alone is enough for the catalog to try a match, and a router that
+/// answers ARP only intermittently should not make the default route
+/// disappear from the map.
+fn gateway_relation(
+    addr: &str,
+    neighbors: &[NeighborMessage],
+    now_ms: i64,
+) -> zensight_common::relation::RelationshipEvidence {
+    use zensight_common::relation::{EndpointClaim, RelationKind, RelationshipEvidence};
+    let mac = neighbors
+        .iter()
+        .find(|n| n.destination().map(|d| d.to_string()).as_deref() == Some(addr))
+        .and_then(|n| n.mac_address())
+        .filter(|m| !crate::evidence::is_zero_mac(m));
+    RelationshipEvidence {
+        sensor: "netlink".to_string(),
+        source: zensight_sensor_core::v1::host_id().as_str().to_string(),
+        kind: RelationKind::GatewayOf,
+        // from = the gateway, to = this host: impact flows from container to
+        // contained, and a host behind a dead gateway is what is unreachable.
+        from: EndpointClaim {
+            ips: vec![addr.to_string()],
+            macs: mac.into_iter().collect(),
+            ..Default::default()
+        },
+        to: EndpointClaim::host(zensight_sensor_core::v1::host_id().as_str()),
+        attrs: std::collections::BTreeMap::from([("family".to_string(), "v4".to_string())]),
+        last_updated: now_ms,
+    }
 }
 
 #[cfg(test)]

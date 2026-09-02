@@ -69,6 +69,11 @@ pub struct Poller {
     last_backup_poll: Option<Instant>,
     backups: Vec<PveBackupSummary>,
     backup_jobs: Vec<PveBackupJob>,
+    /// The `Hosts` claims published last sweep (#916). Retiring a migrated
+    /// guest matters more here than anywhere else: without it the guest shows
+    /// on the old node *and* the new one for the family's TTL, and a migration
+    /// is exactly when someone looks at the map.
+    relations: zensight_sensor_core::relation::RelationSet,
 }
 
 impl Poller {
@@ -82,6 +87,7 @@ impl Poller {
         evidence: Option<Arc<AdvancedPublisherRegistry>>,
         reporter: Option<Arc<AlertReporter>>,
         health: Arc<SensorHealth>,
+        relations: zensight_sensor_core::relation::RelationSet,
     ) -> Self {
         Self {
             client,
@@ -97,6 +103,7 @@ impl Poller {
             last_backup_poll: None,
             backups: Vec::new(),
             backup_jobs: Vec::new(),
+            relations,
         }
     }
 
@@ -440,7 +447,7 @@ impl Poller {
     /// Publish one sweep: gauges, state documents, evidence claims, and the
     /// assertions. Public so the e2e test can drive a single observation
     /// rather than waiting on the interval.
-    pub async fn publish(&self, sweep: &Sweep) {
+    pub async fn publish(&mut self, sweep: &Sweep) {
         let mut published = 0u64;
 
         for g in &sweep.guests {
@@ -500,6 +507,27 @@ impl Poller {
                 && let Err(e) = reg.publish_serializable(&key, &claim).await
             {
                 tracing::debug!(vmid = g.vmid, error = %e, "pve: evidence publish failed");
+            }
+        }
+
+        // One `Hosts` claim per guest, as the complete current set.
+        {
+            let host_id = zensight_sensor_core::v1::host_id().as_str().to_string();
+            let now_ms = zensight_common::current_timestamp_millis();
+            let claims: Vec<zensight_common::relation::RelationshipEvidence> = sweep
+                .guests
+                .iter()
+                .map(|g| guest_relation(&host_id, g, now_ms))
+                .collect();
+            let out = self.relations.sync(&claims).await;
+            if out.retired > 0 || out.failed > 0 || out.dropped > 0 {
+                tracing::debug!(
+                    published = out.published,
+                    retired = out.retired,
+                    dropped = out.dropped,
+                    failed = out.failed,
+                    "pve: relation evidence sync"
+                );
             }
         }
 
@@ -743,6 +771,52 @@ fn guest_labels(g: &PveGuest) -> HashMap<String, String> {
     m.insert("node".to_string(), g.node.clone());
     m.insert("kind".to_string(), g.kind.to_string());
     m
+}
+
+/// A `Hosts` claim: this node hosts this guest (#916).
+///
+/// `from` is a self-claim by `host_id` — the node the sensor runs on, which is
+/// the strongest end available and what lets the catalog resolve this edge to
+/// a real entity. `to` carries the vmid as the device slug **and the guest's
+/// MACs**, which is what makes the far end resolvable at all: a guest running
+/// its own sensor reports the same MACs, so the catalog joins the hypervisor's
+/// view of the guest to the guest's view of itself instead of leaving two
+/// unrelated nodes on the map.
+///
+/// `bridge` and `vlan` ride as attrs off the first NIC that declares them. The
+/// first, not a merge of all: a guest with two NICs on two bridges has two
+/// answers and picking one silently is better than inventing a third, while
+/// modelling each NIC as its own edge would multiply a 1024-cardinality family
+/// by the NIC count to say something the guest document already carries in
+/// full.
+fn guest_relation(
+    host_id: &str,
+    g: &PveGuest,
+    now_ms: i64,
+) -> zensight_common::relation::RelationshipEvidence {
+    use zensight_common::relation::{EndpointClaim, RelationKind, RelationshipEvidence};
+    let mut attrs = std::collections::BTreeMap::new();
+    if let Some(bridge) = g.nics.iter().find_map(|n| n.bridge.as_ref()) {
+        attrs.insert("bridge".to_string(), bridge.clone());
+    }
+    if let Some(vlan) = g.nics.iter().find_map(|n| n.vlan_tag) {
+        attrs.insert("vlan".to_string(), vlan.to_string());
+    }
+    attrs.insert("kind".to_string(), g.kind.to_string());
+    RelationshipEvidence {
+        sensor: "pve".to_string(),
+        source: g.node.clone(),
+        kind: RelationKind::Hosts,
+        from: EndpointClaim::host(host_id),
+        to: EndpointClaim {
+            device: Some(g.vmid.to_string()),
+            macs: g.nics.iter().filter_map(|n| n.mac.clone()).collect(),
+            name: g.name.clone(),
+            ..Default::default()
+        },
+        attrs,
+        last_updated: now_ms,
+    }
 }
 
 /// A third-party identity claim about a guest.

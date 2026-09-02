@@ -24,6 +24,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use zensight_common::container::{ContainerInfo, HealthState};
+use zensight_common::relation::{RelationKind, RelationshipEvidence};
 use zensight_common::{Alert, AlertState, TelemetryPoint, decode_auto};
 use zensight_sensor_core::{AlertReporter, Publisher};
 
@@ -191,6 +192,10 @@ async fn the_container_contract_end_to_end() {
         .declare_subscriber("v1/*/telemetry/container/**")
         .await
         .unwrap();
+    let relations_sub = session
+        .declare_subscriber("v1/*/state/container/evidence/relation/*")
+        .await
+        .unwrap();
 
     let format = zensight_common::Format::Json;
     let publisher = Publisher::new(session.clone(), "container", format);
@@ -221,6 +226,7 @@ async fn the_container_contract_end_to_end() {
         Some(reporter.clone()),
         health.clone(),
         None,
+        zensight_sensor_core::relation::RelationSet::new("container", session.clone(), format),
     );
 
     // ── Sweep 1 establishes the baseline; the delta rules cannot fire yet ───
@@ -295,6 +301,47 @@ async fn the_container_contract_end_to_end() {
     // The kernel's half, joined onto the runtime's.
     assert_eq!(caddy.resources.memory_bytes, Some(20_000_000));
     assert_eq!(caddy.resources.memory_max_bytes, Some(268_435_456));
+
+    // ── The relationship graph (#916) ───────────────────────────────────────
+    //
+    // Three claims, not four: the exited container is not *run* by this host
+    // any more. A `Runs` edge to a stopped container would put it on the map
+    // as a live dependency and let impact attribution treat its absence as a
+    // symptom of something.
+    let mut relations: std::collections::HashMap<String, RelationshipEvidence> = Default::default();
+    while let Ok(Ok(s)) =
+        tokio::time::timeout(Duration::from_millis(500), relations_sub.recv_async()).await
+    {
+        let key = s.key_expr().to_string();
+        let Ok(r) = decode_auto::<RelationshipEvidence>(&s.payload().to_bytes()) else {
+            continue;
+        };
+        assert!(
+            key.ends_with(&r.relation_id()),
+            "the key chunk is the payload's derived id: {key}"
+        );
+        assert_eq!(r.kind, RelationKind::Runs);
+        assert!(r.from.host_id.is_some(), "the host end is a self-claim");
+        relations.insert(r.to.name.clone().unwrap(), r);
+    }
+    assert_eq!(
+        relations.len(),
+        3,
+        "only running containers: {:?}",
+        relations.keys().collect::<Vec<_>>()
+    );
+    let rc = &relations["caddy"];
+    assert_eq!(
+        rc.to.ips,
+        vec!["10.89.0.5".to_string()],
+        "the container end carries its IPs, which is what lets the catalog join \
+         netlink's wire-only bridge entity to this container"
+    );
+    assert_eq!(
+        rc.attrs.get("unit").map(String::as_str),
+        Some("caddy.service"),
+        "the owning unit is an attr on the containment, not a second edge"
+    );
 
     // The number whose absence made 2026-08-17 "the bundle" for eleven days.
     let netring = &docs["netring"];
@@ -457,6 +504,11 @@ async fn an_unreachable_runtime_is_an_error_not_an_empty_fleet() {
         None,
         Arc::new(zensight_sensor_core::SensorHealth::new("container")),
         None,
+        zensight_sensor_core::relation::RelationSet::new(
+            "container",
+            session.clone(),
+            zensight_common::Format::Json,
+        ),
     );
     let err = poller.sweep().await.unwrap_err();
     assert!(err.contains("cannot reach"), "{err}");

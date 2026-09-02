@@ -18,6 +18,7 @@ use std::time::Duration;
 use axum::{Router, routing::get};
 
 use zensight_common::probe::{ProbeKind, ProbeOutcome, ProbeResult};
+use zensight_common::relation::{RelationKind, RelationshipEvidence};
 use zensight_common::{Alert, AlertState, TelemetryPoint, decode_auto};
 use zensight_sensor_core::{AlertReporter, Publisher};
 
@@ -104,6 +105,10 @@ async fn the_probe_contract_end_to_end() {
         .declare_subscriber("v1/*/telemetry/probe/**")
         .await
         .unwrap();
+    let relations_sub = session
+        .declare_subscriber("v1/*/state/probe/evidence/relation/*")
+        .await
+        .unwrap();
 
     let cfg = ProbeConfig {
         vantage: Some("vm-apps".into()),
@@ -150,6 +155,7 @@ async fn the_probe_contract_end_to_end() {
         states,
         Some(reporter.clone()),
         health.clone(),
+        zensight_sensor_core::relation::RelationSet::new("probe", session.clone(), format),
     )
     .unwrap();
 
@@ -159,6 +165,43 @@ async fn the_probe_contract_end_to_end() {
 
     let by_name: std::collections::HashMap<&str, &ProbeResult> =
         results.iter().map(|r| (r.name.as_str(), r)).collect();
+
+    // ── The relationship graph (#916) ───────────────────────────────────────
+    //
+    // One `Probes` claim per checked target, *including the failing ones*. A
+    // claim retired on failure would delete the graph exactly when impact
+    // attribution needs it: #918's rule is that a dead vantage explains its
+    // targets' alerts, and it can only do that if the edges still exist.
+    let mut relations: std::collections::HashMap<String, RelationshipEvidence> = Default::default();
+    while let Ok(Ok(s)) =
+        tokio::time::timeout(Duration::from_millis(500), relations_sub.recv_async()).await
+    {
+        let key = s.key_expr().to_string();
+        let Ok(r) = decode_auto::<RelationshipEvidence>(&s.payload().to_bytes()) else {
+            continue;
+        };
+        assert!(
+            key.ends_with(&r.relation_id()),
+            "the key chunk is the payload's derived id: {key}"
+        );
+        assert_eq!(r.kind, RelationKind::Probes);
+        assert!(
+            r.from.host_id.is_some(),
+            "the vantage end is a self-claim — a probe result is an observation \
+             made from somewhere (#883), and the edge has to say where"
+        );
+        relations.insert(r.to.name.clone().unwrap(), r);
+    }
+    assert_eq!(
+        relations.len(),
+        5,
+        "every checked target, failing ones included: {:?}",
+        relations.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        relations["hairpin"].attrs.contains_key("kind"),
+        "the check kind rides as an attr"
+    );
 
     // ── Contract 1: the 2026-08-20 shape ────────────────────────────────────
     let hairpin = by_name["hairpin"];

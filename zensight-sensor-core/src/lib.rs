@@ -48,6 +48,7 @@ mod identity;
 mod liveliness;
 pub mod procutil;
 mod publisher;
+pub mod relation;
 pub mod report;
 pub mod rpc;
 mod runner;

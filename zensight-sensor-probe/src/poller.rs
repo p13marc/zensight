@@ -35,6 +35,12 @@ pub struct Poller {
     /// still grades the whole set — otherwise every rule would resolve and
     /// re-fire on the targets that were not due this tick.
     last: HashMap<String, ProbeResult>,
+    /// The `Probes` claims published last sweep (#916). Publishing through the
+    /// `states` registry rather than a separate evidence one: this sensor makes
+    /// no *identity* claims — it has none to make — so there is no evidence
+    /// feed to gate this behind, and the vantage → target structure is already
+    /// visible in the telemetry this sensor publishes anyway.
+    relations: zensight_sensor_core::relation::RelationSet,
 }
 
 impl Poller {
@@ -45,6 +51,7 @@ impl Poller {
         states: Arc<AdvancedPublisherRegistry>,
         reporter: Option<Arc<AlertReporter>>,
         health: Arc<SensorHealth>,
+        relations: zensight_sensor_core::relation::RelationSet,
     ) -> anyhow::Result<Self> {
         let vantage = cfg.resolved_vantage();
         let source = cfg.resolved_source();
@@ -66,6 +73,7 @@ impl Poller {
             reporter,
             health,
             due: HashMap::new(),
+            relations,
             last: HashMap::new(),
         })
     }
@@ -221,6 +229,33 @@ impl Poller {
             self.last.insert(r.name.clone(), r.clone());
         }
 
+        // One `Probes` claim per target that has actually been checked, as the
+        // complete current set.
+        //
+        // Checked, not merely configured: a claim is an observation, and
+        // "this vantage checks that target" is not yet true of a target added
+        // to the config a second ago and not yet due. It becomes true on the
+        // first sweep, which is at most one interval away.
+        {
+            let now_ms = zensight_common::current_timestamp_millis();
+            let host_id = zensight_sensor_core::v1::host_id().as_str().to_string();
+            let claims: Vec<zensight_common::relation::RelationshipEvidence> = self
+                .last
+                .values()
+                .map(|r| target_relation(&host_id, r, now_ms))
+                .collect();
+            let out = self.relations.sync(&claims).await;
+            if out.retired > 0 || out.failed > 0 || out.dropped > 0 {
+                tracing::debug!(
+                    published = out.published,
+                    retired = out.retired,
+                    dropped = out.dropped,
+                    failed = out.failed,
+                    "probe: relation evidence sync"
+                );
+            }
+        }
+
         let enabled = self.cfg.targets.iter().filter(|t| t.enabled).count();
         let failing = self.last.values().filter(|r| !r.outcome.is_ok()).count();
         for (metric, value) in [
@@ -259,6 +294,48 @@ impl Poller {
                 }
             }
         }
+    }
+}
+
+/// A `Probes` claim: this vantage point checks this target (#916).
+///
+/// `from` is a self-claim by `host_id` — the vantage, which is the whole point
+/// of this sensor (#883: a probe result is *an observation made from
+/// somewhere*, and filing it under the target discards that). `to` is the
+/// target by name plus whatever address the check resolved, so the catalog can
+/// join a probed host that also runs a sensor, and fall back to an `External`
+/// endpoint for a target on the public internet — which most of them are.
+///
+/// The claim is published whatever the last outcome was. A failing check is
+/// still evidence that this vantage checks this target; retiring the edge on
+/// failure would delete the graph exactly when impact attribution needs it
+/// (#918: a dead vantage explains its targets' alerts, and it can only do that
+/// if the edges still exist).
+fn target_relation(
+    host_id: &str,
+    r: &ProbeResult,
+    now_ms: i64,
+) -> zensight_common::relation::RelationshipEvidence {
+    use zensight_common::relation::{EndpointClaim, RelationKind, RelationshipEvidence};
+    let mut attrs = std::collections::BTreeMap::new();
+    attrs.insert("kind".to_string(), r.kind.to_string());
+    attrs.insert("target".to_string(), r.target.clone());
+    RelationshipEvidence {
+        sensor: "probe".to_string(),
+        source: r.vantage.clone(),
+        kind: RelationKind::Probes,
+        from: EndpointClaim::host(host_id),
+        to: EndpointClaim {
+            ips: r
+                .dns
+                .as_ref()
+                .map(|d| d.answers.clone())
+                .unwrap_or_default(),
+            name: Some(r.name.clone()),
+            ..Default::default()
+        },
+        attrs,
+        last_updated: now_ms,
     }
 }
 

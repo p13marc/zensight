@@ -135,6 +135,7 @@ async fn main() -> Result<()> {
         evidence,
         reporter.clone(),
         runner.health(),
+        zensight_sensor_core::relation::RelationSet::new("pve", runner.session().clone(), format),
     );
     runner.spawn(poller.run());
     if let Some(r) = reporter {
