@@ -267,6 +267,13 @@ pub struct ZenSight {
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: zensight_store::MetricStore,
+    /// Origins whose historian holds a live liveliness token (#909).
+    ///
+    /// A set rather than a flag: a deployment may run one per site, and the
+    /// question a chart asks is "is *any* fleet history reachable", while the
+    /// one a log line wants answered is "which". Empty means this viewer's
+    /// cache is all there is.
+    live_historians: std::collections::BTreeSet<String>,
     /// Ticks counted toward the next periodic store flush (flush every N ticks).
     ticks_since_flush: u32,
     /// Ticks since the last topology query refresh (#391).
@@ -510,6 +517,7 @@ impl ZenSight {
             } else {
                 zensight_store::MetricStore::with_default_persistence()
             },
+            live_historians: std::collections::BTreeSet::new(),
             ticks_since_flush: 0,
             topology_refresh_ticks: 0,
             topology_prefs_dirty: false,
@@ -2306,6 +2314,20 @@ impl ZenSight {
 
             Message::SensorOnline(protocol, source) => {
                 tracing::info!(protocol = %protocol, source = ?source, "Sensor online (liveliness)");
+                // A historian coming up flips every chart from this viewer's
+                // cache to the fleet's history (#909). Recorded here rather
+                // than probed at query time: an `@rpc` GET that times out
+                // costs the chart its whole timeout, and "no historian" is a
+                // standing fact the roster already knows.
+                if protocol == zensight_common::Protocol::Historian.as_str() {
+                    let id = source.clone().unwrap_or_else(|| protocol.to_string());
+                    if self.live_historians.insert(id.clone()) {
+                        tracing::info!(
+                            historian = %id, live = self.live_historians.len(),
+                            "fleet history is available; charts will read the historian"
+                        );
+                    }
+                }
                 // A fresh HealthSnapshot follows shortly; meanwhile lift any
                 // Offline badge left from a previous run so the card doesn't
                 // read dead while the sensor is already back.
@@ -2314,6 +2336,16 @@ impl ZenSight {
 
             Message::SensorOffline(protocol, source) => {
                 tracing::warn!(protocol = %protocol, source = ?source, "Sensor offline (liveliness)");
+                if protocol == zensight_common::Protocol::Historian.as_str() {
+                    let id = source.clone().unwrap_or_else(|| protocol.to_string());
+                    if self.live_historians.remove(&id) && self.live_historians.is_empty() {
+                        tracing::warn!(
+                            historian = %id,
+                            "no historian is alive; charts fall back to this viewer's \
+                             local cache, which holds only what this GUI saw while running"
+                        );
+                    }
+                }
                 // A dead sensor publishes no further HealthSnapshots, so its
                 // last snapshot would sit at "Healthy" forever — flip it here.
                 // Its devices carry their own liveliness tokens and get their
@@ -7772,6 +7804,7 @@ impl ZenSight {
                             active_prefix: self.artifact_job.as_ref().map(|j| j.producer.as_str()),
                             active_kind: self.artifact_job.as_ref().map(|j| j.kind.slug()),
                         }),
+                        history_source: self.history_source(),
                     })
                 } else {
                     dashboard_view(
@@ -8430,71 +8463,100 @@ impl ZenSight {
         // Resolve the persisted metric ids for this device, then query the warm
         // (minute) tier off-thread. Last 24h of minute buckets is plenty to
         // pre-populate a chart without blocking the UI.
-        let history = 'history: {
-            let Some(store) = self.store.persistent() else {
-                break 'history Task::none();
-            };
-            let protocol = device_id.protocol.to_string();
-            let metric_ids =
-                self.store
-                    .device_metric_ids(&protocol, &device_id.origin, &device_id.source);
-            if metric_ids.is_empty() {
-                break 'history Task::none();
-            }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let from = now - 24 * 3_600_000; // 24h window
-            Task::future(async move {
-                let series = tokio::task::spawn_blocking(move || {
-                    metric_ids
-                        .into_iter()
-                        .filter_map(|(name, id)| {
-                            store
-                                .query(id, zensight_store::Tier::Minute, from, now)
-                                .ok()
-                                .filter(|s| !s.is_empty())
-                                .map(|samples| (name, samples))
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await
-                .unwrap_or_default();
-                Message::DeviceHistoryLoaded(device_id, series)
-            })
-        };
+        // 24 h on open — from the fleet when a historian is alive, from this
+        // viewer's cache otherwise (#909). A cold GUI start against a live
+        // historian now shows a day of history it was never running for.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let history = self.load_history(device_id, now - 24 * 3_600_000, now);
 
         Task::batch([teardown, history, prefetch])
     }
 
-    /// Range-query the store for an absolute `[from_ms, to_ms]` window (#36) and
-    /// seed the open chart with it, so an operator can pull up an exact past slice
-    /// (e.g. "14:05–14:12 yesterday") even when it's no longer in the hot ring.
-    /// Mirrors the on-open 24h load but with a caller-chosen window.
+    /// Range-query for an absolute `[from_ms, to_ms]` window (#36) and seed
+    /// the open chart with it, so an operator can pull up an exact past slice
+    /// ("14:05–14:12 yesterday") even when it is no longer in the hot ring.
+    ///
+    /// Since #909 this and the on-open load are the same call: they differed
+    /// only in their bounds, and were two copies of one walk.
     fn load_device_history_range(
         &self,
         device_id: DeviceId,
         from_ms: i64,
         to_ms: i64,
     ) -> Task<Message> {
+        self.load_history(device_id, from_ms, to_ms)
+    }
+
+    /// Which side a chart's history comes from right now (#909).
+    ///
+    /// Fleet when a historian holds a live liveliness token *and* there is a
+    /// session to ask over. Both halves matter: a roster entry from before a
+    /// disconnect is not a reachable service.
+    fn history_source(&self) -> crate::history::HistorySource {
+        if self.session.is_some() && !self.live_historians.is_empty() {
+            crate::history::HistorySource::Fleet
+        } else {
+            crate::history::HistorySource::Local
+        }
+    }
+
+    /// Load `[from_ms, to_ms]` of history for a device — from the fleet when a
+    /// historian is alive, from this viewer's cache otherwise (#909).
+    ///
+    /// One function for both windows: the on-open 24 h load and the
+    /// caller-chosen absolute range differed only in their bounds, and had
+    /// drifted into two copies of one walk.
+    fn load_history(&self, device_id: DeviceId, from_ms: i64, to_ms: i64) -> Task<Message> {
+        if self.history_source() == crate::history::HistorySource::Fleet
+            && let Some(session) = self.session.clone()
+        {
+            // A chart is ~800 px wide; a point per second across a day would
+            // be 86 400 points to draw 800 of.
+            let step = crate::history::step_for(from_ms, to_ms, 800);
+            let selector = format!(
+                "{}?origin={};producer={};from={from_ms};to={to_ms};step={step};limit={}",
+                zensight_common::keyexpr::historian_range_selector(),
+                device_id.origin,
+                device_id.protocol,
+                zensight_common::history::RANGE_LIMIT_DEFAULT,
+            );
+            let device = device_id.clone();
+            return Task::future(async move {
+                let series = fetch_fleet_history(&session, &selector, &device.source).await;
+                Message::DeviceHistoryLoaded(device, series)
+            });
+        }
+
         let Some(store) = self.store.persistent() else {
             return Task::none();
         };
-        let protocol = device_id.protocol.to_string();
-        let metric_ids =
-            self.store
-                .device_metric_ids(&protocol, &device_id.origin, &device_id.source);
+        let metric_ids = self.store.device_metric_ids(
+            &device_id.protocol.to_string(),
+            &device_id.origin,
+            &device_id.source,
+        );
         if metric_ids.is_empty() {
             return Task::none();
         }
+        // Two days is where the minute tier's retention ends. Reading minutes
+        // past it returns a sparse left-hand edge that looks like an outage
+        // rather than like retention — and until now nothing in this GUI had
+        // ever read the hour tier at all, though it has always been written.
+        let tier = if (to_ms - from_ms) > 2 * 86_400_000 {
+            zensight_store::Tier::Hour
+        } else {
+            zensight_store::Tier::Minute
+        };
         Task::future(async move {
             let series = tokio::task::spawn_blocking(move || {
                 metric_ids
                     .into_iter()
                     .filter_map(|(name, id)| {
                         store
-                            .query(id, zensight_store::Tier::Minute, from_ms, to_ms)
+                            .query(id, tier, from_ms, to_ms)
                             .ok()
                             .filter(|s| !s.is_empty())
                             .map(|samples| (name, samples))
@@ -9491,6 +9553,64 @@ mod sensor_liveliness_tests {
         }
     }
 
+    /// #909: the roster is what decides where a chart's history comes from.
+    ///
+    /// Probing instead — a GET that times out when nobody answers — would cost
+    /// every chart its whole timeout to learn a standing fact the roster
+    /// already knows.
+    #[test]
+    fn the_history_source_follows_the_historian_roster() {
+        let mut a = app();
+        // Demo mode has no session, so even a live historian cannot be read.
+        assert_eq!(a.history_source(), crate::history::HistorySource::Local);
+
+        let _ = a.update(Message::SensorOnline(
+            zensight_common::Protocol::Historian.as_str().to_string(),
+            Some("site-a".into()),
+        ));
+        assert_eq!(a.live_historians.len(), 1);
+        // Still Local: a roster entry is not a session.
+        assert_eq!(
+            a.history_source(),
+            crate::history::HistorySource::Local,
+            "a historian on the roster with no session is not reachable history"
+        );
+
+        // A second historian is another site, not a duplicate.
+        let _ = a.update(Message::SensorOnline(
+            zensight_common::Protocol::Historian.as_str().to_string(),
+            Some("site-b".into()),
+        ));
+        assert_eq!(a.live_historians.len(), 2);
+
+        // One going away leaves the other.
+        let _ = a.update(Message::SensorOffline(
+            zensight_common::Protocol::Historian.as_str().to_string(),
+            Some("site-a".into()),
+        ));
+        assert_eq!(a.live_historians.len(), 1);
+        let _ = a.update(Message::SensorOffline(
+            zensight_common::Protocol::Historian.as_str().to_string(),
+            Some("site-b".into()),
+        ));
+        assert!(a.live_historians.is_empty());
+    }
+
+    /// A sensor's liveliness must not be mistaken for a historian's: the
+    /// roster carries every producer, and only one of them holds history.
+    #[test]
+    fn a_sensor_coming_online_does_not_make_fleet_history_available() {
+        let mut a = app();
+        let _ = a.update(Message::SensorOnline(
+            "sysinfo".to_string(),
+            Some("host1".into()),
+        ));
+        assert!(
+            a.live_historians.is_empty(),
+            "sysinfo is not a historian, however alive it is"
+        );
+    }
+
     #[test]
     fn liveliness_match_host_scoped_is_exact() {
         assert!(sensor_liveliness_matches(
@@ -10202,4 +10322,72 @@ mod reply_verdict_tests {
             Verdict::NotValidated(NotValidated::NoSchema)
         );
     }
+}
+
+/// GET `@rpc/historian/range` across the fleet and project the answer onto the
+/// device's series (#909).
+///
+/// Target `All` with consolidation off, per RFC 05 §2.1: several historians
+/// may answer, each on its own concrete key, and `BestMatching` would take
+/// whichever replied first and silently drop the rest of the fleet's history.
+/// An error reply from one does not discard a good one from another — the
+/// point of a fan-in is that a partial answer beats none.
+async fn fetch_fleet_history(
+    session: &zenoh::Session,
+    selector: &str,
+    source: &str,
+) -> Vec<(String, Vec<zensight_store::Sample>)> {
+    let replies = match session
+        .get(selector)
+        .target(zenoh::query::QueryTarget::All)
+        .consolidation(zenoh::query::ConsolidationMode::None)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(selector = %selector, error = %e, "historian range GET failed");
+            return Vec::new();
+        }
+    };
+
+    let mut collected = Vec::new();
+    let mut errored = 0usize;
+    while let Ok(reply) = replies.recv_async().await {
+        match reply.result() {
+            Ok(sample) => match serde_json::from_slice::<zensight_common::history::RangeReply>(
+                &sample.payload().to_bytes(),
+            ) {
+                Ok(r) => {
+                    if r.truncated {
+                        // The chart is about to draw a window it was not given
+                        // all of. Saying so in the log is the least that is
+                        // owed; reading the cursor properly is #910's job.
+                        tracing::warn!(
+                            historian = %r.historian, selector = %selector,
+                            "historian truncated the range at its limit; the chart shows \
+                             the newest points of the window, not all of it"
+                        );
+                    }
+                    collected.push(r);
+                }
+                Err(e) => tracing::warn!(error = %e, "historian range reply did not decode"),
+            },
+            Err(e) => {
+                errored += 1;
+                tracing::warn!(
+                    selector = %selector,
+                    error = %String::from_utf8_lossy(&e.payload().to_bytes()),
+                    "a historian answered the range with an error"
+                );
+            }
+        }
+    }
+    if collected.is_empty() && errored > 0 {
+        tracing::warn!(
+            selector = %selector, errored,
+            "every historian that answered returned an error; the chart stays empty rather \
+             than falling back — the fleet answered, and what it said was no"
+        );
+    }
+    crate::history::series_for_device(crate::history::merge_replies(collected), source)
 }

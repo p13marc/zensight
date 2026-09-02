@@ -17,8 +17,18 @@ history moved to a headless service (#898): the `zensight-historian` subscribes
 
 Both write through the same crate, and since v3 both name a series the same
 way — `<origin>/<producer>/<subject>`, the wire key minus the class chunk — so
-a chart can read the fleet's history when a historian is alive and fall back to
+a chart reads the fleet's history when a historian is alive and falls back to
 this cache when none is (#909).
+
+Which side answered comes from the **liveliness roster**: a historian's token
+appearing flips every chart to the fleet, and its disappearing flips them back.
+Probing instead would cost each chart a full GET timeout to learn a standing
+fact the roster already knows.
+
+A locally-sourced chart says so, above the content: *"Fleet history unavailable
+— showing this viewer's local cache only"*. The two look identical otherwise,
+and the difference is whether the window on screen is one viewer's or the
+fleet's.
 
 **The cache is rebuilt, not migrated, when its layout changes.** v3 re-typed
 `metrics` and `samples`, so an older file is moved aside
@@ -31,7 +41,7 @@ the hot rings and says so in the log.
 
 | Surface | Reads |
 |---|---|
-| Device detail chart | the minute tier, 24 h, on view open (`load_device_history`), plus live hot samples |
+| Device detail chart | the fleet historian when one is alive, else the minute tier (or the **hour** tier past two days) for the requested window, plus live hot samples |
 | Dashboard sparklines | the hot ring only (`device_hot_samples`), per render |
 | Topology edge rates | the hot ring, through `zensight_store::rate::counter_rate` |
 | Logs view | the `logs` table (see below) |

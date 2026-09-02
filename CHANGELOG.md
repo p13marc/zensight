@@ -248,6 +248,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Device charts read the fleet's history when a historian is alive** (#909).
+  The local cache holds what *this* viewer saw while it was running, and on
+  the reference fleet the GUI is open for minutes a week — so a cold start
+  showed minutes of history where a day existed on the bus. A device chart now
+  GETs `v1/*/@rpc/historian/range` (target `All`, consolidation off) and falls
+  back to the cache when no historian is alive.
+
+  Which side answered is decided by the **liveliness roster**, not by probing:
+  a GET that times out when nobody answers would cost every chart its whole
+  timeout to learn a standing fact the roster already knows.
+
+  **The fallback is stated, not hidden.** A locally-sourced chart carries
+  *"Fleet history unavailable — showing this viewer's local cache only"*. The
+  two look identical otherwise — same axes, same shape — and the difference is
+  whether the window is one viewer's or the fleet's.
+
+  Several historians may answer, and where two hold the same series **the
+  first reply wins and the disagreement is logged**: interleaving two versions
+  of one series would draw a chart that is neither, and preferring one means
+  inventing a rule about which historian is more trustworthy that nothing on
+  the wire supports.
+
+  **The hour tier is finally read.** It has been written since the store
+  existed and no reader had ever asked for it; a window over two days now
+  selects it, on both sides, rather than reading minute buckets past their
+  retention and drawing a sparse left edge that looks like an outage.
+
+  The on-open 24 h load and the absolute-range load were two copies of one
+  walk; they are one call now. `RangeSeries` gained the display metric name,
+  because a chart labels its series by metric and re-deriving that from the
+  subject means knowing which producers are proxies and how their device
+  chunks are slugged — a rule the store already recorded at ingest.
+
 - **A durable timeline: events and alert transitions** (#908). The tiers answer
   *what was this number*; this answers *what happened*, and they are different
   questions that want different storage — downsampling a transition would be
