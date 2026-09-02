@@ -1,12 +1,16 @@
-//! Local tiered time-series store (Plan v3-04 §A, Plan v3-05 §5).
+//! The tiered time-series store: hot ring, minute/hour redb tiers, and the
+//! log, event and chunk tables that ride the same file.
 //!
-//! Metric history used to live only in an in-memory `VecDeque` (max 500/metric),
-//! lost on restart. This module adds a Netdata-style tiered store:
+//! This was `zensight::store` — a module inside the Iced binary, writing
+//! `~/.local/share/zensight/metrics.redb`, readable by nothing but the GUI
+//! that wrote it (#904). On a fleet that GUI is open for minutes a week, so
+//! the history it holds is mostly gaps. It is a crate now so a headless
+//! service can write the same tiers and serve them to everyone.
 //!
-//! - **Hot tier:** a fixed-size in-memory [`RingBuffer`] of per-second [`Sample`]s
-//!   per metric — O(1) append, bounded, read directly by charts.
-//! - **Warm/cold tiers:** periodic downsample to per-minute / per-hour buckets,
-//!   flushed to a [`redb`]-backed [`PersistentStore`] keyed by
+//! - **Hot tier:** a fixed-size in-memory [`RingBuffer`] of per-second
+//!   [`Sample`]s per metric — O(1) append, bounded, read directly by charts.
+//! - **Warm/cold tiers:** periodic downsample to per-minute / per-hour
+//!   buckets, flushed to a [`redb`]-backed [`PersistentStore`] keyed by
 //!   `(metric_id, tier, bucket_ts)` so trends survive restart.
 //!
 //! Strong typing per the architecture contract: metric paths are interned to a
@@ -14,14 +18,20 @@
 //! record; the `TelemetryValue` → `f64` projection lives in one place
 //! ([`telemetry_to_f64`]).
 //!
-//! **Async discipline:** the in-memory ring append is O(1) and runs inline on the
-//! Iced update thread, but every `redb` read/write is performed off the UI thread
-//! via `Task::future` + `spawn_blocking` (see [`PersistentStore`] which is `Send +
-//! Sync` and cloned behind an `Arc`). The UI thread never blocks on disk I/O.
+//! **Async discipline:** the in-memory ring append is O(1) and runs inline on
+//! the caller's thread (the Iced update thread, in the GUI), but every `redb`
+//! read/write is meant to run off it via `spawn_blocking` — [`PersistentStore`]
+//! is `Send + Sync` and cloned behind an `Arc` precisely so it can. The
+//! batching seam is explicit in the API: `record` / `record_log` /
+//! `record_event` accumulate, `take_*_flush_batch` hand off
+//! `(PersistentStore, rows)`.
 
 // `redb::Error` is a large enum (~160 bytes); propagating it by value in `Result`
 // is the natural, allocation-free API here, so we accept the size.
 #![allow(clippy::result_large_err)]
+
+pub mod logs;
+pub mod rate;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -29,7 +39,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // redb 4 moved `begin_read` onto the `ReadableDatabase` trait.
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{
+    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableHandle,
+};
 
 use serde::{Deserialize, Serialize};
 use zensight_common::{TelemetryPoint, TelemetryValue};
@@ -37,8 +49,27 @@ use zensight_common::{TelemetryPoint, TelemetryValue};
 /// Default hot-ring capacity: one hour of per-second samples.
 pub const DEFAULT_HOT_CAPACITY: usize = 3_600;
 
-/// redb table: packed `(metric_id, tier, bucket_ts)` key -> downsampled value.
-const SAMPLES_TABLE: TableDefinition<u128, f64> = TableDefinition::new("samples");
+/// Default redb page-cache budget, used by [`PersistentStore::open`].
+///
+/// redb's own default is **1 GiB** (#625). The logs sensor has set an explicit
+/// budget since that issue, because on a 1–2 GB VM the default reads as a slow
+/// multi-day RSS climb toward OOM as the database grows; this store never did,
+/// which was fine while its only caller was a desktop GUI and is not fine now
+/// that a headless service on those same VMs opens it. 64 MiB is ample for a
+/// file whose hot path is a bounded range walk.
+pub const DEFAULT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// redb table: packed `(metric_id, tier, bucket_ts)` key -> downsampled
+/// [`Bucket`], stored as `(last, min, max)`.
+///
+/// v3 widened the value from a bare `f64` (#904). One number per bucket can
+/// answer "what was it at the end of this minute" and nothing else, so a
+/// query for a day at the hour tier could not say whether a gauge that reads
+/// 12 now had touched 400 in between — the spike was averaged out of
+/// existence by the downsample before any reader could ask. `min`/`max` are
+/// `f32`: they bound a range for a chart, they are not the value, and 4 bytes
+/// each keeps the bucket at 16.
+const SAMPLES_TABLE: TableDefinition<u128, (f64, f32, f32)> = TableDefinition::new("samples");
 
 /// redb table: interned metric path -> its [`MetricId`]. The samples table
 /// is keyed by the id, so the id must mean the same path in every process
@@ -46,7 +77,21 @@ const SAMPLES_TABLE: TableDefinition<u128, f64> = TableDefinition::new("samples"
 /// network-arrival order and never written down, so a restart re-numbered
 /// every metric and a chart seeded "from history" read back another metric's
 /// buckets — plausible numbers, wrong series, for up to 30 days.
-const METRICS_TABLE: TableDefinition<&str, u32> = TableDefinition::new("metrics");
+/// v3 (#904) widened the row from a bare id to `(id, kind, source, metric)`:
+///
+/// - **kind** — a counter reset and a gauge that fell are the same negative
+///   delta once every value is an `f64`, which is why three separate callers
+///   in the GUI each re-inferred resets by hand. The store threw the
+///   distinction away at ingest; now it keeps it, and the rate is computed
+///   once where the kind is known.
+/// - **source** and **metric** — the series path is
+///   `<origin>/<producer>/<subject>`, the wire key minus the class chunk, so
+///   that a reader holding only a sample can name its series. Neither the
+///   observed device nor the display metric name survives that on its own: a
+///   proxy producer's subject is `{device}/{metric...}`, so recovering either
+///   would mean un-slugging a device chunk — a guess, in the one place that
+///   must not guess. Both are free at ingest, so both are written down.
+const METRICS_TABLE: TableDefinition<&str, (u32, u8, &str, &str)> = TableDefinition::new("metrics");
 
 /// redb table: store-level metadata. One row, `schema` -> [`SCHEMA_VERSION`].
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
@@ -58,13 +103,17 @@ const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
 ///
 /// v2: `metrics` (path -> id) and `meta` tables; metric paths carry the
 /// publishing origin (`<protocol>/<origin>/<source>|<metric>`).
-pub const SCHEMA_VERSION: u64 = 2;
+///
+/// v3 (#904): series paths become `<origin>/<producer>/<subject>` — the wire
+/// key minus the class chunk, so the GUI's cache and the fleet historian name
+/// the same series the same way; `metrics` rows carry `(id, kind, source,
+/// metric)`; `samples` values become `{last, min, max}` buckets. Every one of
+/// those re-types a table, so a v2 file is not readable by this code and is
+/// moved aside rather than migrated (it is a cache; the fleet history it
+/// shadows outlives it).
+pub const SCHEMA_VERSION: u64 = 3;
 
-/// redb table: log-event uid (time-sortable `<ts><seq>`) -> serialized
-/// [`StoredLog`] (#107, C9). Distinct from the numeric `samples` table — per-line
-/// log events are text and unbounded-cardinality, so they get their own keyed
-/// store with template-aware sampling rather than the downsampled tiers.
-const LOGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("logs");
+use crate::logs::LOGS_TABLE;
 
 /// redb table: event ULID -> serialized [`zensight_common::EventRecord`]
 /// (#578). Events are the `events` class's durable records (SNMP traps
@@ -96,14 +145,17 @@ pub const LOG_STORE_MAX_ROWS: usize = 200_000;
 pub const EVENT_STORE_MAX_ROWS: usize = 20_000;
 
 /// A single downsampled bucket queued for persistence: `(metric, tier, bucket_ts, value)`.
-pub type FlushRow = (MetricId, Tier, i64, f64);
+pub type FlushRow = (MetricId, Tier, i64, Bucket);
 
 /// One flush: the downsampled rows, and the `(path, id)` pairs interned since
 /// the last flush, written in one transaction by [`PersistentStore::write_batch`].
 #[derive(Debug, Default)]
 pub struct FlushBatch {
     pub rows: Vec<FlushRow>,
-    pub paths: Vec<(String, u32)>,
+    /// `(series path, id, meta)` for every metric interned since the last
+    /// flush — written in the same transaction as `rows`, so a sample row
+    /// never lands without the path and kind its id means.
+    pub paths: Vec<(String, u32, MetricMeta)>,
 }
 
 /// Why a store file could not be opened.
@@ -134,6 +186,144 @@ impl std::fmt::Display for StoreOpenError {
             }
         }
     }
+}
+
+/// What a series *is*, kept per metric since v3 (#904).
+///
+/// A counter and a gauge are the same `f64` on the way in and two different
+/// questions on the way out: a counter that goes backwards restarted, a gauge
+/// that goes backwards fell. Flattening both to a number is why three callers
+/// in the GUI each had to re-infer resets from a negative delta, and why none
+/// of them could be sure it was the same rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MetricKind {
+    /// Monotonic until whatever counts it restarts.
+    Counter,
+    /// A level: it may fall, and falling means it fell.
+    Gauge,
+    /// A 0/1 step series (#126) — iface up/carrier, route present, wg up.
+    Bool,
+}
+
+impl MetricKind {
+    /// Stable on-disk code. Unknown codes read back as `Gauge`, which is the
+    /// interpretation that invents nothing: it never claims a reset.
+    pub const fn code(self) -> u8 {
+        match self {
+            MetricKind::Gauge => 0,
+            MetricKind::Counter => 1,
+            MetricKind::Bool => 2,
+        }
+    }
+
+    /// Decode a kind from its on-disk [`code`](Self::code).
+    pub const fn from_code(code: u8) -> MetricKind {
+        match code {
+            1 => MetricKind::Counter,
+            2 => MetricKind::Bool,
+            _ => MetricKind::Gauge,
+        }
+    }
+}
+
+/// One measurement on the way in, with its kind intact.
+///
+/// [`telemetry_to_f64`] is the lossy projection this replaces at the ingest
+/// seam; it stays for the callers that genuinely only want a number.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SampleValue {
+    Counter(u64),
+    Gauge(f64),
+    Bool(bool),
+}
+
+impl SampleValue {
+    /// Project a [`TelemetryValue`], or `None` for text and binary — they are
+    /// not numeric series, and a fabricated `0.0` would be a claim.
+    pub fn from_telemetry(value: &TelemetryValue) -> Option<SampleValue> {
+        match value {
+            TelemetryValue::Counter(v) => Some(SampleValue::Counter(*v)),
+            TelemetryValue::Gauge(v) => Some(SampleValue::Gauge(*v)),
+            TelemetryValue::Boolean(b) => Some(SampleValue::Bool(*b)),
+            TelemetryValue::Text(_) | TelemetryValue::Binary(_) => None,
+        }
+    }
+
+    /// This value as the `f64` the tiers store.
+    pub fn as_f64(self) -> f64 {
+        match self {
+            SampleValue::Counter(v) => v as f64,
+            SampleValue::Gauge(v) => v,
+            SampleValue::Bool(b) => {
+                if b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// The kind this value implies.
+    pub const fn kind(self) -> MetricKind {
+        match self {
+            SampleValue::Counter(_) => MetricKind::Counter,
+            SampleValue::Gauge(_) => MetricKind::Gauge,
+            SampleValue::Bool(_) => MetricKind::Bool,
+        }
+    }
+}
+
+/// One downsampled bucket: the last observation in it, and the range it
+/// covered.
+///
+/// `last` is the value — the tier semantics are last-observation-per-bucket,
+/// unchanged from v2. `min`/`max` exist so a coarse tier can still say a spike
+/// happened: at the hour tier a v2 bucket could only report where the value
+/// landed on the hour, so a gauge that touched 400 and settled at 12 read as
+/// twelve, flat.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bucket {
+    /// The most recent sample's value in this bucket.
+    pub last: f64,
+    /// The lowest value seen in this bucket.
+    pub min: f32,
+    /// The highest value seen in this bucket.
+    pub max: f32,
+}
+
+impl Bucket {
+    /// A bucket holding a single observation.
+    pub fn point(value: f64) -> Bucket {
+        Bucket {
+            last: value,
+            min: value as f32,
+            max: value as f32,
+        }
+    }
+
+    /// The on-disk triple.
+    pub fn as_row(self) -> (f64, f32, f32) {
+        (self.last, self.min, self.max)
+    }
+
+    /// Read back from the on-disk triple.
+    pub fn from_row((last, min, max): (f64, f32, f32)) -> Bucket {
+        Bucket { last, min, max }
+    }
+}
+
+/// Everything about a metric that its series path does not carry (#904).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricMeta {
+    /// Counter, gauge or bool — see [`MetricKind`].
+    pub kind: MetricKind,
+    /// The observed device: [`TelemetryPoint::source`]. The publishing host
+    /// for a host sensor, the polled device for a proxy sensor.
+    pub source: String,
+    /// The display metric name: [`TelemetryPoint::metric`]. For a proxy
+    /// producer this is the subject *minus* its leading device chunk.
+    pub metric: String,
 }
 
 /// Interned identifier for a metric path. Compact key for the store, per Plan 05 §5.
@@ -232,23 +422,29 @@ pub fn pack_key(metric: MetricId, tier: Tier, bucket_ts: i64) -> u128 {
     ((metric.0 as u128) << 72) | ((tier.code() as u128) << 64) | (bucket_ts as u64 as u128)
 }
 
-/// The lowest/highest packed keys for a `(metric, tier)` range scan.
-/// Bucket timestamps are non-negative, so the low bound is bucket 0.
-fn key_range(metric: MetricId, tier: Tier) -> std::ops::RangeInclusive<u128> {
-    pack_key(metric, tier, 0)..=pack_key(metric, tier, i64::MAX)
-}
-
-/// Interns metric paths into compact [`MetricId`]s.
+/// Interns metric paths into compact [`MetricId`]s, and holds the per-metric
+/// [`MetricMeta`] the path itself does not carry.
 ///
-/// Metric keys have the shape `"<protocol>/<origin>/<source>|<metric>"` (see
-/// [`MetricStore::metric_key`]). `by_device` buckets ids under the
-/// `"<protocol>/<origin>/<source>"` prefix (everything before the `|`) so
-/// per-device lookups are O(metrics-for-that-device) instead of a linear scan
-/// of every interned path — the hot path behind the dashboard render (#freeze).
+/// Since v3 (#904) a series path is `"<origin>/<producer>/<subject>"` — the
+/// wire key minus the class chunk, which is what makes a sample
+/// self-identifying and lets the GUI's local cache and the fleet historian
+/// name the same series the same way. It replaced
+/// `"<protocol>/<origin>/<source>|<metric>"`, which encoded the observed
+/// device and the display metric name in the path and so could be taken apart
+/// with a `split_once('|')`. Those two are now stored beside the id instead:
+/// `by_device` indexes `"<producer>/<origin>/<source>"` from the recorded
+/// `source` rather than from a prefix of the path, so per-device lookups stay
+/// O(metrics-for-that-device) without the path having to carry the device.
+///
+/// The origin is in the path for the reason `DeviceId` carries one (#474):
+/// two hosts reporting the same hostname (`localhost`, a cloned image, two
+/// containers named alike) are two devices, and a key without the origin
+/// interleaved their samples into one sawtooth series.
 #[derive(Debug, Default)]
 pub struct MetricInterner {
     ids: HashMap<String, MetricId>,
     paths: Vec<String>,
+    meta: Vec<Option<MetricMeta>>,
     by_device: HashMap<String, Vec<MetricId>>,
 }
 
@@ -258,52 +454,67 @@ impl MetricInterner {
         Self::default()
     }
 
-    /// Rebuild from persisted `(path, id)` pairs, so an id means the same
+    /// Rebuild from persisted `(path, id, meta)` rows, so an id means the same
     /// path it meant in the process that wrote the samples. Ids are dense
     /// ordinals; a gap (a flush that never landed) is kept as a hole so no
     /// later mint can reuse an id that has rows on disk.
-    pub fn restore(entries: Vec<(String, u32)>) -> Self {
+    pub fn restore(entries: Vec<(String, u32, MetricMeta)>) -> Self {
         let mut me = Self::new();
-        let Some(max) = entries.iter().map(|(_, id)| *id).max() else {
+        let Some(max) = entries.iter().map(|(_, id, _)| *id).max() else {
             return me;
         };
         me.paths = vec![String::new(); max as usize + 1];
-        for (path, id) in entries {
+        me.meta = vec![None; max as usize + 1];
+        for (path, id, meta) in entries {
             me.paths[id as usize] = path;
+            me.meta[id as usize] = Some(meta);
         }
-        for (i, path) in me.paths.iter().enumerate() {
-            if path.is_empty() {
+        for i in 0..me.paths.len() {
+            if me.paths[i].is_empty() {
                 continue;
             }
             let id = MetricId(i as u32);
-            me.ids.insert(path.clone(), id);
-            if let Some((device, _)) = path.split_once('|') {
-                me.by_device.entry(device.to_string()).or_default().push(id);
+            me.ids.insert(me.paths[i].clone(), id);
+            if let Some(device) = me.device_key(id) {
+                me.by_device.entry(device).or_default().push(id);
             }
         }
         me
     }
 
-    /// Intern `path`, returning its (possibly new) id.
-    pub fn intern(&mut self, path: &str) -> MetricId {
-        if let Some(id) = self.ids.get(path) {
-            return *id;
+    /// `"<producer>/<origin>/<source>"` for an interned id, if it has meta.
+    /// The producer and origin come from the path's first two chunks, the
+    /// source from the recorded meta.
+    fn device_key(&self, id: MetricId) -> Option<String> {
+        let path = self.paths.get(id.0 as usize)?;
+        let meta = self.meta.get(id.0 as usize)?.as_ref()?;
+        let (origin, rest) = path.split_once('/')?;
+        let (producer, _subject) = rest.split_once('/')?;
+        Some(device_prefix(producer, origin, &meta.source))
+    }
+
+    /// Intern `path` with its metadata, returning its (possibly new) id. An
+    /// already-interned path keeps its id; its metadata is refreshed, because
+    /// a producer may start reporting a series it had only ever sent as a
+    /// gauge as a counter (a `.rate` sibling appearing, a restart under a new
+    /// build), and the newest statement of kind is the one to believe.
+    pub fn intern(&mut self, path: &str, meta: MetricMeta) -> MetricId {
+        if let Some(id) = self.ids.get(path).copied() {
+            self.meta[id.0 as usize] = Some(meta);
+            return id;
         }
         let id = MetricId(self.paths.len() as u32);
         self.paths.push(path.to_string());
+        self.meta.push(Some(meta));
         self.ids.insert(path.to_string(), id);
-        // Index by device prefix (the part before `|`) for O(device) lookups.
-        if let Some((device, _metric)) = path.split_once('|') {
-            self.by_device
-                .entry(device.to_string())
-                .or_default()
-                .push(id);
+        if let Some(device) = self.device_key(id) {
+            self.by_device.entry(device).or_default().push(id);
         }
         id
     }
 
-    /// Ids + paths for a device, where `device` is
-    /// `"<protocol>/<origin>/<source>"` (no trailing `|`).
+    /// Ids + display metric names for a device, where `device` is
+    /// `"<producer>/<origin>/<source>"` (see [`device_prefix`]).
     /// O(metrics-for-that-device) via the `by_device` index —
     /// this replaced a per-render linear scan of every interned path.
     pub fn device_ids<'a>(&'a self, device: &str) -> impl Iterator<Item = (MetricId, &'a str)> {
@@ -311,7 +522,12 @@ impl MetricInterner {
             .get(device)
             .into_iter()
             .flatten()
-            .map(move |&id| (id, self.paths[id.0 as usize].as_str()))
+            .filter_map(move |&id| Some((id, self.meta[id.0 as usize].as_ref()?.metric.as_str())))
+    }
+
+    /// Every device key this interner has seen.
+    pub fn devices(&self) -> impl Iterator<Item = &str> {
+        self.by_device.keys().map(String::as_str)
     }
 
     /// Look up an already-interned path's id, if present.
@@ -322,6 +538,11 @@ impl MetricInterner {
     /// Resolve an id back to its path.
     pub fn resolve(&self, id: MetricId) -> Option<&str> {
         self.paths.get(id.0 as usize).map(String::as_str)
+    }
+
+    /// The recorded metadata for an id.
+    pub fn meta(&self, id: MetricId) -> Option<&MetricMeta> {
+        self.meta.get(id.0 as usize)?.as_ref()
     }
 
     /// Number of interned metrics.
@@ -335,13 +556,30 @@ impl MetricInterner {
     }
 
     /// Ids of all interned paths starting with `prefix` (with their path).
+    /// The historian's `series` listing walks this with an
+    /// `"<origin>/<producer>/"` prefix.
     pub fn with_prefix<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = (MetricId, &'a str)> {
         self.paths
             .iter()
             .enumerate()
-            .filter(move |(_, p)| p.starts_with(prefix))
+            .filter(move |(_, p)| !p.is_empty() && p.starts_with(prefix))
             .map(|(i, p)| (MetricId(i as u32), p.as_str()))
     }
+}
+
+/// The series path for one metric: `"<origin>/<producer>/<subject>"`, the wire
+/// key minus the class chunk (#904).
+///
+/// This is the identity a reader can derive from a sample alone, which is what
+/// lets a historian ingesting `v1/*/telemetry/**` and a GUI caching the same
+/// stream agree on what to call a series without a catalog between them.
+pub fn series_path(origin: &str, producer: &str, subject: &str) -> String {
+    format!("{origin}/{producer}/{subject}")
+}
+
+/// The device-index key: `"<producer>/<origin>/<source>"`.
+pub fn device_prefix(producer: &str, origin: &str, source: &str) -> String {
+    format!("{producer}/{origin}/{source}")
 }
 
 /// A fixed-capacity ring of samples. Appends are O(1); the oldest sample is
@@ -391,24 +629,37 @@ impl RingBuffer {
     }
 }
 
-/// Downsample samples into `(bucket_ts_secs, value)` pairs for a tier, using
-/// last-observation-per-bucket semantics (the most recent sample in each bucket
-/// wins). Pure function — the unit of testing for the tier logic.
+/// Downsample samples into `(bucket_ts_secs, `[`Bucket`]`)` pairs for a tier.
+///
+/// Last-observation-per-bucket for [`Bucket::last`] (the most recent sample in
+/// each bucket wins), and the true min/max across every sample that fell in
+/// it — a coarse tier that reported only the closing value could not say a
+/// spike had happened at all (#904). Pure function — the unit of testing for
+/// the tier logic.
 ///
 /// `samples` need not be sorted; the result is sorted ascending by bucket.
-pub fn downsample(samples: &[Sample], tier: Tier) -> Vec<(i64, f64)> {
+pub fn downsample(samples: &[Sample], tier: Tier) -> Vec<(i64, Bucket)> {
     let width = tier.bucket_secs();
-    // bucket_ts -> (latest_ts, value)
-    let mut buckets: HashMap<i64, (i64, f64)> = HashMap::new();
+    // bucket_ts -> (latest_ts, bucket)
+    let mut buckets: HashMap<i64, (i64, Bucket)> = HashMap::new();
     for s in samples {
         let secs = s.ts.div_euclid(1_000);
         let bucket = secs.div_euclid(width) * width;
-        let entry = buckets.entry(bucket).or_insert((i64::MIN, 0.0));
-        if s.ts >= entry.0 {
-            *entry = (s.ts, s.value);
+        match buckets.get_mut(&bucket) {
+            Some((latest_ts, acc)) => {
+                acc.min = acc.min.min(s.value as f32);
+                acc.max = acc.max.max(s.value as f32);
+                if s.ts >= *latest_ts {
+                    *latest_ts = s.ts;
+                    acc.last = s.value;
+                }
+            }
+            None => {
+                buckets.insert(bucket, (s.ts, Bucket::point(s.value)));
+            }
         }
     }
-    let mut out: Vec<(i64, f64)> = buckets.into_iter().map(|(b, (_, v))| (b, v)).collect();
+    let mut out: Vec<(i64, Bucket)> = buckets.into_iter().map(|(b, (_, v))| (b, v)).collect();
     out.sort_by_key(|(b, _)| *b);
     out
 }
@@ -429,51 +680,105 @@ impl PersistentStore {
     /// A file whose layout is not [`SCHEMA_VERSION`] is refused with
     /// [`StoreOpenError::Schema`] rather than read: its sample rows are keyed
     /// by ids this code cannot map to paths.
+    ///
+    /// **The schema marker is read first, in its own transaction, before any
+    /// other table is opened.** v3 re-typed both `metrics` and `samples`
+    /// (#904), and `open_table` on a re-typed table fails with a redb
+    /// *table type mismatch* — a different error from
+    /// [`StoreOpenError::Schema`], and one
+    /// [`MetricStore::with_default_persistence`] does not recognise as
+    /// "wrong layout, move it aside". Settling the schema question in the
+    /// same transaction that opened the tables was fine while every version
+    /// bump kept the types; it would have turned the first one that did not
+    /// into a GUI that silently ran memory-only on every launch.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreOpenError> {
+        Self::open_with_cache(path, DEFAULT_CACHE_BYTES)
+    }
+
+    /// [`open`](Self::open) with an explicit redb page-cache budget. A
+    /// headless caller on a small host sets its own; see
+    /// [`DEFAULT_CACHE_BYTES`] for why leaving it to redb is not an option.
+    pub fn open_with_cache(
+        path: impl AsRef<Path>,
+        cache_bytes: usize,
+    ) -> Result<Self, StoreOpenError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(redb::Error::from)?;
         }
-        let db = Database::create(path)?;
-        // Ensure the tables exist so reads on a fresh DB don't error, and
-        // settle the schema question in the same transaction.
-        let txn = db.begin_write()?;
+        let db = redb::Builder::new()
+            .set_cache_size(cache_bytes)
+            .create(path)?;
+
+        // Phase 1: the schema marker alone. `meta` is `<&str, u64>` in every
+        // version, so this open cannot type-mismatch.
         let found = {
-            let samples = txn.open_table(SAMPLES_TABLE)?;
+            let txn = db.begin_read()?;
+            match txn.open_table(META_TABLE) {
+                Ok(meta) => meta.get("schema")?.map(|v| v.value()),
+                // No `meta` table at all: a fresh file, or v1 (samples, no ids).
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(StoreOpenError::Redb(e.into())),
+            }
+        };
+        let found = match found {
+            Some(v) => v,
+            None => {
+                // Distinguish "fresh" from "v1" without opening a re-typed
+                // table: `list_tables` names them without needing their value
+                // types, and a pre-v2 file is exactly one that wrote samples
+                // and never wrote a marker. A fresh file has no tables at all
+                // — phase 2 below is what creates them.
+                let txn = db.begin_read()?;
+                let has_samples = txn.list_tables()?.any(|t| t.name() == "samples");
+                drop(txn);
+                if has_samples { 1 } else { SCHEMA_VERSION }
+            }
+        };
+        if found != SCHEMA_VERSION {
+            return Err(StoreOpenError::Schema { found });
+        }
+
+        // Phase 2: the layout is ours, so the typed opens are safe. Ensure
+        // every table exists (so reads on a fresh DB don't error) and stamp
+        // the marker, in one transaction.
+        let txn = db.begin_write()?;
+        {
+            let _ = txn.open_table(SAMPLES_TABLE)?;
             // Ensure the logs table (#107, C9) exists too.
             let _ = txn.open_table(LOGS_TABLE)?;
             // Ensure the events table (#578) exists too.
             let _ = txn.open_table(EVENTS_TABLE)?;
-            // Ensure the Tier-2 chunk store (#199) exists too.
+            // Ensure the Tier-2 chunk store (#199) exists too. Unconditional:
+            // it is created whether or not the `blob` feature is on, so the
+            // on-disk file is the same either way.
             let _ = txn.open_table(CHUNKS_TABLE)?;
             let _ = txn.open_table(METRICS_TABLE)?;
             let mut meta = txn.open_table(META_TABLE)?;
-            let stamped = meta.get("schema")?.map(|v| v.value());
-            match stamped {
-                Some(v) => v,
-                // No marker: a fresh file, or a v1 file (samples, no ids).
-                None if samples.is_empty()? => {
-                    meta.insert("schema", SCHEMA_VERSION)?;
-                    SCHEMA_VERSION
-                }
-                None => 1,
-            }
-        };
-        txn.commit()?;
-        if found != SCHEMA_VERSION {
-            return Err(StoreOpenError::Schema { found });
+            meta.insert("schema", SCHEMA_VERSION)?;
         }
+        txn.commit()?;
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Every persisted `(path, id)` pair, for rebuilding the interner on open.
-    pub fn load_metric_paths(&self) -> Result<Vec<(String, u32)>, redb::Error> {
+    /// Every persisted `(path, id, meta)` row, for rebuilding the interner on
+    /// open.
+    pub fn load_metrics(&self) -> Result<Vec<(String, u32, MetricMeta)>, redb::Error> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(METRICS_TABLE)?;
         let mut out = Vec::new();
         for row in table.iter()? {
             let (k, v) = row?;
-            out.push((k.value().to_string(), v.value()));
+            let (id, kind, source, metric) = v.value();
+            out.push((
+                k.value().to_string(),
+                id,
+                MetricMeta {
+                    kind: MetricKind::from_code(kind),
+                    source: source.to_string(),
+                    metric: metric.to_string(),
+                },
+            ));
         }
         Ok(out)
     }
@@ -495,12 +800,20 @@ impl PersistentStore {
         let mut written = 0usize;
         {
             let mut metrics = txn.open_table(METRICS_TABLE)?;
-            for (path, id) in &batch.paths {
-                metrics.insert(path.as_str(), *id)?;
+            for (path, id, meta) in &batch.paths {
+                metrics.insert(
+                    path.as_str(),
+                    (
+                        *id,
+                        meta.kind.code(),
+                        meta.source.as_str(),
+                        meta.metric.as_str(),
+                    ),
+                )?;
             }
             let mut table = txn.open_table(SAMPLES_TABLE)?;
-            for (metric, tier, bucket_ts, value) in &batch.rows {
-                table.insert(pack_key(*metric, *tier, *bucket_ts), *value)?;
+            for (metric, tier, bucket_ts, bucket) in &batch.rows {
+                table.insert(pack_key(*metric, *tier, *bucket_ts), bucket.as_row())?;
                 written += 1;
             }
         }
@@ -518,53 +831,117 @@ impl PersistentStore {
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<Sample>, redb::Error> {
+        Ok(self
+            .query_buckets(metric, tier, from_ms, to_ms)?
+            .into_iter()
+            .map(|(ts, b)| Sample { ts, value: b.last })
+            .collect())
+    }
+
+    /// Read the full [`Bucket`]s for `(metric, tier)` within the inclusive
+    /// millisecond range, oldest-first. [`query`](Self::query) is this with
+    /// only `last` kept — the historian's `min`/`max` aggregates need the rest.
+    ///
+    /// The redb range is bounded by the requested window rather than walking
+    /// the whole `(metric, tier)` span and filtering in Rust: the packed key
+    /// puts `bucket_ts` in its low bits, so a time window *is* a key range,
+    /// and asking for a day out of a year of hour buckets should not read the
+    /// year.
+    pub fn query_buckets(
+        &self,
+        metric: MetricId,
+        tier: Tier,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<(i64, Bucket)>, redb::Error> {
+        if to_ms < from_ms {
+            return Ok(Vec::new());
+        }
         let txn = self.db.begin_read()?;
         let table = txn.open_table(SAMPLES_TABLE)?;
+        // Bucket timestamps are non-negative seconds; clamp the window so a
+        // caller asking from before the epoch cannot underflow the key.
+        let from_secs = from_ms.div_euclid(1_000).max(0);
+        let to_secs = to_ms.div_euclid(1_000).max(0);
+        let range = pack_key(metric, tier, from_secs)..=pack_key(metric, tier, to_secs);
         let mut out = Vec::new();
-        for entry in table.range(key_range(metric, tier))? {
+        for entry in table.range(range)? {
             let (key, value) = entry?;
             let bucket_secs = (key.value() & u64::MAX as u128) as u64 as i64;
-            let ts = bucket_secs * 1_000;
-            if ts >= from_ms && ts <= to_ms {
-                out.push(Sample {
-                    ts,
-                    value: value.value(),
-                });
-            }
+            out.push((bucket_secs * 1_000, Bucket::from_row(value.value())));
         }
         Ok(out)
+    }
+
+    /// The distinct metric ids that actually have sample rows, by skip-scan.
+    ///
+    /// The packed key puts `metric_id` in its top bits, so all of one metric's
+    /// buckets are contiguous: read the first key at or after the cursor, take
+    /// its id, then jump the cursor to the first key the *next* id could have.
+    /// That is one seek per distinct series rather than one read per bucket —
+    /// the difference between O(series) and O(rows) on a file where a single
+    /// series holds a year of hour buckets.
+    fn sample_metric_ids(&self) -> Result<Vec<MetricId>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(SAMPLES_TABLE)?;
+        let mut ids = Vec::new();
+        let mut cursor: u128 = 0;
+        loop {
+            let Some(entry) = table.range(cursor..)?.next() else {
+                break;
+            };
+            let key = entry?.0.value();
+            let id = (key >> 72) as u32;
+            ids.push(MetricId(id));
+            // The first key any higher id could hold. `id` is a u32, so this
+            // is at most 2^104 and cannot overflow a u128.
+            cursor = ((id as u128) + 1) << 72;
+        }
+        Ok(ids)
     }
 
     /// Evict buckets older than each tier's [retention](Tier::retention_secs)
     /// relative to `now_ms`, bounding on-disk growth (#131). Returns the number
     /// of buckets removed. Blocking I/O — call from `spawn_blocking`.
     ///
-    /// The packed key sorts by `metric_id` first, so a tier's aged-out buckets
-    /// are scattered rather than contiguous; this does one full scan to collect
-    /// expired keys, then removes them. Run it infrequently (not every flush) —
-    /// in steady state each pass only finds the handful of buckets that aged out
-    /// since the last run.
+    /// Walks `(metric, tier)` by `(metric, tier)` and extracts each one's aged
+    /// range directly (#904). The packed key sorts by `metric_id` first, so a
+    /// single tier's expired buckets are scattered across the whole table —
+    /// which is why this used to read every row in the file on every pass, to
+    /// find the handful that had aged out since the last one. Within one
+    /// `(metric, tier)` the low bits *are* the bucket timestamp, so the aged
+    /// buckets are a contiguous prefix and `extract_from_if` can take them
+    /// without the rest of the table being touched.
+    ///
+    /// The ids come from [`sample_metric_ids`](Self::sample_metric_ids), which
+    /// skip-scans the samples table itself rather than reading the `metrics`
+    /// table. Every id with sample rows has a `metrics` row in practice —
+    /// `write_batch` writes both in one transaction — but "in practice" is the
+    /// wrong basis for the code that stops a file growing without bound: an id
+    /// the prune cannot see is an id whose buckets are kept for ever.
     pub fn prune(&self, now_ms: i64) -> Result<usize, redb::Error> {
         let now_secs = now_ms.div_euclid(1_000);
+        let ids = self.sample_metric_ids()?;
+
         let txn = self.db.begin_write()?;
         let mut removed = 0usize;
         {
             let mut table = txn.open_table(SAMPLES_TABLE)?;
-            let mut expired: Vec<u128> = Vec::new();
-            for entry in table.range(0u128..=u128::MAX)? {
-                let (key, _) = entry?;
-                let key = key.value();
-                let tier_code = ((key >> 64) & 0xFF) as u8;
-                let bucket_secs = (key & u64::MAX as u128) as u64 as i64;
-                if let Some(tier) = Tier::from_code(tier_code)
-                    && bucket_secs < now_secs - tier.retention_secs()
-                {
-                    expired.push(key);
+            for id in ids {
+                for tier in Tier::ALL {
+                    // Strictly older than the cutoff, as it always was: a
+                    // bucket exactly at the retention edge is still inside it.
+                    let cutoff = now_secs - tier.retention_secs();
+                    if cutoff <= 0 {
+                        continue;
+                    }
+                    let lo = pack_key(id, tier, 0);
+                    let hi = pack_key(id, tier, cutoff - 1);
+                    for entry in table.extract_from_if(lo..=hi, |_, _| true)? {
+                        entry?;
+                        removed += 1;
+                    }
                 }
-            }
-            for key in expired {
-                table.remove(key)?;
-                removed += 1;
             }
         }
         txn.commit()?;
@@ -576,88 +953,31 @@ impl PersistentStore {
     /// Persist a batch of log records keyed by uid. Blocking I/O — call from
     /// `spawn_blocking`. Records with an empty uid are skipped (no stable key).
     pub fn write_logs(&self, logs: &[StoredLog]) -> Result<usize, redb::Error> {
-        if logs.is_empty() {
-            return Ok(0);
-        }
-        let txn = self.db.begin_write()?;
-        let mut written = 0usize;
-        {
-            let mut table = txn.open_table(LOGS_TABLE)?;
-            for log in logs {
-                if log.uid.is_empty() {
-                    continue;
-                }
-                // serde_json can't fail on this plain struct; skip on the off
-                // chance rather than abort the whole batch.
-                let Ok(bytes) = serde_json::to_vec(log) else {
-                    continue;
-                };
-                table.insert(log.uid.as_str(), bytes.as_slice())?;
-                written += 1;
-            }
-        }
-        txn.commit()?;
-        Ok(written)
+        crate::logs::write_batch(&self.db, logs)
     }
 
-    /// Read persisted log records whose uid timestamp prefix falls in
-    /// `[from_ms, to_ms]`, newest-first, capped at `limit`. Because the uid is
-    /// `<13-digit ts_ms><12-digit seq>`, the table is time-sorted and the scan is
-    /// a bounded range walk. Blocking I/O.
+    /// Read persisted log records whose `ts` falls in `[from_ms, to_ms]`,
+    /// newest-first, capped at `limit`. Blocking I/O.
+    ///
+    /// The cursor form is [`crate::logs::query`]; this cache has no paginating
+    /// reader, because the Logs view paginates against the *sensor's* durable
+    /// store, which is authoritative and unsampled (#603).
     pub fn query_logs(
         &self,
         from_ms: i64,
         to_ms: i64,
         limit: usize,
     ) -> Result<Vec<StoredLog>, redb::Error> {
-        let txn = self.db.begin_read()?;
-        let table = txn.open_table(LOGS_TABLE)?;
-        let mut out = Vec::new();
-        // Walk newest-first and stop once we've filled `limit` or fallen out of
-        // the window (older than `from_ms`).
-        for entry in table.range::<&str>(..)?.rev() {
-            let (_key, value) = entry?;
-            let Ok(log) = serde_json::from_slice::<StoredLog>(value.value()) else {
-                continue;
-            };
-            if log.ts > to_ms {
-                continue;
-            }
-            if log.ts < from_ms {
-                break;
-            }
-            out.push(log);
-            if out.len() >= limit {
-                break;
-            }
-        }
-        Ok(out)
+        crate::logs::query(&self.db, from_ms, to_ms, None, limit)
     }
 
     /// Evict the oldest log rows beyond `keep_max`, bounding on-disk growth.
     /// Returns the number removed. Blocking I/O.
+    ///
+    /// Size-only: this is a per-viewer cache whose rows are template-sampled
+    /// already, and the age bound that matters is the sensor's.
     pub fn prune_logs(&self, keep_max: usize) -> Result<usize, redb::Error> {
-        let txn = self.db.begin_write()?;
-        let mut removed = 0usize;
-        {
-            let mut table = txn.open_table(LOGS_TABLE)?;
-            let total = table.len()? as usize;
-            if total > keep_max {
-                let to_remove = total - keep_max;
-                // The oldest rows are at the front of the key order.
-                let oldest: Vec<String> = table
-                    .range::<&str>(..)?
-                    .take(to_remove)
-                    .filter_map(|e| e.ok().map(|(k, _)| k.value().to_string()))
-                    .collect();
-                for key in oldest {
-                    table.remove(key.as_str())?;
-                    removed += 1;
-                }
-            }
-        }
-        txn.commit()?;
-        Ok(removed)
+        crate::logs::prune::<StoredLog>(&self.db, 0, i64::MAX, keep_max)
     }
 
     // ---- Event records (#578) ----------------------------------------------
@@ -796,6 +1116,12 @@ impl PersistentStore {
     }
 }
 
+// The one part of this crate that is not a time series: the zblob adapter.
+// Gated so a consumer that only wants history (the historian) does not pull
+// the blob stack. The `chunks` TABLE and `PersistentStore`'s chunk methods
+// stay unconditional, so the on-disk file is identical either way and a GUI
+// can open a file a feature-off writer made.
+#[cfg(feature = "blob")]
 /// A redb-backed [`zblob::ContentStore`] (#199): the durable, dedup-and-resume
 /// substrate for Tier-2 directory sync. Wraps a [`PersistentStore`] so chunks share
 /// the one metrics/logs database. The trait is sync; each call is a short blocking
@@ -805,6 +1131,12 @@ pub struct RedbContentStore {
     store: PersistentStore,
 }
 
+// The one part of this crate that is not a time series: the zblob adapter.
+// Gated so a consumer that only wants history (the historian) does not pull
+// the blob stack. The `chunks` TABLE and `PersistentStore`'s chunk methods
+// stay unconditional, so the on-disk file is identical either way and a GUI
+// can open a file a feature-off writer made.
+#[cfg(feature = "blob")]
 impl RedbContentStore {
     /// Wrap a [`PersistentStore`] as a content store.
     pub fn new(store: PersistentStore) -> Self {
@@ -817,8 +1149,15 @@ impl RedbContentStore {
 /// with the 0.2 bump: dedup is per-algorithm, so keys minted under the old
 /// digest name a different address space and are simply cold — the store
 /// refills on the next fetch rather than pretending they still resolve.
+#[cfg(feature = "blob")]
 const CHUNK_ALGO: &str = "blake3";
 
+// The one part of this crate that is not a time series: the zblob adapter.
+// Gated so a consumer that only wants history (the historian) does not pull
+// the blob stack. The `chunks` TABLE and `PersistentStore`'s chunk methods
+// stay unconditional, so the on-disk file is identical either way and a GUI
+// can open a file a feature-off writer made.
+#[cfg(feature = "blob")]
 impl zblob::ContentStore for RedbContentStore {
     // 0.3's trait returns `io::Result` from the read paths too, so a failing
     // redb read is a reported error rather than a silent "not cached" that
@@ -1023,7 +1362,7 @@ pub struct MetricStore {
     persistent: Option<PersistentStore>,
     /// `(path, id)` pairs interned since the last flush, written with it.
     /// Empty (never appended) when there is no persistent store.
-    unsaved_paths: Vec<(String, u32)>,
+    unsaved_paths: Vec<(String, u32, MetricMeta)>,
     /// Log records buffered for the next flush to the cold store (#107, C9),
     /// post-sampling.
     log_pending: Vec<StoredLog>,
@@ -1039,7 +1378,7 @@ impl MetricStore {
     pub fn new(hot_capacity: usize, persistent: Option<PersistentStore>) -> Self {
         // The interner is rebuilt from the file, or the ids in the samples
         // table mean nothing this process can name.
-        let interner = match persistent.as_ref().map(PersistentStore::load_metric_paths) {
+        let interner = match persistent.as_ref().map(PersistentStore::load_metrics) {
             Some(Ok(entries)) => MetricInterner::restore(entries),
             Some(Err(e)) => {
                 tracing::warn!(error = %e, "Could not load persisted metric ids; history will be in-memory only");
@@ -1050,7 +1389,7 @@ impl MetricStore {
         let persistent = match (&persistent, interner.is_empty()) {
             // A load failure above must not leave a store whose new ids can
             // collide with rows already on disk.
-            (Some(store), true) if store.load_metric_paths().is_err() => None,
+            (Some(store), true) if store.load_metrics().is_err() => None,
             _ => persistent,
         };
         Self {
@@ -1125,43 +1464,45 @@ impl MetricStore {
         Self::new(DEFAULT_HOT_CAPACITY, persistent)
     }
 
-    /// The interned key for a device metric:
-    /// `"<protocol>/<origin>/<source>|<metric>"`.
+    /// The series path for a point published by `origin` on `subject`:
+    /// `"<origin>/<producer>/<subject>"` — see [`series_path`]. The producer
+    /// is the point's protocol, which is the producer chunk of the key it
+    /// arrived on.
+    fn metric_key(origin: &str, subject: &str, point: &TelemetryPoint) -> String {
+        series_path(origin, &point.protocol.to_string(), subject)
+    }
+
+    /// The device-index key for a device — see [`device_prefix`].
+    pub fn device_key(producer: &str, origin: &str, source: &str) -> String {
+        device_prefix(producer, origin, source)
+    }
+
+    /// Record a telemetry point published by `origin` on `subject` (the wire
+    /// key's subject tail). Interns its series path with its kind and device,
+    /// projects the value, and appends to the hot ring + pending buffer.
+    /// Non-numeric values are ignored. O(1), safe to call inline on the UI
+    /// thread.
     ///
-    /// The origin is part of it for the reason `DeviceId` carries one (#474):
-    /// two hosts reporting the same hostname (`localhost`, a cloned image,
-    /// two containers named alike) are two devices, and a key without the
-    /// origin interleaved their samples into one sawtooth series.
-    fn metric_key(origin: &str, point: &TelemetryPoint) -> String {
-        format!(
-            "{}/{}/{}|{}",
-            point.protocol, origin, point.source, point.metric
-        )
-    }
-
-    fn device_prefix(protocol: &str, origin: &str, source: &str) -> String {
-        format!("{protocol}/{origin}/{source}")
-    }
-
-    /// The interned key for one metric of a known device — the shape
-    /// [`Self::hot_samples`] takes.
-    pub fn device_metric_key(protocol: &str, origin: &str, source: &str, metric: &str) -> String {
-        format!("{}|{metric}", Self::device_prefix(protocol, origin, source))
-    }
-
-    /// Record a telemetry point. Interns its path, projects the value, and
-    /// appends to the hot ring + pending buffer. Non-numeric values are ignored.
-    /// O(1), safe to call inline on the UI thread.
-    pub fn record(&mut self, origin: &str, point: &TelemetryPoint) {
-        let Some(value) = telemetry_to_f64(&point.value) else {
+    /// `subject` is taken rather than derived because it cannot be derived:
+    /// for a proxy producer the wire subject is `{device}/{metric...}` while
+    /// [`TelemetryPoint::metric`] is only the `{metric...}` half, so a store
+    /// that reconstructed the path from the payload would be un-slugging a
+    /// device chunk and guessing. Both callers already hold the parsed key.
+    pub fn record(&mut self, origin: &str, subject: &str, point: &TelemetryPoint) {
+        let Some(value) = SampleValue::from_telemetry(&point.value) else {
             return;
         };
-        let key = Self::metric_key(origin, point);
+        let key = Self::metric_key(origin, subject, point);
         let before = self.interner.len();
-        let id = self.interner.intern(&key);
+        let meta = MetricMeta {
+            kind: value.kind(),
+            source: point.source.clone(),
+            metric: point.metric.clone(),
+        };
+        let id = self.interner.intern(&key, meta.clone());
         let sample = Sample {
             ts: point.timestamp,
-            value,
+            value: value.as_f64(),
         };
         let capacity = self.hot_capacity;
         let series = self.series.entry(id).or_insert_with(|| MetricSeries {
@@ -1176,7 +1517,7 @@ impl MetricStore {
         if self.persistent.is_some() {
             series.pending.push(sample);
             if self.interner.len() > before {
-                self.unsaved_paths.push((key, id.0));
+                self.unsaved_paths.push((key, id.0, meta));
             }
         }
     }
@@ -1259,25 +1600,27 @@ impl MetricStore {
         Some((store, std::mem::take(&mut self.event_pending)))
     }
 
-    /// Hot samples for one metric of a `(protocol, source)` whose origin the
+    /// Hot samples for one metric of a `(producer, source)` whose origin the
     /// caller does not know — the topology panel and the systemd services
     /// table, which come from an entity or a hostname rather than a
     /// `DeviceId`. When several origins report that source (the #474
     /// collision) the series with the most recent sample wins; the two are
     /// never mixed.
-    pub fn hot_samples_by_source(&self, protocol: &str, source: &str, metric: &str) -> Vec<Sample> {
-        let suffix = format!("/{source}|{metric}");
-        let prefix = format!("{protocol}/");
+    pub fn hot_samples_by_source(&self, producer: &str, source: &str, metric: &str) -> Vec<Sample> {
+        let prefix = format!("{producer}/");
+        let suffix = format!("/{source}");
         self.interner
-            .with_prefix(&prefix)
-            .filter(|(_, path)| path.ends_with(&suffix))
+            .devices()
+            .filter(|d| d.starts_with(&prefix) && d.ends_with(&suffix))
+            .flat_map(|d| self.interner.device_ids(d))
+            .filter(|(_, m)| *m == metric)
             .filter_map(|(id, _)| self.series.get(&id))
             .max_by_key(|s| s.hot.to_vec().last().map(|x| x.ts).unwrap_or(i64::MIN))
             .map(|s| s.hot.to_vec())
             .unwrap_or_default()
     }
 
-    /// Hot (in-memory) samples for a metric path, oldest-first.
+    /// Hot (in-memory) samples for a series path, oldest-first.
     pub fn hot_samples(&self, metric_key: &str) -> Vec<Sample> {
         self.interner
             .get(metric_key)
@@ -1287,42 +1630,43 @@ impl MetricStore {
     }
 
     /// Hot (in-memory) samples for every metric of a device, oldest-first.
-    /// Returns `(metric_suffix, samples)` pairs. Reads only the in-memory ring
+    /// Returns `(metric_name, samples)` pairs. Reads only the in-memory ring
     /// (no disk), so it's cheap to call per dashboard render (#24 sparklines).
     pub fn device_hot_samples(
         &self,
-        protocol: &str,
+        producer: &str,
         origin: &str,
         source: &str,
     ) -> Vec<(String, Vec<Sample>)> {
-        let device = Self::device_prefix(protocol, origin, source);
+        let device = device_prefix(producer, origin, source);
         self.interner
             .device_ids(&device)
-            .filter_map(|(id, path)| {
-                let metric = path.split_once('|').map(|(_, m)| m.to_string())?;
+            .filter_map(|(id, metric)| {
                 let samples = self.series.get(&id).map(|s| s.hot.to_vec())?;
-                Some((metric, samples))
+                Some((metric.to_string(), samples))
             })
             .collect()
     }
 
-    /// Resolve the interned ids + paths for a device, for a history pre-load.
-    /// Returns `(metric_suffix, metric_id)` pairs where `metric_suffix` is the
-    /// metric name (the part after `|`).
+    /// Resolve the interned ids + display metric names for a device, for a
+    /// history pre-load.
     pub fn device_metric_ids(
         &self,
-        protocol: &str,
+        producer: &str,
         origin: &str,
         source: &str,
     ) -> Vec<(String, MetricId)> {
-        let device = Self::device_prefix(protocol, origin, source);
+        let device = device_prefix(producer, origin, source);
         self.interner
             .device_ids(&device)
-            .filter_map(|(id, path)| {
-                path.split_once('|')
-                    .map(|(_, metric)| (metric.to_string(), id))
-            })
+            .map(|(id, metric)| (metric.to_string(), id))
             .collect()
+    }
+
+    /// The interner, for a reader that needs to enumerate series (the
+    /// historian's `series` listing walks it by `"<origin>/<producer>/"`).
+    pub fn interner(&self) -> &MetricInterner {
+        &self.interner
     }
 
     /// A clone of the persistent handle, if any (for off-thread queries).
@@ -1339,6 +1683,21 @@ mod tests {
 
     const ORIGIN: &str = "h-0123456789ab";
 
+    /// Per-metric metadata for a test series: gauge, device `dev1`, whose
+    /// display name is the last chunk of the subject.
+    fn meta(metric: &str) -> MetricMeta {
+        MetricMeta {
+            kind: MetricKind::Gauge,
+            source: "dev1".to_string(),
+            metric: metric.to_string(),
+        }
+    }
+
+    /// The v3 series path for a subject published by [`ORIGIN`]'s sysinfo.
+    fn series(subject: &str) -> String {
+        series_path(ORIGIN, "sysinfo", subject)
+    }
+
     fn point(metric: &str, value: f64, ts: i64) -> TelemetryPoint {
         TelemetryPoint {
             timestamp: ts,
@@ -1354,9 +1713,9 @@ mod tests {
     #[test]
     fn interner_assigns_stable_ids() {
         let mut i = MetricInterner::new();
-        let a = i.intern("cpu");
-        let b = i.intern("mem");
-        let a2 = i.intern("cpu");
+        let a = i.intern("cpu", meta("cpu"));
+        let b = i.intern("mem", meta("mem"));
+        let a2 = i.intern("cpu", meta("cpu"));
         assert_eq!(a, a2);
         assert_ne!(a, b);
         assert_eq!(i.resolve(a), Some("cpu"));
@@ -1369,15 +1728,20 @@ mod tests {
     #[test]
     fn interner_prefix_scan() {
         let mut i = MetricInterner::new();
-        i.intern("snmp/r1|cpu");
-        i.intern("snmp/r1|mem");
-        i.intern("snmp/r2|cpu");
+        // v3 paths: `<origin>/<producer>/<subject>`. The historian's `series`
+        // listing walks exactly this prefix.
+        i.intern("h-aaaaaaaaaaaa/snmp/r1/cpu", meta("cpu"));
+        i.intern("h-aaaaaaaaaaaa/snmp/r1/mem", meta("mem"));
+        i.intern("h-aaaaaaaaaaaa/snmp/r2/cpu", meta("cpu"));
         let mut found: Vec<_> = i
-            .with_prefix("snmp/r1|")
+            .with_prefix("h-aaaaaaaaaaaa/snmp/r1/")
             .map(|(_, p)| p.to_string())
             .collect();
         found.sort();
-        assert_eq!(found, vec!["snmp/r1|cpu", "snmp/r1|mem"]);
+        assert_eq!(
+            found,
+            vec!["h-aaaaaaaaaaaa/snmp/r1/cpu", "h-aaaaaaaaaaaa/snmp/r1/mem"]
+        );
     }
 
     #[test]
@@ -1420,12 +1784,38 @@ mod tests {
                 value: 3.0,
             },
         ];
-        // Minute tier: buckets at 60s and 120s; 90s>60s so last-in-bucket = 2.0.
+        // Minute tier: buckets at 60s and 120s; 90s>60s so last-in-bucket = 2.0,
+        // and the 60s bucket's range spans both samples that fell in it.
         let minute = downsample(&samples, Tier::Minute);
-        assert_eq!(minute, vec![(60, 2.0), (120, 3.0)]);
-        // Hour tier: all three fall in the 0s bucket; last (ts=120_000) wins.
+        assert_eq!(
+            minute,
+            vec![
+                (
+                    60,
+                    Bucket {
+                        last: 2.0,
+                        min: 1.0,
+                        max: 2.0
+                    }
+                ),
+                (120, Bucket::point(3.0)),
+            ]
+        );
+        // Hour tier: all three fall in the 0s bucket; last (ts=120_000) wins,
+        // and min/max are what makes the coarse tier still able to say the
+        // series moved between 1 and 3 rather than sat at 3 (#904).
         let hour = downsample(&samples, Tier::Hour);
-        assert_eq!(hour, vec![(0, 3.0)]);
+        assert_eq!(
+            hour,
+            vec![(
+                0,
+                Bucket {
+                    last: 3.0,
+                    min: 1.0,
+                    max: 3.0
+                }
+            )]
+        );
     }
 
     #[test]
@@ -1440,8 +1830,19 @@ mod tests {
                 value: 1.0,
             },
         ];
-        // Both in the 0s minute/hour bucket; the later ts (5_000) wins.
-        assert_eq!(downsample(&samples, Tier::Minute), vec![(0, 5.0)]);
+        // Both in the 0s minute/hour bucket; the later ts (5_000) wins for
+        // `last`, and the range covers both however they arrived.
+        assert_eq!(
+            downsample(&samples, Tier::Minute),
+            vec![(
+                0,
+                Bucket {
+                    last: 5.0,
+                    min: 1.0,
+                    max: 5.0
+                }
+            )]
+        );
     }
 
     #[test]
@@ -1459,28 +1860,22 @@ mod tests {
     #[test]
     fn store_records_only_numeric() {
         let mut store = MetricStore::new(10, None);
-        store.record(ORIGIN, &point("cpu", 50.0, 1_000));
+        store.record(ORIGIN, "cpu", &point("cpu", 50.0, 1_000));
         let mut p = point("name", 0.0, 2_000);
         p.value = TelemetryValue::Text("hello".into());
-        store.record(ORIGIN, &p);
+        store.record(ORIGIN, "name", &p);
         // Only the numeric metric is tracked.
-        assert_eq!(
-            store.hot_samples("sysinfo/h-0123456789ab/dev1|cpu").len(),
-            1
-        );
-        assert_eq!(
-            store.hot_samples("sysinfo/h-0123456789ab/dev1|name").len(),
-            0
-        );
+        assert_eq!(store.hot_samples(&series("cpu")).len(), 1);
+        assert_eq!(store.hot_samples(&series("name")).len(), 0);
     }
 
     #[test]
     fn store_hot_samples_and_device_ids() {
         let mut store = MetricStore::new(10, None);
-        store.record(ORIGIN, &point("cpu", 50.0, 1_000));
-        store.record(ORIGIN, &point("cpu", 55.0, 2_000));
-        store.record(ORIGIN, &point("mem", 10.0, 1_500));
-        let cpu = store.hot_samples("sysinfo/h-0123456789ab/dev1|cpu");
+        store.record(ORIGIN, "cpu", &point("cpu", 50.0, 1_000));
+        store.record(ORIGIN, "cpu", &point("cpu", 55.0, 2_000));
+        store.record(ORIGIN, "mem", &point("mem", 10.0, 1_500));
+        let cpu = store.hot_samples(&series("cpu"));
         assert_eq!(cpu.len(), 2);
         assert_eq!(cpu[1].value, 55.0);
         let mut ids = store.device_metric_ids("sysinfo", ORIGIN, "dev1");
@@ -1492,15 +1887,12 @@ mod tests {
     #[test]
     fn store_no_persistence_no_flush() {
         let mut store = MetricStore::new(10, None);
-        store.record(ORIGIN, &point("cpu", 1.0, 1_000));
+        store.record(ORIGIN, "cpu", &point("cpu", 1.0, 1_000));
         // No persistent handle => nothing buffered for a flush that can never
         // happen (it used to buffer every sample forever), and no batch.
         assert!(!store.has_pending());
         assert!(store.take_flush_batch().is_none());
-        assert_eq!(
-            store.hot_samples("sysinfo/h-0123456789ab/dev1|cpu").len(),
-            1
-        );
+        assert_eq!(store.hot_samples(&series("cpu")).len(), 1);
     }
 
     fn temp_db_path(tag: &str) -> PathBuf {
@@ -1519,9 +1911,9 @@ mod tests {
         let store = PersistentStore::open(&path).expect("open");
         let m = MetricId(7);
         let batch = vec![
-            (m, Tier::Minute, 60, 1.5),
-            (m, Tier::Minute, 120, 2.5),
-            (m, Tier::Hour, 0, 9.0),
+            (m, Tier::Minute, 60, Bucket::point(1.5)),
+            (m, Tier::Minute, 120, Bucket::point(2.5)),
+            (m, Tier::Hour, 0, Bucket::point(9.0)),
         ];
         let batch = FlushBatch {
             rows: batch,
@@ -1572,12 +1964,12 @@ mod tests {
         let fresh_hour = now_secs - 100 * day; // < 365d old
         let fresh_second = now_secs - day; // 1d < 2d retention -> kept
         let batch = vec![
-            (m, Tier::Minute, 0, 1.0),            // ancient -> evicted
-            (m, Tier::Minute, fresh_minute, 2.0), // fresh -> kept
-            (m, Tier::Hour, 0, 3.0),              // ancient -> evicted
-            (m, Tier::Hour, fresh_hour, 4.0),     // fresh -> kept
-            (m, Tier::Second, 0, 5.0),            // ancient -> evicted
-            (m, Tier::Second, fresh_second, 6.0), // fresh -> kept
+            (m, Tier::Minute, 0, Bucket::point(1.0)), // ancient -> evicted
+            (m, Tier::Minute, fresh_minute, Bucket::point(2.0)), // fresh -> kept
+            (m, Tier::Hour, 0, Bucket::point(3.0)),   // ancient -> evicted
+            (m, Tier::Hour, fresh_hour, Bucket::point(4.0)), // fresh -> kept
+            (m, Tier::Second, 0, Bucket::point(5.0)), // ancient -> evicted
+            (m, Tier::Second, fresh_second, Bucket::point(6.0)), // fresh -> kept
         ];
         store
             .write_batch(&FlushBatch {
@@ -1865,13 +2257,23 @@ mod tests {
         let path = temp_db_path("flush");
         let persistent = PersistentStore::open(&path).expect("open");
         let mut store = MetricStore::new(10, Some(persistent.clone()));
-        store.record(ORIGIN, &point("cpu", 42.0, 60_000));
-        store.record(ORIGIN, &point("cpu", 43.0, 90_000));
+        store.record(ORIGIN, "cpu", &point("cpu", 42.0, 60_000));
+        store.record(ORIGIN, "cpu", &point("cpu", 43.0, 90_000));
         let (handle, batch) = store.take_flush_batch().expect("batch");
         assert!(!batch.rows.is_empty());
         assert_eq!(
             batch.paths,
-            vec![("sysinfo/h-0123456789ab/dev1|cpu".to_string(), 0)]
+            vec![(
+                series("cpu"),
+                0,
+                MetricMeta {
+                    kind: MetricKind::Gauge,
+                    source: "dev1".to_string(),
+                    metric: "cpu".to_string(),
+                }
+            )],
+            "the flush carries the series path, its id AND its kind/device, \
+             all in the one transaction that writes the sample rows"
         );
         handle.write_batch(&batch).unwrap();
         // Pending cleared after taking the batch.
@@ -1903,8 +2305,8 @@ mod tests {
         let path = temp_db_path("restart-ids");
         let persistent = PersistentStore::open(&path).expect("open");
         let mut first = MetricStore::new(10, Some(persistent.clone()));
-        first.record(ORIGIN, &point("cpu", 1.0, 60_000));
-        first.record(ORIGIN, &point("mem", 2.0, 60_000));
+        first.record(ORIGIN, "cpu", &point("cpu", 1.0, 60_000));
+        first.record(ORIGIN, "mem", &point("mem", 2.0, 60_000));
         let (handle, batch) = first.take_flush_batch().expect("batch");
         handle.write_batch(&batch).unwrap();
         let cpu_id = first
@@ -1916,8 +2318,8 @@ mod tests {
 
         // Second launch, opposite arrival order.
         let mut second = MetricStore::new(10, Some(persistent.clone()));
-        second.record(ORIGIN, &point("mem", 3.0, 120_000));
-        second.record(ORIGIN, &point("cpu", 4.0, 120_000));
+        second.record(ORIGIN, "mem", &point("mem", 3.0, 120_000));
+        second.record(ORIGIN, "cpu", &point("cpu", 4.0, 120_000));
         let ids = second.device_metric_ids("sysinfo", ORIGIN, "dev1");
         let cpu_again = ids
             .iter()
@@ -1929,10 +2331,177 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].value, 1.0, "and reads back its OWN history");
         // A brand-new metric mints an id past every persisted one.
-        second.record(ORIGIN, &point("disk", 5.0, 120_000));
+        second.record(ORIGIN, "disk", &point("disk", 5.0, 120_000));
         let (_, batch) = second.take_flush_batch().expect("batch");
         assert_eq!(batch.paths.len(), 1);
         assert!(batch.paths[0].1 >= 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A **v2** file must be refused as `Schema { found: 2 }` — not as a redb
+    /// table-type mismatch (#904).
+    ///
+    /// v3 re-typed both `metrics` and `samples`, so `open_table` on a v2 file
+    /// fails before any schema check that runs after it. That error is not one
+    /// [`MetricStore::with_default_persistence`] recognises as "wrong layout,
+    /// move it aside", so the GUI would have degraded to memory-only on every
+    /// launch instead of rebuilding the cache — silently, since the store is
+    /// designed never to be fatal. Reading the marker in its own transaction
+    /// first is what makes this a clean refusal, and this test is the reason
+    /// that ordering cannot be tidied away.
+    #[test]
+    fn a_v2_file_is_refused_by_schema_not_by_a_table_type_mismatch() {
+        let path = temp_db_path("schema-v2");
+        {
+            // Exactly the v2 layout: `metrics` valued by a bare id, `samples`
+            // valued by a bare f64, and a `meta` marker saying 2.
+            const V2_METRICS: TableDefinition<&str, u32> = TableDefinition::new("metrics");
+            const V2_SAMPLES: TableDefinition<u128, f64> = TableDefinition::new("samples");
+            let db = Database::create(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                txn.open_table(V2_METRICS)
+                    .unwrap()
+                    .insert("sysinfo/h-0123456789ab/dev1|cpu", 0u32)
+                    .unwrap();
+                txn.open_table(V2_SAMPLES)
+                    .unwrap()
+                    .insert(pack_key(MetricId(0), Tier::Minute, 60), 1.0)
+                    .unwrap();
+                txn.open_table(META_TABLE)
+                    .unwrap()
+                    .insert("schema", 2u64)
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        match PersistentStore::open(&path) {
+            Err(StoreOpenError::Schema { found: 2 }) => {}
+            Err(e) => panic!("a v2 file must be refused as Schema {{ found: 2 }}, got: {e}"),
+            Ok(_) => panic!("a v2 file must not open"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The kind and the device survive a reopen, and the device index is
+    /// rebuilt from them (#904).
+    ///
+    /// The v2 path carried both — `<protocol>/<origin>/<source>|<metric>` could
+    /// be taken apart with a `split_once`. A v3 path is the wire series
+    /// identity and carries neither, so if the `metrics` row did not hold them
+    /// a restart would lose every device grouping and every counter would read
+    /// back as a gauge.
+    #[test]
+    fn metric_kind_and_device_survive_a_reopen() {
+        let path = temp_db_path("meta-round-trip");
+        {
+            let store = PersistentStore::open(&path).expect("open");
+            let mut m = MetricStore::new(10, Some(store));
+            let mut counter = point("if/eth0/rx_bytes", 0.0, 60_000);
+            counter.value = TelemetryValue::Counter(1_000);
+            m.record(ORIGIN, "if/eth0/rx_bytes", &counter);
+            m.record(ORIGIN, "cpu", &point("cpu", 42.0, 60_000));
+            let (handle, batch) = m.take_flush_batch().expect("batch");
+            handle.write_batch(&batch).unwrap();
+        }
+
+        let store = PersistentStore::open(&path).expect("reopen");
+        let m = MetricStore::new(10, Some(store));
+        let i = m.interner();
+
+        let counter_id = i
+            .get(&series("if/eth0/rx_bytes"))
+            .expect("counter interned");
+        assert_eq!(
+            i.meta(counter_id).map(|x| x.kind),
+            Some(MetricKind::Counter),
+            "a counter must not read back as a gauge — that is the distinction \
+             three GUI call sites had to re-infer by hand"
+        );
+        assert_eq!(
+            i.meta(counter_id).map(|x| x.metric.as_str()),
+            Some("if/eth0/rx_bytes"),
+        );
+        assert_eq!(
+            i.meta(i.get(&series("cpu")).unwrap()).map(|x| x.kind),
+            Some(MetricKind::Gauge)
+        );
+
+        // The device index is rebuilt from the recorded source, not from the
+        // path — which no longer contains it.
+        let mut names: Vec<String> = m
+            .device_metric_ids("sysinfo", ORIGIN, "dev1")
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["cpu".to_string(), "if/eth0/rx_bytes".to_string()]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `query_buckets` asks redb for the window, not for the series (#904).
+    #[test]
+    fn a_range_query_returns_only_the_window_and_carries_min_max() {
+        let path = temp_db_path("range");
+        let store = PersistentStore::open(&path).expect("open");
+        let m = MetricId(3);
+        let rows: Vec<FlushRow> = (0..10)
+            .map(|i| {
+                (
+                    m,
+                    Tier::Minute,
+                    i * 60,
+                    Bucket {
+                        last: i as f64,
+                        min: 0.0,
+                        max: (i * 2) as f32,
+                    },
+                )
+            })
+            .collect();
+        store
+            .write_batch(&FlushBatch {
+                rows,
+                paths: vec![],
+            })
+            .unwrap();
+
+        // Buckets 2..=4 by their millisecond timestamps.
+        let got = store
+            .query_buckets(m, Tier::Minute, 120_000, 240_000)
+            .unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].0, 120_000);
+        assert_eq!(got[2].0, 240_000);
+        assert_eq!(got[2].1.last, 4.0);
+        assert_eq!(
+            got[2].1.max, 8.0,
+            "the range a coarse bucket covered survives"
+        );
+
+        // `query` is the same walk with only `last` kept.
+        let samples = store.query(m, Tier::Minute, 120_000, 240_000).unwrap();
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[2].value, 4.0);
+
+        // An inverted window is empty, not a panic and not the whole series.
+        assert!(
+            store
+                .query_buckets(m, Tier::Minute, 240_000, 120_000)
+                .unwrap()
+                .is_empty()
+        );
+        // A window that starts before the epoch clamps rather than underflowing.
+        assert_eq!(
+            store
+                .query_buckets(m, Tier::Minute, -5_000, 60_000)
+                .unwrap()
+                .len(),
+            2
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1947,8 +2516,11 @@ mod tests {
             let txn = db.begin_write().unwrap();
             {
                 let mut t = txn.open_table(SAMPLES_TABLE).unwrap();
-                t.insert(pack_key(MetricId(0), Tier::Minute, 60), 1.0)
-                    .unwrap();
+                t.insert(
+                    pack_key(MetricId(0), Tier::Minute, 60),
+                    Bucket::point(1.0).as_row(),
+                )
+                .unwrap();
             }
             txn.commit().unwrap();
         }
@@ -1966,6 +2538,8 @@ mod tests {
         let _ = std::fs::remove_file(&fresh);
     }
 
+    // Needs the zblob adapter (#904 gated it behind `blob`).
+    #[cfg(feature = "blob")]
     /// The GC contract behind the periodic chunk-cache sweep (#131's chunk
     /// half): chunks referenced by a snapshot tag survive, orphans go, and a
     /// temp-tagged chunk (an in-flight download's) is protected.
@@ -2016,6 +2590,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // Needs the zblob adapter (#904 gated it behind `blob`).
+    #[cfg(feature = "blob")]
     #[test]
     fn chunk_store_round_trip_and_persists() {
         use zblob::ContentStore;

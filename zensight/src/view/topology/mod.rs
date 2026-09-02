@@ -28,10 +28,10 @@ pub use layout::{
 pub use model::{
     Edge, EdgeKind, EdgeLabelMode, FocusState, GroupingMode, INTERNET_NODE_ID, LayoutMode, Lens,
     Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, RenderEdge, RenderGraph, RenderNode,
-    RenderSource, TintSource, TopoFilters, TopoPrefs, counter_rate, edges_from_flows,
-    edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip,
-    external_edges_from_matrix, format_rate, gateway_from_metrics, is_public_ip, merge_flow_stats,
-    node_health, render_node_position, roles_from_assets,
+    RenderSource, TintSource, TopoFilters, TopoPrefs, edges_from_flows, edges_from_gateways,
+    edges_from_matrix, edges_from_neighbors, endpoint_ip, external_edges_from_matrix, format_rate,
+    gateway_from_metrics, is_public_ip, merge_flow_stats, node_health, render_node_position,
+    roles_from_assets,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -1155,7 +1155,7 @@ impl TopologyState {
 pub fn topology_view<'a>(
     state: &'a TopologyState,
     entities: &'a crate::entity::EntityStore,
-    store: &'a crate::store::MetricStore,
+    store: &'a zensight_store::MetricStore,
     theme: AppTheme,
 ) -> Element<'a, Message> {
     let is_dark = matches!(theme, AppTheme::Dark);

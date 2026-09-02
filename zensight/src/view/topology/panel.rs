@@ -13,12 +13,12 @@ use iced_anim::widget::button;
 use super::{Edge, EdgeKind, Node, NodeHealth, Provenance, TopologyState, format_rate};
 use crate::entity::EntityStore;
 use crate::message::{AttributionTarget, Message};
-use crate::store::MetricStore;
 use crate::view::components::Sparkline;
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized::attribution;
 use crate::view::specialized::fetch::Fetch;
 use crate::view::topology::graph::format_bytes;
+use zensight_store::MetricStore;
 
 /// Panel width (#393): wide enough for sparklines + flow rows.
 const PANEL_WIDTH: f32 = 320.0;

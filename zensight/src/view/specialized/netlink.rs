@@ -1090,27 +1090,33 @@ fn rate_str(state: &DeviceDetailState, metric: &str) -> String {
 
 /// Per-second rate of a monotonic counter from its two most-recent history
 /// points; `None` on insufficient history, zero dt, or a counter reset.
+///
+/// This view keeps its history as raw `TelemetryPoint`s rather than store
+/// samples, so the adapter is the projection, not the arithmetic: the reset
+/// and non-advancing-clock rules live once, in
+/// [`zensight_store::rate::counter_rate`] (#904). They used to live here too,
+/// spelled the same way by hand — which is not the same thing as being the
+/// same rule.
 fn counter_rate(state: &DeviceDetailState, metric: &str) -> Option<f64> {
     let hist = state.history.get(metric)?;
-    if hist.len() < 2 {
-        return None;
-    }
     let last = hist.back()?;
-    let prev = &hist[hist.len() - 2];
-    let dt = (last.timestamp - prev.timestamp) as f64 / 1000.0;
-    if dt <= 0.0 {
-        return None;
-    }
+    let prev = hist.get(hist.len().checked_sub(2)?)?;
     let v = |p: &zensight_common::TelemetryPoint| match &p.value {
         TelemetryValue::Counter(c) => Some(*c as f64),
         TelemetryValue::Gauge(g) => Some(*g),
         _ => None,
     };
-    let (a, b) = (v(last)?, v(prev)?);
-    if a < b {
-        return None; // counter reset
-    }
-    Some((a - b) / dt)
+    let pair = [
+        zensight_store::Sample {
+            ts: prev.timestamp,
+            value: v(prev)?,
+        },
+        zensight_store::Sample {
+            ts: last.timestamp,
+            value: v(last)?,
+        },
+    ];
+    zensight_store::rate::counter_rate(&pair)
 }
 
 /// The raw numeric value of a metric (counter/gauge/bool→0|1), if present.
@@ -2107,6 +2113,53 @@ fn num(v: Option<&TelemetryValue>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The view-side adapter over [`zensight_store::rate::counter_rate`]
+    /// (#904). It had no test while it was a hand-written copy of that
+    /// arithmetic, which is how a copy stays a copy: the projection from
+    /// `TelemetryPoint` history is the part that can go wrong here, and it is
+    /// the part nothing was checking.
+    #[test]
+    fn counter_rate_projects_history_points_and_inherits_the_reset_rule() {
+        use crate::message::DeviceId;
+        use std::collections::VecDeque;
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+        let point = |ts: i64, v: u64| TelemetryPoint {
+            timestamp: ts,
+            source: "h".into(),
+            protocol: Protocol::Netlink,
+            metric: "if/eth0/rx_bytes".into(),
+            value: TelemetryValue::Counter(v),
+            labels: Default::default(),
+            unit: None,
+        };
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netlink, "h"));
+        let put = |state: &mut DeviceDetailState, pts: Vec<TelemetryPoint>| {
+            state.history.insert("m".to_string(), VecDeque::from(pts));
+        };
+
+        // 1000 bytes over 2 s → 500 B/s, from the last two of three.
+        put(
+            &mut state,
+            vec![point(0, 0), point(1_000, 100), point(3_000, 1_100)],
+        );
+        assert_eq!(counter_rate(&state, "m"), Some(500.0));
+
+        // A reset yields one missing reading, not a negative spike — the rule
+        // now comes from the store crate rather than from a second spelling.
+        put(&mut state, vec![point(0, 5_000), point(1_000, 10)]);
+        assert_eq!(counter_rate(&state, "m"), None);
+
+        // Too short, and a non-advancing clock.
+        put(&mut state, vec![point(0, 1)]);
+        assert_eq!(counter_rate(&state, "m"), None);
+        put(&mut state, vec![point(5, 1), point(5, 2)]);
+        assert_eq!(counter_rate(&state, "m"), None);
+
+        // A metric with no history at all.
+        assert_eq!(counter_rate(&state, "absent"), None);
+    }
 
     /// The producer and this label must agree on what `family` means. They did
     /// not: `fam_digit` emits 4/6 and this matched 2/10, so every retransmit

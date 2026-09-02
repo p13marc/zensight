@@ -67,7 +67,7 @@ What already works well — keep all of it:
 | Passive-DNS names for IPs | `HostEntity.names`, `_meta/query/names?ip=` | ✗ — labels use hostname/source only |
 | Per-process/app bandwidth | netlink + netring `@/query/bandwidth?top=N` → `BandwidthRecord` | ✗ |
 | Top talkers (rolling 60 s rate) | netring `@/query/talkers?top=N` → `TalkerRecord` | ✗ |
-| Metric history (1 s hot ring + redb tiers) | `zensight/src/store.rs` | ✗ — no sparklines/trends in topology |
+| Metric history (1 s hot ring + redb tiers) | `zensight-store/` (was `zensight/src/store.rs`, #904) | ✗ — no sparklines/trends in topology |
 | systemd unit dependencies, per-unit egress/ingress bps | systemd `@/query/unit?name=` → `UnitDetail`; `unit/<n>/ip_*_bps` | ✗ (intra-host; drill-in material) |
 
 ### 1.3 UX problems (why "greatly redesign" is warranted)

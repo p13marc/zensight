@@ -1,73 +1,47 @@
 # Local store
 
-The frontend persists telemetry to a bounded local store (`src/store.rs`) so
-history survives restart without growing unbounded on disk. It is a
-Netdata-style tiered time-series store backed by [redb](https://docs.rs/redb),
-with separate keyed stores for log events and event records.
+The frontend keeps a bounded local store of telemetry so history survives
+restart without growing unbounded on disk. Since #904 the store itself is a
+crate — [`zensight-store`](../../zensight-store/README.md) — and that README is
+the design reference: tiers, retention, interning, the schema, the log and
+event tables, and the async discipline. This page is what the *GUI* does with
+it.
 
-Metric history used to live only in an in-memory `VecDeque` (capped per metric)
-and was lost on restart. The store replaces that with a hot in-memory ring plus
-downsampled, retention-bounded persistence.
+## It is a cache, not the history
 
-## Tiers
+The store the frontend opens (`~/.local/share/zensight/metrics.redb`) holds
+only what this viewer saw while it was running, template-sampled. On a fleet
+the GUI is open for minutes a week, which is exactly why the durable fleet
+history moved to a headless service (#898): the `zensight-historian` subscribes
+`v1/*/telemetry/**` continuously and serves `@rpc/historian/range`.
 
-Numeric series flow through three tiers of decreasing resolution:
+Both write through the same crate, and since v3 both name a series the same
+way — `<origin>/<producer>/<subject>`, the wire key minus the class chunk — so
+a chart can read the fleet's history when a historian is alive and fall back to
+this cache when none is (#909).
 
-| Tier | Resolution | Where it lives |
-|------|------------|----------------|
-| **Hot** | per-second | Fixed-size in-memory `RingBuffer` per metric — O(1) append, bounded, read directly by charts. Default capacity `DEFAULT_HOT_CAPACITY = 3_600` (one hour of per-second samples). |
-| **Warm** | per-minute | Periodically downsampled from hot, flushed to the redb `samples` table. |
-| **Cold** | per-hour | Coarsest downsample, also in the `samples` table. |
+**The cache is rebuilt, not migrated, when its layout changes.** v3 re-typed
+`metrics` and `samples`, so an older file is moved aside
+(`metrics.redb.schema-v2`) and a fresh one started, with a logged warning. That
+is the right trade for a cache whose contents a fleet service also holds — and
+the store is never fatal: if the file cannot be opened at all, the GUI keeps
+the hot rings and says so in the log.
 
-`Tier::ALL` is `[Second, Minute, Hour]` (coarsest last). Each tier has a fixed
-`bucket_secs()` width and a `retention_secs()`; the `PersistentStore::prune`
-sweep evicts buckets older than their tier's retention, so the on-disk file stops
-growing (retention increases from hot → cold).
+## Where the GUI reads it
 
-### Keys and typing
+| Surface | Reads |
+|---|---|
+| Device detail chart | the minute tier, 24 h, on view open (`load_device_history`), plus live hot samples |
+| Dashboard sparklines | the hot ring only (`device_hot_samples`), per render |
+| Topology edge rates | the hot ring, through `zensight_store::rate::counter_rate` |
+| Logs view | the `logs` table (see below) |
+| Trap/event feed | the `events` table, seeded at boot |
+| Debug-report download | the `chunks` table, via `RedbContentStore` (the `blob` feature) |
 
-Metric paths — `<protocol>/<origin>/<source>|<metric>`, the origin included
-for the same reason `DeviceId` carries one (#474: two hosts with one hostname
-are two devices) — are interned to a compact `MetricId(u32)` per the
-architecture contract, so the store is keyed by small integers rather than
-strings. The redb `samples` table maps a packed `(metric_id, tier, bucket_ts)`
-key (a `u128`) to a downsampled `f64`. A `Sample` is a plain
-`{ ts: i64 (ms), value: f64 }` record, and the `TelemetryValue → f64`
-projection lives in one place (`telemetry_to_f64`).
-
-**The ids are persisted.** A `metrics` table maps each interned path to its
-id, written in the same transaction as the samples that use it, and the
-interner is rebuilt from it on open — so an id means the same path in every
-process that opens the file. For a long time it did not: ids were minted in
-network-arrival order and never written, so every launch re-numbered every
-metric and a chart seeded "from history" read another metric's buckets. A
-`meta` table carries the schema version (`SCHEMA_VERSION`); a file without it
-that already holds samples is a pre-v2 file whose rows nobody can name, and it
-is moved aside (`metrics.redb.schema-v1`) rather than read, the same way an
-older redb file format already was.
-
-Without a database (`--demo`, a locked file, a read-only data dir) the store
-keeps only the hot rings: nothing is buffered for a flush that cannot happen.
+Every redb read runs off the Iced update thread via `Task::future` +
+`spawn_blocking`; the hot-ring append is O(1) and runs inline.
 
 ## Log events
-
-Per-line log events are text with unbounded cardinality, so they do **not** go
-through the numeric tiers. They get their own redb `logs` table keyed by a
-time-sortable uid (`<ts><seq>`), storing a serialized `StoredLog`.
-
-To keep this store bounded without losing signal, logs are written with
-**template-aware sampling** (`LogRetention`):
-
-- **Keep all errors** — any line at or above `LOG_ERROR_SEVERITY` (OTel severity
-  17 = ERROR; FATAL is 21–24) is always persisted.
-- **Keep novel templates** — the first sighting of a message template is kept.
-- **Sample repetitive info** — known-template, non-error lines are kept 1-in-N
-  (`LOG_SAMPLE_EVERY = 10`).
-
-A row cap (`LOG_STORE_MAX_ROWS = 200_000`) bounds the table; `prune_logs` drops
-the oldest rows beyond the cap — the log analogue of tier retention. The net
-effect: search-back and boot-selection survive a restart, but the file can't grow
-without limit.
 
 ### Logs view seeding
 
@@ -100,46 +74,7 @@ has never seen.
 
 ## Event records
 
-Durable `events`-class records (SNMP traps today, #578) get their own redb
-`events` table keyed by the record's **ULID**. ULIDs sort chronologically, so
-the table is time-ordered by construction and "the most recent N events" is a
-bounded reverse range walk — the same shape as the logs table.
-
-There is deliberately **no sampler**: an event is already a rare, deliberate
-record, and dropping a trap would defeat the point of persisting them. The
-ULID key also makes writes idempotent, so a record delivered twice (the live
-subscriber overlapping a storage backfill) updates in place instead of
-duplicating.
-
-`EVENT_STORE_MAX_ROWS = 20_000` bounds the table — two orders below the log
-cap, because traps are rare and a trap storm should not evict a week of
-history. `prune_events` drops the oldest rows beyond it on the shared prune
-cadence.
-
-The fleet trap feed seeds from this table at **boot** (not on view open): the
-feed lives on the dashboard, which is the boot view, so the frontend queries
-`events` during `boot()` and delivers the rows via
-`Message::SnmpEventHistoryLoaded`. Records dedup by ULID against whatever the
-live subscriber has already delivered. The net effect is the one #578 asked
-for: the feed survives a GUI restart *without* requiring a bus-side Zenoh
-storage aligned on `**/events/**`.
-
-## Async discipline
-
-The in-memory ring append is O(1) and runs inline on the Iced update thread.
-Every redb read/write, by contrast, runs **off** the UI thread via
-`Task::future` + `spawn_blocking` — `PersistentStore` is `Send + Sync` and is
-cloned behind an `Arc`. The UI thread never blocks on disk I/O.
-
-The batching seam is explicit in the API: the in-memory side accumulates writes
-(`record`, `record_log`, `record_event`) and hands off `take_flush_batch` /
-`take_log_flush_batch` / `take_event_flush_batch` tuples of
-`(PersistentStore, rows)` to be flushed on a blocking task, keeping the redb
-transaction off the render path.
-
-## Other tables
-
-The store also defines a content-addressed `chunks` table (key `<algo>/<hex>`,
-value raw bytes) used as the immutable, idempotent substrate for large-data
-transfer and directory-sync dedup/resume — writing a chunk once and reading it
-back by content hash.
+The `events` table is seeded at **boot** rather than on view open, because the
+trap feed is on the dashboard — the first screen — so waiting for a view switch
+would show an empty feed on every launch (#578). It arrives as
+`Message::SnmpEventHistoryLoaded`.

@@ -16,13 +16,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase};
 use serde::{Deserialize, Serialize};
 use zensight_common::LogRecord;
 
-/// Per-line log table: `uid -> serde_json(LogRecord)`. Same name/layout as the
-/// GUI store's logs table (#107, C9) so both read the same shape.
-const LOGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("logs");
+/// Per-line log table: `uid -> serde_json(LogRecord)`. The table, the uid
+/// keying and the walks over it live in [`zensight_store::logs`] (#904) —
+/// this store and the GUI's cache declared the same table twice and walked it
+/// with two copies of the same range logic. The *records* stay different:
+/// `LogRecord` carries `pid` and a `labels` catch-all that `StoredLog` has no
+/// field for, and it is the lossless one.
+use zensight_store::logs::LOGS_TABLE;
 
 /// A disk-backed, uid-keyed log store.
 #[derive(Clone)]
@@ -54,26 +58,7 @@ impl LogStore {
     /// Persist a batch of records, keyed by uid. Skips records with an empty uid
     /// or that fail to serialize. Returns the count written. Blocking I/O.
     pub fn write_batch(&self, records: &[LogRecord]) -> Result<usize, redb::Error> {
-        if records.is_empty() {
-            return Ok(0);
-        }
-        let txn = self.db.begin_write()?;
-        let mut written = 0usize;
-        {
-            let mut table = txn.open_table(LOGS_TABLE)?;
-            for rec in records {
-                if rec.uid.is_empty() {
-                    continue;
-                }
-                let Ok(bytes) = serde_json::to_vec(rec) else {
-                    continue;
-                };
-                table.insert(rec.uid.as_str(), bytes.as_slice())?;
-                written += 1;
-            }
-        }
-        txn.commit()?;
-        Ok(written)
+        zensight_store::logs::write_batch(&self.db, records)
     }
 
     /// Query persisted records, newest-first, in one bounded page.
@@ -93,32 +78,7 @@ impl LogStore {
         after_uid: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LogRecord>, redb::Error> {
-        let txn = self.db.begin_read()?;
-        let table = txn.open_table(LOGS_TABLE)?;
-        let mut out = Vec::new();
-        // `..after_uid` excludes the cursor itself and everything newer; `.rev()`
-        // yields newest-first among the remaining (older) keys.
-        let iter = match after_uid {
-            Some(cursor) => table.range::<&str>(..cursor)?.rev(),
-            None => table.range::<&str>(..)?.rev(),
-        };
-        for entry in iter {
-            let (_key, value) = entry?;
-            let Ok(rec) = serde_json::from_slice::<LogRecord>(value.value()) else {
-                continue;
-            };
-            if rec.ts > to_ms {
-                continue;
-            }
-            if rec.ts < from_ms {
-                break; // keys are time-ordered: nothing older can qualify
-            }
-            out.push(rec);
-            if out.len() >= limit {
-                break;
-            }
-        }
-        Ok(out)
+        zensight_store::logs::query(&self.db, from_ms, to_ms, after_uid, limit)
     }
 
     /// Search persisted records (#553): like [`query`](Self::query) but applies
@@ -167,70 +127,20 @@ impl LogStore {
         }
         Ok(out)
     }
-
-    /// Prune by age then size (#544): drop everything older than `max_age_ms`
-    /// before `now_ms`, then, if still over `keep_max` rows, drop the oldest
-    /// excess. Returns the number removed. Blocking I/O.
+    /// Evict by age, then by size. Returns the number of rows removed.
+    /// Blocking I/O — see [`zensight_store::logs::prune`].
     pub fn prune(
         &self,
         now_ms: i64,
         max_age_ms: i64,
         keep_max: usize,
     ) -> Result<usize, redb::Error> {
-        let cutoff = now_ms.saturating_sub(max_age_ms);
-        let txn = self.db.begin_write()?;
-        let mut removed = 0usize;
-        {
-            let mut table = txn.open_table(LOGS_TABLE)?;
-
-            // Age: the oldest keys are at the front; stop at the first in-window.
-            let mut expired: Vec<String> = Vec::new();
-            for entry in table.range::<&str>(..)? {
-                let (key, value) = entry?;
-                let ts = serde_json::from_slice::<LogRecord>(value.value())
-                    .map(|r| r.ts)
-                    .unwrap_or(i64::MIN);
-                if ts < cutoff {
-                    expired.push(key.value().to_string());
-                } else {
-                    break;
-                }
-            }
-            for key in &expired {
-                table.remove(key.as_str())?;
-                removed += 1;
-            }
-
-            // Size: drop the oldest excess beyond keep_max.
-            let total = table.len()? as usize;
-            if total > keep_max {
-                let excess = total - keep_max;
-                let oldest: Vec<String> = table
-                    .range::<&str>(..)?
-                    .take(excess)
-                    .filter_map(|e| e.ok().map(|(k, _)| k.value().to_string()))
-                    .collect();
-                for key in oldest {
-                    table.remove(key.as_str())?;
-                    removed += 1;
-                }
-            }
-        }
-        txn.commit()?;
-        Ok(removed)
+        zensight_store::logs::prune::<LogRecord>(&self.db, now_ms, max_age_ms, keep_max)
     }
 
     /// Row count + oldest record timestamp (`None` if empty). Blocking I/O.
     pub fn stats(&self) -> Result<StoreStats, redb::Error> {
-        let txn = self.db.begin_read()?;
-        let table = txn.open_table(LOGS_TABLE)?;
-        let records = table.len()?;
-        let oldest_ts = table
-            .range::<&str>(..)?
-            .next()
-            .and_then(|e| e.ok())
-            .and_then(|(_, v)| serde_json::from_slice::<LogRecord>(v.value()).ok())
-            .map(|r| r.ts);
+        let (records, oldest_ts) = zensight_store::logs::stats::<LogRecord>(&self.db)?;
         Ok(StoreStats { records, oldest_ts })
     }
 }

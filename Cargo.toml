@@ -3,6 +3,14 @@ resolver = "2"
 members = [
     "zensight",
     "zensight-common",
+    # The tiered time-series store, extracted from the GUI binary (#904). It
+    # was `pub mod store` inside `zensight`, so the only process that could
+    # read the history it wrote was the GUI that wrote it — and on a fleet
+    # that GUI is open for minutes a week. Same graduation `zblob` made from
+    # `zenoh-blob/` (see the note on its dependency below): a self-contained
+    # concern with no caller-specific types, now shared by the frontend cache
+    # and the headless historian.
+    "zensight-store",
     "zensight-correlator",
     "zensight-sensor-core",
     "zensight-exporter-prometheus",
@@ -172,6 +180,7 @@ schemars = "1"
 # feature (#741). `default-features = false` keeps the format/regex extras out.
 jsonschema = { version = "0.49", default-features = false }
 zensight-sensor-core = { path = "zensight-sensor-core" }
+zensight-store = { path = "zensight-store" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # graduated from in-tree `zenoh-blob/` — epic #193; renamed on extraction).
 # 0.3 is wire v3: BLAKE3 + bao verified streaming, one postcard encoding,
@@ -179,3 +188,9 @@ zensight-sensor-core = { path = "zensight-sensor-core" }
 # deliberately do not interoperate (chunk addresses are unchanged, so stores
 # stay warm), so a fleet upgrades sensors and frontend together.
 zblob = "0.3.0"
+
+# The embedded store behind zensight-store, the GUI's metric cache and the logs
+# sensor's durable ring. It was pinned per-crate and differently ("4" in the
+# GUI, "4.1.0" in the logs sensor); with a third crate opening the same file
+# formats that had to stop being three independent decisions.
+redb = "4"

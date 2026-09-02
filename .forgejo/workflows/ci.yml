@@ -227,22 +227,34 @@ jobs:
       # The advisory-db clone persists in the runner lane's cargo home, and a
       # clone corrupted mid-fetch ("expected flush after ref listing") fails
       # every later run ON THAT LANE as `advisories FAILED` — intermittent by
-      # lane, indistinguishable from a real advisory without logs. A fresh
-      # shallow clone costs seconds; a wedged lane costs an afternoon.
+      # lane, and without job logs indistinguishable from a real advisory.
       #
-      # BOTH spellings, because cargo-deny changed the directory under us and
-      # this step went quietly dead: 0.18 and earlier cached in
-      # `advisory-dbs`, 0.20 caches in `advisory-db`. install-action installs
-      # the latest, so since that bump the self-heal has been removing a
-      # directory nothing writes to any more while the clone that actually
-      # gets fetched — the singular one — kept whatever state it was in. A
-      # wedged lane then stayed wedged, which is the exact failure this step
-      # was added to end (seen on #948: `deny` red at a commit that changes no
-      # dependency, green everywhere else, and `cargo deny check` clean
-      # locally against the same advisory-db HEAD).
-      - name: reset the advisory-db cache (self-heal)
-        run: rm -rf ~/.cargo/advisory-db ~/.cargo/advisory-dbs
-      - run: cargo deny check
+      # TRY, THEN RESET AND RETRY ONCE. Two earlier shapes were both wrong:
+      #
+      #   1. `rm -rf ~/.cargo/advisory-dbs` before every run. cargo-deny moved
+      #      its cache directory under it — 0.18 and earlier used the plural,
+      #      0.20 uses `advisory-db` — and install-action installs the latest,
+      #      so the step was deleting a directory nothing writes to and the
+      #      wedge it existed to clear survived.
+      #
+      #   2. `rm -rf` BOTH before every run. That cleared the wedge, and made
+      #      every run re-clone the whole advisory database from github.com,
+      #      so a single network flake became a red merge gate. It failed on
+      #      three of the four runs after it landed while `cargo deny check`
+      #      was clean locally at those exact commits — the cache had been the
+      #      thing absorbing that, and removing it unconditionally removed the
+      #      resilience along with the staleness.
+      #
+      # So: use the cache, and reset it only when something actually went
+      # wrong. A wedged clone heals on the retry, a flaked fetch gets a second
+      # chance, and a REAL advisory fails both attempts and still gates.
+      - name: cargo deny (reset the advisory-db cache and retry on failure)
+        run: |
+          cargo deny --version
+          if cargo deny check; then exit 0; fi
+          echo "::warning::cargo deny failed; resetting the advisory-db cache and retrying once"
+          rm -rf ~/.cargo/advisory-db ~/.cargo/advisory-dbs "${CARGO_HOME:-$HOME/.cargo}/advisory-db" "${CARGO_HOME:-$HOME/.cargo}/advisory-dbs"
+          cargo deny check
 
   lint:
     runs-on: ubuntu-24.04

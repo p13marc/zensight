@@ -689,12 +689,18 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
     // drill-downs to the wrong host (#474).
     let origin = parsed.origin.chunk().to_string();
 
-    // Telemetry: the point carries its own metric name; a subscriber does not
-    // need to know *which* subject it is (the views that do refine it
-    // themselves, against their own producer's Subject enum).
+    // Telemetry: the point carries its own metric name, so a subscriber does
+    // not need to *refine* the subject (the views that do refine it
+    // themselves, against their own producer's Subject enum) — but it does
+    // carry the raw subject tail through, because `(origin, producer,
+    // subject)` is what names a series in the store (#904) and the payload
+    // alone cannot reconstruct it for a proxy producer.
     if matches!(parsed.class, ClassOrPlane::Class(Class::Telemetry)) {
+        let subject = parsed.subject.join("/");
         return match decode_auto::<TelemetryPoint>(payload) {
-            Ok(point) => Some(Message::TelemetryReceived(Reading::new(point, origin))),
+            Ok(point) => Some(Message::TelemetryReceived(Reading::new(
+                point, origin, subject,
+            ))),
             Err(e) => {
                 tracing::warn!(error = %e, key = %key, "Failed to decode TelemetryPoint");
                 None
@@ -910,7 +916,12 @@ pub fn demo_subscription() -> Subscription<Message> {
                         _ => {}
                     }
                     let origin = crate::demo::demo_origin(&point);
-                    yield Message::TelemetryReceived(Reading::new(point, origin));
+                    // Demo mode has no wire key. Every demo producer is a host
+                    // sensor, so its subject IS the metric name — the proxy
+                    // case (`{device}/{metric...}`) is the one that differs,
+                    // and the simulator does not model it.
+                    let subject = point.metric.clone();
+                    yield Message::TelemetryReceived(Reading::new(point, origin, subject));
                 }
 
                 // Update metrics counts

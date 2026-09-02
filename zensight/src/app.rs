@@ -266,7 +266,7 @@ pub struct ZenSight {
     explorer_ctl: Option<crate::view::explorer::pump::ExplorerCtl>,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
-    store: crate::store::MetricStore,
+    store: zensight_store::MetricStore,
     /// Ticks counted toward the next periodic store flush (flush every N ticks).
     ticks_since_flush: u32,
     /// Ticks since the last topology query refresh (#391).
@@ -506,9 +506,9 @@ impl ZenSight {
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
-                crate::store::MetricStore::new(crate::store::DEFAULT_HOT_CAPACITY, None)
+                zensight_store::MetricStore::new(zensight_store::DEFAULT_HOT_CAPACITY, None)
             } else {
-                crate::store::MetricStore::with_default_persistence()
+                zensight_store::MetricStore::with_default_persistence()
             },
             ticks_since_flush: 0,
             topology_refresh_ticks: 0,
@@ -1914,7 +1914,7 @@ impl ZenSight {
                         let mut msgs = Vec::with_capacity(records.len());
                         for rec in &records {
                             let point = rec.to_point();
-                            if let Some(log) = crate::store::StoredLog::from_point(&point) {
+                            if let Some(log) = zensight_store::StoredLog::from_point(&point) {
                                 self.store.record_log(log);
                             }
                             msgs.push(crate::view::specialized::syslog_message_from_point(
@@ -2579,7 +2579,8 @@ impl ZenSight {
                                 store.write_logs(&logs).map_err(|e| e.to_string())?;
                                 store.write_events(&events).map_err(|e| e.to_string())?;
                                 if let Some(tags) = &sweep_tags {
-                                    let chunks = crate::store::RedbContentStore::new(store.clone());
+                                    let chunks =
+                                        zensight_store::RedbContentStore::new(store.clone());
                                     match zblob::gc::sweep(&chunks, tags, &sweep_temps, []) {
                                         Ok(stats) => tracing::debug!(
                                             removed = stats.removed,
@@ -2595,10 +2596,10 @@ impl ZenSight {
                                 if prune {
                                     let evicted = store.prune(now_ms).map_err(|e| e.to_string())?;
                                     let log_evicted = store
-                                        .prune_logs(crate::store::LOG_STORE_MAX_ROWS)
+                                        .prune_logs(zensight_store::LOG_STORE_MAX_ROWS)
                                         .map_err(|e| e.to_string())?;
                                     let event_evicted = store
-                                        .prune_events(crate::store::EVENT_STORE_MAX_ROWS)
+                                        .prune_events(zensight_store::EVENT_STORE_MAX_ROWS)
                                         .map_err(|e| e.to_string())?;
                                     if evicted > 0 || log_evicted > 0 || event_evicted > 0 {
                                         tracing::debug!(
@@ -2710,7 +2711,7 @@ impl ZenSight {
                             let point = rec.to_point();
                             // Persist for search-back (#107): redb keys by uid,
                             // so overlap-window re-fetches are idempotent.
-                            if let Some(log) = crate::store::StoredLog::from_point(&point) {
+                            if let Some(log) = zensight_store::StoredLog::from_point(&point) {
                                 self.store.record_log(log);
                             }
                             msgs.push(crate::view::specialized::syslog_message_from_point(
@@ -3024,7 +3025,7 @@ impl ZenSight {
                     .flat_map(|device| {
                         device.metrics.iter().filter_map(|(name, point)| {
                             // Extract numeric value from TelemetryPoint
-                            let value = telemetry_to_f64(&point.value)?;
+                            let value = alert_value_f64(&point.value)?;
                             Some((device.id.source.clone(), name.clone(), value))
                         })
                     })
@@ -4909,7 +4910,7 @@ impl ZenSight {
     /// in-memory store when there is no persistent store (e.g. demo mode).
     fn content_store(&self) -> std::sync::Arc<dyn zblob::ContentStore> {
         match self.store.persistent() {
-            Some(p) => std::sync::Arc::new(crate::store::RedbContentStore::new(p)),
+            Some(p) => std::sync::Arc::new(zensight_store::RedbContentStore::new(p)),
             None => std::sync::Arc::new(zblob::MemoryStore::new()),
         }
     }
@@ -6370,6 +6371,20 @@ impl ZenSight {
             let mut rx = 0.0f64;
             let mut tx = 0.0f64;
             let mut saw = false;
+            // One device lookup, then a map by metric name. A v3 series path is
+            // `<origin>/<producer>/<subject>` and a proxy producer's subject
+            // leads with its device chunk, so a metric name alone no longer
+            // spells a key (#904) — the device index is what resolves it, and
+            // it is also one hash lookup instead of one per metric.
+            let hot: std::collections::HashMap<String, Vec<zensight_store::Sample>> = self
+                .store
+                .device_hot_samples(
+                    &device_id.protocol.to_string(),
+                    &device_id.origin,
+                    &device_id.source,
+                )
+                .into_iter()
+                .collect();
             for metric in device_state.metrics.keys() {
                 // sysinfo `network/{iface}/{rx,tx}_bytes`, via the registry (#475).
                 use zensight_common::registry::sysinfo::Subject as SysSubject;
@@ -6378,15 +6393,10 @@ impl ZenSight {
                     Some(SysSubject::NetworkTxBytes { .. }) => false,
                     _ => continue,
                 };
-                let key = crate::store::MetricStore::device_metric_key(
-                    &device_id.protocol.to_string(),
-                    &device_id.origin,
-                    &device_id.source,
-                    metric,
-                );
-                if let Some(rate) =
-                    crate::view::topology::counter_rate(&self.store.hot_samples(&key))
-                {
+                let Some(samples) = hot.get(metric) else {
+                    continue;
+                };
+                if let Some(rate) = zensight_store::rate::counter_rate(samples) {
                     saw = true;
                     if is_rx {
                         rx += rate;
@@ -7996,7 +8006,7 @@ impl ZenSight {
 
     /// Merge cold-store search-back results (#107, C9) into the rolling log
     /// buffer via the shared de-dup merge below.
-    fn merge_log_history(&mut self, logs: Vec<crate::store::StoredLog>) {
+    fn merge_log_history(&mut self, logs: Vec<zensight_store::StoredLog>) {
         let msgs = logs
             .into_iter()
             .map(|log| {
@@ -8219,10 +8229,14 @@ impl ZenSight {
 
     /// Handle incoming telemetry.
     fn handle_telemetry(&mut self, reading: Reading) {
-        let Reading { point, origin } = reading;
+        let Reading {
+            point,
+            origin,
+            subject,
+        } = reading;
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
-        self.store.record(&origin, &point);
+        self.store.record(&origin, &subject, &point);
 
         // Keep the bandwidth monitor's Services table live while it is open: a
         // systemd `ip_*_bps` point changes the derived rows (#319). Recomputed at
@@ -8267,7 +8281,7 @@ impl ZenSight {
             // Persist to the cold store (#107, C9) — template-aware sampling
             // decides what survives restart for search-back. Only per-line
             // events carry a uid; rollup/derived points (no uid) are skipped.
-            if let Some(log) = crate::store::StoredLog::from_point(&point) {
+            if let Some(log) = zensight_store::StoredLog::from_point(&point) {
                 self.store.record_log(log);
             }
         }
@@ -8297,7 +8311,7 @@ impl ZenSight {
         device_state.metric_count = device_state.metrics.len();
 
         // Check alert rules for numeric values
-        if let Some(numeric_value) = telemetry_to_f64(&point.value)
+        if let Some(numeric_value) = alert_value_f64(&point.value)
             && let Some(alert) =
                 self.alerts
                     .check_metric(&device_id, &point.metric, numeric_value, point.timestamp)
@@ -8438,7 +8452,7 @@ impl ZenSight {
                         .into_iter()
                         .filter_map(|(name, id)| {
                             store
-                                .query(id, crate::store::Tier::Minute, from, now)
+                                .query(id, zensight_store::Tier::Minute, from, now)
                                 .ok()
                                 .filter(|s| !s.is_empty())
                                 .map(|samples| (name, samples))
@@ -8480,7 +8494,7 @@ impl ZenSight {
                     .into_iter()
                     .filter_map(|(name, id)| {
                         store
-                            .query(id, crate::store::Tier::Minute, from_ms, to_ms)
+                            .query(id, zensight_store::Tier::Minute, from_ms, to_ms)
                             .ok()
                             .filter(|s| !s.is_empty())
                             .map(|samples| (name, samples))
@@ -8886,8 +8900,17 @@ fn fmt_duration_ms(ms: i64) -> String {
     }
 }
 
-/// Convert a telemetry value to f64 for alert checking.
-fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
+/// Convert a telemetry value to an f64 **for alert checking**.
+///
+/// Deliberately not [`zensight_store::telemetry_to_f64`], which this looked
+/// like a duplicate of and is not (#904): the store maps `Boolean` to a 0/1
+/// step series so flap-prone signals get history and a trend line (#126).
+/// Folding the two would silently make every boolean telemetry value
+/// comparable against a numeric threshold — a `> 0.5` rule firing on an
+/// interface going down is not a rule anyone wrote, and not a change to make
+/// while moving code. A boolean that should raise an alert has an alert rule
+/// of its own.
+fn alert_value_f64(value: &TelemetryValue) -> Option<f64> {
     match value {
         TelemetryValue::Counter(v) => Some(*v as f64),
         TelemetryValue::Gauge(v) => Some(*v),
@@ -9643,6 +9666,7 @@ mod origin_tests {
                 TelemetryValue::Counter(1),
             ),
             origin,
+            metric,
         )
     }
 
@@ -9892,6 +9916,8 @@ mod tier2_app_fold_tests {
                     unit: None,
                 },
                 "h-5e5e5e5e5e5e",
+                // sysinfo is a host producer: its subject is the metric name.
+                metric,
             )
         };
 

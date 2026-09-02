@@ -246,6 +246,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependencies rather than bumped: no crate has used it since zblob went
   external, so the bump PR was for a line nothing read.
 
+### Changed — BREAKING
+
+- **The GUI's metric cache is rebuilt on first launch after this** (#904).
+  Schema v3 re-types two tables and changes what a series is called, so a v2
+  file cannot be read and is moved aside to `metrics.redb.schema-v2` with a
+  logged warning, exactly as a pre-v2 file and an older redb file format
+  already were. Nothing else is affected: it is a per-viewer cache of a stream
+  the bus still carries, and the durable fleet history it shadows is moving to
+  a service (#898) that this makes possible.
+
+  What changed in it:
+
+  - **A series is `<origin>/<producer>/<subject>`** — the wire key minus the
+    class chunk — where it was
+    `<protocol>/<origin>/<source>|<metric>`. That is the identity a reader can
+    derive from a sample alone, which is what lets the GUI's cache and the
+    fleet historian name the same series the same way without a catalog
+    between them.
+  - **`metrics` rows carry `(id, kind, source, metric)`**, not a bare id. The
+    kind because a counter reset and a gauge that fell are the same negative
+    delta once every value is an `f64`; the other two because the new path
+    carries neither, and recovering them from it would mean un-slugging a
+    proxy producer's device chunk — a guess, in the code that decides which
+    host a chart belongs to.
+  - **`samples` values are `{last, min, max}` buckets.** `last` is still the
+    value and the tier semantics are unchanged; the range is there so a coarse
+    tier can say a spike happened. An hour bucket that reported only its
+    closing value showed a gauge that touched 400 and settled at 12 as twelve,
+    flat.
+
+  The schema marker is now read in its own transaction **before** any other
+  table is opened. Re-typing a table makes `open_table` fail with a redb *table
+  type mismatch*, which is not the error the "wrong layout, move it aside" path
+  recognises — settling the schema question in the same transaction that opened
+  the tables was fine while every version bump kept the types, and would have
+  turned the first one that did not into a GUI silently running memory-only on
+  every launch.
+
+### Changed
+
+- **The tiered time-series store is a crate** (#904). `zensight::store` was
+  2 069 lines inside the Iced binary, opening
+  `~/.local/share/zensight/metrics.redb`, readable by nothing but the GUI that
+  wrote it. On the reference fleet that GUI is open for minutes a week, so the
+  fleet's telemetry history was mostly gaps — and telemetry is the only wire
+  class with no history path for a second process at all. It is now
+  `zensight-store`, so the headless historian of #898 can write the same tiers
+  and serve them to everyone.
+
+  `zblob` is optional behind a `blob` feature: `RedbContentStore` is the one
+  part of the file that is not a time series, and a consumer that only wants
+  history should not pull the blob stack. `redb` moved to
+  `[workspace.dependencies]` — it was pinned per-crate and differently (`"4"`
+  in the GUI, `"4.1.0"` in the logs sensor), which stops being tenable with a
+  third crate opening the same file formats.
+
+- **One `logs` table** (#904). The GUI cache and the logs sensor each declared
+  the same redb table, keyed it the same way, and walked it with their own copy
+  of the same reverse range walk and oldest-first eviction. The table, the uid
+  keying, the paginating query and the age-then-size prune now live once in
+  `zensight_store::logs`, generic over a `LogRow` trait.
+
+  The **records** stay two: `StoredLog` lifts `unit` and `template_id` into
+  typed fields, `LogRecord` has neither and carries `pid` plus a `labels`
+  catch-all instead, and `LogRecord` is the lossless one. They are in different
+  files in different directories and neither reads the other's rows, so there
+  is nothing to migrate and no reason to make either lossy.
+
+  `PersistentStore` also sets an explicit redb page-cache budget now
+  (`DEFAULT_CACHE_BYTES`, 64 MiB). redb's own default is 1 GiB; the logs sensor
+  has set a budget since #625 because on a 1–2 GB VM the default reads as a
+  slow multi-day RSS climb toward OOM, and this store never did — fine while
+  its only caller was a desktop GUI, not fine now that a headless service on
+  those same VMs will open it.
+
+- **One `counter_rate`** (#904). The GUI carried three copies of the same
+  `last - prev` arithmetic — `view/topology/model.rs`,
+  `view/specialized/netlink.rs`, and a near-relative in `parallax_health.rs`.
+  They agreed; nothing *made* them agree, and the store having flattened every
+  value to `f64` is why each caller had to re-infer resets from a negative
+  delta in the first place. `zensight_store::rate` now holds `counter_rate`
+  (last two samples, `None` on a reset) and a new `rate_series` (a whole
+  window, a reset restarting from zero, Prometheus' rule).
+
+  `parallax_health.rs`'s `rate` **stays**, with a comment saying why: it takes
+  its `dt` from the producer-supplied `MediaReceiverReport::interval_ms`, not
+  from a timestamp delta, because a receiver report summarises a *window*
+  rather than an instant. It was never a `counter_rate`. `netlink.rs`'s
+  becomes a projection from `TelemetryPoint` history that delegates the
+  arithmetic — and gains the test it never had.
+
+- **`app.rs`'s `telemetry_to_f64` is now `alert_value_f64`** (#904). It looked
+  like a duplicate of the store's and is not: the store maps `Boolean` to a 0/1
+  step series so flap-prone signals get history (#126), and this one
+  deliberately does not, because folding them would silently make every boolean
+  telemetry value comparable against a numeric threshold.
+
 ### Fixed
 
 - **On-demand detail panels flapped between the sensor's rows and an empty

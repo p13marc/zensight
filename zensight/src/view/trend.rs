@@ -2,7 +2,7 @@
 //!
 //! A signed **% delta + arrow** badge summarizes how a metric moved over a
 //! window (first vs last sample); a 24h **sparkline** on a device card shows the
-//! shape. Both read from the local store's samples (see [`crate::store`]). All
+//! shape. Both read from the local store's samples (see [`zensight_store`]). All
 //! math is pure and unit-tested; rendering is redundant (arrow glyph + sign +
 //! text, never color alone).
 
@@ -12,10 +12,10 @@ use iced::widget::{row, text};
 use iced::{Alignment, Element, Theme};
 
 use crate::message::DeviceId;
-use crate::store::{MetricStore, Sample};
 use crate::view::components::sparkline::Sparkline;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
+use zensight_store::{MetricStore, Sample};
 
 /// Direction of a metric trend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
