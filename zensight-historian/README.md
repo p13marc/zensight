@@ -171,4 +171,22 @@ a producer on a format nobody expected, and a text value is normal.
 
 - [`zensight-store`](../zensight-store/README.md) — the tiers themselves.
 - [`docs/KEYSPACE.md`](../docs/KEYSPACE.md) — the deployed keyspace contract.
+- [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — where this sits in the system.
 - Epic #898 — history is a fleet service, not a file in one GUI.
+
+### The RFC amendment
+
+RFC 04 §4 maps telemetry history to an influx-class time-series *storage*. This
+ships it as an *application* instead, for reasons recorded in #898: the influx v2
+backend cannot serve `*`/`**` selectors, a `_time=` GET has no aggregation or
+downsampling, and — found while building it — an out-of-tree router plugin cannot
+run in the CI jobs that execute workspace binaries, so a storage-based history
+could not have been smoke-tested or judged by the conformance harness at all.
+
+That amendment is tracked upstream as
+[zenkey#415](https://github.com/p13marc/zenkey/issues/415) and is **still open**:
+the reference implementation is here and the RFC text has not moved yet. The
+issue carries what this turned out to be, so the amendment can describe something
+that exists. Until it lands, RFC 04 §4 and this crate disagree about how
+telemetry history is served, and this paragraph is the disagreement written down
+rather than left for a reader to discover.

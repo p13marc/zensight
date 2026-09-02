@@ -47,6 +47,14 @@ zensight/v1/@desired/state/<host>/<producer>/<topic>     fleet desired state (#8
   `…/state/<producer>/device/<device>/alive`,
   `…/@catalog/state/alive`). Alive ⇒ callable: RPC queryables are declared
   before the token.
+- **Telemetry history is pulled, not seeded.** A telemetry key carries the
+  current sample and nothing before it; asking "what did this do yesterday" is
+  a GET on `…/@rpc/historian/range` (#898), never a wider subscription or a
+  seed. A series there is `(origin, producer, subject)` — the wire key minus
+  the class chunk — which a reader derives from a sample alone, so it holds
+  across a catalog merge and a correlator outage. Several historians may answer
+  one fleet selector, so the same target-`All` rule below applies and the
+  caller merges per series.
 - Commands do not exist: writes are GETs on `…/@rpc/<producer>/<topic>/set`,
   reads on `…/@rpc/<producer>/<topic>` (RFC
   [05](https://github.com/p13marc/zenkey/blob/main/rfcs/05-control-rpc.md)). Fleet callers select
@@ -308,8 +316,22 @@ beyond its explicit endpoints; gossip has its own `zenoh.gossip` /
 graph. Unset, both default mode-aware: off for a client with explicit
 `connect` endpoints, on otherwise — #626).
 
-Session config, storage recipes (latest/catalog/timeseries/pdns), ACL, and
+Session config, storage recipes (latest/catalog/pdns), ACL, and
 constrained-link profiles: RFC [09](https://github.com/p13marc/zenkey/blob/main/rfcs/09-operations.md).
+
+**Telemetry history is an application, not a storage recipe.** This paragraph
+used to name a `timeseries` recipe alongside the others; no such config file has
+ever existed in this repository, and RFC 04 §4's InfluxDB storage does not fit
+the requirement it was standing in for — `zenoh-backend-influxdb` v2 cannot
+answer `*`/`**` selectors, a `_time=` GET has no aggregation or downsampling so a
+day of per-second samples travels raw, and an out-of-tree router plugin cannot
+run in the CI jobs that execute workspace binaries. What ships instead is
+[`zensight-historian`](../zensight-historian/README.md) (#898): a subscriber of
+`v1/*/telemetry/**` that writes tiered storage and serves
+`@rpc/historian/{range,series,timeline,stats}` — bounded, typed,
+cursor-paginated, with counter→rate computed server-side from series that know
+their kind. Prometheus remote-write remains the path for deployments that want a
+real TSDB.
 Shipped router configs: [`configs/router-evidence-storage.json5`](../configs/router-evidence-storage.json5)
 (state seed store), [`configs/router-blob-storage.json5`](../configs/router-blob-storage.json5)
 (@blob tiers), [`configs/router-events-storage.json5`](../configs/router-events-storage.json5)

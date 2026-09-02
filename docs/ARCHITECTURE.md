@@ -43,12 +43,15 @@ flowchart TD
         Prom["Prometheus Exporter<br/>/metrics endpoint"]
         OTel["OpenTelemetry Exporter<br/>OTLP gRPC/HTTP"]
         Correlator["Correlator (the @catalog)"]
+        Historian["Historian<br/>fleet telemetry history"]
     end
 
     Bus --> GUI
     Bus --> Prom
     Bus --> OTel
     Bus --> Correlator
+    Bus --> Historian
+    Historian -->|"@rpc/historian/range"| GUI
 
     Prom --> PromServer["Prometheus Server"]
     OTel --> OTelBackend["OTEL Backends"]
@@ -69,6 +72,29 @@ host's stable `h-<12hex>` id. The bus carries:
 - `zensight/v1/<origin>/@media/parallax/<stream>/…` — opaque live media (H.264 +
   JPEG previews with CBOR `FrameMeta` attachments; produced on demand by
   `zensight-sensor-parallax`, viewed in the GUI — KEYSPACE.md)
+
+### History is a service, not a file in one GUI (#898)
+
+Telemetry was the only class with no history path for a second process. Logs
+have `@rpc/logs/events` over a durable store, events have a router `fs` storage
+plus a startup GET, state has seed storages — telemetry had the
+AdvancedPublisher's ten-sample cache and a redb file inside the Iced binary,
+readable by nothing but the GUI that wrote it. On a fleet that GUI is open for
+minutes a week.
+
+`zensight-historian` closes it: an ordinary Zenoh application that subscribes
+`v1/*/telemetry/**`, writes the shared `zensight-store` crate's tiers, and
+serves `@rpc/historian/{range,series,timeline,stats}`. A **host-origin
+producer**, not a service origin — it writes no single-writer fleet state, so
+two of them (one per site) are ordinary RFC 05 §2.1 fan-in with no claim
+protocol. It publishes no telemetry of its own: a history service that re-emitted
+what it ingested would be a loop with a database in it (RFC 04 §1.1).
+
+A series is named `(origin, producer, subject)` — the wire key minus the class
+chunk — which is derivable from a sample alone, so it survives a catalog merge
+and a correlator outage. The GUI's local store is now a **cache** of the same
+tiers under the same names: a chart reads the fleet's history when a historian is
+alive and falls back to the cache when none is, saying which it is showing.
 
 ## Crate Dependencies
 
