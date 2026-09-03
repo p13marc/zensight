@@ -20,6 +20,12 @@ pub const RULE_CERT_EXPIRING: &str = "probe-certificate-expiring";
 pub const RULE_CHAIN_INVALID: &str = "probe-certificate-chain-invalid";
 pub const RULE_SAN_MISMATCH: &str = "probe-certificate-name-mismatch";
 pub const RULE_DNS_UNEXPECTED: &str = "probe-dns-unexpected-answer";
+/// #959. Fires on the **server's own statement** that it is not a usable time
+/// source — leap indicator 3, or a stratum-0 kiss-o'-death — never on an
+/// offset this sensor decided was too large. That number belongs to #931's
+/// `ThresholdsConfig`, and inventing one here is exactly the "a number this
+/// sensor cannot know" the rest of this file refuses.
+pub const RULE_CLOCK_UNSYNCHRONISED: &str = "clock-unsynchronised";
 
 pub const ALL_RULES: &[&str] = &[
     RULE_DOWN,
@@ -29,6 +35,7 @@ pub const ALL_RULES: &[&str] = &[
     RULE_CHAIN_INVALID,
     RULE_SAN_MISMATCH,
     RULE_DNS_UNEXPECTED,
+    RULE_CLOCK_UNSYNCHRONISED,
 ];
 
 fn alert(
@@ -196,6 +203,39 @@ pub fn grade(cfg: &ProbeAlertsConfig, source: &str, results: &[ProbeResult]) -> 
     }
 
     for r in results {
+        // A time server that says it is not a time source. The kiss-o'-death
+        // case matters most: "DENY" and "RATE" are refusals, and a check that
+        // reported them only as a generic failure would leave an operator
+        // guessing at a rate limit or an ACL.
+        if cfg.clock_unsynchronised
+            && let Some(n) = &r.ntp
+            && n.unusable()
+        {
+            out.push(alert(
+                source,
+                r,
+                RULE_CLOCK_UNSYNCHRONISED,
+                AlertSeverity::Warning,
+                if n.stratum == 0 {
+                    format!(
+                        "{} refused the time query with {:?} — it answered, but not with a time",
+                        r.target, n.reference_id
+                    )
+                } else {
+                    format!(
+                        "{} reports itself unsynchronised; this vantage point has no \
+                         disciplined upstream there",
+                        r.target
+                    )
+                },
+                &[
+                    ("stratum", n.stratum.to_string()),
+                    ("leap", n.leap.clone()),
+                    ("reference_id", n.reference_id.clone()),
+                ],
+            ));
+        }
+
         if cfg.dns_unexpected
             && let Some(d) = &r.dns
             && d.expected_matched == Some(false)
@@ -242,6 +282,7 @@ mod tests {
             tls: None,
             dns: None,
             burst: None,
+            ntp: None,
             vantage: "vm-apps".into(),
             observed_at_ms: 0,
         }
@@ -412,10 +453,22 @@ mod tests {
             expected_matched: Some(false),
         });
 
+        // A time server that answered, and said it is not a time source.
+        let mut ntp = base(ProbeKind::Ntp, ProbeOutcome::Failed);
+        ntp.name = "f".into();
+        ntp.ntp = Some(zensight_common::probe::NtpResult {
+            offset_ms: 0.0,
+            delay_ms: 1.0,
+            stratum: 0,
+            leap: "no-warning".into(),
+            reference_id: "DENY".into(),
+            root_dispersion_ms: None,
+        });
+
         let fired: std::collections::HashSet<String> = grade(
             &ProbeAlertsConfig::default(),
             HOST,
-            &[timeout, down, redirect, cert, dns],
+            &[timeout, down, redirect, cert, dns, ntp],
         )
         .iter()
         .map(|a| a.rule.clone())

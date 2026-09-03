@@ -486,6 +486,122 @@ async fn a_burst_measures_jitter_and_publishes_no_rtt_when_everything_is_lost() 
     );
 }
 
+/// An `ntp` check against a **fake time server** with a known transmit
+/// timestamp, and against one that refuses (#959).
+///
+/// A real NTP server would make this test measure the internet. A UDP
+/// responder with a fixed answer makes the expected offset arithmetic rather
+/// than an observation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ntp_check_reads_a_servers_answer_and_believes_its_refusal() {
+    // A server whose clock is deliberately ~2 s ahead of ours, and one that
+    // answers with a kiss-o'-death.
+    let good = fake_ntp(2.0, 0, 2, *b"\x0a\x00\x00\x01").await;
+    let kod = fake_ntp(0.0, 0, 0, *b"DENY").await;
+
+    let mut cfg: ProbeConfig = serde_json::from_str("{}").expect("defaults");
+    cfg.interval_secs = 30;
+    cfg.timeout_secs = 2;
+    cfg.targets = vec![ntp_target("good", &good), ntp_target("kod", &kod)];
+
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let mut poller = Poller::new(
+        cfg,
+        Publisher::new(session.clone(), "probe", zensight_common::Format::Json),
+        Arc::new(
+            zensight_sensor_core::AdvancedPublisherRegistry::new(
+                session.clone(),
+                zensight_sensor_core::v1::for_producer("probe").telemetry_prefix(),
+                zensight_common::Format::Json,
+                zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            )
+            .with_qos(zensight_sensor_probe::poller::STATE_QOS),
+        ),
+        None,
+        Arc::new(zensight_sensor_core::SensorHealth::new("probe")),
+        zensight_sensor_core::relation::RelationSet::new(
+            "probe",
+            session.clone(),
+            zensight_common::Format::Json,
+        ),
+    )
+    .unwrap();
+
+    let results = poller.sweep().await;
+    let by_name: std::collections::HashMap<&str, &ProbeResult> =
+        results.iter().map(|r| (r.name.as_str(), r)).collect();
+
+    let good = by_name["good"];
+    let n = good.ntp.as_ref().expect("an ntp result");
+    assert_eq!(good.outcome, ProbeOutcome::Ok);
+    assert_eq!(n.stratum, 2);
+    assert_eq!(n.leap, "no-warning");
+    assert_eq!(n.reference_id, "10.0.0.1");
+    // The server is ~2 s ahead; the loopback round trip is microseconds, so
+    // the tolerance here is generous enough to survive a loaded CI box and
+    // still tight enough to catch a sign error or a units mistake.
+    assert!(
+        (n.offset_ms - 2000.0).abs() < 500.0,
+        "offset should be about +2000 ms, got {}",
+        n.offset_ms
+    );
+    assert!(n.delay_ms >= 0.0 && n.delay_ms < 1000.0, "{n:?}");
+    assert!(!n.unusable());
+
+    let kod = by_name["kod"];
+    let n = kod.ntp.as_ref().expect("an ntp result");
+    assert_eq!(n.stratum, 0);
+    assert_eq!(n.reference_id, "DENY");
+    assert!(n.unusable());
+    // A refusal is a failed check, and the error names the code — "DENY" and
+    // "RATE" are the answers an operator most needs to see.
+    assert_eq!(kod.outcome, ProbeOutcome::Failed);
+    assert!(
+        kod.error.as_deref().unwrap_or("").contains("DENY"),
+        "{:?}",
+        kod.error
+    );
+}
+
+/// Spawn a UDP responder that answers every SNTP request with a fixed
+/// stratum/leap/refid and a clock `skew_secs` ahead of ours. Returns its
+/// address.
+async fn fake_ntp(skew_secs: f64, li: u8, stratum: u8, refid: [u8; 4]) -> String {
+    const NTP_UNIX: f64 = 2_208_988_800.0;
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 64];
+        while let Ok((_, peer)) = sock.recv_from(&mut buf).await {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64()
+                + skew_secs;
+            let mut p = [0u8; 48];
+            p[0] = (li << 6) | (4 << 3) | 4; // LI | VN 4 | mode 4 = server
+            p[1] = stratum;
+            p[8..12].copy_from_slice(&((0.25 * 65536.0) as u32).to_be_bytes());
+            p[12..16].copy_from_slice(&refid);
+            for off in [32usize, 40] {
+                let ntp = now + NTP_UNIX;
+                p[off..off + 4].copy_from_slice(&(ntp.trunc() as u32).to_be_bytes());
+                p[off + 4..off + 8]
+                    .copy_from_slice(&((ntp.fract() * 4_294_967_296.0) as u32).to_be_bytes());
+            }
+            let _ = sock.send_to(&p, peer).await;
+        }
+    });
+    addr
+}
+
+fn ntp_target(name: &str, addr: &str) -> Target {
+    serde_json::from_str(&format!(
+        r#"{{"name":"{name}","kind":"ntp","target":"{addr}"}}"#
+    ))
+    .expect("ntp target")
+}
+
 fn burst_target(name: &str, addr: &str) -> Target {
     let mut t: Target = serde_json::from_str(&format!(
         r#"{{"name":"{name}","kind":"burst","target":"{addr}"}}"#

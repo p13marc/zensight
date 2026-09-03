@@ -131,6 +131,35 @@ impl SystemCollector {
         }
     }
 
+    /// Publish the host's clock discipline on `state/sysinfo/timesync` (#959).
+    ///
+    /// Absent when no time daemon answers — the document is simply not
+    /// published, rather than published with a zero offset. A zero is what a
+    /// perfectly disciplined clock looks like, and it would report the exact
+    /// opposite of "this host has nothing disciplining its clock".
+    async fn publish_timesync(&self) {
+        let Some(status) = crate::timesync::read() else {
+            return;
+        };
+        let Ok(key) = zensight_sensor_core::v1::for_producer("sysinfo").state_key(&["timesync"])
+        else {
+            return;
+        };
+        let key: String = key.into();
+        if let Err(e) = self
+            .registry
+            .put_serializable(
+                &key,
+                &status,
+                self.format,
+                zensight_common::QosClass::HealthLiveness,
+            )
+            .await
+        {
+            tracing::debug!(error = %e, "sysinfo: timesync publish failed");
+        }
+    }
+
     /// Collect all metrics and publish to Zenoh.
     async fn collect_and_publish(&mut self) {
         let timestamp = chrono::Utc::now().timestamp_millis();
@@ -138,6 +167,10 @@ impl SystemCollector {
 
         if self.config.collect.system {
             count += self.collect_system(timestamp).await;
+        }
+
+        if self.config.collect.timesync {
+            self.publish_timesync().await;
         }
 
         if self.config.collect.cpu {

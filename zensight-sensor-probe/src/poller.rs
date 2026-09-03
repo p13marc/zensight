@@ -213,6 +213,17 @@ impl Poller {
                     }
                 }
             }
+            if let Some(n) = &r.ntp {
+                points.push((format!("{slug}/ntp_offset_ms"), n.offset_ms));
+                points.push((format!("{slug}/ntp_delay_ms"), n.delay_ms));
+                points.push((format!("{slug}/ntp_stratum"), n.stratum as f64));
+                // A boolean the SERVER stated, not a threshold this sensor
+                // invented: leap indicator 3, or stratum 0.
+                points.push((
+                    format!("{slug}/ntp_synchronised"),
+                    if n.unusable() { 0.0 } else { 1.0 },
+                ));
+            }
             if let Some(t) = &r.tls {
                 if let Some(d) = t.days_to_expiry {
                     points.push((format!("{slug}/tls_days_to_expiry"), d as f64));

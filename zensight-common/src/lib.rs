@@ -52,6 +52,7 @@ pub mod stream;
 pub mod subscribe;
 pub mod systemd;
 pub mod telemetry;
+pub mod timesync;
 pub mod v1;
 
 // Re-export commonly used types at the crate root
@@ -118,6 +119,7 @@ pub use stream::{
     FrameMeta, StreamControl, StreamDescriptor, StreamEnd, StreamEndReason, StreamStatus,
 };
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
+pub use timesync::TimesyncStatus;
 /// The registry's *parse* direction, re-exported so consumers get it without a
 /// direct `zenkey` dependency (RFC 08 §1, issue #475).
 pub use zenkey::CommonState;

@@ -21,7 +21,7 @@
 # acquire one.
 
 [registry]
-version = "1.2"
+version = "1.3"
 app = "zensight"
 convention = 1
 
@@ -142,6 +142,38 @@ type = "TelemetryPoint"
 cardinality = 512
 since = "1.2"
 description = "percentage of the burst's probes that did not answer (#958); published even at 100%, where the RTT series are absent rather than zero"
+
+[[subject]]
+path = "{target}/ntp_offset_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.3"
+description = "clock offset from the time server, in ms, positive when the SERVER is ahead of the probe host (#959); measured against the probe host's own clock, so pair it with state/sysinfo/timesync"
+
+[[subject]]
+path = "{target}/ntp_delay_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.3"
+description = "round-trip delay to the time server, in ms (RFC 4330 §5) (#959)"
+
+[[subject]]
+path = "{target}/ntp_stratum"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.3"
+description = "the server's distance from a reference clock; 0 is a kiss-o'-death refusal and never a valid time source (#959)"
+
+[[subject]]
+path = "{target}/ntp_synchronised"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.3"
+description = "1 when the server reports itself usable — leap indicator below 3 and stratum above 0 (#959)"
 
 [[subject]]
 path = "targets/total"

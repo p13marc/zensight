@@ -22,7 +22,7 @@
 # Sources: src/collector.rs (the `publish` helper) and src/map.rs.
 
 [registry]
-version = "1.4"
+version = "1.5"
 app = "zensight"
 convention = 1
 
@@ -1009,6 +1009,14 @@ since = "1.1"
 description = "charging status"
 
 # ── state ───────────────────────────────────────────────────────────────────
+[[subject]]
+path = "timesync"
+class = "state"
+type = "TimesyncStatus"
+ttl_s = 900
+since = "1.5"
+description = "the host's own clock discipline (#959): whether the local time daemon considers the clock synchronised, its offset, stratum, upstream and last-update age. ABSENT when no time daemon answers — never a zero offset, which is what a perfectly disciplined clock looks like. Opt-in (collect.timesync), because reading it shells out"
+
 [[subject]]
 path = "health"
 common = "health"

@@ -217,6 +217,14 @@ pub struct ProbeAlertsConfig {
     /// A DNS answer did not contain the expected address.
     #[serde(default = "default_true")]
     pub dns_unexpected: bool,
+    /// A time server reported itself unusable — leap indicator 3, or a
+    /// stratum-0 kiss-o'-death (#959).
+    ///
+    /// The server's own statement, never an offset threshold: `probe` has no
+    /// business deciding how far out is too far, and `clock-offset-high`
+    /// arrives with #931's shared `ThresholdsConfig`.
+    #[serde(default = "default_true")]
+    pub clock_unsynchronised: bool,
 }
 
 impl Default for ProbeAlertsConfig {
@@ -232,6 +240,7 @@ impl Default for ProbeAlertsConfig {
             chain_invalid: true,
             san_mismatch: true,
             dns_unexpected: true,
+            clock_unsynchronised: true,
         }
     }
 }
@@ -292,7 +301,14 @@ impl Target {
                     .trim_matches(['[', ']'])
                     .to_string(),
             ),
-            ProbeKind::Dns | ProbeKind::Icmp => Some(self.target.clone()),
+            // An ntp target is a host, optionally with a port.
+            ProbeKind::Dns | ProbeKind::Icmp | ProbeKind::Ntp => Some(
+                self.target
+                    .rsplit_once(':')
+                    .map_or(self.target.as_str(), |(h, _)| h)
+                    .trim_matches(['[', ']'])
+                    .to_string(),
+            ),
             // A burst target is `host:port` for tcp and a bare host for icmp.
             ProbeKind::Burst => Some(
                 self.target
