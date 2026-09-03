@@ -7477,3 +7477,108 @@ fn test_a_truncated_scrub_window_says_so() {
             .is_ok()
     );
 }
+
+/// The threshold-rule authoring view (#933) — where "promote this metric to an
+/// alert" now lands for **every** producer, not only netlink.
+mod thresholds_ui {
+    use super::simulator;
+    use zensight::message::Message;
+    use zensight::view::expectations::{ExpTarget, ExpectationsState, expectations_view};
+
+    fn focused(producer: &str) -> ExpectationsState {
+        let mut state = ExpectationsState::default();
+        state.target = ExpTarget::Thresholds;
+        state.thresholds_producer = producer.to_string();
+        state.thresholds_origin =
+            zensight::message::DeviceId::fixture(zensight_common::Protocol::Sysinfo, "server01")
+                .remote_origin();
+        state
+    }
+
+    /// With no producer focused the form does not render an input that pushes
+    /// nowhere: it says what to do instead (#867's lesson, one view over).
+    #[test]
+    fn no_producer_says_how_to_get_one() {
+        let state = ExpectationsState {
+            target: ExpTarget::Thresholds,
+            ..Default::default()
+        };
+        let mut ui = simulator(expectations_view(&state));
+        assert!(ui.find("No producer selected.").is_ok());
+        assert!(ui.find("Add a threshold rule").is_err());
+    }
+
+    /// Focused on a producer, the form renders and its header names WHOSE
+    /// rules these are — the thing that distinguishes one host's sensor from
+    /// the fleet.
+    #[test]
+    fn a_focused_producer_renders_the_form_and_names_itself() {
+        let state = focused("sysinfo");
+        let mut ui = simulator(expectations_view(&state));
+        assert!(ui.find("Thresholds (sysinfo)").is_ok());
+        assert!(ui.find("Add a threshold rule").is_ok());
+        // The scope is stated on its own line, naming the host: the whole
+        // point of the per-origin key is that this is not a fleet push, and a
+        // reader who skims a caption skims past a clause.
+        let scope = format!(
+            "Applies to this host only ({}).",
+            zensight::message::FIXTURE_ORIGIN
+        );
+        assert!(ui.find(scope.as_str()).is_ok());
+    }
+
+    /// The button submits.
+    #[test]
+    fn add_rule_emits_add_expectation() {
+        let mut state = focused("sysinfo");
+        state.new_name = "cpu-usage".into();
+        state.new_metric = "cpu/usage".into();
+        state.new_value = "90".into();
+        let mut ui = simulator(expectations_view(&state));
+        let _ = ui.click("Add rule");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter().any(|m| matches!(m, Message::AddExpectation)),
+            "got {msgs:?}"
+        );
+    }
+
+    /// The configured list shows each rule the way it FIRES (`> 90`), not
+    /// inverted into an expectation — the sensor's own words, plus the value
+    /// hysteresis that has no equivalent in an expectation at all.
+    #[test]
+    fn configured_rules_render_as_they_fire() {
+        use zensight_common::comparison::ComparisonOp;
+        use zensight_common::threshold::{ThresholdRule, ThresholdsConfig};
+
+        let mut rule = ThresholdRule::new("cpu-hot", "cpu/usage", ComparisonOp::GreaterThan, 90.0);
+        rule.clear = Some(80.0);
+        let mut state = focused("sysinfo");
+        state.thresholds = ThresholdsConfig {
+            rules: vec![rule],
+            ..Default::default()
+        };
+
+        let mut ui = simulator(expectations_view(&state));
+        assert!(ui.find("Configured (1)").is_ok());
+        assert!(ui.find("threshold:cpu-hot").is_ok());
+        assert!(ui.find("cpu/usage > 90 (clear 80)").is_ok());
+    }
+
+    /// The `applied/thresholds` marker rides beside the form (#816/#931): a
+    /// push that lost a race with `@desired` must be visible, not mysterious.
+    #[test]
+    fn the_applied_marker_says_who_won() {
+        let mut state = focused("sysinfo");
+        state.thresholds_applied = Some(zensight_common::desired::AppliedConfig {
+            topic: "thresholds".into(),
+            source: zensight_common::desired::AppliedSource::Desired,
+            applied_at: 1,
+            desired_timestamp: None,
+            effective_json: "{}".into(),
+            last_rejected: None,
+        });
+        let mut ui = simulator(expectations_view(&state));
+        assert!(ui.find("In force from: desired").is_ok());
+    }
+}

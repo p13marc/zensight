@@ -156,11 +156,37 @@ sockets/links/routes) and pushes them to the netlink sensor at runtime as an
 `zensight/v1/*/@rpc/netlink/expectations/set` (query target `All`); the sensor
 hot-swaps its evaluator and acks in the reply (refusals arrive as `reply_err`
 `{error, message}` payloads). The current config reads back with a GET on
-`…/@rpc/netlink/expectations`. Three targets share the view: **netlink**
+`…/@rpc/netlink/expectations`. Four targets share the view: **netlink**
 (incremental add/remove commands), **systemd** (whole-set `SetExpectations`
-replace, #278), and **hostspec** (#821 — whole-set replace of the PLAIN
+replace, #278), **hostspec** (#821 — whole-set replace of the PLAIN
 `ExpectationsConfig`, no command tag; the sensor validates before applying
-and a refusal keeps its previous set, arriving as command feedback). The
+and a refusal keeps its previous set, arriving as command feedback), and
+**thresholds** (#933).
+
+**Thresholds** is where "promote this metric to an alert" lands, for *every*
+producer. It used to land here only for netlink — everything else was seeded
+into the GUI's own rule engine, whose alerts reached nothing: not the bus, not
+the exporters, not the notifier. Since #931 every producer evaluates the
+operator's `ThresholdsConfig` on its own publish path, so promotion goes to
+whichever sensor publishes the metric.
+
+Two things distinguish it from the three sentinel targets:
+
+- **It is addressed to one host, never the fleet.** The other three GET
+  `v1/*/@rpc/<producer>/expectations/set`; this one builds a per-origin key
+  from the promoted metric's own device (`origin_rpc_key`). A threshold rule
+  belongs to one host's sensor, and fleet-wide authoring is `@desired`'s job —
+  done deliberately, not fallen into by clicking "alert" on one number. The
+  form states the scope on its own line, naming the host.
+- **It appends to the sensor's set, not to a local draft.** `thresholds/set`
+  replaces wholesale, so the base is always what the sensor last reported;
+  authoring against a stale copy would silently delete every rule added since.
+  If the reply does not parse, authoring stops with the reason rather than
+  falling back to an empty set that the next push would install.
+
+The `applied/thresholds` marker rides beside the form (#816/#931), so a push
+that lost a race with `@desired` is visible rather than mysterious, and a
+refused desired document shows its reason. The
 hostspec form authors each assertion kind's essential fields; the long tail
 (regex `matches`, mount options, per-assertion severity/debounce) is
 config-file territory and the caption says a push rewrites the whole set

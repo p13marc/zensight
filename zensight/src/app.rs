@@ -615,22 +615,49 @@ impl ZenSight {
                 metric,
                 value,
             } => {
-                // #50: netlink has a sentinel that evaluates metric thresholds,
-                // so promote into the expectations authoring form. Other sensors
-                // have no command channel, so seed the local rule engine instead.
-                if device.protocol == zensight_common::Protocol::Netlink {
-                    use crate::view::expectations::ExpKind;
-                    self.expectations.new_kind = ExpKind::MetricThreshold;
-                    self.expectations.new_metric = metric.clone();
-                    self.expectations.new_value = format!("{value}");
-                    self.expectations.new_name = format!("{} threshold", metric);
-                    self.set_view(CurrentView::Expectations);
-                } else {
-                    self.alerts.set_new_rule_name(format!("{metric} alert"));
-                    self.alerts.set_new_rule_metric(metric);
-                    self.alerts.set_new_rule_threshold(format!("{value}"));
-                    self.set_view(CurrentView::Alerts);
+                // #50/#933. This used to branch on `protocol == Netlink`,
+                // because netlink was the only sensor with a channel that could
+                // receive a threshold; everything else was seeded into the
+                // GUI's local rule engine, whose alerts reached nothing — not
+                // the bus, not the exporters, not the notifier.
+                //
+                // Since #931 every producer evaluates the operator's
+                // `ThresholdsConfig` on its own publish path, so promotion goes
+                // to the sensor that publishes the metric, whichever it is.
+                use crate::view::expectations::ExpTarget;
+                let producer = device.protocol.to_string();
+                let origin = device.remote_origin();
+                if origin.is_none() {
+                    // No origin means no single host to address, and a
+                    // threshold rule is never a fleet-wide push. Say so rather
+                    // than opening a form that cannot submit.
+                    self.toasts.push(
+                        ToastSeverity::Error,
+                        format!(
+                            "No host known for {producer}/{} — a threshold rule is \
+                             addressed to one host",
+                            device.source
+                        ),
+                    );
+                    return ControlFlow::Break(Task::none());
                 }
+                self.expectations.target = ExpTarget::Thresholds;
+                self.expectations.thresholds_producer = producer;
+                self.expectations.thresholds_origin = origin;
+                self.expectations.thresholds_applied = None;
+                self.expectations.status_note = None;
+                self.expectations.new_metric = metric.clone();
+                self.expectations.new_value = format!("{value}");
+                self.expectations.new_name = slugify_rule_name(&metric);
+                // The rule fires when the metric goes ABOVE the value it has
+                // now, which is the assumption behind clicking "alert" on a
+                // number you are looking at. An operator who meant the other
+                // direction changes one pick-list.
+                self.expectations.new_op = zensight_common::ComparisonOp::GreaterThan;
+                self.set_view(CurrentView::Expectations);
+                // Read what the sensor is already running before anything is
+                // added to it — `thresholds/set` replaces wholesale.
+                return ControlFlow::Break(self.query_thresholds());
             }
 
             Message::AddMetricToChart(metric_name) => {
@@ -3741,6 +3768,7 @@ impl ZenSight {
                     ExpTarget::Hostspec => self
                         .query_hostspec_expectations()
                         .chain(self.query_hostspec_spec()),
+                    ExpTarget::Thresholds => self.query_thresholds(),
                 };
             }
             Message::SetSystemdExpKind(kind) => {
@@ -3765,6 +3793,28 @@ impl ZenSight {
                     Some(Self::reply_verdict("hostspec", "expectations", &json));
                 self.expectations.hostspec =
                     crate::view::expectations::HostspecExpDraft::from_status(&json);
+            }
+            Message::ThresholdsReceived(json) => {
+                let producer = self.expectations.thresholds_producer.clone();
+                self.expectations.thresholds_verdict =
+                    Some(Self::reply_verdict(&producer, "thresholds", &json));
+                match serde_json::from_str(&json) {
+                    Ok(cfg) => self.expectations.thresholds = cfg,
+                    Err(e) => {
+                        // The sensor answered with something this build cannot
+                        // read. Do NOT fall back to an empty set: the next
+                        // "Add rule" would push it and delete everything the
+                        // sensor is actually running.
+                        self.expectations.status_note = Some(format!(
+                            "The sensor's threshold set did not parse ({e}). Authoring is \
+                             disabled until it does — pushing now would replace a set this \
+                             build cannot see."
+                        ));
+                    }
+                }
+            }
+            Message::ThresholdsAppliedReceived(json) => {
+                self.expectations.thresholds_applied = serde_json::from_str(&json).ok();
             }
             Message::SystemdExpectationsReceived(json) => {
                 self.expectations.systemd_verdict =
@@ -3795,6 +3845,14 @@ impl ZenSight {
             }
             Message::AddExpectation => {
                 use crate::view::expectations::{ExpKind, ExpTarget, SystemdExpKind};
+                // Threshold rules (#933): append to the set the SENSOR last
+                // reported and push the whole thing back, because
+                // `thresholds/set` replaces wholesale — authoring against a
+                // stale local copy would silently delete every rule added
+                // since the last refresh.
+                if self.expectations.target == ExpTarget::Thresholds {
+                    return self.add_threshold_rule();
+                }
                 // Hostspec sentinel (#821): mutate the accumulated draft, then
                 // push the WHOLE set (plain ExpectationsConfig — the sensor
                 // validates before applying; a refusal keeps its previous set
@@ -4034,6 +4092,14 @@ impl ZenSight {
             }
             Message::RemoveExpectation(rule) => {
                 use crate::view::expectations::ExpTarget;
+                if self.expectations.target == ExpTarget::Thresholds {
+                    let name = rule.strip_prefix("threshold:").unwrap_or(&rule);
+                    self.expectations
+                        .thresholds
+                        .rules
+                        .retain(|r| r.name != name);
+                    return self.push_thresholds(format!("Removed {rule}"));
+                }
                 if self.expectations.target == ExpTarget::Hostspec {
                     self.expectations.hostspec.remove_rule(&rule);
                     let command = self.expectations.hostspec.to_set_json();
@@ -4067,6 +4133,7 @@ impl ZenSight {
                     ExpTarget::Hostspec => self
                         .query_hostspec_expectations()
                         .chain(self.query_hostspec_spec()),
+                    ExpTarget::Thresholds => self.query_thresholds(),
                 };
             }
             Message::ExpectationStatusReceived(json) => {
@@ -5233,6 +5300,151 @@ impl ZenSight {
 
     /// Query the systemd sentinel's current expectation set (#278). Routes to
     /// `SystemdExpectationsReceived`.
+    /// GET the focused producer's threshold rule set, and its
+    /// `applied/thresholds` marker beside it (#933).
+    ///
+    /// **Per-origin, never the fleet selector.** A threshold rule belongs to
+    /// one host's sensor; `v1/*/@rpc/<producer>/thresholds/set` would push it
+    /// to every host running that producer. Fleet-wide authoring is
+    /// `@desired`'s job, done deliberately, and not something to fall into by
+    /// clicking "alert" on one metric. With no origin resolved there is no
+    /// single host to address, so this asks nothing and says so.
+    /// Append the form's rule to the set the sensor last reported, and push
+    /// the whole thing (#933).
+    ///
+    /// `thresholds/set` replaces wholesale, so the base is always the *sensor's*
+    /// set — never a local draft that predates someone else's push.
+    fn add_threshold_rule(&mut self) -> Task<Message> {
+        use zensight_common::threshold::ThresholdRule;
+
+        let name = self.expectations.new_name.trim().to_string();
+        let metric = self.expectations.new_metric.trim().to_string();
+        if name.is_empty() || metric.is_empty() {
+            self.toasts
+                .push(ToastSeverity::Error, "A rule needs a name and a metric");
+            return Task::none();
+        }
+        let Ok(value) = self.expectations.new_value.trim().parse::<f64>() else {
+            self.toasts
+                .push(ToastSeverity::Error, "Threshold value must be a number");
+            return Task::none();
+        };
+        // A stale set is worse than no set: pushing it deletes rules the
+        // sensor is running. `status_note` is set when the reply did not
+        // parse, and that is exactly when authoring must stop.
+        if self.expectations.status_note.is_some() {
+            self.toasts.push(
+                ToastSeverity::Error,
+                "The sensor's current rule set could not be read — refresh before authoring",
+            );
+            return Task::none();
+        }
+
+        let mut rule = ThresholdRule::new(&name, &metric, self.expectations.new_op, value);
+        rule.severity = self.expectations.new_severity.into();
+        // Replace by name, so editing a rule is re-adding it rather than
+        // silently accumulating two rules with one identity (the alert rule
+        // is `threshold:<name>`, so two would fight over one alert key).
+        self.expectations
+            .thresholds
+            .rules
+            .retain(|r| r.name != name);
+        self.expectations.thresholds.rules.push(rule);
+        self.push_thresholds(format!("Added threshold:{name}"))
+    }
+
+    /// Push the whole rule set to the focused producer on its own host, then
+    /// re-read what it actually applied (#933).
+    fn push_thresholds(&self, ok_message: String) -> Task<Message> {
+        let producer = self.expectations.thresholds_producer.clone();
+        let Some(origin) = self.expectations.thresholds_origin.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "No host to address — a threshold rule is not a fleet-wide push"
+                    .to_string(),
+            });
+        };
+        let key = zensight_common::keyexpr::origin_rpc_key(&origin, &producer, "thresholds/set");
+        // Re-read afterwards rather than trusting the local copy: the sensor
+        // validates and may refuse, and `@desired` may have written between
+        // the read and this push. What comes back is what is running.
+        self.send_command(key, &self.expectations.thresholds, ok_message)
+            .chain(self.query_thresholds())
+    }
+
+    fn query_thresholds(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let producer = self.expectations.thresholds_producer.clone();
+        let Some(origin) = self.expectations.thresholds_origin.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: format!(
+                    "No host known for the {producer} sensor — nothing to ask. \
+                     A threshold rule is addressed to one host, never the fleet."
+                ),
+            });
+        };
+        if producer.is_empty() {
+            return Task::none();
+        }
+        let rules_key = zensight_common::keyexpr::origin_rpc_key(&origin, &producer, "thresholds");
+        let applied_key = zensight_common::keyexpr::origin_state_subtree(
+            &origin,
+            &producer,
+            &["applied", "thresholds"],
+        );
+        let s2 = session.clone();
+        let rules = Task::future(async move {
+            match session
+                .get(&rules_key)
+                .target(zenoh::query::QueryTarget::All)
+                .await
+            {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        let body =
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
+                        return Message::ThresholdsReceived(body);
+                    }
+                    Message::CommandFeedback {
+                        success: false,
+                        message: format!("The {producer} sensor on that host did not answer"),
+                    }
+                }
+                Err(e) => Message::CommandFeedback {
+                    success: false,
+                    message: format!("Threshold query failed: {e}"),
+                },
+            }
+        });
+        // The marker is a *state* key, so a GET only answers where a storage
+        // or a cache holds it. Silence here is not a failure — it is "nobody
+        // is keeping it" — so this leg reports nothing when it comes back
+        // empty, rather than manufacturing an error beside a good rule reply.
+        let applied = Task::future(async move {
+            if let Ok(replies) = s2
+                .get(&applied_key)
+                .target(zenoh::query::QueryTarget::All)
+                .await
+                && let Ok(reply) = replies.recv_async().await
+                && let Ok(sample) = reply.result()
+            {
+                return Message::ThresholdsAppliedReceived(
+                    String::from_utf8_lossy(&sample.payload().to_bytes()).to_string(),
+                );
+            }
+            Message::CommandFeedback {
+                success: true,
+                message: String::new(),
+            }
+        });
+        rules.chain(applied)
+    }
+
     fn query_systemd_expectations(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
@@ -9421,6 +9633,31 @@ fn save_blob_dialog(
 }
 
 #[cfg(test)]
+mod promote_tests {
+    use super::*;
+
+    /// The rule name a promoted metric gets (#933).
+    ///
+    /// It used to be `format!("{metric} threshold")` — a space and a slash in
+    /// something an operator reads back as an identifier, and which becomes
+    /// the alert rule `threshold:cpu/usage threshold`.
+    #[test]
+    fn a_metric_path_becomes_a_readable_rule_name() {
+        assert_eq!(slugify_rule_name("cpu/usage"), "cpu-usage");
+        assert_eq!(slugify_rule_name("if/*/in_errors"), "if-in-errors");
+        assert_eq!(
+            slugify_rule_name("memory/usage_percent"),
+            "memory-usage-percent"
+        );
+        // Leading/trailing separators do not survive into the name.
+        assert_eq!(slugify_rule_name("/disk/"), "disk");
+        // Case is normalised, because the name is an identity and two rules
+        // differing only in case would fight over one alert key.
+        assert_eq!(slugify_rule_name("Net/RX"), "net-rx");
+    }
+}
+
+#[cfg(test)]
 mod prefetch_tests {
     use super::*;
     use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
@@ -10823,4 +11060,33 @@ async fn fetch_timeline_markers(
         }
     }
     crate::history::dedup_markers(out)
+}
+
+/// A rule name from a metric path (#933).
+///
+/// The name becomes the alert rule `threshold:<name>` and therefore a chunk of
+/// nothing — it is not a key — but it *is* what an operator reads in the alert
+/// list, so `cpu/usage` reading as `cpu-usage` beats `cpu/usage threshold`,
+/// which was the old spelling and put a space and a slash in an identifier.
+fn slugify_rule_name(metric: &str) -> String {
+    let s: String = metric
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    // Collapse runs and trim, so `if/*/in_errors` is `if-in-errors`, not
+    // `if---in-errors`.
+    let mut out = String::with_capacity(s.len());
+    let mut last_dash = true;
+    for c in s.chars() {
+        if c == '-' {
+            if !last_dash {
+                out.push('-');
+            }
+            last_dash = true;
+        } else {
+            out.push(c.to_ascii_lowercase());
+            last_dash = false;
+        }
+    }
+    out.trim_matches('-').to_string()
 }
