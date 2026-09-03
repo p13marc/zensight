@@ -10,7 +10,7 @@
 # nothing serves — the mirror image of the advertised-but-unserved finding in #467.
 
 [registry]
-version = "1.3"
+version = "1.4"
 app = "zensight"
 convention = 1
 
@@ -106,3 +106,46 @@ reply = "SchemaSet"
 idempotent = true
 since = "1.2"
 description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
+
+# ── Incidents, acknowledgement and silence (#900) ─────────────────────────────
+#
+# All three used to live in one GUI process: an ack was a HashSet insert, a
+# silence a HashMap insert beside it, an incident a pure function nobody else
+# could call. Closing the window lost all three, a second GUI never saw them,
+# and the Prometheus and OTel mirrors could not tell an acknowledged alert from
+# a new one. They are documents now, which is also what lets a notifier read
+# them without knowing anything about ZenSight.
+
+[[subject]]
+path = "incident/{incident_id}"
+class = "state"
+type = "Incident"
+cardinality = 10000
+ttl_s = 900
+since = "1.4"
+description = "firing alerts grouped by ENTITY (#922): inc-<entity_id>, or inc-<origin> where the origin resolves to no entity. Tombstoned when no member is firing. The timeline is history (the historian's and the GUI's), deliberately not carried here"
+
+[[subject]]
+path = "ack/{alert_ref}"
+class = "state"
+type = "AlertAck"
+cardinality = 10000
+ttl_s = 0
+since = "1.4"
+description = "an operator's acknowledgement of one firing alert, keyed <origin>.<producer>.<alert_key>. ttl_s = 0 because an ack is operator intent and never ages out; the catalog tombstones it on resolve and on a re-fire. Projection rule for every consumer: it applies only while a firing alert with timestamp <= fired_at exists, so an orphan is inert"
+
+[[subject]]
+path = "silence/{id}"
+class = "state"
+type = "Silence"
+cardinality = 1000
+ttl_s = 0
+since = "1.4"
+description = "a suppression window: matchers over origin/producer/source/rule/labels.*, with starts_at, ends_at and an author. Tombstoned at ends_at or by unsilence. Distinct from an ack — a silence holds across re-fires, which is what a maintenance window means"
+
+# The `ack`/`unack`/`silence`/`unsilence` procedures land with the code that
+# serves them (#924), not here. A declared procedure nobody answers fails the
+# conformance judge's `alive ⇒ callable` check — correctly: the registry is a
+# promise the fleet reads, and a promise this build cannot keep is worse than
+# a missing feature. The three SUBJECTS above are different: a state family
+# nobody has published into yet reads as empty, which is what it is.

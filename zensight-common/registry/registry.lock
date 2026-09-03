@@ -194,11 +194,14 @@ subject	bmc	{chassis}/reachable	telemetry	TelemetryPoint
 subject	bmc	{chassis}/thermal/{sensor}/celsius	telemetry	TelemetryPoint
 subject	bmc	{chassis}/thermal/{sensor}/upper_critical_c	telemetry	TelemetryPoint
 subject	bmc	{chassis}/thermal/{sensor}/upper_warning_c	telemetry	TelemetryPoint
+subject	catalog	ack/{alert_ref}	state	AlertAck
 subject	catalog	alias/{old_id}	state	AliasRecord
 subject	catalog	assertion/{id}	state	OperatorAssertion
 subject	catalog	edge/{edge_id}	state	Edge
 subject	catalog	entity/{entity_id}	state	HostEntity
+subject	catalog	incident/{incident_id}	state	Incident
 subject	catalog	pdns/{ip_slug}	state	PdnsRecord
+subject	catalog	silence/{id}	state	Silence
 subject	container	alert/{alert_key}	state	Alert
 subject	container	applied/{topic}	state	AppliedConfig
 subject	container	container/{name}	state	ContainerInfo

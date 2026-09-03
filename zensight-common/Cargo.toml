@@ -15,6 +15,10 @@ description = "Common types and utilities for ZenSight observability sensors"
 # (#741). `jsonschema` is the weight, and that stays behind the feature.
 zenkey = { workspace = true, features = ["schemars", "decode"] }
 zenoh.workspace = true
+# Silence matchers (#922): `MatchOp::Regex` over origin/producer/source/rule/
+# labels. The alternative — glob only — cannot express "every host in rack 3",
+# which is the shape a maintenance window actually has.
+regex.workspace = true
 # The exporters' shared subscriber uses an AdvancedSubscriber (history +
 # recovery), matching how sensors publish and how the GUI has always consumed
 # (#763). Already a workspace dep used by sensor-core, the correlator and the GUI.

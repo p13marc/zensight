@@ -379,6 +379,55 @@ pub fn entity_key(entity_id: &str) -> String {
     registry::catalog::key(&registry::catalog::Subject::entity(entity_id)).into()
 }
 
+/// Build an incident key (#922): `@catalog/state/incident/<incident_id>`.
+///
+/// The id is `inc-<entity_id>`, or `inc-<origin>` where the origin resolves to
+/// no entity — both already chunk-legal, so the generated constructor's slug
+/// is a no-op.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::incident_key;
+///
+/// assert_eq!(
+///     incident_key("inc-h-3fa9c2d41b7e"),
+///     "v1/@catalog/state/incident/inc-h-3fa9c2d41b7e"
+/// );
+/// ```
+pub fn incident_key(incident_id: &str) -> String {
+    registry::catalog::key(&registry::catalog::Subject::incident(incident_id)).into()
+}
+
+/// Wildcard over the incident family — what a GUI, an exporter or a notifier
+/// subscribes to.
+pub fn all_incidents_wildcard() -> String {
+    registry::catalog::Family::Incident.selector().into()
+}
+
+/// Build an ack key (#922): `@catalog/state/ack/<alert_ref>`.
+///
+/// Takes the parsed [`crate::alert::AlertRef`] rather than a string, which is
+/// what makes a malformed ref a type error here instead of a key nothing can
+/// address back. See that type for why the ref is a readable triple.
+pub fn ack_key(alert_ref: &crate::alert::AlertRef) -> String {
+    registry::catalog::key(&registry::catalog::Subject::ack(alert_ref.to_string())).into()
+}
+
+/// Wildcard over the ack family.
+pub fn all_acks_wildcard() -> String {
+    registry::catalog::Family::Ack.selector().into()
+}
+
+/// Build a silence key (#922): `@catalog/state/silence/<ulid>`.
+pub fn silence_key(id: &str) -> String {
+    registry::catalog::key(&registry::catalog::Subject::silence(id)).into()
+}
+
+/// Wildcard over the silence family.
+pub fn all_silences_wildcard() -> String {
+    registry::catalog::Family::Silence.selector().into()
+}
+
 /// Build the alias-record key (RFC 06 §5): old-id → entity-id re-pointing on
 /// merges/upgrades, published by the catalog as its own key family.
 pub fn alias_key(old_id: &str) -> String {

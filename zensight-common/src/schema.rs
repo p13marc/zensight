@@ -151,6 +151,14 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<Vec<crate::outlet::OutletStatus>>("Vec<OutletStatus>")
         // probe's state document (#820).
         .json::<crate::probe::ProbeResult>("ProbeResult")
+        // Incidents, acknowledgement and silence (#922, epic #900). `AlertAck`
+        // rather than `Ack`: the latter is the generic "the write landed"
+        // reply twenty-odd procedures already declare, and one name for two
+        // things is the drift this table exists to prevent.
+        .json::<crate::incident::Incident>("Incident")
+        .json::<crate::ack::AlertAck>("AlertAck")
+        .json::<crate::silence::Silence>("Silence")
+        .json::<crate::alert::AlertRef>("AlertRef")
         // ── registry drift the table makes visible (RFC 08 §5) ────────────
         // The registry says Vec<HttpRecord>/Vec<IpfixRecord>; the wire types
         // are HttpHostRecord/NetflowRecord. Served under the registry name so
