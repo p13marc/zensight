@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Time hysteresis in `AlertReporter` — `recover_after`** (#929, epic #901).
+
+  Hysteresis existed nowhere in the tree as a generic facility. The sensor
+  budget has an 80/95/75 ratio band, netring's shedding has one, the governor
+  counts calm ticks — three bespoke implementations, none of them available to
+  an expectation. A flapping value flapped the bus: a resolve, a tombstone and
+  a fresh firing document per crossing.
+
+  `AlertReporter::with_recovery(Duration)` is the generic answer, and it works
+  for **every** expectation kind rather than any one of them. A published alert
+  whose condition clears is no longer dropped on that sweep: it is marked and
+  held, and resolves only once it has stayed clear for the window.
+
+  Three decisions:
+
+  - **A re-fire inside the window resets the clock and publishes nothing.** The
+    alert never left `Firing`, so there is no transition to announce — a value
+    oscillating across its threshold produces one document on the bus, not one
+    per crossing. `observe` is where the mark is cleared, because that is where
+    the re-fire happens.
+  - **The default is `ZERO`, so nothing changes for anyone who does not ask.**
+    A zero window skips the marking step entirely and the behaviour is
+    byte-for-byte what it was. A regression test pins that.
+  - **An explicit clear *event* bypasses the window.** `resolve_matching` is
+    driven by a linkUp trap or a resolve notification, not by the absence of a
+    violation in a sweep. A recovery window distinguishes "gone" from "gone for
+    a moment"; an event saying the condition is over is not an absence of
+    evidence, and holding it would delay a fact the device has already told us.
+    `resolve_all` bypasses it too — a process that is exiting cannot offer to
+    wait and see.
+
+  `sensor-budget` opts out per call through the new `ReconcileOpts`: the
+  80/95/75 band **is** that rule's hysteresis, and a sensor that configures a
+  window must not silently stack a timer on top of it.
+
+  The state machine is unit-tested against an **injected clock** — a test that
+  sleeps through a thirty-second window is a test nobody runs twice — with the
+  wire behaviour proved separately over a real bus.
+
 - **`ThresholdsConfig` — the vocabulary for a threshold a *sensor* owns**
   (#928, epic #901).
 

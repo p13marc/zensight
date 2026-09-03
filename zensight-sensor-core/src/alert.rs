@@ -63,6 +63,11 @@ struct ActiveAlert {
     /// Whether a `Put(Firing)` has actually been published yet (false while the
     /// `for:` debounce window is still open).
     published: bool,
+    /// When the condition was first seen clear, while a recovery window is
+    /// open (#929). `None` means "currently violated" — which is also what a
+    /// re-fire restores, because an alert that flickers clear and back was
+    /// never really clear.
+    clear_since: Option<Instant>,
 }
 
 /// What the synchronous bookkeeping decided we should do on the wire.
@@ -82,7 +87,32 @@ pub struct AlertReporter {
     /// The rule slugs this build can still raise, when the producer declares
     /// them. Empty means "unknown", not "none" — see [`AlertReporter::with_known_rules`].
     known_rules: Vec<String>,
+    /// How long a condition must stay clear before the alert resolves (#929).
+    /// `ZERO` — the default — resolves on the first clear sweep, which is
+    /// exactly the behaviour every caller had before this existed.
+    recovery: Duration,
     active: Mutex<HashMap<String, ActiveAlert>>,
+}
+
+/// Per-call overrides for one reconcile (#929).
+///
+/// A rule whose own hysteresis is not a timer — the sensor budget's 80/95/75
+/// ratio band is the in-tree example — opts out here rather than inheriting the
+/// reporter default, so a per-sensor `with_recovery` cannot silently stack a
+/// delay on top of a band that already handles flapping.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReconcileOpts {
+    /// `Some(ZERO)` resolves immediately; `None` uses the reporter's default.
+    pub recover_after: Option<Duration>,
+}
+
+impl ReconcileOpts {
+    /// Resolve as soon as the condition clears, whatever the reporter default.
+    pub fn immediate() -> Self {
+        Self {
+            recover_after: Some(Duration::ZERO),
+        }
+    }
 }
 
 impl AlertReporter {
@@ -97,6 +127,7 @@ impl AlertReporter {
             debounce: Duration::ZERO,
             identity: None,
             known_rules: Vec::new(),
+            recovery: Duration::ZERO,
             active: Mutex::new(HashMap::new()),
         }
     }
@@ -104,6 +135,26 @@ impl AlertReporter {
     /// Set the default "must be violated continuously for" debounce window.
     pub fn with_debounce(mut self, d: Duration) -> Self {
         self.debounce = d;
+        self
+    }
+
+    /// Set the default "must stay clear for" recovery window (#929).
+    ///
+    /// This is **time** hysteresis, and it is generic — which is why it lives
+    /// here rather than in any one expectation kind. Value hysteresis (fire
+    /// above 90, clear below 80) is numeric and belongs to the rule that knows
+    /// what the number means.
+    ///
+    /// The default is `ZERO`, which is precisely today's behaviour: a
+    /// condition that clears resolves on that sweep. Nothing changes for a
+    /// caller that does not ask.
+    ///
+    /// **Cost of asking:** a cleared alert is held in `active` for up to this
+    /// long instead of being dropped at once. That is bounded by the window
+    /// and by the number of distinct alert keys, but it is not free — see the
+    /// note on `retire` about what unbounded key minting does here.
+    pub fn with_recovery(mut self, d: Duration) -> Self {
+        self.recovery = d;
         self
     }
 
@@ -182,10 +233,17 @@ impl AlertReporter {
                 first_seen: now,
                 last: alert.clone(),
                 published: false,
+                clear_since: None,
             });
             let severity_changed = entry.published && entry.severity != alert.severity;
             entry.severity = alert.severity;
             entry.last = alert.clone();
+            // A re-fire inside the recovery window resets the clock and emits
+            // NOTHING: the alert never left `Firing`, so there is no
+            // transition to publish. This is the whole anti-flap — a value
+            // oscillating across the threshold produces one document on the
+            // bus, not one per crossing (#929).
+            entry.clear_since = None;
             if !entry.published && now.duration_since(entry.first_seen) >= dur {
                 entry.published = true;
                 Action::PublishFiring(alert)
@@ -202,9 +260,22 @@ impl AlertReporter {
     /// previously-firing alert under that rule whose key is no longer in
     /// `still_firing`.
     pub async fn reconcile(&self, rule: &str, still_firing: &[String]) -> Result<()> {
+        self.reconcile_opts(rule, still_firing, ReconcileOpts::default())
+            .await
+    }
+
+    /// [`reconcile`](Self::reconcile) with a per-call recovery override (#929).
+    pub async fn reconcile_opts(
+        &self,
+        rule: &str,
+        still_firing: &[String],
+        opts: ReconcileOpts,
+    ) -> Result<()> {
+        let recovery = opts.recover_after.unwrap_or(self.recovery);
         let action = {
             let mut active = self.active.lock().unwrap();
-            Self::retire(&mut active, |k, a| {
+            let now = Instant::now();
+            Self::retire(&mut active, now, recovery, |k, a| {
                 a.rule == rule && !still_firing.iter().any(|s| s == k)
             })
         };
@@ -225,21 +296,55 @@ impl AlertReporter {
     /// systemd's `overdue_secs`) put a per-sweep measurement into the labels
     /// minted a new key every sweep, none of which could ever be evicted, so
     /// the sensor watching for leaks leaked through its own alerting.
+    /// With a non-zero `recovery` (#929) a published entry is **not dropped on
+    /// the first clear sweep**: it is marked `clear_since` and held, resolving
+    /// only once it has stayed clear for the window. [`Self::observe`] clears
+    /// that mark, so a re-fire resets the clock and publishes nothing — the
+    /// alert never left `Firing`.
+    ///
+    /// With `recovery == ZERO`, the default and what every caller had before
+    /// this existed, the marking step is skipped and the behaviour is exactly
+    /// what it was.
     fn retire(
         active: &mut HashMap<String, ActiveAlert>,
+        now: Instant,
+        recovery: Duration,
         no_longer_violated: impl Fn(&str, &ActiveAlert) -> bool,
     ) -> Action {
-        let to_drop: Vec<String> = active
+        let selected: Vec<String> = active
             .iter()
             .filter(|(k, a)| no_longer_violated(k, a))
             .map(|(k, _)| k.clone())
             .collect();
         let mut payloads = Vec::new();
-        for k in to_drop {
-            if let Some(a) = active.remove(&k)
-                && a.published
-            {
-                payloads.push(a.last.resolved());
+        for k in selected {
+            let Some(entry) = active.get_mut(&k) else {
+                continue;
+            };
+            // An unpublished entry has nothing to retract and no window worth
+            // waiting out — dropping it is what resets its debounce clock.
+            if !entry.published {
+                active.remove(&k);
+                continue;
+            }
+            if recovery.is_zero() {
+                if let Some(a) = active.remove(&k) {
+                    payloads.push(a.last.resolved());
+                }
+                continue;
+            }
+            match entry.clear_since {
+                // First clear sweep: start the clock, publish nothing. The
+                // alert stays Firing on the bus, and truthfully so — the
+                // condition has been gone for one sweep, not for the window.
+                None => entry.clear_since = Some(now),
+                Some(since) if now.duration_since(since) >= recovery => {
+                    if let Some(a) = active.remove(&k) {
+                        payloads.push(a.last.resolved());
+                    }
+                }
+                // Still inside the window. Hold.
+                Some(_) => {}
             }
         }
         if payloads.is_empty() {
@@ -260,9 +365,31 @@ impl AlertReporter {
         label_value: &str,
         still_firing: &[String],
     ) -> Result<()> {
+        self.reconcile_labeled_opts(
+            rule,
+            label_key,
+            label_value,
+            still_firing,
+            ReconcileOpts::default(),
+        )
+        .await
+    }
+
+    /// [`reconcile_labeled`](Self::reconcile_labeled) with a per-call recovery
+    /// override (#929).
+    pub async fn reconcile_labeled_opts(
+        &self,
+        rule: &str,
+        label_key: &str,
+        label_value: &str,
+        still_firing: &[String],
+        opts: ReconcileOpts,
+    ) -> Result<()> {
+        let recovery = opts.recover_after.unwrap_or(self.recovery);
         let action = {
             let mut active = self.active.lock().unwrap();
-            Self::retire(&mut active, |k, a| {
+            let now = Instant::now();
+            Self::retire(&mut active, now, recovery, |k, a| {
                 a.rule == rule
                     && a.last.labels.get(label_key).map(String::as_str) == Some(label_value)
                     && !still_firing.iter().any(|s| s == k)
@@ -279,6 +406,14 @@ impl AlertReporter {
     /// matched), so a caller can name the alert it cleared (#651). Reporting
     /// what was resolved beats re-deriving it: a clear with no prior fire then
     /// links to nothing, rather than to a key that never existed.
+    /// **Bypasses the recovery window** (#929), deliberately.
+    ///
+    /// This path is driven by an explicit clear *event* — a linkUp trap, a
+    /// resolve notification — not by the absence of a violation in a sweep. A
+    /// recovery window exists to distinguish "gone" from "gone for a moment",
+    /// and an event that says the condition is over is not an absence of
+    /// evidence. Holding it for a timer would delay a fact the device has
+    /// already told us.
     pub async fn resolve_matching(
         &self,
         rule: &str,
@@ -409,6 +544,8 @@ impl AlertReporter {
                         first_seen: now,
                         last: alert,
                         published: true,
+                        // Adopted because it is firing NOW, per the seed.
+                        clear_since: None,
                     },
                 );
                 adopted += 1;
@@ -439,6 +576,9 @@ impl AlertReporter {
     }
 
     /// Resolve and tombstone every active alert (graceful shutdown).
+    /// Bypasses the recovery window (#929): a shutdown must leave nothing
+    /// firing behind, and "wait and see whether it recovers" is not something
+    /// a process that is exiting can offer.
     pub async fn resolve_all(&self) -> Result<()> {
         let payloads = {
             let mut active = self.active.lock().unwrap();
@@ -584,5 +724,236 @@ pub async fn serve_alerts_query(reporter: std::sync::Arc<AlertReporter>) {
                 Err(e) => tracing::warn!(error = %e, "failed to serialize alert"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    //! The recovery-window state machine (#929), tested against `retire`
+    //! directly with an injected clock.
+    //!
+    //! Injected rather than slept: the window is measured in seconds, and a
+    //! test that sleeps through one is a test nobody runs twice.
+
+    use super::*;
+    use zensight_common::{AlertKind, AlertSeverity, Protocol};
+
+    fn alert(rule: &str) -> Alert {
+        Alert::new(
+            "host1",
+            Protocol::Sysinfo,
+            AlertKind::Expectation,
+            rule,
+            AlertSeverity::Warning,
+            "over".to_string(),
+        )
+    }
+
+    fn firing(now: Instant, rule: &str) -> (String, ActiveAlert) {
+        let a = alert(rule);
+        (
+            a.alert_key(),
+            ActiveAlert {
+                rule: rule.to_string(),
+                severity: a.severity,
+                first_seen: now,
+                last: a,
+                published: true,
+                clear_since: None,
+            },
+        )
+    }
+
+    fn resolved_count(action: &Action) -> usize {
+        match action {
+            Action::Resolve(v) => v.len(),
+            _ => 0,
+        }
+    }
+
+    /// With no window configured, behaviour is byte-for-byte what it was: the
+    /// first clear sweep resolves. Every existing caller depends on this.
+    #[test]
+    fn a_zero_window_resolves_on_the_first_clear_sweep() {
+        let now = Instant::now();
+        let mut active: HashMap<String, ActiveAlert> = [firing(now, "r")].into_iter().collect();
+        let action = AlertReporter::retire(&mut active, now, Duration::ZERO, |_, a| a.rule == "r");
+        assert_eq!(resolved_count(&action), 1);
+        assert!(active.is_empty());
+    }
+
+    /// **The flap the window exists for.** Clear, then clear again inside the
+    /// window: still nothing on the bus, and the entry is still held.
+    #[test]
+    fn a_clear_inside_the_window_publishes_nothing_and_holds_the_entry() {
+        let t0 = Instant::now();
+        let mut active: HashMap<String, ActiveAlert> = [firing(t0, "r")].into_iter().collect();
+        let window = Duration::from_secs(30);
+
+        let action = AlertReporter::retire(&mut active, t0, window, |_, a| a.rule == "r");
+        assert_eq!(
+            resolved_count(&action),
+            0,
+            "the first clear sweep says nothing"
+        );
+        assert_eq!(active.len(), 1, "and the alert is still Firing on the bus");
+        assert!(active.values().next().unwrap().clear_since.is_some());
+
+        let action =
+            AlertReporter::retire(&mut active, t0 + Duration::from_secs(10), window, |_, a| {
+                a.rule == "r"
+            });
+        assert_eq!(resolved_count(&action), 0, "still inside the window");
+        assert_eq!(active.len(), 1);
+    }
+
+    /// …and once it has genuinely stayed clear for the window, it resolves.
+    #[test]
+    fn the_window_elapsing_resolves_exactly_once() {
+        let t0 = Instant::now();
+        let mut active: HashMap<String, ActiveAlert> = [firing(t0, "r")].into_iter().collect();
+        let window = Duration::from_secs(30);
+
+        AlertReporter::retire(&mut active, t0, window, |_, a| a.rule == "r");
+        let action =
+            AlertReporter::retire(&mut active, t0 + Duration::from_secs(30), window, |_, a| {
+                a.rule == "r"
+            });
+        assert_eq!(resolved_count(&action), 1);
+        assert!(active.is_empty(), "and nothing is left to resolve twice");
+    }
+
+    /// **The clock resets on a re-fire, and nothing is published** — the alert
+    /// never left `Firing`, so there is no transition. A value oscillating
+    /// across its threshold produces ONE document, not one per crossing.
+    #[test]
+    fn a_re_fire_inside_the_window_resets_the_clock_silently() {
+        let t0 = Instant::now();
+        let (key, entry) = firing(t0, "r");
+        let mut active: HashMap<String, ActiveAlert> = [(key.clone(), entry)].into_iter().collect();
+        let window = Duration::from_secs(30);
+
+        // Clear at t0 — clock starts.
+        AlertReporter::retire(&mut active, t0, window, |_, a| a.rule == "r");
+        assert!(active[&key].clear_since.is_some());
+
+        // Re-fire at t0+10. `observe` is what clears the mark; simulate the one
+        // line it runs, since the rest of `observe` needs a bus.
+        active.get_mut(&key).unwrap().clear_since = None;
+
+        // Clear again at t0+20. Had the clock NOT reset, t0+20 would be inside
+        // the original window but t0+40 would resolve; with the reset, the
+        // window restarts here.
+        AlertReporter::retire(&mut active, t0 + Duration::from_secs(20), window, |_, a| {
+            a.rule == "r"
+        });
+        let action =
+            AlertReporter::retire(&mut active, t0 + Duration::from_secs(45), window, |_, a| {
+                a.rule == "r"
+            });
+        assert_eq!(
+            resolved_count(&action),
+            0,
+            "45s after the first clear but only 25s after the re-fire — still held"
+        );
+
+        let action =
+            AlertReporter::retire(&mut active, t0 + Duration::from_secs(51), window, |_, a| {
+                a.rule == "r"
+            });
+        assert_eq!(resolved_count(&action), 1, "31s after the re-fire");
+    }
+
+    /// An entry still inside its `for:` debounce window has nothing to retract
+    /// and no window worth waiting out — it is dropped at once, whatever the
+    /// recovery setting, so its debounce clock resets.
+    #[test]
+    fn an_unpublished_entry_is_dropped_at_once_even_with_a_window() {
+        let t0 = Instant::now();
+        let (key, mut entry) = firing(t0, "r");
+        entry.published = false;
+        let mut active: HashMap<String, ActiveAlert> = [(key, entry)].into_iter().collect();
+
+        let action = AlertReporter::retire(&mut active, t0, Duration::from_secs(30), |_, a| {
+            a.rule == "r"
+        });
+        assert_eq!(resolved_count(&action), 0, "nothing was ever published");
+        assert!(active.is_empty(), "and the debounce clock resets");
+    }
+
+    /// The window holds an entry for at most its own length — it does not turn
+    /// a cleared alert into a permanent one. Selecting nothing leaves the
+    /// marked entry alone, so a rule that stops being evaluated entirely keeps
+    /// its alert rather than resolving it by silence.
+    #[test]
+    fn a_rule_that_is_not_reconciled_is_not_resolved_by_omission() {
+        let t0 = Instant::now();
+        let mut active: HashMap<String, ActiveAlert> = [firing(t0, "r")].into_iter().collect();
+        let window = Duration::from_secs(30);
+        AlertReporter::retire(&mut active, t0, window, |_, a| a.rule == "r");
+
+        // A different rule's sweep must not touch it, even long after.
+        let action = AlertReporter::retire(
+            &mut active,
+            t0 + Duration::from_secs(600),
+            window,
+            |_, a| a.rule == "other",
+        );
+        assert_eq!(resolved_count(&action), 0);
+        assert_eq!(active.len(), 1);
+    }
+
+    /// Two alerts under one rule keep independent clocks — the proxy-sensor
+    /// case, where one device clearing must not resolve another's.
+    #[test]
+    fn each_alert_keeps_its_own_recovery_clock() {
+        let t0 = Instant::now();
+        let a = alert("r").with_label("device", "one");
+        let b = alert("r").with_label("device", "two");
+        let mut active: HashMap<String, ActiveAlert> = [&a, &b]
+            .into_iter()
+            .map(|al| {
+                (
+                    al.alert_key(),
+                    ActiveAlert {
+                        rule: "r".to_string(),
+                        severity: al.severity,
+                        first_seen: t0,
+                        last: al.clone(),
+                        published: true,
+                        clear_since: None,
+                    },
+                )
+            })
+            .collect();
+        let window = Duration::from_secs(30);
+        let a_key = a.alert_key();
+
+        // Only `one` clears.
+        AlertReporter::retire(&mut active, t0, window, |k, _| k == a_key);
+        assert!(active[&a_key].clear_since.is_some());
+        assert!(active[&b.alert_key()].clear_since.is_none());
+
+        // …and only `one` resolves when its window elapses.
+        let action =
+            AlertReporter::retire(&mut active, t0 + Duration::from_secs(31), window, |k, _| {
+                k == a_key
+            });
+        assert_eq!(resolved_count(&action), 1);
+        assert_eq!(active.len(), 1, "the other device is untouched");
+    }
+
+    /// A per-call override beats the reporter default in both directions.
+    #[test]
+    fn the_per_call_override_wins_over_the_reporter_default() {
+        assert_eq!(
+            ReconcileOpts::immediate().recover_after,
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            ReconcileOpts::default().recover_after,
+            None,
+            "the default defers to the reporter"
+        );
     }
 }

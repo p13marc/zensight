@@ -843,3 +843,93 @@ async fn a_rule_this_build_no_longer_has_is_retired_not_adopted() {
     assert_eq!(s.kind(), zenoh::sample::SampleKind::Delete);
     assert_eq!(s.key_expr().to_string(), gone_key);
 }
+
+/// **The flap the recovery window exists for** (#929): a condition that
+/// clears and comes back inside the window puts **one** document on the bus,
+/// not a resolve-and-refire pair per crossing.
+///
+/// The state machine is unit-tested against an injected clock in
+/// `alert.rs`; this is the wire proof, with a window short enough to run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flap_inside_the_recovery_window_is_one_document_on_the_bus() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let sub = session
+        .declare_subscriber("v1/*/state/netlink/alert/*")
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json)
+        .with_recovery(Duration::from_secs(30));
+
+    let source = unique_source();
+    let alert = sample_alert(&source);
+
+    reporter
+        .observe(alert.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    let s = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+        .await
+        .expect("recv firing timed out")
+        .expect("recv firing");
+    let got: Alert = decode_auto(&s.payload().to_bytes()).expect("decode firing");
+    assert_eq!(got.state, AlertState::Firing);
+
+    // Clears — inside the window, so nothing goes out and the alert is still
+    // Firing on the bus. Truthfully so: it has been gone for one sweep, not
+    // for the window.
+    reporter
+        .reconcile("ssh-listening", &[])
+        .await
+        .expect("reconcile");
+    assert_eq!(
+        reporter.active_count(),
+        1,
+        "a cleared alert inside its window is still firing"
+    );
+
+    // …and comes back. The clock resets and nothing is published: the alert
+    // never left Firing, so there is no transition to announce.
+    reporter
+        .observe(alert.clone(), Some(Duration::ZERO))
+        .await
+        .expect("re-observe");
+
+    // Nothing further should have reached the bus at all.
+    let quiet = tokio::time::timeout(Duration::from_millis(600), sub.recv_async()).await;
+    assert!(
+        quiet.is_err(),
+        "a flap inside the recovery window must publish nothing further, got {:?}",
+        quiet.map(|s| s.map(|s| s.kind()))
+    );
+    assert_eq!(reporter.active_count(), 1);
+}
+
+/// With no window — the default, and what every caller had before #929 — a
+/// clear still resolves on the first sweep. The regression guard for
+/// "recovery is opt-in".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_default_reporter_still_resolves_immediately() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let alert = sample_alert(&unique_source());
+    reporter
+        .observe(alert, Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    assert_eq!(reporter.active_count(), 1);
+
+    reporter
+        .reconcile("ssh-listening", &[])
+        .await
+        .expect("reconcile");
+    assert_eq!(
+        reporter.active_count(),
+        0,
+        "no window configured means resolve on the first clear sweep"
+    );
+}
