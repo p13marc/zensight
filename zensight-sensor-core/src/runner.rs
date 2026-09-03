@@ -748,13 +748,31 @@ async fn grade_budget(
             {
                 tracing::warn!(error = %e, "sensor-budget: publish failed");
             }
-            if let Err(e) = reporter.reconcile(SENSOR_BUDGET_RULE, &[key]).await {
+            // Opts out of any recovery window the sensor configured (#929):
+            // the 80/95/75 band above IS this rule's hysteresis, and stacking
+            // a timer on top would delay a resolve the band has already
+            // decided is real.
+            if let Err(e) = reporter
+                .reconcile_opts(
+                    SENSOR_BUDGET_RULE,
+                    &[key],
+                    crate::alert::ReconcileOpts::immediate(),
+                )
+                .await
+            {
                 tracing::warn!(error = %e, "sensor-budget: reconcile failed");
             }
             true
         }
         None => {
-            if let Err(e) = reporter.reconcile(SENSOR_BUDGET_RULE, &[]).await {
+            if let Err(e) = reporter
+                .reconcile_opts(
+                    SENSOR_BUDGET_RULE,
+                    &[],
+                    crate::alert::ReconcileOpts::immediate(),
+                )
+                .await
+            {
                 tracing::warn!(error = %e, "sensor-budget: reconcile failed");
             }
             false
