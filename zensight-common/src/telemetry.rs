@@ -188,6 +188,12 @@ pub enum Protocol {
     /// content, permissions. Publishes alerts and one gauge
     /// (`assertions/failing`); strictly read-only, executes nothing.
     Hostspec,
+    /// Out-of-band hardware health (#953) — power supplies, fans, thermal
+    /// sensors and the chassis rollup, read from the BMC over Redfish. The
+    /// one place a physical fault is visible when the sensors never reach
+    /// hwmon, which on rack hardware is the normal case. Read-only: there is
+    /// no chassis reset and no IPMI power command.
+    Bmc,
     /// Proxmox VE (#818): the hypervisor as a hypervisor — guests and their
     /// `onboot`/firewall configuration, storage pools' allocated-vs-capacity,
     /// vzdump outcomes and sizes, cluster/HA/replication state. Polls the PVE
@@ -238,6 +244,7 @@ impl Protocol {
             Protocol::Container => "container",
             Protocol::Probe => "probe",
             Protocol::Historian => "historian",
+            Protocol::Bmc => "bmc",
         }
     }
 
@@ -247,6 +254,7 @@ impl Protocol {
         match self {
             Protocol::Logs => "Logs",
             Protocol::Pve => "PVE",
+            Protocol::Bmc => "BMC",
             _ => self.as_str(),
         }
     }
@@ -279,6 +287,7 @@ impl std::str::FromStr for Protocol {
             "container" => Ok(Protocol::Container),
             "probe" => Ok(Protocol::Probe),
             "historian" => Ok(Protocol::Historian),
+            "bmc" => Ok(Protocol::Bmc),
             _ => Err(()),
         }
     }

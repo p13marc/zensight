@@ -39,6 +39,7 @@ reference pages are under `<crate>/docs/`.
 | [zensight-sensor-systemd](../zensight-sensor-systemd/) | telemetry · units-and-actions · configuration |
 | [zensight-sensor-hostspec](../zensight-sensor-hostspec/) | assertions · configuration |
 | [zensight-sensor-container](../zensight-sensor-container/) | assertions · configuration |
+| [zensight-sensor-bmc](../zensight-sensor-bmc/) | assertions · configuration |
 | [zensight-sensor-probe](../zensight-sensor-probe/) | assertions · configuration |
 | [zensight-sensor-pve](../zensight-sensor-pve/) | assertions · configuration |
 | [zensight-correlator](../zensight-correlator/) | correlation · keyspace · storage |

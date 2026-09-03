@@ -9,6 +9,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-sensor-bmc` — out-of-band hardware health over Redfish** (#953,
+  epic #952 — SYS-SUP-001, and the blind spot behind -010).
+
+  Nothing in ZenSight read a power supply. `sysinfo`'s `collect.power` is RAPL
+  energy, hwmon fan RPM and battery capacity — a CPU-and-laptop surface. A grep
+  for `ipmi`, `redfish` or `power supply` matched **zero** files in the tree and
+  zero of the 567 tracker issues. On a server whose sensors sit behind a BMC and
+  never reach hwmon, which is most rack hardware, the platform reported nothing
+  about temperature or fans either: "temperature and fan speed" was met only on
+  hosts that happened to have hwmon.
+
+  **There is no action surface**, and two tests enforce it rather than one: the
+  first parses the registry slice and fails on any `kind = "write"`, the second
+  greps the sensor's own source for `Actions/`, `Chassis.Reset`, `.post(` and
+  `.patch(` — because a chassis reset could be issued without ever appearing in
+  a registry. A monitor that can power-cycle a server is a different threat
+  model from one that reads its fan speed; crossing that line is a decision for
+  its own issue with the #283 gate pattern.
+
+  Three rules the crate is arranged around, each of which the obvious
+  implementation gets wrong:
+
+  - **"Not measured" is never a zero.** A bay the BMC reports `Absent`
+    publishes `present: false` and **no watts** — even though the fixture (like
+    real firmware) leaves a stale `0.0` in the document. A `0 W` reads as a
+    supply drawing nothing, which is a different and wrong statement, and the
+    one an operator would act on. Same for a fan: `SpeedPercent` is a
+    percentage of maximum, a different quantity, and is deliberately *not* read
+    into an `rpm` series (#954's lesson) — while a fan genuinely stopped keeps
+    its zero, because there it *is* the measurement.
+  - **Every verdict is the BMC's own** `Health` / `State` / `Redundancy` enum,
+    never a threshold this sensor invented. The BMC knows the rating of the
+    hardware it is soldered to and we do not. Its own thresholds are published
+    *beside* each reading so a consumer can make the comparison the vendor
+    intended, and `thermal-critical` fires on the health verdict **or** on the
+    reading crossing that threshold, because firmware disagrees about which it
+    keeps up to date. A 200 °C reading with neither asserts nothing.
+  - **`Unknown` is not a fault**, and an unreachable BMC grades nothing.
+    `Unknown` is the BMC declining to say; treating it as a fault is paging on
+    missing data. And while a BMC is unreachable the component rules keep their
+    previous state rather than resolving — announcing that a failed supply is
+    fine because we cannot see it is worse than saying nothing. (The lesson
+    SNMP's `device_answered` guard already paid for.)
+
+  **The Redfish surface is discovered, not assumed.** Redfish 2020.4 deprecated
+  `Chassis/{id}/Power` and `Thermal` for `PowerSubsystem` and
+  `ThermalSubsystem`, and a great deal of shipped firmware serves only the old
+  pair. The client tries the new one, falls back, and **records which answered**
+  in the chassis document, because a reading absent on one is a different fact
+  from the same reading absent on the other. An e2e test drives both.
+
+  **TLS: two escape hatches that are not equivalent.** A BMC ships a
+  self-signed certificate out of the factory, so refusing to run against one
+  would only push operators to a worse workaround. `ca_file` is the right
+  answer and keeps verification on; `insecure` is the honest-but-loud one,
+  per-endpoint, never implied, and warned at **every** boot. Setting both is
+  refused at startup — `insecure` turns verification off entirely, so the CA
+  would never be consulted, and that contradiction is invisible at runtime. A
+  pinned fingerprint is not implemented and the docs say so rather than
+  half-building it.
+
+  `psu-absent` is off by default *and* requires having seen the bay populated
+  first: a chassis shipped with one supply in a two-bay backplane is normal and
+  permanent, and firing on it would mean every such machine arrives with a
+  standing alert nobody can clear.
+
+  The `ipmi` feature is off by default and is today **a flag whose client is a
+  stub** — deliberately, so the config shape, the startup refusal and the CI leg
+  are settled before a protocol client lands. Either way an `ipmi` endpoint is
+  refused at startup, naming the flag *and* naming Redfish as the working
+  alternative: a check that did not run is not evidence about the target.
+
+  Everything is published under the **reporting host's** origin with the
+  chassis in the key and in the labels (#883) — a managed chassis is a facet of
+  the vantage point that polls it, and an e2e test asserts every alert's
+  `source`. The BMC's view of the machine (serial, model, NIC MACs) also goes
+  out as third-party identity evidence, so it fuses in the catalog with that
+  machine's own sensors.
+
+  **Built against a fake, and said so.** There is no BMC on any build machine.
+  The `axum` fixture serves the seven shapes #953 names, including an absent
+  bay, a fan reporting only a percentage, and a BMC that serves neither
+  surface. Treat first contact with real hardware the way #947 treats Proxmox
+  and podman: as work still to do.
+
 - **NAS appliance profiles — array, disk and pool health** (#960, epic #952 —
   the appliance half of SYS-SUP-014).
 

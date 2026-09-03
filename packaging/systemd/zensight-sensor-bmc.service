@@ -1,0 +1,70 @@
+[Unit]
+Description=ZenSight BMC sensor (#953) — read-only out-of-band hardware health
+Documentation=https://git.marcpardo.eu/marcpardo/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-sensor-bmc --config /etc/zensight/bmc.json5
+# SIGTERM with time to publish offline status and tombstone firing alerts (#161).
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+Restart=on-failure
+RestartSec=10
+
+# The sensor makes HTTPS GETs to the BMCs named in its config and nothing else.
+# It holds no capability, writes nothing, and has no action surface at all — see
+# the crate docs: a monitor that can power-cycle a server is a different threat
+# model from one that reads its fan speed. Two tests enforce that, and this
+# empty CapabilityBoundingSet is the third line of the same defence.
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# The config and the BMC password. The password belongs in its own root-0600
+# file — never inline in the JSON5, and never in git. Under DynamicUser the
+# sensor cannot read a root-0600 file, so it is passed through systemd's
+# credential store instead:
+#
+#   LoadCredential=bmc.password:/etc/zensight/bmc.password
+#   password: "file:/run/credentials/zensight-sensor-bmc.service/bmc.password"
+#
+# which keeps the file root-0600 on disk and hands the sensor a copy no other
+# unit can read. One credential per endpoint if they differ: add another
+# LoadCredential line and point that endpoint's `password` at it.
+LoadCredential=bmc.password:/etc/zensight/bmc.password
+ReadOnlyPaths=/etc/zensight
+
+# A CA bundle for BMCs behind an internal CA, if `ca_file` names one. Read-only
+# and outside /etc/zensight so it can be managed separately.
+# ReadOnlyPaths=/etc/ssl/bmc-ca.pem
+
+# NOTE for the `ipmi` feature, when a client lands: IPMI over lanplus needs no
+# extra capability (it is UDP 623), but it does need AF_INET above, which is
+# already granted. Nothing here has to change.
+
+# A starting point, not a measurement (#812/#813): the sensor's own health doc
+# reports `self_stats.rss_bytes`, so size this from what it actually uses.
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

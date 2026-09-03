@@ -1,0 +1,106 @@
+// zensight-sensor-bmc — out-of-band hardware health over Redfish (#953).
+//
+// This sensor reads what no in-band sensor can see: power supplies, fans,
+// thermal sensors and the chassis rollup, from the machine's baseboard
+// management controller. It is READ-ONLY. There is no chassis reset, no IPMI
+// power command, and no write procedure of any kind.
+{
+  zenoh: {
+    mode: "peer",
+    connect: ["tcp/localhost:7447"],
+    listen: [],
+  },
+
+  serialization: "cbor",
+
+  bmc: {
+    // The reporting host. Leave it out and this machine's hostname is used.
+    //
+    // NOT an endpoint address, ever: everything here is published under the
+    // host that DID the polling (#883), and `127.0.0.1` — which a locally
+    // managed BMC is often reached on — is the one address guaranteed to be
+    // ambiguous across machines (#885).
+    // source: "mgmt01",
+
+    // Seconds between sweeps of each chassis. A BMC is a small embedded
+    // computer sharing a board with the thing keeping the server alive;
+    // 60 s is polite and plenty for hardware state. Floor: 10 s.
+    interval_secs: 60,
+
+    // Per-request timeout. MUST be shorter than the interval, and startup
+    // refuses it otherwise: a poll that can outlive its own tick is queued,
+    // not bounded.
+    timeout_secs: 10,
+
+    // In-flight requests across all endpoints.
+    max_concurrent: 4,
+
+    // Publish a third-party identity claim about each chassis — its serial,
+    // model and, where Redfish exposes them, its NIC MACs — so the BMC's view
+    // of a machine fuses in the catalog with that machine's own sensors.
+    evidence: true,
+
+    endpoints: [
+      // {
+      //   name: "rack-a-1",          // the key chunk and the alert label
+      //   address: "10.0.0.10",      // host or host:port, NOT a URL
+      //   transport: "redfish",      // "ipmi" needs --features ipmi
+      //   username: "monitor",
+      //
+      //   // Never in this file in a deployment. `file:` (root-0600) or
+      //   // ${ENV}; the systemd unit ships a LoadCredential for it.
+      //   password: "file:/run/credentials/zensight-sensor-bmc.service/bmc.password",
+      //
+      //   // A BMC ships a self-signed certificate out of the factory, so
+      //   // there are two escape hatches and they are not equivalent:
+      //   //
+      //   //   ca_file  — the RIGHT one. Point it at the CA that signed the
+      //   //              BMC's certificate and verification stays ON.
+      //   //   insecure — the honest-but-loud one. The endpoint is NOT
+      //   //              authenticated; the sensor says so at every boot.
+      //   //
+      //   // Setting both is refused at startup: `insecure` turns
+      //   // verification off entirely, so the CA would never be consulted.
+      //   // ca_file: "/etc/zensight/bmc-ca.pem",
+      //   // insecure: false,
+      //
+      //   // Per-chassis overrides for the two above.
+      //   // interval_secs: 120,
+      //   // timeout_secs: 15,
+      //
+      //   // Park a chassis without deleting its configuration.
+      //   // enabled: true,
+      // },
+    ],
+
+    // Every assertion below reads a verdict the BMC reached. NONE of them
+    // takes a threshold, and that is the design: the BMC knows the rating of
+    // the hardware it is soldered to and this sensor does not, so a number
+    // invented here would be a guess about someone else's silicon. The BMC's
+    // own thresholds are published beside each reading instead. Numeric
+    // thresholds of your own arrive with #931.
+    alerts: {
+      enabled: true,
+      for_secs: 0,          // continuous-violation debounce
+
+      // Consecutive failed sweeps before `bmc-unreachable`. While a BMC is
+      // unreachable the component rules keep their previous state rather than
+      // resolving: announcing that a failed supply is fine because we cannot
+      // see it is worse than saying nothing.
+      unreachable_cycles: 3,
+
+      // Fire when a bay that WAS populated reads absent. Off by default: a
+      // chassis shipped with one supply in a two-bay backplane is normal and
+      // permanent, and this sensor cannot tell that from a supply someone
+      // pulled — so on a fleet it would mean a standing alert nobody can
+      // clear. With it on, the rule still needs to have seen the bay
+      // populated first.
+      psu_absent: false,
+    },
+  },
+
+  logging: {
+    level: "info",
+    format: "text",
+  },
+}

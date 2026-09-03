@@ -155,6 +155,11 @@ pub fn overview_section<'a>(
             // generic table already renders exactly that; a bespoke view is a
             // follow-up, not a blocker for the sensor existing.
             Protocol::Pve => generic_overview(&protocol_devices, "guests"),
+            // #953: one device per managed chassis. The generic table renders
+            // the watts, the RPM and the temperatures; a chassis-shaped tab
+            // (a bay diagram, redundancy groups) is a follow-up, not a
+            // blocker for the sensor existing.
+            Protocol::Bmc => generic_overview(&protocol_devices, "chassis"),
             // #819: one device per container. The generic table renders the
             // gauges; a container-shaped tab (image digests, health, restart
             // history) is a follow-up, not a blocker.
@@ -314,6 +319,7 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
         Protocol::Parallax => "Parallax",
         Protocol::Hostspec => "hostspec",
         Protocol::Pve => "PVE",
+        Protocol::Bmc => "BMC",
         Protocol::Container => "Containers",
         Protocol::Probe => "Probes",
         Protocol::Historian => "History",

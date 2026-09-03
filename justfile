@@ -12,6 +12,7 @@
 #   just container      # the container sensor (#819) — needs a runtime socket
 #   just probe          # the outside-in probe sensor (#820) — needs targets
 #   just pve            # the Proxmox VE sensor (#818) — needs a PVE endpoint
+#   just bmc            # the BMC sensor (#953) — needs a Redfish endpoint
 #                       # and a read-only API token, so it is not in `just run`
 #   just rerun          # optional Rerun sidecar (evaluation, epic #415) — see the recipe
 #   just demo-actions   # install the inert unit + polkit rule that make gated
@@ -157,6 +158,7 @@ build:
         -p zensight-sensor-systemd \
         -p zensight-sensor-hostspec \
         -p zensight-sensor-pve \
+        -p zensight-sensor-bmc \
         -p zensight-sensor-container \
         -p zensight-sensor-probe \
         -p zensight-sensor-parallax \
@@ -315,6 +317,17 @@ probe config="configs/probe.json5": build
 container config="configs/container.json5": build
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false \
         {{bindir}}/zensight-sensor-container --config "{{trim_start_match(config, 'config=')}}"
+
+# Run the BMC sensor (#953). NOT part of `just run`: there is no baseboard
+# management controller on a dev box, and a sensor whose every endpoint is
+# unreachable would report a failure a minute for something the machine simply
+# does not have. Copy configs/bmc.json5, fill in an endpoint and a credential,
+# then:
+#   just bmc                       # uses .run/bmc.json5 if you put one there,
+#                                  # else configs/bmc.json5
+bmc config="configs/bmc.json5": build
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-sensor-bmc --config "{{trim_start_match(config, 'config=')}}"
 
 # Run the Proxmox VE sensor (#818). NOT part of `just run`: it needs a PVE API
 # endpoint and a read-only PVEAuditor token, which no demo can invent. Copy

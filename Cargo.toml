@@ -40,6 +40,14 @@ members = [
     "zensight-sensor-pve",
     "zensight-sensor-container",
     "zensight-sensor-probe",
+    # Out-of-band hardware health over Redfish (#953, epic #952). Nothing in
+    # the tree read a power supply: sysinfo's `collect.power` is RAPL energy,
+    # hwmon fans and battery capacity — a CPU-and-laptop surface. On rack
+    # hardware whose sensors sit behind a BMC and never reach hwmon, ZenSight
+    # reported nothing about temperature or fans either. Read-only, with the
+    # same `the_slice_declares_no_write_surface` test pve and probe carry: a
+    # monitor that can reset a chassis is a different threat model.
+    "zensight-sensor-bmc",
     # EVALUATION ONLY (epic #415): Rerun visualization adapter prototype.
     # publish = false, nothing depends on it; may be removed wholesale if the
     # evaluation concludes "do not adopt" (docs/plans/rerun/).

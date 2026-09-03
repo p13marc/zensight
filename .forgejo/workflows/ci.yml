@@ -228,6 +228,15 @@ jobs:
       - name: common --features linux-audit (tests)
         run: cargo test -p zensight-common --features linux-audit --locked
 
+      # bmc's IPMI transport (#953). Off by default, and today a flag whose
+      # client is a stub — which is exactly why it needs a leg: the startup
+      # refusal and its test are `cfg!`-branched, so a default build never
+      # type-checks the other arm.
+      - name: bmc --features ipmi
+        run: cargo clippy -p zensight-sensor-bmc --features ipmi --all-targets --locked -- -D warnings
+      - name: bmc --features ipmi (tests)
+        run: cargo test -p zensight-sensor-bmc --features ipmi --locked
+
       # netring detectors, each off by default and each pulling its own
       # upstream parser through the netring facade.
       - name: netring --features sigma
