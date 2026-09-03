@@ -2299,3 +2299,114 @@ async fn a_switch_is_not_a_ups() {
         assert!(firing(&events, rule).is_empty(), "{rule} fired on a switch");
     }
 }
+
+// ===========================================================================
+// NAS appliances — #960 (the appliance half of SYS-SUP-014)
+// ===========================================================================
+
+fn nas_alerts() -> SnmpAlertsConfig {
+    use zensight_sensor_snmp::alerts::OptionalPercentRule;
+    SnmpAlertsConfig {
+        interface_down: zensight_sensor_snmp::alerts::SimpleRule { enabled: false },
+        interface_errors: zensight_sensor_snmp::alerts::ErrorRateRule {
+            enabled: false,
+            per_sec: 1.0,
+        },
+        utilization: zensight_sensor_snmp::alerts::PercentRule {
+            enabled: false,
+            percent: 90.0,
+        },
+        // The array is 80% full in the fixture; 70 puts it over.
+        nas_volume_full: OptionalPercentRule {
+            enabled: true,
+            percent: Some(70.0),
+        },
+        ..SnmpAlertsConfig::default()
+    }
+}
+
+/// A degrading array and a failing disk, through the shipped `nas-synology`
+/// profile — and the state in between, which must say nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_synology_array_degrading_and_a_disk_failing_each_fire_once() {
+    let mib = SimMib::new().with_system_group().with_synology();
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("nas01", agent.addr());
+    device.profile = Some("nas-synology".to_string());
+
+    let ar = rig_with_profiles_and_alerts(device, nas_alerts()).await;
+
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert!(firing(&events, "nas_array_degraded").is_empty());
+    assert!(firing(&events, "nas_disk_failed").is_empty());
+    // 200 free of 1000 is 80% used, over the configured 70.
+    assert_eq!(firing(&events, "nas_volume_full").len(), 1);
+
+    // Expanding(4) is a planned operation, not a fault.
+    mib.set("1.3.6.1.4.1.6574.3.1.1.3.1", Value::Integer(4));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert!(
+        firing(&events, "nas_array_degraded").is_empty(),
+        "an expanding array is not a degraded one"
+    );
+
+    // Degrade(11) is.
+    mib.set("1.3.6.1.4.1.6574.3.1.1.3.1", Value::Integer(11));
+    mib.set("1.3.6.1.4.1.6574.2.1.1.5.2", Value::Integer(5)); // Crashed
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+
+    let arrays = firing(&events, "nas_array_degraded");
+    assert_eq!(arrays.len(), 1);
+    assert_eq!(arrays[0].labels["array_name"], "volume1");
+    let disks = firing(&events, "nas_disk_failed");
+    assert_eq!(disks.len(), 1);
+    assert_eq!(disks[0].labels["disk_name"], "/dev/sdb");
+
+    // Rebuilt.
+    mib.set("1.3.6.1.4.1.6574.3.1.1.3.1", Value::Integer(1));
+    mib.set("1.3.6.1.4.1.6574.2.1.1.5.2", Value::Integer(1));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert_eq!(resolved(&events, "nas_array_degraded").len(), 1);
+    assert_eq!(resolved(&events, "nas_disk_failed").len(), 1);
+}
+
+/// The vendor tree becomes telemetry under names that do not say "synology" —
+/// and `extends = ["host-resources"]` means hrStorage rides along, so an
+/// appliance whose vendor MIB is switched off still reports its capacity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_nas_profile_publishes_vendor_neutral_names_on_top_of_host_resources() {
+    let mib = SimMib::new()
+        .with_system_group()
+        .with_synology()
+        .with_host_resources();
+    let agent = SimAgent::start(mib).await;
+    let mut device = v2c_device("nas02", agent.addr());
+    device.profile = Some("nas-synology".to_string());
+    let rig = harness::rig_with_profiles(device).await;
+
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    let names: Vec<&str> = points.values().map(|p| p.metric.as_str()).collect();
+
+    for want in [
+        "nas/array/1/status",
+        "nas/array/1/total_bytes",
+        "nas/disk/1/status",
+        "nas/system/power_status",
+    ] {
+        assert!(names.contains(&want), "missing {want}");
+    }
+    // The inherited floor: the `extends` chain is what keeps this true when a
+    // vendor MIB is off, and it is the reason these profiles extend rather
+    // than replace.
+    for want in ["storage/1/size", "storage/1/used", "cpu/1/load"] {
+        assert!(
+            names.contains(&want),
+            "host-resources did not ride along: {want}"
+        );
+    }
+}

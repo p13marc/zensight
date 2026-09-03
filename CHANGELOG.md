@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NAS appliance profiles — array, disk and pool health** (#960, epic #952 —
+  the appliance half of SYS-SUP-014).
+
+  From the **client** side a NAS was already covered: `hostspec` asserts the
+  mount is present with the right options, `sysinfo` publishes per-mount space,
+  inodes and a time-to-full, `probe` checks the service answers. What none of
+  them can see is the box. `nas-synology`, `nas-qnap` and `nas-truenas`
+  `extends = ["host-resources"]` — not *instead of* it — so hrStorage keeps
+  giving the capacity floor even on an appliance whose vendor MIB is switched
+  off, and the vendor tree adds the array and disk health hrStorage has no
+  concept of.
+
+  Three rules: `nas_array_degraded`, `nas_disk_failed`, `nas_volume_full`. As
+  with #955, the refusals carry the design:
+
+  - **A Synology array that is repairing, expanding, migrating or syncing is
+    not degraded.** `raidStatus` puts eight planned operations between
+    `Normal(1)` and `Degrade(11)`; firing on them would page on every capacity
+    change. A test walks all eight.
+  - **An empty bay has not failed.** QNAP's `noDisk(-5)` is a bay with nothing
+    in it and `unknown(-4)` is the appliance declining to say. Neither is a
+    fault, and neither is "healthy" either — both leave the verdict unset.
+  - **`nas_volume_full` is not `storage_usage`.** hrStorage lists mounted
+    *filesystems*; a RAID group or a ZFS pool is not one, and a pool at 95 %
+    under a half-empty filesystem is exactly what it cannot see. No default
+    percentage, for the same reason as #955's.
+
+  **QNAP is where `extends` earns its place.** Its volume table reports total
+  size, free size *and* status as `DisplayString`s — `"2.75 TB"`, `"Ready"` —
+  not integers. Parsing a vendor's free-form size string is how a monitor
+  starts reporting confident wrong numbers, so those three are published as
+  text, no rule reads them, and hrStorage is the capacity rule for a QNAP. Its
+  disk table *is* an enum and `nas_disk_failed` reads it — including the detail
+  that its `hdStatus` DESCRIPTION contradicts its own SYNTAX, and the SYNTAX is
+  what the device sends.
+
+  Capacity arrives in two dialects — Synology reports **free** and total,
+  TrueNAS **used** and size — and each column lands in its own field, with the
+  ratio reconciled once the sweep is in. The first cut folded them on arrival
+  and depended on which column came first: a bug that would have shown on
+  exactly one vendor. A test drives both orders.
+
+  Every OID was read out of the vendor MIB (SYNOLOGY-SYSTEM-, -RAID- and
+  -DISK-MIB, QNAP's NAS-MIB, FREENAS-MIB) rather than remembered.
+  `nas-truenas` ships **only** the zpool table: the dataset and zvol tables
+  exist, but the table-versus-entry level was not confirmed against the MIB
+  itself, and an OID one arc wrong publishes a plausible number under a
+  right-looking name. Registry `version = "1.11"`, 37 new families.
+
+  Not validated against an appliance, and said so where a reader will meet it.
+
 - **UPS and PDU device profiles, and six rules that read them** (#955, epic
   #952 — SYS-SUP-002 *UPS state*, and the read half of -003).
 

@@ -240,15 +240,18 @@ so one device's recovery never resolves another's alerts.
 | `ups_load_high` | `upsOutputPercentLoad` above `percent` — **no default** | warning |
 | `pdu_outlet_off` | an outlet listed in `expect_on` reads off. An outlet the device did not report is **not** an outage, and a transition (Eaton `pendingOn`, Raritan `cycling`) is not off | critical |
 | `pdu_overload` | the PDU's **own** load verdict says near/over (APC `rPDU2DeviceStatusLoadState`), or inlet load is above `percent` — **no default** | warning |
+| `nas_array_degraded` | a RAID group or ZFS pool is degraded/crashed/faulted. A Synology array that is **repairing, expanding, migrating or syncing** is a planned operation and fires nothing | critical |
+| `nas_disk_failed` | a physical disk reports a failure. An **empty bay** (QNAP `noDisk`) and an appliance that declines to answer (`unknown`) are neither | critical |
+| `nas_volume_full` | a RAID group / ZFS pool above `percent` used — **no default**. Distinct from `storage_usage`: hrStorage lists mounted *filesystems*, and a pool at 95 % under a half-empty filesystem is exactly what it cannot see | warning |
 
-The last six read what the `ups` and `pdu-*` profiles walk (see *Device
+The last nine read what the `ups`, `pdu-*` and `nas-*` profiles walk (see *Device
 profiles* below). A device with neither profile produces no observation for
 them, so they reconcile empty every sweep and fire nothing — which is why they
 can default to enabled without an ordinary switch paying for the UPS tree.
 Unlike the interface rules, **their columns are not auto-added to the walk
 set**: pinning or matching a profile is what turns them on.
 
-**Why two of them ship without a number.** A five-minute line-interactive UPS
+**Why three of them ship without a number.** A five-minute line-interactive UPS
 under a switch and a sixty-minute one under a rack have different answers, and
 "80 % loaded" is a property of how a site sized its power, not of power. A
 default here would page the whole fleet the first time it ran. Both migrate to
@@ -525,7 +528,7 @@ supports it and keep v2c communities in files, not inline.
 ## Device profiles (#531)
 
 Onboarding needs only `name` + `address` + credentials: profiles supply the
-OID sets. Eight profiles ship **embedded in the binary**:
+OID sets. Eleven profiles ship **embedded in the binary**:
 
 | Profile | Match | Polls |
 |---------|-------|-------|
@@ -537,6 +540,9 @@ OID sets. Eight profiles ship **embedded in the binary**:
 | `pdu-apc` | `1.3.6.1.4.1.318.1.3.4` | PowerNet rPDU2 switched + metered outlet tables, device load state and power |
 | `pdu-eaton` | `1.3.6.1.4.1.534.6.6.7` | EATON-EPDU outlet designator/control status/current, inlet current and percent load |
 | `pdu-raritan` | `1.3.6.1.4.1.13742` | Raritan PDU outlet label/state/current |
+| `nas-synology` | `1.3.6.1.4.1.6574` | + `host-resources`: system/power/fan status, RAID group name/status/free/total, per-disk id/status/temperature/remaining life |
+| `nas-qnap` | `1.3.6.1.4.1.24681` | + `host-resources`: per-disk id/status/temperature/SMART summary, volume name/filesystem/size **as text** |
+| `nas-truenas` | `1.3.6.1.4.1.50536` | + `host-resources`: ZFS pool name/health/size/used/available and per-pool IO counters |
 
 ### Power: one set of names, three vendor trees (#955)
 
@@ -567,6 +573,32 @@ knowing before extending them:
 
 Validation against real hardware is still outstanding — see the caveats at the
 end of this page.
+
+### NAS: the appliance, on top of the client view (#960)
+
+From the **client** side a NAS is already covered: `hostspec` asserts the mount
+is present with the right options, `sysinfo` publishes per-mount space, inodes
+and a time-to-full, `probe` checks the service answers. What none of them can
+see is the box — which is why the three `nas-*` profiles
+`extends = ["host-resources"]` rather than replacing it: hrStorage keeps giving
+the capacity floor even on an appliance whose vendor MIB is switched off, and
+the vendor tree adds the array and disk health hrStorage has no concept of.
+
+`nas/array/*` (Synology RAID groups) and `nas/pool/*` (TrueNAS ZFS pools) are
+separate families on purpose. The columns are genuinely different — a pool
+reports used and size in *its own* allocation units, a RAID group free and
+total in bytes — and one family with half its columns absent per vendor would
+tell a consumer less, not more. The rules read both.
+
+**QNAP is where `extends` earns its place.** Its volume table reports total
+size, free size *and* status as `DisplayString`s — `"2.75 TB"`, `"Ready"` — not
+integers. Parsing a vendor's free-form size string is how a monitor starts
+reporting confident wrong numbers, so those three are published as text, no
+rule reads them, and `storage_usage` on hrStorage (which QNAP serves properly)
+is the capacity rule for a QNAP. Its disk table *is* an enum, and
+`nas_disk_failed` reads it — including the detail that its `hdStatus`
+DESCRIPTION contradicts its own SYNTAX, and the SYNTAX is what the device
+sends.
 
 Selection per device runs once, on the first cycle that reads
 `sysObjectID.0` (deferred while the device is unreachable): every `default`
@@ -716,6 +748,13 @@ used, never below — below is what would re-open a replay window.
   different sensor (NUT is not SNMP) and is not designed here. Treat first
   contact with a real UPS or PDU the way #947 treats Proxmox and podman: as
   work still to do, not as work the fake has done.
+- **The NAS profiles have not met an appliance either (#960)**, and the same
+  rule applied: every OID was read out of the vendor MIB (SYNOLOGY-SYSTEM-,
+  -RAID- and -DISK-MIB, QNAP's NAS-MIB, FREENAS-MIB) rather than remembered.
+  `nas-truenas` ships **only** the zpool table: the dataset and zvol tables
+  exist at `…50536.1.2` / `.1.3`, but the table-versus-entry level was not
+  confirmed against the MIB itself, and an OID one arc wrong publishes a
+  plausible number under a right-looking name.
 - The `ups` profile deliberately carries **no vendor OIDs** on top of RFC 1628,
   and `pdu-raritan` maps the legacy `13742.1` tree rather than PDU2-MIB, for
   the same reason: an OID guessed from memory publishes a plausible number

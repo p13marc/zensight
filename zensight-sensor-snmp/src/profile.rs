@@ -105,6 +105,12 @@ const BUILTIN_PROFILES: &[&str] = &[
     include_str!("../profiles/pdu-apc.toml"),
     include_str!("../profiles/pdu-eaton.toml"),
     include_str!("../profiles/pdu-raritan.toml"),
+    // NAS appliances (#960, SYS-SUP-014). Each extends `host-resources`: the
+    // vendor tree adds array and disk health hrStorage has no concept of, and
+    // hrStorage keeps giving the capacity floor if the vendor MIB is off.
+    include_str!("../profiles/nas-synology.toml"),
+    include_str!("../profiles/nas-qnap.toml"),
+    include_str!("../profiles/nas-truenas.toml"),
 ];
 
 impl ProfileSet {

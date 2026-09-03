@@ -148,6 +148,30 @@ impl SimMib {
         self
     }
 
+    /// A healthy Synology: one array, three disks, everything Normal (#960).
+    ///
+    /// Serves `raidFreeSize`/`raidTotalSize` — the free-and-total dialect, the
+    /// one whose column order the ingest must not depend on.
+    pub fn with_synology(self) -> Self {
+        self.set("1.3.6.1.4.1.6574.1.1.0", Value::Integer(1)); // systemStatus Normal
+        self.set("1.3.6.1.4.1.6574.1.3.0", Value::Integer(1)); // powerStatus Normal
+        self.set("1.3.6.1.4.1.6574.1.4.1.0", Value::Integer(1)); // systemFanStatus
+        self.set("1.3.6.1.4.1.6574.1.5.1.0", text("DS1821+"));
+        self.set("1.3.6.1.4.1.6574.3.1.1.2.1", text("volume1"));
+        self.set("1.3.6.1.4.1.6574.3.1.1.3.1", Value::Integer(1)); // raidStatus Normal
+        self.set("1.3.6.1.4.1.6574.3.1.1.4.1", Value::Counter64(200)); // free
+        self.set("1.3.6.1.4.1.6574.3.1.1.5.1", Value::Counter64(1000)); // total
+        for i in 1..=3u32 {
+            self.set(
+                &format!("1.3.6.1.4.1.6574.2.1.1.2.{i}"),
+                text(&format!("/dev/sd{}", (b'a' + i as u8 - 1) as char)),
+            );
+            self.set(&format!("1.3.6.1.4.1.6574.2.1.1.5.{i}"), Value::Integer(1)); // Normal
+            self.set(&format!("1.3.6.1.4.1.6574.2.1.1.6.{i}"), Value::Integer(34));
+        }
+        self
+    }
+
     /// Synthetic IF-MIB ifTable + ifXTable with `n` interfaces (indexes 1..=n).
     ///
     /// Interfaces come up admin-up/oper-up at 100 Mb/s with zeroed counters;
