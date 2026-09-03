@@ -20,6 +20,18 @@ thermal/power) and publishes it to Zenoh as `TelemetryPoint`s.
   published on `zensight/v1/<origin>/state/sysinfo/alert/*`.
 - **Process explorer** — a per-pid firehose served on demand at
   `@rpc/sysinfo/processes` (never streamed), with secret-scrubbed command lines (#302).
+- **GPU, opt-in** (#954) — inventory on `state/sysinfo/gpu/{card}` plus
+  utilisation, VRAM, temperature, power, fan and clock, read from the kernel's
+  DRM sysfs with **no vendor library**. What that costs is stated rather than
+  hidden: amdgpu publishes a busy percentage and Intel does not, so
+  **utilisation is absent on i915/xe** — a zero would say the GPU is idle.
+  Passthrough and vGPU both surface as a DRM card *inside* the guest, so a
+  guest running this sensor reports its own GPU with no host-side work.
+- **Clock discipline, opt-in** (#959) — `state/sysinfo/timesync` from
+  `chronyc -c tracking`, falling back to `timedatectl show`. **Absent when no
+  time daemon answers**, never a zero offset: a zero is what a perfectly
+  disciplined clock looks like. This is the half `probe`'s `ntp` check cannot
+  see — that one measures a server against *this* host's clock.
 - **Optional eBPF saturation histograms** (#99) — `runqlat` + `biolatency` log2
   histograms on `@rpc/sysinfo/latency`; opt-in build (`--features ebpf`) and off
   by default.

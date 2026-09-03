@@ -288,6 +288,22 @@ pub struct CollectConfig {
     /// the truth.
     #[serde(default)]
     pub timesync: bool,
+
+    /// Publish GPU inventory and telemetry from the kernel's DRM sysfs
+    /// (`/sys/class/drm/card*`) — #954.
+    ///
+    /// **Default OFF.** Not because it is expensive (it is a handful of sysfs
+    /// reads) but because it is new: a family that appears on every host in
+    /// the fleet with an upgrade is a surprise, and most hosts have no GPU
+    /// worth charting.
+    ///
+    /// No vendor library in a default build. What that costs is stated rather
+    /// than hidden: **amdgpu publishes a busy percentage and Intel does not**,
+    /// so utilisation is absent on i915/xe. An absent metric is the honest
+    /// answer; a zero would say the GPU is idle. The `nvml` build feature adds
+    /// the numbers only NVIDIA's library can give.
+    #[serde(default)]
+    pub gpu: bool,
 }
 
 impl Default for CollectConfig {
@@ -322,6 +338,7 @@ impl Default for CollectConfig {
             saturation_score: true,
             ebpf: false,
             timesync: false,
+            gpu: false,
         }
     }
 }

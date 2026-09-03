@@ -23,6 +23,7 @@
 pub mod alerts;
 pub mod collector;
 pub mod config;
+pub mod gpu;
 pub mod map;
 pub mod query;
 pub mod saturation;

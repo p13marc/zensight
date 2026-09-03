@@ -131,6 +131,65 @@ impl SystemCollector {
         }
     }
 
+    /// Publish GPU inventory and telemetry (#954).
+    ///
+    /// One `state/sysinfo/gpu/{card}` document per card — published even when
+    /// the card reports no numbers at all, because "there is a GPU here and it
+    /// tells us nothing" is itself worth knowing — plus whatever metrics the
+    /// driver exposed. A metric the driver does not publish is **absent**, not
+    /// zero.
+    async fn collect_gpu(&self, timestamp: i64) -> usize {
+        let mut published = 0;
+        for (info, m) in crate::gpu::read_cards(std::path::Path::new(crate::gpu::DRM_ROOT)) {
+            // Operator-facing and kernel-supplied, so slugged before it can
+            // reach a key — the #843 boundary.
+            let slug = zenkey::Chunk::slug(&info.card).to_string();
+            if let Ok(key) =
+                zensight_sensor_core::v1::for_producer("sysinfo").state_key(&["gpu", &slug])
+            {
+                let key: String = key.into();
+                if let Err(e) = self
+                    .registry
+                    .put_serializable(
+                        &key,
+                        &info,
+                        self.format,
+                        zensight_common::QosClass::HealthLiveness,
+                    )
+                    .await
+                {
+                    tracing::debug!(error = %e, card = %info.card, "sysinfo: gpu doc publish failed");
+                }
+            }
+            let labels: HashMap<String, String> = [
+                ("card".to_string(), info.card.clone()),
+                ("vendor".to_string(), info.vendor.clone()),
+            ]
+            .into_iter()
+            .collect();
+            for (metric, value) in [
+                ("utilisation_pct", m.utilisation_pct),
+                ("vram_used_bytes", m.vram_used_bytes),
+                ("vram_total_bytes", m.vram_total_bytes),
+                ("temp_celsius", m.temp_celsius),
+                ("power_watts", m.power_watts),
+                ("fan_rpm", m.fan_rpm),
+                ("clock_mhz", m.clock_mhz),
+            ] {
+                let Some(v) = value else { continue };
+                self.publish(
+                    &format!("gpu/{slug}/{metric}"),
+                    TelemetryValue::Gauge(v),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                published += 1;
+            }
+        }
+        published
+    }
+
     /// Publish the host's clock discipline on `state/sysinfo/timesync` (#959).
     ///
     /// Absent when no time daemon answers — the document is simply not
@@ -171,6 +230,10 @@ impl SystemCollector {
 
         if self.config.collect.timesync {
             self.publish_timesync().await;
+        }
+
+        if self.config.collect.gpu {
+            count += self.collect_gpu(timestamp).await;
         }
 
         if self.config.collect.cpu {

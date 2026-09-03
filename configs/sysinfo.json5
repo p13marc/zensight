@@ -164,6 +164,25 @@
       // the truth. This is the half `probe`'s ntp check cannot see — that one
       // measures a server against THIS host's clock.
       // timesync: true,
+
+      // GPU inventory and telemetry from the kernel's DRM sysfs (#954):
+      // `state/sysinfo/gpu/{card}` plus utilisation, VRAM, temperature, power,
+      // fan and clock where the driver exposes them.
+      //
+      // OFF by default — not because it is expensive (a handful of sysfs reads)
+      // but because it is new: a family appearing on every host in the fleet
+      // with an upgrade is a surprise, and most hosts have no GPU worth
+      // charting.
+      //
+      // NO VENDOR LIBRARY. What that costs is stated rather than hidden:
+      // amdgpu publishes a busy percentage and Intel does NOT, so utilisation
+      // is absent on i915/xe. An absent metric is the honest answer; a zero
+      // would say the GPU is idle.
+      //
+      // Per VM: passthrough and vGPU both surface as a DRM card INSIDE the
+      // guest, so a guest running this sensor reports its own GPU with no
+      // host-side work.
+      // gpu: true,
     },
 
     // Process-explorer privacy (#302): argv values whose key looks secret

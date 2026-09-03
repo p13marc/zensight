@@ -22,7 +22,7 @@
 # Sources: src/collector.rs (the `publish` helper) and src/map.rs.
 
 [registry]
-version = "1.5"
+version = "1.6"
 app = "zensight"
 convention = 1
 
@@ -1009,6 +1009,71 @@ since = "1.1"
 description = "charging status"
 
 # ── state ───────────────────────────────────────────────────────────────────
+[[subject]]
+path = "gpu/{card}"
+class = "state"
+type = "GpuInfo"
+cardinality = 16
+ttl_s = 900
+since = "1.6"
+description = "GPU inventory from the kernel's DRM sysfs (#954): vendor, driver, PCI id and product name where the driver publishes one. Published even for a card that reports no numbers — a GPU that tells us nothing is itself worth knowing. Opt-in (collect.gpu)"
+
+[[subject]]
+path = "gpu/{card}/utilisation_pct"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.6"
+description = "GPU busy percentage (#954). amdgpu's gpu_busy_percent; ABSENT on i915/xe, which expose no equivalent without perf counters — a zero would say the GPU is idle"
+
+[[subject]]
+path = "gpu/{card}/vram_used_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.6"
+description = "VRAM in use, from the driver's own accounting (#954)"
+
+[[subject]]
+path = "gpu/{card}/vram_total_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.6"
+description = "total VRAM the driver reports (#954)"
+
+[[subject]]
+path = "gpu/{card}/temp_celsius"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.6"
+description = "GPU temperature, converted from the kernel's millidegrees (#954)"
+
+[[subject]]
+path = "gpu/{card}/power_watts"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.6"
+description = "average GPU power draw, converted from the kernel's microwatts (#954)"
+
+[[subject]]
+path = "gpu/{card}/fan_rpm"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.6"
+description = "GPU fan speed where a fan is reported (#954)"
+
+[[subject]]
+path = "gpu/{card}/clock_mhz"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.6"
+description = "current GPU clock; hwmon freq1_input where present, else the i915/xe GT node (#954)"
+
 [[subject]]
 path = "timesync"
 class = "state"

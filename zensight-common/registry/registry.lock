@@ -612,6 +612,14 @@ subject	sysinfo	disk/{mount}/usage_percent	telemetry	TelemetryPoint
 subject	sysinfo	disk/{mount}/used	telemetry	TelemetryPoint
 subject	sysinfo	errors	state	ErrorReport
 subject	sysinfo	evidence/self	state	HostEvidence
+subject	sysinfo	gpu/{card}	state	GpuInfo
+subject	sysinfo	gpu/{card}/clock_mhz	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/fan_rpm	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/power_watts	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/temp_celsius	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/utilisation_pct	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/vram_total_bytes	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/vram_used_bytes	telemetry	TelemetryPoint
 subject	sysinfo	health	state	HealthSnapshot
 subject	sysinfo	memory/available	telemetry	TelemetryPoint
 subject	sysinfo	memory/buffers	telemetry	TelemetryPoint

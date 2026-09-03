@@ -261,6 +261,18 @@ fn edac_and_mdstat_metrics_are_registered() {
 /// check below, and the reverse family-coverage check (#648), which would
 /// otherwise report every collector-built family as unemitted.
 const COLLECTOR_INLINE_METRICS: &[&str] = &[
+    // gpu/* (#954). The BUILD emits all seven — `collect_gpu` publishes each
+    // one the driver exposed. Which of them a given host actually sees is a
+    // property of its hardware and driver (amdgpu publishes a busy
+    // percentage, i915 does not), and that is the same "property of the
+    // config, not the build" distinction the ledger comment below draws.
+    "gpu/card0/utilisation_pct",
+    "gpu/card0/vram_used_bytes",
+    "gpu/card0/vram_total_bytes",
+    "gpu/card0/temp_celsius",
+    "gpu/card0/power_watts",
+    "gpu/card0/fan_rpm",
+    "gpu/card0/clock_mhz",
     // system/*
     "system/uptime",
     "system/load",

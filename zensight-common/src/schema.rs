@@ -71,6 +71,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::RelationshipEvidence>("RelationshipEvidence")
         .json::<crate::Edge>("Edge")
         .json::<crate::TimesyncStatus>("TimesyncStatus")
+        .json::<crate::GpuInfo>("GpuInfo")
         .json::<crate::PdnsRecord>("PdnsRecord")
         .json::<crate::StreamStatus>("StreamStatus")
         .json::<crate::stream::FrameMeta>("FrameMeta")

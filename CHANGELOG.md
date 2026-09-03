@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GPU telemetry, from the kernel's DRM sysfs** (#954, part of #952 —
+  SYS-SUP-009/012's GPU half, **default-build portion**). GPU was absent from
+  the whole platform: `grep -ri 'nvidia\|nvml\|amdgpu\|/sys/class/drm'` matched
+  nothing, while `sysinfo` already carried twenty-five other `collect.*`
+  families and the requirement sheet names GPU twice.
+
+  A `collect.gpu` family, off by default, publishing
+  `state/sysinfo/gpu/{card}` (vendor, driver, PCI id, product name) plus
+  `utilisation_pct`, `vram_used_bytes`, `vram_total_bytes`, `temp_celsius`,
+  `power_watts`, `fan_rpm` and `clock_mhz` where the driver exposes them.
+
+  **No vendor library**, and what that costs is stated rather than hidden:
+  **amdgpu publishes a busy percentage and Intel does not**, so utilisation is
+  absent on i915/xe. An absent metric is the honest answer; a zero would say
+  the GPU is idle. The same rule runs through the whole reader — a file that
+  exists but does not parse (some drivers write `unknown`) is absent, not zero.
+
+  Units are converted, because the kernel's are not chart units: millidegrees →
+  °C, microwatts → W, Hz → MHz. Publishing `54000` on an axis labelled °C is
+  the failure this prevents, and the fixture test pins each conversion.
+
+  **Per VM, SYS-SUP-012 is met with no host-side work**: passthrough and vGPU
+  both surface as a DRM card *inside* the guest, so a guest running `sysinfo`
+  reports its own GPU. Host-side attribution of which guest owns which card
+  (joining `hostpci` from the pve guest config to the host's DRM inventory) is
+  deliberately **not** done and is a `pve` follow-up.
+
+  The reader takes its sysfs root as a parameter, so nine fixture tests cover
+  it against a synthetic `/sys/class/drm` tree: an amdgpu card with every
+  conversion checked, an Intel card whose utilisation must be *absent*, render
+  nodes and connectors skipped (the same device seen twice would otherwise
+  become two GPUs), sorted card order, two hwmon nodes resolving stably (the
+  temperature must not jump between sensors with no visible cause), a
+  vendor-less node, a host with no DRM at all, and an unparseable value.
+
+  **What this does not include: the `nvml` build feature.** The issue asks for
+  it, and it is left out deliberately — see the PR discussion. There is no
+  NVIDIA hardware on the development box or in CI, so a `nvml-wrapper`
+  integration could be compiled but never executed, and shipping an untested
+  vendor-library path that talks to hardware is a worse outcome than shipping
+  the half that is verified. NVIDIA cards still appear in the inventory here
+  via their DRM node. #954 stays open for that half.
+
 - **NTP is covered, both ends of it** (#959, part of #952 — SYS-SUP-013's NTP
   half). Before this, `grep -ri 'chrony\|sntp'` matched **nothing** in the
   tree: no clock offset, no sync state, no stratum. The only coverage was "is
