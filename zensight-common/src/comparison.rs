@@ -8,7 +8,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Comparison operators for threshold rules / metric expectations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// `JsonSchema` since #928: a `ThresholdsConfig` is a state-class `@desired`
+/// document, and the #815 gate wants a real schema for one rather than a
+/// summary.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub enum ComparisonOp {
     #[default]
     GreaterThan,

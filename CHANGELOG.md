@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ThresholdsConfig` — the vocabulary for a threshold a *sensor* owns**
+  (#928, epic #901).
+
+  ZenSight has two alerting authorities. One runs in every sensor: it has
+  `for`, adopt-on-restart, a seed queryable, and it publishes to the bus. The
+  other runs in one GUI's memory, has a 60-second cooldown, persists to a JSON
+  file on one laptop, and its alerts reach **nothing** — not the bus, not the
+  exporters, not the notifier. An operator who set a threshold there had made a
+  note to themselves that looked like monitoring. This is the vocabulary that
+  lets the sensor own the rule instead.
+
+  A rule is a metric-name glob plus optional label globs, an operator and a
+  value. `source` is just a label, which is what lets a **proxy** sensor — snmp,
+  gnmi, modbus — write one rule per polled device, or one for all of them,
+  without the vocabulary knowing proxies exist.
+
+  Four decisions in it:
+
+  - **`clear` is value hysteresis, and it must be on the quiet side.**
+    `recovered()` is deliberately *not* `!fires()`: between `clear` and `value`
+    a firing alert stays firing, and that gap is the whole point. A `clear` on
+    the loud side produces a rule that can fire and never recover, so
+    `validate()` refuses it and says which side it wanted.
+  - **`*` does not cross a `/`.** The `glob` crate's default is the opposite;
+    this sets `require_literal_separator` explicitly, so `if/*/in_errors.rate`
+    means what someone writing it means and `cpu/*` cannot quietly match a
+    deeper family. `**` is there for whoever does mean the subtree.
+  - **A non-finite threshold is refused rather than silently inert.** Every
+    comparison against NaN is false, so the rule would do nothing at all —
+    the worst outcome for something an operator wrote down to be told about.
+  - **An unknown summary placeholder survives verbatim.** `{lable.if_name}` in
+    the alert text is how an operator finds their typo; an empty gap where a
+    value should be reads as a missing measurement.
+
+  `validate()` reports every problem at once, and an invalid glob that ever
+  reaches the matcher matches **nothing** — a pattern that cannot compile
+  matching everything would turn a typo into a fleet-wide alert.
+
+  `ComparisonOp` gained `JsonSchema`: this is a state-class `@desired` document
+  and the #815 gate wants a real schema for one, not a summary.
+
 - **Gated PDU outlet power-cycle — the first write surface outside `systemd`**
   (#956, epic #952 — SYS-SUP-003 *secure remote power restart*). This closes
   epic #952.

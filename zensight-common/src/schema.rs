@@ -141,6 +141,8 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::bmc::ThermalSensor>("BmcThermalSensor")
         // container's state document (#819).
         .json::<crate::container::ContainerInfo>("ContainerInfo")
+        // Threshold rules a sensor owns (#928, epic #901).
+        .json::<crate::threshold::ThresholdsConfig>("ThresholdsConfig")
         // snmp's gated outlet control (#956) — the wire types the GUI reads
         // to render the gate before anyone clicks.
         .json::<crate::outlet::OutletAction>("OutletAction")
