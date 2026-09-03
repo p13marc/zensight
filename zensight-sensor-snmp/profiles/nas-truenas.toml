@@ -1,0 +1,38 @@
+# TrueNAS / FreeNAS (FREENAS-MIB, 1.3.6.1.4.1.50536) — #960, SYS-SUP-014.
+#
+# ZFS pools are the thing hrStorage cannot see: it lists mounted filesystems,
+# and a pool is not one. `zpoolHealth` is the appliance's own verdict, and
+# used/size are in the pool's own allocation units (column 3), which is why
+# `nas_volume_full` reads a ratio and never an absolute.
+#
+# Only the zpool table ships. The dataset and zvol tables exist
+# (`…50536.1.2` / `.1.3`) but the entry level was not confirmed against the
+# MIB itself, and an OID that is one arc wrong publishes a plausible number
+# under a right-looking name.
+name = "nas-truenas"
+extends = ["host-resources"]
+
+walks = [
+  "1.3.6.1.4.1.50536.1.1.1.1", # zpoolEntry
+]
+
+[oid_names]
+"1.3.6.1.4.1.50536.1.1.1.1.2" = "nas/pool/{index}/name"
+"1.3.6.1.4.1.50536.1.1.1.1.3" = "nas/pool/{index}/allocation_units"
+"1.3.6.1.4.1.50536.1.1.1.1.4" = "nas/pool/{index}/size"
+"1.3.6.1.4.1.50536.1.1.1.1.5" = "nas/pool/{index}/used"
+"1.3.6.1.4.1.50536.1.1.1.1.6" = "nas/pool/{index}/available"
+"1.3.6.1.4.1.50536.1.1.1.1.7" = "nas/pool/{index}/health"
+"1.3.6.1.4.1.50536.1.1.1.1.8" = "nas/pool/{index}/read_ops"
+"1.3.6.1.4.1.50536.1.1.1.1.9" = "nas/pool/{index}/write_ops"
+"1.3.6.1.4.1.50536.1.1.1.1.10" = "nas/pool/{index}/read_bytes"
+"1.3.6.1.4.1.50536.1.1.1.1.11" = "nas/pool/{index}/write_bytes"
+
+[oid_syntax]
+"1.3.6.1.4.1.50536.1.1.1.1.8" = "Counter64"
+"1.3.6.1.4.1.50536.1.1.1.1.9" = "Counter64"
+"1.3.6.1.4.1.50536.1.1.1.1.10" = "Counter64"
+"1.3.6.1.4.1.50536.1.1.1.1.11" = "Counter64"
+[match]
+default = false
+sys_object_id = ["1.3.6.1.4.1.50536"]

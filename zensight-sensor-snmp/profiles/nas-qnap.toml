@@ -1,0 +1,37 @@
+# QNAP QTS (NAS-MIB, 1.3.6.1.4.1.24681) — #960, SYS-SUP-014.
+#
+# QNAP is the reason `extends = ["host-resources"]` is load-bearing rather
+# than decorative. Its volume table reports total size, free size AND status
+# as **DisplayStrings** — "2.75 TB", "Ready" — not integers, so there is no
+# honest numeric rule to build on them: parsing a vendor's free-form size
+# string is how a monitor starts reporting confident wrong numbers. The
+# strings are published as text, and the capacity rule runs on hrStorage,
+# which QNAP serves properly.
+#
+# The disk table IS an enum, and `nas_disk_failed` reads it.
+#
+# Verified against NAS-MIB as shipped in librenms. Note that `hdStatus`'s
+# DESCRIPTION ("0:not availible, 1:availible") contradicts its own SYNTAX; the
+# enum is what the device sends.
+name = "nas-qnap"
+extends = ["host-resources"]
+
+walks = [
+  "1.3.6.1.4.1.24681.1.2.11.1", # systemHdTable entry
+  "1.3.6.1.4.1.24681.1.2.17.1", # systemVolumeTable entry
+]
+
+[oid_names]
+"1.3.6.1.4.1.24681.1.2.11.1.2" = "nas/disk/{index}/name"
+"1.3.6.1.4.1.24681.1.2.11.1.3" = "nas/disk/{index}/temperature_c"
+"1.3.6.1.4.1.24681.1.2.11.1.4" = "nas/disk/{index}/status"
+"1.3.6.1.4.1.24681.1.2.11.1.5" = "nas/disk/{index}/model"
+"1.3.6.1.4.1.24681.1.2.11.1.7" = "nas/disk/{index}/smart_info"
+"1.3.6.1.4.1.24681.1.2.17.1.2" = "nas/volume/{index}/name"
+"1.3.6.1.4.1.24681.1.2.17.1.3" = "nas/volume/{index}/filesystem"
+"1.3.6.1.4.1.24681.1.2.17.1.4" = "nas/volume/{index}/total_size_text"
+"1.3.6.1.4.1.24681.1.2.17.1.5" = "nas/volume/{index}/free_size_text"
+"1.3.6.1.4.1.24681.1.2.17.1.6" = "nas/volume/{index}/status_text"
+[match]
+default = false
+sys_object_id = ["1.3.6.1.4.1.24681"]

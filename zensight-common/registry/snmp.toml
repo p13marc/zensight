@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.10"
+version = "1.11"
 app = "zensight"
 convention = 1
 
@@ -412,6 +412,317 @@ cardinality = 1024
 since = "1.9"
 description = "used space in allocation units (hrStorageUsed)"
 
+
+# ── NAS appliances (#960, the appliance half of SYS-SUP-014) ─────────────────
+#
+# The CLIENT side of a NAS is already covered elsewhere: `hostspec` asserts the
+# mount is present with the right options, `sysinfo` publishes per-mount space,
+# inodes and time-to-full, `probe` checks the service answers. These families
+# are the appliance — array and disk health that no client-side sensor can see
+# — and they sit on top of `host-resources`, not instead of it, so an appliance
+# whose vendor MIB is switched off still reports its capacity.
+#
+# `nas/array/*` is Synology's RAID group and `nas/pool/*` is TrueNAS's ZFS
+# pool: separate families because the columns are genuinely different (a pool
+# reports used and size in ITS OWN allocation units, a RAID group reports free
+# and total in bytes), and one family with half its columns absent per vendor
+# would tell a consumer less, not more.
+
+[[subject]]
+path = "{device}/nas/system/status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.11"
+description = "Synology systemStatus: Normal(1) Failed(2) — Failed means a volume has crashed"
+
+[[subject]]
+path = "{device}/nas/system/temperature_c"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.11"
+description = "appliance temperature in degrees C"
+
+[[subject]]
+path = "{device}/nas/system/power_status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.11"
+description = "Normal(1) Failed(2) — one of the power supplies has failed"
+
+[[subject]]
+path = "{device}/nas/system/fan_status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.11"
+description = "Normal(1) Failed(2) — one of the chassis fans stopped"
+
+[[subject]]
+path = "{device}/nas/system/cpu_fan_status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.11"
+description = "Normal(1) Failed(2) — one of the CPU fans stopped"
+
+[[subject]]
+path = "{device}/nas/system/model"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.11"
+description = "appliance model name"
+
+[[subject]]
+path = "{device}/nas/system/firmware"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.11"
+description = "appliance firmware / DSM version"
+
+[[subject]]
+path = "{device}/nas/array/{index}/name"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "RAID group name (Synology raidName) or ZFS pool name (TrueNAS zpoolDescr)"
+
+[[subject]]
+path = "{device}/nas/array/{index}/status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "the appliance's own array verdict. Synology: Normal(1), Degrade(11), Crashed(12), and 2..10 are TRANSITIONS (repairing, migrating, expanding, creating, syncing, parity-checking, assembling, cancelling) that the rules deliberately do not treat as faults"
+
+[[subject]]
+path = "{device}/nas/array/{index}/free_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "Synology raidFreeSize"
+
+[[subject]]
+path = "{device}/nas/array/{index}/total_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "Synology raidTotalSize"
+
+[[subject]]
+path = "{device}/nas/array/{index}/hotspare_count"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "Synology raidHotspareCnt"
+
+[[subject]]
+path = "{device}/nas/disk/{index}/name"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.11"
+description = "disk id as the appliance names it (Synology diskID, QNAP hdDescr)"
+
+[[subject]]
+path = "{device}/nas/disk/{index}/model"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.11"
+description = "disk model string"
+
+[[subject]]
+path = "{device}/nas/disk/{index}/status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.11"
+description = "Synology: Normal(1) Initialized(2) NotInitialized(3) are all working disks, SystemPartitionFailed(4) and Crashed(5) are not. QNAP: ready(0); invalid(-6) and rwError(-9) are faults, while noDisk(-5) is an EMPTY BAY and unknown(-4) is the appliance declining to say"
+
+[[subject]]
+path = "{device}/nas/disk/{index}/temperature_c"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.11"
+description = "disk temperature in degrees C"
+
+[[subject]]
+path = "{device}/nas/disk/{index}/remaining_life_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.11"
+description = "Synology diskRemainLife — SSD wear headroom"
+
+[[subject]]
+path = "{device}/nas/disk/{index}/smart_info"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.11"
+description = "QNAP hdSmartInfo, the appliance's SMART summary string"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/name"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "ZFS pool name (TrueNAS zpoolDescr)"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/allocation_units"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "bytes per unit for the size/used/available columns below (zpoolAllocationUnits)"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/size"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "pool size in allocation units (zpoolSize)"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/used"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "pool space used in allocation units (zpoolUsed)"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/available"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "pool space available in allocation units (zpoolAvailable)"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/health"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "zpoolHealth: online(0) degraded(1) faulted(2) offline(3) unavail(4) removed(5) — for a pool, every non-online state is a fault"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/read_ops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "zpoolReadOps"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/read_ops.rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "derived per-second rate of the counter above"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/write_ops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "zpoolWriteOps"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/write_ops.rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "derived per-second rate of the counter above"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/read_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "zpoolReadBytes"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/read_bytes.rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "derived per-second rate of the counter above"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/write_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "zpoolWriteBytes"
+
+[[subject]]
+path = "{device}/nas/pool/{index}/write_bytes.rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "derived per-second rate of the counter above"
+
+[[subject]]
+path = "{device}/nas/volume/{index}/name"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "QNAP sysVolumeDescr"
+
+[[subject]]
+path = "{device}/nas/volume/{index}/filesystem"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "QNAP sysVolumeFS"
+
+[[subject]]
+path = "{device}/nas/volume/{index}/total_size_text"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "QNAP sysVolumeTotalSize. TEXT, not a number: QNAP serves it as a DisplayString (\"2.75 TB\"). Parsing a vendor's free-form size string is how a monitor starts reporting confident wrong numbers, so the capacity RULE runs on hrStorage instead, which QNAP serves properly"
+
+[[subject]]
+path = "{device}/nas/volume/{index}/free_size_text"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "QNAP sysVolumeFreeSize — text, see above"
+
+[[subject]]
+path = "{device}/nas/volume/{index}/status_text"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.11"
+description = "QNAP sysVolumeStatus — text, see above; no rule reads it because its vocabulary is undocumented"
 
 # ── Families the shipped profiles have always published (#955) ───────────────
 #

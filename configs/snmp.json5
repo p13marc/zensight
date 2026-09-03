@@ -173,6 +173,24 @@
       //     pdu_overload:   { enabled: true, percent: 80 },
       //   },
       // },
+
+      // A NAS appliance. `nas-synology`, `nas-qnap` and `nas-truenas` each
+      // EXTEND `host-resources`, so hrStorage capacity keeps working even if
+      // the vendor MIB is off — and the vendor tree adds the array and disk
+      // health hrStorage has no concept of.
+      // {
+      //   name: "nas-01",
+      //   address: "192.168.1.4:161",
+      //   version: "v3",
+      //   credentials: "readonly",
+      //   poll_interval_secs: 120,
+      //   profile: "nas-synology",
+      //   alerts: {
+      //     nas_array_degraded: { enabled: true },
+      //     nas_disk_failed:    { enabled: true },
+      //     nas_volume_full:    { enabled: true, percent: 85 },
+      //   },
+      // },
     ],
 
     // Standard SMI MIB directories (#532): drop vendor .mib files in and their
@@ -227,6 +245,15 @@
     //   pdu_overload:    { enabled: true },   // + percent: 80 (an APC also
     //                                         //   reports its OWN verdict,
     //                                         //   which wins where it exists)
+    //
+    //   // NAS appliances (#960), through the `nas-*` profiles. The client
+    //   // side of a NAS is covered by hostspec/sysinfo/probe already; these
+    //   // read the box. `nas_volume_full` is NOT `storage_usage`: hrStorage
+    //   // lists mounted filesystems, and a pool at 95% under a half-empty
+    //   // filesystem is exactly what it cannot see.
+    //   nas_array_degraded: { enabled: true },
+    //   nas_disk_failed:    { enabled: true },
+    //   nas_volume_full:    { enabled: true },  // + percent: 85
     // },
 
     // Predefined OID groups (reusable across devices)

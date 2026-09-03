@@ -36,6 +36,10 @@ const UPS_RUNTIME_LOW_RULE: &str = "ups_runtime_low";
 const UPS_LOAD_HIGH_RULE: &str = "ups_load_high";
 const PDU_OUTLET_OFF_RULE: &str = "pdu_outlet_off";
 const PDU_OVERLOAD_RULE: &str = "pdu_overload";
+// NAS appliances (#960, SYS-SUP-014 — the appliance half).
+const NAS_ARRAY_DEGRADED_RULE: &str = "nas_array_degraded";
+const NAS_DISK_FAILED_RULE: &str = "nas_disk_failed";
+const NAS_VOLUME_FULL_RULE: &str = "nas_volume_full";
 
 // ===========================================================================
 // Configuration
@@ -90,6 +94,18 @@ pub struct SnmpAlertsConfig {
     pub pdu_outlet_off: OutletRule,
     #[serde(default)]
     pub pdu_overload: OptionalPercentRule,
+
+    // ── NAS appliances (#960) ───────────────────────────────────────────
+    //
+    // The client side of a NAS is already covered (hostspec mounts, sysinfo
+    // space and fill-rate, probe reachability). These read the *appliance*,
+    // through the `nas-*` profiles, and are silent on a device with none.
+    #[serde(default)]
+    pub nas_array_degraded: SimpleRule,
+    #[serde(default)]
+    pub nas_disk_failed: SimpleRule,
+    #[serde(default)]
+    pub nas_volume_full: OptionalPercentRule,
 }
 
 impl Default for SnmpAlertsConfig {
@@ -110,6 +126,9 @@ impl Default for SnmpAlertsConfig {
             ups_load_high: OptionalPercentRule::default(),
             pdu_outlet_off: OutletRule::default(),
             pdu_overload: OptionalPercentRule::default(),
+            nas_array_degraded: SimpleRule::default(),
+            nas_disk_failed: SimpleRule::default(),
+            nas_volume_full: OptionalPercentRule::default(),
         }
     }
 }
@@ -315,6 +334,53 @@ pub struct CycleObservation {
     pub outlets: BTreeMap<String, OutletObservation>,
     /// Whole-PDU load, however the vendor expresses it.
     pub pdu: PduObservation,
+    /// NAS arrays / ZFS pools, keyed by table index (#960).
+    pub arrays: BTreeMap<String, ArrayObservation>,
+    /// NAS physical disks, keyed by table index.
+    pub disks: BTreeMap<String, DiskObservation>,
+}
+
+#[derive(Debug, Default)]
+pub struct ArrayObservation {
+    pub name: Option<String>,
+    /// `None` where the vendor reports a *transitional* state — a Synology
+    /// array that is expanding, syncing or being created is not a degraded
+    /// one, and firing on it would page every capacity change.
+    pub degraded: Option<bool>,
+    /// What the vendor reports directly, where it does (TrueNAS `zpoolUsed`).
+    pub used_bytes: Option<f64>,
+    /// The other dialect (Synology `raidFreeSize`). Kept as its own field
+    /// rather than converted on arrival: the two columns of one row arrive in
+    /// no guaranteed order, and a conversion that depends on which came first
+    /// is a bug that only shows up on one vendor.
+    pub free_bytes: Option<f64>,
+    pub total_bytes: Option<f64>,
+}
+
+impl ArrayObservation {
+    /// Used and total, whichever pair of columns the vendor served. `None`
+    /// unless BOTH are known — a ratio with a guessed denominator is a number
+    /// nobody should act on.
+    pub fn used_and_total(&self) -> Option<(f64, f64)> {
+        let total = self.total_bytes?;
+        if total <= 0.0 {
+            return None;
+        }
+        let used = match (self.used_bytes, self.free_bytes) {
+            (Some(used), _) => used,
+            (None, Some(free)) => (total - free).max(0.0),
+            (None, None) => return None,
+        };
+        Some((used, total))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct DiskObservation {
+    pub name: Option<String>,
+    /// `None` for "no verdict": QNAP's `noDisk(-5)` is an empty bay and
+    /// `unknown(-4)` is the appliance declining to say. Neither is a failure.
+    pub failed: Option<bool>,
 }
 
 /// RFC 1628 scalars the UPS rules read. Every field is `Option`: a UPS that
@@ -418,6 +484,50 @@ const PDU_PERCENT_LOAD_COLUMN: &str = "1.3.6.1.4.1.534.6.6.7.3.3.1.11";
 /// APC `rPDU2DeviceStatusLoadState`: lowLoad(1) normal(2) nearOverload(3)
 /// overload(4) notsupported(5).
 const PDU_LOAD_STATE_COLUMN: &str = "1.3.6.1.4.1.318.1.1.26.4.3.1.4";
+
+// ── NAS appliance columns, per vendor (#960) ──────────────────────────────
+//
+// Same shape as the PDU columns above and for the same reason: three vendors
+// name the same fact three ways, and the difference belongs here — beside the
+// OID it came from, where a reviewer can check it against the MIB — rather
+// than leaking into the rules.
+//
+// The status tables are `(column oid, healthy values, fault values)`. Anything
+// in **neither** list is a *transition* or a non-answer and leaves the verdict
+// `None`: a Synology array that is expanding is not degraded, and a QNAP bay
+// with no disk in it has not failed.
+const NAS_ARRAY_STATUS_COLUMNS: [(&str, &[i64], &[i64]); 2] = [
+    // Synology raidStatus: Normal(1); Degrade(11), Crashed(12); 2..=10 are
+    // repairing / migrating / expanding / deleting / creating / syncing /
+    // parity-checking / assembling / cancelling.
+    ("1.3.6.1.4.1.6574.3.1.1.3", &[1], &[11, 12]),
+    // TrueNAS zpoolHealth: online(0); degraded(1) faulted(2) offline(3)
+    // unavail(4) removed(5) — every non-online state is a fault for a pool.
+    ("1.3.6.1.4.1.50536.1.1.1.1.7", &[0], &[1, 2, 3, 4, 5]),
+];
+const NAS_DISK_STATUS_COLUMNS: [(&str, &[i64], &[i64]); 2] = [
+    // Synology diskStatus: Normal(1), Initialized(2), NotInitialized(3) are
+    // all working disks; SystemPartitionFailed(4) and Crashed(5) are not.
+    ("1.3.6.1.4.1.6574.2.1.1.5", &[1, 2, 3], &[4, 5]),
+    // QNAP hdStatus: ready(0); invalid(-6), rwError(-9). noDisk(-5) is an
+    // empty bay and unknown(-4) is the appliance declining to say.
+    ("1.3.6.1.4.1.24681.1.2.11.1.4", &[0], &[-6, -9]),
+];
+const NAS_ARRAY_NAME_COLUMNS: [&str; 2] = [
+    "1.3.6.1.4.1.6574.3.1.1.2",    // Synology raidName
+    "1.3.6.1.4.1.50536.1.1.1.1.2", // TrueNAS zpoolDescr
+];
+const NAS_DISK_NAME_COLUMNS: [&str; 2] = [
+    "1.3.6.1.4.1.6574.2.1.1.2",     // Synology diskID
+    "1.3.6.1.4.1.24681.1.2.11.1.2", // QNAP hdDescr
+];
+/// Synology `raidFreeSize` and `raidTotalSize` — free, not used.
+const NAS_SYNOLOGY_FREE_COLUMN: &str = "1.3.6.1.4.1.6574.3.1.1.4";
+const NAS_SYNOLOGY_TOTAL_COLUMN: &str = "1.3.6.1.4.1.6574.3.1.1.5";
+/// TrueNAS `zpoolSize` and `zpoolUsed`, in the pool's own allocation units —
+/// so the rule reads a RATIO and never an absolute.
+const NAS_TRUENAS_SIZE_COLUMN: &str = "1.3.6.1.4.1.50536.1.1.1.1.4";
+const NAS_TRUENAS_USED_COLUMN: &str = "1.3.6.1.4.1.50536.1.1.1.1.5";
 
 /// Walked columns the interface rules need. [`SnmpPoller`] auto-adds any of
 /// these not already covered by a configured walk when alerting is on.
@@ -573,6 +683,8 @@ impl CycleObservation {
                     let pct = n as f64;
                     self.pdu.percent_load =
                         Some(self.pdu.percent_load.map_or(pct, |cur| cur.max(pct)));
+                } else if self.ingest_nas(oid, value) {
+                    // handled
                 } else if index_after(oid, PDU_LOAD_STATE_COLUMN).is_some()
                     && let Some(n) = as_int(value)
                 {
@@ -589,6 +701,89 @@ impl CycleObservation {
                 }
             }
         }
+    }
+}
+
+/// A verdict from a `(healthy, fault)` pair: `None` for anything in neither,
+/// which is a transition or a non-answer rather than a fact about health.
+fn verdict(n: i64, healthy: &[i64], fault: &[i64]) -> Option<bool> {
+    if fault.contains(&n) {
+        Some(true)
+    } else if healthy.contains(&n) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+impl CycleObservation {
+    /// NAS appliance columns (#960). Returns whether the OID was one.
+    fn ingest_nas(&mut self, oid: &str, value: &async_snmp::Value) -> bool {
+        use async_snmp::Value;
+
+        for (column, healthy, fault) in NAS_ARRAY_STATUS_COLUMNS {
+            if let Some(index) = index_after(oid, column) {
+                if let Some(n) = as_int(value) {
+                    self.arrays.entry(index).or_default().degraded = verdict(n, healthy, fault);
+                }
+                return true;
+            }
+        }
+        for (column, healthy, fault) in NAS_DISK_STATUS_COLUMNS {
+            if let Some(index) = index_after(oid, column) {
+                if let Some(n) = as_int(value) {
+                    self.disks.entry(index).or_default().failed = verdict(n, healthy, fault);
+                }
+                return true;
+            }
+        }
+        for column in NAS_ARRAY_NAME_COLUMNS {
+            if let Some(index) = index_after(oid, column) {
+                if let Value::OctetString(bytes) = value {
+                    self.arrays.entry(index).or_default().name =
+                        String::from_utf8(bytes.to_vec()).ok();
+                }
+                return true;
+            }
+        }
+        for column in NAS_DISK_NAME_COLUMNS {
+            if let Some(index) = index_after(oid, column) {
+                if let Value::OctetString(bytes) = value {
+                    self.disks.entry(index).or_default().name =
+                        String::from_utf8(bytes.to_vec()).ok();
+                }
+                return true;
+            }
+        }
+        // Capacity. Synology reports FREE and total, TrueNAS used and size;
+        // each column lands in its own field and `used_and_total()` reconciles
+        // them once the sweep is in, so the order two columns of one row
+        // arrive in cannot change the answer.
+        if let Some(index) = index_after(oid, NAS_SYNOLOGY_TOTAL_COLUMN) {
+            if let Some(n) = as_int(value) {
+                self.arrays.entry(index).or_default().total_bytes = Some(n as f64);
+            }
+            return true;
+        }
+        if let Some(index) = index_after(oid, NAS_SYNOLOGY_FREE_COLUMN) {
+            if let Some(n) = as_int(value) {
+                self.arrays.entry(index).or_default().free_bytes = Some(n as f64);
+            }
+            return true;
+        }
+        if let Some(index) = index_after(oid, NAS_TRUENAS_SIZE_COLUMN) {
+            if let Some(n) = as_int(value) {
+                self.arrays.entry(index).or_default().total_bytes = Some(n as f64);
+            }
+            return true;
+        }
+        if let Some(index) = index_after(oid, NAS_TRUENAS_USED_COLUMN) {
+            if let Some(n) = as_int(value) {
+                self.arrays.entry(index).or_default().used_bytes = Some(n as f64);
+            }
+            return true;
+        }
+        false
     }
 }
 
@@ -1040,6 +1235,94 @@ fn evaluate(
             }
             out.push(RuleAlerts {
                 rule: PDU_OVERLOAD_RULE,
+                alerts,
+            });
+        }
+
+        // ── NAS appliance (#960) ────────────────────────────────────────
+
+        // --- nas_array_degraded ---------------------------------------------
+        if cfg.nas_array_degraded.enabled {
+            let mut alerts = Vec::new();
+            for (index, array) in &obs.arrays {
+                if array.degraded == Some(true) {
+                    let name = array
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("array {index}"));
+                    alerts.push(
+                        base(
+                            NAS_ARRAY_DEGRADED_RULE,
+                            AlertSeverity::Critical,
+                            format!("{device}: array {name} is degraded or crashed"),
+                        )
+                        .with_label("array", index.clone())
+                        .with_label("array_name", name),
+                    );
+                }
+            }
+            out.push(RuleAlerts {
+                rule: NAS_ARRAY_DEGRADED_RULE,
+                alerts,
+            });
+        }
+
+        // --- nas_disk_failed ------------------------------------------------
+        if cfg.nas_disk_failed.enabled {
+            let mut alerts = Vec::new();
+            for (index, disk) in &obs.disks {
+                if disk.failed == Some(true) {
+                    let name = disk.name.clone().unwrap_or_else(|| format!("disk {index}"));
+                    alerts.push(
+                        base(
+                            NAS_DISK_FAILED_RULE,
+                            AlertSeverity::Critical,
+                            format!("{device}: disk {name} has failed"),
+                        )
+                        .with_label("disk", index.clone())
+                        .with_label("disk_name", name),
+                    );
+                }
+            }
+            out.push(RuleAlerts {
+                rule: NAS_DISK_FAILED_RULE,
+                alerts,
+            });
+        }
+
+        // --- nas_volume_full ------------------------------------------------
+        //
+        // Distinct from `storage_usage`, which reads hrStorage: hrStorage lists
+        // mounted FILESYSTEMS, and a RAID group or a ZFS pool is not one. A
+        // pool at 95% with a half-empty filesystem on it is exactly the state
+        // an operator needs told about and hrStorage cannot see.
+        if cfg.nas_volume_full.enabled {
+            let mut alerts = Vec::new();
+            if let Some(limit) = cfg.nas_volume_full.percent {
+                for (index, array) in &obs.arrays {
+                    let Some((used, total)) = array.used_and_total() else {
+                        continue;
+                    };
+                    let percent = used / total * 100.0;
+                    if percent > limit {
+                        let name = array
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| format!("array {index}"));
+                        alerts.push(
+                            base(
+                                NAS_VOLUME_FULL_RULE,
+                                AlertSeverity::Warning,
+                                format!("{device}: {name} at {percent:.0}% used"),
+                            )
+                            .with_label("array", index.clone())
+                            .with_label("array_name", name),
+                        );
+                    }
+                }
+            }
+            out.push(RuleAlerts {
+                rule: NAS_VOLUME_FULL_RULE,
                 alerts,
             });
         }
@@ -1652,6 +1935,216 @@ mod tests {
         ] {
             assert_eq!(fired(&out, rule), 0, "{rule}");
         }
+    }
+
+    fn nas_cfg() -> SnmpAlertsConfig {
+        SnmpAlertsConfig {
+            nas_volume_full: OptionalPercentRule {
+                enabled: true,
+                percent: Some(85.0),
+            },
+            ..SnmpAlertsConfig::default()
+        }
+    }
+
+    /// Three vendors, three status enums, one observation. The numbers here
+    /// were read out of SYNOLOGY-RAID-MIB, SYNOLOGY-DISK-MIB, QNAP's NAS-MIB
+    /// and FREENAS-MIB — not remembered.
+    #[test]
+    fn nas_status_columns_map_to_one_verdict_per_vendor() {
+        use async_snmp::Value;
+        let mut obs = CycleObservation::default();
+
+        // Synology: Normal(1) healthy, Degrade(11)/Crashed(12) faults.
+        obs.ingest("1.3.6.1.4.1.6574.3.1.1.3.1", &Value::Integer(1), None);
+        obs.ingest("1.3.6.1.4.1.6574.3.1.1.3.2", &Value::Integer(11), None);
+        assert_eq!(obs.arrays["1"].degraded, Some(false));
+        assert_eq!(obs.arrays["2"].degraded, Some(true));
+
+        // …and everything between is a TRANSITION, not a fault. Expanding an
+        // array is a planned operation; paging on it would page on every
+        // capacity change.
+        for transitional in 2..=10 {
+            obs.ingest(
+                "1.3.6.1.4.1.6574.3.1.1.3.3",
+                &Value::Integer(transitional),
+                None,
+            );
+            assert_eq!(
+                obs.arrays["3"].degraded, None,
+                "Synology raidStatus {transitional} is a transition, not a fault"
+            );
+        }
+
+        // TrueNAS: online(0) healthy, every other state a fault for a pool.
+        obs.ingest("1.3.6.1.4.1.50536.1.1.1.1.7.1", &Value::Integer(0), None);
+        assert_eq!(obs.arrays["1"].degraded, Some(false));
+        obs.ingest("1.3.6.1.4.1.50536.1.1.1.1.7.4", &Value::Integer(2), None);
+        assert_eq!(obs.arrays["4"].degraded, Some(true));
+
+        // Synology disks: Normal/Initialized/NotInitialized all work.
+        for ok in [1, 2, 3] {
+            obs.ingest("1.3.6.1.4.1.6574.2.1.1.5.1", &Value::Integer(ok), None);
+            assert_eq!(obs.disks["1"].failed, Some(false), "diskStatus {ok}");
+        }
+        obs.ingest("1.3.6.1.4.1.6574.2.1.1.5.2", &Value::Integer(5), None); // Crashed
+        assert_eq!(obs.disks["2"].failed, Some(true));
+
+        // QNAP: ready(0) healthy; invalid(-6)/rwError(-9) faults; noDisk(-5)
+        // is an EMPTY BAY and unknown(-4) is the appliance declining to say.
+        obs.ingest("1.3.6.1.4.1.24681.1.2.11.1.4.1", &Value::Integer(0), None);
+        assert_eq!(obs.disks["1"].failed, Some(false));
+        obs.ingest("1.3.6.1.4.1.24681.1.2.11.1.4.3", &Value::Integer(-9), None);
+        assert_eq!(obs.disks["3"].failed, Some(true));
+        for neither in [-5, -4] {
+            obs.ingest(
+                "1.3.6.1.4.1.24681.1.2.11.1.4.4",
+                &Value::Integer(neither),
+                None,
+            );
+            assert_eq!(
+                obs.disks["4"].failed, None,
+                "QNAP hdStatus {neither} is not a failure"
+            );
+        }
+    }
+
+    /// Synology reports FREE and total, TrueNAS used and size. Both reconcile
+    /// to one ratio, in **either** arrival order — the bug that would only
+    /// show on one vendor.
+    #[test]
+    fn capacity_reconciles_whichever_dialect_and_order_it_arrives_in() {
+        use async_snmp::Value;
+
+        // Synology, total first.
+        let mut obs = CycleObservation::default();
+        obs.ingest("1.3.6.1.4.1.6574.3.1.1.5.1", &Value::Counter64(1000), None);
+        obs.ingest("1.3.6.1.4.1.6574.3.1.1.4.1", &Value::Counter64(100), None);
+        assert_eq!(obs.arrays["1"].used_and_total(), Some((900.0, 1000.0)));
+
+        // Synology, free first.
+        let mut obs = CycleObservation::default();
+        obs.ingest("1.3.6.1.4.1.6574.3.1.1.4.1", &Value::Counter64(100), None);
+        obs.ingest("1.3.6.1.4.1.6574.3.1.1.5.1", &Value::Counter64(1000), None);
+        assert_eq!(obs.arrays["1"].used_and_total(), Some((900.0, 1000.0)));
+
+        // TrueNAS.
+        let mut obs = CycleObservation::default();
+        obs.ingest("1.3.6.1.4.1.50536.1.1.1.1.4.1", &Value::Integer(1000), None);
+        obs.ingest("1.3.6.1.4.1.50536.1.1.1.1.5.1", &Value::Integer(910), None);
+        assert_eq!(obs.arrays["1"].used_and_total(), Some((910.0, 1000.0)));
+
+        // Half a pair is not a ratio: a denominator we guessed is a number
+        // nobody should act on.
+        let mut obs = CycleObservation::default();
+        obs.ingest("1.3.6.1.4.1.6574.3.1.1.4.1", &Value::Counter64(100), None);
+        assert_eq!(obs.arrays["1"].used_and_total(), None);
+    }
+
+    #[test]
+    fn nas_rules_fire_on_a_fault_and_stay_quiet_on_a_transition() {
+        let mut obs = CycleObservation::default();
+        obs.arrays.insert(
+            "1".to_string(),
+            ArrayObservation {
+                name: Some("volume1".to_string()),
+                degraded: Some(true),
+                used_bytes: Some(900.0),
+                free_bytes: None,
+                total_bytes: Some(1000.0),
+            },
+        );
+        obs.arrays.insert(
+            "2".to_string(),
+            ArrayObservation {
+                name: Some("expanding".to_string()),
+                degraded: None, // mid-expand
+                ..Default::default()
+            },
+        );
+        obs.disks.insert(
+            "5".to_string(),
+            DiskObservation {
+                name: Some("/dev/sde".to_string()),
+                failed: Some(true),
+            },
+        );
+
+        let out = evaluate(
+            "nas01",
+            &nas_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        let arrays = &out
+            .iter()
+            .find(|r| r.rule == NAS_ARRAY_DEGRADED_RULE)
+            .unwrap()
+            .alerts;
+        assert_eq!(arrays.len(), 1, "only the degraded one");
+        assert_eq!(arrays[0].labels["array_name"], "volume1");
+
+        let disks = &out
+            .iter()
+            .find(|r| r.rule == NAS_DISK_FAILED_RULE)
+            .unwrap()
+            .alerts;
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].labels["disk_name"], "/dev/sde");
+
+        // 90% of 1000 is over the 85% limit; the expanding array has no
+        // capacity pair and contributes nothing.
+        assert_eq!(fired(&out, NAS_VOLUME_FULL_RULE), 1);
+    }
+
+    /// A healthy appliance, and an unconfigured capacity limit.
+    #[test]
+    fn a_healthy_nas_fires_nothing_and_an_unset_limit_never_fires() {
+        let mut obs = CycleObservation::default();
+        obs.arrays.insert(
+            "1".to_string(),
+            ArrayObservation {
+                name: Some("volume1".to_string()),
+                degraded: Some(false),
+                used_bytes: Some(990.0),
+                free_bytes: None,
+                total_bytes: Some(1000.0),
+            },
+        );
+        obs.disks.insert(
+            "1".to_string(),
+            DiskObservation {
+                name: None,
+                failed: Some(false),
+            },
+        );
+
+        // Default config: no capacity limit, so 99% full says nothing.
+        let out = evaluate(
+            "nas01",
+            &SnmpAlertsConfig::default(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        for rule in [
+            NAS_ARRAY_DEGRADED_RULE,
+            NAS_DISK_FAILED_RULE,
+            NAS_VOLUME_FULL_RULE,
+        ] {
+            assert_eq!(fired(&out, rule), 0, "{rule}");
+        }
+
+        // With a limit, the same observation fires.
+        let out = evaluate(
+            "nas01",
+            &nas_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        assert_eq!(fired(&out, NAS_VOLUME_FULL_RULE), 1);
     }
 
     #[test]
