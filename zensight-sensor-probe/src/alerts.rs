@@ -22,9 +22,9 @@ pub const RULE_SAN_MISMATCH: &str = "probe-certificate-name-mismatch";
 pub const RULE_DNS_UNEXPECTED: &str = "probe-dns-unexpected-answer";
 /// #959. Fires on the **server's own statement** that it is not a usable time
 /// source — leap indicator 3, or a stratum-0 kiss-o'-death — never on an
-/// offset this sensor decided was too large. That number belongs to #931's
-/// `ThresholdsConfig`, and inventing one here is exactly the "a number this
-/// sensor cannot know" the rest of this file refuses.
+/// offset this sensor decided was too large. That number is an operator's and
+/// lives in a `ThresholdsConfig` rule (#931); inventing one here is exactly the
+/// "a number this sensor cannot know" the rest of this file refuses.
 pub const RULE_CLOCK_UNSYNCHRONISED: &str = "clock-unsynchronised";
 
 pub const ALL_RULES: &[&str] = &[

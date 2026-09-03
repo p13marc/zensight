@@ -4,7 +4,7 @@
 //! invented. That is not squeamishness: the BMC knows the rating of the
 //! hardware it is soldered to and we do not, so a threshold we made up would
 //! be a guess about someone else's silicon — worse information than none.
-//! Where an operator wants a numeric threshold it arrives with #931's
+//! Where an operator wants a numeric threshold it is a #931 rule in
 //! `ThresholdsConfig`, from someone who decided.
 //!
 //! `grade` is pure — no bus, no HTTP — so the whole rule table is testable

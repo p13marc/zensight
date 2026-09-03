@@ -244,7 +244,8 @@ impl Default for RebootRule {
 /// five-minute line-interactive UPS under a switch and a sixty-minute one under
 /// a rack have different answers, and a number invented here would page the
 /// whole fleet the first time it ran. Unset means the rule never fires; it
-/// migrates to #931's `ThresholdsConfig` when that lands.
+/// is expressible as a #931 `ThresholdsConfig` rule, per device or across all
+/// of them, without touching this table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MinutesRule {
     #[serde(default = "default_true")]

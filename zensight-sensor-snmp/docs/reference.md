@@ -255,7 +255,9 @@ set**: pinning or matching a profile is what turns them on.
 under a switch and a sixty-minute one under a rack have different answers, and
 "80 % loaded" is a property of how a site sized its power, not of power. A
 default here would page the whole fleet the first time it ran. Both migrate to
-the shared thresholds vocabulary when #931 lands.
+the shared thresholds vocabulary (#931): `thresholds` in the config, or
+`@rpc/snmp/thresholds/set` on a running sensor. `source` is a label there, so
+one rule names one device or matches every device this proxy polls.
 
 Config: a `snmp.alerts` block — `enabled` (default true), `for_secs`
 (continuous-violation debounce, default 0), and one sub-block per rule, each

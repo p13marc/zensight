@@ -22,7 +22,7 @@
 # file-config baseline).
 
 [registry]
-version = "1.2"
+version = "1.3"
 app = "zensight"
 convention = 1
 
@@ -115,3 +115,93 @@ cardinality = 10000
 ttl_s = 0
 since = "1.2"
 description = "desired threshold rule set for probe on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/snmp/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for snmp on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/netlink/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for netlink on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/netring/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for netring on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/container/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for container on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/pve/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for pve on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/bmc/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for bmc on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/parallax/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for parallax on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/gnmi/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for gnmi on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/modbus/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for modbus on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/netflow/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.3"
+description = "desired threshold rule set for netflow on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"

@@ -106,8 +106,8 @@ and that is true of a `chronyd` that has never reached a server: the daemon
 runs, the unit is green, and the clock is wrong.
 
 There is **no offset threshold** — a number this sensor cannot know, the same
-stance it takes on latency. `clock-offset-high` arrives with #931's shared
-`ThresholdsConfig`.
+stance it takes on latency. `clock-offset-high` is a `thresholds` rule an
+operator writes over the shared `ThresholdsConfig` (#931).
 
 ### What a burst is careful about
 
@@ -133,7 +133,8 @@ accept path — so the transport is published beside the numbers.
 There is **no built-in jitter or loss threshold**, for the reason this sensor
 refuses built-in latency thresholds: a number it cannot know. The figures go on
 the bus for the GUI, the exporters and the historian; thresholds arrive with
-the shared `ThresholdsConfig` (#931).
+the shared `ThresholdsConfig` — `thresholds` in the config, or
+`@rpc/probe/thresholds/set` on a running sensor (#931).
 
 ## Running it
 

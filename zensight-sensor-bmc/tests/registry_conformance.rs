@@ -49,13 +49,21 @@ fn every_registered_family_has_an_emitter() {
 /// gate pattern (default-off master switch, allowlist, a refusal that names
 /// the switch that refused). #956 is that decision being taken for PDU
 /// outlets; it is not this file's to make.
+///
+/// The allowlist is one entry long and is not an exception: `thresholds/set`
+/// (#931) rewrites what this sensor **alerts on** and reaches no BMC. It is
+/// declared `write` because #957 classifies a procedure that changes a host's
+/// behaviour as one whose outcome must reach that host's audit trail —
+/// accountability for "who changed the rules", not permission to act.
 #[test]
-fn the_slice_declares_no_write_surface() {
-    // Parsed, not grepped. `pve`, `probe` and `container` test this with
+fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
+    const ALLOWED: &[&str] = &["thresholds/set"];
+    // Parsed, not grepped. `pve`, `probe` and `container` tested this with
     // `!toml.contains("kind = \"write\"")`, which also matches the sentence in
     // a comment explaining that there is no write surface — it failed on the
     // first run here for exactly that reason. Asking the slice is both
-    // stronger and immune to its own documentation.
+    // stronger and immune to its own documentation. (They have since moved to
+    // this shape too, for the same reason.)
     let toml = zensight_common::registry::bmc::REGISTRY_TOML;
     let slice = zenkey::parse_slice(toml).expect("the shipped bmc slice parses");
     let writes: Vec<&str> = slice
@@ -68,6 +76,7 @@ fn the_slice_declares_no_write_surface() {
                 .is_some_and(|k| matches!(k, zenkey::slice::ProcedureKind::Write))
         })
         .map(|p| p.path.as_str())
+        .filter(|path| !ALLOWED.contains(path))
         .collect();
     assert!(
         writes.is_empty(),

@@ -13,7 +13,6 @@ mod rollup;
 
 use anyhow::Result;
 use config::NetFlowSensorConfig;
-use zensight_common::serialization::encode;
 use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 
 #[tokio::main]
@@ -101,6 +100,44 @@ async fn main() -> Result<()> {
     // rollup counters on a cadence through declared publishers.
     let registry = zensight_common::PublisherRegistry::new(session.clone());
     let mut runner = runner;
+
+    // This sensor's FIRST alerting surface (#931). It had none — no
+    // `AlertReporter`, no `alerts.rs`, no `alert/{alert_key}` subject — so an
+    // operator watching netflow rollups had nowhere for a threshold to land.
+    // The rules are the operator's; this sensor still asserts nothing of its
+    // own. Handing the reporter to the runner is what serves the late-joiner
+    // seed and makes the firing set survive a restart (#882).
+    let reporter = {
+        let mut r = zensight_sensor_core::AlertReporter::new(
+            runner.publisher(),
+            zensight_common::Protocol::Netflow,
+            format,
+        );
+        if let Some(id) = runner.identity() {
+            r = r.with_identity(id);
+        }
+        std::sync::Arc::new(r)
+    };
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    // `source` is a label in a `ThresholdRule`, so one rule can name one
+    // exporter or match every one that reports here.
+    let thresholds = zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Netflow,
+        reporter,
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::netflow_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    registry.set_observer(thresholds);
+
     runner.spawn(async move {
         let mut rollups = rollup::Rollups::default();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(rollup_period.max(1)));
@@ -120,16 +157,16 @@ async fn main() -> Result<()> {
                     let now = zensight_common::current_timestamp_millis();
                     for point in rollups.points(now) {
                         let key = format!("{key_prefix}/{}", point.metric);
-                        match encode(&point, format) {
-                            Ok(payload) => {
-                                if let Err(e) = registry
-                                    .put(&key, payload, zensight_common::QosClass::Telemetry)
-                                    .await
-                                {
-                                    tracing::error!("Failed to publish to {}: {}", key, e);
-                                }
-                            }
-                            Err(e) => tracing::error!("Failed to serialize rollup: {}", e),
+                        if let Err(e) = registry
+                            .put_point(
+                                &key,
+                                &point,
+                                zensight_common::QosClass::Telemetry,
+                                format,
+                            )
+                            .await
+                        {
+                            tracing::error!("Failed to publish to {}: {}", key, e);
                         }
                     }
                 }

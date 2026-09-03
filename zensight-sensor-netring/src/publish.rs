@@ -30,6 +30,11 @@ pub async fn run_drains(
         crate::disk::CaptureDiskHandle,
         crate::config::CaptureToDiskConfig,
     )>,
+    // The operator's threshold evaluator (#931). It is installed HERE and not
+    // in `main.rs` because the registry every aggregate point rides is built
+    // below, inside this function — an observer on the runner's publisher
+    // would watch a path netring's telemetry never takes.
+    thresholds: Arc<dyn zensight_common::point_observer::PointObserver>,
 ) {
     // This sensor monitors one capture host (itself).
     health.set_devices_total(1);
@@ -68,6 +73,7 @@ pub async fn run_drains(
         format,
         AdvancedPublisherConfig::default(),
     );
+    registry.set_observer(thresholds);
 
     let mut flow_tick = tokio::time::interval(Duration::from_secs(flow_period_secs.max(1)));
 

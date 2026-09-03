@@ -32,6 +32,20 @@ pub struct NetringSensorConfig {
     /// `sensor-budget` rule at 80% — declared, not enforced (#812).
     #[serde(default)]
     pub resources: ResourcesConfig,
+
+    /// `@desired` reconcile settings (#931): the kill switch and refresh
+    /// cadence. File config on purpose — the mechanism that could misbehave
+    /// must be disarmable from outside itself.
+    #[serde(default)]
+    pub desired: zensight_common::desired::DesiredConfig,
+
+    /// Operator-authored threshold rules over this sensor's own telemetry
+    /// (#931). **Empty by default** — this build ships no threshold that
+    /// fires. Also authorable fleet-wide on `@desired` and per-host over
+    /// `@rpc/netring/thresholds/set`; `state/netring/applied/thresholds`
+    /// says which of the three is in force.
+    #[serde(default)]
+    pub thresholds: zensight_common::threshold::ThresholdsConfig,
 }
 
 /// The declared resource envelope (#811).
@@ -957,6 +971,14 @@ impl SensorConfig for NetringSensorConfig {
     }
     fn producer(&self) -> &str {
         "netring"
+    }
+
+    fn desired(&self) -> zensight_common::desired::DesiredConfig {
+        self.desired.clone()
+    }
+
+    fn thresholds(&self) -> zensight_common::threshold::ThresholdsConfig {
+        self.thresholds.clone()
     }
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
         self.artifacts.clone()

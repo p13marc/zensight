@@ -11,7 +11,7 @@ use tokio_modbus::client::{Context, Reader};
 use tokio_modbus::prelude::*;
 use tracing::{debug, error, info, warn};
 use zenoh::Session;
-use zensight_common::serialization::{Format, encode};
+use zensight_common::serialization::Format;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
 /// Error type for polling operations.
@@ -57,6 +57,20 @@ impl ModbusPoller {
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,
         }
+    }
+
+    /// Install the operator's threshold evaluator on this poller's own
+    /// publisher registry (#931).
+    ///
+    /// A poller builds its registry in `new`, one per device, and every point
+    /// this sensor publishes rides one of them — the runner's publisher
+    /// carries none.
+    pub fn with_thresholds(
+        self,
+        observer: Arc<dyn zensight_common::point_observer::PointObserver>,
+    ) -> Self {
+        self.registry.set_observer(observer);
+        self
     }
 
     /// Run the polling loop.
@@ -335,18 +349,20 @@ impl ModbusPoller {
             unit: None,
         };
 
-        match encode(&point, self.format) {
-            Ok(payload) => {
-                if let Err(e) = self
-                    .registry
-                    .put(&key, payload, zensight_common::QosClass::Telemetry)
-                    .await
-                {
-                    warn!("Failed to publish to '{}': {}", key, e);
-                } else {
-                    debug!("Published: {} = {:?}", key, point.value);
-                }
-            }
+        // `put_point`, not `put`: the last place this is a `TelemetryPoint`
+        // rather than bytes, and where the operator's threshold rules see it
+        // (#931).
+        match self
+            .registry
+            .put_point(
+                &key,
+                &point,
+                zensight_common::QosClass::Telemetry,
+                self.format,
+            )
+            .await
+        {
+            Ok(()) => debug!("Published: {} = {:?}", key, point.value),
             Err(e) => {
                 warn!("Failed to encode telemetry: {}", e);
             }

@@ -103,4 +103,45 @@
     level: "info",
     format: "text",
   },
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Threshold rules (#931) — numbers YOU chose, about metrics this sensor
+  // publishes, evaluated on its own publish path and raised as alerts on
+  // state/bmc/alert/*.
+  //
+  // Empty by default: this build ships no threshold that fires. The same set
+  // is authorable fleet-wide on v1/@desired/state/<this-host>/bmc/
+  // thresholds and per-host over @rpc/bmc/thresholds/set; whichever
+  // wrote last is visible on state/bmc/applied/thresholds
+  // (source: file | desired | rpc).
+  //
+  // This is a PROXY: `source` is the polled device, so a rule matches one
+  // device with `labels: { source: "..." }` or all of them by leaving it out.
+  // thresholds: {
+  //   default_for_secs: 0,           // fire on the first violating sample
+  //   default_recover_after_secs: 0, // resolve as soon as it is clear again
+  //   rules: [
+  //     {
+  //       name: "inlet-hot",
+  //       metric: "*/thermal/*/celsius",  // glob; `*` does not cross `/`
+  //       // labels: { source: "chassis-a" },  // all label globs must match
+  //       op: "GreaterThan",            // GreaterThan | GreaterOrEqual | LessThan
+  //                                     // | LessOrEqual | Equal | NotEqual
+  //       value: 35.0,
+  //       clear: 30.0,                 // must cross back through this to resolve
+  //       for_secs: 60,                 // continuously violated for this long
+  //       recover_after_secs: 120,      // continuously clear for this long
+  //       severity: "warning",
+  //       summary: "{metric} is {value} on {source}",
+  //     },
+  //   ],
+  // },
+
+  // `@desired` fleet reconcile (#931): the kill switch lives HERE, in file
+  // config, so the mechanism that could misbehave is disarmable from outside
+  // itself.
+  // desired: {
+  //   enabled: true,
+  //   refresh_secs: 300,   // storage re-GET cadence (the primary path)
+  // },
 }

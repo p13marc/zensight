@@ -163,7 +163,13 @@ async fn main() -> Result<()> {
 
     // Threshold alerting (#528): one shared reporter, one evaluator per
     // device (rules/thresholds per device via `devices[].alerts` override).
-    let alert_reporter = if snmp_config.alerts.enabled {
+    //
+    // The reporter is unconditional since #931: `alerts.enabled` governs this
+    // sensor's own per-device evaluators, but an operator can push a threshold
+    // rule to a running sensor over `@desired` or `@rpc`, so a build that
+    // could not report an alert would have had to refuse a rule it had just
+    // declared it accepts.
+    let alert_reporter = {
         use zensight_common::Protocol;
         use zensight_sensor_core::AlertReporter;
         let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Snmp, serialization)
@@ -173,11 +179,32 @@ async fn main() -> Result<()> {
         }
         let reporter = Arc::new(reporter);
         runner = runner.with_alert_reporter(reporter.clone());
-        tracing::info!("SNMP threshold alerting enabled");
-        Some(reporter)
-    } else {
-        None
+        if snmp_config.alerts.enabled {
+            tracing::info!("SNMP threshold alerting enabled");
+        }
+        reporter
     };
+
+    // The operator's threshold rules over every metric this proxy polls
+    // (#931). `source` is a label in a `ThresholdRule`, so one rule can name
+    // one device or match them all — which is what the shared vocabulary was
+    // shaped for, without it needing to know that proxies exist. The evaluator
+    // is installed on each poller's own registry below, and on the trap
+    // receiver's, because that is where a polled point actually goes.
+    let thresholds = zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Snmp,
+        alert_reporter.clone(),
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::snmp_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Shared advanced-publisher registry for the per-device InterfaceTable
     // state docs (#529): cache 1 → late joiners seed the current doc.
@@ -237,7 +264,9 @@ async fn main() -> Result<()> {
             serialization,
         );
 
-        if let Some(reporter) = &alert_reporter {
+        poller.with_thresholds(thresholds.clone());
+
+        {
             let cfg = device
                 .alerts
                 .clone()
@@ -246,7 +275,7 @@ async fn main() -> Result<()> {
                 let evaluator = zensight_sensor_snmp::alerts::AlertEvaluator::new(
                     device.name.clone(),
                     cfg,
-                    reporter.clone(),
+                    alert_reporter.clone(),
                 );
                 poller.with_alerts(evaluator);
             }
@@ -391,8 +420,9 @@ async fn main() -> Result<()> {
         if let Some(smi) = &smi {
             trap_receiver.with_smi(smi.clone());
         }
-        if let Some(reporter) = &alert_reporter {
-            trap_receiver.with_alerts(reporter.clone());
+        trap_receiver.with_thresholds(thresholds.clone());
+        if snmp_config.alerts.enabled {
+            trap_receiver.with_alerts(alert_reporter.clone());
         }
 
         runner.spawn(async move {

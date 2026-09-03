@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every remaining sensor adopts thresholds; three get their first alerting
+  surface** (#931, epic #901) — snmp, netlink, netring, container, pve, bmc,
+  parallax, and `gnmi`/`modbus`/`netflow`, which had **no `AlertReporter`, no
+  `alerts.rs` and no `alert/{alert_key}` subject at all**. An operator watching
+  a gNMI counter or a Modbus register had nowhere for a threshold to land.
+  They still assert nothing of their own; the rules are the operator's.
+
+  **`source` was documented as matchable and was not.** `ThresholdsConfig`'s
+  module doc has said since #928 that `source` is a label, which is what lets a
+  proxy — snmp, gnmi, modbus — write one rule for one polled device or one for
+  all of them. `decide()` matched against the point's *labels* only, and
+  `source` is a `TelemetryPoint` field, not a label. The unit test that claimed
+  to cover it put `"source"` in `point.labels` — a shape no sensor emits — and
+  so passed while the feature did not work at all. Found from snmp's side,
+  against a real SNMP agent. The rule now matches against the labels **plus**
+  `source`, in a map separate from the one the alert carries: `source` is
+  already `alert.source`, and every label that reaches an alert is a label
+  `alert_key()` hashes.
+
+  **Four more sensors' telemetry went where the evaluator was not watching.**
+  snmp's poller and trap receiver, modbus's poller and netflow's rollup task
+  each encoded their own points and called `put`; gnmi hand-rolled the encode
+  in `process_notification`. All five now go through `put_point` — and gnmi's
+  private two-variant `SerializationFormat` gained a `From` into the shared
+  `Format` rather than duplicating the encode.
+
+  **The registries a sensor builds itself needed reaching, one shape each.**
+  `SnmpPoller`, `ModbusPoller` and `GnmiSubscriber` build one registry per
+  device or target inside their own constructors; netlink builds its
+  `AdvancedPublisherRegistry` in `Collector::new`; netring builds its inside
+  `run_drains`. Each grew a `with_thresholds` seam (netring, a parameter),
+  because an observer set on `runner.publisher()` would have looked installed
+  and evaluated nothing.
+
+  The `the_slice_declares_no_write_surface` guards on pve, container and bmc
+  are **narrowed rather than deleted**, to `…_beyond_its_own_rule_set` with a
+  one-entry allowlist, and pve's and container's now parse the slice instead of
+  grepping it — the grep form matches the sentence in the comment that explains
+  there is no write surface. `thresholds/set` is `write` because #957 says a
+  procedure that changes a host's behaviour must reach that host's audit trail:
+  accountability for *who changed the rules*, not permission to act. None of
+  the three can reach a guest, a container or a chassis, and each slice header
+  now says so.
+
+  Registry (all additive): `desired` 1.2 → 1.3, `snmp` 1.12 → 1.13, `netlink`
+  1.4 → 1.5, `netring` 1.3 → 1.4, `container` 1.1 → 1.2, `pve` 1.1 → 1.2,
+  `bmc` 1.0 → 1.1, `parallax` 1.9 → 1.10, `gnmi`/`modbus`/`netflow` 1.2 → 1.3.
+
 - **Threshold rules adopted by the first five sensors** (#931, epic #901) —
   `sysinfo`, `logs`, `systemd`, `hostspec` and `probe`, which is exactly the
   roster `scripts/conformance-verify.sh` stands up.

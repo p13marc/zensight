@@ -75,7 +75,12 @@ async fn main() -> Result<()> {
         pve.max_concurrent,
     )?);
 
-    let reporter = if pve.alerts.enabled {
+    // The shared reporter. Unconditional since #931: `alerts.enabled` governs
+    // this sensor's OWN judgements about a cluster, but an operator can push a
+    // threshold rule to a running sensor over `@desired` or `@rpc`, so a build
+    // that could not report an alert would have had to refuse a rule it had
+    // just declared it accepts.
+    let reporter = {
         let mut r = AlertReporter::new(runner.publisher(), zensight_common::Protocol::Pve, format)
             .with_debounce(Duration::from_secs(pve.alerts.for_secs))
             // The rule table this build can still raise, so a restart retires
@@ -84,12 +89,14 @@ async fn main() -> Result<()> {
         if let Some(id) = runner.identity() {
             r = r.with_identity(id);
         }
-        let r = Arc::new(r);
-        Some(r)
-    } else {
-        tracing::warn!("pve: alerts are disabled — telemetry only, nothing is asserted");
-        None
+        Arc::new(r)
     };
+    if !pve.alerts.enabled {
+        tracing::warn!(
+            "pve: this sensor's own assertions are disabled — telemetry only. \
+             Operator threshold rules (#931) still apply if any are set."
+        );
+    }
 
     // State documents ride an advanced publisher with cache 1, so a late
     // joiner (the GUI, a storage) seeds the current document rather than
@@ -133,14 +140,30 @@ async fn main() -> Result<()> {
         runner.publisher(),
         states,
         evidence,
-        reporter.clone(),
+        pve.alerts.enabled.then(|| reporter.clone()),
         runner.health(),
         zensight_sensor_core::relation::RelationSet::new("pve", runner.session().clone(), format),
     );
     runner.spawn(poller.run());
-    if let Some(r) = reporter {
-        runner = runner.with_alert_reporter(r);
-    }
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    // The operator's threshold rules over this sensor's own telemetry (#931):
+    // guest memory and CPU, storage fill, backup duration and size. Every one
+    // rides `Publisher::publish`; `states` and `evidence` carry documents.
+    zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Pve,
+        reporter,
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::pve_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     runner
         .run_with_metadata(Some(serde_json::json!({

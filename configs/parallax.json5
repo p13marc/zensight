@@ -117,4 +117,43 @@
     level: "info",     // trace, debug, info, warn, error
     format: "text",    // text or json
   },
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Threshold rules (#931) — numbers YOU chose, about metrics this sensor
+  // publishes, evaluated on its own publish path and raised as alerts on
+  // state/parallax/alert/*.
+  //
+  // Empty by default: this build ships no threshold that fires. The same set
+  // is authorable fleet-wide on v1/@desired/state/<this-host>/parallax/
+  // thresholds and per-host over @rpc/parallax/thresholds/set; whichever
+  // wrote last is visible on state/parallax/applied/thresholds
+  // (source: file | desired | rpc).
+  //
+  // thresholds: {
+  //   default_for_secs: 0,           // fire on the first violating sample
+  //   default_recover_after_secs: 0, // resolve as soon as it is clear again
+  //   rules: [
+  //     {
+  //       name: "encoder-backlog",
+  //       metric: "stream/*/queue_depth",  // glob; `*` does not cross `/`
+  //       // labels: { source: "*" },  // all label globs must match
+  //       op: "GreaterThan",            // GreaterThan | GreaterOrEqual | LessThan
+  //                                     // | LessOrEqual | Equal | NotEqual
+  //       value: 30.0,
+  //       clear: 10.0,                 // must cross back through this to resolve
+  //       for_secs: 60,                 // continuously violated for this long
+  //       recover_after_secs: 120,      // continuously clear for this long
+  //       severity: "warning",
+  //       summary: "{metric} is {value} on {source}",
+  //     },
+  //   ],
+  // },
+
+  // `@desired` fleet reconcile (#931): the kill switch lives HERE, in file
+  // config, so the mechanism that could misbehave is disarmable from outside
+  // itself.
+  // desired: {
+  //   enabled: true,
+  //   refresh_secs: 300,   // storage re-GET cadence (the primary path)
+  // },
 }

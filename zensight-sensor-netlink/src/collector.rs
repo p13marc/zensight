@@ -258,6 +258,20 @@ impl Collector {
         self.sentinel_wake.clone()
     }
 
+    /// Install the operator's threshold evaluator on this collector's own
+    /// publisher registry (#931).
+    ///
+    /// netlink builds its `AdvancedPublisherRegistry` in `new`, not in
+    /// `main.rs`, so an observer set on the runner's publisher would watch a
+    /// path none of this sensor's 106 metric families takes.
+    pub fn with_thresholds(
+        self,
+        observer: Arc<dyn zensight_common::point_observer::PointObserver>,
+    ) -> Self {
+        self.registry.set_observer(observer);
+        self
+    }
+
     /// Use the runner's shared health tracker (so updates reach the published
     /// `state/netlink/health` snapshot). Without this the collector updates a local tracker.
     pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {

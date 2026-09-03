@@ -53,9 +53,47 @@ async fn main() -> Result<()> {
     // Serialization format (default to JSON)
     let format = Format::Json;
 
+    // This sensor's FIRST alerting surface (#931). It had none — no
+    // `AlertReporter`, no `alerts.rs`, no `alert/{alert_key}` subject — so an
+    // operator watching modbus metrics had nowhere for a threshold to land.
+    // The rules are the operator's; this sensor still asserts nothing of its
+    // own. Handing the reporter to the runner is what serves the late-joiner
+    // seed and makes the firing set survive a restart (#882).
+    let reporter = {
+        let mut r = zensight_sensor_core::AlertReporter::new(
+            runner.publisher(),
+            zensight_common::Protocol::Modbus,
+            format,
+        );
+        if let Some(id) = runner.identity() {
+            r = r.with_identity(id);
+        }
+        std::sync::Arc::new(r)
+    };
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    // `source` is a label in a `ThresholdRule`, so one rule can name one
+    // device or match every device this proxy polls — which is what the shared
+    // vocabulary was shaped for, without it needing to know proxies exist.
+    let thresholds = zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Modbus,
+        reporter,
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::modbus_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     // Start pollers for each device
     for device in &modbus_config.devices {
-        let poller = ModbusPoller::new(device.clone(), &modbus_config, session.clone(), format);
+        let poller = ModbusPoller::new(device.clone(), &modbus_config, session.clone(), format)
+            .with_thresholds(thresholds.clone());
 
         info!(
             "Starting poller for device '{}' ({:?})",

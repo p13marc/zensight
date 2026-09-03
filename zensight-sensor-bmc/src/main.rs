@@ -70,7 +70,13 @@ async fn main() -> Result<()> {
     let format = runner.config().serialization;
     runner = runner.with_format(format).with_identity();
 
-    let reporter = if bmc.alerts.enabled {
+    // The shared reporter. Unconditional since #931: `alerts.enabled` governs
+    // this sensor's OWN judgements about a chassis, but an operator can push a
+    // threshold rule to a running sensor over `@desired` or `@rpc`, so a build
+    // that could not report an alert would have had to refuse a rule it had
+    // just declared it accepts. This is also where the crate docs' promise
+    // lands — "numeric thresholds of your own arrive with #931".
+    let reporter = {
         let mut r = AlertReporter::new(runner.publisher(), zensight_common::Protocol::Bmc, format)
             .with_debounce(Duration::from_secs(bmc.alerts.for_secs))
             // The rule table this build can still raise, so a restart retires
@@ -79,11 +85,14 @@ async fn main() -> Result<()> {
         if let Some(id) = runner.identity() {
             r = r.with_identity(id);
         }
-        Some(Arc::new(r))
-    } else {
-        tracing::warn!("bmc: alerts are disabled — telemetry only, nothing is asserted");
-        None
+        Arc::new(r)
     };
+    if !bmc.alerts.enabled {
+        tracing::warn!(
+            "bmc: this sensor's own assertions are disabled — telemetry only. \
+             Operator threshold rules (#931) still apply if any are set."
+        );
+    }
 
     // State documents ride an advanced publisher with cache 1, so a late
     // joiner seeds the current document instead of waiting a whole interval to
@@ -123,13 +132,30 @@ async fn main() -> Result<()> {
         runner.publisher(),
         states,
         evidence,
-        reporter.clone(),
+        bmc.alerts.enabled.then(|| reporter.clone()),
         runner.health(),
     );
     runner.spawn(poller.run());
-    if let Some(r) = reporter {
-        runner = runner.with_alert_reporter(r);
-    }
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    // The operator's threshold rules over this sensor's own telemetry (#931):
+    // watts, RPM, and the thermal readings this sensor deliberately publishes
+    // WITHOUT a judgement of its own beside the BMC's stated thresholds. This
+    // is the promised way to say "and 78 °C is too hot for me".
+    zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Bmc,
+        reporter,
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::bmc_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     runner
         .run_with_metadata(Some(serde_json::json!({
