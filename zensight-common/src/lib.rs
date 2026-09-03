@@ -38,6 +38,7 @@ pub mod interfaces;
 pub mod keyexpr;
 pub mod media;
 pub mod metric_guard;
+pub mod outlet;
 pub mod pipeline_health;
 pub mod probe;
 pub mod publisher_registry;

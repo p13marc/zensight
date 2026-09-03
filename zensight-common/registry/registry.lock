@@ -110,6 +110,10 @@ procedure	probe	describe	read	-	SchemaSet
 procedure	probe	introspect	read	-	RegistrySlice
 procedure	pve	describe	read	-	SchemaSet
 procedure	pve	introspect	read	-	RegistrySlice
+procedure	snmp	action	read	-	OutletStatus
+procedure	snmp	action/capability	read	-	OutletCapability
+procedure	snmp	action/set	write	OutletAction	OutletStatus
+procedure	snmp	actions	read	-	Vec<OutletStatus>
 procedure	snmp	artifact/cancel	write	-	Ack
 procedure	snmp	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	snmp	artifact/status	read	-	ArtifactStatus

@@ -141,6 +141,12 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::bmc::ThermalSensor>("BmcThermalSensor")
         // container's state document (#819).
         .json::<crate::container::ContainerInfo>("ContainerInfo")
+        // snmp's gated outlet control (#956) — the wire types the GUI reads
+        // to render the gate before anyone clicks.
+        .json::<crate::outlet::OutletAction>("OutletAction")
+        .json::<crate::outlet::OutletStatus>("OutletStatus")
+        .json::<crate::outlet::OutletCapability>("OutletCapability")
+        .json::<Vec<crate::outlet::OutletStatus>>("Vec<OutletStatus>")
         // probe's state document (#820).
         .json::<crate::probe::ProbeResult>("ProbeResult")
         // ── registry drift the table makes visible (RFC 08 §5) ────────────

@@ -945,7 +945,12 @@ fn rate_unit_for(metric_name: &str) -> &'static str {
 
 /// Build a lightweight client for a discovery probe (#541): same auth
 /// mapping as the poller, no engine seeding.
-pub(crate) async fn build_probe_client(device: &DeviceConfig) -> Result<Client<UdpHandle>> {
+///
+/// Also the client the gated outlet action uses (#956) — with a device whose
+/// credentials are the WRITE set, never the read one. Sharing the constructor
+/// is the point: one auth mapping, so a v3 privacy rule cannot be right on the
+/// read path and wrong on the write one.
+pub async fn build_probe_client(device: &DeviceConfig) -> Result<Client<UdpHandle>> {
     let auth = build_auth(device)?;
     Client::builder(device.address.as_str(), auth)
         .request_timeout(Duration::from_secs(device.timeout_secs))

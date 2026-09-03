@@ -3,6 +3,7 @@
 //! The binary entry point lives in `main.rs`; the library exists so integration
 //! tests can drive the poller against an in-process SNMP agent.
 
+pub mod action;
 pub mod alerts;
 pub mod budget;
 pub mod cli;

@@ -92,6 +92,11 @@ pub struct SnmpConfig {
     #[serde(default)]
     pub credentials: HashMap<String, CredentialSet>,
 
+    /// Gated PDU outlet control (#956, SYS-SUP-003). **Default off**, so
+    /// every existing deployment is unaffected by this feature existing.
+    #[serde(default)]
+    pub actions: ActionsConfig,
+
     /// Resilience tuning (#539): backoff, circuit breaker, jitter.
     #[serde(default)]
     pub resilience: ResilienceConfig,
@@ -138,6 +143,57 @@ impl Default for ResilienceConfig {
             backoff_cap: default_backoff_cap(),
             breaker_after: default_breaker_after(),
             jitter_percent: default_jitter_percent(),
+        }
+    }
+}
+
+/// Gated PDU outlet control (#956) — the strictest gate in the tree, and it
+/// is arranged so the default configuration **cannot act at all**.
+///
+/// Four independent things must be true before an outlet cycles:
+///
+/// 1. `enabled` is set (default `false`);
+/// 2. the target matches a pattern in `allow_outlets` (default **empty**,
+///    which accepts nothing even with the switch on);
+/// 3. `credentials` names a **separate write credential set** — startup
+///    refuses `enabled` without one, because a read community that can reach a
+///    SET is how a monitoring credential quietly becomes a control one;
+/// 4. the device is pinned to a PDU profile whose control OIDs this build has
+///    actually verified.
+///
+/// Any of them missing is a refusal that **names the switch that refused**
+/// (#866), so an operator learns which of the four from the answer rather than
+/// from the source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionsConfig {
+    /// The master switch.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `<device>/<outlet>` glob patterns. **Empty rejects everything**, and
+    /// there is deliberately no `allow_all`: a wildcard an operator typed is a
+    /// decision, a wildcard a default provided is an accident.
+    #[serde(default)]
+    pub allow_outlets: Vec<String>,
+    /// The name of a `snmp.credentials` set with **write** access. Never the
+    /// device's read credential, and startup refuses `enabled` without it.
+    #[serde(default)]
+    pub credentials: Option<String>,
+    /// How many outcomes the in-sensor ring keeps for `@rpc/snmp/actions`.
+    #[serde(default = "default_action_history")]
+    pub history_capacity: usize,
+}
+
+fn default_action_history() -> usize {
+    64
+}
+
+impl Default for ActionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_outlets: Vec::new(),
+            credentials: None,
+            history_capacity: default_action_history(),
         }
     }
 }
@@ -740,6 +796,56 @@ impl zensight_sensor_core::SensorConfig for SnmpSensorConfig {
                     "Device '{}' uses SNMPv3 but has no security configuration",
                     device.name
                 )));
+            }
+        }
+
+        // ── Gated outlet control (#956) ──────────────────────────────────
+        //
+        // Refused at STARTUP rather than at the first request, because the two
+        // failures below are configuration mistakes an operator would
+        // otherwise discover by trying to power-cycle a server.
+        if self.snmp.actions.enabled {
+            let Some(name) = self.snmp.actions.credentials.as_deref() else {
+                return Err(zensight_sensor_core::SensorError::config(
+                    "snmp.actions.enabled is true but snmp.actions.credentials names no \
+                     credential set. An outlet cycle is an SNMP SET, and it must not ride \
+                     the read credential: a monitoring community that can reach a SET is a \
+                     control credential nobody decided to grant. Add a write-access \
+                     credential set and name it here (#956)",
+                ));
+            };
+            if !self.snmp.credentials.contains_key(name) {
+                return Err(zensight_sensor_core::SensorError::config(format!(
+                    "snmp.actions.credentials names {name:?}, which is not a defined \
+                     snmp.credentials set"
+                )));
+            }
+            // A cleartext community that can CUT POWER is a different
+            // proposition from one that can read a counter, so it needs the
+            // #825 flag said out loud even though the device-level gate above
+            // may already have accepted the read path.
+            let write = &self.snmp.credentials[name];
+            if write.community.is_some()
+                && write.security.is_none()
+                && !self.snmp.allow_insecure_versions
+            {
+                return Err(zensight_sensor_core::SensorError::config(format!(
+                    "the write credential set {name:?} is a v1/v2c community — a cleartext \
+                     string on the wire that can CUT POWER. Prefer a v3 authPriv user; if \
+                     this PDU genuinely cannot, set snmp.allow_insecure_versions = true to \
+                     accept the cost (#825, #956)"
+                )));
+            }
+            if self.snmp.actions.allow_outlets.is_empty() {
+                // Not an error: "on with an empty allowlist" is a legitimate,
+                // fully-refusing state, and it is what the capability
+                // advertises. But it reads as a working gate until you try it,
+                // so it is said once at startup.
+                tracing::warn!(
+                    "snmp.actions.enabled is true but snmp.actions.allow_outlets is empty, \
+                     so every outlet request will be refused. Add <device>/<outlet> globs \
+                     to permit control (#956)"
+                );
             }
         }
         Ok(())

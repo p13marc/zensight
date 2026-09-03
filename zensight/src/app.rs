@@ -1274,6 +1274,111 @@ impl ZenSight {
                     device.systemd_detail.unit_file = Fetch::Idle;
                 }
             }
+            // ── Gated PDU outlet control (#956) ──────────────────────────
+            Message::FetchSnmpOutletCapability => {
+                return ControlFlow::Break(self.query_snmp_outlet_capability());
+            }
+            Message::SnmpOutletCapabilityReceived(result) => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.snmp_detail.outlet_capability = match result {
+                        Ok(cap) => Fetch::Ready(cap),
+                        Err(e) => Fetch::Error(e),
+                    };
+                }
+            }
+            Message::SnmpOutletArm(outlet) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.snmp_detail.pending_outlet = Some(outlet);
+                    device.snmp_detail.outlet_confirm_text.clear();
+                }
+            }
+            Message::SnmpOutletConfirmTextChanged(typed) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.snmp_detail.outlet_confirm_text = typed;
+                }
+            }
+            Message::SnmpOutletCancel => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.snmp_detail.pending_outlet = None;
+                    device.snmp_detail.outlet_confirm_text.clear();
+                }
+            }
+            Message::SnmpOutletActionResult(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.snmp_detail.outlet_inflight = None;
+                    match result {
+                        Ok(status) => {
+                            let ok = status.accepted && status.error.is_none();
+                            let message = if ok {
+                                format!("Cycling outlet {}/{}", status.device, status.outlet)
+                            } else {
+                                status
+                                    .error
+                                    .clone()
+                                    .or_else(|| status.reason.clone())
+                                    .unwrap_or_else(|| "the sensor refused".to_string())
+                            };
+                            device.snmp_detail.outlet_last = Some(status);
+                            return ControlFlow::Break(Task::done(Message::CommandFeedback {
+                                success: ok,
+                                message,
+                            }));
+                        }
+                        Err(e) => {
+                            return ControlFlow::Break(Task::done(Message::CommandFeedback {
+                                success: false,
+                                message: e,
+                            }));
+                        }
+                    }
+                }
+            }
+            Message::SnmpOutletConfirm => {
+                // Belt and braces: the button is only live when the typed name
+                // matches, and the check is repeated here so a message
+                // arriving any other way cannot skip it.
+                let armed = self.selected_device.as_ref().and_then(|d| {
+                    d.snmp_detail
+                        .outlet_confirmation_matches()
+                        .then(|| d.snmp_detail.pending_outlet.clone())
+                        .flatten()
+                });
+                if let Some(outlet) = armed {
+                    // Addressed to the drilled-in host only. A wildcard origin
+                    // here would cycle the matching outlet on every host
+                    // serving the sensor — a datacentre going dark — so an
+                    // unresolvable origin refuses rather than widening.
+                    let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Snmp)
+                    else {
+                        return ControlFlow::Break(Task::done(Message::CommandFeedback {
+                            success: false,
+                            message: "No host selected — refusing to broadcast an outlet cycle"
+                                .to_string(),
+                        }));
+                    };
+                    let Some(device_name) = self
+                        .selected_device
+                        .as_ref()
+                        .map(|d| d.device_id.source.clone())
+                    else {
+                        return ControlFlow::Break(Task::none());
+                    };
+                    let key = crate::view::specialized::snmp::outlet_action_key(&origin);
+                    let command = zensight_common::outlet::OutletAction {
+                        device: device_name,
+                        outlet: outlet.clone(),
+                        verb: zensight_common::outlet::OutletVerb::Cycle,
+                    };
+                    if let Some(device) = self.selected_device.as_mut() {
+                        device.snmp_detail.outlet_inflight = Some(outlet);
+                        device.snmp_detail.pending_outlet = None;
+                        device.snmp_detail.outlet_confirm_text.clear();
+                    }
+                    return ControlFlow::Break(self.call_snmp_outlet_action(key, command));
+                }
+            }
+
             Message::FetchSystemdActionCapability => {
                 return ControlFlow::Break(self.query_systemd_action_capability());
             }
@@ -5465,6 +5570,80 @@ impl ZenSight {
         Some(self.query_systemd_detail(SystemdDetailTopic::Units))
     }
 
+    /// Ask the drilled-in SNMP sensor what outlet control it permits (#956).
+    /// Answered whether control is on or off, so "off" is an answer.
+    fn query_snmp_outlet_capability(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Snmp) else {
+            return Task::done(Message::SnmpOutletCapabilityReceived(Err(
+                "No SNMP host selected".to_string(),
+            )));
+        };
+        let key = crate::view::specialized::snmp::outlet_capability_key(&origin);
+        Task::future(async move {
+            let cap = crate::view::specialized::systemd_detail::fetch_one::<
+                zensight_common::outlet::OutletCapability,
+            >(session, key)
+            .await;
+            Message::SnmpOutletCapabilityReceived(
+                cap.ok_or_else(|| "This host did not answer the outlet-control probe".to_string()),
+            )
+        })
+    }
+
+    /// Issue one gated outlet cycle (#956), origin-scoped.
+    fn call_snmp_outlet_action(
+        &self,
+        key: String,
+        command: zensight_common::outlet::OutletAction,
+    ) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SnmpOutletActionResult(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        Task::future(async move {
+            let payload = match serde_json::to_vec(&command) {
+                Ok(p) => p,
+                Err(e) => return Message::SnmpOutletActionResult(Err(e.to_string())),
+            };
+            let result = async {
+                let replies = session
+                    .get(&key)
+                    .payload(payload)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let reply = replies
+                    .recv_async()
+                    .await
+                    .map_err(|_| "the sensor did not answer".to_string())?;
+                match reply.result() {
+                    Ok(sample) => zensight_common::decode_auto::<
+                        zensight_common::outlet::OutletStatus,
+                    >(&sample.payload().to_bytes())
+                    .map_err(|e| e.to_string()),
+                    // A refusal is an `error/gated` reply carrying the switch
+                    // that refused (#866/#957) — surfaced verbatim, because
+                    // "which of the four gates" is the whole answer.
+                    Err(err) => {
+                        let decoded: zensight_common::rpc::RpcError =
+                            serde_json::from_slice(&err.payload().to_bytes())
+                                .map_err(|e| e.to_string())?;
+                        Err(match decoded.refused_by {
+                            Some(switch) => format!("{} (refused by {switch})", decoded.message),
+                            None => decoded.message,
+                        })
+                    }
+                }
+            }
+            .await;
+            Message::SnmpOutletActionResult(result)
+        })
+    }
+
     /// Ask the drilled-in host what service control it permits (#283). Every
     /// 1.4+ sensor answers, enabled or not.
     fn query_systemd_action_capability(&self) -> Task<Message> {
@@ -9071,6 +9250,11 @@ fn prefetch_channels(protocol: zensight_common::Protocol) -> Vec<Message> {
             Message::FetchNetlinkDetail(NetlinkDetailTopic::RouteChanges),
         ],
         Protocol::Netring => vec![Message::FetchNetringFlows],
+        // The outlet panel decides what to offer from the sensor's advertised
+        // gate (#956), so the probe has to have been asked before the first
+        // render — otherwise a PDU's outlets appear controlless for a beat on
+        // a deployment where control is on.
+        Protocol::Snmp => vec![Message::FetchSnmpOutletCapability],
         Protocol::Sysinfo => vec![Message::FetchSysinfoProcesses(ProcessSort::default())],
         Protocol::Parallax => vec![Message::FetchParallaxStreams],
         _ => Vec::new(),
@@ -9273,8 +9457,16 @@ mod prefetch_tests {
             [Message::FetchParallaxStreams]
         ));
 
+        // SNMP prefetches the outlet-control gate (#956) — not a detail
+        // channel, but the panel decides what to offer from it, so it has to
+        // have been asked before the first render or a PDU's outlets appear
+        // controlless for a beat on a deployment where control is on.
+        assert!(matches!(
+            prefetch_channels(Protocol::Snmp).as_slice(),
+            [Message::FetchSnmpOutletCapability]
+        ));
+
         // Protocols without queryable detail channels prefetch nothing.
-        assert!(prefetch_channels(Protocol::Snmp).is_empty());
         assert!(prefetch_channels(Protocol::Logs).is_empty());
         assert!(prefetch_channels(Protocol::Modbus).is_empty());
     }

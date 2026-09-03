@@ -311,7 +311,13 @@ in a log.
   sanctions a typed, scriptable, logged fleet push. The GUI is strictly
   origin-scoped there: a per-row restart button that could widen to every host
   is a blast radius nobody asked for, so its key builders take a concrete origin
-  and a wildcard action key cannot be spelled.
+  and a wildcard action key cannot be spelled. **`snmp action/set` (#956) is the
+  same shape and the same restriction**, and it is the sharper case: a fleet
+  push that cycles every PDU outlet on the allowlist would take a datacentre
+  down. Its four independent gates are in
+  [`zensight-sensor-snmp/docs/reference.md`](../zensight-sensor-snmp/docs/reference.md);
+  what none of them provides is *attribution*, and that is written down there
+  rather than left to be assumed.
 - **Bus explorer**: [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) is the `busctl`/`d-feet`
   equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
   `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply

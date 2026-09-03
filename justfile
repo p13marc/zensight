@@ -41,6 +41,15 @@
 # unprivileged; the demo config enables everything *except* gated service control
 # (`actions`), which is left off because it stops/restarts real units. `just
 # actions=1 run` arms it for ONE inert unit — see `just demo-actions` and #866.
+#
+# SNMP outlet control (#956) has no `just` demo and cannot have one: it cycles
+# power on a real PDU, and a fake that pretends to would be a demo of the wrong
+# thing. What IS demonstrable without hardware is the half that matters most —
+# that the gate refuses and says which switch refused — and
+# `a_default_sensor_answers_the_probe_and_refuses_the_write_surface` in
+# zensight-sensor-snmp does exactly that over a real bus. The opt-in path for a
+# deployment that has a PDU is the commented `actions:` block in
+# configs/snmp.json5, which spells out all four gates.
 
 # Build profile: "release" (default) or "dev".
 profile := "release"

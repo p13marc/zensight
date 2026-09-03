@@ -256,6 +256,57 @@
     //   nas_volume_full:    { enabled: true },  // + percent: 85
     // },
 
+    // ── Gated PDU outlet control (#956, SYS-SUP-003) ─────────────────────
+    //
+    // The FIRST write surface outside the systemd sensor, and it is a bigger
+    // step than restarting a unit: a monitor that can CUT POWER is a
+    // different threat model — the sentence the pve and bmc sensors use to
+    // justify having no action surface at all. It is off, and the whole block
+    // below is commented out, because a default deployment must not be able
+    // to act.
+    //
+    // FOUR independent things must be true before an outlet cycles, and each
+    // refusal names which one refused:
+    //
+    //   1. actions.enabled          — the master switch, default false
+    //   2. actions.allow_outlets    — <device>/<outlet> globs, default EMPTY,
+    //                                 which rejects everything even with the
+    //                                 switch on. There is no `allow_all`: a
+    //                                 wildcard you typed is a decision, a
+    //                                 wildcard a default provided is an
+    //                                 accident.
+    //   3. actions.credentials      — a SEPARATE write credential set. Startup
+    //                                 refuses `enabled` without one: a read
+    //                                 community that can reach a SET is a
+    //                                 control credential nobody granted. A
+    //                                 v1/v2c community here also needs
+    //                                 allow_insecure_versions, because a
+    //                                 cleartext string that can cut power is
+    //                                 a different proposition from one that
+    //                                 reads a counter.
+    //   4. devices[].profile        — the device must be pinned to a PDU
+    //                                 profile whose CONTROL OIDs this build
+    //                                 verified against the vendor MIB.
+    //                                 Currently `pdu-apc` only: pdu-eaton and
+    //                                 pdu-raritan are read-only, because
+    //                                 guessing a control OID sends a write to
+    //                                 a machine.
+    //
+    // WHAT THIS DOES NOT GIVE YOU. There is no polkit here — a PDU speaks
+    // SNMP, and there is no local policy engine between us and it — and the
+    // bus caller is anonymous. Every attempt, executed or refused, reaches
+    // the host's audit subsystem (#957), which makes it AUDITABLE and not
+    // ATTRIBUTABLE. Until a caller identity exists (Zenoh mTLS + ACL), the
+    // honest sentence is: anyone who can reach the bus, and whose target is
+    // on the allowlist, can cycle that outlet.
+    //
+    // actions: {
+    //   enabled: true,
+    //   allow_outlets: ["pdu-a/3", "pdu-a/4"],   // NOT ["*"] unless you mean it
+    //   credentials: "pdu-write",                // a set defined above, v3 authPriv
+    //   history_capacity: 64,                    // the @rpc/snmp/actions ring
+    // },
+
     // Predefined OID groups (reusable across devices)
     oid_groups: {
       system_info: {

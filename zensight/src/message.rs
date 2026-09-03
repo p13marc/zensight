@@ -391,6 +391,20 @@ pub enum Message {
     SystemdHideUnitFile,
     /// Fetch this host's advertised service-control gate (#283) so the Units tab
     /// can render what it will actually accept.
+    // ── Gated PDU outlet control (#956) ─────────────────────────────────
+    /// Ask the drilled-in SNMP sensor what outlet control it permits.
+    FetchSnmpOutletCapability,
+    SnmpOutletCapabilityReceived(Result<zensight_common::outlet::OutletCapability, String>),
+    /// Arm one outlet for confirmation. Arming shows a field; it sends nothing.
+    SnmpOutletArm(String),
+    /// The operator is typing the outlet's name. Nothing is live until it
+    /// matches exactly — a `[confirm]` button one slip away from a live one is
+    /// not a confirmation, and this action cuts power.
+    SnmpOutletConfirmTextChanged(String),
+    SnmpOutletCancel,
+    SnmpOutletConfirm,
+    SnmpOutletActionResult(Result<zensight_common::outlet::OutletStatus, String>),
+
     FetchSystemdActionCapability,
     /// The service-control probe's reply, or why there wasn't one.
     SystemdActionCapabilityReceived(Result<zensight_common::action::ActionCapability, String>),

@@ -355,6 +355,31 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Gated PDU outlet control (#956). The procedures are declared
+    // UNCONDITIONALLY — `action/capability` so "off" is an answer rather than
+    // a silence (#648), `action/set` so the registry does not advertise
+    // something nothing serves — and the gate inside them is what refuses.
+    //
+    // The write credential is substituted into the device set ONCE, here. The
+    // read credential is not deprioritised on the SET path; it is not present
+    // in the value that path can reach.
+    {
+        let action_cfg = snmp_config.actions.clone();
+        let history = zensight_sensor_snmp::action::History::new(action_cfg.history_capacity);
+        let server = zensight_sensor_snmp::action::ActionServer {
+            cfg: action_cfg,
+            write_devices: zensight_sensor_snmp::action::write_devices(&snmp_config),
+            devices: snmp_config.devices.clone(),
+        };
+        let session = runner.session().clone();
+        runner.spawn(zensight_sensor_snmp::action::run(
+            session,
+            "snmp".to_string(),
+            server,
+            history,
+        ));
+    }
+
     // Spawn trap receiver if enabled (#535): durable events + alert mapping.
     if snmp_config.trap_listener.enabled {
         let mut trap_receiver = TrapReceiver::new(

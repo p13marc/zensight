@@ -266,6 +266,18 @@ kind = "json-schema"
 [types.ContainerInfo]
 kind = "json-schema"
 
+# snmp's gated outlet control (#956). A monitor that can cut power is a
+# different threat model, so the types are here — where the GUI can preview the
+# gate from the same struct the sensor answers with.
+[types.OutletAction]
+kind = "json-schema"
+[types.OutletStatus]
+kind = "json-schema"
+[types.OutletCapability]
+kind = "json-schema"
+[types."Vec<OutletStatus>"]
+kind = "json-schema"
+
 # bmc's state documents (#953) — the BMC's own verdicts about hardware no
 # in-band sensor can see.
 [types.BmcChassis]
