@@ -28,7 +28,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-common/` | shared model: telemetry, alert/command, identity/evidence/entity, artifact, QoS, keyexpr, payload type table |
 | [`zenkey`](https://github.com/p13marc/zenkey) | v1 key grammar (`V1Context`, `AppProfile`, origin minting) — external repo (crates.io dep, like `zblob`), was in-tree `zensight-keyspace/`; registry TOMLs live in `zensight-common/registry/`, compiled by `zenkey-build` |
 | `zensight-sensor-core/` | sensor framework: runner, publishers (declared, QoS), health, alerting, identity, artifacts |
-| `zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/` | protocol pollers/receivers |
+| `zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/` | protocol pollers/receivers. `snmp` also carries the **only write surface outside `systemd`** (#956): a gated PDU outlet cycle behind four independent switches, default off — a monitor that can cut power is a different threat model |
 | `zensight-sensor-netlink/` | kernel net telemetry (RTNETLINK/sock_diag) + sentinel + optional eBPF |
 | `zensight-sensor-netring/` | wire-level flow/L7/NDR (AF_PACKET/AF_XDP/pcap) + detectors + threat-intel |
 | `zensight-sensor-systemd/` | systemd unit/boot telemetry (D-Bus) + sentinel + gated actions |

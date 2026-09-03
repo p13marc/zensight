@@ -21,7 +21,17 @@
 /// which is exactly why the gated PDU outlet cycle (#956) is a separate issue
 /// with a separate decision, and why landing it means **editing this list**
 /// rather than watching a test keep passing.
-const ALLOWED_WRITE_PROCEDURES: &[&str] = &["artifact/request", "artifact/cancel"];
+const ALLOWED_WRITE_PROCEDURES: &[&str] = &[
+    "artifact/request",
+    "artifact/cancel",
+    // #956, and adding it here was the deliberate act the doc above describes.
+    // Default OFF, an empty allowlist that rejects everything, a SEPARATE
+    // write credential refused at startup if missing, and a PDU profile whose
+    // control OIDs were verified against the vendor MIB. Both outcomes reach
+    // the host's audit trail (#957) — which for this procedure is the only
+    // record that a request to cut power was ever made.
+    "action/set",
+];
 
 #[test]
 fn the_slice_declares_no_write_surface_beyond_the_artifact_channel() {

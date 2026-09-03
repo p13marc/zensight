@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.11"
+version = "1.12"
 app = "zensight"
 convention = 1
 
@@ -1220,6 +1220,52 @@ cardinality = 16
 ttl_s = 900
 since = "1.1"
 description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
+
+# ── Gated PDU outlet control (#956, SYS-SUP-003) ─────────────────────────────
+#
+# The FIRST write surface outside `systemd`, and it is a bigger step than
+# restarting a unit: a monitor that can cut power is a different threat model —
+# the sentence `pve` and `bmc` use to justify having no action surface at all.
+#
+# Declared UNCONDITIONALLY and answering `error/gated` when the switch is shut
+# (#648): "off" has to be an answer rather than a silence, or a caller cannot
+# tell a read-only deployment from an offline one. `action/capability` is
+# served first and always, so a frontend can render the gate before anyone
+# clicks.
+
+[[procedure]]
+path = "action/set"
+kind = "write"
+fanout = "allowed"  # zenctl fleet push (G2); the GUI is strictly origin-scoped
+request = "OutletAction"
+reply = "OutletStatus"
+idempotent = false
+since = "1.12"
+description = "gated PDU outlet cycle {device,outlet} — default OFF, allowlist plus a SEPARATE write credential plus a PDU profile whose control OIDs are verified; refuses with error/gated, and BOTH outcomes reach the host audit trail (#957). There is no polkit here and the bus caller is anonymous: the honest description is anyone who can reach the bus and whose target is on the allowlist"
+
+[[procedure]]
+path = "action"
+kind = "read"
+reply = "OutletStatus"
+idempotent = true
+since = "1.12"
+description = "the most recent outcome, or null when nothing has run — null rather than an empty status, which reads exactly like a refusal"
+
+[[procedure]]
+path = "actions"
+kind = "read"
+reply = "Vec<OutletStatus>"
+idempotent = true
+since = "1.12"
+description = "bounded ring of recent outcomes (operator audit timeline; the durable trail is the host's audit subsystem, #957)"
+
+[[procedure]]
+path = "action/capability"
+kind = "read"
+reply = "OutletCapability"
+idempotent = true
+since = "1.12"
+description = "outlet-control gate state: the switch, the allowlist and the reason nothing is permitted when nothing is. Served even when actions are disabled, so 'off' is an answer and not a silence"
 
 [[procedure]]
 path = "introspect"

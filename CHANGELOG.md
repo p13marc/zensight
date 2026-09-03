@@ -9,6 +9,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gated PDU outlet power-cycle — the first write surface outside `systemd`**
+  (#956, epic #952 — SYS-SUP-003 *secure remote power restart*). This closes
+  epic #952.
+
+  ZenSight could not power-cycle anything. This is #283's gate pattern applied
+  to an outlet, with a stricter gate, because **a monitor that can cut power is
+  a different threat model** — the sentence `pve` and `bmc` use to justify
+  having no action surface at all. It is its own decision, taken separately
+  from the read side in #955.
+
+  **Four independent gates**, each of which must pass and each of which names
+  itself in the refusal (#866) — as a *field* on the error, not only inside the
+  sentence, so both the audit trail and the caller can filter on it:
+
+  1. `snmp.actions.enabled` — default `false`;
+  2. `snmp.actions.allow_outlets` — `<device>/<outlet>` globs, default
+     **empty**, rejecting everything even with the switch on. There is no
+     `allow_all`: a wildcard an operator typed is a decision, a wildcard a
+     default provided is an accident;
+  3. `snmp.actions.credentials` — a **separate write credential set**, refused
+     at startup if absent. A read community that can reach a SET is a control
+     credential nobody decided to grant. A v1/v2c community here additionally
+     needs `allow_insecure_versions`, because a cleartext string that can cut
+     power is a different proposition from one that reads a counter;
+  4. `devices[].profile` — the device must be pinned to a PDU profile whose
+     **control** OIDs were verified against the vendor MIB. Today `pdu-apc`
+     only: #955 verified Eaton's and Raritan's *status* columns and not their
+     *control* ones, and the difference matters more here than anywhere else —
+     a wrong read publishes a wrong number, a wrong write does something to a
+     machine.
+
+  One verb, `cycle`. `off` and `on` behind their own switches are a follow-up:
+  the requirement asks for *restart*, and a verb that can leave a load dark
+  indefinitely is a different promise.
+
+  **What it is honest about, in the docs and in the config**: there is no
+  polkit here — a PDU speaks SNMP, and there is no local policy engine between
+  the sensor and the device — and the bus caller is anonymous. #957 records
+  every attempt, executed *and* refused, on the host's own audit subsystem,
+  which makes an outlet cycle **auditable** and not **attributable**. Until a
+  caller identity exists (Zenoh mTLS + ACL, named in the epic and outside 1.0
+  by #903), the honest sentence is *anyone who can reach the bus and whose
+  target is on the allowlist*.
+
+  `action/set` is declared **unconditionally** and answers `error/gated` when
+  the switch is shut (#648), so "off" is an answer rather than a silence, and
+  `action/capability` is served first and always so a frontend renders the gate
+  before anyone clicks. An e2e test over a real bus asserts both halves and
+  that the refusal carries `refused_by`.
+
+  **In the GUI**, the outlet panel is *absent* rather than greyed where control
+  is off or the device has no outlets — a disabled power button invites a
+  support question — and where an outlet is merely outside the allowlist it
+  says so, because "this outlet, deliberately not" is different from "this
+  deployment, not at all". The confirmation is **typing the outlet's own
+  name**: a `[confirm]` button one slip from a live one is not a confirmation.
+  The panel reads outlet state through the device's *applied profile*, because
+  the raw integer is vendor-specific — APC off(1)/on(2), Eaton and Raritan
+  off(0)/on(1), so `1` means opposite things — and an unrecognised profile
+  renders "—" rather than guessing. A wrong on/off beside a power button is
+  worse than none.
+
+  The write key is origin-scoped with no fleet spelling, and `docs/KEYSPACE.md`
+  now says why this is the sharper case of the rule `systemd action/set`
+  already follows: a fleet push that cycled every outlet on the allowlist would
+  take a datacentre down.
+
+  The snmp `registry_conformance` allowlist from #955 had to be **edited
+  deliberately** to admit `action/set` — which was the point of writing it that
+  way.
+
 - **`zensight-sensor-bmc` — out-of-band hardware health over Redfish** (#953,
   epic #952 — SYS-SUP-001, and the blind spot behind -010).
 

@@ -636,6 +636,72 @@ Naming/SYNTAX tables from all loaded profiles feed the shared resolver
 (fleet-wide); built-in MIB names and config `oid_names` win on collisions.
 Disable everything with `snmp.profiles.enabled: false`.
 
+## Gated PDU outlet control (#956)
+
+The **first write surface outside the `systemd` sensor**, and a bigger step
+than restarting a unit: *a monitor that can cut power is a different threat
+model* — the sentence `zensight-sensor-pve` and `zensight-sensor-bmc` use to
+justify having no action surface at all. So it is its own decision, taken
+separately from the read side in #955, and the gate is the strictest in the
+tree.
+
+One verb: **`cycle`**. `off` and `on` as separate verbs, each behind its own
+switch, are a follow-up — the requirement asks for *restart*, and a verb that
+can leave a load dark indefinitely is a different promise from one that
+returns it.
+
+### Four independent gates
+
+Each must pass, and each refusal **names the switch that refused** (#866) — as
+a field on the error, not only inside the sentence, so the audit trail can be
+filtered on it.
+
+| # | Switch | Default | What it means |
+|---|---|---|---|
+| 1 | `snmp.actions.enabled` | `false` | The master switch. Every existing deployment is unaffected by this feature existing. |
+| 2 | `snmp.actions.allow_outlets` | **empty** | `<device>/<outlet>` globs. Empty rejects everything *even with the switch on*. There is deliberately no `allow_all`: a wildcard an operator typed is a decision, a wildcard a default provided is an accident. |
+| 3 | `snmp.actions.credentials` | none | Names a **separate write credential set**. Startup refuses `enabled` without one — a read community that can reach a SET is a control credential nobody decided to grant. A v1/v2c community here additionally needs `allow_insecure_versions`, because a cleartext string that can cut power is a different proposition from one that reads a counter. |
+| 4 | `devices[].profile` | none | The device must be pinned to a PDU profile whose **control** OIDs this build verified against the vendor MIB. Today that is `pdu-apc` only. |
+
+Gate 4 is worth dwelling on. `pdu-eaton` and `pdu-raritan` ship for #955 with
+verified *status* columns and unverified *control* columns, and the difference
+matters more here than anywhere else in the crate: **a wrong read publishes a
+wrong number, a wrong write does something to a machine.** They stay read-only
+until someone has the MIB, or the hardware, in front of them.
+
+### What this does not give you
+
+There is **no polkit here.** A PDU speaks SNMP; there is no local policy engine
+between the sensor and the device, so the allowlist is the only gate. And the
+bus caller is anonymous: #957 records every attempt, executed or refused, on
+the host's own audit subsystem, which makes an outlet cycle **auditable** and
+not **attributable**.
+
+Until a caller identity exists — Zenoh mTLS certificate CN plus Zenoh's ACL, a
+scope question named in epic #952 and deliberately outside 1.0 (#903) — the
+honest description is:
+
+> anyone who can reach the bus, and whose target is on the allowlist, can
+> cycle that outlet.
+
+### The keys
+
+| Key | Kind | What |
+|---|---|---|
+| `@rpc/snmp/action/set` | **write** | `OutletAction { device, outlet, verb }` → `OutletStatus`. Refuses with `error/gated`, carrying `refused_by`. |
+| `@rpc/snmp/action/capability` | read | `OutletCapability` — the gate, renderable **before** anyone clicks. Served first and unconditionally, so "off" is an answer rather than a silence (#648). |
+| `@rpc/snmp/action` | read | The most recent outcome, or `null`. `null` rather than an empty status, which reads exactly like a refusal. |
+| `@rpc/snmp/actions` | read | A bounded ring of recent outcomes — the operator timeline. In memory and lost on restart; the durable trail is #957's. |
+
+### What an outcome actually claims
+
+`OutletStatus` carries the outlet's state before and after the SET, and the
+PDU's own configured reboot duration where it publishes one (`5–60 s` on an
+APC; the delay belongs to the device, not to us). **`state_after` is evidence
+the SET was accepted, not evidence the load restarted** — a cycle is
+asynchronous inside the PDU and the outlet is usually still `on` a moment
+later. The field's own documentation says so, so nobody reads more into it.
+
 ## SMI MIBs (#532)
 
 `mib.dirs` loads standard SMI modules (mib-rs; SNMPv2-SMI/-TC base modules
