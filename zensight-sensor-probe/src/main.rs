@@ -28,7 +28,12 @@ async fn main() -> Result<()> {
     let format = runner.config().serialization;
     runner = runner.with_format(format).with_identity();
 
-    let reporter = if pc.alerts.enabled {
+    // The shared reporter. Unconditional since #931: `alerts.enabled` governs
+    // this sensor's OWN judgements about a check's outcome, but an operator can
+    // push a threshold rule to a running sensor over `@desired` or `@rpc`, so a
+    // build that could not report an alert would have had to refuse a rule it
+    // had just declared it accepts.
+    let reporter = {
         let mut r =
             AlertReporter::new(runner.publisher(), zensight_common::Protocol::Probe, format)
                 .with_debounce(Duration::from_secs(pc.alerts.for_secs))
@@ -38,11 +43,29 @@ async fn main() -> Result<()> {
         if let Some(id) = runner.identity() {
             r = r.with_identity(id);
         }
-        let r = Arc::new(r);
-        Some(r)
-    } else {
-        None
+        Arc::new(r)
     };
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    // The operator's threshold rules over this sensor's own telemetry (#931):
+    // `duration_ms`, `tls/days_remaining`, `clock/offset_ms` — the numbers this
+    // crate's docs have been promising an operator would get to choose. Every
+    // one of them rides `Publisher::publish`, so the runner's publisher is the
+    // whole surface here.
+    zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Probe,
+        reporter.clone(),
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::probe_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let states = Arc::new(
         zensight_sensor_core::AdvancedPublisherRegistry::new(
@@ -79,14 +102,11 @@ async fn main() -> Result<()> {
         pc.clone(),
         runner.publisher(),
         states,
-        reporter.clone(),
+        pc.alerts.enabled.then(|| reporter.clone()),
         runner.health(),
         zensight_sensor_core::relation::RelationSet::new("probe", runner.session().clone(), format),
     )?;
     runner.spawn(poller.run());
-    if let Some(r) = reporter {
-        runner = runner.with_alert_reporter(r);
-    }
 
     runner
         .run_with_metadata(Some(serde_json::json!({

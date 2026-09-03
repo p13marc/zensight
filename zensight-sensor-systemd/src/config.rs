@@ -34,6 +34,18 @@ pub struct SystemdSensorConfig {
     /// must be disarmable from outside itself.
     #[serde(default)]
     pub desired: zensight_common::desired::DesiredConfig,
+
+    /// Operator-authored threshold rules over this sensor's own telemetry
+    /// (#931). **Empty by default** — this build ships no threshold that
+    /// fires. Also authorable fleet-wide on `@desired` and per-host over
+    /// `@rpc/systemd/thresholds/set`; `state/systemd/applied/thresholds` says
+    /// which of the three is in force.
+    ///
+    /// Distinct from `systemd.alerts` (#276), which is this sensor's own
+    /// judgement about units it understands; these are numbers an operator
+    /// chose about metrics it publishes.
+    #[serde(default)]
+    pub thresholds: zensight_common::threshold::ThresholdsConfig,
 }
 
 /// systemd protocol configuration.
@@ -314,6 +326,14 @@ impl zensight_sensor_core::SensorConfig for SystemdSensorConfig {
 
     fn producer(&self) -> &str {
         "systemd"
+    }
+
+    fn desired(&self) -> zensight_common::desired::DesiredConfig {
+        self.desired.clone()
+    }
+
+    fn thresholds(&self) -> zensight_common::threshold::ThresholdsConfig {
+        self.thresholds.clone()
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {

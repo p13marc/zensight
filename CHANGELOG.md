@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Threshold rules adopted by the first five sensors** (#931, epic #901) —
+  `sysinfo`, `logs`, `systemd`, `hostspec` and `probe`, which is exactly the
+  roster `scripts/conformance-verify.sh` stands up.
+
+  #930 built the evaluator; nothing installed it. Each of these now carries the
+  whole surface: a `thresholds` block in file config, the `@desired` topic
+  `{host}/<producer>/thresholds` so a controller can author the set
+  fleet-wide, the `@rpc/<producer>/thresholds` read and `…/thresholds/set`
+  write so an operator can author it for one host, and
+  `state/<producer>/applied/thresholds` saying which of the three writers is
+  actually in force. One framework call, `threshold::adopt`, does all of it,
+  and `SensorConfig` grew `desired()`/`thresholds()` defaulted accessors so it
+  can — the `artifact_limits`/`budget_bytes` precedent.
+
+  **It runs whether or not a `thresholds` block is in the file config.** That
+  is the #849 lesson quoted back: gating the reconciler on the file block meant
+  a stock install never subscribed, never seeded and never published the marker
+  at all — and the primary case for `@desired` is precisely a host with *no*
+  local set that is supposed to receive one.
+
+  **Two sensors' telemetry did not go where the evaluator was watching.**
+  sysinfo's collector builds its own `PublisherRegistry` and encoded each point
+  itself before calling `put`; logs does the same on four paths (ingest ratios,
+  derived per-unit rates, template counts, store gauges). An evaluator on
+  `runner.publisher()` would have logged "installed", accepted rules over
+  `@rpc`, and evaluated **none of sysinfo's 138 metric families**. Both now
+  publish through `put_point`, and `zensight-sensor-sysinfo`'s
+  `thresholds_e2e` test fails — with that sentence in the message — if the
+  wiring is ever undone.
+
+  **Three reporters became unconditional** (sysinfo, logs, probe; systemd's
+  too). They used to exist only when that sensor's own alert families were
+  switched on. An operator can now push a threshold rule to a *running* sensor,
+  so a build that could not report an alert would have had to refuse a rule it
+  had just declared it accepts. systemd's sentinel keeps its own switch: a
+  threshold is not an expectation, and making the reporter unconditional must
+  not quietly turn a sentinel on for a host whose operator turned it off.
+
+  probe's `the_slice_declares_no_write_surface` test is narrowed rather than
+  deleted, to `…_beyond_its_own_rule_set`, and now parses the slice instead of
+  grepping it (the grep form matches the sentence in the comment that explains
+  there is no write surface — bmc hit that last month). `thresholds/set` is
+  declared `write` because #957 says a procedure that changes a host's
+  behaviour must reach that host's audit trail; it reaches no probe target, and
+  the guard still fails on anything else.
+
+  Registry: `desired` 1.0 → 1.2 (five `{host}/<producer>/thresholds`
+  subjects), `sysinfo` 1.7 → 1.8, `logs` 2.6 → 2.7, `systemd` 1.4 → 1.5,
+  `hostspec` 1.1 → 1.2, `probe` 1.3 → 1.4. All additive.
+
 - **The threshold evaluator, on the publish path** (#930, epic #901).
 
   One state machine, installed where a sensor's points already flow, evaluating

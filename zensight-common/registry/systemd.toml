@@ -4,7 +4,7 @@
 # Source: src/map.rs, src/collector.rs (boot/manager/units), src/events.rs.
 
 [registry]
-version = "1.4"
+version = "1.5"
 app = "zensight"
 convention = 1
 
@@ -526,3 +526,24 @@ algo = "blake3"
 reference = "ArtifactStatus"
 since = "1.3"
 description = "content-addressed chunks backing the snapshot trees"
+
+# Operator-authored threshold rules (#931). Three writers — file, `@desired`,
+# this pair — and one `applied/thresholds` marker that says which of them is
+# actually in force. The set ships EMPTY: this build has no threshold that
+# fires, only ones an operator chose.
+[[procedure]]
+path = "thresholds"
+kind = "read"
+reply = "ThresholdsConfig"
+idempotent = true
+since = "1.5"
+description = "the threshold rule set currently evaluated against this producer's own telemetry"
+
+[[procedure]]
+path = "thresholds/set"
+kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
+request = "ThresholdsConfig"
+reply = "Ack"
+since = "1.5"
+description = "replace the threshold rule set; validated (metric globs, operators, durations, unique names) before apply — refuses with error/invalid-args and the previous set keeps running"

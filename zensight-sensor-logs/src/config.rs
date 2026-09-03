@@ -43,6 +43,20 @@ pub struct SyslogSensorConfig {
     /// config. Default false: a typo'd key fails startup with a clear error.
     #[serde(default)]
     pub allow_unknown_fields: bool,
+
+    /// `@desired` reconcile settings (#931): the kill switch and refresh
+    /// cadence. File config on purpose — the mechanism that could misbehave
+    /// must be disarmable from outside itself.
+    #[serde(default)]
+    pub desired: zensight_common::desired::DesiredConfig,
+
+    /// Operator-authored threshold rules over this sensor's own telemetry
+    /// (#931). **Empty by default** — this build ships no threshold that
+    /// fires. Also authorable fleet-wide on `@desired` and per-host over
+    /// `@rpc/logs/thresholds/set`; `state/logs/applied/thresholds`
+    /// says which of the three is in force.
+    #[serde(default)]
+    pub thresholds: zensight_common::threshold::ThresholdsConfig,
 }
 
 /// Syslog receiver configuration.
@@ -1273,6 +1287,14 @@ impl zensight_sensor_core::SensorConfig for SyslogSensorConfig {
 
     fn producer(&self) -> &str {
         "logs"
+    }
+
+    fn desired(&self) -> zensight_common::desired::DesiredConfig {
+        self.desired.clone()
+    }
+
+    fn thresholds(&self) -> zensight_common::threshold::ThresholdsConfig {
+        self.thresholds.clone()
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {

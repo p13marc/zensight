@@ -51,13 +51,40 @@ fn every_registered_family_has_an_emitter() {
 }
 
 /// A prober is a client. It opens connections an operator configured and does
-/// nothing else — no listener, no write surface — and a `write` procedure
-/// appearing in the slice would change that with no other visible sign.
+/// nothing else, and a `write` procedure that reaches a *target* appearing in
+/// the slice would change that with no other visible sign.
+///
+/// The allowlist is one entry long and it is not an exception to that rule:
+/// `thresholds/set` (#931) rewrites what this sensor **alerts on**, and
+/// touches nothing it probes. It is declared `write` because #957 classifies a
+/// procedure that changes a host's behaviour as one whose outcome must reach
+/// that host's audit trail — accountability for "who changed the rules", not
+/// permission to act on a target. Anything else is a decision to take in its
+/// own issue, with the #283 gate pattern, and not one to land by editing a
+/// registry file.
+///
+/// Parsed, not grepped: `!toml.contains("kind = \"write\"")` — which this was
+/// — also matches the sentence in a comment explaining that there is no write
+/// surface. Asking the slice is stronger and immune to its own documentation.
 #[test]
-fn the_slice_declares_no_write_surface() {
+fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
+    const ALLOWED: &[&str] = &["thresholds/set"];
     let toml = zensight_common::registry::probe::REGISTRY_TOML;
+    let slice = zenkey::parse_slice(toml).expect("the shipped probe slice parses");
+    let writes: Vec<&str> = slice
+        .procedures
+        .iter()
+        .filter(|p| {
+            p.kind
+                .as_ref()
+                .and_then(|k| k.known())
+                .is_some_and(|k| matches!(k, zenkey::slice::ProcedureKind::Write))
+        })
+        .map(|p| p.path.as_str())
+        .filter(|path| !ALLOWED.contains(path))
+        .collect();
     assert!(
-        !toml.contains(r#"kind = "write""#),
-        "probe declared a write procedure. This sensor is a client only (#820)."
+        writes.is_empty(),
+        "probe declared write procedure(s) {writes:?}. This sensor is a client only (#820):          it opens connections an operator configured and does nothing else."
     );
 }

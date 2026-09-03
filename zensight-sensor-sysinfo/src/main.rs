@@ -86,7 +86,13 @@ async fn main() -> Result<()> {
         Format::Json,
     )
     .with_health(runner.health());
-    if sysinfo_config.alerts.enabled {
+
+    // The shared reporter. Unconditional since #931: `alerts.enabled` governs
+    // this sensor's OWN judgements (#276-style OOM/PSI/disk/FD/thermal/swap),
+    // but an operator can push a threshold rule to a running sensor over
+    // `@desired` or `@rpc`, so a build that could not report an alert would
+    // have had to refuse a rule it had just declared it accepts.
+    let reporter = {
         use std::sync::Arc;
         use std::time::Duration;
         use zensight_sensor_core::AlertReporter;
@@ -95,16 +101,38 @@ async fn main() -> Result<()> {
         if let Some(id) = runner.identity() {
             reporter = reporter.with_identity(id);
         }
-        let reporter = Arc::new(reporter);
-        runner = runner.with_alert_reporter(reporter.clone());
+        Arc::new(reporter)
+    };
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    if sysinfo_config.alerts.enabled {
         let evaluator = zensight_sensor_sysinfo::alerts::AlertEvaluator::new(
             source.clone(),
             sysinfo_config.alerts.clone(),
-            reporter,
+            reporter.clone(),
         );
         collector = collector.with_alerts(evaluator);
         tracing::info!("Sysinfo threshold alerting enabled");
     }
+
+    // The operator's threshold rules (#931), installed on the collector's own
+    // registry — not the runner's publisher, which sysinfo's telemetry never
+    // touches.
+    let evaluator = zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        Protocol::Sysinfo,
+        reporter,
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::sysinfo_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    collector = collector.with_thresholds(evaluator);
     runner.spawn(async move {
         collector.run().await;
     });

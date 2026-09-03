@@ -61,8 +61,10 @@ This does not replace external outage monitoring, and a deployment that treats
 it as a replacement has a blind spot exactly where it believes it has coverage.
 
 It is also a **client only**: it opens the connections its config names and
-nothing else. No listeners, no write surface, and the registry slice declares
-no `write` procedure — with a test that fails if one appears.
+nothing else. No listeners, and no procedure that reaches a target — the
+registry slice declares exactly one `write`, `thresholds/set` (#931), which
+rewrites what this sensor *alerts on* and touches nothing it probes. A test
+fails if any other appears.
 
 ## Bounded by construction
 

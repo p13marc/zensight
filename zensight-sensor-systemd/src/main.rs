@@ -96,21 +96,52 @@ async fn main() -> Result<()> {
         .await;
     });
 
-    // Shared AlertReporter → state/systemd/alert/* for both the built-in
-    // threshold alerts (#276) and the sentinel (#277), with one late-joiner
-    // alert-state seed on state/systemd/alert/*. Created when either feature is active.
+    // Shared AlertReporter → state/systemd/alert/* for the built-in threshold
+    // alerts (#276), the sentinel (#277) and the operator's threshold rules
+    // (#931), with one late-joiner alert-state seed on state/systemd/alert/*.
+    //
+    // Unconditional since #931. It used to be built only when `alerts.enabled`
+    // or an `expectations` block was set, but an operator can now push a
+    // threshold rule to a running sensor over `@desired` or `@rpc` — so a
+    // build that could not report an alert would have had to refuse a rule it
+    // had just declared it accepts. Empty of alerts it costs one liveliness
+    // token and one seed queryable.
     let expectations = systemd_config.expectations.clone();
-    let alerts_active = systemd_config.alerts.enabled || expectations.is_some();
-    let reporter = alerts_active.then(|| {
+    // Whether the *sentinel* (#277) runs. Unchanged by #931: a threshold rule
+    // is not an expectation, so making the reporter unconditional must not
+    // quietly switch a sentinel on for a host whose operator turned it off.
+    let sentinel_active = systemd_config.alerts.enabled || expectations.is_some();
+    let reporter = {
         let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Systemd, format)
             .with_debounce(Duration::from_secs(systemd_config.alerts.for_secs));
         if let Some(id) = runner.identity() {
             reporter = reporter.with_identity(id);
         }
         Arc::new(reporter)
-    });
-    if let Some(r) = &reporter {
-        runner = runner.with_alert_reporter(r.clone());
+    };
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    // Threshold rules over this sensor's own telemetry (#931) — distinct from
+    // the built-in unit judgements above (#276) and from the sentinel's
+    // expectations below (#277): these are numbers an *operator* chose, over
+    // metrics this producer publishes, authorable fleet-wide on `@desired`.
+    // Installed whenever alerting is on, with or without a file `thresholds`
+    // block — same #849 reason the reconciler below does not gate on one.
+    {
+        zensight_sensor_core::threshold::adopt(
+            &mut runner,
+            Protocol::Systemd,
+            reporter.clone(),
+            {
+                use zensight_common::registry::desired;
+                desired::key(&desired::Subject::systemd_thresholds(
+                    zensight_common::PROFILE.host_id(),
+                ))
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
     let mut collector = SystemdCollector::new(
@@ -121,9 +152,7 @@ async fn main() -> Result<()> {
     )
     .with_events(event_state);
     // Threshold alerts (#276).
-    if systemd_config.alerts.enabled
-        && let Some(reporter) = &reporter
-    {
+    if systemd_config.alerts.enabled {
         let evaluator = zensight_sensor_systemd::alerts::AlertEvaluator::new(
             source.clone(),
             systemd_config.alerts.clone(),
@@ -148,7 +177,7 @@ async fn main() -> Result<()> {
     // config comments the block out) never subscribed, never seeded, and
     // never published `applied/expectations` at all. An empty set evaluates
     // to nothing and costs one D-Bus round trip per sweep.
-    if let Some(reporter) = reporter {
+    if sentinel_active {
         let exp_cfg = expectations.unwrap_or_default();
         if let Err(e) = zensight_sensor_systemd::sentinel::validate(&exp_cfg) {
             anyhow::bail!("systemd.expectations is invalid: {e}");
@@ -158,7 +187,7 @@ async fn main() -> Result<()> {
                 let evaluator = zensight_sensor_systemd::sentinel::Evaluator::new(
                     source.clone(),
                     exp_cfg,
-                    reporter,
+                    reporter.clone(),
                     conn,
                 )
                 .with_wake(sentinel_wake);

@@ -66,6 +66,11 @@ use crate::alert::AlertReporter;
 /// other bound in the tree is: an unbounded queue is a leak with a nice name.
 const TRANSITION_QUEUE: usize = 1024;
 
+/// The topic chunk this whole surface hangs off: `@desired
+/// {host}/<producer>/thresholds`, `state/<producer>/applied/thresholds`,
+/// `@rpc/<producer>/thresholds{,/set}`. One name, so the three cannot drift.
+pub const THRESHOLDS_TOPIC: &str = "thresholds";
+
 /// One rule's verdict about one matched series.
 #[derive(Debug)]
 enum Transition {
@@ -345,6 +350,116 @@ pub fn install<C: crate::config::SensorConfig>(
     runner.spawn(task);
     tracing::info!(rules = count, "threshold evaluator installed");
     evaluator
+}
+
+/// The whole of a sensor's threshold adoption, in one call (#931).
+///
+/// [`install`] puts the evaluator on the publish path. This puts the *rule
+/// set* on the bus: the `@desired` reconciler that lets a controller author
+/// it fleet-wide, the `@rpc/<producer>/thresholds` read and
+/// `…/thresholds/set` write that let an operator author it for one host, and
+/// the `applied/thresholds` marker that says which of the three writers —
+/// file, desired, rpc — is actually in force.
+///
+/// It runs **whether or not the file config carries a `thresholds` block**.
+/// That is the #849 lesson, learned the expensive way on systemd: gating the
+/// reconciler on the file block meant a stock install (whose shipped config
+/// comments the block out) never subscribed, never seeded and never published
+/// the marker at all — and the primary case for `@desired` is precisely a
+/// host with *no* local set that is supposed to receive one.
+///
+/// `desired_key` comes from the caller's generated registry
+/// (`registry::desired::key(&Subject::<producer>_thresholds(host_id))`), which
+/// is what keeps this crate registry-agnostic.
+pub async fn adopt<C: crate::config::SensorConfig>(
+    runner: &mut crate::runner::SensorRunner<C>,
+    protocol: Protocol,
+    reporter: Arc<AlertReporter>,
+    desired_key: zenkey::Key,
+    extra: &[Arc<crate::AdvancedPublisherRegistry>],
+) -> crate::Result<Arc<ThresholdEvaluator>> {
+    let config = runner.config().thresholds();
+    // The same gate both writers run. A file config that is invalid is a
+    // startup error — the operator is at the keyboard — where an invalid
+    // desired document is refused and rides the marker instead.
+    config
+        .validate()
+        .map_err(|e| crate::SensorError::validation(format!("thresholds is invalid: {e}")))?;
+
+    let baseline = config.clone();
+    let evaluator = install(runner, config, protocol, reporter, extra);
+
+    // The @desired reconciler and the @rpc surface are two writers to one
+    // evaluator; the shared marker is what says who won last.
+    let desired_cfg = runner.config().desired();
+    let apply_to = evaluator.clone();
+    let (marker, _task) = crate::desired::reconcile_topic(
+        runner.session().clone(),
+        runner.publisher(),
+        crate::desired::DesiredTopic {
+            topic: THRESHOLDS_TOPIC,
+            desired_key,
+        },
+        desired_cfg,
+        baseline,
+        move |cfg: ThresholdsConfig| {
+            let e = apply_to.clone();
+            async move {
+                // The SAME gate the RPC path runs: an invalid desired doc is
+                // refused (kept off the evaluator) and rides the marker's
+                // `last_rejected`, with the previous good set still running.
+                cfg.validate()?;
+                e.set_config(cfg);
+                Ok(())
+            }
+        },
+    );
+
+    let producer = runner.publisher().v1().producer().name().to_string();
+    let apply_marker = marker.clone();
+    let apply_to = evaluator.clone();
+    let read_from = evaluator.clone();
+    let tasks = crate::rpc::serve_topic::<ThresholdsConfig, _, _, _, _>(
+        runner.session().clone(),
+        runner.publisher().v1(),
+        THRESHOLDS_TOPIC,
+        move |cfg: ThresholdsConfig| {
+            let e = apply_to.clone();
+            let m = apply_marker.clone();
+            async move {
+                cfg.validate().map_err(crate::rpc::RpcError::invalid_args)?;
+                e.set_config(cfg.clone());
+                m.publish(
+                    zensight_common::desired::AppliedSource::Rpc,
+                    &cfg,
+                    None,
+                    None,
+                )
+                .await;
+                tracing::info!(
+                    rules = cfg.rules.len(),
+                    "threshold rule set replaced over @rpc"
+                );
+                Ok(())
+            }
+        },
+        move || {
+            let e = read_from.clone();
+            let p = producer.clone();
+            async move {
+                serde_json::to_vec(&e.config())
+                    .map_err(|err| crate::rpc::RpcError::producer(&p, "serialize", err.to_string()))
+            }
+        },
+    )
+    .await?;
+    for t in tasks {
+        runner.spawn(async move {
+            let _ = t.await;
+        });
+    }
+
+    Ok(evaluator)
 }
 
 impl PointObserver for ThresholdEvaluator {

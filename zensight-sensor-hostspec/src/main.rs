@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         "hostspec sensor running (read-only; executes nothing)"
     );
 
+    let reporter_for_thresholds = reporter.clone();
     let evaluator = Evaluator::new(
         source.clone(),
         expectations.clone(),
@@ -105,6 +106,26 @@ async fn main() -> Result<()> {
         handle,
         marker,
     ));
+
+    // Threshold rules over this sensor's own telemetry (#931). Separate from
+    // the assertion set above and deliberately so: an expectation is a
+    // *statement about the host* that this sensor goes and checks; a
+    // threshold is a number an operator picked about a metric it publishes.
+    // Same three writers, same marker discipline, its own topic.
+    zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Hostspec,
+        reporter_for_thresholds,
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::hostspec_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     runner
         .run_with_metadata(Some(serde_json::json!({

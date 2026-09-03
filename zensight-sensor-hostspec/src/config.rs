@@ -28,6 +28,14 @@ pub struct HostspecSensorConfig {
     /// must be disarmable from outside itself.
     #[serde(default)]
     pub desired: zensight_common::desired::DesiredConfig,
+
+    /// Operator-authored threshold rules over this sensor's own telemetry
+    /// (#931). **Empty by default** — this build ships no threshold that
+    /// fires. Also authorable fleet-wide on `@desired` and per-host over
+    /// `@rpc/hostspec/thresholds/set`; `state/hostspec/applied/thresholds`
+    /// says which of the three is in force.
+    #[serde(default)]
+    pub thresholds: zensight_common::threshold::ThresholdsConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -67,6 +75,14 @@ impl zensight_sensor_core::SensorConfig for HostspecSensorConfig {
 
     fn producer(&self) -> &str {
         "hostspec"
+    }
+
+    fn desired(&self) -> zensight_common::desired::DesiredConfig {
+        self.desired.clone()
+    }
+
+    fn thresholds(&self) -> zensight_common::threshold::ThresholdsConfig {
+        self.thresholds.clone()
     }
 
     /// The same validation the hot-swap path runs — a config that would be
