@@ -956,6 +956,72 @@ pub fn host_entities_at(now: i64) -> Vec<HostEntity> {
     ]
 }
 
+/// Mock catalog edges (#919), consistent with [`host_entities_at`] and the
+/// sources [`mock_environment`] emits.
+///
+/// The demo has to carry these for the same reason it carries entities: the
+/// topology view now draws its structural edges from catalog documents, and a
+/// demo without them would show a flow-only map — which is the *degraded*
+/// path, not the product. Per the repo's demo/mock contract these use the same
+/// wire types the correlator publishes, so the demo exercises the real decode.
+pub fn catalog_edges_at(now: i64) -> Vec<zensight_common::relation::Edge> {
+    use zensight_common::relation::{Edge, Endpoint, Observer, RelationKind};
+    let entity = |id: &str| Endpoint::Entity {
+        entity_id: id.to_string(),
+    };
+    let mk = |kind: RelationKind, from: Endpoint, to: Endpoint, sensor: &str, origin: &str| Edge {
+        edge_id: Edge::edge_id(kind, &from, &to),
+        kind,
+        from,
+        to,
+        attrs: Default::default(),
+        observers: vec![Observer {
+            sensor: sensor.to_string(),
+            origin: origin.to_string(),
+        }],
+        last_updated: now,
+    };
+    vec![
+        // router01 is the default gateway for both servers — which is also
+        // what makes it render as a Router.
+        mk(
+            RelationKind::GatewayOf,
+            entity("router01"),
+            entity("server01"),
+            "netlink",
+            "server01",
+        ),
+        mk(
+            RelationKind::GatewayOf,
+            entity("router01"),
+            entity("server02"),
+            "netlink",
+            "server02",
+        ),
+        // The wire-only host shares a segment with server01.
+        mk(
+            RelationKind::L2Adjacent,
+            entity("server01"),
+            entity("wire-host-a"),
+            "netlink",
+            "server01",
+        ),
+        // An external endpoint: the upstream the fleet can see and does not
+        // monitor. Exercises the passive-node synthesis path.
+        mk(
+            RelationKind::GatewayOf,
+            Endpoint::External {
+                ip: Some("203.0.113.1".to_string()),
+                mac: None,
+                name: Some("upstream".to_string()),
+            },
+            entity("router01"),
+            "netlink",
+            "router01",
+        ),
+    ]
+}
+
 /// [`host_entities_at`] stamped with the current wall clock.
 pub fn host_entities() -> Vec<HostEntity> {
     let now = std::time::SystemTime::now()

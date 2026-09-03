@@ -412,6 +412,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (GUI): the topology graph is read from the catalog, not derived
+  in the view** (#919, completing #899). `zensight/src/view/topology/` no
+  longer computes structural edges from data it happened to have in memory; it
+  subscribes to `@catalog/state/edge/*`, seeds from the edges queryable on
+  connect, and draws what the fleet publishes. The graph was the one thing on
+  this bus that no exporter, notifier or second console could see. It is now
+  ordinary fleet state.
+
+  `EdgeKind` becomes `Flow | Hosts | Runs | GatewayOf | Probes | L2Adjacent`
+  (`L2Adjacency` → `L2Adjacent`, `Gateway` → `GatewayOf`). Only `Flow` is still
+  derived locally — it is the overlay: per-observed-peer, unbounded, rebuilt
+  from the traffic matrix each refresh.
+
+  **Deleted**: `edges_from_neighbors`, `edges_from_gateways`,
+  `gateway_from_metrics`, the `last_neighbors` / `pending_gateways` /
+  `last_gateways` plumbing, `apply_neighbor_edges` (already dead since the #440
+  batch consolidation) and `apply_gateway_edges` — and with them the
+  **fleet-wide `@rpc` neighbour fan-out every open GUI issued on a 10 s
+  timer**. That work now happens once, in the correlator.
+
+  **Three things went with that derivation that are not edges**, and each would
+  have failed *silently*. All three are re-sourced, with tests:
+
+  1. **Router role.** `NodeRole::Router` came from the neighbour table's
+     `is_router` flag and from gateway-edge targets. The tiered layout keys its
+     Infrastructure tier on `Router|Switch|AccessPoint`, so losing it empties
+     that tier and the layout collapses to two bands — which reads as a layout
+     bug, not a missing join. Re-sourced from the catalog: **the `from` of a
+     `GatewayOf` edge is a router by construction.**
+  2. **Passive router nodes.** An unresolved gateway address used to become a
+     synthesized wire-only node. `Endpoint::External` now does the same, so a
+     gateway known only by IP still appears.
+  3. **The L2 lens**, which shows exactly `[L2Adjacent, GatewayOf]` and now
+     gets both from catalog documents. It stays deliberately narrow —
+     containment is not a link-layer fact, and adding it would turn the one
+     view that answers "what is on this segment" into another general map.
+
+  One narrow regression, stated rather than hidden: a router known **only** by
+  the neighbour table's `is_router` flag, and which is nobody's default
+  gateway, no longer gets the Router role. Nothing publishes that flag as
+  evidence; the fix belongs in netlink's evidence, not in the view.
+
+  Persisted preferences are unaffected **by construction, not by a migration**:
+  `TopoFilters` holds three booleans and a count, and `Lens` names a view, not
+  a kind. A test pins that — the moment a persisted field starts naming an
+  `EdgeKind`, renaming a variant becomes a silent data migration.
+
+  Edge application is change-gated (a re-emit that moved only `last_updated` is
+  not a change), because an unconditional rebuild clears the canvas cache and
+  drops the edge selection. The demo carries synthetic catalog edges for the
+  same reason it carries entities: without them the demo would show the
+  flow-only *degraded* path rather than the product.
+
 - **`async-snmp` 0.17 → 0.18.1 and `mib-rs` 0.10** (the half of Renovate #610
   that was an API rewrite). What an operator can see:
 

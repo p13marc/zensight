@@ -199,8 +199,11 @@ impl<'a> TopologyGraphProgram<'a> {
         let colors = theme::colors(&theme);
         match kind {
             EdgeKind::Flow => colors.topology_edge_flow(),
-            EdgeKind::L2Adjacency => colors.topology_edge_l2(),
-            EdgeKind::Gateway => colors.topology_edge_gateway(),
+            EdgeKind::L2Adjacent => colors.topology_edge_l2(),
+            EdgeKind::GatewayOf => colors.topology_edge_gateway(),
+            EdgeKind::Hosts | EdgeKind::Runs | EdgeKind::Probes => {
+                colors.topology_edge_containment()
+            }
         }
     }
 
@@ -699,8 +702,13 @@ impl<'a> TopologyGraphProgram<'a> {
         // Edge width based on live rate (log-scaled) or cumulative bytes;
         // structural kinds stay thin (#391).
         let width = match edge.kind {
-            EdgeKind::L2Adjacency => 1.0,
-            EdgeKind::Gateway => 1.2,
+            EdgeKind::L2Adjacent => 1.0,
+            EdgeKind::GatewayOf => 1.2,
+            // Containment is the strongest structural statement on the map —
+            // it is what impact attribution walks — so it draws heaviest of
+            // the structural kinds while still staying under a busy flow.
+            EdgeKind::Hosts | EdgeKind::Runs => 1.6,
+            EdgeKind::Probes => 1.2,
             EdgeKind::Flow => edge_width(edge.rate + edge.reverse_rate, edge.bytes),
         };
 
@@ -738,15 +746,25 @@ impl<'a> TopologyGraphProgram<'a> {
             .with_color(color)
             .with_width(width * self.state.zoom);
         match edge.kind {
-            EdgeKind::L2Adjacency => {
+            EdgeKind::L2Adjacent => {
                 stroke.line_dash = iced::widget::canvas::LineDash {
                     segments: &[2.0, 4.0],
                     offset: 0,
                 };
             }
-            EdgeKind::Gateway => {
+            EdgeKind::GatewayOf => {
                 stroke.line_dash = iced::widget::canvas::LineDash {
                     segments: &[6.0, 4.0],
+                    offset: 0,
+                };
+            }
+            // Containment draws solid: it is a fact about how the fleet is
+            // built, not an observation that may lapse, and a dashed line
+            // reads as "provisional" everywhere else on this canvas.
+            EdgeKind::Hosts | EdgeKind::Runs => {}
+            EdgeKind::Probes => {
+                stroke.line_dash = iced::widget::canvas::LineDash {
+                    segments: &[1.0, 3.0],
                     offset: 0,
                 };
             }
