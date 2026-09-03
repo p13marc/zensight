@@ -59,6 +59,8 @@ pub mod stream;
 pub mod subscribe;
 pub mod systemd;
 pub mod telemetry;
+// Threshold rules a sensor owns (#928, epic #901).
+pub mod threshold;
 pub mod timesync;
 pub mod v1;
 

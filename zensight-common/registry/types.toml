@@ -266,6 +266,11 @@ kind = "json-schema"
 [types.ContainerInfo]
 kind = "json-schema"
 
+# Threshold rules a sensor owns (#928, epic #901). A `@desired` document and an
+# `@rpc` reply, so it needs a real schema on both counts.
+[types.ThresholdsConfig]
+kind = "json-schema"
+
 # snmp's gated outlet control (#956). A monitor that can cut power is a
 # different threat model, so the types are here — where the GUI can preview the
 # gate from the same struct the sensor answers with.
