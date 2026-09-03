@@ -51,6 +51,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The incident engine** (#923, epic #900) — the catalog now publishes
+  `@catalog/state/incident/*`.
+
+  It subscribes the fleet's alert wildcard, its own `ack` and `silence`
+  families, and the **liveliness plane**; groups firing alerts by entity;
+  attributes each group over the relationship graph; and diffs against what it
+  last published. `incidents_enabled` (default on) is the kill switch.
+
+  - **It is the first caller `impact::attribute` has ever had.** #918 landed
+    attribution with unit tests and no consumer. A guest alerting behind a down
+    hypervisor now carries `symptom_of` naming the hypervisor — and the
+    liveliness subscription is what makes that possible at all, because a
+    machine that stopped answering publishes no alert of its own. The absence
+    of its token is the only evidence it is the cause.
+  - **An incident is a symptom only when *every* member is.** One unexplained
+    alert means an operator still has to look; an incident filed under "caused
+    by the hypervisor" that also carries a failing disk is how the disk gets
+    missed.
+  - **The origin → entity join goes through the evidence, not the entity.**
+    There is no `origin` field on a `HostEntity` and there usefully cannot be
+    one — the origin is a key chunk, never in the payload. So the join follows
+    the way the evidence went: an origin published a self-report, the merge
+    attached it to an entity as a `MemberClaim`. Third-party claims are skipped
+    deliberately, or a hypervisor observing a guest would file the
+    *hypervisor's* alerts under the guest it watches.
+  - **`merge.rs` never learns that alerts exist**, pinned by a grep test beside
+    the one `edges.rs` already carries. The identity merge is a pure function
+    of host evidence; an alert that could make two machines the same machine
+    would be an identity claim wearing a different hat.
+  - Three passes in order — entities, edges, incidents — each reading the
+    finished answer of the one before, so an incident can never name an entity
+    retired in the same pass or attribute through a vanished edge. The content
+    hash gate means a restart with an unchanged fleet publishes **nothing**,
+    and a shuffled-input test pins that the whole pass is order-independent.
+
+  The alert store keys by the full `(origin, producer, alert_key)` and not the
+  hash alone: since epic #453 the key no longer includes the source, so two
+  hosts firing the identical rule have the identical hash and a single-keyed
+  store would have shown one of them. A resolved alert *and* a tombstone both
+  remove the member — an incident is what is firing, and a resolved member that
+  stayed would keep it alive after the problem ended.
+
 - **Incidents, acknowledgement and silence, as documents** (#922, epic #900) —
   the model half. Nothing publishes these yet; #923 is the engine.
 

@@ -179,6 +179,104 @@ impl EdgePublisher {
     }
 }
 
+/// Manages the per-incident declared publishers (#923).
+///
+/// The same shape as [`EdgePublisher`], and for the same reason: an incident
+/// is materialized fleet state with an entity's lifecycle — it must arrive, it
+/// is seeded for late joiners by a queryable rather than a publisher cache,
+/// and it is tombstoned rather than left to age out.
+struct IncidentPublisher {
+    session: Arc<Session>,
+    format: Format,
+    publishers: HashMap<String, Publisher<'static>>,
+}
+
+impl IncidentPublisher {
+    fn new(session: Arc<Session>, format: Format) -> Self {
+        Self {
+            session,
+            format,
+            publishers: HashMap::new(),
+        }
+    }
+
+    async fn publisher_for(&mut self, incident_id: &str) -> anyhow::Result<&Publisher<'static>> {
+        if !self.publishers.contains_key(incident_id) {
+            let key = zensight_common::keyexpr::incident_key(incident_id);
+            let q = zensight_common::QosClass::Entity;
+            let pubr = self
+                .session
+                .declare_publisher(key.clone())
+                .congestion_control(q.congestion_control())
+                .priority(q.priority())
+                .express(q.express())
+                .reliability(q.reliability())
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to declare incident publisher {key}: {e}"))?;
+            self.publishers.insert(incident_id.to_string(), pubr);
+        }
+        Ok(self.publishers.get(incident_id).unwrap())
+    }
+
+    async fn upsert(
+        &mut self,
+        incident: &zensight_common::incident::Incident,
+    ) -> anyhow::Result<()> {
+        let payload =
+            encode(incident, self.format).map_err(|e| anyhow::anyhow!("encode incident: {e}"))?;
+        let encoding = self.format.encoding();
+        let pubr = self.publisher_for(&incident.id).await?;
+        pubr.put(payload)
+            .encoding(encoding)
+            .await
+            .map_err(|e| anyhow::anyhow!("put incident {}: {e}", incident.id))?;
+        Ok(())
+    }
+
+    async fn tombstone(&mut self, incident_id: &str) -> anyhow::Result<()> {
+        let pubr = self.publisher_for(incident_id).await?;
+        pubr.delete()
+            .await
+            .map_err(|e| anyhow::anyhow!("tombstone incident {incident_id}: {e}"))?;
+        Ok(())
+    }
+}
+
+/// Run the incident publisher: drain `op_rx`, apply each op, until shutdown.
+pub async fn run_incidents(
+    session: Arc<Session>,
+    format: Format,
+    mut op_rx: mpsc::Receiver<crate::incidents::IncidentOp>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut publisher = IncidentPublisher::new(session, format);
+    info!("incident publisher ready");
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            op = op_rx.recv() => {
+                match op {
+                    Some(crate::incidents::IncidentOp::Upsert(incident)) => {
+                        if let Err(e) = publisher.upsert(&incident).await {
+                            warn!(error = %e, "incident upsert failed");
+                        }
+                    }
+                    Some(crate::incidents::IncidentOp::Tombstone(id)) => {
+                        if let Err(e) = publisher.tombstone(&id).await {
+                            warn!(error = %e, "incident tombstone failed");
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    debug!("incident publisher stopped");
+    Ok(())
+}
+
 /// Run the edge publisher: drain `op_rx`, apply each op, until shutdown.
 pub async fn run_edges(
     session: Arc<Session>,

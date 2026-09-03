@@ -86,9 +86,18 @@ async fn main() -> anyhow::Result<()> {
     // Engine.
     let (edge_tx, edge_rx) =
         mpsc::channel::<zensight_correlator::edges::EdgeOp>(ENGINE_CHANNEL_CAP);
-    let engine = Engine::new(state.clone(), rx, op_tx)
+    // Incidents (#923): on unless the operator disarmed the mechanism.
+    let (incident_tx, incident_rx) =
+        mpsc::channel::<zensight_correlator::incidents::IncidentOp>(ENGINE_CHANNEL_CAP);
+    let mut engine = Engine::new(state.clone(), rx, op_tx)
         .with_pdns(pdns_tx)
         .with_edges(edge_tx);
+    if config.incidents_enabled {
+        engine = engine.with_incidents(incident_tx);
+    } else {
+        info!("incident evaluation disabled by config (incidents_enabled: false)");
+    }
+    let engine = engine;
     let engine_shutdown = shutdown_rx.clone();
     let engine_task = tokio::spawn(async move {
         if let Err(e) = engine.run(engine_shutdown).await {
@@ -105,6 +114,20 @@ async fn main() -> anyhow::Result<()> {
             error!(error = %e, "publisher error");
         }
     });
+
+    // Incident publisher (#923). Spawned whether or not incidents are enabled:
+    // with the engine leg off, no op ever arrives and this task idles on an
+    // empty channel — which costs nothing and keeps the shutdown path one
+    // shape rather than two.
+    let incident_task = {
+        let s = session.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = publisher::run_incidents(s, serialization, incident_rx, sh).await {
+                error!(error = %e, "incident publisher error");
+            }
+        })
+    };
 
     // Edge publisher (#917): the catalog's resolved relationship graph on
     // @catalog/state/edge/*, with the same lifecycle as entities.
@@ -149,6 +172,16 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             if let Err(e) = query::serve_edges(s, st, sh).await {
                 error!(error = %e, "edges queryable error");
+            }
+        })
+    };
+    let incidents_query_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_incidents(s, st, sh).await {
+                error!(error = %e, "incidents queryable error");
             }
         })
     };
@@ -273,6 +306,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = engine_task.await;
         let _ = publish_task.await;
         let _ = edge_task.await;
+        let _ = incident_task.await;
+        let _ = incidents_query_task.await;
         let _ = pdns_task.await;
         let _ = entities_task.await;
         let _ = names_task.await;

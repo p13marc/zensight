@@ -136,6 +136,59 @@ pub async fn serve_edges(
     Ok(())
 }
 
+/// Serve the incident seed queryable until shutdown (#923).
+///
+/// The third twin of [`serve_entities`], for the third reason it exists: a GUI
+/// or a notifier joining a running fleet must see what is *already* on fire.
+/// Without it, a late joiner shows an empty triage surface until the next
+/// re-emit — which, with the change gate doing its job, may be a minute away
+/// and is supposed to be.
+pub async fn serve_incidents(
+    session: Arc<Session>,
+    state: SharedState,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::all_incidents_wildcard();
+    let queryable = zensight_common::served::serve_state_queryable(&session, &key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare incidents queryable: {e}"))?;
+    info!(key = %key, "incidents seed queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                // Storage-shaped, stamped inside the lock — the same hazard as
+                // the other two seeds: an incident the engine updates mid-loop
+                // would have its live `put` stamped earlier than this loop's
+                // stale copy, and LWW would keep the stale one.
+                let (incidents, stamp) = {
+                    let guard = state.lock().unwrap();
+                    (
+                        guard.current_incidents(),
+                        zensight_common::served::seed_stamp(&session),
+                    )
+                };
+                for incident in incidents {
+                    let key = zensight_common::keyexpr::incident_key(&incident.id);
+                    match serde_json::to_vec(&incident) {
+                        Ok(payload) => {
+                            if let Err(e) = query.reply_state(&key, payload, stamp).await {
+                                warn!(error = %e, "incidents seed reply failed");
+                            }
+                        }
+                        Err(e) => warn!(error = %e, "serialize incident failed"),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Serve the on-demand names queryable until shutdown.
 pub async fn serve_names(
     session: Arc<Session>,

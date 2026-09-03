@@ -71,6 +71,24 @@
   // feature exists and is disabled.
   allow_operator_assertions: false,
 
+  // Incidents (#900): group the fleet's firing alerts by ENTITY, attribute
+  // each group to a root cause over the relationship graph, and publish
+  // @catalog/state/incident/*. One incident per machine, whether its own
+  // sensor, a hypervisor polling it or a prober noticed — which is the thing
+  // grouping by `source` could never do.
+  //
+  // ON by default, unlike allow_operator_assertions, and the difference is the
+  // point: assertions let an operator override the guard against fusing two
+  // real machines, so they wait to be chosen. Incidents only read — they group
+  // alerts that already exist and publish a conclusion, exactly as entity and
+  // edge documents do, and turning them off makes the fleet's triage surface
+  // silently absent rather than safe.
+  //
+  // The switch is here so the mechanism that could misbehave is disarmable
+  // from outside itself: an incident pass that churns should be stoppable
+  // without stopping the catalog.
+  // incidents_enabled: true,
+
   // Logging configuration
   logging: {
     // Log level: "trace", "debug", "info", "warn", "error"
