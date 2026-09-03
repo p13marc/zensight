@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NTP is covered, both ends of it** (#959, part of #952 — SYS-SUP-013's NTP
+  half). Before this, `grep -ri 'chrony\|sntp'` matched **nothing** in the
+  tree: no clock offset, no sync state, no stratum. The only coverage was "is
+  `chronyd` active" — which is true of a `chronyd` that has never reached a
+  server. The daemon runs, the unit is green, and the clock is wrong. A
+  supervision platform whose own correlation assumes fleet time discipline
+  should measure that assumption.
+
+  **An `ntp` probe kind**: one SNTP exchange (RFC 4330), no privilege, and it
+  never sets the clock — it is a client that reads what a server says.
+  Publishes `ntp_offset_ms`, `ntp_delay_ms`, `ntp_stratum` and
+  `ntp_synchronised`, plus the leap indicator and reference id in the state
+  document. The check fails on the **server's own statement** that it is
+  unusable: leap indicator 3, or stratum 0 — a kiss-o'-death, whose code is
+  published verbatim, because `DENY` and `RATE` are the two answers an operator
+  most needs and both are otherwise indistinguishable from a silent failure.
+
+  **A `timesync` collector in sysinfo**, off by default, publishing
+  `state/sysinfo/timesync` from `chronyc -c tracking` with a `timedatectl show`
+  fallback: `synchronised`, `offset_ms`, `stratum`, `reference`,
+  `last_update_age_s`.
+
+  **The two halves are separate on purpose, because neither answers the
+  other's question.** The probe's offset is measured against the *probe host's*
+  clock — the only clock that process has — so a vantage that is itself an hour
+  out reports every server as an hour out. Only the local document says which
+  of the two is adrift.
+
+  Three refusals to invent a number:
+
+  - **No offset threshold anywhere.** `probe` refuses built-in latency
+    thresholds ("a number this sensor cannot know") and that stance holds;
+    `clock-offset-high` arrives with #931's shared `ThresholdsConfig`. The one
+    new rule, `clock-unsynchronised`, fires only on the server's own statement.
+  - **`timesync` is absent when no daemon answers**, never a zero offset. A
+    zero is exactly what a perfectly disciplined clock looks like, so
+    publishing it for a host with nothing disciplining its clock would report
+    the opposite of the truth.
+  - **`timedatectl` reports no offset and no stratum, so those stay absent**
+    rather than being filled with a plausible number. Chrony is preferred when
+    both answer, because it reports more.
+
+  `collect.timesync` is off by default because it **shells out**: a subprocess
+  every poll interval on every host in the fleet should be a deliberate choice,
+  not something an upgrade switches on.
+
+  Tests: six SNTP decoder cases against packets built with known answers (a
+  stratum-2 answer with offset and delay checked against the RFC 4330 §5
+  arithmetic, a kiss-o'-death, an unsynchronised server, each leap value, and a
+  non-answer that must decode to nothing rather than to a time); an e2e leg
+  against a **fake UDP time server** with a deliberate 2 s skew and a second
+  that refuses; eight `timesync` fixture tests including the running-but-never-
+  synchronised chrony that motivated the issue, and the neither-present case.
+
+  **Anti-malware — the requirement's other example — has no generic surface**,
+  and this does not invent one. It remains covered as "the unit is active" via
+  `systemd`/`hostspec`, which is stated rather than left implied.
+
 - **A `burst` probe kind: latency, jitter and loss for a link** (#958, part of
   #952 — SYS-SUP-008's jitter half). Latency was measured and loss was
   inferable, but **nothing in the tree computed jitter for a link** — the only

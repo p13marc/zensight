@@ -271,6 +271,23 @@ pub struct CollectConfig {
     /// AND the process holds CAP_BPF/CAP_PERFMON. Never streamed onto the bus.
     #[serde(default)]
     pub ebpf: bool,
+
+    /// Publish the host's own clock discipline on `state/sysinfo/timesync`
+    /// (#959): whether the local time daemon considers the clock
+    /// synchronised, its offset, stratum, upstream and the age of the last
+    /// update.
+    ///
+    /// **Default OFF**, and it shells out — `chronyc -c tracking`, falling
+    /// back to `timedatectl show` — which is the reason. A sensor that runs a
+    /// subprocess every poll interval on every host in the fleet should be a
+    /// deliberate choice, not a default that arrives with an upgrade.
+    ///
+    /// When neither daemon answers the family is **absent**, never a zero
+    /// offset: a zero is what a perfectly disciplined clock looks like, and
+    /// publishing it for a host with no time daemon reports the opposite of
+    /// the truth.
+    #[serde(default)]
+    pub timesync: bool,
 }
 
 impl Default for CollectConfig {
@@ -304,6 +321,7 @@ impl Default for CollectConfig {
             mdadm: true,
             saturation_score: true,
             ebpf: false,
+            timesync: false,
         }
     }
 }

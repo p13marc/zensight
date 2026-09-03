@@ -81,7 +81,31 @@ interval. A check that can outlive its own tick is queued, not bounded.
 | `tcp` | connect success, connect time |
 | `icmp` | reachability — build feature `icmp`, off by default, needs `CAP_NET_RAW` |
 | `certfile` | a PEM's `notAfter`, with no network at all |
+| `ntp` | **clock offset, delay, stratum, leap and reference id** from an SNTP query (RFC 4330) — one UDP exchange, no privilege, and it never sets the clock |
 | `burst` | **latency, jitter and loss for a link** — `count` probes `spacing_ms` apart in one interval, reduced to rtt min/avg/max/p95, mean absolute IPDV and loss % |
+
+### What the `ntp` check does and does not tell you
+
+**`offset_ms` is measured against the probe host's own clock**, which is the
+only clock this process has. It is a statement about the *relationship* between
+two clocks, not about either being right: a probe host that is itself an hour
+out reports every server as an hour out. Pair it with
+`state/sysinfo/timesync` — sysinfo's opt-in `collect.timesync`, which reports
+the **local** discipline — to tell the two cases apart.
+
+The check fails on the **server's own statement** that it is unusable: leap
+indicator 3 (unsynchronised) or stratum 0 (a kiss-o'-death refusal, whose code
+— `DENY`, `RATE` — is published verbatim, because those are the two answers an
+operator most needs to see and both are otherwise indistinguishable from a
+silent failure).
+
+It exists because "is `chronyd` active" was the only NTP coverage in the tree,
+and that is true of a `chronyd` that has never reached a server: the daemon
+runs, the unit is green, and the clock is wrong.
+
+There is **no offset threshold** — a number this sensor cannot know, the same
+stance it takes on latency. `clock-offset-high` arrives with #931's shared
+`ThresholdsConfig`.
 
 ### What a burst is careful about
 

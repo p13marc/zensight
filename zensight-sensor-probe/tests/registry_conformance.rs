@@ -30,6 +30,11 @@ fn every_registered_family_has_an_emitter() {
         "forge/rtt_max_ms",
         "forge/rtt_p95_ms",
         "forge/jitter_ms",
+        // The ntp kind (#959).
+        "forge/ntp_offset_ms",
+        "forge/ntp_delay_ms",
+        "forge/ntp_stratum",
+        "forge/ntp_synchronised",
         "targets/total",
         "targets/failing",
     ]

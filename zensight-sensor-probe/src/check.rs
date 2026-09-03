@@ -34,6 +34,7 @@ fn result(t: &Target, vantage: &str, outcome: ProbeOutcome, started: Instant) ->
         tls: None,
         dns: None,
         burst: None,
+        ntp: None,
         vantage: vantage.to_string(),
         observed_at_ms: zensight_common::current_timestamp_millis(),
     }
@@ -54,7 +55,120 @@ pub async fn run(
         ProbeKind::CertFile => certfile(t, vantage),
         ProbeKind::Icmp => icmp(t, vantage, timeout).await,
         ProbeKind::Burst => burst(t, vantage, timeout).await,
+        ProbeKind::Ntp => ntp(t, vantage, timeout).await,
     }
+}
+
+/// An SNTP query against a time server (RFC 4330) (#959).
+///
+/// One UDP exchange from an ephemeral port — **no privilege**, unlike setting
+/// the clock, which this never does. The sensor is a client; it reads what a
+/// time server says and publishes it.
+///
+/// The check fails when the server says it is not a usable time source, which
+/// is its own statement and not a judgement made here: leap indicator 3
+/// (unsynchronised), or stratum 0 (a kiss-o'-death refusal). A `chronyd` that
+/// has never reached an upstream answers exactly this way, and "is the unit
+/// active" — the only NTP coverage that existed before — is true of it.
+async fn ntp(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
+    use zensight_common::probe::{decode_sntp, sntp_request};
+    let started = Instant::now();
+
+    // Default port 123, so a target may be a bare host.
+    let addr = if t.target.contains(':') {
+        t.target.clone()
+    } else {
+        format!("{}:123", t.target)
+    };
+
+    let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(e) => {
+            let mut r = result(t, vantage, ProbeOutcome::Failed, started);
+            r.error = Some(format!("bind: {e}"));
+            return r;
+        }
+    };
+    if let Err(e) = sock.connect(&addr).await {
+        let mut r = result(t, vantage, ProbeOutcome::Failed, started);
+        r.error = Some(format!("{addr}: {e}"));
+        return r;
+    }
+
+    // T1 and T4 are taken as close to the send and receive as possible: every
+    // instruction between them is added to the measured offset.
+    let t1 = unix_secs();
+    if let Err(e) = sock.send(&sntp_request()).await {
+        let mut r = result(t, vantage, ProbeOutcome::Failed, started);
+        r.error = Some(format!("send: {e}"));
+        return r;
+    }
+    let mut buf = [0u8; 48];
+    let recv = tokio::time::timeout(timeout, sock.recv(&mut buf)).await;
+    let t4 = unix_secs();
+
+    match recv {
+        Ok(Ok(n)) => match decode_sntp(&buf[..n], t1, t4) {
+            Some(ntp) => {
+                let unusable = ntp.unusable();
+                let mut r = result(
+                    t,
+                    vantage,
+                    if unusable {
+                        ProbeOutcome::Failed
+                    } else {
+                        ProbeOutcome::Ok
+                    },
+                    started,
+                );
+                if unusable {
+                    r.error = Some(if ntp.stratum == 0 {
+                        format!(
+                            "kiss-o'-death from {addr}: {:?} — the server refused, it did \
+                             not answer with a time",
+                            ntp.reference_id
+                        )
+                    } else {
+                        format!("{addr} reports itself unsynchronised (leap indicator 3)")
+                    });
+                }
+                r.ntp = Some(ntp);
+                r
+            }
+            None => {
+                let mut r = result(t, vantage, ProbeOutcome::Failed, started);
+                r.error = Some(format!(
+                    "{addr} answered {n} bytes that are not an SNTP server response"
+                ));
+                r
+            }
+        },
+        Ok(Err(e)) => {
+            let mut r = result(t, vantage, ProbeOutcome::Failed, started);
+            r.error = Some(format!("recv: {e}"));
+            r
+        }
+        Err(_) => {
+            let mut r = result(t, vantage, ProbeOutcome::Timeout, started);
+            r.error = Some(format!(
+                "{addr} did not answer in {}s",
+                timeout.as_secs_f64()
+            ));
+            r
+        }
+    }
+}
+
+/// Wall-clock seconds since the Unix epoch, as a float.
+///
+/// Deliberately the *wall* clock and not a monotonic one: an NTP offset is a
+/// statement about wall clocks, and a monotonic instant has no relationship to
+/// the server's timestamps at all.
+fn unix_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// A burst of probes in one interval, reduced to delay variation and loss

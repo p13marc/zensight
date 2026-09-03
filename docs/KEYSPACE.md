@@ -158,6 +158,26 @@ and unbounded, so it stays an `@rpc` overlay rather than entering a
 cardinality-budgeted state family — `edge/{edge_id}` declares 50 000, and a
 resolver emitting an edge per observed peer would breach it.
 
+## Clock discipline (#959)
+
+Two halves, deliberately separate, because neither answers the other's
+question:
+
+```
+zensight/v1/<origin>/telemetry/probe/{target}/ntp_offset_ms   a SERVER, from a vantage
+zensight/v1/<origin>/state/sysinfo/timesync                   THIS HOST's own discipline
+```
+
+The probe's offset is measured against the **probe host's** clock, so a vantage
+that is itself adrift reports every server as adrift. Only
+`state/sysinfo/timesync` — the local daemon's own report, via `chronyc -c
+tracking` or `timedatectl show` — says which of the two is wrong.
+
+`timesync` is **absent** when no time daemon answers, never a zero offset: a
+zero is what a perfectly disciplined clock looks like, and publishing it for a
+host with nothing disciplining its clock reports the opposite of the truth. It
+is opt-in (`collect.timesync`) because reading it shells out.
+
 ## `@desired` — fleet configuration as desired state (#816)
 
 A controller publishes per-host runtime POLICY under the `@desired` service

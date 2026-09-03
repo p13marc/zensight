@@ -120,6 +120,25 @@
       // { name: "uplink", kind: "burst", target: "10.0.0.1:443",
       //   count: 10, spacing_ms: 100, transport: "tcp",
       //   interval_secs: 30, timeout_secs: 1 },
+
+      // NTP (#959). One SNTP exchange (RFC 4330) against a time server: no
+      // privilege, and this sensor NEVER sets the clock — it is a client that
+      // reads what a server says.
+      //
+      // Publishes offset, delay, stratum, leap and the reference id. The
+      // OFFSET IS MEASURED AGAINST THIS HOST'S CLOCK, so a probe host that is
+      // itself an hour out reports every server as an hour out — pair it with
+      // `state/sysinfo/timesync` (sysinfo's `collect.timesync`, off by
+      // default), which reports the LOCAL discipline, to tell the two apart.
+      //
+      // The check fails on the server's OWN statement that it is unusable:
+      // leap indicator 3, or a stratum-0 kiss-o'-death, whose code ("DENY",
+      // "RATE") is published verbatim because those are the two answers an
+      // operator most needs to see. There is deliberately no offset threshold
+      // — a number this sensor cannot know; `clock-offset-high` arrives with
+      // #931.
+      // { name: "time", kind: "ntp", target: "10.0.0.1",
+      //   interval_secs: 300, timeout_secs: 5 },
     ],
 
     alerts: {

@@ -70,6 +70,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         // reads one schema rather than re-deriving the shape.
         .json::<crate::RelationshipEvidence>("RelationshipEvidence")
         .json::<crate::Edge>("Edge")
+        .json::<crate::TimesyncStatus>("TimesyncStatus")
         .json::<crate::PdnsRecord>("PdnsRecord")
         .json::<crate::StreamStatus>("StreamStatus")
         .json::<crate::stream::FrameMeta>("FrameMeta")

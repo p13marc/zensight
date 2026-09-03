@@ -26,6 +26,7 @@ pub mod config;
 pub mod map;
 pub mod query;
 pub mod saturation;
+pub mod timesync;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

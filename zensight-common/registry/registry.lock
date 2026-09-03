@@ -465,6 +465,10 @@ subject	probe	{target}/http_status	telemetry	TelemetryPoint
 subject	probe	{target}/http_ttfb_ms	telemetry	TelemetryPoint
 subject	probe	{target}/jitter_ms	telemetry	TelemetryPoint
 subject	probe	{target}/loss_pct	telemetry	TelemetryPoint
+subject	probe	{target}/ntp_delay_ms	telemetry	TelemetryPoint
+subject	probe	{target}/ntp_offset_ms	telemetry	TelemetryPoint
+subject	probe	{target}/ntp_stratum	telemetry	TelemetryPoint
+subject	probe	{target}/ntp_synchronised	telemetry	TelemetryPoint
 subject	probe	{target}/rtt_avg_ms	telemetry	TelemetryPoint
 subject	probe	{target}/rtt_max_ms	telemetry	TelemetryPoint
 subject	probe	{target}/rtt_min_ms	telemetry	TelemetryPoint
@@ -696,6 +700,7 @@ subject	sysinfo	system/procs_running	telemetry	TelemetryPoint
 subject	sysinfo	system/saturation_score	telemetry	TelemetryPoint
 subject	sysinfo	system/uptime	telemetry	TelemetryPoint
 subject	sysinfo	tcp/{state}	telemetry	TelemetryPoint
+subject	sysinfo	timesync	state	TimesyncStatus
 subject	sysinfo	{cpu}/schedstat/run_delay_ns_total	telemetry	TelemetryPoint
 subject	sysinfo	{cpu}/times/{component}	telemetry	TelemetryPoint
 subject	systemd	alert/{alert_key}	state	Alert

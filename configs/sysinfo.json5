@@ -149,6 +149,21 @@
       // GUI distinguishes "not built with eBPF" from "no sensor answered".
       // `just run` flips this on automatically when it built an eBPF binary.
       ebpf: false,
+
+      // Publish this host's own clock discipline on `state/sysinfo/timesync`
+      // (#959): synchronised, offset, stratum, upstream, last-update age.
+      //
+      // OFF by default because reading it SHELLS OUT — `chronyc -c tracking`,
+      // falling back to `timedatectl show`. A subprocess every poll interval on
+      // every host should be a deliberate choice, not something an upgrade
+      // switches on.
+      //
+      // When neither daemon answers the document is ABSENT, never a zero
+      // offset: a zero is what a perfectly disciplined clock looks like, and
+      // publishing it for a host with no time daemon reports the opposite of
+      // the truth. This is the half `probe`'s ntp check cannot see — that one
+      // measures a server against THIS host's clock.
+      // timesync: true,
     },
 
     // Process-explorer privacy (#302): argv values whose key looks secret

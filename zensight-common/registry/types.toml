@@ -132,6 +132,9 @@ kind = "json-schema"
 [types.ThreatIntelConfig]
 kind = "json-schema"
 
+[types.TimesyncStatus]
+kind = "json-schema"
+
 [types.TopicConfig]
 kind = "json-schema"
 
