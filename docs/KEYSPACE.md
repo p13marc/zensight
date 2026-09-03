@@ -131,8 +131,27 @@ demonstrates that a real relation document does decode as `HostEvidence`.
 Neither family carries a `common =` key: `zenkey::CommonState` is a closed RFC
 enum in an external crate, so both refine app-side through
 `zensight_common::state::ZensightState` — the same escape hatch
-`catalog/assertion/{id}` uses. **The RFC (zenkey#416) and the code disagree
-until that releases**, deliberately and in writing.
+`catalog/assertion/{id}` uses.
+
+> **RFC status.** These two families are **implemented and shipped ahead of the
+> RFC.** The amendment is [zenkey#416](https://github.com/p13marc/zenkey/issues/416),
+> which is open; a comment there records what the implementation turned out to
+> be, the three places it is more specific than the amendment text, and two
+> `edge_id` details worth making normative because both are silent when wrong.
+> Until #416 releases, **the RFC and this code disagree**, deliberately and in
+> writing — the same treatment zenkey#415 got for the historian. When it lands,
+> `CommonState::{EvidenceRelation, CatalogEdge}` replaces the app-side
+> refinement and both families gain a `common =` key; nothing on the wire moves.
+
+`L2Adjacent` is the one kind **no sensor publishes**. The catalog derives it
+from the observed-device identity claims already on the bus — "the sensor on
+this host saw that device" is a statement about a link-layer segment — which is
+the inference the GUI used to make privately from netlink's neighbour table.
+
+The consumer side is written up in
+[`zensight-correlator/README.md`](../zensight-correlator/README.md#consumer-recipe-topology-aware-alert-inhibition):
+what a key-agnostic notifier needs to inhibit "do not page for a guest whose
+hypervisor is down" with no application knowledge at all.
 
 Flow adjacency is deliberately *not* a relation kind. It is per-observed-peer
 and unbounded, so it stays an `@rpc` overlay rather than entering a
