@@ -28,6 +28,8 @@ procedure	hostspec	expectations	read	-	TopicStatus
 procedure	hostspec	expectations/set	write	HostspecExpectations	Ack
 procedure	hostspec	introspect	read	-	RegistrySlice
 procedure	hostspec	spec	read	-	HostspecEvaluation
+procedure	hostspec	thresholds	read	-	ThresholdsConfig
+procedure	hostspec	thresholds/set	write	ThresholdsConfig	Ack
 procedure	logs	artifact/cancel	write	-	Ack
 procedure	logs	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	logs	artifact/status	read	-	ArtifactStatus
@@ -38,6 +40,8 @@ procedure	logs	filter/set	write	TopicConfig	Ack
 procedure	logs	introspect	read	-	RegistrySlice
 procedure	logs	rules	read	-	RulesStatus
 procedure	logs	rules/set	write	LogRulesConfig	Ack
+procedure	logs	thresholds	read	-	ThresholdsConfig
+procedure	logs	thresholds/set	write	ThresholdsConfig	Ack
 procedure	modbus	artifact/cancel	write	-	Ack
 procedure	modbus	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	modbus	artifact/status	read	-	ArtifactStatus
@@ -108,6 +112,8 @@ procedure	parallax	stream/set	write	Command<StreamControl>	Ack
 procedure	parallax	streams	read	-	Vec<StreamDescriptor>
 procedure	probe	describe	read	-	SchemaSet
 procedure	probe	introspect	read	-	RegistrySlice
+procedure	probe	thresholds	read	-	ThresholdsConfig
+procedure	probe	thresholds/set	write	ThresholdsConfig	Ack
 procedure	pve	describe	read	-	SchemaSet
 procedure	pve	introspect	read	-	RegistrySlice
 procedure	snmp	action	read	-	OutletStatus
@@ -126,6 +132,8 @@ procedure	sysinfo	describe	read	-	SchemaSet
 procedure	sysinfo	introspect	read	-	RegistrySlice
 procedure	sysinfo	latency	read	-	LatencyReport
 procedure	sysinfo	processes	read	-	Vec<ProcessRecord>
+procedure	sysinfo	thresholds	read	-	ThresholdsConfig
+procedure	sysinfo	thresholds/set	write	ThresholdsConfig	Ack
 procedure	systemd	action	read	-	ActionStatus
 procedure	systemd	action/capability	read	-	ActionCapability
 procedure	systemd	action/set	write	ServiceAction	ActionStatus
@@ -140,6 +148,8 @@ procedure	systemd	expectations	read	-	TopicStatus
 procedure	systemd	expectations/set	write	ExpectationsConfig	Ack
 procedure	systemd	failed	read	-	Vec<UnitRecord>
 procedure	systemd	introspect	read	-	RegistrySlice
+procedure	systemd	thresholds	read	-	ThresholdsConfig
+procedure	systemd	thresholds/set	write	ThresholdsConfig	Ack
 procedure	systemd	timers	read	-	Vec<TimerRecord>
 procedure	systemd	unit	read	-	UnitDetail
 procedure	systemd	unit/file	read	-	UnitFile
@@ -198,7 +208,12 @@ subject	container	{name}/restart_count	telemetry	TelemetryPoint
 subject	container	{name}/running	telemetry	TelemetryPoint
 subject	container	{name}/uptime_secs	telemetry	TelemetryPoint
 subject	desired	{host}/hostspec/expectations	state	HostspecExpectations
+subject	desired	{host}/hostspec/thresholds	state	ThresholdsConfig
+subject	desired	{host}/logs/thresholds	state	ThresholdsConfig
+subject	desired	{host}/probe/thresholds	state	ThresholdsConfig
+subject	desired	{host}/sysinfo/thresholds	state	ThresholdsConfig
 subject	desired	{host}/systemd/expectations	state	ExpectationsConfig
+subject	desired	{host}/systemd/thresholds	state	ThresholdsConfig
 subject	gnmi	artifact/{kind}	state	ArtifactStatus
 subject	gnmi	errors	state	ErrorReport
 subject	gnmi	evidence/self	state	HostEvidence
@@ -218,6 +233,7 @@ subject	hostspec	evidence/self	state	HostEvidence
 subject	hostspec	health	state	HealthSnapshot
 subject	hostspec	sensor	state	SensorInfo
 subject	logs	alert/{alert_key}	state	Alert
+subject	logs	applied/{topic}	state	AppliedConfig
 subject	logs	artifact/{kind}	state	ArtifactStatus
 subject	logs	by_severity/{severity}	telemetry	TelemetryPoint
 subject	logs	by_template/{template}/count_total	telemetry	TelemetryPoint
@@ -476,6 +492,7 @@ subject	parallax	{stream}/stats/rc_drops	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/sink_queue	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/viewers	telemetry	TelemetryPoint
 subject	probe	alert/{alert_key}	state	Alert
+subject	probe	applied/{topic}	state	AppliedConfig
 subject	probe	errors	state	ErrorReport
 subject	probe	evidence/relation/{relation_id}	state	RelationshipEvidence
 subject	probe	evidence/self	state	HostEvidence
@@ -679,6 +696,7 @@ subject	snmp	{device}/ups/output/{line}/power_w	telemetry	TelemetryPoint
 subject	snmp	{device}/ups/output/{line}/voltage_v	telemetry	TelemetryPoint
 subject	snmp	{device}/{metric...}	telemetry	TelemetryPoint
 subject	sysinfo	alert/{alert_key}	state	Alert
+subject	sysinfo	applied/{topic}	state	AppliedConfig
 subject	sysinfo	artifact/{kind}	state	ArtifactStatus
 subject	sysinfo	battery/{name}/capacity	telemetry	TelemetryPoint
 subject	sysinfo	battery/{name}/status	telemetry	TelemetryPoint

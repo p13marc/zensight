@@ -197,13 +197,21 @@ subscription as the accelerator. A `Delete` reverts the target to its
 file-config baseline. This is convergence; durable pub/sub *commands* are
 the permanently forbidden alternative (RFC 12).
 
-What it carries: the hostspec assertion set (`HostspecExpectations`, #816)
-and the systemd unit-expectation set (`ExpectationsConfig`, #849) — both real
-schemars types, which is what the RFC 08 §7 schema gate requires of a
-state-class payload and what a sensor-crate type can never be (zensight-common
-cannot depend on a sensor, so `describe` could only carry a stub). Topics join
-as their config types migrate; the netlink and logs sentinels have the
-identical seam (`SentinelHandle::replace`) and are the remainder.
+What it carries: the hostspec assertion set (`HostspecExpectations`, #816),
+the systemd unit-expectation set (`ExpectationsConfig`, #849), and a
+`thresholds` set per producer (`ThresholdsConfig`, #931) — all real schemars
+types, which is what the RFC 08 §7 schema gate requires of a state-class
+payload and what a sensor-crate type can never be (zensight-common cannot
+depend on a sensor, so `describe` could only carry a stub).
+
+The two *expectation* topics joined one sensor at a time, as each set's type
+migrated into zensight-common; the netlink and logs sentinels still hold
+theirs in their own crates and are the remainder there. `thresholds` needed no
+migration — `ThresholdsConfig` was written in zensight-common from the start
+(#928) — so every producer joined at once. That is the point of it: one rule
+vocabulary, authored fleet-wide, evaluated **at the edge by whichever sensor
+publishes the metric**, instead of a rule engine in a GUI whose alerts reached
+nothing.
 
 systemd's type name is `ExpectationsConfig` rather than a producer-prefixed
 `SystemdExpectations` like hostspec's, and deliberately so: that is the name

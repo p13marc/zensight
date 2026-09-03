@@ -22,7 +22,7 @@
 # file-config baseline).
 
 [registry]
-version = "1.0"
+version = "1.2"
 app = "zensight"
 convention = 1
 
@@ -37,8 +37,15 @@ description = "fleet desired-state author (#816): per-host runtime policy, targe
 # a sensor, so `describe` could only carry a summary stub. #815's gate refused
 # exactly that, correctly.
 #
-# hostspec (#816) and systemd (#849) have migrated. netlink and logs have the
-# identical seam (`SentinelHandle::replace`) and are the remainder.
+# hostspec (#816) and systemd (#849) migrated their `expectations` sets.
+# netlink's and logs' sets still live in their sensor crates and are the
+# remainder there.
+#
+# `thresholds` (#931) needed no migration: `ThresholdsConfig` was written in
+# `zensight-common` from the start (#928) and is schema-registered, so every
+# producer joins at once rather than one per sentinel rewrite. One rule
+# vocabulary, authored fleet-wide, evaluated at the edge by whichever sensor
+# publishes the metric.
 
 [[subject]]
 path = "{host}/hostspec/expectations"
@@ -63,3 +70,48 @@ cardinality = 10000
 ttl_s = 0
 since = "1.1"
 description = "desired systemd unit-expectation set for {host} (#277 — services/targets active, timer freshness and success, restart rates, forbid-failed)"
+
+[[subject]]
+path = "{host}/sysinfo/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.2"
+description = "desired threshold rule set for sysinfo on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/logs/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.2"
+description = "desired threshold rule set for logs on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/systemd/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.2"
+description = "desired threshold rule set for systemd on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/hostspec/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.2"
+description = "desired threshold rule set for hostspec on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+[[subject]]
+path = "{host}/probe/thresholds"
+class = "state"
+type = "ThresholdsConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.2"
+description = "desired threshold rule set for probe on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"

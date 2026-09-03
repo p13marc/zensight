@@ -86,6 +86,27 @@ pub trait SensorConfig: Sized + DeserializeOwned {
         None
     }
 
+    /// `@desired` reconcile settings (#816/#849) — the kill switch and the
+    /// re-seed interval. Every sensor that adopts a fleet-authorable topic
+    /// (`thresholds`, `expectations`, …) reads them from here, so the
+    /// framework can spawn the reconciler without knowing the config type.
+    /// Default: enabled, with the standard refresh.
+    fn desired(&self) -> zensight_common::desired::DesiredConfig {
+        zensight_common::desired::DesiredConfig::default()
+    }
+
+    /// Operator-authored threshold rules (`thresholds.*`, #928/#931).
+    ///
+    /// Default: **no rules**. That is not "thresholds are off" — the
+    /// evaluator is installed either way, because `@desired` and
+    /// `@rpc/<producer>/thresholds/set` can add rules to a running sensor.
+    /// It is "this build ships no threshold that fires", which is the
+    /// standing rule for every number in this tree that an operator did not
+    /// choose.
+    fn thresholds(&self) -> zensight_common::threshold::ThresholdsConfig {
+        zensight_common::threshold::ThresholdsConfig::default()
+    }
+
     /// Validate the configuration.
     ///
     /// Called automatically after loading. Override to add custom validation.

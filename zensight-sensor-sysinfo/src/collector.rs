@@ -12,7 +12,7 @@ use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
 use tracing::{debug, warn};
 use zenoh::Session;
-use zensight_common::serialization::{Format, encode};
+use zensight_common::serialization::Format;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
 #[cfg(target_os = "linux")]
@@ -99,6 +99,22 @@ impl SystemCollector {
     /// Use the runner's shared health tracker (so updates reach `state/sysinfo/health`).
     pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {
         self.health = health;
+        self
+    }
+
+    /// Install the operator's threshold evaluator on this collector's own
+    /// publisher registry (#931).
+    ///
+    /// sysinfo builds its registry here rather than taking the runner's, and
+    /// publishes through `PublisherRegistry::put_point` — so an observer set
+    /// only on `runner.publisher()` would have watched a path this sensor's
+    /// 138 metric families never take. It would have looked installed and
+    /// evaluated nothing.
+    pub fn with_thresholds(
+        self,
+        observer: Arc<dyn zensight_common::point_observer::PointObserver>,
+    ) -> Self {
+        self.registry.set_observer(observer);
         self
     }
 
@@ -1655,19 +1671,22 @@ impl SystemCollector {
             unit: None,
         };
 
-        match encode(&point, self.format) {
-            Ok(payload) => {
-                if let Err(e) = self
-                    .registry
-                    .put(&key, payload, zensight_common::QosClass::Telemetry)
-                    .await
-                {
-                    warn!("Failed to publish '{}': {}", key, e);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to encode metric '{}': {}", metric, e);
-            }
+        // `put_point`, not `put`: this is the last place the point is still a
+        // `TelemetryPoint` rather than bytes, and it is where the operator's
+        // threshold rules see it (#931). Encoding self-first and calling `put`
+        // — as this did — would have made every one of sysinfo's metric
+        // families invisible to its own thresholds.
+        if let Err(e) = self
+            .registry
+            .put_point(
+                &key,
+                &point,
+                zensight_common::QosClass::Telemetry,
+                self.format,
+            )
+            .await
+        {
+            warn!("Failed to publish '{}': {}", key, e);
         }
     }
 }

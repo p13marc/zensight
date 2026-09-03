@@ -32,7 +32,6 @@ use config::SyslogSensorConfig;
 use filter::FilterManager;
 use sentinel::LogSentinel;
 use std::sync::Arc;
-use zensight_common::serialization::encode;
 use zensight_common::telemetry::Protocol;
 use zensight_sensor_core::{AlertReporter, SensorArgs, SensorConfig, SensorRunner};
 
@@ -208,22 +207,45 @@ async fn main() -> Result<()> {
     let sentinel_on = journald_events_on
         || !syslog_config.sentinel.rules.is_empty()
         || syslog_config.sentinel.include_kernel_builtins;
-    let alert_reporter: Option<Arc<AlertReporter>> =
-        if journald_events_on || budget_alerts_on || sentinel_on {
-            let reporter = AlertReporter::new(runner.publisher(), Protocol::Logs, format);
-            // Stamp alerts with the host identity envelope when available.
-            let reporter = match runner.identity() {
-                Some(id) => reporter.with_identity(id),
-                None => reporter,
-            };
-            let reporter = Arc::new(reporter);
-            // Handing the reporter to the runner seeds late-joining consumers
-            // (e.g. the GUI) and makes the firing set survive a restart (#882).
-            runner = runner.with_alert_reporter(reporter.clone());
-            Some(reporter)
-        } else {
-            None
+    //
+    // Unconditional since #931: it used to exist only when one of those three
+    // families was on, but an operator can now push a threshold rule to a
+    // running sensor over `@desired` or `@rpc`, and a build that could not
+    // report an alert would have had to refuse a rule it had just declared it
+    // accepts. The three gates below still decide which families evaluate.
+    let alert_reporter: Arc<AlertReporter> = {
+        let reporter = AlertReporter::new(runner.publisher(), Protocol::Logs, format);
+        // Stamp alerts with the host identity envelope when available.
+        let reporter = match runner.identity() {
+            Some(id) => reporter.with_identity(id),
+            None => reporter,
         };
+        let reporter = Arc::new(reporter);
+        // Handing the reporter to the runner seeds late-joining consumers
+        // (e.g. the GUI) and makes the firing set survive a restart (#882).
+        runner = runner.with_alert_reporter(reporter.clone());
+        reporter
+    };
+    // The operator's threshold rules over this producer's own telemetry (#931):
+    // ingest ratios, derived per-unit rates, template counts, store gauges.
+    // Installed on the plain registry those four paths publish through — the
+    // runner's `Publisher` sees none of them.
+    let threshold_evaluator = zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        Protocol::Logs,
+        alert_reporter.clone(),
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::logs_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    registry.set_observer(threshold_evaluator);
+
     if syslog_config.error_budget.enabled && !syslog_config.derived {
         tracing::warn!(
             "error_budget enabled but derived telemetry is off; SLO alerting needs \
@@ -232,11 +254,9 @@ async fn main() -> Result<()> {
     }
     // Log sentinel (#543): declarative pattern→alert rules evaluated per intake
     // line, folding the journald known-events (#61) in as built-in rules. Runs
-    // whenever a reporter exists and there's something to evaluate.
-    let log_sentinel: Option<Arc<LogSentinel>> = alert_reporter
-        .as_ref()
-        .filter(|_| sentinel_on)
-        .map(|reporter| {
+    // whenever there is something to evaluate.
+    let log_sentinel: Option<Arc<LogSentinel>> =
+        sentinel_on.then_some(&alert_reporter).map(|reporter| {
             let mut rules_cfg = syslog_config.sentinel.clone();
             // Built-in known-events ride the journald `detect_events` gate: keep
             // them off when journald detection is off, preserving the old opt-out.
@@ -372,16 +392,11 @@ async fn main() -> Result<()> {
                 ));
                 for point in points {
                     let key = format!("{}/{}", v1_prefix_tick, point.metric);
-                    match encode(&point, format) {
-                        Ok(payload) => {
-                            if let Err(e) = registry_tick
-                                .put(&key, payload, zensight_common::QosClass::Telemetry)
-                                .await
-                            {
-                                tracing::warn!(error = %e, key, "failed to publish ingest metric");
-                            }
-                        }
-                        Err(e) => tracing::warn!(error = %e, "failed to encode ingest metric"),
+                    if let Err(e) = registry_tick
+                        .put_point(&key, &point, zensight_common::QosClass::Telemetry, format)
+                        .await
+                    {
+                        tracing::warn!(error = %e, key, "failed to publish ingest metric");
                     }
                 }
 
@@ -448,7 +463,7 @@ async fn main() -> Result<()> {
         let v1_prefix_tick = zensight_sensor_core::v1::for_producer("logs").telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let stats_tick = journald_stats.clone();
-        let budget_reporter = budget_alerts_on.then(|| alert_reporter.clone()).flatten();
+        let budget_reporter = budget_alerts_on.then(|| alert_reporter.clone());
         // Local host identifies this sensor's rollups (network syslog spans many
         // hosts; journald is local — a single sensor-wide source keeps the
         // derived series cardinality bounded).
@@ -482,13 +497,11 @@ async fn main() -> Result<()> {
 
                 for point in points {
                     let key = format!("{}/{}", v1_prefix_tick, point.metric);
-                    match encode(&point, format) {
-                        Ok(payload) => {
-                            if let Err(e) = registry_tick.put(&key, payload, zensight_common::QosClass::Telemetry).await {
-                                tracing::warn!(error = %e, key, "failed to publish derived metric");
-                            }
-                        }
-                        Err(e) => tracing::warn!(error = %e, "failed to encode derived metric"),
+                    if let Err(e) = registry_tick
+                        .put_point(&key, &point, zensight_common::QosClass::Telemetry, format)
+                        .await
+                    {
+                        tracing::warn!(error = %e, key, "failed to publish derived metric");
                     }
                 }
             }
@@ -522,13 +535,11 @@ async fn main() -> Result<()> {
                 tick.tick().await;
                 for point in tagg.emit(&source) {
                     let key = format!("{}/{}", v1_prefix_tick, point.metric);
-                    match encode(&point, format) {
-                        Ok(payload) => {
-                            if let Err(e) = registry_tick.put(&key, payload, zensight_common::QosClass::Telemetry).await {
-                                tracing::warn!(error = %e, key, "failed to publish template metric");
-                            }
-                        }
-                        Err(e) => tracing::warn!(error = %e, "failed to encode template metric"),
+                    if let Err(e) = registry_tick
+                        .put_point(&key, &point, zensight_common::QosClass::Telemetry, format)
+                        .await
+                    {
+                        tracing::warn!(error = %e, key, "failed to publish template metric");
                     }
                 }
             }
@@ -680,10 +691,7 @@ async fn main() -> Result<()> {
     let aggregator_loop = aggregator.clone();
     let template_loop = template_agg.clone();
     let sentinel_loop = log_sentinel.clone();
-    let sentinel_reporter = log_sentinel
-        .is_some()
-        .then(|| alert_reporter.clone())
-        .flatten();
+    let sentinel_reporter = log_sentinel.is_some().then(|| alert_reporter.clone());
     let store_tx_loop = store_tx.clone();
     let store_counters_loop = store_counters.clone();
     // Repeat collapse (#546): fold consecutive identical lines into one record +
@@ -938,16 +946,11 @@ async fn store_maintenance_loop(
         ];
         for point in points {
             let key = format!("{}/{}", prefix, point.metric);
-            match encode(&point, format) {
-                Ok(payload) => {
-                    if let Err(e) = registry
-                        .put(&key, payload, zensight_common::QosClass::Telemetry)
-                        .await
-                    {
-                        tracing::warn!(error = %e, key, "failed to publish store metric");
-                    }
-                }
-                Err(e) => tracing::warn!(error = %e, "failed to encode store metric"),
+            if let Err(e) = registry
+                .put_point(&key, &point, zensight_common::QosClass::Telemetry, format)
+                .await
+            {
+                tracing::warn!(error = %e, key, "failed to publish store metric");
             }
         }
     }
