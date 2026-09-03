@@ -199,6 +199,11 @@ impl Evaluator {
         // (the shared reporter's base debounce is the threshold-alerts one, which
         // may differ); `0` → publish immediately.
         let for_duration = Some(Duration::from_secs(exp.for_secs));
+        // The set's recovery hold (#932): how long an expectation must be
+        // continuously satisfied again before its alert resolves. `Some(0)`
+        // resolves on the first passing sweep, which is what this did before
+        // the field existed.
+        let recover_after = Some(Duration::from_secs(exp.recover_after_secs));
 
         // expect service/target active.
         let mut svc_keys = Vec::new();
@@ -214,7 +219,8 @@ impl Evaluator {
                 self.observe(a, for_duration).await;
             }
         }
-        self.reconcile(SERVICE_ACTIVE_RULE, &svc_keys).await;
+        self.reconcile(SERVICE_ACTIVE_RULE, &svc_keys, recover_after)
+            .await;
 
         let mut tgt_keys = Vec::new();
         for e in &exp.targets_active {
@@ -229,7 +235,8 @@ impl Evaluator {
                 self.observe(a, for_duration).await;
             }
         }
-        self.reconcile(TARGET_ACTIVE_RULE, &tgt_keys).await;
+        self.reconcile(TARGET_ACTIVE_RULE, &tgt_keys, recover_after)
+            .await;
 
         // expect timer triggered / succeeded within.
         let now = Self::now_usec();
@@ -284,8 +291,9 @@ impl Evaluator {
                 }
             }
         }
-        self.reconcile(TIMER_RULE, &timer_keys).await;
-        self.reconcile(TIMER_SUCCEEDED_RULE, &timer_ok_keys).await;
+        self.reconcile(TIMER_RULE, &timer_keys, recover_after).await;
+        self.reconcile(TIMER_SUCCEEDED_RULE, &timer_ok_keys, recover_after)
+            .await;
 
         // expect restart rate below a ceiling.
         let mut rate_keys = Vec::new();
@@ -309,7 +317,8 @@ impl Evaluator {
                 self.observe(a, for_duration).await;
             }
         }
-        self.reconcile(RESTART_RATE_RULE, &rate_keys).await;
+        self.reconcile(RESTART_RATE_RULE, &rate_keys, recover_after)
+            .await;
 
         // forbid any failed unit.
         if exp.forbid_failed {
@@ -326,7 +335,8 @@ impl Evaluator {
                     self.observe(a, for_duration).await;
                 }
             }
-            self.reconcile(FORBID_FAILED_RULE, &failed_keys).await;
+            self.reconcile(FORBID_FAILED_RULE, &failed_keys, recover_after)
+                .await;
         }
     }
 
@@ -347,8 +357,13 @@ impl Evaluator {
             warn!(error = %e, "sentinel: publish failed");
         }
     }
-    async fn reconcile(&self, rule: &str, firing: &[String]) {
-        if let Err(e) = self.reporter.reconcile(rule, firing).await {
+    /// `recover_after` is the set's own recovery hold (#932), passed
+    /// explicitly for the same reason `observe` passes the debounce
+    /// explicitly: this reporter is SHARED with the #276 threshold alerts and
+    /// the #931 operator rules, whose windows are their own.
+    async fn reconcile(&self, rule: &str, firing: &[String], recover_after: Option<Duration>) {
+        let opts = zensight_sensor_core::ReconcileOpts { recover_after };
+        if let Err(e) = self.reporter.reconcile_opts(rule, firing, opts).await {
             warn!(error = %e, rule, "sentinel: reconcile failed");
         }
     }

@@ -28,12 +28,29 @@ fn default_for_secs() -> u64 {
 }
 
 /// Declared expectations for a host.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// `Default` is hand-written rather than derived (#932): `main.rs` reaches it
+/// through `expectations.clone().unwrap_or_default()`, and a derived `Default`
+/// gave `eval_interval_secs = 0` and `default_for_secs = 0` — disagreeing with
+/// the serde defaults a *file* gets for the same absent fields. A host with no
+/// `expectations` block silently ran a different sentinel from one with an
+/// empty `{}`. hostspec and systemd hand-wrote theirs to avoid exactly this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectationsConfig {
     #[serde(default = "default_eval_interval")]
     pub eval_interval_secs: u64,
     #[serde(default = "default_for_secs")]
     pub default_for_secs: u64,
+    /// Set-wide recovery hold (#932): how long every expectation must be
+    /// **continuously clear** before its alert resolves, unless the
+    /// expectation overrides it. `0` — the default — resolves on the first
+    /// clear sweep, which is the behaviour before this field existed.
+    ///
+    /// This is *time* hysteresis. The value hysteresis a numeric rule wants —
+    /// "fire above 90, clear below 80" — is `ThresholdRule::clear` (#928), on
+    /// the threshold rules this sensor also evaluates.
+    #[serde(default)]
+    pub default_recover_after_secs: u64,
     #[serde(default)]
     pub sockets: Vec<SocketExpectation>,
     #[serde(default)]
@@ -57,6 +74,25 @@ pub struct ExpectationsConfig {
     /// entries (traffic-diversion detection) or require a known rule to exist.
     #[serde(default)]
     pub rules: Vec<RuleExpectation>,
+}
+
+impl Default for ExpectationsConfig {
+    fn default() -> Self {
+        ExpectationsConfig {
+            eval_interval_secs: default_eval_interval(),
+            default_for_secs: default_for_secs(),
+            default_recover_after_secs: 0,
+            sockets: Vec::new(),
+            links: Vec::new(),
+            neighbors: Vec::new(),
+            routes: Vec::new(),
+            metrics: Vec::new(),
+            rates: Vec::new(),
+            delivery: Vec::new(),
+            route_flaps: Vec::new(),
+            rules: Vec::new(),
+        }
+    }
 }
 
 impl ExpectationsConfig {
@@ -98,6 +134,10 @@ pub struct SocketExpectation {
     /// Per-expectation debounce override (seconds).
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 fn one() -> usize {
@@ -115,6 +155,10 @@ pub struct LinkExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -133,6 +177,10 @@ pub struct NeighborExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 /// A default-route expectation.
@@ -150,11 +198,42 @@ pub struct RouteExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 /// A generic metric-threshold expectation: "metric `<op>` value should hold".
-/// The keystone for promoting a GUI threshold rule into a headless expectation
-/// (shares [`ComparisonOp`] with the frontend).
+///
+/// **Superseded by [`ThresholdRule`] (#931/#932).** This is the same idea in a
+/// worse place: it lives in a sensor crate, so it can never carry a real
+/// schemars schema and can never be a `@desired` document (`zensight-common`
+/// cannot depend on a sensor — the #815 gate refused exactly that); it exists
+/// only for netlink, so an operator has to learn a different vocabulary per
+/// sensor; and it has no value hysteresis, so a metric sitting on the
+/// threshold flaps.
+///
+/// `ThresholdsConfig` has all three, is evaluated on netlink's own publish
+/// path since #931, and is authorable fleet-wide on `@desired`. A rule here:
+///
+/// ```json5
+/// { name: "retrans", metric: "sockets/tcp/retransmits_total",
+///   op: "LessOrEqual", value: 100.0 }
+/// ```
+///
+/// becomes, under `thresholds.rules`, the same rule with the comparison the
+/// right way round (a threshold rule states the FIRING condition, an
+/// expectation states the healthy one) plus a `clear` if you want hysteresis:
+///
+/// ```json5
+/// { name: "retrans", metric: "sockets/tcp/retransmits_total",
+///   op: "GreaterThan", value: 100.0, clear: 80.0 }
+/// ```
+///
+/// Kept working for now; removed one release after 0.13. Nothing else in the
+/// expectation set is deprecated — the other eight kinds assert things about
+/// the *host* that no metric threshold can express.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricExpectation {
     /// Label for the rule slug `metric:<name>`.
@@ -169,6 +248,10 @@ pub struct MetricExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 fn default_delivery_metric() -> String {
@@ -204,6 +287,10 @@ pub struct RateExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 /// A consecutive pair of samples for a rate-of-change check, plus the wall-clock
@@ -236,6 +323,10 @@ pub struct DeliveryFloorExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 /// A route-flap expectation (#113): alert when the default route changes or
@@ -259,6 +350,10 @@ pub struct RouteFlapExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 /// Whether a rule expectation forbids or requires its matching rules (#323).
@@ -296,6 +391,10 @@ pub struct RuleExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+    /// Per-expectation override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default)]
+    pub recover_after_secs: Option<u64>,
 }
 
 /// One observed policy-routing rule, reduced to the facts the checks match on.
@@ -323,6 +422,26 @@ pub struct RouteObservation {
 }
 
 /// A single currently-violated fact.
+///
+/// **`labels` must not carry a per-sweep measurement** (#932). Every non-`host.*`
+/// label is hashed into `Alert::alert_key`, so a label that changes each sweep
+/// mints a new alert key each sweep: `first_seen` resets, the entry is dropped
+/// unpublished by the next `reconcile`, and a `for_secs` longer than the sweep
+/// interval **can never elapse** — the rule silently never fires. It also
+/// leaves a Put/Delete pair on the bus per sample, and, since #929's recovery
+/// hold retains published entries, grows `active` without bound.
+///
+/// `check_metric`, `check_rate`, `check_delivery_floor`, `check_route_flap` and
+/// `check_socket` all did this until #932. `AlertReporter::retire`'s own doc
+/// records the same bug found twice before, in probe's `duration_ms` and
+/// systemd's `overdue_secs`.
+///
+/// The measured value belongs in [`summary`](Self::summary), which every one of
+/// them already puts it in, and which is *not* part of the key.
+///
+/// A **categorical** label is fine and is the point of the field: `up`/`down`,
+/// `absent`, a peer address, a gateway. Those identify *which* thing is wrong,
+/// which is exactly what should fork an alert key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Violation {
     pub summary: String,
@@ -384,7 +503,6 @@ pub fn check_socket(exp: &SocketExpectation, obs: &SocketObservation) -> Vec<Vio
                 labels: vec![
                     ("expected".into(), format!("established>={}", exp.min)),
                     ("peer".into(), target.clone()),
-                    ("actual".into(), count.to_string()),
                 ],
             });
         }
@@ -574,7 +692,6 @@ pub fn check_metric(exp: &MetricExpectation, observed: Option<f64>) -> Vec<Viola
                     format!("{} {} {}", exp.metric, exp.op.symbol(), exp.value),
                 ),
                 ("metric".into(), exp.metric.clone()),
-                ("actual".into(), v.to_string()),
             ],
         }],
         _ => Vec::new(),
@@ -604,7 +721,6 @@ pub fn check_rate(exp: &RateExpectation, sample: Option<RateSample>) -> Vec<Viol
                     format!("{} rate <= {}/min", exp.metric, exp.max_increase_per_min),
                 ),
                 ("metric".into(), exp.metric.clone()),
-                ("rate_per_min".into(), format!("{per_min:.1}")),
             ],
         }]
     } else {
@@ -631,7 +747,6 @@ pub fn check_delivery_floor(
                     format!("{} >= {}", exp.metric, exp.floor),
                 ),
                 ("metric".into(), exp.metric.clone()),
-                ("actual".into(), v.to_string()),
             ],
         }],
         _ => Vec::new(),
@@ -674,7 +789,6 @@ pub fn check_route_flap(exp: &RouteFlapExpectation, flaps_in_window: u64) -> Vec
                     format!("flaps <= {} per {}s", exp.max_flaps, exp.window_secs),
                 ),
                 ("metric".into(), exp.metric.clone()),
-                ("actual".into(), flaps_in_window.to_string()),
             ],
         }]
     } else {
@@ -701,6 +815,7 @@ impl SentinelHandle {
 
     /// Replace the entire live expectation set.
     pub async fn replace(&self, cfg: ExpectationsConfig) {
+        warn_metrics_deprecated(&cfg);
         *self.expectations.write().await = cfg;
     }
     /// Add (or replace by name) a socket expectation.
@@ -816,6 +931,30 @@ pub struct Evaluator {
     wake: Option<Arc<Notify>>,
 }
 
+/// Say it out loud, once, when a set that uses `metrics` is loaded (#932).
+///
+/// A deprecation that only exists in a doc comment reaches nobody who is
+/// running the thing; the operator with a live `metrics` block never opens
+/// rustdoc. It fires on the `@desired` and `@rpc` paths too, because
+/// `SentinelHandle::replace` is how a set arrives on a running sensor and a
+/// pushed set is exactly the one an operator is still editing.
+pub fn warn_metrics_deprecated(config: &ExpectationsConfig) {
+    if config.metrics.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        count = config.metrics.len(),
+        rules = %config.metrics.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "),
+        "netlink.expectations.metrics is DEPRECATED (#932) and is removed one \
+         release after 0.13. Move these to `thresholds.rules`, which netlink \
+         evaluates on its own publish path since #931: same metric, the \
+         comparison the other way round (a threshold states the FIRING \
+         condition), and a `clear` for value hysteresis. Unlike this block, a \
+         threshold rule is a real schema, is authorable fleet-wide on \
+         @desired, and is the same vocabulary on every sensor"
+    );
+}
+
 impl Evaluator {
     pub fn new(
         host: String,
@@ -823,6 +962,7 @@ impl Evaluator {
         reporter: Arc<AlertReporter>,
         metric_cache: MetricCache,
     ) -> Self {
+        warn_metrics_deprecated(&config);
         Self {
             host,
             expectations: Arc::new(RwLock::new(config)),
@@ -898,8 +1038,15 @@ impl Evaluator {
                         let rule = format!("socket:{}", exp.name);
                         current_rules.insert(rule.clone());
                         let violations = check_socket(exp, &obs);
-                        self.report(&rule, exp.severity, exp.for_secs, violations)
-                            .await;
+                        self.report(
+                            &rule,
+                            exp.severity,
+                            exp.for_secs.or(Some(config.default_for_secs)),
+                            exp.recover_after_secs
+                                .or(Some(config.default_recover_after_secs)),
+                            violations,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "sentinel: socket observation failed"),
@@ -917,8 +1064,15 @@ impl Evaluator {
                         current_rules.insert(rule.clone());
                         let observed = links.iter().find(|(n, _)| n == &exp.iface).map(|(_, u)| *u);
                         let violations = check_link(exp, observed);
-                        self.report(&rule, exp.severity, exp.for_secs, violations)
-                            .await;
+                        self.report(
+                            &rule,
+                            exp.severity,
+                            exp.for_secs.or(Some(config.default_for_secs)),
+                            exp.recover_after_secs
+                                .or(Some(config.default_recover_after_secs)),
+                            violations,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "sentinel: link observation failed"),
@@ -939,8 +1093,15 @@ impl Evaluator {
                             .find(|(ip, _)| ip == &exp.ip)
                             .map(|(_, r)| *r);
                         let violations = check_neighbor(exp, observed);
-                        self.report(&rule, exp.severity, exp.for_secs, violations)
-                            .await;
+                        self.report(
+                            &rule,
+                            exp.severity,
+                            exp.for_secs.or(Some(config.default_for_secs)),
+                            exp.recover_after_secs
+                                .or(Some(config.default_recover_after_secs)),
+                            violations,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "sentinel: neighbor observation failed"),
@@ -957,8 +1118,15 @@ impl Evaluator {
                         let rule = format!("route:{}", exp.name);
                         current_rules.insert(rule.clone());
                         let violations = check_route(exp, &obs);
-                        self.report(&rule, exp.severity, exp.for_secs, violations)
-                            .await;
+                        self.report(
+                            &rule,
+                            exp.severity,
+                            exp.for_secs.or(Some(config.default_for_secs)),
+                            exp.recover_after_secs
+                                .or(Some(config.default_recover_after_secs)),
+                            violations,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "sentinel: route observation failed"),
@@ -977,8 +1145,15 @@ impl Evaluator {
                         let rule = format!("rules:{}", exp.name);
                         current_rules.insert(rule.clone());
                         let violations = check_rules(exp, &obs);
-                        self.report(&rule, exp.severity, exp.for_secs, violations)
-                            .await;
+                        self.report(
+                            &rule,
+                            exp.severity,
+                            exp.for_secs.or(Some(config.default_for_secs)),
+                            exp.recover_after_secs
+                                .or(Some(config.default_recover_after_secs)),
+                            violations,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "sentinel: rule observation failed"),
@@ -992,8 +1167,15 @@ impl Evaluator {
             current_rules.insert(rule.clone());
             let observed = self.metric_cache.get(&exp.metric).await;
             let violations = check_metric(exp, observed);
-            self.report(&rule, exp.severity, exp.for_secs, violations)
-                .await;
+            self.report(
+                &rule,
+                exp.severity,
+                exp.for_secs.or(Some(config.default_for_secs)),
+                exp.recover_after_secs
+                    .or(Some(config.default_recover_after_secs)),
+                violations,
+            )
+            .await;
         }
 
         // Rate-of-change expectations (#113). The previous sample is retained per
@@ -1019,8 +1201,15 @@ impl Evaluator {
                 None => None,
             };
             let violations = check_rate(exp, sample);
-            self.report(&rule, exp.severity, exp.for_secs, violations)
-                .await;
+            self.report(
+                &rule,
+                exp.severity,
+                exp.for_secs.or(Some(config.default_for_secs)),
+                exp.recover_after_secs
+                    .or(Some(config.default_recover_after_secs)),
+                violations,
+            )
+            .await;
         }
 
         // Delivery-rate floor expectations (#113): a typed threshold over the
@@ -1030,8 +1219,15 @@ impl Evaluator {
             current_rules.insert(rule.clone());
             let observed = self.metric_cache.get(&exp.metric).await;
             let violations = check_delivery_floor(exp, observed);
-            self.report(&rule, exp.severity, exp.for_secs, violations)
-                .await;
+            self.report(
+                &rule,
+                exp.severity,
+                exp.for_secs.or(Some(config.default_for_secs)),
+                exp.recover_after_secs
+                    .or(Some(config.default_recover_after_secs)),
+                violations,
+            )
+            .await;
         }
 
         // Route-flap expectations (#113): windowed increase of a cumulative
@@ -1056,8 +1252,15 @@ impl Evaluator {
                 None => 0,
             };
             let violations = check_route_flap(exp, flaps);
-            self.report(&rule, exp.severity, exp.for_secs, violations)
-                .await;
+            self.report(
+                &rule,
+                exp.severity,
+                exp.for_secs.or(Some(config.default_for_secs)),
+                exp.recover_after_secs
+                    .or(Some(config.default_recover_after_secs)),
+                violations,
+            )
+            .await;
         }
 
         // Drop retained per-rule state for rate/flap rules no longer configured
@@ -1085,7 +1288,15 @@ impl Evaluator {
             removed
         };
         for rule in removed {
-            if let Err(e) = self.reporter.reconcile(&rule, &[]).await {
+            // Immediate, never held (#932): a recovery window says "wait, in
+            // case it comes back", and a DELETED expectation is not coming
+            // back — holding it would strand an alert for a rule nobody can
+            // see or clear.
+            if let Err(e) = self
+                .reporter
+                .reconcile_opts(&rule, &[], zensight_sensor_core::ReconcileOpts::immediate())
+                .await
+            {
                 tracing::warn!(error = %e, rule = %rule, "sentinel: failed to resolve removed rule");
             }
         }
@@ -1098,9 +1309,17 @@ impl Evaluator {
         rule: &str,
         severity: AlertSeverity,
         for_secs: Option<u64>,
+        recover_after_secs: Option<u64>,
         violations: Vec<Violation>,
     ) {
         let for_duration = for_secs.map(Duration::from_secs);
+        // `None` here means "use the reporter's own recovery", exactly as
+        // `for_duration` means "use its debounce" — the sweep resolves the
+        // per-expectation override and the set-wide default; the reporter
+        // resolves the rest (#932).
+        let opts = zensight_sensor_core::ReconcileOpts {
+            recover_after: recover_after_secs.map(Duration::from_secs),
+        };
         let mut firing_keys = Vec::new();
         for v in violations {
             let mut alert = Alert::new(
@@ -1119,8 +1338,9 @@ impl Evaluator {
                 tracing::warn!(error = %e, "sentinel: failed to publish alert");
             }
         }
-        // Resolve previously-firing alerts under this rule that are now satisfied.
-        if let Err(e) = self.reporter.reconcile(rule, &firing_keys).await {
+        // Resolve previously-firing alerts under this rule that are now
+        // satisfied — after the recovery hold, if one is configured (#932).
+        if let Err(e) = self.reporter.reconcile_opts(rule, &firing_keys, opts).await {
             tracing::warn!(error = %e, "sentinel: failed to reconcile alerts");
         }
     }
@@ -1232,6 +1452,7 @@ mod tests {
             forbid_listen: None,
             severity: AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert_eq!(check_socket(&exp, &obs_with(&[80], &[])).len(), 1);
         assert!(check_socket(&exp, &obs_with(&[22, 80], &[])).is_empty());
@@ -1247,6 +1468,7 @@ mod tests {
             forbid_listen: Some(23),
             severity: AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert_eq!(check_socket(&exp, &obs_with(&[23], &[])).len(), 1);
         assert!(check_socket(&exp, &obs_with(&[22], &[])).is_empty());
@@ -1262,6 +1484,7 @@ mod tests {
             forbid_listen: None,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         // None established → violation.
         assert_eq!(check_socket(&exp, &obs_with(&[], &[])).len(), 1);
@@ -1281,6 +1504,7 @@ mod tests {
             up: true,
             severity: AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert!(check_link(&exp, Some(true)).is_empty());
         assert_eq!(check_link(&exp, Some(false)).len(), 1);
@@ -1294,6 +1518,7 @@ mod tests {
             reachable: true,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert!(check_neighbor(&exp, Some(true)).is_empty()); // reachable → ok
         assert_eq!(check_neighbor(&exp, Some(false)).len(), 1); // unreachable → fire
@@ -1310,22 +1535,33 @@ mod tests {
             value: 100.0,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert!(check_metric(&exp, Some(5.0)).is_empty());
         assert_eq!(check_metric(&exp, Some(250.0)).len(), 1);
         // Absent metric → no violation (only fires on data it has seen).
         assert!(check_metric(&exp, None).is_empty());
-        // The firing violation carries metric + actual labels.
+        // The firing violation names the metric in a label…
         let v = &check_metric(&exp, Some(250.0))[0];
         assert!(
             v.labels
                 .iter()
                 .any(|(k, val)| k == "metric" && val == "sockets/tcp/retransmits_total")
         );
+        // …and puts the MEASURED VALUE in the summary and nowhere else (#932).
+        // It used to ride an `actual` label, which `alert_key()` hashes — so a
+        // moving value minted a new key every sweep and the `for_secs` window
+        // could never elapse. See `Violation`'s doc.
+        assert!(v.summary.contains("250"), "{}", v.summary);
         assert!(
+            !v.labels.iter().any(|(k, _)| k == "actual"),
+            "the measured value must not be a label: {:?}",
             v.labels
-                .iter()
-                .any(|(k, val)| k == "actual" && val == "250")
+        );
+        assert_eq!(
+            check_metric(&exp, Some(250.0))[0].labels,
+            check_metric(&exp, Some(999.0))[0].labels,
+            "two different measurements must give ONE alert identity"
         );
     }
 
@@ -1338,6 +1574,7 @@ mod tests {
             max_increase_per_min: 60.0,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         // No previous sample yet → no violation (baseline-only first sweep).
         assert!(check_rate(&exp, None).is_empty());
@@ -1368,7 +1605,10 @@ mod tests {
                 .iter()
                 .any(|(k, val)| k == "metric" && val == "interfaces/eth0/rx_errors")
         );
-        assert!(v[0].labels.iter().any(|(k, _)| k == "rate_per_min"));
+        // The RATE is in the summary and not in a label (#932): it changes
+        // every sweep, and `alert_key()` hashes every label.
+        assert!(v[0].summary.contains("200.0/min"), "{}", v[0].summary);
+        assert!(!v[0].labels.iter().any(|(k, _)| k == "rate_per_min"));
         // A counter reset (negative delta) does not fire.
         assert!(
             check_rate(
@@ -1404,17 +1644,16 @@ mod tests {
             floor: 1_000_000.0,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         // Above floor → ok.
         assert!(check_delivery_floor(&exp, Some(5_000_000.0)).is_empty());
         // Below floor → fire.
         let v = check_delivery_floor(&exp, Some(250_000.0));
         assert_eq!(v.len(), 1);
-        assert!(
-            v[0].labels
-                .iter()
-                .any(|(k, val)| k == "actual" && val == "250000")
-        );
+        // The measurement is in the summary, not in a label (#932).
+        assert!(v[0].summary.contains("250000"), "{}", v[0].summary);
+        assert!(!v[0].labels.iter().any(|(k, _)| k == "actual"));
         // Absent metric → no violation (only fires on data seen).
         assert!(check_delivery_floor(&exp, None).is_empty());
     }
@@ -1443,16 +1682,15 @@ mod tests {
             window_secs: 60,
             severity: AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert!(check_route_flap(&exp, 0).is_empty());
         assert!(check_route_flap(&exp, 3).is_empty()); // at limit → ok
         let v = check_route_flap(&exp, 7); // above limit → fire
         assert_eq!(v.len(), 1);
-        assert!(
-            v[0].labels
-                .iter()
-                .any(|(k, val)| k == "actual" && val == "7")
-        );
+        // The flap count is in the summary, not in a label (#932).
+        assert!(v[0].summary.contains(" 7 times"), "{}", v[0].summary);
+        assert!(!v[0].labels.iter().any(|(k, _)| k == "actual"));
     }
 
     #[test]
@@ -1463,6 +1701,7 @@ mod tests {
             default_via: Some("10.0.0.1".into()),
             severity: AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         };
         // present + correct gw → ok
         assert!(
@@ -1520,6 +1759,7 @@ mod tests {
             sense: RuleSense::Forbid,
             severity: AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         };
         // Only the baseline lookup rules → quiet.
         let obs = RuleObservation { rules: baseline() };
@@ -1553,6 +1793,7 @@ mod tests {
             sense: RuleSense::Forbid,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         let mut rules = baseline();
         rules.push(fact(50, 300, false));
@@ -1572,6 +1813,7 @@ mod tests {
             sense: RuleSense::Require,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         // Present → quiet.
         let mut rules = baseline();
@@ -1609,6 +1851,7 @@ mod tests {
                 sense: RuleSense::Require,
                 severity: AlertSeverity::Warning,
                 for_secs: None,
+                recover_after_secs: None,
             })
             .await;
         assert_eq!(handle.snapshot().await.rules.len(), 2);

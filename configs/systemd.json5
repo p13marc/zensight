@@ -50,6 +50,11 @@
     alerts: {
       enabled: true,
       for_secs: 15,            // debounce before a firing alert publishes
+      // Recovery hold (#932): satisfied continuously for N s before the alert
+      // resolves. 0 (the default) resolves on the first passing sweep — good
+      // for a unit that is either up or down, less good for a timer whose
+      // freshness window straddles the sweep.
+      // recover_after_secs: 0,
       unit_failed: true,       // watched unit ActiveState=failed (see logs-sensor dedup)
       system_degraded: true,   // SystemState=degraded / NFailedUnits>0
       restart_storm_threshold: 3,

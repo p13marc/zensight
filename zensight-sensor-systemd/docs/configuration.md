@@ -63,6 +63,7 @@ Absent block = sentinel disabled. Fields (see
 |-----|---------|---------|
 | `eval_interval_secs` | 10 | re-evaluation cadence |
 | `for_secs` | 15 | debounce before a firing sentinel alert publishes |
+| `recover_after_secs` | 0 | recovery hold (#932): satisfied continuously for this long before the alert resolves. Set-wide only — this set has never had a per-expectation `for_secs` either |
 | `services_active` | `[]` | `[{ unit }]` — expect service active |
 | `targets_active` | `[]` | `[{ target }]` — expect target active |
 | `timers` | `[]` | `[{ timer, within_secs }]` — expect timer fired within window |

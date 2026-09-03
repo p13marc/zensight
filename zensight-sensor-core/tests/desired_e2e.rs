@@ -92,6 +92,7 @@ fn doc(name: &str) -> ExpectationsConfig {
             path: "/tmp/desired-e2e".into(),
             severity: zensight_common::AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         }],
         ..Default::default()
     }

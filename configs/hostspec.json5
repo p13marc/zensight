@@ -46,6 +46,12 @@
       // debounce only delays the page. Give flappy checks (a listener during
       // a service restart) a per-expectation for_secs instead.
       // default_for_secs: 0,
+      // Recovery hold (#932): satisfied continuously for N s before the alert
+      // resolves. 0 (the default) resolves on the first passing sweep; a
+      // non-zero hold is what stops a mount that comes and goes, or a
+      // listener restarting, from producing a resolved/firing pair per sweep.
+      // Every expectation below may override it with `recover_after_secs`.
+      // default_recover_after_secs: 0,
 
       // Every expectation carries: name (unique per kind — it is the alert
       // rule slug, e.g. mount:var-tmp-scratch), severity ("info" | "warning"

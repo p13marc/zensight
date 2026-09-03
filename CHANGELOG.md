@@ -9,6 +9,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`recover_after_secs` on every expectation kind** (#932, epic #901).
+
+  #929 gave the `AlertReporter` a recovery window and **nothing used it** —
+  `with_recovery` had no in-tree caller. Now netlink and hostspec carry a
+  set-wide `default_recover_after_secs` plus a per-expectation override on all
+  sixteen of their kinds, and systemd a set-wide `recover_after_secs`. All
+  default to `0`, which is what these sentinels did before the field existed.
+
+  A **removed** expectation always resolves immediately, hold or no hold: a
+  recovery window says "wait, in case it comes back", and a deleted assertion
+  is not coming back — holding it strands an alert for a rule nobody can see
+  or clear.
+
+  **logs deliberately gained nothing**, and its docs now say why. Its
+  `for_secs` *is* the recovery hold — a quiet period implemented in the
+  sentinel's own `active` map with an expiry sweep, which is why `observe` is
+  called there with a zero debounce. A second hold would be two timers meaning
+  the same thing, with the alert clearing after the sum of them.
+
+### Fixed
+
+- **A netlink expectation on a moving value could never fire** (#932). Five
+  graders — `check_metric`, `check_rate`, `check_delivery_floor`,
+  `check_route_flap`, `check_socket` — put the **measured value** in the
+  violation's labels, and `Alert::alert_key()` hashes every non-`host.*`
+  label. So each sweep minted a new alert key: `first_seen` reset, the entry
+  was dropped unpublished by the next `reconcile`, and **a `for_secs` longer
+  than the sweep interval could never elapse**. It also left a Put/Delete pair
+  on the bus per sample.
+
+  `AlertReporter::retire`'s own doc comment records the same bug found twice
+  before — probe's `duration_ms`, systemd's `overdue_secs` — which is what
+  makes five more instances worth stating plainly rather than quietly fixing.
+  #929 made it worse, not better: with a recovery hold a published entry is
+  retained rather than dropped, so a key-minting grader grows `active` without
+  bound.
+
+  The value goes in the summary, which every one of them already writes it
+  into and which is not part of the key. `Violation`'s doc now says the rule
+  and draws the line: a **categorical** label (`up`/`down`, `absent`, a peer, a
+  gateway) is the point of the field — it identifies *which* thing is wrong.
+
+- **netlink's `ExpectationsConfig::Default` disagreed with its serde
+  defaults** (#932). It derived `Default`, so `main.rs`'s
+  `expectations.clone().unwrap_or_default()` gave `eval_interval_secs = 0` and
+  `default_for_secs = 0` where a file with an empty `{}` got 10 and 15. A host
+  with no `expectations` block silently ran a different sentinel from one with
+  an empty one. Hand-written now, as hostspec's and systemd's already were.
+
+- **The GUI's systemd draft would have erased the new field** (#932).
+  `SystemdExpDraft::to_command_json` sends a *whole replacement set*, so a
+  field the draft does not carry is a field the next GUI push resets to its
+  default — a hold set over `@rpc` or `@desired` would have vanished the first
+  time anyone opened the view and pressed submit. It round-trips
+  `recover_after_secs` now, with a test.
+
+- `for_each_kind!`'s doc claimed to pass `(kind, name, severity, for_secs)`
+  and has only ever passed `(kind, name)`.
+
+### Deprecated
+
+- **`netlink.expectations.metrics`** (#932) — superseded by `thresholds.rules`
+  (#928/#931), which netlink evaluates on its own publish path. The
+  `MetricExpectation` block is the same idea in a worse place: it lives in a
+  sensor crate, so it can never carry a real schemars schema and can never be
+  an `@desired` document (the #815 gate refused exactly that); it exists only
+  for netlink, so an operator learns a different vocabulary per sensor; and it
+  has no value hysteresis, so a metric sitting on the threshold flaps.
+
+  It keeps working and is removed one release after 0.13. **The deprecation is
+  announced at runtime**, not only in rustdoc — on startup and on every
+  `@desired`/`@rpc` hot-swap, naming the rules to move, because the operator
+  with a live `metrics` block never opens rustdoc. Nothing else in the
+  expectation set is deprecated: the other eight kinds assert things about the
+  *host* that no metric threshold can express.
+
 - **Every remaining sensor adopts thresholds; three get their first alerting
   surface** (#931, epic #901) — snmp, netlink, netring, container, pve, bmc,
   parallax, and `gnmi`/`modbus`/`netflow`, which had **no `AlertReporter`, no

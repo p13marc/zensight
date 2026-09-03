@@ -103,6 +103,17 @@ pub struct LogRule {
     pub labels_from: Vec<String>,
     /// Auto-resolve TTL: the alert clears this long after its last match
     /// (the "quiet period"). Defaults to 300s.
+    ///
+    /// **This is already the recovery window** (#932), which is why this
+    /// sensor gained no `recover_after_secs` while netlink, hostspec and
+    /// systemd did. A log rule has no "currently violated" state to debounce —
+    /// a line either matched or it did not — so `for_secs` here means "must
+    /// stay quiet this long", implemented in this module's own `active` map
+    /// with an expiry sweep, and `observe` is called with `Some(Duration::ZERO)`
+    /// precisely because the reporter's debounce is meaningless for it.
+    ///
+    /// A second hold stacked on top would be two timers meaning the same
+    /// thing, with the alert clearing after the sum of them.
     #[serde(default = "default_for_secs")]
     pub for_secs: u64,
     /// Cap on *fires* per window (#824): at most `max_fires` alert

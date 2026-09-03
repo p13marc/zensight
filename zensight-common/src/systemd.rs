@@ -74,6 +74,16 @@ pub struct ExpectationsConfig {
     pub eval_interval_secs: u64,
     #[serde(default = "default_for_secs")]
     pub for_secs: u64,
+    /// Set-wide recovery hold (#932): how long an expectation must be
+    /// **continuously satisfied again** before its alert resolves. `0` — the
+    /// default — resolves on the first passing sweep.
+    ///
+    /// There is no per-expectation override here, unlike hostspec and netlink,
+    /// because there is no per-expectation `for_secs` either: this set has
+    /// always had one debounce for all of it, and inventing a second axis of
+    /// per-kind overrides is a change to make when something asks for it.
+    #[serde(default)]
+    pub recover_after_secs: u64,
     #[serde(default)]
     pub services_active: Vec<ServiceActiveExpectation>,
     #[serde(default)]
@@ -92,6 +102,7 @@ impl Default for ExpectationsConfig {
         ExpectationsConfig {
             eval_interval_secs: default_eval_interval_secs(),
             for_secs: default_for_secs(),
+            recover_after_secs: 0,
             services_active: Vec::new(),
             targets_active: Vec::new(),
             timers: Vec::new(),
@@ -118,6 +129,7 @@ mod tests {
         for field in [
             "eval_interval_secs",
             "for_secs",
+            "recover_after_secs",
             "services_active",
             "targets_active",
             "timers",
