@@ -443,7 +443,36 @@ fn overlapping_families_resolve_to_the_right_entry() {
 /// the ledger lives here, next to the check that enforces it. Entries are
 /// verified in both directions: one the build *does* emit fails, and one the
 /// registry no longer declares fails. See `zensight_common::registry_audit`.
-const CONDITIONAL_FAMILIES: &[(&str, &str)] = &[];
+/// On a default build the four NVML families are unreachable: their only
+/// caller is `gpu::nvml::extra_metrics`, fed by a `read()` that returns `None`
+/// without `--features nvml`. Unlike a conditional *procedure*, which is
+/// declared unconditionally and answers `error/unsupported`, a gauge with no
+/// reading has no honest wire value — a sentinel corrupts every consumer
+/// downstream, and publishing nothing is indistinguishable from a quiet host.
+///
+/// The netlink eBPF entries are the same shape and set the precedent.
+#[cfg(not(feature = "nvml"))]
+fn conditional_families() -> Vec<(&'static str, &'static str)> {
+    let ledger = zensight_common::registry_audit::conditional_families("sysinfo");
+    assert_eq!(
+        ledger.len(),
+        4,
+        "conditional.lock lost sysinfo's NVML entries — a default build cannot \
+         emit them, so dropping the excuse turns the coverage check into a \
+         false failure"
+    );
+    ledger
+}
+
+/// On an `nvml` build the collector *does* reach them, so nothing is excused —
+/// and `assert_families_covered`'s "the ledger excuses families this build DOES
+/// emit" check then becomes positive proof that the ledger's condition is real:
+/// if the feature stopped being what makes the difference, this build would
+/// fail here.
+#[cfg(feature = "nvml")]
+fn conditional_families() -> Vec<(&'static str, &'static str)> {
+    Vec::new()
+}
 
 /// The other direction from every test above (#648, RFC 08 §6.1).
 ///
@@ -462,6 +491,29 @@ fn every_registered_family_has_an_emitter() {
         .iter()
         .map(|m| (*m).to_string())
         .collect();
+
+    // Only on an `nvml` build: the sole caller of `extra_metrics` is fed by a
+    // `read()` that returns `None` without the feature, so listing these
+    // unconditionally would paper over the very conditionality the ledger
+    // above exists to record.
+    //
+    // Derived from the shaping function rather than hand-written, so this
+    // proves the names the sensor actually publishes are the ones the registry
+    // declares — a string list would only prove that two lists match.
+    #[cfg(feature = "nvml")]
+    emitted.extend(
+        zensight_sensor_sysinfo::gpu::nvml::extra_metrics(
+            &zensight_sensor_sysinfo::gpu::nvml::NvmlMetrics {
+                memory_utilisation_pct: Some(30.0),
+                ecc_volatile_uncorrected: Some(0.0),
+                ecc_aggregate_uncorrected: Some(1.0),
+                processes: vec![(1234, 500)],
+                ..Default::default()
+            },
+        )
+        .into_iter()
+        .map(|(name, _)| format!("gpu/card0/{name}")),
+    );
 
     let mut push = |ms: Vec<Metric>| emitted.extend(ms.into_iter().map(|m| m.metric));
 
@@ -577,6 +629,6 @@ fn every_registered_family_has_an_emitter() {
         "sysinfo",
         &emitted,
         |m| Subject::parse_metric(m).map(|s| s.pattern()),
-        CONDITIONAL_FAMILIES,
+        &conditional_families(),
     );
 }

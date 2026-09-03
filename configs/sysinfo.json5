@@ -183,6 +183,16 @@
       // guest, so a guest running this sensor reports its own GPU with no
       // host-side work.
       // gpu: true,
+      //
+      // NVIDIA cards appear here through their DRM node with no extra build.
+      // `--features nvml` adds what only the vendor library gives:
+      // memory-controller utilisation (which separates a memory-bound workload
+      // from a compute-bound one), uncorrected ECC counters, and per-process
+      // VRAM at gpu/{card}/process/{pid}/vram_bytes — capped at 32 rows per
+      // card, largest first, since one key per pid is otherwise unbounded.
+      //
+      // That feature links libnvidia-ml and is NOT exercised in CI: no build
+      // machine has an NVIDIA card. It is type-checked and nothing runs it.
     },
 
     // Process-explorer privacy (#302): argv values whose key looks secret

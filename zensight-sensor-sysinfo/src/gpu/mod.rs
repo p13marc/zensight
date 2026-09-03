@@ -25,6 +25,8 @@
 //! card (joining `hostpci` from the pve guest config to the host's DRM
 //! inventory) is deliberately **not** done here and is a `pve` follow-up.
 
+pub mod nvml;
+
 use std::path::{Path, PathBuf};
 
 pub use zensight_common::gpu::{GpuInfo, vendor_name};
@@ -84,6 +86,15 @@ pub fn read_cards(root: &Path) -> Vec<(GpuInfo, GpuMetrics)> {
         .into_iter()
         .filter_map(|card| {
             let dev = root.join(&card).join("device");
+            // `/sys/class/drm/<card>/device` is a symlink into the PCI tree;
+            // its last component is the address. That is the join key to a
+            // vendor library's view of the same card — matching by
+            // enumeration index instead would silently pair the wrong two
+            // devices on a host with more than one GPU.
+            let pci_addr = std::fs::read_link(&dev)
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .filter(|a| a.contains(':'));
             // No `device/vendor` means this is not a PCI GPU node we can
             // describe. Skipped rather than published as an anonymous card.
             let vendor_id = read_trimmed(&dev.join("vendor"))?;
@@ -96,6 +107,7 @@ pub fn read_cards(root: &Path) -> Vec<(GpuInfo, GpuMetrics)> {
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
                 pci_id: device_id.map(|d| format!("{vendor_id}:{d}")),
                 name: read_trimmed(&dev.join("product_name")),
+                pci_addr,
             };
             let metrics = read_metrics(&root.join(&card), &dev);
             Some((info, metrics))

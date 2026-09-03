@@ -22,7 +22,7 @@
 # Sources: src/collector.rs (the `publish` helper) and src/map.rs.
 
 [registry]
-version = "1.6"
+version = "1.7"
 app = "zensight"
 convention = 1
 
@@ -1073,6 +1073,38 @@ type = "TelemetryPoint"
 cardinality = 16
 since = "1.6"
 description = "current GPU clock; hwmon freq1_input where present, else the i915/xe GT node (#954)"
+
+[[subject]]
+path = "gpu/{card}/memory_utilisation_pct"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.7"
+description = "percentage of the sample period the GPU MEMORY CONTROLLER was busy (#954). Distinct from VRAM occupancy: this is what separates a memory-bound workload from a compute-bound one. NVML only — `--features nvml`; no kernel driver exposes it"
+
+[[subject]]
+path = "gpu/{card}/ecc_volatile_uncorrected"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.7"
+description = "uncorrected (double-bit) device-memory ECC errors since the driver loaded (#954). UNCORRECTED, not corrected: a corrected error is the hardware working. NVML only, and absent on a card with ECC disabled"
+
+[[subject]]
+path = "gpu/{card}/ecc_aggregate_uncorrected"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.7"
+description = "uncorrected device-memory ECC errors over the lifetime of the device (#954). NVML only"
+
+[[subject]]
+path = "gpu/{card}/process/{pid}/vram_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.7"
+description = "VRAM held by one process on this card (#954). NVML only. Capped at 32 rows per card, largest first — one key per pid per card is otherwise an unbounded family keyed by something that changes every few seconds"
 
 [[subject]]
 path = "timesync"

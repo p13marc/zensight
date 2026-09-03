@@ -33,6 +33,13 @@ pub struct GpuInfo {
     /// The driver's own product name, where it publishes one (amdgpu does).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The PCI address the card sits at, e.g. `"0000:01:00.0"` — what you
+    /// paste into `lspci -s`, and the key that joins a DRM card to a vendor
+    /// library's view of the same device (#954). Absent when
+    /// `/sys/class/drm/<card>/device` is not a symlink into the PCI tree,
+    /// which is the case for a virtual DRM node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pci_addr: Option<String>,
 }
 
 /// Resolve a PCI vendor id to a name, or hand back the id.

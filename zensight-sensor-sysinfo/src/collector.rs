@@ -140,7 +140,19 @@ impl SystemCollector {
     /// zero.
     async fn collect_gpu(&self, timestamp: i64) -> usize {
         let mut published = 0;
-        for (info, m) in crate::gpu::read_cards(std::path::Path::new(crate::gpu::DRM_ROOT)) {
+        // NVML, when the build has it and the host has a driver. Read once per
+        // tick and joined to the DRM cards by PCI address — never by
+        // enumeration index, which would pair the wrong two devices on a host
+        // with more than one GPU.
+        let nvml = crate::gpu::nvml::read().unwrap_or_default();
+        for (info, mut m) in crate::gpu::read_cards(std::path::Path::new(crate::gpu::DRM_ROOT)) {
+            let nv = info.pci_addr.as_deref().and_then(|addr| {
+                let want = crate::gpu::nvml::normalise_pci(addr);
+                nvml.iter().find(|n| n.pci_addr == want)
+            });
+            if let Some(nv) = nv {
+                crate::gpu::nvml::merge(&mut m, nv);
+            }
             // Operator-facing and kernel-supplied, so slugged before it can
             // reach a key — the #843 boundary.
             let slug = zenkey::Chunk::slug(&info.card).to_string();
@@ -185,6 +197,21 @@ impl SystemCollector {
                 )
                 .await;
                 published += 1;
+            }
+            // The families DRM sysfs has no equivalent for — memory-controller
+            // utilisation, ECC counters, per-process VRAM. Everything else
+            // went through `merge` above, so nothing arrives twice.
+            if let Some(nv) = nv {
+                for (metric, v) in crate::gpu::nvml::extra_metrics(nv) {
+                    self.publish(
+                        &format!("gpu/{slug}/{metric}"),
+                        TelemetryValue::Gauge(v),
+                        timestamp,
+                        labels.clone(),
+                    )
+                    .await;
+                    published += 1;
+                }
             }
         }
         published

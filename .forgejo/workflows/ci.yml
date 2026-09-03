@@ -139,6 +139,10 @@ jobs:
   # only B pulls in", which is the more likely regression.)
   #
   # NOT covered here: `zensight-sensor-{netlink,sysinfo}` `--features ebpf`.
+  #
+  # Note what `sysinfo --features nvml` can and cannot be: no build machine has
+  # an NVIDIA card, so that leg type-checks a path nothing executes. It is
+  # deliberately the only claim made for it (#954).
   # Their build scripts invoke `aya-build` through `rustup run nightly`, so the
   # leg needs a nightly toolchain, `rust-src`, and a `bpf-linker` install (a
   # 100 MB prebuilt binary with LLVM baked in — building it from source needs a
@@ -191,6 +195,27 @@ jobs:
       # LIBRARY's; the crate's tests and examples require std and always will.
       - name: btf --no-default-features
         run: cargo clippy -p zensight-btf --no-default-features --locked -- -D warnings
+
+      # probe's icmp check needs a raw socket, so it is a build feature and a
+      # default build never type-checks it. Added with #984 — it had been
+      # feature-gated since the sensor shipped with no leg here, which is the
+      # blind spot this whole job exists for.
+      - name: probe --features icmp
+        run: cargo clippy -p zensight-sensor-probe --features icmp --all-targets --locked -- -D warnings
+
+      # sysinfo's NVML path (#954). There is NO NVIDIA hardware on any build
+      # machine, so this leg is the ONLY thing that checks it: nothing
+      # executes it, here or anywhere. That is the deal the feature was
+      # accepted on, and this step is the half of it CI can keep.
+      #
+      # It also proves the conditional ledger's condition is real: with the
+      # feature on, `conditional.lock`'s four sysinfo entries stop being
+      # excuses and the families must actually be emitted, so the coverage
+      # check fails if the gate ever stops being what makes the difference.
+      - name: sysinfo --features nvml
+        run: cargo clippy -p zensight-sensor-sysinfo --features nvml --all-targets --locked -- -D warnings
+      - name: sysinfo --features nvml (tests)
+        run: cargo test -p zensight-sensor-sysinfo --features nvml --locked
 
       # netring detectors, each off by default and each pulling its own
       # upstream parser through the netring facade.
