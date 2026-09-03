@@ -36,6 +36,11 @@ glob.workspace = true
 # Only for the `validate-json` feature (#741) — draft-2020-12 payload
 # conformance. Never in a default (sensor) build.
 jsonschema = { workspace = true, optional = true }
+# Only for the `linux-audit` feature (#957) — one AUDIT_USYS_CONFIG datagram on
+# a NETLINK_AUDIT socket. `default-features = false` keeps it to the plain
+# `Socket`: no tokio, no mio, no futures. Already in the lock file as a
+# transitive dependency, and MIT — see the feature comment.
+netlink-sys = { version = "0.8", default-features = false, optional = true }
 
 [features]
 default = []
@@ -57,6 +62,24 @@ default = []
 # Without it, `schema::verdict_for` answers
 # `Verdict::NotValidated(NotValidated::FeatureOff)` — never a fake "valid".
 validate-json = ["zenkey/validate-json", "dep:jsonschema"]
+
+# SYS-SUP-019 (#957): deliver every write procedure's outcome to the host's
+# audit subsystem instead of only to our own log.
+#
+# OFF by default, the same rule as `icmp`/`ebpf`/`nvml`: writing to
+# `NETLINK_AUDIT` needs CAP_AUDIT_WRITE, which a container deployment does not
+# have and must not be made to want. Without the feature — and with it, on a
+# host with no audit socket — `audit::record` logs the same fields under the
+# `zensight::audit` target instead. It never drops a record and never fails a
+# call.
+#
+# Named `linux-audit`, not `libaudit` as #957 first sketched it, because it
+# does NOT link the LGPL-2.1+ C library: it writes the netlink datagram
+# directly (MIT `netlink-sys`, already in the lock file), so `deny.toml` needs
+# no new licence exception and no build host needs `libaudit-dev`. A feature
+# named after a library it does not use is a name that has to be apologised
+# for at every reading.
+linux-audit = ["dep:netlink-sys"]
 
 [build-dependencies]
 # Compiles registry/*.toml into the typed subject registry (RFC 08 §5).

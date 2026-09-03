@@ -429,10 +429,7 @@ mod tests {
     use super::*;
 
     fn req(params: &str) -> RpcRequest {
-        RpcRequest {
-            payload: Vec::new(),
-            parameters: params.to_string(),
-        }
+        RpcRequest::new(Vec::new(), params)
     }
 
     fn b(last: f64, min: f32, max: f32) -> Bucket {

@@ -202,10 +202,14 @@ pub async fn serve_assertions(
 ) -> anyhow::Result<()> {
     let link_key = catalog_rpc_key("link");
     let unlink_key = catalog_rpc_key("unlink");
-    let link_q = zensight_common::served::serve_queryable(&session, &link_key)
+    // `link` and `unlink` are the catalog's write procedures: the audited seam
+    // (#957), which has no unrecorded way to answer. Merging two hosts into one
+    // entity, or splitting them again, is exactly the kind of operator action
+    // SYS-SUP-019 asks to be journalled.
+    let link_q = zensight_common::served::serve_write_queryable(&session, &link_key)
         .await
         .map_err(|e| anyhow::anyhow!("declare link queryable: {e}"))?;
-    let unlink_q = zensight_common::served::serve_queryable(&session, &unlink_key)
+    let unlink_q = zensight_common::served::serve_write_queryable(&session, &unlink_key)
         .await
         .map_err(|e| anyhow::anyhow!("declare unlink queryable: {e}"))?;
     info!(
@@ -244,14 +248,14 @@ async fn handle_assertion(
     allowed: bool,
     kind: AssertionKind,
     reply_key: &str,
-    query: zenoh::query::Query,
+    query: zensight_common::served::WriteQuery,
 ) {
-    let req = RpcRequest {
-        payload: query
-            .payload()
-            .map(|p| p.to_bytes().to_vec())
-            .unwrap_or_default(),
-        parameters: query.parameters().to_string(),
+    let req = query.request();
+    // What was acted on, for the trail: the operator is merging or splitting
+    // *these two* origins, and the record is read without the payload.
+    let target = match (req.param("old"), req.param("new")) {
+        (Some(old), Some(new)) => Some(format!("{old}->{new}")),
+        _ => None,
     };
     match build_assertion(&req, allowed, kind) {
         Ok(assertion) => {
@@ -279,23 +283,32 @@ async fn handle_assertion(
 
             if let Err(e) = crate::publisher::publish_assertion(session, format, &assertion).await {
                 warn!(error = %e, "publishing the assertion failed");
-                reply_err(
-                    &query,
-                    RpcError::new("error/catalog/publish", e.to_string()),
-                )
-                .await;
+                let err = RpcError::new("error/catalog/publish", e.to_string());
+                if let Err(e) = query.refused(&err, target.as_deref()).await {
+                    warn!(error = %e, "assertion reply_err failed");
+                }
                 return;
             }
             match serde_json::to_vec(&assertion) {
                 Ok(payload) => {
-                    if let Err(e) = query.reply(reply_key, payload).await {
+                    if let Err(e) = query.executed(reply_key, payload, target.as_deref()).await {
                         warn!(error = %e, "assertion reply failed");
                     }
                 }
-                Err(e) => warn!(error = %e, "serialize assertion failed"),
+                Err(e) => {
+                    warn!(error = %e, "serialize assertion failed");
+                    let err = RpcError::new("error/catalog/serialize", e.to_string());
+                    if let Err(e) = query.refused(&err, target.as_deref()).await {
+                        warn!(error = %e, "assertion reply_err failed");
+                    }
+                }
             }
         }
-        Err(e) => reply_err(&query, e).await,
+        Err(e) => {
+            if let Err(e) = query.refused(&e, target.as_deref()).await {
+                warn!(error = %e, "assertion reply_err failed");
+            }
+        }
     }
 }
 
@@ -346,13 +359,6 @@ fn build_assertion(
         asserted_at: zensight_common::current_timestamp_millis(),
         note: req.param("note"),
     })
-}
-
-async fn reply_err(query: &zenoh::query::Query, err: RpcError) {
-    let payload = serde_json::to_vec(&err).unwrap_or_default();
-    if let Err(e) = query.reply_err(payload).await {
-        warn!(error = %e, "reply_err failed");
-    }
 }
 
 /// Serve `introspect` — the catalog registry slice this build was compiled

@@ -325,6 +325,20 @@ Sensors therefore bound the *cost of one query*, never the number in flight.
 Details, the three handlers where it is measurable, and why bounded concurrency
 is deferred: [`zensight-sensor-core/docs/framework.md`](../zensight-sensor-core/docs/framework.md).
 
+### A write leaves a trail before it answers
+
+Every procedure the registry declares `kind = "write"` records **both** outcomes
+— executed and refused — on the host's own audit subsystem before the reply goes
+out (#957, SYS-SUP-019). This is a type rather than a convention:
+`served::WriteQuery` has no `reply` and no `reply_err`, so an unaudited answer to
+a write is not something a call site can spell, and `served::check_write_coverage`
+fails a producer that declares one through the plain seam.
+
+The record says what was asked and what happened. It does **not** say who asked:
+the bus caller is anonymous, and the honest limits of `caller_zid` and `actor`
+are written down in
+[`zensight-common/docs/audit.md`](../zensight-common/docs/audit.md).
+
 ## Frontend Architecture
 
 ```mermaid

@@ -13,6 +13,13 @@
 //! - Queryables MUST be declared **before** the producer's `alive`
 //!   liveliness token ("alive ⇒ callable", RFC 04 §5) — serve procedures
 //!   before `SensorRunner::run()` and the ordering holds.
+//! - **Every WRITE procedure's outcome is recorded** (#957). `serve` asks the
+//!   registry once, at declare time, whether the procedure it is declaring is
+//!   `kind = "write"`; if it is, both outcomes — executed and refused — go to
+//!   `zensight_common::audit::record`. Reads are not recorded: a trail that
+//!   also carries every `introspect` is a trail nobody reads. A write surface
+//!   served through a hand-rolled `select!` loop rather than through here must
+//!   call `audit::record` itself, and say which switch refused it.
 //! - **Handler loops are serial, by design.** One task drains a queryable's
 //!   FIFO channel and awaits each handler before taking the next query, so a
 //!   slow query delays every query behind it — and the `select!` multiplexers
@@ -63,6 +70,43 @@ where
             ctx.producer().name()
         ))
     })?;
+    // Is this a write? Asked once, at declare time, from the registry's own
+    // `kind = "write"` column (#957) — so a new write surface becomes audited
+    // by being declared, and a read never pays for the question.
+    let producer = ctx.producer().name().to_string();
+    let path = procedure.join("/");
+    if zensight_common::audit::is_write_procedure(&producer, &path) {
+        let queryable = zensight_common::served::serve_write_queryable(&session, key.as_str())
+            .await
+            .map_err(|e| SensorError::Publish {
+                key: key.clone().into(),
+                message: format!("failed to declare write procedure queryable: {e}"),
+            })?;
+        tracing::info!(key = %key, "write procedure ready (audited)");
+        let handle = tokio::spawn(async move {
+            while let Ok(query) = queryable.recv_async().await {
+                let request = query.request();
+                match handler(request).await {
+                    // The reply key is the concrete one (RFC 05 §2.1) — never
+                    // the selector. `target` is left to the call sites that
+                    // know one; a generic seam does not.
+                    Ok(bytes) => {
+                        if let Err(e) = query.executed(key.as_str(), bytes, None).await {
+                            tracing::warn!(key = %key, error = %e, "failed to reply");
+                        }
+                    }
+                    Err(err) => {
+                        if let Err(e) = query.refused(&err, None).await {
+                            tracing::warn!(key = %key, error = %e, "failed to reply_err");
+                        }
+                    }
+                }
+            }
+            tracing::debug!(key = %key, "write procedure queryable closed");
+        });
+        return Ok(handle);
+    }
+
     let queryable = zensight_common::served::serve_queryable(&session, key.as_str())
         .await
         .map_err(|e| SensorError::Publish {
@@ -72,13 +116,7 @@ where
     tracing::info!(key = %key, "procedure ready");
     let handle = tokio::spawn(async move {
         while let Ok(query) = queryable.recv_async().await {
-            let request = RpcRequest {
-                payload: query
-                    .payload()
-                    .map(|p| p.to_bytes().to_vec())
-                    .unwrap_or_default(),
-                parameters: query.parameters().as_str().to_string(),
-            };
+            let request = RpcRequest::from_query(&query);
             match handler(request).await {
                 Ok(bytes) => {
                     // Concrete reply key (RFC 05 §2.1) — never echo the selector.
@@ -176,10 +214,7 @@ mod tests {
 
     #[test]
     fn request_params() {
-        let req = RpcRequest {
-            payload: vec![],
-            parameters: "since=17;max=500;source=web01".into(),
-        };
+        let req = RpcRequest::new(vec![], "since=17;max=500;source=web01");
         assert_eq!(req.param("max").as_deref(), Some("500"));
         assert_eq!(req.param("source").as_deref(), Some("web01"));
         assert_eq!(req.param("nope"), None);

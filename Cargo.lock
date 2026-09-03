@@ -14361,6 +14361,7 @@ dependencies = [
  "glob",
  "json5 1.3.1",
  "jsonschema",
+ "netlink-sys",
  "schemars 1.2.1",
  "serde",
  "serde_json",

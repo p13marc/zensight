@@ -9,6 +9,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every write procedure records its outcome on the host's own audit trail**
+  (#957, epic #952 — SYS-SUP-019 *journal every user action*).
+
+  Before this, the only trail in the tree was the `systemd` sensor's bounded
+  in-memory ring: per-sensor, volatile, lost on restart, and covering **one**
+  write surface out of twelve. `grep -rn 'zensight::audit'` matched one file.
+  There are **35** `kind = "write"` declarations across twelve registry slices.
+
+  **It is a type, not a convention.** `served::WriteQuery` has no `reply` and no
+  `reply_err`; the only two ways to answer are `executed`/`executed_but` and
+  `refused`, and each writes the record *before* it replies — a lost reply is a
+  retry, a lost record is a hole. An unaudited answer to a write is not
+  something a call site can spell. This is the `StateQueryable` shape #782
+  arrived at for the same reason, with one thing #782 could not have: whether a
+  key is a write is **machine-decidable**, from the registry's own
+  `kind = "write"` column. So `serve_queryable` debug-asserts on a write key,
+  and `served::check_write_coverage` — run by every producer at `introspect`
+  time, before `alive` — fails a build that declares one through the plain seam.
+  The CI grep guard is the tripwire for the branch that never runs a sensor's
+  tests, not the enforcement.
+
+  Four decisions inside it:
+
+  - **It is not `libaudit`, and the feature is not called that.** The C library
+    is LGPL-2.1+ and `deny.toml` grants LGPL only as a named per-crate
+    exception. What we send is one header and one line of text, so the datagram
+    is written directly over MIT `netlink-sys`, which was **already in the lock
+    file**: no licence exception, no `libaudit-dev` on a build host, one new
+    crate. The feature is `linux-audit`, after the subsystem it writes to — a
+    feature named for a library it does not link is a name that needs
+    apologising for at every reading.
+  - **The record type is `AUDIT_USYS_CONFIG` (1111), not 1107.** 1107 is
+    `AUDIT_USER_AVC`; every ZenSight record would have been filed as an SELinux
+    access-vector denial. Pinned in the framing test.
+  - **The first record's ack is read.** A netlink permission failure comes back
+    as an `NLMSGERR` datagram, *not* as a `sendmsg` error, so a writer that
+    checks only the send return reports every record as delivered while the
+    trail silently does not exist — the exact failure this module exists to
+    avoid, since *a silent audit path is worse than none, because it looks like
+    one*. A refusal is logged once at `error`, naming `CAP_AUDIT_WRITE`, and the
+    process falls back to a structured `warn!` with the same fields for its
+    lifetime. `is_delivering()` reports which of the three states it is in, and
+    every sensor's startup line carries it.
+  - **The send is `MSG_DONTWAIT`.** The `@rpc` handler loop is serial by design;
+    auditd backlog pressure can park a blocking send for a minute with every
+    queued call behind it.
+
+  **A refusal names its switch as a field.** `systemd`'s `gate()` returns a
+  `Refusal { switch, message }` instead of prose that happens to contain the
+  switch name, so #866's contract stops being enforced by a test reading
+  English and the trail can be *filtered* on `refused_by`. A new test asserts
+  every gate arm names a switch that is a real field of `ActionsConfig` — a
+  plausible name no config key matches sends an operator looking for a setting
+  that does not exist. `RpcError` gained an optional `refused_by` (additive on
+  the wire), so the caller gets it too.
+
+  **A gated write is audited too.** `serve_unavailable` — the #648 seam that
+  answers `error/gated` for an advertised-but-switched-off surface — routes
+  write keys through the audited path: somebody trying to change something
+  while the switch is off is the most interesting refusal there is.
+
+  **What it deliberately does not claim.** It records what was asked and what
+  happened; it does **not** say who asked. `caller_zid` is a Zenoh *session*,
+  not a person, and today is essentially always absent (nothing populates a
+  query's source info, and zenoh's constructor for one is behind an `internal`
+  feature) — it is read anyway, because the day someone fills it in it costs
+  nothing to already be recording it. `actor` and `request_id` ride `?actor=` /
+  `?request_id=` and are unauthenticated claims. Real attribution needs a
+  transport identity (mTLS CN + ACL), which is the scope question epic #952
+  names and #903 kept out of 1.0 on purpose. All of that is written into
+  `zensight-common/docs/audit.md` rather than left for someone to discover.
+
+  **The loop closes with no new transport**: `auditd` records land in journald,
+  and the `logs` sensor already security-tags anything carrying
+  `_AUDIT_TYPE_NAME` (#107), so an action comes back onto the bus and into the
+  GUI Logs view. Nothing in `zensight-sensor-logs` had to change.
+
+  One exemption, named and tested: `parallax stream/report`, which RFC 07 §1.2
+  forbids from commanding anything and which arrives once per interval per
+  consumer — auditing it would bury every real action under records of a
+  measurement.
+
 - **The `nvml` GPU feature** (#954, completing it). NVIDIA cards already
   appeared through their DRM node; this adds what **only the vendor library can
   give**: memory-controller utilisation (the figure that separates a

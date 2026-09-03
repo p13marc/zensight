@@ -74,7 +74,10 @@ pub async fn run(
     let cmd_key = command_key(&producer, EXPECTATIONS_TOPIC);
     let stat_key = status_key(&producer, EXPECTATIONS_TOPIC);
 
-    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
+    // Replacing the expectation set is a write: it changes what this host
+    // asserts about itself, so both outcomes reach the audit trail (#957).
+    let subscriber = match zensight_common::served::serve_write_queryable(&session, &cmd_key).await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "sentinel: subscribe to commands failed");
@@ -95,10 +98,7 @@ pub async fn run(
             query = subscriber.recv_async() => {
                 match query {
                     Ok(query) => {
-                        let payload = query
-                            .payload()
-                            .map(|p| p.to_bytes().to_vec())
-                            .unwrap_or_default();
+                        let payload = query.request().payload;
                         match parse_set_body(&payload).and_then_validated() {
                             Ok(cfg) => {
                                 tracing::info!("sentinel: expectation set replaced");
@@ -111,16 +111,24 @@ pub async fn run(
                                         None,
                                     )
                                     .await;
-                                if let Err(e) = query.reply(cmd_key.as_str(), Vec::<u8>::new()).await {
+                                // The whole expectation set is replaced at once,
+                                // so the topic IS the target; there is no
+                                // narrower thing that was acted on.
+                                if let Err(e) = query
+                                    .executed(
+                                        cmd_key.as_str(),
+                                        Vec::<u8>::new(),
+                                        Some(EXPECTATIONS_TOPIC),
+                                    )
+                                    .await
+                                {
                                     tracing::warn!(error = %e, "sentinel: ack failed");
                                 }
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "sentinel: bad expectation command");
                                 let err = zensight_sensor_core::rpc::RpcError::invalid_args(e);
-                                let _ = query
-                                    .reply_err(serde_json::to_vec(&err).unwrap_or_default())
-                                    .await;
+                                let _ = query.refused(&err, None).await;
                             }
                         }
                     }

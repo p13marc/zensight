@@ -36,6 +36,8 @@ use zensight_common::action::{
 };
 use zensight_common::command::{capability_key, command_key, query_key, status_key};
 
+use zensight_common::audit::Refusal;
+
 use crate::config::ActionsConfig;
 use crate::dbus::ManagerProxy;
 
@@ -50,14 +52,17 @@ const ACTIONS_TOPIC: &str = "actions";
 ///
 /// Delegates the matching itself to [`zensight_common::action::allows`] so the
 /// gate and the frontend's preview of the gate cannot disagree.
-pub fn validate(allow: &[String], unit: &str) -> Result<(), String> {
+pub fn validate(allow: &[String], unit: &str) -> Result<(), Refusal> {
     if unit.is_empty() {
-        return Err("empty unit".to_string());
+        return Err(Refusal::new("actions.allow_units", "empty unit"));
     }
     if zensight_common::action::allows(allow, unit) {
         Ok(())
     } else {
-        Err(format!("unit {unit} not in actions.allow_units allowlist"))
+        Err(Refusal::new(
+            "actions.allow_units",
+            format!("unit {unit} not in actions.allow_units allowlist"),
+        ))
     }
 }
 
@@ -105,21 +110,34 @@ pub fn capability(cfg: &ActionsConfig) -> ActionCapability {
 
 /// Which gate rejected a request, if any. Pure, so the whole gate table is
 /// testable without a bus or a system.
-pub fn gate(cfg: &ActionsConfig, cmd: &ServiceAction) -> Result<(), String> {
+///
+/// The [`Refusal`] carries the switch as a *field* (#957), not only inside the
+/// sentence: the audit trail filters on it, and #866's "name the switch"
+/// contract should not be enforced by reading English.
+pub fn gate(cfg: &ActionsConfig, cmd: &ServiceAction) -> Result<(), Refusal> {
     if !cfg.enabled {
-        return Err("service control disabled (actions.enabled = false)".to_string());
+        return Err(Refusal::new(
+            "actions.enabled",
+            "service control disabled (actions.enabled = false)",
+        ));
     }
     if cmd.verb.writes_unit_files() && !cfg.allow_unit_files {
-        return Err(format!(
-            "{} requires actions.allow_unit_files (writes unit files, persists across reboots)",
-            cmd.verb
+        return Err(Refusal::new(
+            "actions.allow_unit_files",
+            format!(
+                "{} requires actions.allow_unit_files (writes unit files, persists across reboots)",
+                cmd.verb
+            ),
         ));
     }
     if cmd.verb == Verb::DaemonReload {
         return if cfg.allow_daemon_reload {
             Ok(())
         } else {
-            Err("daemon-reload requires actions.allow_daemon_reload".to_string())
+            Err(Refusal::new(
+                "actions.allow_daemon_reload",
+                "daemon-reload requires actions.allow_daemon_reload",
+            ))
         };
     }
     // Every remaining verb names a unit, so the allowlist applies. daemon-reload
@@ -266,7 +284,9 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsCon
     let cmd_key = command_key(&producer, ACTION_TOPIC);
     let stat_key = status_key(&producer, ACTION_TOPIC);
     let ring_key = query_key(&producer, ACTIONS_TOPIC);
-    let set_q = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
+    // The write half goes through the audited seam (#957): there is no way to
+    // answer `action/set` without the outcome reaching the host's audit trail.
+    let set_q = match zensight_common::served::serve_write_queryable(&session, &cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "action: subscribe failed");
@@ -297,31 +317,23 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsCon
         tokio::select! {
             query = set_q.recv_async() => {
                 let Ok(query) = query else { return };
-                let payload = query
-                    .payload()
-                    .map(|p| p.to_bytes().to_vec())
-                    .unwrap_or_default();
-                let cmd = match serde_json::from_slice::<ServiceAction>(&payload) {
+                let req = query.request();
+                let cmd = match serde_json::from_slice::<ServiceAction>(&req.payload) {
                     Ok(cmd) => cmd,
                     Err(e) => {
                         tracing::warn!(error = %e, "action: bad action command");
                         let err = zensight_sensor_core::rpc::RpcError::invalid_args(e.to_string());
-                        let _ = query
-                            .reply_err(serde_json::to_vec(&err).unwrap_or_default())
-                            .await;
+                        let _ = query.refused(&err, None).await;
                         continue;
                     }
                 };
                 // Gate before spawning: a refusal costs nothing and must be
-                // audited even when the host is busy.
-                if let Err(reason) = gate(&cfg, &cmd) {
-                    tracing::warn!(target: "zensight::audit", verb = %cmd.verb, unit = %cmd.unit,
-                        decision = "rejected", reason = %reason, "service action rejected");
-                    history.record(rejected(&cmd, reason.clone())).await;
-                    let err = zensight_sensor_core::rpc::RpcError::gated(reason);
-                    let _ = query
-                        .reply_err(serde_json::to_vec(&err).unwrap_or_default())
-                        .await;
+                // recorded even when the host is busy.
+                if let Err(refusal) = gate(&cfg, &cmd) {
+                    history.record(rejected(&cmd, refusal.message.clone())).await;
+                    let err = zensight_sensor_core::rpc::RpcError::gated(refusal.message)
+                        .with_refused_by(refusal.switch);
+                    let _ = query.refused(&err, Some(&cmd.unit)).await;
                     continue;
                 }
                 // Run each accepted action on its own task. Awaiting `execute`
@@ -343,11 +355,31 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsCon
                     history.record(status.clone()).await;
                     match serde_json::to_vec(&status) {
                         Ok(body) => {
-                            if let Err(e) = query.reply(cmd_key.as_str(), body).await {
+                            // Answered HERE, not at the gate: the operator's
+                            // trail must not read a clean "executed" for a job
+                            // that failed to enqueue. The verdict is still
+                            // `executed` — the gate said yes and the sensor
+                            // acted — with the failure carried in `error`.
+                            if let Err(e) = query
+                                .executed_but(
+                                    cmd_key.as_str(),
+                                    body,
+                                    Some(&cmd.unit),
+                                    status.error.clone(),
+                                )
+                                .await
+                            {
                                 tracing::warn!(error = %e, "action: reply failed");
                             }
                         }
-                        Err(e) => tracing::warn!(error = %e, "action: serialize outcome failed"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "action: serialize outcome failed");
+                            let err = zensight_sensor_core::rpc::RpcError::new(
+                                "error/systemd/serialize",
+                                e.to_string(),
+                            );
+                            let _ = query.refused(&err, Some(&cmd.unit)).await;
+                        }
                     }
                 });
             }
@@ -557,16 +589,72 @@ mod tests {
         }
     }
 
+    /// Every refusal names a switch that **actually exists** in the config
+    /// (#957). `refused_by` is what an operator filters the audit trail on to
+    /// answer "what is turned off on this host", so a plausible-looking name
+    /// that no config key matches is worse than none: it sends them looking
+    /// for a setting they will never find.
+    #[test]
+    fn every_gate_arm_names_a_real_switch() {
+        let keys = match serde_json::to_value(ActionsConfig::default()) {
+            Ok(serde_json::Value::Object(map)) => map
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            other => panic!("ActionsConfig should serialize to an object, got {other:?}"),
+        };
+
+        let configs = [
+            cfg(false, &["nginx.service"]),
+            cfg(true, &[]),
+            cfg(true, &["nginx.service"]),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for c in &configs {
+            for verb in Verb::all() {
+                let unit = if verb.targets_unit() {
+                    "sshd.service"
+                } else {
+                    ""
+                };
+                if let Err(refusal) = gate(c, &act(verb, unit)) {
+                    let field = refusal
+                        .switch
+                        .strip_prefix("actions.")
+                        .unwrap_or(refusal.switch);
+                    assert!(
+                        keys.contains(field),
+                        "gate refused with switch {:?}, which is not a field of ActionsConfig \
+                         (fields: {keys:?})",
+                        refusal.switch
+                    );
+                    assert!(
+                        refusal.message.contains(refusal.switch),
+                        "the sentence must name the switch too, for the caller that only sees \
+                         the message: {refusal:?}"
+                    );
+                    seen.insert(refusal.switch);
+                }
+            }
+        }
+        // All four gates are reachable from those three configurations; a new
+        // one that nothing here exercises is a gate with no test.
+        assert_eq!(
+            seen.len(),
+            4,
+            "expected every gate arm to fire at least once, saw {seen:?}"
+        );
+    }
+
     #[test]
     fn validate_reports_a_reason_for_the_audit_log() {
         let allow = vec!["nginx.service".to_string()];
         assert!(validate(&allow, "nginx.service").is_ok());
-        assert!(
-            validate(&allow, "sshd.service")
-                .unwrap_err()
-                .contains("not in actions.allow_units")
-        );
-        assert_eq!(validate(&allow, "").unwrap_err(), "empty unit");
+        let refused = validate(&allow, "sshd.service").unwrap_err();
+        assert!(refused.message.contains("not in actions.allow_units"));
+        // The switch is a FIELD now (#957), not something to find in the prose.
+        assert_eq!(refused.switch, "actions.allow_units");
+        assert_eq!(validate(&allow, "").unwrap_err().message, "empty unit");
     }
 
     #[test]
@@ -591,7 +679,8 @@ mod tests {
     fn unit_file_verbs_need_their_own_switch_on_top_of_the_allowlist() {
         let mut c = cfg(true, &["nginx.service"]);
         let err = gate(&c, &act(Verb::Enable, "nginx.service")).unwrap_err();
-        assert!(err.contains("allow_unit_files"), "{err}");
+        assert!(err.message.contains("allow_unit_files"), "{err}");
+        assert_eq!(err.switch, "actions.allow_unit_files");
 
         c.allow_unit_files = true;
         assert!(gate(&c, &act(Verb::Enable, "nginx.service")).is_ok());

@@ -240,11 +240,26 @@ call is made.
    scoped polkit rule. If polkit denies the call, the D-Bus method returns an
    error that surfaces as `accepted: true` with an `error` (the request was
    allowlisted and issued, but the call failed).
-4. **Audit log.** Every request — accepted or rejected — is written to the
-   `zensight::audit` tracing target: rejections log `decision = "rejected"` with
-   the reason; issued actions log `decision = "accepted"` with the verb, unit,
-   job path (job verbs), and result. Rejections are recorded in the ring too, so
-   the timeline shows refused attempts, not only successful ones.
+4. **Audit trail.** Every request — accepted or rejected — is recorded through
+   the shared `zensight_common::audit` seam (#957), which is no longer this
+   sensor's private convention: `action/set` is served through
+   `served::serve_write_queryable`, whose only two ways to answer both write the
+   record before they reply. A refusal carries `refused_by` as a **field** — the
+   config switch that refused (`actions.enabled`, `actions.allow_units`,
+   `actions.allow_unit_files`, `actions.allow_daemon_reload`) — rather than only
+   inside the sentence, so the trail can be filtered on it. An action that was
+   permitted and then failed records `verdict=executed` with the failure in
+   `error` and `res=0`; it is not a success.
+
+   With the `linux-audit` feature the record goes to the host's own audit
+   subsystem (`ausearch -m USYS_CONFIG`); without it, to the `zensight::audit`
+   tracing target with the same fields. See
+   [`zensight-common/docs/audit.md`](../../zensight-common/docs/audit.md) for
+   the record format and, importantly, for what it cannot say — it records what
+   was asked and what happened, never *who* asked.
+
+   Rejections are recorded in the in-memory ring too, so the operator timeline
+   on `@rpc/systemd/actions` shows refused attempts, not only successful ones.
 
 ### Execution semantics
 

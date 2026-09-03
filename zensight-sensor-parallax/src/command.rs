@@ -23,7 +23,9 @@ pub const STREAMS_TOPIC: &str = "streams";
 pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: SessionHandle) {
     let cmd_key = command_key(&producer, STREAM_TOPIC);
 
-    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
+    // Starting, stopping and retuning a camera stream is a write (#957).
+    let subscriber = match zensight_common::served::serve_write_queryable(&session, &cmd_key).await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "stream: failed to declare command queryable");
@@ -37,24 +39,23 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Session
             query = subscriber.recv_async() => {
                 match query {
                     Ok(query) => {
-                        let payload = query
-                            .payload()
-                            .map(|p| p.to_bytes().to_vec())
-                            .unwrap_or_default();
+                        let payload = query.request().payload;
                         match decode_auto::<Command<StreamControl>>(&payload) {
                             Ok(cmd) => {
                                 tracing::debug!(command = ?cmd.body, "stream: control command");
+                                let target = format!("{:?}", cmd.body);
                                 handle.send(SessionMsg::Control(cmd.body)).await;
-                                if let Err(e) = query.reply(cmd_key.as_str(), Vec::<u8>::new()).await {
+                                if let Err(e) = query
+                                    .executed(cmd_key.as_str(), Vec::<u8>::new(), Some(&target))
+                                    .await
+                                {
                                     tracing::warn!(error = %e, "stream: failed to ack command");
                                 }
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "stream: bad control command");
                                 let err = zensight_sensor_core::rpc::RpcError::invalid_args(e.to_string());
-                                let _ = query
-                                    .reply_err(serde_json::to_vec(&err).unwrap_or_default())
-                                    .await;
+                                let _ = query.refused(&err, None).await;
                             }
                         }
                     }

@@ -93,9 +93,234 @@ pub async fn serve_queryable(
              cannot be LWW-ordered against live samples (RFC 04 §3.2, #782)"
         );
     }
+    // #957: a WRITE procedure's outcome must reach the host's audit trail, and
+    // this seam hands out a bare `Query` whose `reply`/`reply_err` are the two
+    // ways to answer without recording anything. `serve_write_queryable` has no
+    // such path — its terminators record first — so route writes there.
+    //
+    // The classification is not a guess: it is the registry's own
+    // `kind = "write"` column, read out of the compiled slice.
+    if let Some((producer, path)) = crate::audit::rpc_route(key)
+        && crate::audit::is_write_procedure(&producer, &path)
+    {
+        debug_assert!(
+            false,
+            "write procedure {key} declared through the unaudited seam — both of its outcomes \
+             MUST reach the audit trail (#957). Use served::serve_write_queryable."
+        );
+        tracing::warn!(
+            key = %key,
+            "write procedure served through the unaudited seam; its outcomes will not reach \
+             the host's audit trail (#957)"
+        );
+    }
     let queryable = session.declare_queryable(key).await?;
     note_served(key);
     Ok(queryable)
+}
+
+/// A queryable on a **write** procedure, whose outcomes are audited (#957).
+///
+/// # Why this is a separate type
+///
+/// SYS-SUP-019 asks for a journal of every operator action. A convention —
+/// "call `audit::record` on both arms" — is a comment, and this module already
+/// records twice over what comments cost here: #484 exists because seven
+/// surfaces were advertised and not served, and [`StateQueryable`] exists
+/// because the reply-stamping rule was obeyed until the next call site.
+///
+/// So [`WriteQuery`] exposes **no** `reply` and **no** `reply_err`. The only
+/// two ways to answer are [`WriteQuery::executed`] and
+/// [`WriteQuery::refused`], and both write the record before they reply — an
+/// unaudited answer to a write procedure is not something a caller can spell.
+///
+/// The record goes out *before* the reply on purpose: a lost reply is a retry,
+/// a lost record is a hole in the trail.
+pub struct WriteQueryable {
+    inner: zenoh::query::Queryable<zenoh::handlers::FifoChannelHandler<zenoh::query::Query>>,
+    procedure: String,
+    key: String,
+}
+
+/// One call on a write procedure. See [`WriteQueryable`].
+pub struct WriteQuery {
+    inner: zenoh::query::Query,
+    procedure: String,
+}
+
+/// Declare a write procedure's queryable, recorded as served *and* as audited.
+///
+/// Refuses a key the registry does not declare `kind = "write"`: this seam
+/// writes an audit record for every answer, and recording a read would bury
+/// the actions in the noise the trail exists to avoid.
+pub async fn serve_write_queryable(
+    session: &zenoh::Session,
+    key: &str,
+) -> zenoh::Result<WriteQueryable> {
+    let route = crate::audit::rpc_route(key);
+    // Only a producer this build HAS a slice for can be classified. The
+    // framework's artifact channel is generic over the producer name, so a
+    // synthetic one (a test rig) resolves to no slice — "cannot say" is not
+    // the same finding as "declared a read", and only the second is a bug.
+    let classifiable = route
+        .as_ref()
+        .is_some_and(|(p, _)| crate::registry::registry_toml(p).is_some());
+    debug_assert!(
+        !classifiable
+            || route
+                .as_ref()
+                .is_some_and(|(p, path)| crate::audit::is_write_procedure(p, path)),
+        "serve_write_queryable called with {key}, which the registry does not declare as a \
+         write procedure — reads are deliberately not audited (#957)"
+    );
+    let procedure = route
+        .map(|(p, path)| format!("{p}/{path}"))
+        .unwrap_or_else(|| key.to_string());
+    let inner = session.declare_queryable(key).await?;
+    note_served(key);
+    audited()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.to_string());
+    Ok(WriteQueryable {
+        inner,
+        procedure,
+        key: key.to_string(),
+    })
+}
+
+fn audited() -> &'static Mutex<HashSet<String>> {
+    static AUDITED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    AUDITED.get_or_init(Default::default)
+}
+
+impl WriteQueryable {
+    /// The key this queryable answers.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Await the next call. `Err` when the session has closed.
+    pub async fn recv_async(&self) -> zenoh::Result<WriteQuery> {
+        self.inner.recv_async().await.map(|inner| WriteQuery {
+            inner,
+            procedure: self.procedure.clone(),
+        })
+    }
+
+    /// Stop answering.
+    pub async fn undeclare(self) -> zenoh::Result<()> {
+        self.inner.undeclare().await
+    }
+}
+
+impl WriteQuery {
+    /// The call, with whatever the bus can say about its caller.
+    pub fn request(&self) -> crate::rpc::RpcRequest {
+        crate::rpc::RpcRequest::from_query(&self.inner)
+    }
+
+    /// The selector's parameters, for a procedure that takes some.
+    pub fn parameters(&self) -> &zenoh::query::Parameters<'static> {
+        self.inner.parameters()
+    }
+
+    /// The procedure this call is on, as it appears in an audit record.
+    pub fn procedure(&self) -> &str {
+        &self.procedure
+    }
+
+    /// Answer with the outcome of a permitted action.
+    ///
+    /// `target` is what was acted on — the unit, the outlet, the topic — and
+    /// belongs in the record even when it is already in the payload, because
+    /// the trail is read without the payload.
+    pub async fn executed(
+        self,
+        reply_key: &str,
+        payload: impl Into<zenoh::bytes::ZBytes>,
+        target: Option<&str>,
+    ) -> zenoh::Result<()> {
+        self.executed_but(reply_key, payload, target, None).await
+    }
+
+    /// Answer with the outcome of a permitted action that did not achieve what
+    /// it was asked to. The verdict is still `executed` — the gate said yes and
+    /// the producer acted — with the failure recorded in `error`.
+    pub async fn executed_but(
+        self,
+        reply_key: &str,
+        payload: impl Into<zenoh::bytes::ZBytes>,
+        target: Option<&str>,
+        error: Option<String>,
+    ) -> zenoh::Result<()> {
+        let mut rec = crate::audit::AuditRecord::executed(&self.procedure)
+            .with_request(&self.request())
+            .with_error(error);
+        rec.target = target.map(str::to_string);
+        crate::audit::record(&rec);
+        self.inner.reply(reply_key, payload).await
+    }
+
+    /// Refuse the call, recording which switch refused it.
+    ///
+    /// `refused_by` comes from the error's own field when the gate set one
+    /// (#866); failing that, the error *name*, which is at least a true
+    /// statement about the class that refused.
+    pub async fn refused(
+        self,
+        err: &crate::rpc::RpcError,
+        target: Option<&str>,
+    ) -> zenoh::Result<()> {
+        let switch = err.refused_by.clone().unwrap_or_else(|| err.error.clone());
+        let mut rec = crate::audit::AuditRecord::refused(&self.procedure, switch)
+            .with_request(&self.request());
+        rec.target = target.map(str::to_string);
+        rec.error = Some(err.message.clone());
+        crate::audit::record(&rec);
+        let payload = serde_json::to_vec(err).unwrap_or_default();
+        self.inner.reply_err(payload).await
+    }
+}
+
+/// Assert that every write procedure `producer` registers was declared through
+/// the audited seam (#957).
+///
+/// The honest half of the enforcement: a test cannot watch a hook fire, but a
+/// *declaration* is an observable event this process makes once, at startup,
+/// exactly like [`check_registry_coverage`] — which is where this is called
+/// from, so every sensor gets it without a new line.
+pub fn check_write_coverage(producer: &str) {
+    let Some(toml) = crate::registry::registry_toml(producer) else {
+        return;
+    };
+    let Ok(slice) = zenkey::parse_slice(toml) else {
+        return;
+    };
+    let audited = audited().lock().unwrap_or_else(|e| e.into_inner());
+    let served = served().lock().unwrap_or_else(|e| e.into_inner());
+    let missing: Vec<String> = slice
+        .procedures
+        .iter()
+        .filter(|p| crate::audit::is_write_procedure(producer, &p.path))
+        .map(|p| serve_spelling(producer, &p.path))
+        // Only a procedure this build actually serves: an undeclared one is
+        // already #484's finding, and reporting it twice buries the new one.
+        .filter(|key| served.contains(key) && !audited.contains(key))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let list = missing.join(", ");
+    debug_assert!(
+        false,
+        "{producer} serves write procedures through the unaudited seam: {list}. Both outcomes          of a write MUST reach the host's audit trail (#957) — declare them with          served::serve_write_queryable."
+    );
+    tracing::warn!(
+        producer = %producer,
+        unaudited = %list,
+        "write procedures served without an audit trail (#957)"
+    );
 }
 
 /// A queryable on a **state-class** selector, whose replies are stamped (#782).
@@ -250,6 +475,10 @@ impl StateQuery {
 ///
 /// Declaring nothing collapses the middle two into the first, which is exactly
 /// the silence the registry check exists to prevent.
+///
+/// A **write** procedure declared here answers through the audited seam
+/// ([`serve_write_queryable`]): a caller turned away by a shut gate is exactly
+/// the event SYS-SUP-019 asks to be journalled (#957).
 pub async fn serve_unavailable(
     session: std::sync::Arc<zenoh::Session>,
     keys: Vec<String>,
@@ -264,6 +493,34 @@ pub async fn serve_unavailable(
     };
     let mut tasks = Vec::with_capacity(keys.len());
     for key in keys {
+        let name = err.error.clone();
+        tracing::debug!(key = %key, reason = %name, "procedure declared but unavailable");
+
+        // A shut gate on a WRITE procedure is the most interesting refusal
+        // there is — somebody tried to change something and the switch was off
+        // — so it goes through the audited seam like any other refusal (#957),
+        // rather than being the one refusal the trail never sees.
+        if crate::audit::rpc_route(&key)
+            .is_some_and(|(p, path)| crate::audit::is_write_procedure(&p, &path))
+        {
+            let queryable = match serve_write_queryable(&session, &key).await {
+                Ok(q) => q,
+                Err(e) => {
+                    tracing::error!(error = %e, key = %key, "serve_unavailable: declare failed");
+                    continue;
+                }
+            };
+            let err = err.clone();
+            tasks.push(tokio::spawn(async move {
+                while let Ok(query) = queryable.recv_async().await {
+                    if let Err(e) = query.refused(&err, None).await {
+                        tracing::warn!(error = %e, key = %key, "unavailable reply failed");
+                    }
+                }
+            }));
+            continue;
+        }
+
         let queryable = match serve_queryable(&session, &key).await {
             Ok(q) => q,
             Err(e) => {
@@ -272,8 +529,6 @@ pub async fn serve_unavailable(
             }
         };
         let payload = payload.clone();
-        let name = err.error.clone();
-        tracing::debug!(key = %key, reason = %name, "procedure declared but unavailable");
         tasks.push(tokio::spawn(async move {
             while let Ok(query) = queryable.recv_async().await {
                 if let Err(e) = query.reply_err(payload.clone()).await {
@@ -351,6 +606,11 @@ fn serve_spelling(producer: &str, path: &str) -> String {
 /// (#484). Call once, at the point the producer starts serving `introspect` —
 /// after its procedures are declared, before `alive` says it is callable.
 pub fn check_registry_coverage(producer: &str) {
+    // The write half rides along (#957): both checks answer "does what this
+    // build advertises match what it actually declared", and both are only
+    // meaningful at exactly this moment — after the procedures are declared,
+    // before `alive` says the producer is callable.
+    check_write_coverage(producer);
     let missing = unserved_procedures(producer);
     if missing.is_empty() {
         return;
