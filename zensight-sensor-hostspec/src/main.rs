@@ -40,7 +40,11 @@ async fn main() -> Result<()> {
         zensight_common::Protocol::Hostspec,
         format,
     )
-    .with_debounce(Duration::from_secs(expectations.default_for_secs));
+    .with_debounce(Duration::from_secs(expectations.default_for_secs))
+    // The set-wide recovery hold (#932). The sentinel resolves per-assertion
+    // overrides itself and passes them per reconcile, so this is the base for
+    // anything that does not — the threshold rules (#931) share this reporter.
+    .with_recovery(Duration::from_secs(expectations.default_recover_after_secs));
     if let Some(id) = runner.identity() {
         reporter = reporter.with_identity(id);
     }

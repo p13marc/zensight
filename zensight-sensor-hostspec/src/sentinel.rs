@@ -597,7 +597,15 @@ impl Evaluator {
     async fn sweep(&self, inputs: &SweepInputs) {
         let cfg = self.handle.expectations.read().await.clone();
         let mut results: Vec<AssertionResult> = Vec::new();
-        let mut reported: Vec<(String, AlertSeverity, Option<u64>, Vec<Violation>)> = Vec::new();
+        // (rule, severity, for_secs, recover_after_secs, violations)
+        type Reported = (
+            String,
+            AlertSeverity,
+            Option<u64>,
+            Option<u64>,
+            Vec<Violation>,
+        );
+        let mut reported: Vec<Reported> = Vec::new();
 
         macro_rules! run_kind {
             ($kind:literal, $list:expr, $check:expr) => {
@@ -627,6 +635,10 @@ impl Evaluator {
                         rule,
                         exp.severity,
                         Some(exp.for_secs.unwrap_or(cfg.default_for_secs)),
+                        Some(
+                            exp.recover_after_secs
+                                .unwrap_or(cfg.default_recover_after_secs),
+                        ),
                         violations,
                     ));
                 }
@@ -670,6 +682,10 @@ impl Evaluator {
                     rule,
                     exp.severity,
                     Some(exp.for_secs.unwrap_or(cfg.default_for_secs)),
+                    Some(
+                        exp.recover_after_secs
+                            .unwrap_or(cfg.default_recover_after_secs),
+                    ),
                     violations,
                 ));
             }
@@ -710,9 +726,10 @@ impl Evaluator {
         // Publish: violations fire (debounced per expectation), clean rules
         // reconcile, and rules deleted from the set resolve via the GC diff.
         let mut seen = self.seen_rules.lock().await;
-        for (rule, severity, for_secs, violations) in reported {
+        for (rule, severity, for_secs, recover_after_secs, violations) in reported {
             seen.insert(rule.clone());
-            self.report(&rule, severity, for_secs, violations).await;
+            self.report(&rule, severity, for_secs, recover_after_secs, violations)
+                .await;
         }
         let live = cfg.rule_slugs();
         let gone: Vec<String> = seen
@@ -721,7 +738,13 @@ impl Evaluator {
             .cloned()
             .collect();
         for rule in gone {
-            if let Err(e) = self.reporter.reconcile(&rule, &[]).await {
+            // Immediate, never held (#932): a recovery window says "wait, in
+            // case it comes back", and a DELETED assertion is not coming back.
+            if let Err(e) = self
+                .reporter
+                .reconcile_opts(&rule, &[], zensight_sensor_core::ReconcileOpts::immediate())
+                .await
+            {
                 tracing::warn!(error = %e, rule = %rule, "hostspec: failed to resolve removed rule");
             }
             seen.remove(&rule);
@@ -752,9 +775,16 @@ impl Evaluator {
         rule: &str,
         severity: AlertSeverity,
         for_secs: Option<u64>,
+        recover_after_secs: Option<u64>,
         violations: Vec<Violation>,
     ) {
         let for_duration = for_secs.map(Duration::from_secs);
+        // `None` means "use the reporter's own recovery"; the sweep has
+        // already resolved the per-assertion override against the set-wide
+        // default, so this is always `Some` from there (#932).
+        let opts = zensight_sensor_core::ReconcileOpts {
+            recover_after: recover_after_secs.map(Duration::from_secs),
+        };
         let mut firing_keys = Vec::new();
         for v in violations {
             let mut alert = Alert::new(
@@ -773,7 +803,7 @@ impl Evaluator {
                 tracing::warn!(error = %e, "hostspec: failed to publish alert");
             }
         }
-        if let Err(e) = self.reporter.reconcile(rule, &firing_keys).await {
+        if let Err(e) = self.reporter.reconcile_opts(rule, &firing_keys, opts).await {
             tracing::warn!(error = %e, "hostspec: failed to reconcile alerts");
         }
     }
@@ -936,6 +966,7 @@ mod tests {
             options: Vec::new(),
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         }
     }
 
@@ -995,6 +1026,7 @@ mod tests {
             size_within_pct_of_previous: Some(40.0),
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         }
     }
 
@@ -1111,6 +1143,7 @@ mod tests {
             forbid: false,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert!(check_listening(&e, &listeners()).is_empty());
         e.port = 8444;
@@ -1125,6 +1158,7 @@ mod tests {
             forbid: true,
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert_eq!(check_listening(&forbid4, &listeners()).len(), 1);
         let forbid4_on_81 = ListeningExpectation {
@@ -1144,6 +1178,7 @@ mod tests {
             path: "/tmp/x".into(),
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert!(check_absent(&e, &Observation::Absent).is_empty());
         assert_eq!(
@@ -1167,6 +1202,7 @@ mod tests {
             matches: vec![r"^127\.0\.0\.1\s+localhost".into()],
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         let good = "127.0.0.1  localhost\n10.0.0.5 registry.internal\n";
         assert!(check_content(&e, &Observation::Present(good.into())).is_empty());
@@ -1193,6 +1229,7 @@ mod tests {
             group: Some("998".into()),
             severity: AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         };
         assert!(
             check_perms(
@@ -1214,6 +1251,7 @@ mod tests {
             target: "/usr/lib/jvm/x/bin/java".into(),
             severity: AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         };
         let mut f = facts(0o777, 0, 0, 0, 0);
         f.is_symlink = true;

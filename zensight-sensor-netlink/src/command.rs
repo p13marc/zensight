@@ -216,6 +216,7 @@ mod tests {
             forbid_listen: None,
             severity: AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         }
     }
 

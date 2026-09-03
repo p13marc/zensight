@@ -424,6 +424,11 @@ impl HostspecExpDraft {
 pub struct SystemdExpDraft {
     pub eval_interval_secs: u64,
     pub for_secs: u64,
+    /// The set's recovery hold (#932). Round-tripped even though nothing in
+    /// this view edits it yet: `to_command_json` sends a WHOLE replacement
+    /// set, so a field the draft does not carry is a field the next GUI push
+    /// silently resets to its default.
+    pub recover_after_secs: u64,
     pub services: Vec<String>,
     pub targets: Vec<String>,
     /// `(timer, within_secs, succeeded_within_secs)` — either window may be
@@ -438,6 +443,7 @@ impl Default for SystemdExpDraft {
         Self {
             eval_interval_secs: 10,
             for_secs: 15,
+            recover_after_secs: 0,
             services: Vec::new(),
             targets: Vec::new(),
             timers: Vec::new(),
@@ -454,6 +460,7 @@ impl SystemdExpDraft {
             "type": "set_expectations",
             "eval_interval_secs": self.eval_interval_secs,
             "for_secs": self.for_secs,
+            "recover_after_secs": self.recover_after_secs,
             "services_active": self.services.iter().map(|u| serde_json::json!({"unit": u})).collect::<Vec<_>>(),
             "targets_active": self.targets.iter().map(|t| serde_json::json!({"target": t})).collect::<Vec<_>>(),
             "timers": self.timers.iter().map(|(t, w, sw)| {
@@ -484,6 +491,7 @@ impl SystemdExpDraft {
         Self {
             eval_interval_secs: u64_at("eval_interval_secs", 10),
             for_secs: u64_at("for_secs", 15),
+            recover_after_secs: u64_at("recover_after_secs", 0),
             services: arr("services_active")
                 .iter()
                 .filter_map(|s| s.get("unit").and_then(|x| x.as_str()).map(String::from))
@@ -1206,6 +1214,7 @@ mod tests {
         d.targets.push("multi-user.target".into());
         d.timers.push(("b.timer".into(), Some(120), Some(600)));
         d.forbid_failed = true;
+        d.recover_after_secs = 90;
         // The command payload drops the "type" tag but is otherwise the config.
         let json = serde_json::to_string(&d.to_command_json()).unwrap();
         let back = SystemdExpDraft::from_status(&json);
@@ -1218,6 +1227,12 @@ mod tests {
             vec![("b.timer".to_string(), Some(120), Some(600))]
         );
         assert!(back.forbid_failed);
+        // The recovery hold survives too (#932). `to_command_json` sends a
+        // WHOLE replacement set, so a field the draft did not carry would be
+        // silently reset to its default on the next GUI push — which is how a
+        // hold an operator set over `@rpc` or `@desired` would vanish the
+        // first time anyone opened this view and pressed submit.
+        assert_eq!(back.recover_after_secs, 90);
     }
 
     #[test]

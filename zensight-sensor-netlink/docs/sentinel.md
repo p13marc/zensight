@@ -66,6 +66,17 @@ view's tactic lens.
 - `default_for_secs` — global debounce: an expectation must be violated
   continuously for this many seconds before its alert fires (default 3). Any
   expectation may override with its own `for_secs`.
+- `default_recover_after_secs` — global recovery hold (#932): an expectation
+  must be **continuously satisfied again** for this many seconds before its
+  alert resolves (default 0 — resolve on the first clear sweep). Any
+  expectation may override with its own `recover_after_secs`. A rule deleted
+  from the set always resolves immediately, hold or no hold: a recovery window
+  says "wait, in case it comes back", and a deleted expectation is not coming
+  back.
+
+That is *time* hysteresis. The *value* hysteresis a numeric rule wants — fire
+above 90, clear below 80 — is `clear` on a `thresholds` rule, which this sensor
+also evaluates since #931. Which is also why `metrics` below is deprecated.
 
 Rate and route-flap checks retain the previous sample / sliding window inside the
 evaluator, so they need two sweeps before they can fire.

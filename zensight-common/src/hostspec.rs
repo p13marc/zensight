@@ -45,6 +45,10 @@ pub struct MountExpectation {
     pub severity: AlertSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_secs: Option<u64>,
+    /// Per-assertion override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -69,6 +73,10 @@ pub struct FileExpectation {
     pub severity: AlertSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_secs: Option<u64>,
+    /// Per-assertion override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -89,6 +97,10 @@ pub struct ListeningExpectation {
     pub severity: AlertSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_secs: Option<u64>,
+    /// Per-assertion override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -102,6 +114,10 @@ pub struct SymlinkExpectation {
     pub severity: AlertSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_secs: Option<u64>,
+    /// Per-assertion override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -112,6 +128,10 @@ pub struct AbsentExpectation {
     pub severity: AlertSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_secs: Option<u64>,
+    /// Per-assertion override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -128,6 +148,10 @@ pub struct ContentExpectation {
     pub severity: AlertSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_secs: Option<u64>,
+    /// Per-assertion override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -148,6 +172,10 @@ pub struct PermsExpectation {
     pub severity: AlertSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_secs: Option<u64>,
+    /// Per-assertion override of
+    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_after_secs: Option<u64>,
 }
 
 /// The whole hot-swappable assertion set. Every field defaults, so a partial
@@ -165,6 +193,16 @@ pub struct ExpectationsConfig {
     /// the module doc for why that is the right default here).
     #[serde(default)]
     pub default_for_secs: u64,
+    /// Set-wide recovery hold (#932): how long an assertion must be
+    /// **continuously satisfied again** before its alert resolves, unless the
+    /// assertion overrides it. `0` — the default — resolves on the first
+    /// passing sweep.
+    ///
+    /// Useful here in a way the debounce is not: a mount that comes back and
+    /// goes again, or a listener restarting, otherwise produces a
+    /// resolved/firing pair per sweep.
+    #[serde(default)]
+    pub default_recover_after_secs: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<MountExpectation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -218,6 +256,7 @@ impl Default for ExpectationsConfig {
         ExpectationsConfig {
             eval_interval_secs: default_eval_interval(),
             default_for_secs: 0,
+            default_recover_after_secs: 0,
             mounts: Vec::new(),
             files: Vec::new(),
             listening: Vec::new(),
@@ -229,8 +268,11 @@ impl Default for ExpectationsConfig {
     }
 }
 
-/// `(kind, name, severity, for_secs)` for every expectation, in a stable
-/// order — the sweep and the `spec` reply both walk this.
+/// `(kind, name)` for every expectation, in a stable order — the sweep and the
+/// `spec` reply both walk this.
+///
+/// (The doc used to promise `(kind, name, severity, for_secs)`; the closure has
+/// only ever received two arguments. Corrected in #932.)
 macro_rules! for_each_kind {
     ($cfg:expr, $f:expr) => {{
         let f = $f;

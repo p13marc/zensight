@@ -57,6 +57,17 @@ sentinel: {
   (e.g. `coredump_exe`), on top of the always-included `unit`/`app`/`message_id`.
 - **`for_secs`** — auto-resolve TTL. The alert clears this long after its last
   matching line (the "quiet period").
+
+  **This already *is* the recovery hold**, which is why this sensor gained no
+  `recover_after_secs` when netlink, hostspec and systemd did (#932). Those
+  three evaluate a condition that is either currently violated or currently
+  satisfied, so "how long must it be violated before firing" and "how long must
+  it be clear before resolving" are two separate windows. A log rule has
+  neither state: a line either matched or it did not. `for_secs` here is the
+  quiet period, implemented in the sentinel's own `active` map with an expiry
+  sweep, and the reporter is called with a zero debounce precisely because its
+  debounce means nothing here. A second hold would be two timers meaning the
+  same thing, and the alert would clear after the sum of them.
 - **`rate_limit`** — optional `{ max_fires, per_secs }` cap on alert
   *publications* (#824). Distinct from `threshold`, which delays the first
   fire: this bounds how often a flapping rule can page. Suppressed fires are

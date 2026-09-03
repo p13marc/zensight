@@ -2,9 +2,16 @@
 
 Seven kinds, closed. Every expectation carries `name` (unique per kind — it
 is the alert rule slug, `mount:var-tmp-scratch`), `severity`
-(`info`/`warning` default/`critical`) and optional `for_secs` (debounce
+(`info`/`warning` default/`critical`), optional `for_secs` (debounce
 override; the set-wide `default_for_secs` is 0 — host state does not flap,
-and a debounce only delays the page).
+and a debounce only delays the page) and optional `recover_after_secs`
+(recovery hold, #932; set-wide `default_recover_after_secs`, also 0).
+
+The two are not symmetric here. A debounce delays the page and host state
+rarely flaps, so 0 is right. A **recovery** hold has a use the debounce does
+not: a mount that comes back and goes again, or a listener restarting, produces
+a resolved/firing pair per sweep without one. It is still 0 by default, because
+holding a resolution is also a lie about the present.
 
 **The one rule above the kinds: an unreadable observation is NOT
 satisfied.** A `stat()` refused by EPERM proves nothing; those violations

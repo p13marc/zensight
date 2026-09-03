@@ -48,6 +48,7 @@ fn expectations(leftover: &std::path::Path, hosts: &std::path::Path) -> Expectat
             path: leftover.to_string_lossy().into_owned(),
             severity: zensight_common::AlertSeverity::Warning,
             for_secs: None,
+            recover_after_secs: None,
         }],
         content: vec![ContentExpectation {
             name: "hosts-hairpin".into(),
@@ -56,6 +57,7 @@ fn expectations(leftover: &std::path::Path, hosts: &std::path::Path) -> Expectat
             matches: Vec::new(),
             severity: zensight_common::AlertSeverity::Critical,
             for_secs: None,
+            recover_after_secs: None,
         }],
         ..Default::default()
     }
@@ -240,4 +242,122 @@ async fn the_sentinel_contract_end_to_end() {
 
     eval_task.abort();
     cmd_task.abort();
+}
+
+/// **The recovery hold, end to end** (#932): a per-assertion
+/// `recover_after_secs` must reach the reporter's `reconcile_opts`, which is
+/// the whole of what this issue plumbs.
+///
+/// It is easy to add the field, thread it through a tuple, and have it reach
+/// nothing — the sweep's `report` funnel is four call frames from the config.
+/// So: assert a satisfied assertion whose hold has NOT elapsed publishes no
+/// resolution, and that the same assertion without a hold resolves at once.
+/// The first half is the one that fails if the plumbing is missing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recovery_hold_delays_the_resolution() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let sub = session
+        .declare_subscriber("v1/*/state/hostspec/alert/*")
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let leftover = dir.path().join("debug.sock");
+    std::fs::write(&leftover, b"x").unwrap();
+
+    let cfg = ExpectationsConfig {
+        eval_interval_secs: 1,
+        default_for_secs: 0,
+        absent: vec![AbsentExpectation {
+            name: "leftover".into(),
+            path: leftover.to_string_lossy().into_owned(),
+            severity: zensight_common::AlertSeverity::Warning,
+            for_secs: None,
+            // Far longer than this test runs: a resolution inside it is the
+            // hold not being applied at all.
+            recover_after_secs: Some(600),
+        }],
+        ..Default::default()
+    };
+
+    let publisher = Publisher::new(session.clone(), "hostspec", Format::Json);
+    let reporter = Arc::new(AlertReporter::new(
+        publisher.clone(),
+        zensight_common::Protocol::Hostspec,
+        Format::Json,
+    ));
+    let evaluator = Evaluator::new("e2e-host", cfg, reporter, publisher);
+    let eval_task = tokio::spawn(evaluator.run());
+
+    // It fires.
+    let (kind, alert) = recv_alert(&sub).await;
+    assert_eq!(kind, zenoh::sample::SampleKind::Put);
+    assert_eq!(alert.unwrap().state, AlertState::Firing);
+
+    // Fix the host. Without a hold this resolves on the next sweep (one
+    // second); with a ten-minute hold nothing may reach the bus.
+    std::fs::remove_file(&leftover).unwrap();
+    let quiet = tokio::time::timeout(Duration::from_secs(4), sub.recv_async()).await;
+    assert!(
+        quiet.is_err(),
+        "the assertion is satisfied again but its recovery hold has not elapsed — \
+         nothing should have been published, got {quiet:?}"
+    );
+
+    eval_task.abort();
+}
+
+/// The other half: no hold, and the same fix resolves at once. Without this,
+/// the test above would also pass on a sentinel that had simply stopped
+/// resolving anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_hold_resolves_on_the_next_sweep() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let sub = session
+        .declare_subscriber("v1/*/state/hostspec/alert/*")
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let leftover = dir.path().join("debug.sock");
+    std::fs::write(&leftover, b"x").unwrap();
+
+    let cfg = ExpectationsConfig {
+        eval_interval_secs: 1,
+        default_for_secs: 0,
+        absent: vec![AbsentExpectation {
+            name: "leftover".into(),
+            path: leftover.to_string_lossy().into_owned(),
+            severity: zensight_common::AlertSeverity::Warning,
+            for_secs: None,
+            recover_after_secs: None,
+        }],
+        ..Default::default()
+    };
+
+    let publisher = Publisher::new(session.clone(), "hostspec", Format::Json);
+    let reporter = Arc::new(AlertReporter::new(
+        publisher.clone(),
+        zensight_common::Protocol::Hostspec,
+        Format::Json,
+    ));
+    let evaluator = Evaluator::new("e2e-host", cfg, reporter, publisher);
+    let eval_task = tokio::spawn(evaluator.run());
+
+    let (_, alert) = recv_alert(&sub).await;
+    assert_eq!(alert.unwrap().state, AlertState::Firing);
+
+    std::fs::remove_file(&leftover).unwrap();
+    let mut saw_resolved = false;
+    for _ in 0..2 {
+        if let (zenoh::sample::SampleKind::Put, Some(a)) = recv_alert(&sub).await {
+            assert_eq!(a.state, AlertState::Resolved);
+            saw_resolved = true;
+        }
+    }
+    assert!(saw_resolved, "with no hold the fix must resolve at once");
+
+    eval_task.abort();
 }

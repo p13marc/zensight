@@ -112,6 +112,10 @@
     expectations: {
       eval_interval_secs: 3,
       default_for_secs: 3,         // debounce: violated continuously for N s
+      // Recovery hold (#932): satisfied continuously for N s before the alert
+      // resolves. 0 (the default) resolves on the first clear sweep. Every
+      // expectation below may override it with `recover_after_secs`.
+      // default_recover_after_secs: 0,
       sockets: [
         // Security baseline: nothing should be listening on telnet. Safe on a
         // clean host (won't false-fire), demonstrates a forbid_listen rule.
