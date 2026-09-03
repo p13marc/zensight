@@ -123,6 +123,7 @@ pub fn declared_of(
         S::Parallax(s) => (s.qos(), s.payload_type()),
         S::Container(s) => (s.qos(), s.payload_type()),
         S::Probe(s) => (s.qos(), s.payload_type()),
+        S::Bmc(s) => (s.qos(), s.payload_type()),
         S::Pve(s) => (s.qos(), s.payload_type()),
         S::Snmp(s) => (s.qos(), s.payload_type()),
         S::Sysinfo(s) => (s.qos(), s.payload_type()),

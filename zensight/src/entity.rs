@@ -231,6 +231,7 @@ mod tests {
             Protocol::Parallax,
             Protocol::Hostspec,
             Protocol::Pve,
+            Protocol::Bmc,
             Protocol::Container,
             Protocol::Probe,
             Protocol::Historian,

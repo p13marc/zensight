@@ -1,0 +1,61 @@
+[package]
+name = "zensight-sensor-bmc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Zenoh sensor for out-of-band hardware health over Redfish — power supplies, fans, thermal sensors and chassis state, read from the BMC. Read-only; no action surface."
+license = "Apache-2.0"
+
+[features]
+default = []
+# IPMI for BMCs that predate Redfish. OFF by default, the same rule as
+# probe's `icmp` and sysinfo's `nvml`: it links a client for a protocol whose
+# only remaining transport is `lanplus`, and a default build should not carry
+# it. `validate()` refuses an `ipmi` endpoint in a build without the feature
+# and names Redfish as the alternative.
+#
+# NOT IMPLEMENTED YET, and the gate says so: the feature compiles a stub that
+# refuses at startup. It exists as a flag first so the config shape, the
+# refusal and the CI leg are settled before a protocol client lands (#953).
+ipmi = []
+
+[dependencies]
+zenkey = { workspace = true }
+zensight-common = { path = "../zensight-common" }
+zensight-sensor-core = { path = "../zensight-sensor-core" }
+hostname = "0.4"
+
+tokio = { workspace = true, features = ["full", "sync", "time"] }
+zenoh.workspace = true
+
+# Redfish is HTTPS + JSON. rustls only — the same stack pve, container and
+# the Prometheus exporter already ship, so no OpenSSL enters the tree.
+# A BMC ships a self-signed certificate out of the factory, so BOTH escape
+# hatches exist and both must be spelled out in the config: a per-endpoint CA
+# file (the right answer), and `insecure` (the honest-but-loud one).
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "json"] }
+
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json5.workspace = true
+
+clap = { workspace = true, features = ["derive"] }
+
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The fake Redfish service the e2e tests poll — the pve pattern. A mocked
+# client would only prove the mock; this speaks real JSON over a real socket.
+axum = "0.8"
+
+[[bin]]
+name = "zensight-sensor-bmc"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

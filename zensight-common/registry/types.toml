@@ -266,6 +266,17 @@ kind = "json-schema"
 [types.ContainerInfo]
 kind = "json-schema"
 
+# bmc's state documents (#953) — the BMC's own verdicts about hardware no
+# in-band sensor can see.
+[types.BmcChassis]
+kind = "json-schema"
+[types.BmcPowerSupply]
+kind = "json-schema"
+[types.BmcFan]
+kind = "json-schema"
+[types.BmcThermalSensor]
+kind = "json-schema"
+
 # probe's state document (#820).
 [types.ProbeResult]
 kind = "json-schema"

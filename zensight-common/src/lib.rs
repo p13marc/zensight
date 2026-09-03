@@ -16,6 +16,8 @@ pub mod artifact;
 // audits the registry, not what anyone did.
 pub mod audit;
 pub mod bandwidth;
+// Out-of-band hardware health as the BMC reports it (#953).
+pub mod bmc;
 pub mod command;
 pub mod comparison;
 pub mod config;

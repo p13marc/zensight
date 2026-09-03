@@ -34,6 +34,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-sensor-systemd/` | systemd unit/boot telemetry (D-Bus) + sentinel + gated actions |
 | `zensight-sensor-hostspec/` | machine-checked desired-state assertions (#821): mounts/files/listeners/symlinks/content/perms sentinel — read-only, executes nothing |
 | `zensight-sensor-container/` | OCI containers (#819): per-container cgroup/OOM/restart/exit-code, image ref + digest, healthcheck state (incl. *never ran*), signature presence, and the owning systemd unit — read-only socket + cgroupfs, no action surface |
+| `zensight-sensor-bmc/` | out-of-band hardware health (#953): power supplies, fans, thermal sensors and the chassis rollup, over Redfish. The only place a physical fault is visible when the sensors never reach hwmon — which on rack hardware is the normal case. Read-only, **no action surface at all**; every verdict is the BMC's own enum, never a threshold this sensor invented |
 | `zensight-sensor-probe/` | outside-in synthetic checks (#820): HTTP/TLS/DNS/TCP (+opt-in ICMP) against configured targets, plus local certificate expiry — a client only, and every result carries its vantage point |
 | `zensight-sensor-pve/` | Proxmox VE (#818): guests + their `onboot`/NIC-firewall config, storage allocated-vs-capacity, vzdump outcomes and size trend, cluster/HA/replication — read-only, **no action surface at all** |
 | `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline) |
@@ -155,6 +156,7 @@ flowchart LR
 | `zensight-sensor-{netlink,sysinfo}` | `ebpf` | opt-in eBPF collectors (need host validation) |
 | `zensight-sensor-probe` | `icmp` | ICMP echo checks — needs `CAP_NET_RAW`; startup refuses an icmp target in a build without it |
 | `zensight-common` | `linux-audit` | write-procedure outcomes to the host's audit subsystem (#957): one `AUDIT_USYS_CONFIG` netlink datagram per record, needs `CAP_AUDIT_WRITE`. Off by default; without it (and on a host that refuses the first record) the same fields go to the `zensight::audit` tracing target. It does **not** link the LGPL `libaudit` — hence the name. Turn it on per binary with `--features zensight-common/linux-audit` |
+| `zensight-sensor-bmc` | `ipmi` | IPMI for BMCs that predate Redfish (#953). Off by default; **today a flag whose client is a stub**, so the config shape, the startup refusal and the CI leg are settled before a protocol client lands. Either way an `ipmi` endpoint is refused at startup, naming the flag and naming Redfish as the alternative |
 | `zensight-sensor-sysinfo` | `nvml` | NVIDIA GPU telemetry via `libnvidia-ml` (#954). **Compile-checked only** — no build machine has an NVIDIA card, so CI type-checks it and nothing executes it. NVIDIA cards still appear in the default build through their DRM node |
 
 Netring detector features are documented in `zensight-sensor-netring/docs/detectors.md`.

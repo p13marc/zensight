@@ -3,6 +3,8 @@
 # an incompatible edit (changed type/class/kind/shape on an existing
 # path) is refused — retire through [[deprecated]] and add a sibling
 # instead (RFC 08 §3).
+procedure	bmc	describe	read	-	SchemaSet
+procedure	bmc	introspect	read	-	RegistrySlice
 procedure	catalog	describe	read	-	SchemaSet
 procedure	catalog	introspect	read	-	RegistrySlice
 procedure	catalog	link	write	-	OperatorAssertion
@@ -138,6 +140,25 @@ procedure	systemd	timers	read	-	Vec<TimerRecord>
 procedure	systemd	unit	read	-	UnitDetail
 procedure	systemd	unit/file	read	-	UnitFile
 procedure	systemd	units	read	-	Vec<UnitRecord>
+subject	bmc	alert/{alert_key}	state	Alert
+subject	bmc	chassis/{chassis}	state	BmcChassis
+subject	bmc	chassis/{chassis}/fan/{fan}	state	BmcFan
+subject	bmc	chassis/{chassis}/psu/{psu}	state	BmcPowerSupply
+subject	bmc	chassis/{chassis}/thermal/{sensor}	state	BmcThermalSensor
+subject	bmc	errors	state	ErrorReport
+subject	bmc	evidence/device/{device}	state	HostEvidence
+subject	bmc	evidence/self	state	HostEvidence
+subject	bmc	health	state	HealthSnapshot
+subject	bmc	sensor	state	SensorInfo
+subject	bmc	{chassis}/fan/{fan}/rpm	telemetry	TelemetryPoint
+subject	bmc	{chassis}/psu/{psu}/capacity_watts	telemetry	TelemetryPoint
+subject	bmc	{chassis}/psu/{psu}/input_watts	telemetry	TelemetryPoint
+subject	bmc	{chassis}/psu/{psu}/output_watts	telemetry	TelemetryPoint
+subject	bmc	{chassis}/psu/{psu}/present	telemetry	TelemetryPoint
+subject	bmc	{chassis}/reachable	telemetry	TelemetryPoint
+subject	bmc	{chassis}/thermal/{sensor}/celsius	telemetry	TelemetryPoint
+subject	bmc	{chassis}/thermal/{sensor}/upper_critical_c	telemetry	TelemetryPoint
+subject	bmc	{chassis}/thermal/{sensor}/upper_warning_c	telemetry	TelemetryPoint
 subject	catalog	alias/{old_id}	state	AliasRecord
 subject	catalog	assertion/{id}	state	OperatorAssertion
 subject	catalog	edge/{edge_id}	state	Edge

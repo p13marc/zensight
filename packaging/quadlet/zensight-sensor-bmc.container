@@ -1,0 +1,44 @@
+# ZenSight BMC sensor — one container, one cgroup, its own budget (#813).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via
+# the sensor's health doc self_stats and adjust. See README.md beside this.
+#
+# NOTE ON PLACEMENT (#953). A BMC is reachable from anywhere on the management
+# network, so unlike most sensors this one does NOT have to run on the machine
+# it describes — one management host can poll a rack of chassis. What that
+# costs is attribution: everything is published under the origin of the host
+# that did the polling (#883), with the chassis as a key chunk and a label. If
+# you want a chassis's hardware health to land on that machine's own card,
+# run this sensor on that machine and point it at its own BMC.
+#
+# It needs only outbound HTTPS to each BMC. There is no action surface at all:
+# no chassis reset, no IPMI power command, no write procedure.
+[Unit]
+Description=ZenSight BMC sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-bmc:latest
+ContainerName=zensight-sensor-bmc
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+# The BMC password, root-0600 on the host, read-only inside. Referenced from
+# the config as `file:/run/secrets/bmc.password`. One volume per credential if
+# your chassis do not share one.
+Volume=/etc/zensight/bmc.password:/run/secrets/bmc.password:ro
+# A CA bundle, if your BMCs are behind an internal CA and the config names it
+# in `ca_file`. The right answer: verification stays ON.
+# Volume=/etc/ssl/bmc-ca.pem:/run/secrets/bmc-ca.pem:ro
+
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/bmc.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

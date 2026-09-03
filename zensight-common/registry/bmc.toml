@@ -1,0 +1,242 @@
+# Subject registry: bmc (out-of-band hardware health over Redfish). RFC 08 §2;
+# issue #953, epic #952 (SYS-SUP-001, and the blind spot behind -010).
+#
+# Nothing in ZenSight read a power supply. `sysinfo`'s `collect.power` is RAPL
+# energy, hwmon fan RPM and battery capacity — a CPU-and-laptop surface. On
+# rack hardware whose sensors sit behind a BMC and are never exported to
+# hwmon, which is most of it, the platform reported nothing about temperature
+# or fans either: SYS-SUP-010 was met only on hosts that happened to have
+# hwmon.
+#
+# ATTRIBUTION (#883). The origin is the **reporting host** — the machine
+# running this sensor — and never the BMC. A managed chassis is a facet of the
+# vantage point that polls it, in exactly the sense a guest is a facet of its
+# hypervisor and a probe target of its prober: it does not publish for itself,
+# and filing its series under its own name puts them on no host's card at all.
+# The chassis rides in the key path and in the labels, both of which already
+# carry it.
+#
+# Families, not a `{metric...}` catch-all (RFC 08 §5, #468): a chassis's
+# vocabulary is OURS — supplies, fans, thermal sensors, a power state — a
+# closed set we name, not an OID tree a vendor owns. Same reason `pve`
+# registers real families though it too polls a remote API.
+#
+# This sensor is READ-ONLY and no procedure below can acquire a write. Power
+# control is a separate decision with a different threat model; see #956 for
+# how that decision is being taken for PDU outlets.
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "bmc"
+description = "out-of-band hardware health over Redfish (#953): power-supply presence/health/redundancy and watts, fan health and RPM, thermal readings WITH THE BMC'S OWN THRESHOLDS beside them, and the chassis rollup — power state, intrusion, firmware. Read-only; no chassis reset, no IPMI power command, no write surface at all"
+
+# ── Telemetry ────────────────────────────────────────────────────────────────
+#
+# Gauges only where there is a reading. A supply bay the BMC reports Absent
+# publishes NO watts rather than zero watts, and a BMC that does not meter
+# publishes none either — "not measured" is never a zero, and a zero here
+# reads as a supply drawing nothing.
+
+[[subject]]
+path = "{chassis}/psu/{psu}/input_watts"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "W"
+cardinality = 256
+since = "1.0"
+description = "power drawn from the mains by this supply; absent on an empty bay and on a BMC that does not meter"
+
+[[subject]]
+path = "{chassis}/psu/{psu}/output_watts"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "W"
+cardinality = 256
+since = "1.0"
+description = "power delivered to the chassis by this supply"
+
+[[subject]]
+path = "{chassis}/psu/{psu}/capacity_watts"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "W"
+cardinality = 256
+since = "1.0"
+description = "nameplate capacity, so the two readings above can be read against something"
+
+[[subject]]
+path = "{chassis}/psu/{psu}/present"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.0"
+description = "1 when the bay holds a supply, 0 when the BMC reports it Absent — the fact that makes an absent wattage legible"
+
+[[subject]]
+path = "{chassis}/fan/{fan}/rpm"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.0"
+description = "fan speed in RPM. Absent on a BMC that reports only a percentage of maximum — a different quantity, and publishing it here would be a wrong number rather than a missing one (#954's lesson)"
+
+[[subject]]
+path = "{chassis}/thermal/{sensor}/celsius"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "Cel"
+cardinality = 512
+since = "1.0"
+description = "temperature reading"
+
+[[subject]]
+path = "{chassis}/thermal/{sensor}/upper_critical_c"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "Cel"
+cardinality = 512
+since = "1.0"
+description = "the BMC's OWN upper-critical threshold, published beside the reading. The hardware vendor set it against the board being measured; a number this sensor invented would be a guess about someone else's silicon"
+
+[[subject]]
+path = "{chassis}/thermal/{sensor}/upper_warning_c"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "Cel"
+cardinality = 512
+since = "1.0"
+description = "the BMC's own upper-warning threshold"
+
+[[subject]]
+path = "{chassis}/reachable"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.0"
+description = "1 when the BMC answered this cycle, 0 when it did not — published every interval, so an unreachable BMC reads as 0 and never as silence"
+
+# ── State ────────────────────────────────────────────────────────────────────
+
+[[subject]]
+path = "chassis/{chassis}"
+class = "state"
+type = "BmcChassis"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "the chassis rollup: power state, intrusion, health, firmware, identity — and WHICH Redfish surface answered (the modern PowerSubsystem/ThermalSubsystem or the legacy Power/Thermal), because a field absent on one is a different fact from one absent on the other"
+
+[[subject]]
+path = "chassis/{chassis}/psu/{psu}"
+class = "state"
+type = "BmcPowerSupply"
+cardinality = 256
+ttl_s = 900
+since = "1.0"
+description = "one power-supply bay: presence, the BMC's health and state verdicts, watts, redundancy group and its status"
+
+[[subject]]
+path = "chassis/{chassis}/fan/{fan}"
+class = "state"
+type = "BmcFan"
+cardinality = 512
+ttl_s = 900
+since = "1.0"
+description = "one fan: presence, health, state, RPM where the BMC gives one, redundancy group"
+
+[[subject]]
+path = "chassis/{chassis}/thermal/{sensor}"
+class = "state"
+type = "BmcThermalSensor"
+cardinality = 512
+ttl_s = 900
+since = "1.0"
+description = "one thermal sensor: health, reading, and the BMC's own warning and critical thresholds"
+
+# ── Framework subjects ───────────────────────────────────────────────────────
+
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework)"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim of the host running this sensor (RFC 06 §4)"
+
+[[subject]]
+# `{device}`, not `{chassis}`: the framework table owns this subject's
+# spelling (RFC 04 §1.4), and the device here IS the chassis.
+path = "evidence/device/{device}"
+common = "evidence_device"
+class = "state"
+type = "HostEvidence"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "third-party identity claim about a managed chassis (observer = bmc): its serial, asset tag and, where Redfish exposes them, its NIC MACs — so the BMC's view of a machine fuses in the catalog with that machine's own sensors (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 256
+ttl_s = 900
+since = "1.0"
+description = "assertions derived from the BMC's OWN Health/State/Redundancy enums, never from a numeric threshold this sensor invented: psu-failed, psu-absent-unexpectedly, psu-redundancy-lost, fan-failed, thermal-critical, bmc-unreachable"
+
+# ── Procedures ───────────────────────────────────────────────────────────────
+#
+# Read only, and that is the whole design. There is no chassis reset, no
+# Actions/Chassis.Reset, no IPMI power command, and `registry_conformance.rs`
+# fails the build if a `kind = "write"` ever appears here.
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.0"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
