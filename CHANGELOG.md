@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The GUI's alert rule engine** (#934, epic #901) — **breaking**.
+
+  ZenSight had two alerting authorities. One runs in every sensor: it has
+  `for`, adopt-on-restart, a seed queryable, and it publishes to the bus, where
+  the exporters, the historian and every other GUI can see it. The other ran in
+  one GUI process, had a flat 60-second cooldown keyed on
+  `protocol/source/metric` — **origin-blind**, so two hosts sharing a `source`
+  name shared one slot, and unrelated to whether the condition was still true —
+  persisted its rules to a JSON file on one laptop, and its alerts reached
+  **nothing**. An operator who set a threshold there had made a note to
+  themselves that looked like monitoring.
+
+  Gone: `AlertRule`, the local `Alert` type, `AlertsState::check_metric` and
+  the telemetry-path call that drove it, the rule form, the rule list, the
+  alert history, the twelve `Message` variants that fed them, and
+  `PersistentSettings::alert_rules`. The **"Max alerts to keep"** setting goes
+  with the history it bounded: nothing consumed it any more, and a knob that
+  does nothing is the same class of problem as an alert that goes nowhere.
+
+  **What operators lose, and where it went.** Rules authored in the GUI stop
+  evaluating. `alert_rules` is `#[serde(default)]`, so an existing settings
+  blob still *loads* — it is simply no longer honoured, which is the migration
+  hazard worth stating rather than the crash. Re-author them as sensor
+  thresholds: #931 made every producer evaluate `ThresholdsConfig` on its own
+  publish path, and #933 made "promote this metric to an alert" a one-click
+  path to exactly that.
+
+  **What the view keeps** is everything that was already sourced from the bus —
+  the alert feed, filters and presets, incidents, the timeline, the log pivot —
+  plus two things that got better: the unacknowledged badge counts firing *bus*
+  alerts rather than a number local to one process, and the incident row's
+  "View" pivot now carries the **metric** where the alert names one (a
+  threshold alert does, since #931), which is the precision the deleted rule
+  rows used to supply.
+
+  `the_gui_evaluates_no_thresholds_of_its_own` is the guard. Deletion cannot be
+  enforced by the compiler, but a *second* engine growing back would look like
+  another local `check_metric` on the telemetry path, and that is what it reads
+  for.
+
 ### Added
 
 - **Promote any metric to a sensor-owned threshold** (#933, epic #901).

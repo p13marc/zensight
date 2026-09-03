@@ -272,7 +272,7 @@ zensight/
 | Dashboard | `ui_tests.rs` | Empty state, device cards, navigation buttons |
 | Device | `ui_tests.rs` | Metrics display, back button, filtering |
 | Settings | `ui_tests.rs` | Form rendering, save functionality |
-| Alerts | `ui_tests.rs` | Alert rules, acknowledgment |
+| Alerts | `ui_tests.rs` | Bus alerts: filters, incidents, acknowledgment, pivots |
 
 ## Replay fixtures (`.zrec`) — #747
 

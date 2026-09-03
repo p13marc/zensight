@@ -3,7 +3,7 @@ use zensight_common::{
     SensorInfo, TelemetryPoint,
 };
 
-use crate::view::alerts::{ComparisonOp, Severity};
+use crate::view::alerts::ComparisonOp;
 use crate::view::chart::TimeWindow;
 use crate::view::settings::ZenohMode;
 
@@ -1124,7 +1124,6 @@ pub enum Message {
     SetMaxHistory(String),
 
     /// Set max alerts to keep.
-    SetMaxAlerts(String),
     /// Set the live-video frame-age deadline in milliseconds (#716); "0" is off.
     SetMaxLiveLatency(String),
 
@@ -1140,39 +1139,6 @@ pub enum Message {
 
     /// Close the alerts view.
     CloseAlerts,
-
-    /// Set new rule name.
-    SetAlertRuleName(String),
-
-    /// Set new rule metric pattern.
-    SetAlertRuleMetric(String),
-
-    /// Set new rule threshold.
-    SetAlertRuleThreshold(String),
-
-    /// Set new rule operator.
-    SetAlertRuleOperator(ComparisonOp),
-
-    /// Set new rule severity.
-    SetAlertRuleSeverity(Severity),
-
-    /// Add a new alert rule.
-    AddAlertRule,
-
-    /// Test the current rule form against existing metrics.
-    TestAlertRule,
-
-    /// Remove an alert rule.
-    RemoveAlertRule(u32),
-
-    /// Toggle an alert rule's enabled state.
-    ToggleAlertRule(u32),
-
-    /// Acknowledge an alert.
-    AcknowledgeAlert(u64),
-
-    /// Acknowledge all alerts.
-    AcknowledgeAllAlerts,
 
     /// Acknowledge all firing external (sensor-pushed) alerts from one source.
     AcknowledgeExternalSource(String),
@@ -1221,9 +1187,6 @@ pub enum Message {
     CloseGlobalSearch,
     /// Update the global search query (#27).
     SetGlobalSearch(String),
-
-    /// Clear all alerts.
-    ClearAlerts,
 
     // Export messages
     /// Export device metrics to CSV.

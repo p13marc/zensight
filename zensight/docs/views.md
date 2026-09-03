@@ -16,7 +16,7 @@ pure (state in, widgets out), which is what makes them testable in isolation
 |-------|------|-------|
 | `DashboardState` | Dashboard | Device/host list, connection status, sensor-health summary. |
 | `DeviceDetailState` | Device | Selected device's metrics and chart data. |
-| `AlertsState` | Alerts | Alert rules, triggered alerts, external anomalies/expectations. |
+| `AlertsState` | Alerts | Sensor-published alerts: anomalies, expectation violations, operator thresholds. |
 | `SecurityState` | Security | NDR/anomaly lens over alerts (ATT&CK tactic rollup). |
 | `TopologyState` | Topology | Graph nodes, edges, force-directed layout. |
 | `SettingsState` | Settings | Zenoh connection settings. |
@@ -135,8 +135,21 @@ table with current values, plus a time-series chart for the selected metric
 /current statistics and a configurable time window. Entered contextually, not
 from the nav rail.
 
-**Alerts** (`view/alerts.rs`) — threshold alert rules alongside sensor- and
-sensor-external alerts (anomalies/expectations). Severity and source filter pills
+**Alerts** (`view/alerts.rs`) — everything the sensors publish: anomalies,
+expectation violations, and the operator's threshold rules (#931).
+
+There is nothing local here any more (#934). This view used to carry a second
+alerting authority: a rule form, a rule list and an alert history evaluated in
+this process, persisted to one laptop, with a flat 60-second cooldown keyed on
+`protocol/source/metric` — origin-blind, so two hosts sharing a `source` name
+shared one slot. Its alerts reached **nothing**: not the bus, not the
+exporters, not the notifier. An operator who set a threshold there had made a
+note to themselves that looked like monitoring. Thresholds are authored on the
+sensor now, through the Expectations view's `thresholds` target (#933), and
+what comes back is on the bus where everything else can see it.
+
+The unacknowledged badge counts firing bus alerts; the "Max alerts to keep"
+setting is gone with the history it bounded. Severity and source filter pills
 plus saved filter presets narrow the list; alerts move through a
 firing → resolved lifecycle. External alert rows show a **generic label-context
 block** (`alert_detail_pairs`, #558) — unit / burn ratio / template / coredump
