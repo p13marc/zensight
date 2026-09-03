@@ -151,6 +151,8 @@ flowchart LR
 | `zensight-sensor-netring` | `lateral` / `sigma` / `yara` / `snmp` | opt-in NDR detectors (off by default) |
 | `zensight-sensor-netring` | `ja4plus` | JA4/JA4H fingerprints — FoxIO License 1.1 (NOT OSI); default build stays OSI-clean |
 | `zensight-sensor-{netlink,sysinfo}` | `ebpf` | opt-in eBPF collectors (need host validation) |
+| `zensight-sensor-probe` | `icmp` | ICMP echo checks — needs `CAP_NET_RAW`; startup refuses an icmp target in a build without it |
+| `zensight-sensor-sysinfo` | `nvml` | NVIDIA GPU telemetry via `libnvidia-ml` (#954). **Compile-checked only** — no build machine has an NVIDIA card, so CI type-checks it and nothing executes it. NVIDIA cards still appear in the default build through their DRM node |
 
 Netring detector features are documented in `zensight-sensor-netring/docs/detectors.md`.
 

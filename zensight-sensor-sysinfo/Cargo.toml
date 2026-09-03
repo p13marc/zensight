@@ -14,12 +14,27 @@ license = "Apache-2.0"
 # feature out of `cargo build --workspace` on stable CI.
 ebpf = ["dep:aya", "dep:aya-log", "dep:aya-build"]
 
+# NVIDIA GPU telemetry through NVML (#954). OFF by default: it links
+# `libnvidia-ml`, which only a host with the NVIDIA driver installed has, and
+# the DEFAULT build already reports NVIDIA cards through their DRM node — this
+# feature adds the numbers only the vendor library can give (memory-controller
+# utilisation, ECC counters, per-process VRAM).
+#
+# NOT EXERCISED IN CI: there is no NVIDIA hardware on the build machines, so
+# the `features` job type-checks this path and nothing executes it. What CAN be
+# tested without a card is tested (see `gpu::nvml`): the join to a DRM node, the
+# per-process cap and ordering, and the metric shaping.
+nvml = ["dep:nvml-wrapper"]
+
 [dependencies]
 zensight-common = { path = "../zensight-common" }
 zenkey = { workspace = true }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 # Per-mount threshold override matching (#822), the action.rs precedent.
 glob = { workspace = true }
+
+# NVIDIA Management Library binding, behind `--features nvml` (#954).
+nvml-wrapper = { version = "0.13", optional = true }
 
 # Shared kernel<->user eBPF types (MAX_SLOTS, log2_bucket). Plain no_std lib —
 # always present so map.rs can size histograms without a feature gate.

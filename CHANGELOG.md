@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `nvml` GPU feature** (#954, completing it). NVIDIA cards already
+  appeared through their DRM node; this adds what **only the vendor library can
+  give**: memory-controller utilisation (the figure that separates a
+  memory-bound workload from a compute-bound one — no kernel driver exposes
+  it), uncorrected ECC counters volatile and aggregate, and per-process VRAM.
+
+  **Compile-checked, not executed, and that is stated everywhere it matters** —
+  the feature's Cargo comment, the module docs, `CLAUDE.md`, the config and the
+  CI step. No build machine has an NVIDIA card.
+
+  What follows from that shapes the module: **everything testable without a
+  card is separated from the FFI and tested in a *default* build.** Seventeen
+  tests cover the PCI join, the per-process cap and ordering, the merge and the
+  metric shaping. Only the twenty lines that call `nvml-wrapper` are
+  unexercised.
+
+  Four decisions inside it:
+
+  - **The join is by PCI address, never by enumeration index.** NVML prints the
+    domain as eight hex digits (`00000000:01:00.0`), the kernel as four
+    (`0000:01:00.0`), so comparing raw never matches and every card would
+    silently fail to join — publishing vendor numbers against nothing. Four is
+    a *minimum*, not a truncation: a wider domain keeps its width on both
+    sides, or the join lands on the wrong card. `GpuInfo` gained `pci_addr`,
+    which is also just useful (it is what you paste into `lspci -s`).
+  - **NVML wins where it answers, sysfs stands where it does not**, so enabling
+    the feature can only *add* information. A test pins that.
+  - **`fan_rpm` is deliberately not filled from NVML**, whose fan speed is a
+    percentage of maximum — a different quantity. Publishing a percentage on a
+    series named `fan_rpm` is a wrong number, not a missing one.
+  - **ECC counters are the *uncorrected* ones.** A corrected error is the
+    hardware working; counting it as a fault would page on healthy cards. A
+    zero is published (ECC is on and has seen nothing — exactly what an
+    operator wants), an absent one is not.
+
+  Per-process rows are capped at **32 per card, largest first, ties broken on
+  pid** — one key per pid per card is otherwise an unbounded family keyed by
+  something that changes every few seconds, and an unstable tie-break would
+  look like processes appearing and vanishing between ticks.
+
+  The four families are the workspace's first use of the **conditional ledger**
+  for a whole build feature (`conditional.lock`, RFC 08 §6.1), following
+  netlink's eBPF precedent — including its feature-aware split, so on an `nvml`
+  build the ledger is empty and the coverage check becomes *positive proof*
+  that the gate is real.
+
+### Fixed
+
+- **CI never type-checked `zensight-sensor-probe --features icmp`.** The
+  `features` job exists precisely because a default workspace build does not
+  compile feature-gated code, and the icmp check has been behind a feature
+  since the sensor shipped with no leg here. Added alongside the `nvml` one.
+
 - **GPU telemetry, from the kernel's DRM sysfs** (#954, part of #952 —
   SYS-SUP-009/012's GPU half, **default-build portion**). GPU was absent from
   the whole platform: `grep -ri 'nvidia\|nvml\|amdgpu\|/sys/class/drm'` matched

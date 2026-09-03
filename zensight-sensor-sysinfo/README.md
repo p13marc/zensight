@@ -27,6 +27,12 @@ thermal/power) and publishes it to Zenoh as `TelemetryPoint`s.
   **utilisation is absent on i915/xe** — a zero would say the GPU is idle.
   Passthrough and vGPU both surface as a DRM card *inside* the guest, so a
   guest running this sensor reports its own GPU with no host-side work.
+  `--features nvml` adds what only NVIDIA's library can give —
+  memory-controller utilisation, ECC counters, per-process VRAM — joined to the
+  DRM card **by PCI address**, never by enumeration index. **That path is
+  compile-checked, not executed**: no build machine has an NVIDIA card. What
+  can be tested without one is (the join, the per-process cap, the merge);
+  only the twenty lines that call the library are unexercised.
 - **Clock discipline, opt-in** (#959) — `state/sysinfo/timesync` from
   `chronyc -c tracking`, falling back to `timedatectl show`. **Absent when no
   time daemon answers**, never a zero offset: a zero is what a perfectly

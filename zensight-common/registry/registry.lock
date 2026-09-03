@@ -614,8 +614,12 @@ subject	sysinfo	errors	state	ErrorReport
 subject	sysinfo	evidence/self	state	HostEvidence
 subject	sysinfo	gpu/{card}	state	GpuInfo
 subject	sysinfo	gpu/{card}/clock_mhz	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/ecc_aggregate_uncorrected	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/ecc_volatile_uncorrected	telemetry	TelemetryPoint
 subject	sysinfo	gpu/{card}/fan_rpm	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/memory_utilisation_pct	telemetry	TelemetryPoint
 subject	sysinfo	gpu/{card}/power_watts	telemetry	TelemetryPoint
+subject	sysinfo	gpu/{card}/process/{pid}/vram_bytes	telemetry	TelemetryPoint
 subject	sysinfo	gpu/{card}/temp_celsius	telemetry	TelemetryPoint
 subject	sysinfo	gpu/{card}/utilisation_pct	telemetry	TelemetryPoint
 subject	sysinfo	gpu/{card}/vram_total_bytes	telemetry	TelemetryPoint

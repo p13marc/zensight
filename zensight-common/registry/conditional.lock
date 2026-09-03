@@ -34,3 +34,7 @@
 netlink	sockets/tcp/connlat_us_p50	eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)
 netlink	sockets/tcp/connlat_us_p95	eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)
 container	{name}/image_behind_upstream	needs `container.upstream.enabled` — the one collector that leaves the host, off by default (#819)
+sysinfo	gpu/{card}/memory_utilisation_pct	NVML: needs `--features nvml` + `collect.gpu` + an NVIDIA driver; no kernel driver exposes memory-controller utilisation (#954)
+sysinfo	gpu/{card}/ecc_volatile_uncorrected	NVML: needs `--features nvml` + `collect.gpu` + a card with ECC enabled (#954)
+sysinfo	gpu/{card}/ecc_aggregate_uncorrected	NVML: needs `--features nvml` + `collect.gpu` + a card with ECC enabled (#954)
+sysinfo	gpu/{card}/process/{pid}/vram_bytes	NVML: needs `--features nvml` + `collect.gpu`; per-process attribution has no sysfs equivalent (#954)
