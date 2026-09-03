@@ -234,6 +234,25 @@ so one device's recovery never resolves another's alerts.
 | `device_rebooted` | sysUpTime went backwards; holds `hold_secs` (default 300) then auto-resolves | info |
 | `storage_usage` | `hrStorageUsed/hrStorageSize` above `percent` (default 90) — only when hrStorage is walked | warning |
 | `processor_load` | `hrProcessorLoad` above `percent` (default 90) — only when walked | warning |
+| `ups_on_battery` | `upsOutputSource != normal(3)` — **including `bypass(4)`**, which means the load is running unprotected | critical on `battery(5)`/`none(2)`, warning otherwise |
+| `ups_battery_low` | `upsBatteryStatus` is `low(3)` or `depleted(4)`. **Not `unknown(1)`** — that is the UPS saying it does not know, and paging on a missing measurement is not the same as paging on a fault | critical |
+| `ups_runtime_low` | `upsEstimatedMinutesRemaining` below `minutes` — **no default; unset never fires** | critical |
+| `ups_load_high` | `upsOutputPercentLoad` above `percent` — **no default** | warning |
+| `pdu_outlet_off` | an outlet listed in `expect_on` reads off. An outlet the device did not report is **not** an outage, and a transition (Eaton `pendingOn`, Raritan `cycling`) is not off | critical |
+| `pdu_overload` | the PDU's **own** load verdict says near/over (APC `rPDU2DeviceStatusLoadState`), or inlet load is above `percent` — **no default** | warning |
+
+The last six read what the `ups` and `pdu-*` profiles walk (see *Device
+profiles* below). A device with neither profile produces no observation for
+them, so they reconcile empty every sweep and fire nothing — which is why they
+can default to enabled without an ordinary switch paying for the UPS tree.
+Unlike the interface rules, **their columns are not auto-added to the walk
+set**: pinning or matching a profile is what turns them on.
+
+**Why two of them ship without a number.** A five-minute line-interactive UPS
+under a switch and a sixty-minute one under a rack have different answers, and
+"80 % loaded" is a property of how a site sized its power, not of power. A
+default here would page the whole fleet the first time it ran. Both migrate to
+the shared thresholds vocabulary when #931 lands.
 
 Config: a `snmp.alerts` block — `enabled` (default true), `for_secs`
 (continuous-violation debounce, default 0), and one sub-block per rule, each
@@ -293,6 +312,9 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 | `oids` | string[] | Individual OIDs polled with GET. |
 | `walks` | string[] | OID subtrees polled with WALK (GETBULK on v2c/v3, GETNEXT on v1; tooBig responses are recovered by bisection). |
 | `oid_group` | string? | Reference a predefined `oid_groups` entry instead of inline `oids`/`walks`. |
+| `profile` | string? | Pin a device profile by name instead of `sysObjectID` prefix matching (defaults still apply). An unknown name fails startup. |
+| `credentials` | string? | Name a `snmp.credentials` set instead of spelling the community/v3 secrets inline (#538). |
+| `alerts` | object? | Per-device alert rules. **Replaces** the whole `snmp.alerts` block for this device — it is not a field merge, so a partial block silently reverts every other rule to its default. |
 
 ### `security` (SNMPv3)
 
@@ -503,7 +525,7 @@ supports it and keep v2c communities in files, not inline.
 ## Device profiles (#531)
 
 Onboarding needs only `name` + `address` + credentials: profiles supply the
-OID sets. Four base profiles ship **embedded in the binary**:
+OID sets. Eight profiles ship **embedded in the binary**:
 
 | Profile | Match | Polls |
 |---------|-------|-------|
@@ -511,6 +533,40 @@ OID sets. Four base profiles ship **embedded in the binary**:
 | `network-interfaces` | default | IF-MIB ifTable + ifXTable |
 | `host-resources` | extend/pin | hrStorage descr/units/size/used + hrProcessorLoad |
 | `entity-sensors` | extend/pin | entPhySensorTable type/scale/value/status |
+| `ups` | `1.3.6.1.2.1.33`, APC `…318.1.3.2`, Eaton `…534` | UPS-MIB (RFC 1628): battery status/charge/runtime, input + output tables, output source, alarms |
+| `pdu-apc` | `1.3.6.1.4.1.318.1.3.4` | PowerNet rPDU2 switched + metered outlet tables, device load state and power |
+| `pdu-eaton` | `1.3.6.1.4.1.534.6.6.7` | EATON-EPDU outlet designator/control status/current, inlet current and percent load |
+| `pdu-raritan` | `1.3.6.1.4.1.13742` | Raritan PDU outlet label/state/current |
+
+### Power: one set of names, three vendor trees (#955)
+
+There is no standard PDU MIB — RFC 1628 covers UPSes and stops at the outlet —
+so each `pdu-*` overlay maps **its own** tree onto the **same** metric names
+(`pdu/outlet/{index}/state`, `…/current_ma`). A rule, a dashboard and a query
+never have to know which brand answered. Three things follow that are worth
+knowing before extending them:
+
+- **`{index}` for an outlet is the table index verbatim**, however many
+  integers it is. An Eaton ePDU indexes its outlet tables by `unit.outlet`, so
+  `"1.3"` is as legal an outlet id as `"3"` — which is why `expect_on` takes
+  strings.
+- **A scale lives in the name, never in the value.** `voltage_dv` is decivolts
+  because that is what RFC 1628 puts on the wire, and `current_ma` and
+  `current_da` are separate families because summing milliamps with tenths of
+  an amp is silently meaningless. Rescaling in the poller would need a per-OID
+  scale table, and a scale applied in the wrong place is a wrong number nobody
+  can see.
+- **No vendor OID is shipped unverified.** Every number in these four profiles
+  was read out of the vendor MIB (APC PowerNet-MIB v4.5.8) or out of the OID
+  set NUT drives that hardware with (Eaton Marlin, Raritan PX). A guessed OID
+  does not fail loudly; it publishes a plausible number under a right-looking
+  name, which is worse than publishing nothing. That is also why the `ups`
+  profile carries the APC and Eaton match prefixes but adds **no** vendor
+  OIDs on top of the standard tree: both implement RFC 1628, and what they add
+  beyond it needs their MIB in front of us.
+
+Validation against real hardware is still outstanding — see the caveats at the
+end of this page.
 
 Selection per device runs once, on the first cycle that reads
 `sysObjectID.0` (deferred while the device is unreachable): every `default`
@@ -586,8 +642,17 @@ harness lives in `tests/harness/mod.rs`:
   with a `v1/*/telemetry/snmp/**` subscriber; assertions read decoded
   `TelemetryPoint`s.
 
-The harness maps OIDs through lowercase `oid_names` (grammar-valid chunks);
-built-in MIB names currently violate the chunk grammar — see issue #559.
+The harness maps OIDs through lowercase `oid_names` (grammar-valid chunks).
+Built-in MIB names satisfy the grammar too — #559 fixed that, and
+`built_in_mib_names_are_chunk_grammar_valid` in `src/mib.rs` is what keeps it
+fixed.
+
+The simulated agent serves **`1.3.6.1`**, not just `mib-2`: the vendor PDU
+profiles live under `1.3.6.1.4.1`, and a fixture the agent does not serve
+answers nothing at all — which every rule reading it would score as "healthy".
+A fake that agrees with any assertion is worse than no fake.
+`SimMib::with_ups_mib()`, `::on_battery()` and `::with_pdu_outlets(n)` are the
+power fixtures.
 
 ## SNMPv3 receiving identity (#650)
 
@@ -641,3 +706,18 @@ used, never below — below is what would re-open a replay window.
   mapping requires `snmp.alerts.enabled` (the shared reporter).
 - MIB resolution is best-effort: unresolved OIDs are published under their raw
   dotted-OID metric name.
+- **The UPS and PDU profiles have never met the hardware they describe (#955).**
+  They are built and tested against the in-process simulated agent, and every
+  OID in them was read out of a vendor MIB or out of NUT's driver for that
+  hardware rather than remembered — but a fake is not a UPS. The requirement
+  that motivated them (SYS-SUP-002) also notes the UPSes are **not yet on the
+  network**: implementation could proceed, validation cannot, and it needs a
+  management card or a NUT/serial gateway first. A gateway would be a
+  different sensor (NUT is not SNMP) and is not designed here. Treat first
+  contact with a real UPS or PDU the way #947 treats Proxmox and podman: as
+  work still to do, not as work the fake has done.
+- The `ups` profile deliberately carries **no vendor OIDs** on top of RFC 1628,
+  and `pdu-raritan` maps the legacy `13742.1` tree rather than PDU2-MIB, for
+  the same reason: an OID guessed from memory publishes a plausible number
+  under a right-looking name, and nothing downstream can tell. Extending
+  either needs the vendor MIB, or a device to check against.

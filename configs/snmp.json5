@@ -131,13 +131,47 @@
       },
       // A legacy v1/v2c device — needs `allow_insecure_versions: true`
       // above, and the comment there says what that costs.
+      //
+      // A UPS is the usual reason to still be running v2c: a network
+      // management card old enough to be under a UPS is often too old for v3.
+      // `profile: "ups"` polls RFC 1628 (#955) and gives the `ups_*` rules
+      // something to read — WITHOUT it the rules see nothing and fire nothing,
+      // which is the design: a switch must not pay for the UPS tree.
       // {
       //   name: "legacy-ups",
       //   address: "192.168.1.2:161",
       //   community: "${SNMP_LEGACY_COMMUNITY}",
       //   version: "v2c",
       //   poll_interval_secs: 60,
-      //   oid_group: "network_interfaces",  // Reference a predefined group
+      //   profile: "ups",
+      //   alerts: {
+      //     // A per-device block REPLACES the global one, field for field.
+      //     // The runtime floor is a site decision: this UPS's, not the
+      //     // fleet's. There is no default, and that is deliberate — a number
+      //     // invented here would page every small UPS you own.
+      //     ups_runtime_low: { enabled: true, minutes: 10 },
+      //     ups_load_high:   { enabled: true, percent: 85 },
+      //   },
+      // },
+
+      // A switched rack PDU. `pdu-apc`, `pdu-eaton` and `pdu-raritan` map
+      // three vendor trees onto ONE set of metric names, so a rule and a
+      // dashboard do not have to know which brand answered. `expect_on` is
+      // the outlet ids that must read on — the table index as the device
+      // reports it, which is `"3"` on an APC or a Raritan and `"1.3"` on an
+      // Eaton, whose outlet tables are indexed by unit AND outlet. Empty
+      // (the default) fires nothing: which outlets matter is site knowledge.
+      // {
+      //   name: "rack-pdu-a",
+      //   address: "192.168.1.3:161",
+      //   version: "v3",
+      //   credentials: "readonly",
+      //   poll_interval_secs: 60,
+      //   profile: "pdu-apc",
+      //   alerts: {
+      //     pdu_outlet_off: { enabled: true, expect_on: ["1", "2", "5"] },
+      //     pdu_overload:   { enabled: true, percent: 80 },
+      //   },
       // },
     ],
 
@@ -173,6 +207,26 @@
     //   reboot: { enabled: true, hold_secs: 300 },
     //   storage: { enabled: true, percent: 90.0 },    // needs an hrStorage walk
     //   processor: { enabled: true, percent: 90.0 },  // needs an hrProcessorLoad walk
+    //
+    //   // UPS and PDU (#955). All six read what the `ups` / `pdu-*` profiles
+    //   // walk, so a device with neither profile produces nothing for them
+    //   // and they reconcile empty every sweep — which is why they can be on
+    //   // by default without costing a switch anything.
+    //   //
+    //   // The two that take a NUMBER have no default, and that is the rule
+    //   // rather than an omission: a five-minute UPS under a switch and a
+    //   // sixty-minute one under a rack have different answers, and "80%
+    //   // loaded" is a property of how a site sized its power. Unset means
+    //   // the rule never fires. Both migrate to the shared thresholds
+    //   // vocabulary when #931 lands.
+    //   ups_on_battery:  { enabled: true },   // upsOutputSource != normal(3)
+    //   ups_battery_low: { enabled: true },   // upsBatteryStatus low(3)/depleted(4)
+    //   ups_runtime_low: { enabled: true },   // + minutes: 10
+    //   ups_load_high:   { enabled: true },   // + percent: 85
+    //   pdu_outlet_off:  { enabled: true },   // + expect_on: ["1", "2"]
+    //   pdu_overload:    { enabled: true },   // + percent: 80 (an APC also
+    //                                         //   reports its OWN verdict,
+    //                                         //   which wins where it exists)
     // },
 
     // Predefined OID groups (reusable across devices)

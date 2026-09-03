@@ -762,7 +762,7 @@ async fn v3_configured_engine_id_polls() {
 // Threshold alerts (#528)
 // ---------------------------------------------------------------------------
 
-use harness::{collect_alerts, rig_with_alerts};
+use harness::{collect_alerts, rig_with_alerts, rig_with_profiles_and_alerts};
 use zensight_common::AlertState;
 use zensight_sensor_snmp::alerts::SnmpAlertsConfig;
 
@@ -2098,4 +2098,204 @@ async fn discovery_proposes_unconfigured_responders() {
     // #825 item-1 flag. The proposal has to say so, or it hands the operator a
     // config that does not run.
     assert!(proposal.contains("allow_insecure_versions"), "{proposal}");
+}
+
+// ===========================================================================
+// UPS / PDU — #955 (SYS-SUP-002, and the read half of -003)
+// ===========================================================================
+
+/// Only the rules under test: the interface rules auto-add IF-MIB walks, which
+/// would put the poller on a tree this fake does not serve.
+fn power_alerts() -> SnmpAlertsConfig {
+    use zensight_sensor_snmp::alerts::{MinutesRule, OptionalPercentRule, OutletRule};
+    SnmpAlertsConfig {
+        interface_down: zensight_sensor_snmp::alerts::SimpleRule { enabled: false },
+        interface_errors: zensight_sensor_snmp::alerts::ErrorRateRule {
+            enabled: false,
+            per_sec: 1.0,
+        },
+        utilization: zensight_sensor_snmp::alerts::PercentRule {
+            enabled: false,
+            percent: 90.0,
+        },
+        ups_runtime_low: MinutesRule {
+            enabled: true,
+            minutes: Some(10.0),
+        },
+        pdu_outlet_off: OutletRule {
+            enabled: true,
+            expect_on: vec!["2".to_string()],
+        },
+        pdu_overload: OptionalPercentRule {
+            enabled: true,
+            percent: Some(80.0),
+        },
+        ..SnmpAlertsConfig::default()
+    }
+}
+
+/// A real agent serving the RFC 1628 tree, polled through the shipped `ups`
+/// profile: on mains it says nothing, and when the mains drop it says three
+/// distinct things — the source changed, the battery is low, and the runtime
+/// is under the configured floor.
+///
+/// The profile has to be pinned for any of it to happen. That is the design:
+/// the rules read what a profile walked, so a switch never pays for the UPS
+/// tree, and a UPS with no profile publishes nothing rather than silently
+/// half-working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ups_on_mains_says_nothing_and_a_mains_failure_says_three_things() {
+    let mib = SimMib::new().with_system_group().with_ups_mib();
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("ups01", agent.addr());
+    device.profile = Some("ups".to_string());
+
+    let ar = rig_with_profiles_and_alerts(device, power_alerts()).await;
+
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    for rule in ["ups_on_battery", "ups_battery_low", "ups_runtime_low"] {
+        assert!(
+            firing(&events, rule).is_empty(),
+            "{rule} fired against a healthy UPS"
+        );
+    }
+
+    mib.on_battery();
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+
+    let on_battery = firing(&events, "ups_on_battery");
+    assert_eq!(on_battery.len(), 1, "the mains dropped");
+    assert_eq!(on_battery[0].labels["output_source"], "5");
+    assert_eq!(on_battery[0].labels["device"], "ups01");
+
+    assert_eq!(firing(&events, "ups_battery_low").len(), 1);
+    let runtime = firing(&events, "ups_runtime_low");
+    assert_eq!(runtime.len(), 1, "6 minutes is under the 10-minute floor");
+    assert_eq!(runtime[0].labels["minutes_remaining"], "6");
+
+    // Mains back: every one of them resolves.
+    mib.set("1.3.6.1.2.1.33.1.4.1.0", Value::Integer(3));
+    mib.set("1.3.6.1.2.1.33.1.2.1.0", Value::Integer(2));
+    mib.set("1.3.6.1.2.1.33.1.2.3.0", Value::Integer(45));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    for rule in ["ups_on_battery", "ups_battery_low", "ups_runtime_low"] {
+        assert_eq!(resolved(&events, rule).len(), 1, "{rule} must resolve");
+    }
+}
+
+/// The UPS tree becomes telemetry under the vendor-neutral names, so a
+/// dashboard does not have to know which brand answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ups_profile_publishes_the_standard_names() {
+    let agent = SimAgent::start(SimMib::new().with_system_group().with_ups_mib()).await;
+    let mut device = v2c_device("ups02", agent.addr());
+    device.profile = Some("ups".to_string());
+    let rig = harness::rig_with_profiles(device).await;
+
+    rig.poller.poll_once().await.expect("poll");
+    let points = collect_points(&rig, IDLE).await;
+    let names: Vec<&str> = points.values().map(|p| p.metric.as_str()).collect();
+
+    for want in [
+        "ups/battery/status",
+        "ups/battery/minutes_remaining",
+        "ups/battery/charge_percent",
+        "ups/output/source",
+        "ups/output/1/percent_load",
+    ] {
+        assert!(names.contains(&want), "missing {want} in {names:?}");
+    }
+}
+
+/// An outlet that should be on and is not. The PDU's own load verdict is
+/// separate, and a healthy PDU says neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pdu_outlet_going_dark_fires_and_recovers() {
+    let mib = SimMib::new().with_system_group().with_pdu_outlets(3);
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("pdu01", agent.addr());
+    device.profile = Some("pdu-apc".to_string());
+
+    let ar = rig_with_profiles_and_alerts(device, power_alerts()).await;
+
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert!(firing(&events, "pdu_outlet_off").is_empty());
+    assert!(firing(&events, "pdu_overload").is_empty());
+
+    // Outlet 2 goes off — APC spells that off(1).
+    mib.set("1.3.6.1.4.1.318.1.1.26.9.2.3.1.5.2", Value::Integer(1));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    let f = firing(&events, "pdu_outlet_off");
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].labels["outlet"], "2");
+    assert_eq!(f[0].labels["outlet_name"], "outlet-2");
+
+    // Outlet 3 is not in expect_on: turning it off is not an incident.
+    mib.set("1.3.6.1.4.1.318.1.1.26.9.2.3.1.5.3", Value::Integer(1));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert_eq!(
+        firing(&events, "pdu_outlet_off").len(),
+        0,
+        "already firing for outlet 2, and outlet 3 is not expected on"
+    );
+
+    mib.set("1.3.6.1.4.1.318.1.1.26.9.2.3.1.5.2", Value::Integer(2));
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert_eq!(resolved(&events, "pdu_outlet_off").len(), 1);
+}
+
+/// The PDU's own overload verdict, which is measured against a rating this
+/// sensor does not know — so it wins over any percentage we could configure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pdu_own_overload_verdict_fires() {
+    let mib = SimMib::new().with_system_group().with_pdu_outlets(2);
+    let agent = SimAgent::start(mib.clone()).await;
+    let mut device = v2c_device("pdu02", agent.addr());
+    device.profile = Some("pdu-apc".to_string());
+    let ar = rig_with_profiles_and_alerts(device, power_alerts()).await;
+
+    ar.rig.poller.poll_once().await.expect("poll");
+    let _ = collect_alerts(&ar, IDLE).await;
+
+    mib.set("1.3.6.1.4.1.318.1.1.26.4.3.1.4.1", Value::Integer(4)); // overload
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert_eq!(firing(&events, "pdu_overload").len(), 1);
+
+    mib.set("1.3.6.1.4.1.318.1.1.26.4.3.1.4.1", Value::Integer(2)); // normal
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    assert_eq!(resolved(&events, "pdu_overload").len(), 1);
+}
+
+/// A device that answers neither tree: the power rules reconcile every sweep
+/// and never fire. This is what lets them default to enabled — an ordinary
+/// switch pays nothing for them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_is_not_a_ups() {
+    let agent = SimAgent::start(base_mib()).await;
+    let mut device = v2c_device("sw01", agent.addr());
+    device.oids = vec![format!("{SYSTEM}.5.0")];
+    let ar = rig_with_alerts(device, power_alerts()).await;
+
+    ar.rig.poller.poll_once().await.expect("poll");
+    ar.rig.poller.poll_once().await.expect("poll");
+    let events = collect_alerts(&ar, IDLE).await;
+    for rule in [
+        "ups_on_battery",
+        "ups_battery_low",
+        "ups_runtime_low",
+        "ups_load_high",
+        "pdu_outlet_off",
+        "pdu_overload",
+    ] {
+        assert!(firing(&events, rule).is_empty(), "{rule} fired on a switch");
+    }
 }
