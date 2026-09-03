@@ -225,6 +225,20 @@ pub fn origin_rpc_key(origin: &RemoteOrigin, producer: &str, procedure: &str) ->
     selector::rpc_at(origin, producer, &proc_chunks(procedure)).into()
 }
 
+/// One producer's state subtree on ONE origin:
+/// `<base>/v1/<origin>/state/<producer>[/<prefix…>]/**`.
+///
+/// The state-plane counterpart of [`origin_rpc_key`], and typed for the same
+/// reason: a caller reading *someone else's* state must address that host, and
+/// a `*` here fans a read out across the fleet — cheap for one `applied`
+/// marker, wrong as a habit, and indistinguishable in a `format!`.
+///
+/// Takes a parsed [`RemoteOrigin`], so a malformed origin cannot become a
+/// matches-nothing key that fails as a timeout in one view.
+pub fn origin_state_subtree(origin: &RemoteOrigin, producer: &str, prefix: &[&str]) -> String {
+    selector::producer_state(Scope::origin(origin), producer, prefix).into()
+}
+
 /// Caller-side fleet selector for the historian's `range` procedure:
 /// `<base>/v1/*/@rpc/historian/range`.
 ///

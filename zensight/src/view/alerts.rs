@@ -173,6 +173,21 @@ impl From<zensight_common::AlertSeverity> for Severity {
     }
 }
 
+/// The other direction (#933): the authoring form picks a [`Severity`], and a
+/// threshold rule the sensor evaluates carries an `AlertSeverity`. Without
+/// this the form would have to spell the mapping at its one call site, which
+/// is how the two ended up able to drift.
+impl From<Severity> for zensight_common::AlertSeverity {
+    fn from(s: Severity) -> Self {
+        use zensight_common::AlertSeverity;
+        match s {
+            Severity::Info => AlertSeverity::Info,
+            Severity::Warning => AlertSeverity::Warning,
+            Severity::Critical => AlertSeverity::Critical,
+        }
+    }
+}
+
 /// Comparison operators for alert rules — shared with the sensors' headless
 /// `metric-threshold` expectations (see `zensight_common::ComparisonOp`).
 pub use zensight_common::ComparisonOp;

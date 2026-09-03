@@ -221,6 +221,12 @@ pub enum Message {
     HostspecSpecReceived(String),
     /// A systemd sentinel status reply (ExpectationsConfig JSON) (#278).
     SystemdExpectationsReceived(String),
+    /// A producer's `@rpc/<producer>/thresholds` reply — the operator rule set
+    /// it is currently evaluating (raw JSON, #933).
+    ThresholdsReceived(String),
+    /// The producer's `state/<producer>/applied/thresholds` marker (#933):
+    /// which writer — file, desired or rpc — is actually in force.
+    ThresholdsAppliedReceived(String),
     /// Set the kind of expectation being authored.
     SetExpectationKind(crate::view::expectations::ExpKind),
     /// Set the expectation name (socket) or interface (link).

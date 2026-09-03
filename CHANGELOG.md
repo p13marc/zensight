@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Promote any metric to a sensor-owned threshold** (#933, epic #901).
+
+  `PromoteMetricToAlert` used to branch on `protocol == Netlink`: netlink got
+  the expectations authoring form, and **everything else was seeded into the
+  GUI's own rule engine**, whose alerts reached nothing — not the bus, not the
+  exporters, not the notifier. That branch was really the test "does this
+  sensor have a channel that can receive a threshold", and since #931 every
+  producer does. So promotion now goes to whichever sensor publishes the
+  metric.
+
+  The expectations view gains a fourth target, `Thresholds`, and two
+  properties the three sentinel targets do not have:
+
+  - **It is addressed to one host, never the fleet.** The others GET
+    `v1/*/@rpc/<producer>/expectations/set`; this builds a per-origin key from
+    the promoted metric's own device. A threshold rule belongs to one host's
+    sensor, and pushing it fleet-wide is `@desired`'s job — done deliberately,
+    not fallen into by clicking "alert" on one number. The form states the
+    scope on its own line, naming the host, rather than burying it in a
+    caption nobody reads to the end.
+  - **It appends to the *sensor's* set, not to a local draft.**
+    `thresholds/set` replaces wholesale, so authoring against a stale copy
+    would silently delete every rule added since the last refresh. If the
+    reply does not parse, authoring stops with the reason instead of falling
+    back to an empty set that the next push would install.
+
+  The `applied/thresholds` marker rides beside the form, so a push that lost a
+  race with `@desired` is visible rather than mysterious.
+
+  `ExpTarget::Thresholds` is a **unit** variant, not the
+  `Thresholds { producer, origin }` the issue sketched: that costs `Copy` and
+  the `&'static [ExpTarget]` const, which between them break twenty-five call
+  sites, and a pick-list entry carrying data means one entry per
+  (producer, origin) pair — a different control from four fixed targets. The
+  producer and origin live beside `target` in `ExpectationsState`.
+
 - **`recover_after_secs` on every expectation kind** (#932, epic #901).
 
   #929 gave the `AlertReporter` a recovery window and **nothing used it** —

@@ -49,18 +49,34 @@ impl std::fmt::Display for ExpKind {
     }
 }
 
-/// Which sensor's sentinel we're authoring for (#278). Netlink uses incremental
-/// add/remove commands; systemd uses a full-set `SetExpectations` replace.
+/// What we're authoring here (#278, #933). Netlink uses incremental
+/// add/remove commands; systemd and hostspec use a full-set replace; and
+/// `Thresholds` (#933) authors the operator's *threshold rules* — which every
+/// producer now evaluates on its own publish path (#931) — rather than a
+/// sentinel's expectations.
+///
+/// `Thresholds` is a **unit** variant carrying no producer or origin, even
+/// though it needs both. #933 sketched `Thresholds { producer, origin }`; that
+/// costs `Copy` and the `&'static [ExpTarget]` const, which between them break
+/// twenty-five call sites across this file, `app.rs`, `message.rs` and the UI
+/// tests — and a pick-list entry that carries data means one entry per
+/// (producer, origin) pair, which is a different control from three fixed
+/// targets. The two live beside `target` in [`ExpectationsState`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpTarget {
     Netlink,
     Systemd,
     Hostspec,
+    Thresholds,
 }
 
 impl ExpTarget {
-    pub const ALL: &'static [ExpTarget] =
-        &[ExpTarget::Netlink, ExpTarget::Systemd, ExpTarget::Hostspec];
+    pub const ALL: &'static [ExpTarget] = &[
+        ExpTarget::Netlink,
+        ExpTarget::Systemd,
+        ExpTarget::Hostspec,
+        ExpTarget::Thresholds,
+    ];
 }
 
 impl std::fmt::Display for ExpTarget {
@@ -72,6 +88,7 @@ impl std::fmt::Display for ExpTarget {
                 ExpTarget::Netlink => "netlink",
                 ExpTarget::Systemd => "systemd",
                 ExpTarget::Hostspec => "hostspec",
+                ExpTarget::Thresholds => "thresholds",
             }
         )
     }
@@ -601,8 +618,28 @@ pub struct ExpRow {
 /// State for the expectations authoring view.
 #[derive(Debug)]
 pub struct ExpectationsState {
-    /// Which sensor's sentinel we're authoring for (#278).
+    /// What we're authoring for (#278, #933).
     pub target: ExpTarget,
+    /// Which producer's threshold rules, when `target == Thresholds` (#933).
+    /// Set by `PromoteMetricToAlert` from the metric's own device.
+    pub thresholds_producer: String,
+    /// The **concrete** origin those rules live on. Never a fleet selector:
+    /// a threshold rule belongs to one host's sensor, and `*` would push it
+    /// to every host running that producer — which is `@desired`'s job, done
+    /// deliberately, not a side effect of clicking "alert" on one metric.
+    pub thresholds_origin: Option<zenkey::RemoteOrigin>,
+    /// The rule set as the sensor last reported it. The form APPENDS to this
+    /// and pushes the whole thing back, because `thresholds/set` replaces
+    /// wholesale — so authoring against a stale copy silently deletes
+    /// everything added since the last refresh.
+    pub thresholds: zensight_common::threshold::ThresholdsConfig,
+    /// Schema verdict for the last `thresholds` reply (#791).
+    pub thresholds_verdict: Option<zensight_common::schema::Verdict>,
+    /// The `applied/thresholds` marker for the focused producer+origin
+    /// (#816/#931): which of file / desired / rpc is actually in force, and
+    /// the last desired document it refused. Shown so a push that lost a race
+    /// with `@desired` is visible rather than mysterious.
+    pub thresholds_applied: Option<zensight_common::desired::AppliedConfig>,
     pub new_kind: ExpKind,
     /// The systemd expectation kind (when `target == Systemd`).
     pub systemd_kind: SystemdExpKind,
@@ -641,6 +678,11 @@ impl Default for ExpectationsState {
     fn default() -> Self {
         Self {
             target: ExpTarget::Netlink,
+            thresholds_producer: String::new(),
+            thresholds_origin: None,
+            thresholds: zensight_common::threshold::ThresholdsConfig::default(),
+            thresholds_verdict: None,
+            thresholds_applied: None,
             new_kind: ExpKind::SocketListen,
             systemd_kind: SystemdExpKind::ServiceActive,
             new_name: String::new(),
@@ -668,6 +710,7 @@ pub fn expectations_view(state: &ExpectationsState) -> Element<'_, Message> {
         ExpTarget::Netlink => render_form(state),
         ExpTarget::Systemd => render_systemd_form(state),
         ExpTarget::Hostspec => render_hostspec_form(state),
+        ExpTarget::Thresholds => render_thresholds_form(state),
     };
     let content = column![
         render_header(state),
@@ -704,7 +747,15 @@ fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
 
     row![
         back,
-        text(format!("Expectations ({} sentinel)", state.target)).size(22),
+        text(match state.target {
+            // Not "the thresholds sentinel": these are the operator's rules,
+            // and naming the producer is what tells them WHOSE.
+            ExpTarget::Thresholds if !state.thresholds_producer.is_empty() =>
+                format!("Thresholds ({})", state.thresholds_producer),
+            ExpTarget::Thresholds => "Thresholds".to_string(),
+            t => format!("Expectations ({t} sentinel)"),
+        })
+        .size(22),
         target,
         refresh
     ]
@@ -862,6 +913,138 @@ fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
 /// systemd's: each add mutates the draft and re-pushes the full set (which
 /// the sensor VALIDATES before applying — a refusal keeps its previous set
 /// and surfaces as a command-feedback toast).
+/// One row per threshold rule, for the "Configured" list (#933).
+///
+/// The comparison is spelled the way the rule fires — `> 90` — not inverted
+/// into an expectation, because that is what the sensor evaluates and a
+/// rendering that flipped it would be a second opinion on the operator's own
+/// words.
+pub fn threshold_rows(cfg: &zensight_common::threshold::ThresholdsConfig) -> Vec<ExpRow> {
+    cfg.rules
+        .iter()
+        .map(|r| {
+            let mut detail = format!("{} {} {}", r.metric, r.op.symbol(), r.value);
+            if let Some(clear) = r.clear {
+                detail.push_str(&format!(" (clear {clear})"));
+            }
+            for (k, v) in &r.labels {
+                detail.push_str(&format!(" [{k}={v}]"));
+            }
+            ExpRow {
+                rule: format!("threshold:{}", r.name),
+                detail,
+                severity: format!("{:?}", r.severity).to_lowercase(),
+            }
+        })
+        .collect()
+}
+
+/// The threshold-rule authoring form (#933) — the destination of "promote this
+/// metric to an alert" for every producer.
+///
+/// It reuses the metric-threshold fields (`new_name`, `new_metric`, `new_op`,
+/// `new_value`, `new_severity`) rather than growing a parallel set: they mean
+/// the same things, and a second copy would drift.
+fn render_thresholds_form(state: &ExpectationsState) -> Element<'_, Message> {
+    if state.thresholds_producer.is_empty() || state.thresholds_origin.is_none() {
+        // Not an error — nobody has promoted a metric yet. Say what to do
+        // rather than showing an empty form that pushes nowhere (#867).
+        return column![
+            text("No producer selected.").size(14),
+            text(
+                "A threshold rule belongs to one host's sensor, so this form needs to know \
+                 which. Open a device, find the metric you care about, and press its \
+                 \u{201c}alert\u{201d} button — that is what fills this in."
+            )
+            .size(12)
+            .style(dim),
+        ]
+        .spacing(8)
+        .into();
+    }
+
+    let name = text_input("rule name", &state.new_name)
+        .on_input(Message::SetExpectationName)
+        .padding(8)
+        .width(Length::Fixed(160.0));
+    let metric = text_input("metric (cpu/usage)", &state.new_metric)
+        .on_input(Message::SetExpectationMetric)
+        .padding(8)
+        .width(Length::Fixed(240.0));
+    let op = pick_list(
+        ComparisonOp::ALL,
+        Some(state.new_op),
+        Message::SetExpectationOp,
+    )
+    .width(Length::Fixed(70.0));
+    let value = text_input("value", &state.new_value)
+        .on_input(Message::SetExpectationValue)
+        .padding(8)
+        .width(Length::Fixed(90.0));
+    let severity = pick_list(
+        crate::view::alerts::Severity::ALL,
+        Some(state.new_severity),
+        Message::SetExpectationSeverity,
+    )
+    .width(Length::Fixed(110.0));
+    let add = button(text("Add rule").size(13))
+        .on_press(Message::AddExpectation)
+        .style(iced::widget::button::primary);
+
+    let mut col = column![
+        text("Add a threshold rule").size(18),
+        row![name, metric, op, value, severity, add]
+            .spacing(10)
+            .align_y(Alignment::Center),
+    ]
+    .spacing(10);
+
+    // The marker, verbatim about who won last (#816/#931). Without it a push
+    // that lost a race with `@desired` looks like a push that did nothing.
+    if let Some(applied) = &state.thresholds_applied {
+        let src = format!("{:?}", applied.source).to_lowercase();
+        col = col.push(text(format!("In force from: {src}")).size(12).style(dim));
+        if let Some(rejected) = &applied.last_rejected {
+            col = col.push(
+                text(format!("Last refused desired document: {}", rejected.error))
+                    .size(11)
+                    .style(dim),
+            );
+        }
+    }
+
+    // The scope gets its own line rather than a clause in the paragraph
+    // below: "this host, not the fleet" is the single fact an operator most
+    // needs before pressing the button, and a reader who skims a caption
+    // skims past it.
+    col = col.push(
+        text(format!(
+            "Applies to this host only ({}).",
+            state
+                .thresholds_origin
+                .as_ref()
+                .map(|o| {
+                    use zenkey::origin::ConcreteOrigin;
+                    o.chunk().to_string()
+                })
+                .unwrap_or_default()
+        ))
+        .size(12)
+        .style(dim),
+    );
+    col = col.push(
+        text(
+            "The whole rule set is replaced over thresholds/set. The sensor validates it \
+             before applying (metric globs, operators, a `clear` on the quiet side of \
+             `value`) and a refusal keeps the previous set. To hold a rule across the \
+             fleet, publish it on @desired instead.",
+        )
+        .size(11)
+        .style(dim),
+    );
+    col.into()
+}
+
 fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
     let kind = pick_list(
         HostspecExpKind::ALL,
@@ -954,6 +1137,7 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
         ExpTarget::Netlink => state.current.clone(),
         ExpTarget::Systemd => state.systemd.rows(),
         ExpTarget::Hostspec => state.hostspec.rows(),
+        ExpTarget::Thresholds => threshold_rows(&state.thresholds),
     };
     let title = text(format!("Configured ({})", rows.len())).size(18);
     // The reply's schema verdict rides beside the count (#791): three
@@ -962,6 +1146,7 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
         ExpTarget::Netlink => state.status_verdict.as_ref(),
         ExpTarget::Systemd => state.systemd_verdict.as_ref(),
         ExpTarget::Hostspec => state.hostspec_verdict.as_ref(),
+        ExpTarget::Thresholds => state.thresholds_verdict.as_ref(),
     };
     let title: Element<'_, Message> = match verdict {
         Some(v) => row![title, crate::view::components::verdict::verdict_badge(v)]
