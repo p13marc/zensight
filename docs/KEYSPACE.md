@@ -135,8 +135,20 @@ origin / producer / source / rule / `labels.*` with `Eq` or `Regex`, and an
 typo mutes a fleet.
 
 `ack`, `unack`, `silence` and `unsilence` are `kind = "write"` procedures on
-`@catalog/@rpc`, behind the same gate as `link`/`unlink`. There are no bare
-puts: `session.put` is CI-banned and the GUI is not the authority.
+`@catalog/@rpc`, behind the same `allow_operator_assertions` gate as
+`link`/`unlink` — all six change what the fleet believes about itself on an
+operator's say-so, and all six ride the audited seam (#957), which has no
+unrecorded way to answer. When gated they reply `error/gated` naming the switch
+rather than timing out. There are no bare puts: `session.put` is CI-banned and
+the GUI is not the authority.
+
+`ack` refuses with `error/catalog/not-firing` when nothing is firing for the
+ref — an acknowledgement names an occurrence someone looked at, and one for a
+problem nobody has is a suppression waiting to apply the next time that alert
+fires. A `silence` is validated before it applies: at least one matcher, every
+field matchable, every regex compiling, `ends_at` after `starts_at`, and an
+author taken from `?actor=` and never from the body. The catalog sweeps both:
+an ack whose occurrence ended or re-fired, a silence past its window.
 
 **Not built, on purpose:** notification routing, escalation, on-call rotations,
 repeat intervals. zenkey's zenwatch (#387–#390) scoped those out deliberately —

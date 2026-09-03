@@ -7,11 +7,15 @@ procedure	bmc	describe	read	-	SchemaSet
 procedure	bmc	introspect	read	-	RegistrySlice
 procedure	bmc	thresholds	read	-	ThresholdsConfig
 procedure	bmc	thresholds/set	write	ThresholdsConfig	Ack
+procedure	catalog	ack	write	-	AlertAck
 procedure	catalog	describe	read	-	SchemaSet
 procedure	catalog	introspect	read	-	RegistrySlice
 procedure	catalog	link	write	-	OperatorAssertion
 procedure	catalog	names	read	-	Vec<NameVal>
+procedure	catalog	silence	write	Silence	Silence
+procedure	catalog	unack	write	-	AlertAck
 procedure	catalog	unlink	write	-	OperatorAssertion
+procedure	catalog	unsilence	write	-	Silence
 procedure	container	describe	read	-	SchemaSet
 procedure	container	introspect	read	-	RegistrySlice
 procedure	container	thresholds	read	-	ThresholdsConfig
