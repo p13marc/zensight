@@ -60,6 +60,9 @@ kind = "json-schema"
 [types.FilterConfig]
 kind = "json-schema"
 
+[types.GpuInfo]
+kind = "json-schema"
+
 [types.HostspecEvaluation]
 kind = "json-schema"
 

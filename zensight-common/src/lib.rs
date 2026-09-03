@@ -24,6 +24,7 @@ pub mod error;
 pub mod event;
 pub mod evidence;
 pub mod exposition;
+pub mod gpu;
 pub mod health;
 pub mod history;
 pub mod hostspec;
@@ -83,6 +84,7 @@ pub use entity::{
 pub use error::{Error, Result};
 pub use event::EventRecord;
 pub use evidence::{CloudFacts, HostEvidence, NameObservation};
+pub use gpu::GpuInfo;
 pub use health::{
     CgroupSelf, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus,
     LadderEviction, LadderState, SelfStats, SensorInfo, TableStats,
