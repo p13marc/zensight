@@ -357,6 +357,54 @@ impl CorrelatorState {
         self.incidents.current()
     }
 
+    /// The firing alert for `r`, if it is firing right now (#924).
+    ///
+    /// The gate on `ack`: acknowledging something nobody is reporting is a
+    /// suppression waiting to happen — the ack would sit on the key, inert by
+    /// the projection rule, and then quietly apply the moment that exact
+    /// alert next fired within its `fired_at`.
+    pub fn firing_alert(
+        &self,
+        r: &zensight_common::alert::AlertRef,
+    ) -> Option<zensight_common::alert::Alert> {
+        self.alerts.firing().into_iter().find_map(
+            |(k, a)| {
+                if &k == r { Some(a.clone()) } else { None }
+            },
+        )
+    }
+
+    /// Acks whose alert is no longer firing, or whose alert has re-fired past
+    /// `fired_at` (#924).
+    ///
+    /// The sweep's input. Both cases retire the ack, and they are the two
+    /// halves of one rule: an ack names an *occurrence*. The occurrence ended
+    /// (resolved, tombstoned) or a different one began (re-fire), and either
+    /// way the operator who said "I am on this" was talking about something
+    /// else.
+    pub fn stale_acks(&self) -> Vec<zensight_common::alert::AlertRef> {
+        let firing: std::collections::BTreeMap<_, _> = self.alerts.firing().into_iter().collect();
+        self.acks
+            .iter()
+            .filter(|(r, ack)| !ack.applies_to(firing.get(*r).copied()))
+            .map(|(r, _)| r.clone())
+            .collect()
+    }
+
+    /// Silences whose window has closed (#924).
+    pub fn expired_silences(&self, now_ms: i64) -> Vec<String> {
+        self.silences
+            .values()
+            .filter(|s| now_ms >= s.ends_at)
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    /// Whether a silence with this id is currently held.
+    pub fn has_silence(&self, id: &str) -> bool {
+        self.silences.contains_key(id)
+    }
+
     /// Number of firing alerts held, for health reporting.
     pub fn firing_alerts(&self) -> usize {
         self.alerts.len()

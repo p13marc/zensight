@@ -382,6 +382,12 @@ mod tests {
     use zensight_common::relation::{Endpoint, RelationKind};
     use zensight_common::{AlertKind, AlertSeverity, Protocol};
 
+    /// Shared with `lifecycle_tests`, which drives the same fixtures through
+    /// `CorrelatorState` rather than the pure pass.
+    pub(super) fn alert_fixture(source: &str, rule: &str, sev: AlertSeverity, ts: i64) -> Alert {
+        alert(source, rule, sev, ts)
+    }
+
     fn alert(source: &str, rule: &str, sev: AlertSeverity, ts: i64) -> Alert {
         let mut a = Alert::new(
             source,
@@ -817,5 +823,160 @@ mod tests {
                 "merge.rs mentions {needle:?}: identity and alerting must not become one problem"
             );
         }
+    }
+}
+
+/// The ack and silence **lifecycle** the catalog owns (#924).
+///
+/// These exercise `CorrelatorState`'s accessors rather than the procedures, so
+/// they need no bus: the procedures are a thin gate over exactly these
+/// answers, and testing the answers is testing the rule.
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::tests::*;
+    use crate::engine::{CorrelatorState, EvidenceMsg};
+    use zensight_common::ack::AlertAck;
+    use zensight_common::alert::{Alert, AlertRef, AlertSeverity};
+    use zensight_common::silence::{MatchOp, Matcher, Silence};
+
+    fn state() -> CorrelatorState {
+        CorrelatorState::new(crate::config::CorrelatorConfig::default())
+    }
+
+    fn fire(st: &mut CorrelatorState, r: &AlertRef, a: Alert) {
+        st.apply(EvidenceMsg::Alert {
+            r: Box::new(r.clone()),
+            alert: Some(Box::new(a)),
+        });
+    }
+
+    fn ack_of(r: &AlertRef, fired_at: i64) -> AlertAck {
+        AlertAck {
+            alert_ref: r.clone(),
+            fired_at,
+            by: "marc".into(),
+            note: String::new(),
+            at: fired_at,
+        }
+    }
+
+    /// **The gate on `ack`.** Acknowledging something nobody is reporting
+    /// would put an inert document on the key that quietly applies the moment
+    /// that exact alert next fires within its `fired_at`.
+    #[test]
+    fn there_is_no_firing_alert_to_acknowledge() {
+        let mut st = state();
+        let r = AlertRef::new("h-aaaaaaaaaaaa", "netlink", "k1");
+        assert!(st.firing_alert(&r).is_none(), "nothing is firing");
+
+        fire(
+            &mut st,
+            &r,
+            alert_fixture("web01", "x", AlertSeverity::Warning, 1_000),
+        );
+        assert_eq!(st.firing_alert(&r).map(|a| a.timestamp), Some(1_000));
+    }
+
+    /// **A re-fire clears the ack.** `fired_at` names the occurrence someone
+    /// looked at; a later one is a new problem and must page again.
+    #[test]
+    fn a_re_fire_makes_the_ack_stale() {
+        let mut st = state();
+        let r = AlertRef::new("h-aaaaaaaaaaaa", "netlink", "k1");
+        fire(
+            &mut st,
+            &r,
+            alert_fixture("web01", "x", AlertSeverity::Warning, 1_000),
+        );
+        st.apply(EvidenceMsg::Ack(Box::new(ack_of(&r, 1_000))));
+        assert!(st.stale_acks().is_empty(), "the acknowledged occurrence");
+
+        // The condition cleared and came back.
+        fire(
+            &mut st,
+            &r,
+            alert_fixture("web01", "x", AlertSeverity::Warning, 2_000),
+        );
+        assert_eq!(st.stale_acks(), vec![r], "a later occurrence is not acked");
+    }
+
+    /// An alert that resolves takes its ack with it — otherwise the ack sits
+    /// on the key, inert, waiting to apply to something it never saw.
+    #[test]
+    fn a_resolved_alert_makes_the_ack_stale() {
+        let mut st = state();
+        let r = AlertRef::new("h-aaaaaaaaaaaa", "netlink", "k1");
+        fire(
+            &mut st,
+            &r,
+            alert_fixture("web01", "x", AlertSeverity::Warning, 1_000),
+        );
+        st.apply(EvidenceMsg::Ack(Box::new(ack_of(&r, 1_000))));
+        st.apply(EvidenceMsg::Alert {
+            r: Box::new(r.clone()),
+            alert: None, // tombstone
+        });
+        assert_eq!(st.stale_acks(), vec![r]);
+    }
+
+    /// A silence past `ends_at` is swept, and stops applying at the instant it
+    /// ends whether or not the sweep has run — a partitioned catalog cannot
+    /// keep an expired suppression alive.
+    #[test]
+    fn a_silence_expires_at_its_window() {
+        let mut st = state();
+        let s = Silence {
+            id: "s1".into(),
+            matchers: vec![Matcher {
+                name: "source".into(),
+                op: MatchOp::Eq,
+                value: "web01".into(),
+            }],
+            starts_at: 1_000,
+            ends_at: 2_000,
+            by: "marc".into(),
+            note: String::new(),
+        };
+        st.apply(EvidenceMsg::Silence(Box::new(s)));
+        assert!(st.has_silence("s1"));
+        assert!(st.expired_silences(1_500).is_empty(), "inside the window");
+        assert_eq!(
+            st.expired_silences(2_000),
+            vec!["s1".to_string()],
+            "at ends_at"
+        );
+
+        // The recompute drops it even before the sweep publishes a tombstone.
+        st.recompute_incidents(2_500);
+        assert!(!st.has_silence("s1"));
+    }
+
+    /// A silenced member is counted, and leaves the operator's queue.
+    #[test]
+    fn a_silenced_member_leaves_the_queue() {
+        let mut st = state();
+        let r = AlertRef::new("h-aaaaaaaaaaaa", "netlink", "k1");
+        fire(
+            &mut st,
+            &r,
+            alert_fixture("web01", "x", AlertSeverity::Warning, 1_000),
+        );
+        st.apply(EvidenceMsg::Silence(Box::new(Silence {
+            id: "s1".into(),
+            matchers: vec![Matcher {
+                name: "source".into(),
+                op: MatchOp::Eq,
+                value: "web01".into(),
+            }],
+            starts_at: 0,
+            ends_at: i64::MAX,
+            by: "marc".into(),
+            note: String::new(),
+        })));
+        st.recompute_incidents(1_500);
+        let incidents = st.current_incidents();
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].silenced, 1);
+        assert_eq!(incidents[0].open(), 0);
     }
 }

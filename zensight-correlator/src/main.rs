@@ -231,6 +231,37 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
+    // Ack/silence (#924): the same gate as link/unlink, and served whether or
+    // not it is enabled for the same reason — a gated procedure that replies
+    // "gated" tells an operator the feature exists.
+    let ack_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        let allowed = config.allow_operator_assertions;
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_ack_and_silence(s, st, serialization, allowed, sh).await {
+                error!(error = %e, "ack/silence queryable error");
+            }
+        })
+    };
+
+    // Lifecycle sweep (#924): tombstone acks whose occurrence ended and
+    // silences past `ends_at`. On a timer, because `ends_at` is a clock and a
+    // window must close on a fleet where nothing else is happening.
+    let sweep_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                query::run_lifecycle_sweep(s, st, std::time::Duration::from_secs(30), sh).await
+            {
+                error!(error = %e, "ack/silence sweep error");
+            }
+        })
+    };
+
     // Input source: real evidence subscribers, or (in --demo) a synthetic feed
     // driving the exact same engine/store/publisher pipeline.
     let input_task = if args.demo {
@@ -275,6 +306,10 @@ async fn main() -> anyhow::Result<()> {
         catalog_rpc_key("describe"),
         catalog_rpc_key("link"),
         catalog_rpc_key("unlink"),
+        catalog_rpc_key("ack"),
+        catalog_rpc_key("unack"),
+        catalog_rpc_key("silence"),
+        catalog_rpc_key("unsilence"),
     ];
     let missing = zensight_common::served::await_served(&callable, DECLARATION_GRACE).await;
     if !missing.is_empty() {
@@ -308,6 +343,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = edge_task.await;
         let _ = incident_task.await;
         let _ = incidents_query_task.await;
+        let _ = ack_task.await;
+        let _ = sweep_task.await;
         let _ = pdns_task.await;
         let _ = entities_task.await;
         let _ = names_task.await;

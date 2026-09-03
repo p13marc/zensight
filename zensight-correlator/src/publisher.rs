@@ -356,6 +356,88 @@ pub async fn run(
 /// record that makes a restarted correlator (or a second one, or a
 /// storage-backed router) see the operator's decision. A declared publisher per
 /// call is fine — an operator invokes this by hand, not in a loop.
+/// Publish an acknowledgement (#924).
+///
+/// A one-shot declared publisher rather than a cached one, exactly as
+/// `publish_assertion` is: acks are written by an operator pressing a button,
+/// not on a loop, and a cache keyed by alert ref would grow with the fleet's
+/// history for no gain.
+pub async fn publish_ack(
+    session: &Session,
+    format: Format,
+    ack: &zensight_common::ack::AlertAck,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::ack_key(&ack.alert_ref);
+    put_catalog_doc(session, format, &key, ack).await?;
+    info!(key = %key, by = %ack.by, "published acknowledgement");
+    Ok(())
+}
+
+/// Tombstone an acknowledgement.
+pub async fn retire_ack(
+    session: &Session,
+    alert_ref: &zensight_common::alert::AlertRef,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::ack_key(alert_ref);
+    delete_catalog_doc(session, &key).await?;
+    info!(key = %key, "retired acknowledgement");
+    Ok(())
+}
+
+/// Publish a suppression window (#924).
+pub async fn publish_silence(
+    session: &Session,
+    format: Format,
+    silence: &zensight_common::silence::Silence,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::silence_key(&silence.id);
+    put_catalog_doc(session, format, &key, silence).await?;
+    info!(key = %key, by = %silence.by, "published silence");
+    Ok(())
+}
+
+/// Tombstone a suppression window.
+pub async fn retire_silence(session: &Session, id: &str) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::silence_key(id);
+    delete_catalog_doc(session, &key).await?;
+    info!(key = %key, "retired silence");
+    Ok(())
+}
+
+async fn put_catalog_doc<T: serde::Serialize>(
+    session: &Session,
+    format: Format,
+    key: &str,
+    doc: &T,
+) -> anyhow::Result<()> {
+    let payload = encode(doc, format).map_err(|e| anyhow::anyhow!("encode {key}: {e}"))?;
+    let q = zensight_common::QosClass::Entity;
+    let pubr = session
+        .declare_publisher(key.to_string())
+        .congestion_control(q.congestion_control())
+        .priority(q.priority())
+        .express(q.express())
+        .reliability(q.reliability())
+        .await
+        .map_err(|e| anyhow::anyhow!("declare publisher {key}: {e}"))?;
+    pubr.put(payload)
+        .encoding(format.encoding())
+        .await
+        .map_err(|e| anyhow::anyhow!("put {key}: {e}"))?;
+    Ok(())
+}
+
+async fn delete_catalog_doc(session: &Session, key: &str) -> anyhow::Result<()> {
+    let pubr = session
+        .declare_publisher(key.to_string())
+        .await
+        .map_err(|e| anyhow::anyhow!("declare publisher {key}: {e}"))?;
+    pubr.delete()
+        .await
+        .map_err(|e| anyhow::anyhow!("delete {key}: {e}"))?;
+    Ok(())
+}
+
 pub async fn publish_assertion(
     session: &Session,
     format: Format,
