@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Documentation for the topology graph** (#920, closing #899).
+  `docs/KEYSPACE.md` carries both families, the determinism rule, the
+  structural-vs-traffic boundary and an explicit **RFC status note** — the
+  families are shipped ahead of zenkey#416, and the doc says the RFC and the
+  code disagree until it releases rather than leaving a reader to discover it.
+  `zensight-correlator/docs/{keyspace,correlation}.md` gain the edge family,
+  the seed queryable, and why the identity merge never sees a relationship.
+  `zensight-common/docs/identity-evidence.md` puts `RelationshipEvidence`
+  beside `HostEvidence` — with a warning to anyone writing a consumer of
+  `evidence/**`, since that selector delivers families added after the consumer
+  was written.
+
+  `zensight-correlator/README.md` gains a **consumer recipe for topology-aware
+  alert inhibition**: the three subscriptions a key-agnostic notifier needs to
+  answer "do not page for a guest whose hypervisor is down" with no application
+  knowledge at all. Cross-posted to zenwatch (zenkey#389), which is the
+  motivating consumer.
+
+  `docs/TOPOLOGY-REDESIGN.md` gets an addendum that **quotes the position this
+  epic reverses** rather than quietly superseding it. That report's executive
+  summary says in bold that the redesign is "not a data project — it's a
+  presentation and interaction project", and §3.1 calls neighbour and gateway
+  edges "cheap constants". They were cheap, and that was the problem: cheap to
+  derive *inside the view* is exactly what kept them there. Everything the
+  report said about presentation survives intact, and §5's deferral of
+  intra-host service graphs stands — more clearly than before, since
+  `edge/{edge_id}` declares 50 000 and one edge per systemd dependency per host
+  would breach it. The lesson recorded: *"we can compute it here" is not a
+  reason to compute it here — ask who else would need the answer.*
+
 - **Link-layer adjacency is derived in the catalog, not the GUI** (completes
   #917). A third-party identity claim — `evidence/device/{device}` with
   `observer` set — says "the sensor on *this* host saw *that* device", learned

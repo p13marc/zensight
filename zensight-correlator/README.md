@@ -35,6 +35,55 @@ double-write. Only the elected owner declares `…/@catalog/state/alive` and the
 catalog publishers/queryables (deterministic merge means a partition-split pair
 would emit identical docs, so this is a safety net, not a lock).
 
+## The topology graph (#899)
+
+Beside identity, the catalog resolves **relationships**. Sensors publish claims on
+`state/<producer>/evidence/relation/{relation_id}` — pve a `Hosts` per guest, container a
+`Runs` per running container, probe a `Probes` per checked target, netlink a `GatewayOf` for
+the default route — and the correlator resolves both ends against the union-find result and
+publishes `@catalog/state/edge/{edge_id}`. `L2Adjacent` is not published by anyone: it is
+*derived* here from the observed-device identity claims already on the bus.
+
+Two properties are load-bearing:
+
+- **`edge_id` is `fnv1a_64(kind ‖ from ‖ to)` computed after resolution.** A refresh is an
+  idempotent LWW overwrite, a restart with unchanged evidence publishes nothing, and two
+  sensors seeing one relationship land on one key. Anything non-deterministic in the
+  resolver would churn tombstones and upserts forever, so every lookup is sorted before it
+  can reach the hash.
+- **`merge.rs` never sees a relationship.** An edge cannot make two machines the same
+  machine; a claim that could would be an identity claim wearing a different hat. A test
+  greps to keep it that way.
+
+### Consumer recipe: topology-aware alert inhibition
+
+For a **key-agnostic** notifier — zenwatch (zenkey#389) is the motivating case — "do not
+page for a guest whose hypervisor is down" needs three things off the bus and **no
+application knowledge at all**:
+
+1. **The edges.** `GET @catalog/@rpc/describe` for the `Edge` schema, then subscribe
+   `v1/@catalog/state/edge/*` and seed with a `GET` on the same selector (it answers
+   storage-shaped, one reply per edge on its own key). Deletes are tombstones. Filter to the
+   **containment** kinds — `hosts`, `runs`, `gateway_of`, `probes`; `l2_adjacent` is inert
+   and must not propagate, or a page floods the segment and blames a neighbour.
+2. **Alert → entity.** An alert's key carries its origin (`v1/<origin>/state/<producer>/alert/…`).
+   Subscribe `v1/@catalog/state/entity/*` and match `HostEntity.host_id == origin`; follow
+   `@catalog/state/alias/*` so an entity that has been merged still resolves. That is the
+   whole mapping — no per-application table.
+3. **Down.** Liveliness tokens: an entity is down when every member origin's
+   `…/state/<producer>/alive` is gone. What counts as "down" is deliberately the consumer's
+   decision — lost liveliness, `HostEntity.status == "offline"`, an operator marking
+   maintenance are all legitimate and differ per deployment.
+
+Then walk `from → to` over containment edges from each down entity, bounded (ZenSight caps
+at depth 4 with a visited set — the graph is built by independent sensors that have no way
+to agree there is no cycle, and two hosts can each claim to be the other's gateway from a
+stale table). Every firing alert on a reached entity is a **symptom**; the alert on the
+entity that has no down containment ancestor is the **cause**.
+
+`zensight_common::impact::attribute(edges, firing, down) -> Impact` is exactly this
+function, pure and clock-free, if a consumer would rather link it than reimplement it.
+
 ## Documentation
 
 - [`docs/correlation.md`](docs/correlation.md) — the operational merge model

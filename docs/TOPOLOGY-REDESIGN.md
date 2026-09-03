@@ -427,3 +427,51 @@ The non-goals hold: still no petgraph/fdg, no Barnes–Hut (revisit threshold do
 - [Juniper Paragon — topology visualization (cluster view)](https://www.juniper.net/documentation/us/en/software/juniper-paragon-automation2.0.0/user-guide/topics/concept/topology-visualization.html) · [LibreNMS network map](https://docs.librenms.org/Extensions/Network-Map/)
 - [Grooming the hairball — tidying network visualizations](https://www.researchgate.net/publication/281050201_Grooming_the_hairball_-_how_to_tidy_up_network_visualizations) · [Force-directed graph drawing](https://en.wikipedia.org/wiki/Force-directed_graph_drawing)
 - Rust ecosystem: [petgraph](https://github.com/petgraph/petgraph) · [fdg](https://github.com/grantshandy/fdg) (evaluated, not adopted)
+
+---
+
+## Addendum (2026-09-03): the data project, after all
+
+**This report's executive summary is wrong about one thing, and #899 is what proved it.**
+It says, in bold:
+
+> The redesign is therefore **not a data project — it's a presentation and interaction
+> project**
+
+and §3.1 dismisses the structural half of the graph in a clause:
+
+> Neighbor and gateway edges are cheap constants.
+
+They were cheap, and that was the problem. Being cheap to derive *inside the view* is
+exactly what kept them inside the view. The neighbour table, the `routes/default_v4_gw`
+metric and the asset inventory were all on the bus; the *conclusion drawn from them* —
+"these two machines are adjacent", "this is that host's gateway" — existed only in the
+memory of a running GUI. Every consumer that wanted the graph had to re-derive it, and the
+two that most obviously want it (an exporter and a notifier) had no way to.
+
+So the topology graph became a data project after all. Milestone 0.15.0 (#899) moved both
+halves onto the bus:
+
+| | before | after |
+|---|---|---|
+| Inputs | netlink neighbour/gateway `@rpc` GETs, read by each GUI | `state/<producer>/evidence/relation/{relation_id}` — pve, container, probe, netlink |
+| Conclusion | derived per-GUI in `rebuild_edges` | `@catalog/state/edge/{edge_id}` — the correlator, once |
+| Consumers | one open GUI | anything that can subscribe |
+
+**What this report got right, and #899 did not touch.** Everything about *presentation*:
+lenses, grouping, focus, the side panel, the tiered layout, the Shneiderman mantra. The
+graph model is still typed, directed and rate-weighted; the view still reads it the same
+way. What changed is where the structural half comes from, not what is done with it. Phase
+1–4's framing survives intact.
+
+**And §5's deferral still stands.** "Intra-host service graph (systemd unit deps as
+sub-topology) — belongs in the device drill-in" is, if anything, more clearly right now:
+`edge/{edge_id}` declares a cardinality of 50 000, and one edge per systemd dependency per
+host would breach it on a modest fleet. The same reasoning is why **flow adjacency is not a
+relation kind**: per-observed-peer, unbounded, and therefore an `@rpc` overlay rather than
+budgeted catalog state. §3.1's instinct that flow edges belong to a query and structural
+edges to something cheaper was sound — it just put the cheap thing in the wrong place.
+
+The one thing to carry forward from the mistake: **"we can compute it here" is not a reason
+to compute it here.** Ask who else would need the answer.
+

@@ -16,8 +16,10 @@ flowchart LR
     Self["self-report sensor (observer: None)"] -->|"HostEvidence"| Evidence["state/*/evidence/**"]
     Third["third-party observer (observer: Some(sensor))"] -->|"HostEvidence"| Evidence
     Third -->|"NameObservation"| Evidence
+    Rel["relationship observer (pve/container/probe/netlink)"] -->|"RelationshipEvidence"| Evidence
     Evidence --> Correlator["catalog (single writer)"]
     Correlator -->|"HostEntity"| Entity["@catalog/state/entity/&lt;id&gt;"]
+    Correlator -->|"Edge"| Edge["@catalog/state/edge/&lt;edge_id&gt; (#917)"]
     Correlator -->|"PdnsRecord"| Pdns["@catalog/state/pdns/&lt;ip-slug&gt; (durable, #310)"]
 ```
 
@@ -74,6 +76,31 @@ Merge strength of the identifying fields (strongest first): `host_id` >
 - **`CloudFacts`** (`provider`, `instance_id`, optional `region` / `account`) is
   authoritative: cloned images duplicate machine-ids, but a cloud control plane
   never hands out an instance id twice.
+
+## RelationshipEvidence
+
+The third thing under `evidence/**`, and the one that is **not about identity** (#915).
+`relation.rs`; published on
+`zensight/v1/<origin>/state/<producer>/evidence/relation/<relation_id>`.
+
+A claim that two things are connected: a `kind`
+(`hosts` · `runs` · `gateway_of` · `probes` · `l2_adjacent`) and two `EndpointClaim`s. Like
+`HostEvidence` it carries what was *observed* — a vmid, a MAC, a gateway address, a target
+name — and never an entity id: resolving a claim to an entity needs the union-find, and only
+the catalog has run it. The catalog's output, `Edge`, is the resolved form, whose ends are
+an entity id or an honest `External` for something the fleet can see and runs no sensor on.
+
+`relation_id` derives from `(kind, from, to)` and nothing else — no timestamp, no publisher
+— so a refresh is an idempotent LWW overwrite on one key rather than a document per
+observation.
+
+**A note for anyone writing a consumer of `evidence/**`.** That selector is a hand-spelled
+union of several families, so *every* evidence subject reaches a subscriber of it, including
+ones added after the subscriber was written. `HostEvidence` carries no
+`deny_unknown_fields` and requires only `sensor` and `source`, both of which a relationship
+claim has — so a handler that filters by key substring rather than by refined subject will
+decode a relation document as a host-identity claim, cleanly and silently. Dispatch on the
+subject, and ignore subjects you do not recognise.
 
 ## NameObservation
 

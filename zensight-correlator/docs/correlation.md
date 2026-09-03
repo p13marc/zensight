@@ -188,6 +188,32 @@ set — because its evidence aged out past the TTL, was explicitly removed (an
 evidence `DELETE` becomes `RemoveHost`, dropping the claim immediately rather than
 waiting for the TTL), or was subsumed into an alias by an id upgrade.
 
+## Relationships are a second output, not a second input
+
+The catalog resolves relationship claims into `@catalog/state/edge/<edge_id>` (#917), and
+the merge above **never sees them**. That is a deliberate boundary, not an accident of
+layering: an edge cannot make two machines the same machine, and a claim that could would be
+an identity claim wearing a different hat. Entangling the two would mean anyone touching
+either has to reason about both, and the merge's determinism is what every other guarantee
+here rests on. A test greps `merge.rs` to keep it true.
+
+Resolution runs strictly **after** `recompute`, reading the union-find's finished answer, and
+ranks signals the same way the merge does — `host_id`, then device slug through the entity's
+member sources, then IP, then MAC, then name — so a weaker signal cannot override a stronger
+one. Ends that resolve to nothing *known* become `Endpoint::External`, the honest answer for
+an upstream router; ends that named nothing at all drop the edge, because half an edge looks
+like a discovery.
+
+`L2Adjacent` is the one kind no sensor publishes: it is derived here from the observed-device
+identity claims already on the bus ("the sensor on this host saw that device" is a statement
+about a link-layer segment). It is expressed as synthetic `RelationshipEvidence` and pushed
+through the same resolver as every real claim — a second construction path would be a second
+place for `edge_id` to be computed differently.
+
+Determinism is the acceptance: same evidence in any order ⇒ byte-identical edge set; a
+restart with unchanged evidence publishes nothing; a refresh that moved only a timestamp
+publishes nothing.
+
 ## Names accumulate (they don't replace)
 
 The `NameStore` is the one store that accumulates. Passive-DNS publishes one
