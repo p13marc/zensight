@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A `burst` probe kind: latency, jitter and loss for a link** (#958, part of
+  #952 — SYS-SUP-008's jitter half). Latency was measured and loss was
+  inferable, but **nothing in the tree computed jitter for a link** — the only
+  "jitter" was the RTP buffer inside the parallax pipeline. A single-shot check
+  per interval cannot produce a delay-variation figure at all: one sample has
+  no variation, which is why this is a kind of its own rather than a flag on
+  `tcp`.
+
+  Smokeping-shaped: `count` probes (default 10, capped at 50) `spacing_ms`
+  apart (default 100) in one interval, reduced to `rtt_min_ms` / `rtt_avg_ms` /
+  `rtt_max_ms` / `rtt_p95_ms`, `jitter_ms`, `loss_pct` and `sent`/`received`.
+  `transport` is `"tcp"` (connect RTT, no capability, what CI and the demo use)
+  or `"icmp"` (the existing build feature, `CAP_NET_RAW`); startup refuses an
+  icmp burst in a build without the feature, as it already does for a plain
+  icmp target.
+
+  Four decisions where the obvious implementation produces a **wrong number
+  rather than a missing one**, each with a test:
+
+  - **A total loss publishes `loss_pct: 100` and no RTT series at all** — not
+    zeros. A zero is indistinguishable from a perfect link, and a consumer
+    averaging it silently improves the fleet's numbers every time a link dies.
+    The fields are genuinely absent from the wire, not null.
+  - **Jitter spans only *consecutive* successes.** A burst that lost its middle
+    would otherwise report the gap the loss left as delay variation. Fewer than
+    two consecutive successes ⇒ loss and RTTs, no jitter.
+  - **A timed-out probe counts as lost, not as a slow sample.** Recording it at
+    the timeout value drags the average toward a number the link never produced
+    and makes a dying link look merely slow.
+  - **p95 is nearest-rank.** An interpolating percentile invents a value
+    between two measurements that the link never exhibited.
+
+  The check's *outcome* is separate from the loss inside it: it fails only when
+  nothing answered. A burst that lost half its probes succeeded at measuring
+  50% loss, and reporting that as a failed check would hide the number behind
+  the failure.
+
+  One new startup refusal: **`count × (spacing + timeout)` must fit inside the
+  interval.** Overlapping bursts do not merely queue — the figures then
+  describe two overlapping bursts rather than one link — and the refusal names
+  what to change.
+
+  **No built-in jitter or loss threshold.** `probe` refuses built-in latency
+  thresholds ("a number this sensor cannot know") and that stance holds; the
+  figures go on the bus for the GUI, the exporters and the historian, and
+  thresholds arrive with the shared `ThresholdsConfig` (#931).
+
 - **Detection latency is measured and asserted** (#961, part of #952 —
   SYS-SUP-004's timing half). The requirement puts a number on it — a newly
   connected communication means detected and shown in under 10 seconds — and

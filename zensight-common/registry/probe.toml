@@ -21,7 +21,7 @@
 # acquire one.
 
 [registry]
-version = "1.1"
+version = "1.2"
 app = "zensight"
 convention = 1
 
@@ -94,6 +94,54 @@ type = "TelemetryPoint"
 cardinality = 512
 since = "1.0"
 description = "how many records the resolver returned"
+
+[[subject]]
+path = "{target}/rtt_min_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.2"
+description = "fastest round trip in the burst (#958); absent when every probe was lost"
+
+[[subject]]
+path = "{target}/rtt_avg_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.2"
+description = "mean round trip over the answering probes in the burst (#958)"
+
+[[subject]]
+path = "{target}/rtt_max_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.2"
+description = "slowest round trip in the burst (#958)"
+
+[[subject]]
+path = "{target}/rtt_p95_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.2"
+description = "95th-percentile round trip, nearest-rank (#958)"
+
+[[subject]]
+path = "{target}/jitter_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.2"
+description = "mean absolute inter-packet delay variation (RFC 3393 IPDV) over CONSECUTIVE successful probes (#958); absent below two consecutive successes"
+
+[[subject]]
+path = "{target}/loss_pct"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.2"
+description = "percentage of the burst's probes that did not answer (#958); published even at 100%, where the RTT series are absent rather than zero"
 
 [[subject]]
 path = "targets/total"

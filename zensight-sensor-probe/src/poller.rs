@@ -194,6 +194,25 @@ impl Poller {
                     points.push((format!("{slug}/http_ttfb_ms"), t));
                 }
             }
+            if let Some(b) = &r.burst {
+                // Loss is always published — a total loss is a measurement.
+                points.push((format!("{slug}/loss_pct"), b.loss_pct));
+                // The RTT series are published only when something was
+                // actually measured. A zero here would be indistinguishable
+                // from a perfect link, and a dashboard averaging it would
+                // silently improve every time a link died.
+                for (metric, value) in [
+                    ("rtt_min_ms", b.rtt_min_ms),
+                    ("rtt_avg_ms", b.rtt_avg_ms),
+                    ("rtt_max_ms", b.rtt_max_ms),
+                    ("rtt_p95_ms", b.rtt_p95_ms),
+                    ("jitter_ms", b.jitter_ms),
+                ] {
+                    if let Some(v) = value {
+                        points.push((format!("{slug}/{metric}"), v));
+                    }
+                }
+            }
             if let Some(t) = &r.tls {
                 if let Some(d) = t.days_to_expiry {
                     points.push((format!("{slug}/tls_days_to_expiry"), d as f64));

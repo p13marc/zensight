@@ -96,6 +96,30 @@
       // a build without it, naming the tcp alternative, rather than letting
       // the check silently never run.
       // { name: "gateway", kind: "icmp", target: "10.0.0.1" },
+
+      // A BURST: `count` probes `spacing_ms` apart in one interval, reduced to
+      // rtt min/avg/max/p95, JITTER and LOSS (#958). A single-shot check per
+      // interval cannot produce a delay-variation figure at all — one sample
+      // has no variation — which is why this is its own kind.
+      //
+      // `transport: "tcp"` (the default) is connect-RTT and needs no
+      // capability; "icmp" needs the `icmp` build feature and CAP_NET_RAW, and
+      // startup refuses it in a build without them. The two are NOT
+      // comparable (a TCP connect RTT includes the peer's accept path), which
+      // is why the transport is published beside the numbers.
+      //
+      // Startup also refuses a burst that cannot finish inside its own
+      // interval — count x (spacing + timeout) must fit, or the figures
+      // describe two overlapping bursts rather than one link. With the
+      // defaults (10 probes, 100 ms apart) keep `timeout_secs` small: a
+      // reachability measurement wants a short timeout anyway.
+      //
+      // There is deliberately NO built-in jitter or loss threshold: a number
+      // this sensor cannot know. The figures go on the bus for the GUI, the
+      // exporters and the historian; thresholds arrive with #931.
+      // { name: "uplink", kind: "burst", target: "10.0.0.1:443",
+      //   count: 10, spacing_ms: 100, transport: "tcp",
+      //   interval_secs: 30, timeout_secs: 1 },
     ],
 
     alerts: {

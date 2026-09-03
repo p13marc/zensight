@@ -16,6 +16,17 @@ use zensight_sensor_core::{LoggingConfig, SensorConfig};
 /// footgun with a config file.
 pub const MIN_INTERVAL_SECS: u64 = 5;
 
+/// Cap on `burst.count` (#958). A burst is a measurement, not a load
+/// generator: fifty probes at the 100 ms default is five seconds of traffic,
+/// already the whole minimum interval.
+pub const MAX_BURST_COUNT: u32 = 50;
+
+/// Default probes per burst.
+pub const DEFAULT_BURST_COUNT: u32 = 10;
+
+/// Default milliseconds between probes in a burst.
+pub const DEFAULT_BURST_SPACING_MS: u64 = 100;
+
 fn default_interval() -> u64 {
     60
 }
@@ -124,6 +135,30 @@ pub struct Target {
     pub headers: Vec<(String, String)>,
 
     // ── TLS ──────────────────────────────────────────────────────────────
+    /// `burst` only (#958): how many probes to send in one interval. Default
+    /// 10, capped at [`MAX_BURST_COUNT`] — a burst is a measurement, not a
+    /// load generator, and an uncapped count against a satellite link is
+    /// indistinguishable from abuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+
+    /// `burst` only: milliseconds between probes. Default 100.
+    ///
+    /// Spacing is what makes the figure a *delay variation* rather than a
+    /// congestion measurement: probes sent back to back measure how the link
+    /// responds to the burst itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_ms: Option<u64>,
+
+    /// `burst` only: `"tcp"` (default, no capability) or `"icmp"` (needs the
+    /// `icmp` build feature and `CAP_NET_RAW`).
+    ///
+    /// The two are **not comparable** — a TCP connect RTT includes the peer's
+    /// accept path — which is why the transport is published beside the
+    /// numbers rather than left for a consumer to assume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+
     /// SNI name to send and to match SANs against. Defaults to the target's
     /// host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,6 +245,31 @@ impl Target {
         self.timeout_secs.unwrap_or(default)
     }
 
+    /// Probes per burst, capped.
+    pub fn burst_count(&self) -> u32 {
+        self.count
+            .unwrap_or(DEFAULT_BURST_COUNT)
+            .min(MAX_BURST_COUNT)
+    }
+
+    /// Milliseconds between probes in a burst.
+    pub fn burst_spacing_ms(&self) -> u64 {
+        self.spacing_ms.unwrap_or(DEFAULT_BURST_SPACING_MS)
+    }
+
+    /// Which transport a burst uses.
+    pub fn burst_transport(&self) -> &str {
+        self.transport.as_deref().unwrap_or("tcp")
+    }
+
+    /// Worst-case wall time for one burst: every probe spaced, every probe
+    /// timing out. This is what must fit inside the interval.
+    pub fn burst_worst_case_secs(&self, default_timeout: u64) -> u64 {
+        let n = self.burst_count() as u64;
+        let spacing_total = n.saturating_sub(1) * self.burst_spacing_ms() / 1000;
+        spacing_total + n * self.timeout(default_timeout)
+    }
+
     /// The host this target is about — for SNI, for SAN matching, and for
     /// deciding whether a redirect left it.
     pub fn host(&self) -> Option<String> {
@@ -233,6 +293,14 @@ impl Target {
                     .to_string(),
             ),
             ProbeKind::Dns | ProbeKind::Icmp => Some(self.target.clone()),
+            // A burst target is `host:port` for tcp and a bare host for icmp.
+            ProbeKind::Burst => Some(
+                self.target
+                    .rsplit_once(':')
+                    .map_or(self.target.as_str(), |(h, _)| h)
+                    .trim_matches(['[', ']'])
+                    .to_string(),
+            ),
             ProbeKind::CertFile => None,
         }
     }
@@ -324,6 +392,52 @@ impl SensorConfig for ProbeSensorConfig {
                      use a tcp probe, which needs nothing",
                     t.name
                 )),
+                ProbeKind::Burst => {
+                    // Same refusal as a plain icmp target, for the same
+                    // reason: a check the build cannot answer for must be
+                    // refused at startup, not discovered as a permanent
+                    // failure on the bus.
+                    if t.burst_transport() == "icmp" && !cfg!(feature = "icmp") {
+                        problems.push(format!(
+                            "target {:?} is an icmp burst, but this build has no `icmp` \
+                             feature — it needs a raw socket (CAP_NET_RAW). Build with \
+                             --features icmp, or use transport \"tcp\", which needs nothing",
+                            t.name
+                        ));
+                    }
+                    if !matches!(t.burst_transport(), "tcp" | "icmp") {
+                        problems.push(format!(
+                            "target {:?}: burst transport {:?} is not \"tcp\" or \"icmp\"",
+                            t.name,
+                            t.burst_transport()
+                        ));
+                    }
+                    if t.burst_transport() == "tcp" && !t.target.contains(':') {
+                        problems.push(format!(
+                            "target {:?}: a tcp burst needs host:port, got {:?}",
+                            t.name, t.target
+                        ));
+                    }
+                    if t.count == Some(0) {
+                        problems.push(format!("target {:?}: burst count must be > 0", t.name));
+                    }
+                    // The bound the issue asks for: a burst that cannot finish
+                    // inside its own interval overlaps the next one, and the
+                    // figures then describe two overlapping bursts rather than
+                    // one link.
+                    let worst = t.burst_worst_case_secs(p.timeout_secs);
+                    if worst >= interval {
+                        problems.push(format!(
+                            "target {:?}: a burst of {} probes {}ms apart with a {timeout}s \
+                             timeout can take {worst}s, which does not fit in its {interval}s \
+                             interval — raise the interval, or lower the count, spacing or \
+                             timeout",
+                            t.name,
+                            t.burst_count(),
+                            t.burst_spacing_ms(),
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -343,6 +457,94 @@ impl SensorConfig for ProbeSensorConfig {
 
 #[cfg(test)]
 mod tests {
+
+    /// A burst that cannot finish inside its own interval is refused.
+    ///
+    /// Overlapping bursts do not merely queue: the figures then describe two
+    /// overlapping bursts rather than one link, which is a wrong number rather
+    /// than a late one.
+    #[test]
+    fn a_burst_that_overruns_its_interval_is_refused() {
+        let cfg = burst_config(|t| {
+            t.count = Some(20);
+            t.spacing_ms = Some(1000);
+            t.interval_secs = Some(10);
+            t.timeout_secs = Some(2);
+        });
+        let err = cfg.validate().expect_err("must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("does not fit"), "{msg}");
+        assert!(
+            msg.contains("raise the interval"),
+            "the refusal must say what to change: {msg}"
+        );
+    }
+
+    /// The default burst fits comfortably in the minimum interval.
+    #[test]
+    fn the_default_burst_fits_the_minimum_interval() {
+        // 10 probes, 100 ms apart, 1 s timeout: 0.9 s of spacing plus at most
+        // 10 s of timeouts — which does NOT fit in 5 s, and that is the point:
+        // the default timeout has to be small for a burst.
+        let cfg = burst_config(|t| {
+            t.interval_secs = Some(5);
+            t.timeout_secs = Some(1);
+        });
+        assert!(
+            cfg.validate().is_err(),
+            "10 x 1s timeouts cannot fit in 5s and must be refused"
+        );
+        // A realistic burst config: a short timeout, which is what a
+        // reachability measurement wants anyway.
+        let cfg = burst_config(|t| {
+            t.interval_secs = Some(30);
+            t.timeout_secs = Some(1);
+        });
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+    }
+
+    #[test]
+    fn burst_count_is_capped_and_transport_defaults_to_tcp() {
+        let t = target_burst(|t| t.count = Some(10_000));
+        assert_eq!(t.burst_count(), MAX_BURST_COUNT);
+        assert_eq!(target_burst(|_| {}).burst_count(), DEFAULT_BURST_COUNT);
+        assert_eq!(target_burst(|_| {}).burst_transport(), "tcp");
+        assert_eq!(
+            target_burst(|_| {}).burst_spacing_ms(),
+            DEFAULT_BURST_SPACING_MS
+        );
+    }
+
+    #[test]
+    fn a_tcp_burst_needs_a_port_and_an_unknown_transport_is_refused() {
+        let cfg = burst_config(|t| {
+            t.target = "example.test".into();
+            t.interval_secs = Some(30);
+            t.timeout_secs = Some(1);
+        });
+        assert!(format!("{}", cfg.validate().unwrap_err()).contains("host:port"));
+
+        let cfg = burst_config(|t| {
+            t.transport = Some("udp".into());
+            t.interval_secs = Some(30);
+            t.timeout_secs = Some(1);
+        });
+        assert!(format!("{}", cfg.validate().unwrap_err()).contains("not \"tcp\" or \"icmp\""));
+    }
+
+    fn target_burst(f: impl FnOnce(&mut Target)) -> Target {
+        let mut t: Target =
+            serde_json::from_str(r#"{"name":"link","kind":"burst","target":"example.test:443"}"#)
+                .expect("burst target");
+        f(&mut t);
+        t
+    }
+
+    fn burst_config(f: impl FnOnce(&mut Target)) -> ProbeSensorConfig {
+        let mut c: ProbeSensorConfig = serde_json::from_str("{}").expect("defaults");
+        c.probe.targets = vec![target_burst(f)];
+        c
+    }
     use super::*;
 
     fn cfg(json: &str) -> std::result::Result<ProbeSensorConfig, String> {

@@ -241,6 +241,7 @@ mod tests {
             http: None,
             tls: None,
             dns: None,
+            burst: None,
             vantage: "vm-apps".into(),
             observed_at_ms: 0,
         }

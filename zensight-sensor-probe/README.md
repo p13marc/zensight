@@ -81,6 +81,33 @@ interval. A check that can outlive its own tick is queued, not bounded.
 | `tcp` | connect success, connect time |
 | `icmp` | reachability — build feature `icmp`, off by default, needs `CAP_NET_RAW` |
 | `certfile` | a PEM's `notAfter`, with no network at all |
+| `burst` | **latency, jitter and loss for a link** — `count` probes `spacing_ms` apart in one interval, reduced to rtt min/avg/max/p95, mean absolute IPDV and loss % |
+
+### What a burst is careful about
+
+A single-shot check per interval cannot produce a jitter figure at all — one
+sample has no variation. Three things follow, and each is the difference
+between a number and a wrong number:
+
+- **A total loss publishes `loss_pct: 100` and no RTT series at all** — not
+  zeros. A zero is indistinguishable from a perfect link, and a dashboard
+  averaging it improves the fleet's numbers every time a link dies.
+- **Jitter spans only *consecutive* successes.** Bridging a gap would report
+  the gap the loss left as delay variation. A burst with fewer than two
+  consecutive successes publishes loss and RTTs but no jitter.
+- **Startup refuses a burst that cannot finish inside its own interval.**
+  Overlapping bursts do not merely queue: the figures then describe two
+  overlapping bursts rather than one link.
+
+`tcp` transport works in a default build with no capability; `icmp` needs the
+`icmp` feature and `CAP_NET_RAW`, and startup refuses it in a build without
+them. The two are **not comparable** — a TCP connect RTT includes the peer's
+accept path — so the transport is published beside the numbers.
+
+There is **no built-in jitter or loss threshold**, for the reason this sensor
+refuses built-in latency thresholds: a number it cannot know. The figures go on
+the bus for the GUI, the exporters and the historian; thresholds arrive with
+the shared `ThresholdsConfig` (#931).
 
 ## Running it
 

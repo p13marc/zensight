@@ -38,6 +38,11 @@ pub enum ProbeKind {
     Icmp,
     /// A PEM on disk. No network at all.
     CertFile,
+    /// A **burst** of probes in one interval, producing delay variation and
+    /// loss (#958). A single-shot check per interval cannot produce a jitter
+    /// figure at all — one sample has no variation — which is why this is a
+    /// kind of its own rather than a flag on `tcp`/`icmp`.
+    Burst,
 }
 
 impl ProbeKind {
@@ -49,6 +54,7 @@ impl ProbeKind {
             ProbeKind::Tcp => "tcp",
             ProbeKind::Icmp => "icmp",
             ProbeKind::CertFile => "certfile",
+            ProbeKind::Burst => "burst",
         }
     }
 }
@@ -155,6 +161,118 @@ pub struct DnsResult {
     pub expected_matched: Option<bool>,
 }
 
+/// A burst's delay-variation and loss figures (#958).
+///
+/// Smokeping-shaped: `count` probes spaced `spacing_ms` apart within one
+/// interval, reduced to the numbers a link is judged by.
+///
+/// **Every RTT field is optional and absent means "not measured".** A burst in
+/// which every probe was lost publishes `loss_pct: 100` and *no* RTT or jitter
+/// — not zeros. A zero would be indistinguishable from a perfect link, which is
+/// the exact opposite of what happened, and a consumer averaging it would
+/// silently improve the fleet's numbers every time a link died.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct BurstResult {
+    /// Probes attempted.
+    pub sent: u32,
+    /// Probes that answered.
+    pub received: u32,
+    /// Loss as a percentage of `sent`. Always present — a total loss is a
+    /// measurement, unlike the RTT fields it suppresses.
+    pub loss_pct: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_min_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_avg_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_p95_ms: Option<f64>,
+    /// Mean absolute inter-packet delay variation (RFC 3393 IPDV, the
+    /// smokeping/RFC 1889 definition) over **consecutive successful** probes.
+    ///
+    /// Needs at least two successes to exist, so a burst with one survivor
+    /// publishes loss and RTTs but no jitter. Computing it over
+    /// non-consecutive probes would measure the gaps the losses left, not the
+    /// link's delay variation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_ms: Option<f64>,
+    /// Which transport produced these numbers: `"tcp"` or `"icmp"`. They are
+    /// not comparable — a TCP connect RTT includes the peer's accept path —
+    /// so a consumer charting both needs to know which it has.
+    pub transport: String,
+}
+
+impl BurstResult {
+    /// Reduce a burst's per-probe outcomes to the published figures.
+    ///
+    /// `samples` is one entry per probe **in send order**, `None` for a probe
+    /// that did not answer. Order matters: jitter is computed only across
+    /// consecutive successes, and reordering the input would measure something
+    /// else.
+    pub fn reduce(samples: &[Option<f64>], transport: &str) -> BurstResult {
+        let sent = samples.len() as u32;
+        let ok: Vec<f64> = samples.iter().flatten().copied().collect();
+        let received = ok.len() as u32;
+        let loss_pct = if sent == 0 {
+            0.0
+        } else {
+            ((sent - received) as f64 / sent as f64) * 100.0
+        };
+        if ok.is_empty() {
+            return BurstResult {
+                sent,
+                received,
+                loss_pct,
+                rtt_min_ms: None,
+                rtt_avg_ms: None,
+                rtt_max_ms: None,
+                rtt_p95_ms: None,
+                jitter_ms: None,
+                transport: transport.to_string(),
+            };
+        }
+        let mut sorted = ok.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Nearest-rank p95: with ten samples the honest answer is the largest,
+        // and an interpolating percentile would invent a value between two
+        // measurements that a link never exhibited.
+        let idx = (((sorted.len() as f64) * 0.95).ceil() as usize).max(1) - 1;
+        let p95 = sorted[idx.min(sorted.len() - 1)];
+
+        // IPDV over CONSECUTIVE successes only. `samples` is in send order, so
+        // a lost probe breaks the chain rather than joining the probes either
+        // side of it — otherwise a burst that lost its middle would report the
+        // gap the loss left as delay variation.
+        let mut diffs = Vec::new();
+        let mut prev: Option<f64> = None;
+        for s in samples {
+            match s {
+                Some(v) => {
+                    if let Some(p) = prev {
+                        diffs.push((v - p).abs());
+                    }
+                    prev = Some(*v);
+                }
+                None => prev = None,
+            }
+        }
+        let jitter_ms = (!diffs.is_empty()).then(|| diffs.iter().sum::<f64>() / diffs.len() as f64);
+
+        BurstResult {
+            sent,
+            received,
+            loss_pct,
+            rtt_min_ms: Some(sorted[0]),
+            rtt_avg_ms: Some(ok.iter().sum::<f64>() / ok.len() as f64),
+            rtt_max_ms: Some(sorted[sorted.len() - 1]),
+            rtt_p95_ms: Some(p95),
+            jitter_ms,
+            transport: transport.to_string(),
+        }
+    }
+}
+
 /// One target's result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProbeResult {
@@ -178,6 +296,9 @@ pub struct ProbeResult {
     pub tls: Option<TlsResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<DnsResult>,
+    /// Delay variation and loss, for a `burst` check (#958).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<BurstResult>,
     /// Where this probe ran from. The same target checked from the edge, from
     /// a guest and from a workstation gives three different and equally true
     /// answers; without the vantage point they are indistinguishable.
@@ -209,6 +330,93 @@ pub fn san_matches(san: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// The figures a burst reduces to, on a burst that lost nothing.
+    #[test]
+    fn a_clean_burst_reduces_to_its_measurements() {
+        let b = BurstResult::reduce(&[Some(10.0), Some(12.0), Some(11.0), Some(30.0)], "tcp");
+        assert_eq!((b.sent, b.received), (4, 4));
+        assert_eq!(b.loss_pct, 0.0);
+        assert_eq!(b.rtt_min_ms, Some(10.0));
+        assert_eq!(b.rtt_max_ms, Some(30.0));
+        assert_eq!(b.rtt_avg_ms, Some(15.75));
+        // Nearest-rank p95 over four samples is the largest: an interpolating
+        // percentile would invent a value the link never exhibited.
+        assert_eq!(b.rtt_p95_ms, Some(30.0));
+        // IPDV: |12-10| + |11-12| + |30-11| = 2 + 1 + 19, over 3 gaps.
+        assert_eq!(b.jitter_ms, Some((2.0 + 1.0 + 19.0) / 3.0));
+        assert_eq!(b.transport, "tcp");
+    }
+
+    /// A total loss publishes loss and **no RTT fields at all**.
+    #[test]
+    fn a_total_loss_publishes_no_rtt_not_zero() {
+        let b = BurstResult::reduce(&[None, None, None], "icmp");
+        assert_eq!((b.sent, b.received), (3, 0));
+        assert_eq!(b.loss_pct, 100.0);
+        // Zeros here would be indistinguishable from a perfect link — the
+        // exact opposite of what happened — and a consumer averaging them
+        // would silently improve the fleet's numbers every time a link died.
+        assert!(b.rtt_min_ms.is_none());
+        assert!(b.rtt_avg_ms.is_none());
+        assert!(b.rtt_max_ms.is_none());
+        assert!(b.rtt_p95_ms.is_none());
+        assert!(b.jitter_ms.is_none());
+        // And they are genuinely absent from the wire, not null.
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(!json.contains("rtt_"), "{json}");
+        assert!(!json.contains("jitter"), "{json}");
+        assert!(json.contains("\"loss_pct\":100"), "{json}");
+    }
+
+    /// One survivor gives RTTs but no jitter: variation needs two points.
+    #[test]
+    fn a_single_survivor_has_rtts_but_no_jitter() {
+        let b = BurstResult::reduce(&[None, Some(7.5), None], "tcp");
+        assert_eq!(b.received, 1);
+        assert_eq!(b.rtt_min_ms, Some(7.5));
+        assert_eq!(b.rtt_avg_ms, Some(7.5));
+        assert!(
+            b.jitter_ms.is_none(),
+            "delay variation across one sample is not a number"
+        );
+    }
+
+    /// Jitter spans only **consecutive** successes.
+    #[test]
+    fn a_loss_breaks_the_jitter_chain_rather_than_bridging_it() {
+        // 10, lost, 100. Bridging would report 90 ms of "delay variation"
+        // that is really the gap the loss left; the honest answer is that no
+        // consecutive pair was measured, so there is no jitter figure.
+        let b = BurstResult::reduce(&[Some(10.0), None, Some(100.0)], "icmp");
+        assert_eq!(b.received, 2);
+        assert!(
+            b.jitter_ms.is_none(),
+            "no two consecutive probes both answered: {:?}",
+            b.jitter_ms
+        );
+        // But a pair that IS consecutive still counts, even beside a loss.
+        let b = BurstResult::reduce(&[Some(10.0), Some(14.0), None, Some(100.0)], "icmp");
+        assert_eq!(b.jitter_ms, Some(4.0));
+    }
+
+    /// Order is meaningful: jitter is not a property of the multiset.
+    #[test]
+    fn reordering_the_samples_changes_the_jitter() {
+        let ascending = BurstResult::reduce(&[Some(10.0), Some(20.0), Some(30.0)], "tcp");
+        let jagged = BurstResult::reduce(&[Some(10.0), Some(30.0), Some(20.0)], "tcp");
+        // Same samples, same min/avg/max — different delay variation.
+        assert_eq!(ascending.rtt_avg_ms, jagged.rtt_avg_ms);
+        assert_eq!(ascending.jitter_ms, Some(10.0));
+        assert_eq!(jagged.jitter_ms, Some(15.0));
+    }
+
+    #[test]
+    fn loss_is_a_percentage_of_what_was_sent() {
+        let b = BurstResult::reduce(&[Some(1.0), None, None, None], "tcp");
+        assert_eq!(b.loss_pct, 75.0);
+        assert_eq!(BurstResult::reduce(&[], "tcp").loss_pct, 0.0);
+    }
     use super::*;
 
     #[test]
@@ -259,6 +467,7 @@ mod tests {
                 ..Default::default()
             }),
             dns: None,
+            burst: None,
             vantage: "vm-dev".into(),
             observed_at_ms: 0,
         };

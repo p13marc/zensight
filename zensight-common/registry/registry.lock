@@ -463,6 +463,12 @@ subject	probe	{target}/dns_answers	telemetry	TelemetryPoint
 subject	probe	{target}/duration_ms	telemetry	TelemetryPoint
 subject	probe	{target}/http_status	telemetry	TelemetryPoint
 subject	probe	{target}/http_ttfb_ms	telemetry	TelemetryPoint
+subject	probe	{target}/jitter_ms	telemetry	TelemetryPoint
+subject	probe	{target}/loss_pct	telemetry	TelemetryPoint
+subject	probe	{target}/rtt_avg_ms	telemetry	TelemetryPoint
+subject	probe	{target}/rtt_max_ms	telemetry	TelemetryPoint
+subject	probe	{target}/rtt_min_ms	telemetry	TelemetryPoint
+subject	probe	{target}/rtt_p95_ms	telemetry	TelemetryPoint
 subject	probe	{target}/timeout	telemetry	TelemetryPoint
 subject	probe	{target}/tls_chain_valid	telemetry	TelemetryPoint
 subject	probe	{target}/tls_days_to_expiry	telemetry	TelemetryPoint
