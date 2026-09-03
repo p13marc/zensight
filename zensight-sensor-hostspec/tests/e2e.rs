@@ -148,6 +148,14 @@ async fn the_sentinel_contract_end_to_end() {
     // so a GET fired the instant the alerts arrive can honestly see
     // `evaluated_at_ms == 0` ("not yet evaluated") — poll briefly for the
     // completed snapshot instead of racing it.
+    //
+    // **No reply is also "not yet"**, and this loop used to treat it as a
+    // failure: `recv_async().expect("spec reply")` on an empty reply set
+    // panicked with `Disconnected`. The queryable is declared inside a spawned
+    // task, so on a loaded runner the first GET can legitimately land before
+    // it exists — the same DECLARATION_GRACE window `SensorRunner` waits out
+    // in production. Retrying is the whole point of the loop; it just did not
+    // cover the case where nobody answered at all.
     let mut eval = HostspecEvaluation::default();
     for _ in 0..50 {
         let replies = session
@@ -155,15 +163,21 @@ async fn the_sentinel_contract_end_to_end() {
             .timeout(Duration::from_secs(5))
             .await
             .expect("spec get");
-        let reply = replies.recv_async().await.expect("spec reply");
-        let sample = reply.result().expect("spec ok");
-        eval = serde_json::from_slice(&sample.payload().to_bytes()).expect("spec decodes");
-        if eval.evaluated_at_ms > 0 {
-            break;
+        if let Ok(reply) = replies.recv_async().await
+            && let Ok(sample) = reply.result()
+        {
+            eval = serde_json::from_slice(&sample.payload().to_bytes()).expect("spec decodes");
+            if eval.evaluated_at_ms > 0 {
+                break;
+            }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(eval.evaluated_at_ms > 0, "a sweep completed within 5s");
+    assert!(
+        eval.evaluated_at_ms > 0,
+        "no completed sweep within 5s — the spec queryable never answered, or answered \
+         `evaluated_at_ms == 0` every time"
+    );
     let status = |rule: &str| {
         eval.assertions
             .iter()

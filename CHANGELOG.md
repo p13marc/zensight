@@ -66,6 +66,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **hostspec's e2e treated "nobody answered" as a failure** — the flake that
+  reddened the #900 stack.
+
+  Step 2 polls `@rpc/hostspec/spec` up to fifty times, because the evaluation
+  snapshot lands at the *end* of a sweep and a GET fired the instant the alerts
+  arrive can honestly see `evaluated_at_ms == 0`. But it did
+  `recv_async().expect("spec reply")`, so a GET that returned **no reply at
+  all** panicked with `Disconnected` instead of going round the loop.
+
+  No reply is the same "not yet" the loop already exists for: the queryable is
+  declared inside a spawned task, so on a loaded runner the first GET can land
+  before it exists — the window `SensorRunner` waits out as
+  `DECLARATION_GRACE` in production.
+
+  It became likely rather than theoretical with #932, which took that binary
+  from one test to three, each with its own Zenoh session and evaluator.
+  Reproduced 1/10 under synthetic load on the old code and 0/20 on the new,
+  same load; 12/12 clean unloaded.
+
+
 - **A netlink expectation on a moving value could never fire** (#932). Five
   graders — `check_metric`, `check_rate`, `check_delivery_floor`,
   `check_route_flap`, `check_socket` — put the **measured value** in the
