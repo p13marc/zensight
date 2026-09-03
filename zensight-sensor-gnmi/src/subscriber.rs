@@ -22,6 +22,9 @@ pub struct GnmiSubscriber {
     /// The v1 telemetry prefix keys hang off.
     telemetry_prefix: String,
     serialization: SerializationFormat,
+    /// Set by [`GnmiSubscriber::with_thresholds`] (#931); installed on the
+    /// registry this subscriber builds in `run`.
+    thresholds: Option<Arc<dyn zensight_common::point_observer::PointObserver>>,
 }
 
 impl GnmiSubscriber {
@@ -35,7 +38,21 @@ impl GnmiSubscriber {
             target,
             telemetry_prefix,
             serialization,
+            thresholds: None,
         }
+    }
+
+    /// The operator's threshold evaluator (#931).
+    ///
+    /// It has to arrive here rather than in `main.rs`: each subscriber builds
+    /// its own registry inside `run`, one per target, and every point this
+    /// sensor publishes rides one of them.
+    pub fn with_thresholds(
+        mut self,
+        observer: Arc<dyn zensight_common::point_observer::PointObserver>,
+    ) -> Self {
+        self.thresholds = Some(observer);
+        self
     }
 
     /// Run the subscriber, publishing telemetry to Zenoh
@@ -48,6 +65,9 @@ impl GnmiSubscriber {
         // Telemetry goes through declared publishers (declare-on-first-use + cache
         // per key, drop QoS), never a one-shot `session.put`.
         let registry = zensight_common::PublisherRegistry::new(session);
+        if let Some(observer) = &self.thresholds {
+            registry.set_observer(observer.clone());
+        }
 
         let mut backoff = Duration::from_secs(5);
         let max_backoff = Duration::from_secs(300);
@@ -286,17 +306,16 @@ impl GnmiSubscriber {
                     self.telemetry_prefix, self.target.name, full_path
                 );
 
-                let payload = match self.serialization {
-                    SerializationFormat::Json => serde_json::to_vec(&point)?,
-                    SerializationFormat::Cbor => {
-                        let mut buf = Vec::new();
-                        ciborium::into_writer(&point, &mut buf)?;
-                        buf
-                    }
-                };
-
+                // `put_point`, not a hand-rolled encode: the last place this
+                // is a `TelemetryPoint` rather than bytes, and where the
+                // operator's threshold rules see it (#931).
                 registry
-                    .put(&key, payload, zensight_common::QosClass::Telemetry)
+                    .put_point(
+                        &key,
+                        &point,
+                        zensight_common::QosClass::Telemetry,
+                        self.serialization.into(),
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("Zenoh put failed: {}", e))?;
                 debug!("Published telemetry to {}", key);

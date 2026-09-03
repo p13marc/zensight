@@ -37,6 +37,20 @@ pub struct ParallaxSensorConfig {
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
+
+    /// `@desired` reconcile settings (#931): the kill switch and refresh
+    /// cadence. File config on purpose — the mechanism that could misbehave
+    /// must be disarmable from outside itself.
+    #[serde(default)]
+    pub desired: zensight_common::desired::DesiredConfig,
+
+    /// Operator-authored threshold rules over this sensor's own telemetry
+    /// (#931). **Empty by default** — this build ships no threshold that
+    /// fires. Also authorable fleet-wide on `@desired` and per-host over
+    /// `@rpc/parallax/thresholds/set`; `state/parallax/applied/thresholds`
+    /// says which of the three is in force.
+    #[serde(default)]
+    pub thresholds: zensight_common::threshold::ThresholdsConfig,
 }
 
 /// Video source and stream configuration.
@@ -577,6 +591,14 @@ impl SensorConfig for ParallaxSensorConfig {
 
     fn producer(&self) -> &str {
         "parallax"
+    }
+
+    fn desired(&self) -> zensight_common::desired::DesiredConfig {
+        self.desired.clone()
+    }
+
+    fn thresholds(&self) -> zensight_common::threshold::ThresholdsConfig {
+        self.thresholds.clone()
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {

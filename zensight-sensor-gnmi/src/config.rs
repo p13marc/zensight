@@ -23,6 +23,20 @@ pub struct GnmiConfig {
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
+
+    /// `@desired` reconcile settings (#931): the kill switch and refresh
+    /// cadence. File config on purpose — the mechanism that could misbehave
+    /// must be disarmable from outside itself.
+    #[serde(default)]
+    pub desired: zensight_common::desired::DesiredConfig,
+
+    /// Operator-authored threshold rules over this sensor's own telemetry
+    /// (#931). **Empty by default** — this build ships no threshold that
+    /// fires. Also authorable fleet-wide on `@desired` and per-host over
+    /// `@rpc/gnmi/thresholds/set`; `state/gnmi/applied/thresholds`
+    /// says which of the three is in force.
+    #[serde(default)]
+    pub thresholds: zensight_common::threshold::ThresholdsConfig,
 }
 
 /// gNMI-specific settings
@@ -165,6 +179,19 @@ pub enum SerializationFormat {
     Cbor,
 }
 
+impl From<SerializationFormat> for zensight_common::serialization::Format {
+    /// This crate predates the shared [`Format`] and kept its own two-variant
+    /// copy. The publish path needs the shared one (#931: `put_point` encodes
+    /// *after* the threshold evaluator has seen the point), so the two are
+    /// bridged here rather than duplicating the encode.
+    fn from(f: SerializationFormat) -> Self {
+        match f {
+            SerializationFormat::Json => zensight_common::serialization::Format::Json,
+            SerializationFormat::Cbor => zensight_common::serialization::Format::Cbor,
+        }
+    }
+}
+
 impl GnmiSettings {
     /// The agent host's unified source id: the `source` override, else the hostname.
     pub fn resolved_source(&self) -> String {
@@ -200,6 +227,14 @@ impl zensight_sensor_core::SensorConfig for GnmiConfig {
 
     fn producer(&self) -> &str {
         "gnmi"
+    }
+
+    fn desired(&self) -> zensight_common::desired::DesiredConfig {
+        self.desired.clone()
+    }
+
+    fn thresholds(&self) -> zensight_common::threshold::ThresholdsConfig {
+        self.thresholds.clone()
     }
 
     fn validate(&self) -> zensight_sensor_core::Result<()> {

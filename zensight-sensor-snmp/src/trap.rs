@@ -26,7 +26,7 @@ use async_snmp::notification::{Notification, NotificationReceiver};
 use zenoh::Session as ZenohSession;
 
 use zensight_common::{
-    Alert, AlertKind, AlertSeverity, EventRecord, Protocol, TelemetryPoint, TelemetryValue, encode,
+    Alert, AlertKind, AlertSeverity, EventRecord, Protocol, TelemetryPoint, TelemetryValue,
 };
 use zensight_sensor_core::{AlertReporter, EventPublisher, Publisher};
 
@@ -80,6 +80,15 @@ impl TrapReceiver {
     }
 
     /// Attach the shared alert reporter for trap → alert mappings.
+    /// Install the operator's threshold evaluator on the trap counters'
+    /// registry (#931) — the same seam as the poller's, for the same reason.
+    pub fn with_thresholds(
+        &mut self,
+        observer: Arc<dyn zensight_common::point_observer::PointObserver>,
+    ) {
+        self.registry.set_observer(observer);
+    }
+
     pub fn with_alerts(&mut self, reporter: Arc<AlertReporter>) {
         self.alerts = Some(reporter);
     }
@@ -415,17 +424,17 @@ impl TrapReceiver {
             &zensight_common::registry::snmp::Subject::device_metric(device, metric.split('/')),
         );
         let key = key.as_str();
-        match encode(&point, self.format) {
-            Ok(payload) => {
-                if let Err(e) = self
-                    .registry
-                    .put(key, payload, zensight_common::QosClass::Telemetry)
-                    .await
-                {
-                    tracing::warn!(key = %key, error = %e, "trap counter publish failed");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "trap counter encode failed"),
+        if let Err(e) = self
+            .registry
+            .put_point(
+                key,
+                &point,
+                zensight_common::QosClass::Telemetry,
+                self.format,
+            )
+            .await
+        {
+            tracing::warn!(key = %key, error = %e, "trap counter publish failed");
         }
     }
 

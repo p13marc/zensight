@@ -22,7 +22,7 @@
 //! And the verdicts are the BMC's own [`Health`] / [`State`] /
 //! [`Redundancy`] enums, never a numeric threshold this sensor invents. The
 //! BMC knows the rating of the hardware it is soldered to; we do not. Numeric
-//! thresholds arrive with #931's `ThresholdsConfig`, from an operator who
+//! thresholds are `ThresholdsConfig` rules (#931), from an operator who
 //! decided.
 
 use schemars::JsonSchema;

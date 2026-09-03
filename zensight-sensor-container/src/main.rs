@@ -58,7 +58,12 @@ async fn main() -> Result<()> {
         .map(|(p, rootless)| Arc::new(RuntimeClient::new(p, timeout, rootless)))
         .collect();
 
-    let reporter = if cc.alerts.enabled {
+    // The shared reporter. Unconditional since #931: `alerts.enabled` governs
+    // this sensor's OWN judgements, but an operator can push a threshold rule
+    // to a running sensor over `@desired` or `@rpc`, so a build that could not
+    // report an alert would have had to refuse a rule it had just declared it
+    // accepts.
+    let reporter = {
         let mut r = AlertReporter::new(
             runner.publisher(),
             zensight_common::Protocol::Container,
@@ -71,10 +76,7 @@ async fn main() -> Result<()> {
         if let Some(id) = runner.identity() {
             r = r.with_identity(id);
         }
-        let r = Arc::new(r);
-        Some(r)
-    } else {
-        None
+        Arc::new(r)
     };
 
     let session = runner.session().clone();
@@ -124,7 +126,7 @@ async fn main() -> Result<()> {
         runner.publisher(),
         states,
         evidence,
-        reporter.clone(),
+        cc.alerts.enabled.then(|| reporter.clone()),
         runner.health(),
         upstream,
         zensight_sensor_core::relation::RelationSet::new(
@@ -134,9 +136,26 @@ async fn main() -> Result<()> {
         ),
     );
     runner.spawn(poller.run());
-    if let Some(r) = reporter {
-        runner = runner.with_alert_reporter(r);
-    }
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    // The operator's threshold rules over this sensor's own telemetry (#931):
+    // per-container memory, CPU throttling, PSI, restart counts. Every one of
+    // them rides `Publisher::publish`, so the runner's publisher is the whole
+    // surface; `states` and `evidence` carry state documents, not points.
+    zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Container,
+        reporter,
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::container_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     runner
         .run_with_metadata(Some(serde_json::json!({

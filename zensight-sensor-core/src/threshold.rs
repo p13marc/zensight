@@ -223,11 +223,25 @@ impl ThresholdEvaluator {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
+        // What a rule matches against is the point's labels **plus its
+        // `source`** — which is what `ThresholdsConfig`'s doc promises and
+        // what makes a proxy work: snmp, gnmi and modbus publish one series
+        // per polled device, so `labels: { source: "switch-01" }` scopes a
+        // rule to one of them and leaving it out matches them all. Without
+        // this the promise was in the documentation and nowhere else (#931).
+        //
+        // It is a SEPARATE map from the one the alert carries. `source` is
+        // already `alert.source`; adding it to the labels as well would put it
+        // in `alert_key()`'s hash for no gain, and every label that reaches an
+        // alert is a label that can fork its identity.
+        let mut match_labels = labels.clone();
+        match_labels.insert("source".to_string(), point.source.clone());
+
         let mut out = Vec::new();
         let inner = &mut *self.inner.lock().unwrap();
         let (config, state) = (&inner.config, &mut inner.rules);
         for rule in &config.rules {
-            if !rule.matches(&point.metric, &labels) {
+            if !rule.matches(&point.metric, &match_labels) {
                 continue;
             }
             let alert = self.build_alert(rule, point, value, &labels);
@@ -534,6 +548,55 @@ mod tests {
         })
     }
 
+    /// `source` is matchable as a label, and does NOT become one on the alert.
+    ///
+    /// The first half is what makes a proxy work: snmp, gnmi and modbus
+    /// publish one series per polled device, so `labels: { source: … }` scopes
+    /// a rule to one of them. It was documented from the start (#928) and did
+    /// not work until #931 — `decide` matched against the point's labels
+    /// alone, and `source` is not one of them.
+    ///
+    /// The second half is why it is a separate map: `source` is already
+    /// `alert.source`, and every label that reaches an alert is a label
+    /// `alert_key()` hashes. Two rules that differ only in their `source`
+    /// pattern must not fork one device's alert identity.
+    #[test]
+    fn a_source_label_scopes_a_rule_without_entering_the_alert_key() {
+        let mut scoped = ThresholdRule::new("hot", "cpu/usage", ComparisonOp::GreaterThan, 90.0);
+        scoped.labels.insert("source".into(), "web01".into());
+        let mut other = ThresholdRule::new("hot", "cpu/usage", ComparisonOp::GreaterThan, 90.0);
+        other.labels.insert("source".into(), "db*".into());
+
+        let p = point("cpu/usage", 95.0);
+        assert_eq!(
+            evaluator(vec![scoped]).decide(&p).len(),
+            1,
+            "a rule naming this source must fire on it"
+        );
+        assert!(
+            evaluator(vec![other]).decide(&p).is_empty(),
+            "a rule naming a different source must not"
+        );
+
+        // …and the alert it produces carries no `source` label, so the key is
+        // the same one an unscoped rule of the same name would mint.
+        let mut scoped = ThresholdRule::new("hot", "cpu/usage", ComparisonOp::GreaterThan, 90.0);
+        scoped.labels.insert("source".into(), "web01".into());
+        let unscoped = ThresholdRule::new("hot", "cpu/usage", ComparisonOp::GreaterThan, 90.0);
+        let key_of = |rule: ThresholdRule| match evaluator(vec![rule]).decide(&p).remove(0) {
+            Transition::Firing(alert, _) => {
+                assert!(
+                    !alert.labels.contains_key("source"),
+                    "source must not ride the alert's labels: {:?}",
+                    alert.labels
+                );
+                alert.alert_key()
+            }
+            other => panic!("expected a firing transition, got {other:?}"),
+        };
+        assert_eq!(key_of(scoped), key_of(unscoped));
+    }
+
     fn with_config(config: ThresholdsConfig) -> ThresholdEvaluator {
         let (tx, _rx) = tokio::sync::mpsc::channel(TRANSITION_QUEUE);
         ThresholdEvaluator {
@@ -676,6 +739,12 @@ mod tests {
 
     /// A label glob scopes a rule to devices — the proxy sensor writing one
     /// rule for one PDU rather than for every device it polls.
+    ///
+    /// The device comes from `TelemetryPoint::source`, which is where a proxy
+    /// actually puts it (#883: the payload `source` is the polled device).
+    /// This test used to put `"source"` in `point.labels` instead — a shape no
+    /// sensor emits — and so passed while the feature did not work at all
+    /// (#931 found it, from snmp's side, with a real agent).
     #[test]
     fn a_label_glob_scopes_the_rule() {
         let mut r = rule();
@@ -685,15 +754,11 @@ mod tests {
         let e = evaluator(vec![r]);
 
         let mut matching = point("rack/temperature", 50.0);
-        matching
-            .labels
-            .insert("source".to_string(), "pdu-a".to_string());
+        matching.source = "pdu-a".to_string();
         assert!(firing_alert(&e.decide(&matching)).is_some());
 
         let mut other = point("rack/temperature", 50.0);
-        other
-            .labels
-            .insert("source".to_string(), "switch01".to_string());
+        other.source = "switch01".to_string();
         assert!(
             e.decide(&other).is_empty(),
             "a different device is not covered"

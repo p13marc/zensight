@@ -98,6 +98,25 @@ async fn main() -> Result<()> {
     }
     let reporter = Arc::new(reporter);
     runner = runner.with_alert_reporter(reporter.clone());
+
+    // The operator's threshold rules over this sensor's own telemetry (#931):
+    // frames published, encoder queue depth, viewers. Everything parallax
+    // publishes as a point rides `Publisher::publish`, so the runner's
+    // publisher is the whole surface here.
+    zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        Protocol::Parallax,
+        reporter.clone(),
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::parallax_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let alerts = Arc::new(zensight_sensor_parallax::alerts::ParallaxAlerts::new(
         reporter.clone(),
         source.clone(),

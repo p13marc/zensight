@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.2"
+version = "1.3"
 app = "zensight"
 convention = 1
 
@@ -136,3 +136,48 @@ algo = "blake3"
 reference = "ArtifactStatus"
 since = "1.2"
 description = "content-addressed chunks backing the snapshot trees"
+
+# This producer's first alerting surface (#931). It had none: no `AlertReporter`,
+# no `alerts.rs`, and no `alert/{alert_key}` subject — so an operator watching
+# netflow metrics had nowhere for a threshold to land. The rules are the
+# operator's, evaluated on this producer's own publish path.
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 128
+ttl_s = 900
+since = "1.3"
+description = "operator-authored threshold alerts over this producer's telemetry (#931); firing->resolved on one key, the rule and metric in the labels"
+
+[[subject]]
+path = "applied/{topic}"
+class = "state"
+type = "AppliedConfig"
+cardinality = 8
+ttl_s = 900
+since = "1.3"
+description = "effective config actually in force for {topic} (#931): source file|desired|rpc, the effective doc, the last rejected desired doc"
+
+# Operator-authored threshold rules (#931). Three writers — file, `@desired`,
+# this pair — and one `applied/thresholds` marker that says which of them is
+# actually in force. The set ships EMPTY: this build has no threshold that
+# fires, only ones an operator chose.
+[[procedure]]
+path = "thresholds"
+kind = "read"
+reply = "ThresholdsConfig"
+idempotent = true
+since = "1.3"
+description = "the threshold rule set currently evaluated against this producer's own telemetry"
+
+[[procedure]]
+path = "thresholds/set"
+kind = "write"
+fanout = "allowed"  # operator-console fleet push (G2: explicit, deliberate)
+request = "ThresholdsConfig"
+reply = "Ack"
+since = "1.3"
+description = "replace the threshold rule set; validated (metric globs, operators, durations, unique names) before apply — refuses with error/invalid-args and the previous set keeps running"

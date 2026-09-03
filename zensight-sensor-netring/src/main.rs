@@ -785,6 +785,30 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // The operator's threshold rules over this sensor's own telemetry (#931).
+    // The evaluator is handed to `run_drains` rather than installed here: the
+    // registry every aggregate point rides is built inside that function, so
+    // an observer on the runner's publisher would watch a path netring's
+    // telemetry never takes.
+    //
+    // Distinct from `cfg.detectors`, which is this sensor's own NDR judgement
+    // about traffic; these are numbers an operator picked about metrics it
+    // publishes.
+    let thresholds = zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        Protocol::Netring,
+        reporter.clone(),
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::netring_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     // Drain task (telemetry + anomalies + periodic flow aggregates).
     let health = runner.health();
     runner.spawn(publish::run_drains(
@@ -797,6 +821,7 @@ async fn main() -> Result<()> {
         flow_period,
         health,
         capture_disk_trigger,
+        thresholds,
     ));
 
     // Monitor run loop: pcap replay (bounded) or live capture (until signal).

@@ -5,6 +5,8 @@
 # instead (RFC 08 §3).
 procedure	bmc	describe	read	-	SchemaSet
 procedure	bmc	introspect	read	-	RegistrySlice
+procedure	bmc	thresholds	read	-	ThresholdsConfig
+procedure	bmc	thresholds/set	write	ThresholdsConfig	Ack
 procedure	catalog	describe	read	-	SchemaSet
 procedure	catalog	introspect	read	-	RegistrySlice
 procedure	catalog	link	write	-	OperatorAssertion
@@ -12,11 +14,15 @@ procedure	catalog	names	read	-	Vec<NameVal>
 procedure	catalog	unlink	write	-	OperatorAssertion
 procedure	container	describe	read	-	SchemaSet
 procedure	container	introspect	read	-	RegistrySlice
+procedure	container	thresholds	read	-	ThresholdsConfig
+procedure	container	thresholds/set	write	ThresholdsConfig	Ack
 procedure	gnmi	artifact/cancel	write	-	Ack
 procedure	gnmi	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	gnmi	artifact/status	read	-	ArtifactStatus
 procedure	gnmi	describe	read	-	SchemaSet
 procedure	gnmi	introspect	read	-	RegistrySlice
+procedure	gnmi	thresholds	read	-	ThresholdsConfig
+procedure	gnmi	thresholds/set	write	ThresholdsConfig	Ack
 procedure	historian	describe	read	-	SchemaSet
 procedure	historian	introspect	read	-	RegistrySlice
 procedure	historian	range	read	-	RangeReply
@@ -47,12 +53,16 @@ procedure	modbus	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	modbus	artifact/status	read	-	ArtifactStatus
 procedure	modbus	describe	read	-	SchemaSet
 procedure	modbus	introspect	read	-	RegistrySlice
+procedure	modbus	thresholds	read	-	ThresholdsConfig
+procedure	modbus	thresholds/set	write	ThresholdsConfig	Ack
 procedure	netflow	artifact/cancel	write	-	Ack
 procedure	netflow	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	netflow	artifact/status	read	-	ArtifactStatus
 procedure	netflow	describe	read	-	SchemaSet
 procedure	netflow	flows	read	-	Vec<FlowRecord>
 procedure	netflow	introspect	read	-	RegistrySlice
+procedure	netflow	thresholds	read	-	ThresholdsConfig
+procedure	netflow	thresholds/set	write	ThresholdsConfig	Ack
 procedure	netlink	addresses	read	-	Vec<AddressRecord>
 procedure	netlink	artifact/cancel	write	-	Ack
 procedure	netlink	artifact/request	write	ArtifactRequest	ArtifactAck
@@ -73,6 +83,8 @@ procedure	netlink	route_changes	read	-	Vec<RouteChangeRecord>
 procedure	netlink	routes	read	-	Vec<RouteRecord>
 procedure	netlink	sockets	read	-	Vec<SocketRecord>
 procedure	netlink	tc	read	-	Vec<TcRecord>
+procedure	netlink	thresholds	read	-	ThresholdsConfig
+procedure	netlink	thresholds/set	write	ThresholdsConfig	Ack
 procedure	netlink	xfrm	read	-	Vec<XfrmRecord>
 procedure	netring	artifact/cancel	write	-	Ack
 procedure	netring	artifact/request	write	ArtifactRequest	ArtifactAck
@@ -101,6 +113,8 @@ procedure	netring	ssh	read	-	Vec<SshRecord>
 procedure	netring	talkers	read	-	Vec<TalkerRecord>
 procedure	netring	threat_intel	read	-	TopicStatus
 procedure	netring	threat_intel/set	write	ThreatIntelConfig	Ack
+procedure	netring	thresholds	read	-	ThresholdsConfig
+procedure	netring	thresholds/set	write	ThresholdsConfig	Ack
 procedure	netring	tls	read	-	Vec<TlsRecord>
 procedure	parallax	artifact/cancel	write	-	Ack
 procedure	parallax	artifact/request	write	ArtifactRequest	ArtifactAck
@@ -110,12 +124,16 @@ procedure	parallax	introspect	read	-	RegistrySlice
 procedure	parallax	stream/report	write	MediaReceiverReport	Ack
 procedure	parallax	stream/set	write	Command<StreamControl>	Ack
 procedure	parallax	streams	read	-	Vec<StreamDescriptor>
+procedure	parallax	thresholds	read	-	ThresholdsConfig
+procedure	parallax	thresholds/set	write	ThresholdsConfig	Ack
 procedure	probe	describe	read	-	SchemaSet
 procedure	probe	introspect	read	-	RegistrySlice
 procedure	probe	thresholds	read	-	ThresholdsConfig
 procedure	probe	thresholds/set	write	ThresholdsConfig	Ack
 procedure	pve	describe	read	-	SchemaSet
 procedure	pve	introspect	read	-	RegistrySlice
+procedure	pve	thresholds	read	-	ThresholdsConfig
+procedure	pve	thresholds/set	write	ThresholdsConfig	Ack
 procedure	snmp	action	read	-	OutletStatus
 procedure	snmp	action/capability	read	-	OutletCapability
 procedure	snmp	action/set	write	OutletAction	OutletStatus
@@ -125,6 +143,8 @@ procedure	snmp	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	snmp	artifact/status	read	-	ArtifactStatus
 procedure	snmp	describe	read	-	SchemaSet
 procedure	snmp	introspect	read	-	RegistrySlice
+procedure	snmp	thresholds	read	-	ThresholdsConfig
+procedure	snmp	thresholds/set	write	ThresholdsConfig	Ack
 procedure	sysinfo	artifact/cancel	write	-	Ack
 procedure	sysinfo	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	sysinfo	artifact/status	read	-	ArtifactStatus
@@ -155,6 +175,7 @@ procedure	systemd	unit	read	-	UnitDetail
 procedure	systemd	unit/file	read	-	UnitFile
 procedure	systemd	units	read	-	Vec<UnitRecord>
 subject	bmc	alert/{alert_key}	state	Alert
+subject	bmc	applied/{topic}	state	AppliedConfig
 subject	bmc	chassis/{chassis}	state	BmcChassis
 subject	bmc	chassis/{chassis}/fan/{fan}	state	BmcFan
 subject	bmc	chassis/{chassis}/psu/{psu}	state	BmcPowerSupply
@@ -179,6 +200,7 @@ subject	catalog	edge/{edge_id}	state	Edge
 subject	catalog	entity/{entity_id}	state	HostEntity
 subject	catalog	pdns/{ip_slug}	state	PdnsRecord
 subject	container	alert/{alert_key}	state	Alert
+subject	container	applied/{topic}	state	AppliedConfig
 subject	container	container/{name}	state	ContainerInfo
 subject	container	containers/running	telemetry	TelemetryPoint
 subject	container	containers/total	telemetry	TelemetryPoint
@@ -207,13 +229,25 @@ subject	container	{name}/pids	telemetry	TelemetryPoint
 subject	container	{name}/restart_count	telemetry	TelemetryPoint
 subject	container	{name}/running	telemetry	TelemetryPoint
 subject	container	{name}/uptime_secs	telemetry	TelemetryPoint
+subject	desired	{host}/bmc/thresholds	state	ThresholdsConfig
+subject	desired	{host}/container/thresholds	state	ThresholdsConfig
+subject	desired	{host}/gnmi/thresholds	state	ThresholdsConfig
 subject	desired	{host}/hostspec/expectations	state	HostspecExpectations
 subject	desired	{host}/hostspec/thresholds	state	ThresholdsConfig
 subject	desired	{host}/logs/thresholds	state	ThresholdsConfig
+subject	desired	{host}/modbus/thresholds	state	ThresholdsConfig
+subject	desired	{host}/netflow/thresholds	state	ThresholdsConfig
+subject	desired	{host}/netlink/thresholds	state	ThresholdsConfig
+subject	desired	{host}/netring/thresholds	state	ThresholdsConfig
+subject	desired	{host}/parallax/thresholds	state	ThresholdsConfig
 subject	desired	{host}/probe/thresholds	state	ThresholdsConfig
+subject	desired	{host}/pve/thresholds	state	ThresholdsConfig
+subject	desired	{host}/snmp/thresholds	state	ThresholdsConfig
 subject	desired	{host}/sysinfo/thresholds	state	ThresholdsConfig
 subject	desired	{host}/systemd/expectations	state	ExpectationsConfig
 subject	desired	{host}/systemd/thresholds	state	ThresholdsConfig
+subject	gnmi	alert/{alert_key}	state	Alert
+subject	gnmi	applied/{topic}	state	AppliedConfig
 subject	gnmi	artifact/{kind}	state	ArtifactStatus
 subject	gnmi	errors	state	ErrorReport
 subject	gnmi	evidence/self	state	HostEvidence
@@ -263,12 +297,16 @@ subject	logs	store/records	telemetry	TelemetryPoint
 subject	logs	store/write_drops_total	telemetry	TelemetryPoint
 subject	logs	units_in_failure	telemetry	TelemetryPoint
 subject	logs	warnings_total	telemetry	TelemetryPoint
+subject	modbus	alert/{alert_key}	state	Alert
+subject	modbus	applied/{topic}	state	AppliedConfig
 subject	modbus	artifact/{kind}	state	ArtifactStatus
 subject	modbus	errors	state	ErrorReport
 subject	modbus	evidence/self	state	HostEvidence
 subject	modbus	health	state	HealthSnapshot
 subject	modbus	sensor	state	SensorInfo
 subject	modbus	{device}/{metric...}	telemetry	TelemetryPoint
+subject	netflow	alert/{alert_key}	state	Alert
+subject	netflow	applied/{topic}	state	AppliedConfig
 subject	netflow	artifact/{kind}	state	ArtifactStatus
 subject	netflow	errors	state	ErrorReport
 subject	netflow	evidence/self	state	HostEvidence
@@ -280,6 +318,7 @@ subject	netlink	addresses/ipv4_count	telemetry	TelemetryPoint
 subject	netlink	addresses/ipv6_count	telemetry	TelemetryPoint
 subject	netlink	addresses/total	telemetry	TelemetryPoint
 subject	netlink	alert/{alert_key}	state	Alert
+subject	netlink	applied/{topic}	state	AppliedConfig
 subject	netlink	artifact/{kind}	state	ArtifactStatus
 subject	netlink	conntrack/by_proto/{proto}	telemetry	TelemetryPoint
 subject	netlink	conntrack/entries	telemetry	TelemetryPoint
@@ -391,6 +430,7 @@ subject	netlink	xfrm/sa/by_proto/{proto}	telemetry	TelemetryPoint
 subject	netlink	xfrm/sa/total	telemetry	TelemetryPoint
 subject	netring	alert/{alert_key}	state	Alert
 subject	netring	anomaly/{kind}/total	telemetry	TelemetryPoint
+subject	netring	applied/{topic}	state	AppliedConfig
 subject	netring	artifact/{kind}	state	ArtifactStatus
 subject	netring	assets/discovered	telemetry	TelemetryPoint
 subject	netring	bandwidth/{app}/bytes_per_sec	telemetry	TelemetryPoint
@@ -468,6 +508,7 @@ subject	netring	tls/distinct_fingerprints	telemetry	TelemetryPoint
 subject	netring	tls/handshakes_total	telemetry	TelemetryPoint
 subject	netring	tls/pq_ratio	telemetry	TelemetryPoint
 subject	parallax	alert/{alert_key}	state	Alert
+subject	parallax	applied/{topic}	state	AppliedConfig
 subject	parallax	artifact/{kind}	state	ArtifactStatus
 subject	parallax	errors	state	ErrorReport
 subject	parallax	evidence/self	state	HostEvidence
@@ -520,6 +561,7 @@ subject	probe	{target}/tls_chain_valid	telemetry	TelemetryPoint
 subject	probe	{target}/tls_days_to_expiry	telemetry	TelemetryPoint
 subject	probe	{target}/up	telemetry	TelemetryPoint
 subject	pve	alert/{alert_key}	state	Alert
+subject	pve	applied/{topic}	state	AppliedConfig
 subject	pve	backup/job/{node}	state	PveBackupJob
 subject	pve	backup/job/{node}/duration_secs	telemetry	TelemetryPoint
 subject	pve	backup/job/{node}/ok	telemetry	TelemetryPoint
@@ -559,6 +601,7 @@ subject	pve	storage/{store}/total_bytes	telemetry	TelemetryPoint
 subject	pve	storage/{store}/used_bytes	telemetry	TelemetryPoint
 subject	pve	storage/{store}/used_ratio	telemetry	TelemetryPoint
 subject	snmp	alert/{alert_key}	state	Alert
+subject	snmp	applied/{topic}	state	AppliedConfig
 subject	snmp	artifact/{kind}	state	ArtifactStatus
 subject	snmp	discovery	state	DiscoveryReport
 subject	snmp	errors	state	ErrorReport

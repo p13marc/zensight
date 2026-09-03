@@ -8,7 +8,7 @@ use async_snmp::{Auth, Client, EngineCache, MessageSize, Retry, UdpHandle, Value
 use bytes::Bytes;
 use zenoh::Session as ZenohSession;
 
-use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, encode};
+use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue};
 
 use crate::config::{AuthProtocol, DeviceConfig, OidGroup, PrivProtocol, SnmpVersion};
 use crate::mib::MibResolver;
@@ -213,6 +213,20 @@ impl SnmpPoller {
     /// Attach threshold alerting (#528). When the interface rules are on,
     /// the IF-MIB columns they read are added to the walk set unless an
     /// existing walk already covers them.
+    /// Install the operator's threshold evaluator on this poller's own
+    /// publisher registry (#931).
+    ///
+    /// A poller builds its registry here, one per device, and publishes
+    /// through `put_point` — so an observer set only on `runner.publisher()`
+    /// would watch a path no polled metric ever takes. It would look installed
+    /// and evaluate nothing.
+    pub fn with_thresholds(
+        &mut self,
+        observer: Arc<dyn zensight_common::point_observer::PointObserver>,
+    ) {
+        self.registry.set_observer(observer);
+    }
+
     pub fn with_alerts(&mut self, evaluator: crate::alerts::AlertEvaluator) {
         if evaluator.wants_interface_columns() {
             for column in crate::alerts::INTERFACE_RULE_COLUMNS {
@@ -898,20 +912,23 @@ impl SnmpPoller {
         );
         let key = key.as_str();
 
-        match encode(&point, self.format) {
-            Ok(payload) => {
-                if let Err(e) = self
-                    .registry
-                    .put(key, payload, zensight_common::QosClass::Telemetry)
-                    .await
-                {
-                    tracing::error!(key = %key, error = %e, "Failed to publish to Zenoh");
-                } else {
-                    tracing::trace!(key = %key, "Published telemetry");
-                }
-            }
+        // `put_point`, not `put`: this is the last place the point is still a
+        // `TelemetryPoint` rather than bytes, and it is where the operator's
+        // threshold rules see it (#931). Every metric this proxy polls, from
+        // every device, rides this line.
+        match self
+            .registry
+            .put_point(
+                key,
+                &point,
+                zensight_common::QosClass::Telemetry,
+                self.format,
+            )
+            .await
+        {
+            Ok(()) => tracing::trace!(key = %key, "Published telemetry"),
             Err(e) => {
-                tracing::error!(error = %e, "Failed to encode telemetry");
+                tracing::error!(key = %key, error = %e, "Failed to publish to Zenoh");
             }
         }
     }

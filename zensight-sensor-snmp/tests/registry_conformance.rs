@@ -31,6 +31,11 @@ const ALLOWED_WRITE_PROCEDURES: &[&str] = &[
     // the host's audit trail (#957) — which for this procedure is the only
     // record that a request to cut power was ever made.
     "action/set",
+    // #931. Unlike `action/set` this reaches no device: it rewrites the rule
+    // set this sensor evaluates against its OWN telemetry. `kind = "write"`
+    // buys the #957 audit record for "who changed the rules", which is the
+    // right accountability for a procedure that changes what a host alerts on.
+    "thresholds/set",
 ];
 
 #[test]

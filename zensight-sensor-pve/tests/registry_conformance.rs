@@ -68,20 +68,44 @@ fn every_registered_family_has_an_emitter() {
     );
 }
 
-/// The slice declares no write procedure, and this test is the thing that
-/// notices if one is ever added by accident.
+/// The slice declares no write procedure that reaches the cluster, and this test is the
+/// thing that notices if one is ever added.
 ///
-/// The sensor's whole security posture is that it *cannot* act: a monitor
-/// that can stop a VM is a different threat model. Adding a `kind = "write"`
-/// procedure to `pve.toml` would change that silently — the code would still
-/// compile, the tests would still pass, and the only visible difference would
-/// be a new key on the bus.
+/// The sensor's whole security posture is that it *cannot* act: a monitor that can stop a VM is a different threat model. Adding a `kind = "write"` procedure to `pve.toml` would
+/// change that silently — the code would still compile, the tests would still
+/// pass, and the only visible difference would be a new key on the bus.
+///
+/// The allowlist is one entry long and is not an exception to that rule:
+/// `thresholds/set` (#931) rewrites what this sensor **alerts on** and touches
+/// nothing it observes. It is declared `write` because #957 classifies a
+/// procedure that changes a host's behaviour as one whose outcome must reach
+/// that host's audit trail — accountability for "who changed the rules", not
+/// permission to act.
+///
+/// Parsed, not grepped: `!toml.contains("kind = \"write\"")` — which this was
+/// — also matches the sentence in a comment explaining that there is no write
+/// surface, which is how bmc's version failed on its own documentation.
 #[test]
-fn the_slice_declares_no_write_surface() {
+fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
+    const ALLOWED: &[&str] = &["thresholds/set"];
     let toml = zensight_common::registry::pve::REGISTRY_TOML;
+    let slice = zenkey::parse_slice(toml).expect("the shipped pve slice parses");
+    let mut writes: Vec<&str> = slice
+        .procedures
+        .iter()
+        .filter(|p| {
+            p.kind
+                .as_ref()
+                .and_then(|k| k.known())
+                .is_some_and(|k| matches!(k, zenkey::slice::ProcedureKind::Write))
+        })
+        .map(|p| p.path.as_str())
+        .filter(|path| !ALLOWED.contains(path))
+        .collect();
+    writes.sort_unstable();
     assert!(
-        !toml.contains(r#"kind = "write""#),
-        "pve declared a write procedure. That is a deliberate decision to make \
+        writes.is_empty(),
+        "pve declared write procedure(s) {writes:?}. That is a deliberate decision to make \
          explicitly (see the crate docs and #818), not one to land by editing a \
          registry file — a monitor that can stop a VM is a different threat model."
     );

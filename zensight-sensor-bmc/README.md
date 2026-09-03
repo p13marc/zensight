@@ -56,7 +56,8 @@ point that polls it, not a machine that publishes for itself.
   Redfish `Health` / `State` / `Redundancy`. The BMC knows the rating of the
   hardware it is soldered to; we do not. Its own thresholds are published
   beside each reading so a consumer can make the comparison the vendor
-  intended. Numeric thresholds of your own arrive with #931.
+  intended. Numeric thresholds of your own are `thresholds` in the config, or
+  `@rpc/bmc/thresholds/set` on a running sensor (#931).
 - **`Unknown` is not a fault.** A BMC that answers without a health field has
   told us nothing, and a sensor that reads nothing as "broken" pages on
   missing data.

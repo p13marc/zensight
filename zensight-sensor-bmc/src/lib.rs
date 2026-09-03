@@ -27,7 +27,7 @@
 //! `Health` / `State` / `Redundancy` enums. The BMC knows the rating of the
 //! hardware it is soldered to; we do not, and a number we made up about
 //! someone else's silicon is worse information than none. Numeric thresholds
-//! arrive with #931's `ThresholdsConfig`, from an operator who decided. The
+//! are `ThresholdsConfig` rules (#931), from an operator who decided. The
 //! BMC's own thresholds are published *beside* each reading, so a consumer can
 //! make the comparison the hardware vendor intended.
 //!

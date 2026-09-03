@@ -54,6 +54,40 @@ async fn main() -> anyhow::Result<()> {
         gnmi_config.targets.len()
     );
 
+    // This sensor's FIRST alerting surface (#931). It had none — no
+    // `AlertReporter`, no `alerts.rs`, no `alert/{alert_key}` subject — so an
+    // operator watching gnmi metrics had nowhere for a threshold to land.
+    // The rules are the operator's; this sensor still asserts nothing of its
+    // own. Handing the reporter to the runner is what serves the late-joiner
+    // seed and makes the firing set survive a restart (#882).
+    let reporter = {
+        let mut r = zensight_sensor_core::AlertReporter::new(
+            runner.publisher(),
+            zensight_common::Protocol::Gnmi,
+            gnmi_config.serialization.into(),
+        );
+        if let Some(id) = runner.identity() {
+            r = r.with_identity(id);
+        }
+        std::sync::Arc::new(r)
+    };
+    runner = runner.with_alert_reporter(reporter.clone());
+
+    let thresholds = zensight_sensor_core::threshold::adopt(
+        &mut runner,
+        zensight_common::Protocol::Gnmi,
+        reporter,
+        {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::gnmi_thresholds(
+                zensight_common::PROFILE.host_id(),
+            ))
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     // Create subscriber tasks for each target
     for target in gnmi_config.targets {
         let subscriber = GnmiSubscriber::new(
@@ -62,7 +96,8 @@ async fn main() -> anyhow::Result<()> {
                 .telemetry_prefix()
                 .into(),
             gnmi_config.serialization,
-        );
+        )
+        .with_thresholds(thresholds.clone());
         let session = session.clone();
 
         runner.spawn(async move {
