@@ -122,10 +122,6 @@ pub fn commands() -> Vec<Command> {
             message: Message::ToggleHelp,
         },
         Command {
-            label: "Clear triggered alerts",
-            message: Message::ClearAlerts,
-        },
-        Command {
             label: "Export device data (CSV)",
             message: Message::ExportToCsv,
         },

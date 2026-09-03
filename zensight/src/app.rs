@@ -407,23 +407,12 @@ impl ZenSight {
             AppTheme::Light
         };
 
-        // Create alerts state with configured max
-        let mut alerts = AlertsState::with_max_alerts(persistent.max_alerts);
-        // Load saved alert rules
-        alerts.rules = persistent.alert_rules.clone();
+        // Alerts state. Since #934 it holds only what the bus published: the
+        // local rule engine and its persisted rules are gone, so there is
+        // nothing here to seed from disk or from the demo fixtures.
+        let mut alerts = AlertsState::new();
         // Load saved alert-filter presets (#27)
         alerts.alert_filter_presets = persistent.alert_filter_presets.clone();
-        if demo_mode {
-            use crate::demo::demo_alert_rules;
-            // Add demo rules if none are saved
-            if alerts.rules.is_empty() {
-                for rule in demo_alert_rules() {
-                    alerts.rules.push(rule);
-                }
-            }
-            // Set shorter cooldown for demo (10 seconds instead of 60)
-            alerts.alert_cooldown_ms = 10_000;
-        }
 
         // Load groups from persistent settings
         let groups = persistent.groups.clone();
@@ -3235,10 +3224,6 @@ impl ZenSight {
                 self.settings.set_max_history(max_history);
             }
 
-            Message::SetMaxAlerts(max_alerts) => {
-                self.settings.set_max_alerts(max_alerts);
-            }
-
             Message::SetMaxLiveLatency(deadline) => {
                 self.settings.set_max_live_latency(deadline);
             }
@@ -3265,70 +3250,6 @@ impl ZenSight {
                 };
                 self.set_view(target);
                 self.save_current_view();
-            }
-
-            Message::SetAlertRuleName(name) => {
-                self.alerts.set_new_rule_name(name);
-            }
-
-            Message::SetAlertRuleMetric(metric) => {
-                self.alerts.set_new_rule_metric(metric);
-            }
-
-            Message::SetAlertRuleThreshold(threshold) => {
-                self.alerts.set_new_rule_threshold(threshold);
-            }
-
-            Message::SetAlertRuleOperator(op) => {
-                self.alerts.set_new_rule_operator(op);
-            }
-
-            Message::SetAlertRuleSeverity(severity) => {
-                self.alerts.set_new_rule_severity(severity);
-            }
-
-            Message::AddAlertRule => {
-                if let Err(e) = self.alerts.add_rule() {
-                    tracing::warn!(error = %e, "Failed to add alert rule");
-                } else {
-                    self.save_alert_rules();
-                }
-            }
-
-            Message::TestAlertRule => {
-                // Collect all current metrics from dashboard devices
-                let metrics: Vec<(String, String, f64)> = self
-                    .dashboard
-                    .devices
-                    .values()
-                    .flat_map(|device| {
-                        device.metrics.iter().filter_map(|(name, point)| {
-                            // Extract numeric value from TelemetryPoint
-                            let value = alert_value_f64(&point.value)?;
-                            Some((device.id.source.clone(), name.clone(), value))
-                        })
-                    })
-                    .collect();
-
-                let _ = self.alerts.test_rule(&metrics);
-            }
-
-            Message::RemoveAlertRule(rule_id) => {
-                self.alerts.remove_rule(rule_id);
-                self.save_alert_rules();
-            }
-
-            Message::ToggleAlertRule(rule_id) => {
-                self.alerts.toggle_rule(rule_id);
-                self.save_alert_rules();
-            }
-
-            Message::AcknowledgeAlert(alert_id) => {
-                self.alerts.acknowledge(alert_id);
-            }
-
-            Message::AcknowledgeAllAlerts => {
-                self.alerts.acknowledge_all();
             }
 
             Message::AcknowledgeExternalSource(source) => {
@@ -3417,10 +3338,6 @@ impl ZenSight {
                     self.command_palette.close();
                     return Task::done(msg);
                 }
-            }
-
-            Message::ClearAlerts => {
-                self.alerts.clear_alerts();
             }
 
             // Export messages
@@ -4484,15 +4401,6 @@ impl ZenSight {
         persistent.groups = self.groups.clone();
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save groups: {}", e);
-        }
-    }
-
-    /// Save alert rules to persistent settings.
-    fn save_alert_rules(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.alert_rules = self.alerts.rules.clone();
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save alert rules: {}", e);
         }
     }
 
@@ -8148,9 +8056,10 @@ impl ZenSight {
     pub fn view(&self) -> Element<'_, Message> {
         use iced::widget::{Stack, row};
 
-        // Badge counts both unacknowledged rule alerts and active sensor-pushed
-        // alerts (anomalies + expectation violations).
-        let unack = self.alerts.unacknowledged_count + self.alerts.external_count();
+        // Badge counts the sensor-pushed alerts that are firing — since #934
+        // that is all of them. There is no second count to add: the local rule
+        // engine that produced one is gone.
+        let unack = self.alerts.external_count();
 
         // Per-card sparkline previews (#24). Built at 1 Hz in `handle_tick` and
         // cached in `dashboard_sparks` — rendering just clones the small (≤2
@@ -8857,21 +8766,11 @@ impl ZenSight {
         }
         device_state.metric_count = device_state.metrics.len();
 
-        // Check alert rules for numeric values
-        if let Some(numeric_value) = alert_value_f64(&point.value)
-            && let Some(alert) =
-                self.alerts
-                    .check_metric(&device_id, &point.metric, numeric_value, point.timestamp)
-        {
-            tracing::warn!(
-                rule = %alert.rule_name,
-                device = %alert.device_id,
-                metric = %alert.metric,
-                value = %alert.value,
-                threshold = %alert.threshold,
-                "Alert triggered"
-            );
-        }
+        // No rule evaluation here since #934. The sensor that published this
+        // point evaluated the operator's thresholds against it on its own
+        // publish path (#931), and whatever it decided is already on the bus —
+        // where the exporters, the historian and every other GUI can see it,
+        // which the engine that used to run on this line never was.
 
         // Update selected device if this telemetry is for it. Per-line log events
         // are excluded for the same cardinality reason as above (#104).
@@ -9113,9 +9012,6 @@ impl ZenSight {
         // Apply stale threshold immediately
         self.stale_threshold_ms = self.settings.stale_threshold_ms();
 
-        // Apply max alerts setting
-        self.alerts.set_max_alerts(self.settings.max_alerts_value());
-
         // Apply max history to current device view if any
         if let Some(ref mut device) = self.selected_device {
             device.set_max_history(self.settings.max_history_value());
@@ -9162,7 +9058,6 @@ impl ZenSight {
         // Persist settings to disk (include all app state)
         let mut persistent = PersistentSettings::from_state(&self.settings);
         persistent.groups = self.groups.clone();
-        persistent.alert_rules = self.alerts.rules.clone();
         persistent.alert_filter_presets = self.alerts.alert_filter_presets.clone();
         persistent.favorite_metrics = self.favorites.iter().cloned().collect();
         persistent.overview_selected_protocol = self.overview.selected_protocol;
@@ -9480,24 +9375,6 @@ fn fmt_duration_ms(ms: i64) -> String {
         format!("{}h", mins / 60)
     } else {
         format!("{mins}m")
-    }
-}
-
-/// Convert a telemetry value to an f64 **for alert checking**.
-///
-/// Deliberately not [`zensight_store::telemetry_to_f64`], which this looked
-/// like a duplicate of and is not (#904): the store maps `Boolean` to a 0/1
-/// step series so flap-prone signals get history and a trend line (#126).
-/// Folding the two would silently make every boolean telemetry value
-/// comparable against a numeric threshold — a `> 0.5` rule firing on an
-/// interface going down is not a rule anyone wrote, and not a change to make
-/// while moving code. A boolean that should raise an alert has an alert rule
-/// of its own.
-fn alert_value_f64(value: &TelemetryValue) -> Option<f64> {
-    match value {
-        TelemetryValue::Counter(v) => Some(*v as f64),
-        TelemetryValue::Gauge(v) => Some(*v),
-        _ => None,
     }
 }
 

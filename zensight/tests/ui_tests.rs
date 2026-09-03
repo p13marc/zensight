@@ -725,22 +725,29 @@ fn test_device_back_button() {
     );
 }
 
-/// #35: clicking "View" on an alert row jumps to the offending device + metric.
+/// #35: clicking "View" on an alert row jumps to the offending device +
+/// metric.
+///
+/// Rebuilt on a **bus** alert (#934). It used to construct the local rule
+/// engine's `AlertRule` + `Alert`, which no longer exist: the engine's alerts
+/// reached nothing outside this process, and the metric-level pivot they
+/// supported now comes off a threshold alert's `metric` label instead (#931).
 #[test]
 fn test_alert_investigate_navigates_to_device_metric() {
-    use zensight::view::alerts::{Alert, AlertRule, AlertsState, Severity, alerts_view};
+    use zensight::view::alerts::{AlertsState, alerts_view};
+    use zensight_common::{AlertKind, AlertSeverity, Protocol as P};
 
     let mut state = AlertsState::new();
-    let rule = AlertRule::new(1, "High CPU", "cpu/usage").with_severity(Severity::Critical);
-    let device = DeviceId::fixture(Protocol::Sysinfo, "server01");
-    state.alerts.push(Alert::new(
-        1,
-        &rule,
-        device.clone(),
-        "cpu/usage".into(),
-        95.0,
-        0,
-    ));
+    let alert = zensight_common::Alert::new(
+        "server01",
+        P::Sysinfo,
+        AlertKind::Expectation,
+        "threshold:cpu-usage",
+        AlertSeverity::Critical,
+        "cpu/usage is 95 on server01",
+    )
+    .with_label("metric", "cpu/usage");
+    state.ingest_external(alert);
 
     let mut ui = simulator(alerts_view(&state));
     let _ = ui.click("View");
@@ -7580,5 +7587,35 @@ mod thresholds_ui {
         });
         let mut ui = simulator(expectations_view(&state));
         assert!(ui.find("In force from: desired").is_ok());
+    }
+}
+
+/// The GUI has **one** alerting authority (#934), and this is what notices if
+/// a second one grows back.
+///
+/// It had two. One ran in every sensor: `for`, adopt-on-restart, a seed
+/// queryable, alerts on the bus. The other ran here — a rule form, a rule
+/// list, an alert history and a flat 60-second cooldown keyed on
+/// `protocol/source/metric`, which was origin-blind, so two hosts sharing a
+/// `source` name shared one slot. Its alerts reached nothing: not the bus, not
+/// the exporters, not the notifier. Thresholds are authored on the sensor now
+/// (#931) through the Expectations view's `thresholds` target (#933).
+///
+/// Grep-shaped on purpose. The engine is gone by deletion, so the compiler
+/// cannot enforce its absence; what it *can* be re-added as is another local
+/// `check_metric` on the telemetry path, which is exactly what this reads for.
+#[test]
+fn the_gui_evaluates_no_thresholds_of_its_own() {
+    let src = concat!(
+        include_str!("../src/view/alerts.rs"),
+        include_str!("../src/app.rs"),
+    );
+    for forbidden in ["struct AlertRule", "fn check_metric", "alert_cooldown_ms"] {
+        assert!(
+            !src.contains(forbidden),
+            "{forbidden:?} is back in the GUI. Threshold evaluation belongs to the sensor \
+             that publishes the metric (#931): an alert raised here reaches no exporter, no \
+             notifier and no other GUI, and persists to one laptop."
+        );
     }
 }

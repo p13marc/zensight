@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::CurrentView;
 use crate::message::Message;
-use crate::view::alerts::{AlertFilterPreset, AlertRule};
+use crate::view::alerts::AlertFilterPreset;
 use crate::view::groups::GroupsState;
 use crate::view::icons::{self, IconSize};
 use zensight_common::{LinkProfile, Protocol};
@@ -36,8 +36,6 @@ pub struct PersistentSettings {
     #[serde(default = "default_max_history")]
     pub max_history: usize,
     /// Maximum number of alerts to keep.
-    #[serde(default = "default_max_alerts")]
-    pub max_alerts: usize,
     /// Frame-age deadline for live video tiles, in milliseconds (#716).
     ///
     /// An access unit older than this on arrival is shed rather than decoded,
@@ -52,9 +50,6 @@ pub struct PersistentSettings {
     /// Device groups configuration.
     #[serde(default)]
     pub groups: GroupsState,
-    /// Alert rules.
-    #[serde(default)]
-    pub alert_rules: Vec<AlertRule>,
     /// Saved alert-filter presets (#27).
     #[serde(default)]
     pub alert_filter_presets: Vec<AlertFilterPreset>,
@@ -129,10 +124,6 @@ fn default_max_history() -> usize {
     500
 }
 
-fn default_max_alerts() -> usize {
-    100
-}
-
 /// Default frame-age deadline (#716).
 ///
 /// Generous on purpose. Shedding costs a keyframe wait, so a deadline tighter
@@ -160,10 +151,8 @@ impl Default for PersistentSettings {
             dark_theme: true,
             desktop_notifications: false,
             max_history: default_max_history(),
-            max_alerts: default_max_alerts(),
             max_live_latency_ms: default_max_live_latency_ms(),
             groups: GroupsState::default(),
-            alert_rules: Vec::new(),
             alert_filter_presets: Vec::new(),
             favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
@@ -258,7 +247,6 @@ impl PersistentSettings {
             (self.stale_threshold_secs * 1000) as i64,
             self.dark_theme,
             self.max_history,
-            self.max_alerts,
         );
         state.desktop_notifications = self.desktop_notifications;
         state.group_by_host = self.group_by_host;
@@ -303,13 +291,11 @@ impl PersistentSettings {
             dark_theme: state.dark_theme,
             desktop_notifications: state.desktop_notifications,
             max_history: state.max_history.parse().unwrap_or(default_max_history()),
-            max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
             max_live_latency_ms: state
                 .max_live_latency_ms
                 .parse()
                 .unwrap_or_else(|_| default_max_live_latency_ms()),
             groups: GroupsState::default(),
-            alert_rules: Vec::new(),
             alert_filter_presets: Vec::new(),
             favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
@@ -355,7 +341,6 @@ pub struct SettingsState {
     /// Maximum metric history entries per device.
     pub max_history: String,
     /// Maximum alerts to keep.
-    pub max_alerts: String,
     /// Frame-age deadline for live video tiles, milliseconds; "0" disables it.
     pub max_live_latency_ms: String,
     /// Whether settings have been modified.
@@ -379,7 +364,6 @@ impl Default for SettingsState {
             subscription_scope: String::new(),
             link_profile: LinkProfile::default(),
             max_history: "500".to_string(),
-            max_alerts: "100".to_string(),
             max_live_latency_ms: default_max_live_latency_ms().to_string(),
             modified: false,
             error: None,
@@ -397,7 +381,6 @@ impl SettingsState {
         stale_threshold_ms: i64,
         dark_theme: bool,
         max_history: usize,
-        max_alerts: usize,
     ) -> Self {
         Self {
             zenoh_mode: ZenohMode::parse(mode),
@@ -410,7 +393,6 @@ impl SettingsState {
             subscription_scope: String::new(),
             link_profile: LinkProfile::default(),
             max_history: max_history.to_string(),
-            max_alerts: max_alerts.to_string(),
             max_live_latency_ms: default_max_live_latency_ms().to_string(),
             modified: false,
             error: None,
@@ -463,13 +445,6 @@ impl SettingsState {
     /// Update max history.
     pub fn set_max_history(&mut self, max_history: String) {
         self.max_history = max_history;
-        self.modified = true;
-        self.clear_messages();
-    }
-
-    /// Update max alerts.
-    pub fn set_max_alerts(&mut self, max_alerts: String) {
-        self.max_alerts = max_alerts;
         self.modified = true;
         self.clear_messages();
     }
@@ -536,20 +511,6 @@ impl SettingsState {
             return Err("Max history cannot exceed 10000".to_string());
         }
 
-        // Validate max alerts
-        let max_alerts: usize = self
-            .max_alerts
-            .parse()
-            .map_err(|_| "Max alerts must be a number".to_string())?;
-
-        if max_alerts < 10 {
-            return Err("Max alerts must be at least 10".to_string());
-        }
-
-        if max_alerts > 1000 {
-            return Err("Max alerts cannot exceed 1000".to_string());
-        }
-
         // Live-video frame-age deadline (#716). 0 is a valid answer — it means
         // "do not shed on age" — but anything between 0 and a frame interval
         // is not: it would shed every frame and show nothing.
@@ -605,10 +566,6 @@ impl SettingsState {
     }
 
     /// Get max alerts value.
-    pub fn max_alerts_value(&self) -> usize {
-        self.max_alerts.parse().unwrap_or(100)
-    }
-
     /// The live-video frame-age deadline (#716), or `None` when it is off.
     ///
     /// `None` and `Some(0)` would mean the same thing to a caller, so the type
@@ -909,23 +866,6 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         .spacing(10)
         .align_y(Alignment::Center);
 
-    // Max alerts
-    let alerts_label = text("Max alerts to keep:").size(14);
-    let alerts_input = text_input("100", &state.max_alerts)
-        .on_input(Message::SetMaxAlerts)
-        .padding(8)
-        .width(Length::Fixed(100.0));
-
-    let alerts_help = text("Maximum alerts to keep in history (10-1000)")
-        .size(11)
-        .style(|theme: &Theme| text::Style {
-            color: Some(crate::view::theme::colors(theme).text_dimmed()),
-        });
-
-    let alerts_row = row![alerts_label, alerts_input]
-        .spacing(10)
-        .align_y(Alignment::Center);
-
     // Live-video frame-age deadline (#716).
     let latency_label = text("Live video latency deadline (ms):").size(14);
     let latency_input = text_input("1500", &state.max_live_latency_ms)
@@ -963,8 +903,6 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         threshold_help,
         history_row,
         history_help,
-        alerts_row,
-        alerts_help,
         latency_row,
         latency_help,
         notif_row,
@@ -1091,10 +1029,8 @@ mod tests {
             dark_theme: true,
             desktop_notifications: false,
             max_history: 1000,
-            max_alerts: 200,
             max_live_latency_ms: 2000,
             groups: GroupsState::default(),
-            alert_rules: Vec::new(),
             alert_filter_presets: Vec::new(),
             favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
@@ -1124,7 +1060,6 @@ mod tests {
         assert_eq!(restored.zenoh_listen, vec!["tcp/0.0.0.0:7448"]);
         assert_eq!(restored.stale_threshold_secs, 60);
         assert_eq!(restored.max_history, 1000);
-        assert_eq!(restored.max_alerts, 200);
         assert_eq!(restored.max_live_latency_ms, 2000);
     }
 
@@ -1203,10 +1138,8 @@ mod tests {
             dark_theme: false,
             desktop_notifications: true,
             max_history: 750,
-            max_alerts: 150,
             max_live_latency_ms: 800,
             groups: GroupsState::default(),
-            alert_rules: Vec::new(),
             alert_filter_presets: Vec::new(),
             favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
@@ -1235,7 +1168,6 @@ mod tests {
         assert!(state.zenoh_listen.is_empty());
         assert_eq!(state.stale_threshold_secs, "90");
         assert_eq!(state.max_history, "750");
-        assert_eq!(state.max_alerts, "150");
         // The opt-in notification flag survives the persistent→state hop (#26).
         assert!(state.desktop_notifications);
 
@@ -1253,7 +1185,6 @@ mod tests {
         assert!(restored.zenoh_listen.is_empty());
         assert_eq!(restored.stale_threshold_secs, 90);
         assert_eq!(restored.max_history, 750);
-        assert_eq!(restored.max_alerts, 150);
         assert!(restored.desktop_notifications);
         assert_eq!(
             restored.subscription_scope,
