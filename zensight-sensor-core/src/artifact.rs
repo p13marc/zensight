@@ -430,17 +430,22 @@ impl ArtifactChannel {
 
     async fn run_inner(self: &ArtifactChannel) -> anyhow::Result<()> {
         let request_key = artifact_request_key(&self.producer);
-        let req_q = zensight_common::served::serve_queryable(&self.session, request_key.as_str())
-            .await
-            .map_err(|e| anyhow::anyhow!("declare artifact request queryable: {e}"))?;
+        // `artifact/request` and `artifact/cancel` are write procedures, and
+        // this channel is framework-owned — so routing them through the audited
+        // seam (#957) gives every artifact-capable sensor a trail at once.
+        let req_q =
+            zensight_common::served::serve_write_queryable(&self.session, request_key.as_str())
+                .await
+                .map_err(|e| anyhow::anyhow!("declare artifact request queryable: {e}"))?;
         let status_key = artifact_status_key(&self.producer);
         let status_q = zensight_common::served::serve_queryable(&self.session, status_key.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("declare artifact status queryable: {e}"))?;
         let cancel_key = artifact_cancel_key(&self.producer);
-        let cancel_q = zensight_common::served::serve_queryable(&self.session, cancel_key.as_str())
-            .await
-            .map_err(|e| anyhow::anyhow!("declare artifact cancel queryable: {e}"))?;
+        let cancel_q =
+            zensight_common::served::serve_write_queryable(&self.session, cancel_key.as_str())
+                .await
+                .map_err(|e| anyhow::anyhow!("declare artifact cancel queryable: {e}"))?;
 
         // `spawn()` declares the queryable *before* it returns, so by the time
         // this channel starts answering `artifact/request` its blob endpoints
@@ -481,21 +486,25 @@ impl ArtifactChannel {
                 Ok(query) = req_q.recv_async() => {
                     // Write procedure (RFC 05 §3): value reply = accepted
                     // ({ id }); failures ride reply_err with a namespaced name.
-                    let payload = query
-                        .payload()
-                        .map(|p| p.to_bytes().to_vec())
-                        .unwrap_or_default();
+                    let payload = query.request().payload;
+                    // The kind is what an operator asked this host to produce,
+                    // and it is what the trail is read for.
+                    let kind = serde_json::from_slice::<serde_json::Value>(&payload)
+                        .ok()
+                        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string));
                     match self.handle_request(&payload).await {
                         Ok(id) => {
                             let body = serde_json::to_vec(&serde_json::json!({ "id": id.to_string() }))
                                 .unwrap_or_default();
-                            if let Err(e) = query.reply(request_key.as_str(), body).await {
+                            if let Err(e) = query
+                                .executed(request_key.as_str(), body, kind.as_deref())
+                                .await
+                            {
                                 tracing::warn!(error = %e, "artifact request reply failed");
                             }
                         }
                         Err(err) => {
-                            let body = serde_json::to_vec(&err).unwrap_or_default();
-                            if let Err(e) = query.reply_err(body).await {
+                            if let Err(e) = query.refused(&err, kind.as_deref()).await {
                                 tracing::warn!(error = %e, "artifact request reply_err failed");
                             }
                         }
@@ -512,19 +521,18 @@ impl ArtifactChannel {
                 Ok(query) = cancel_q.recv_async() => {
                     // `?id=<ulid>` selector param, with the legacy body form
                     // as fallback.
-                    let param_id = query
-                        .parameters()
-                        .as_str()
-                        .split(';')
-                        .find_map(|kv| kv.strip_prefix("id="))
-                        .map(str::to_string);
-                    let body_id = query
-                        .payload()
-                        .map(|p| String::from_utf8_lossy(&p.to_bytes()).trim().to_string());
+                    let req = query.request();
+                    let param_id = req.param("id");
+                    let body_id = (!req.payload.is_empty())
+                        .then(|| String::from_utf8_lossy(&req.payload).trim().to_string());
                     match param_id.or(body_id).and_then(|s| s.parse::<Ulid>().ok()) {
                         Some(id) => {
                             self.cancel(id).await;
-                            if let Err(e) = query.reply(cancel_key.as_str(), Vec::new()).await {
+                            let target = id.to_string();
+                            if let Err(e) = query
+                                .executed(cancel_key.as_str(), Vec::new(), Some(&target))
+                                .await
+                            {
                                 tracing::warn!(error = %e, "artifact cancel reply failed");
                             }
                         }
@@ -532,8 +540,7 @@ impl ArtifactChannel {
                             let err = crate::rpc::RpcError::invalid_args(
                                 "cancel needs ?id=<ulid> (or a ULID body)",
                             );
-                            let body = serde_json::to_vec(&err).unwrap_or_default();
-                            let _ = query.reply_err(body).await;
+                            let _ = query.refused(&err, None).await;
                         }
                     }
                 }

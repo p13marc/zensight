@@ -12,6 +12,9 @@
 pub mod action;
 pub mod alert;
 pub mod artifact;
+// The operator's trail (#957). Distinct from `registry_audit` below, which
+// audits the registry, not what anyone did.
+pub mod audit;
 pub mod bandwidth;
 pub mod command;
 pub mod comparison;

@@ -1,4 +1,4 @@
-# Registry honesty — the four checks, and what none of them checks
+# Registry honesty — the five checks, and what none of them checks
 
 RFC 08 §6.1 is one sentence:
 
@@ -10,11 +10,11 @@ fleet *as truth*, and a generic explorer has nothing else to go on. An entry
 for a surface the code does not serve is not aspirational — it is a lie
 transmitted to every consumer that asks.
 
-Nothing enforces that sentence by itself. Four checks do, between them, and
+Nothing enforces that sentence by itself. Five checks do, between them, and
 they cover different halves in different places. This page says which is which,
 and — more usefully — what is still not covered.
 
-## The four checks
+## The five checks
 
 | Check | Direction | When | Covers |
 |---|---|---|---|
@@ -22,6 +22,14 @@ and — more usefully — what is still not covered.
 | `tests/registry_conformance.rs` (per sensor) | published ⊆ registered | CI | subjects |
 | [`served`](../src/served.rs) | registered ⊆ served | run time, before `alive` | **procedures** |
 | [`registry_audit`](../src/registry_audit.rs) | registered ⊆ emittable | CI | **subjects** |
+| [`served::check_write_coverage`](../src/served.rs) | registered **write** ⊆ audited | run time, before `alive` | **procedures** |
+
+The fifth is #957's, and it is a different question from the third: the third
+asks whether a declared procedure is *answered at all*, the fifth whether a
+declared **write** is answered through a seam that records the outcome. A build
+can pass the third and fail the fifth — that is precisely the state the tree was
+in before #957, with eleven of twelve write surfaces leaving no trail. See
+[`audit.md`](audit.md).
 
 The two directions are not mirror images and the first does not imply the
 second. A registry may be a strict superset of what the code does and every

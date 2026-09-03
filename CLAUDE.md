@@ -85,13 +85,15 @@ GitHub is a passive push mirror. `ci.yml` enforces, as a merge gate, in four job
   blind spot. The `ebpf` legs are out-of-band in `features-ebpf.yml` (nightly +
   `bpf-linker`).
 - **lint** — `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked
-  -- -D warnings`, plus five grep guards: a **design-system color guard** (no ad-hoc Color
+  -- -D warnings`, plus six grep guards: a **design-system color guard** (no ad-hoc Color
   constructors — `from_rgb*`, `new`, the constants, `color!`, the struct literal —
   outside `zensight/src/view/{theme.rs,tokens.rs,components/}`
   — see [`zensight/docs/design-system.md`](zensight/docs/design-system.md)), a
   **`session.put`/`session.delete` ban** (publish through declared publishers), a ban on
   exporters hand-rolling `declare_subscriber` (history/recovery, #763), a ban on raw
-  `declare_queryable` (serve through `served::serve_queryable`, #484), and the two #466
+  `declare_queryable` (serve through `served::serve_queryable`, #484), a ban on serving a
+  **write** procedure through the unaudited seam (answer through
+  `served::serve_write_queryable`, #957), and the two #466
   checks — no `"zensight/` literal in application source, and only
   `zensight_common::session` may call `zenoh::open`.
 
@@ -152,6 +154,7 @@ flowchart LR
 | `zensight-sensor-netring` | `ja4plus` | JA4/JA4H fingerprints — FoxIO License 1.1 (NOT OSI); default build stays OSI-clean |
 | `zensight-sensor-{netlink,sysinfo}` | `ebpf` | opt-in eBPF collectors (need host validation) |
 | `zensight-sensor-probe` | `icmp` | ICMP echo checks — needs `CAP_NET_RAW`; startup refuses an icmp target in a build without it |
+| `zensight-common` | `linux-audit` | write-procedure outcomes to the host's audit subsystem (#957): one `AUDIT_USYS_CONFIG` netlink datagram per record, needs `CAP_AUDIT_WRITE`. Off by default; without it (and on a host that refuses the first record) the same fields go to the `zensight::audit` tracing target. It does **not** link the LGPL `libaudit` — hence the name. Turn it on per binary with `--features zensight-common/linux-audit` |
 | `zensight-sensor-sysinfo` | `nvml` | NVIDIA GPU telemetry via `libnvidia-ml` (#954). **Compile-checked only** — no build machine has an NVIDIA card, so CI type-checks it and nothing executes it. NVIDIA cards still appear in the default build through their DRM node |
 
 Netring detector features are documented in `zensight-sensor-netring/docs/detectors.md`.

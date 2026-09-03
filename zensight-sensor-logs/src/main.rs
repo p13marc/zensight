@@ -120,8 +120,10 @@ async fn main() -> Result<()> {
 
         tracing::info!("Dynamic filters enabled, listening on {}", command_key);
 
-        // Serve filter writes as an @rpc procedure (RFC 05; epic #453).
-        let subscriber = zensight_common::served::serve_queryable(&session, &command_key)
+        // Serve filter writes as an @rpc procedure (RFC 05; epic #453), through
+        // the audited seam — changing what a host collects is an operator
+        // action, and SYS-SUP-019 asks for those to be journalled (#957).
+        let subscriber = zensight_common::served::serve_write_queryable(&session, &command_key)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to declare filter/set queryable: {}", e))?;
 
@@ -138,23 +140,22 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     Ok(query) = subscriber.recv_async() => {
-                        let payload = query
-                            .payload()
-                            .map(|p| p.to_bytes().to_vec())
-                            .unwrap_or_default();
+                        let payload = query.request().payload;
                         match serde_json::from_slice::<FilterCommand>(&payload) {
                             Ok(cmd) => {
+                                let target = format!("{cmd:?}");
                                 handle_filter_command(&filter_manager_cmd, cmd).await;
-                                if let Err(e) = query.reply(command_key.as_str(), Vec::<u8>::new()).await {
+                                if let Err(e) = query
+                                    .executed(command_key.as_str(), Vec::<u8>::new(), Some(&target))
+                                    .await
+                                {
                                     tracing::warn!("Failed to ack filter command: {}", e);
                                 }
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to parse filter command: {}", e);
                                 let err = zensight_sensor_core::rpc::RpcError::invalid_args(e.to_string());
-                                let _ = query
-                                    .reply_err(serde_json::to_vec(&err).unwrap_or_default())
-                                    .await;
+                                let _ = query.refused(&err, None).await;
                             }
                         }
                     }

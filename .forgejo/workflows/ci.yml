@@ -217,6 +217,17 @@ jobs:
       - name: sysinfo --features nvml (tests)
         run: cargo test -p zensight-sensor-sysinfo --features nvml --locked
 
+      # The audit writer (#957). Unlike nvml this one CAN be exercised here —
+      # it is pure Rust over a netlink socket, so the framing and the ack
+      # parsing are real tests. What the runner cannot do is prove a record
+      # reaches an auditd (there is none, and the job has no CAP_AUDIT_WRITE),
+      # which is exactly why `audit::record` degrades to a structured warn
+      # rather than assuming.
+      - name: common --features linux-audit
+        run: cargo clippy -p zensight-common --features linux-audit --all-targets --locked -- -D warnings
+      - name: common --features linux-audit (tests)
+        run: cargo test -p zensight-common --features linux-audit --locked
+
       # netring detectors, each off by default and each pulling its own
       # upstream parser through the netring facade.
       - name: netring --features sigma
@@ -396,6 +407,24 @@ jobs:
             | grep -vE 'served\.rs' || true)
           if [ -n "$hits" ]; then
             echo "::error::Raw declare_queryable — serve through zensight_common::served::serve_queryable so registry coverage (RFC 08 §6.1, #484) can see it:"
+            echo "$hits"
+            exit 1
+          fi
+
+      # #957: a write procedure's outcome must reach the host's audit trail.
+      #
+      # The real enforcement is a type — `served::WriteQuery` has no `reply` and
+      # no `reply_err`, so an unaudited answer to a write is unspellable — plus
+      # the `debug_assert` in `serve_queryable` and the `check_write_coverage`
+      # run every sensor makes before it says `alive`. This step is the tripwire
+      # for the branch that never runs a sensor's tests: it catches a NEW write
+      # procedure declared through the plain seam by the key it is built from.
+      - name: write procedures are served through the audited seam (#957)
+        run: |
+          hits=$(grep -nE 'serve_queryable\(&?[a-z_.]+, *&?(command_key|artifact_request_key|artifact_cancel_key)' /tmp/guard-stripped-all \
+            | grep -vE 'served\.rs' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::A write procedure is served through the unaudited seam — use zensight_common::served::serve_write_queryable so both outcomes reach the host audit trail (SYS-SUP-019, #957):"
             echo "$hits"
             exit 1
           fi

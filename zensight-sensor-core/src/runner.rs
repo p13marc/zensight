@@ -155,7 +155,19 @@ impl<C: SensorConfig> SensorRunner<C> {
 
         init_tracing(&log_config).map_err(|e| SensorError::config(e.to_string()))?;
 
-        tracing::info!(sensor = %name, source = %source, version = %version, "Starting sensor");
+        // Register this process as an audit client (#957), so every write
+        // procedure it serves records under the right producer and origin. A
+        // sensor with no write surface never emits a record and pays only this
+        // one assignment.
+        zensight_common::audit::init(name.clone());
+
+        tracing::info!(
+            sensor = %name,
+            source = %source,
+            version = %version,
+            audit_delivering = zensight_common::audit::is_delivering(),
+            "Starting sensor"
+        );
 
         // Connect to Zenoh
         let session = Arc::new(

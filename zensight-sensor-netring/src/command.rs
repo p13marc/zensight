@@ -195,7 +195,8 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Detecto
     let cmd_key = command_key(&producer, DETECTORS_TOPIC);
     let stat_key = status_key(&producer, DETECTORS_TOPIC);
 
-    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
+    let subscriber = match zensight_common::served::serve_write_queryable(&session, &cmd_key).await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to detector commands");
@@ -216,19 +217,17 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Detecto
             query = subscriber.recv_async() => {
                 match query {
                     Ok(query) => {
-                        let payload = query
-                            .payload()
-                            .map(|p| p.to_bytes().to_vec())
-                            .unwrap_or_default();
+                        let payload = query.request().payload;
                         match serde_json::from_slice::<DetectorCommand>(&payload) {
                             Ok(cmd) => {
                                 let next = handle.apply(cmd);
                                 tracing::info!(allowlist = next.allowlist.len(), "netring: detector config updated");
-                                ack(&query, &cmd_key).await;
+                                let target = format!("allowlist:{}", next.allowlist.len());
+                                ack(query, &cmd_key, &target).await;
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "netring: bad detector command");
-                                nack_invalid(&query, &e.to_string()).await;
+                                nack_invalid(query, &e.to_string()).await;
                             }
                         }
                     }
@@ -299,7 +298,8 @@ pub async fn run_capture_filter(
     let cmd_key = command_key(&producer, CAPTURE_FILTER_TOPIC);
     let stat_key = status_key(&producer, CAPTURE_FILTER_TOPIC);
 
-    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
+    let subscriber = match zensight_common::served::serve_write_queryable(&session, &cmd_key).await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to capture-filter commands");
@@ -325,23 +325,21 @@ pub async fn run_capture_filter(
                     tracing::warn!("netring: capture-filter command subscriber ended");
                     return;
                 };
-                let payload = query
-                    .payload()
-                    .map(|p| p.to_bytes().to_vec())
-                    .unwrap_or_default();
+                let payload = query.request().payload;
                 match serde_json::from_slice::<CaptureFilterCommand>(&payload) {
                     Ok(CaptureFilterCommand::SetPacketFilter { expr }) => {
                         apply_filter(&reload, &expr, &mut current, &mut last_error);
-                        ack(&query, &cmd_key).await;
+                        let target = format!("filter:{expr}");
+                        ack(query, &cmd_key, &target).await;
                     }
                     Ok(CaptureFilterCommand::ClearPacketFilter) => {
                         let base = base_expr.clone();
                         apply_filter(&reload, &base, &mut current, &mut last_error);
-                        ack(&query, &cmd_key).await;
+                        ack(query, &cmd_key, "filter:cleared").await;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "netring: bad capture-filter command");
-                        nack_invalid(&query, &e.to_string()).await;
+                        nack_invalid(query, &e.to_string()).await;
                     }
                 }
             }
@@ -451,7 +449,8 @@ pub async fn run_threat_intel(
     let cmd_key = command_key(&producer, THREAT_INTEL_TOPIC);
     let stat_key = status_key(&producer, THREAT_INTEL_TOPIC);
 
-    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
+    let subscriber = match zensight_common::served::serve_write_queryable(&session, &cmd_key).await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to threat-intel commands");
@@ -479,19 +478,17 @@ pub async fn run_threat_intel(
                     tracing::warn!("netring: threat-intel command subscriber ended");
                     return;
                 };
-                let payload = query
-                    .payload()
-                    .map(|p| p.to_bytes().to_vec())
-                    .unwrap_or_default();
+                let payload = query.request().payload;
                 match serde_json::from_slice::<ThreatIntelCommand>(&payload) {
                     Ok(cmd) => {
                         let outcome = apply_threat_intel(&reload, &mut live_ioc, &mut ioc_total, cmd);
                         last_reload = Some(outcome);
-                        ack(&query, &cmd_key).await;
+                        let target = format!("ioc:{ioc_total}");
+                        ack(query, &cmd_key, &target).await;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "netring: bad threat-intel command");
-                        nack_invalid(&query, &e.to_string()).await;
+                        nack_invalid(query, &e.to_string()).await;
                     }
                 }
             }
@@ -639,7 +636,8 @@ pub async fn run_capture_disk(
     let cmd_key = command_key(&producer, CAPTURE_DISK_TOPIC);
     let stat_key = status_key(&producer, CAPTURE_DISK_TOPIC);
 
-    let subscriber = match zensight_common::served::serve_queryable(&session, &cmd_key).await {
+    let subscriber = match zensight_common::served::serve_write_queryable(&session, &cmd_key).await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to capture-disk commands");
@@ -662,22 +660,21 @@ pub async fn run_capture_disk(
                     tracing::warn!("netring: capture-disk command subscriber ended");
                     return;
                 };
-                let payload = query
-                    .payload()
-                    .map(|p| p.to_bytes().to_vec())
-                    .unwrap_or_default();
+                let payload = query.request().payload;
                 match serde_json::from_slice::<CaptureDiskCommand>(&payload) {
                     Ok(CaptureDiskCommand::CaptureNow { tag }) => {
+                        let target = format!("capture-now:{}", tag.as_deref().unwrap_or("-"));
                         handle.capture_now(tag);
-                        ack(&query, &cmd_key).await;
+                        ack(query, &cmd_key, &target).await;
                     }
                     Ok(CaptureDiskCommand::SetCapture { mode }) => {
                         handle.set_mode(mode);
-                        ack(&query, &cmd_key).await;
+                        let target = format!("capture-mode:{mode:?}");
+                        ack(query, &cmd_key, &target).await;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "netring: bad capture-disk command");
-                        nack_invalid(&query, &e.to_string()).await;
+                        nack_invalid(query, &e.to_string()).await;
                     }
                 }
             }
@@ -753,18 +750,22 @@ fn apply_yara(_reload: &netring::monitor::ReloadHandle, _rules: &str) -> String 
     "error: set_yara ignored — sensor built without the `yara` feature".to_string()
 }
 
-/// Ack a write procedure: empty value reply on the concrete key (RFC 05 §3).
-async fn ack(query: &zenoh::query::Query, key: &str) {
-    if let Err(e) = query.reply(key, Vec::<u8>::new()).await {
+/// Ack a write procedure: empty value reply on the concrete key (RFC 05 §3),
+/// with the outcome recorded on the way out (#957).
+///
+/// `target` is what the command changed — the detector set, the filter
+/// expression, the IOC feed — because the audit trail is read without the
+/// payload that carried it.
+async fn ack(query: zensight_common::served::WriteQuery, key: &str, target: &str) {
+    if let Err(e) = query.executed(key, Vec::<u8>::new(), Some(target)).await {
         tracing::warn!(error = %e, "netring: failed to ack command");
     }
 }
 
 /// Refuse a write with `error/invalid-args` via reply_err (RFC 05 §3).
-async fn nack_invalid(query: &zenoh::query::Query, message: &str) {
+async fn nack_invalid(query: zensight_common::served::WriteQuery, message: &str) {
     let err = zensight_sensor_core::rpc::RpcError::invalid_args(message);
-    let payload = serde_json::to_vec(&err).unwrap_or_default();
-    if let Err(e) = query.reply_err(payload).await {
+    if let Err(e) = query.refused(&err, None).await {
         tracing::warn!(error = %e, "netring: failed to reply_err");
     }
 }
