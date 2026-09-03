@@ -101,6 +101,53 @@ impl SimMib {
         self
     }
 
+    /// A healthy RFC 1628 UPS: on mains, battery normal, 45 minutes left
+    /// (#955).
+    ///
+    /// Deliberately does **not** set every scalar the profile walks: a real
+    /// UPS implements a subset, and the rules have to be right about an absent
+    /// OID being absent rather than zero.
+    pub fn with_ups_mib(self) -> Self {
+        self.set("1.3.6.1.2.1.33.1.1.1.0", text("SimPower"));
+        self.set("1.3.6.1.2.1.33.1.1.2.0", text("SIM-3000"));
+        self.set("1.3.6.1.2.1.33.1.2.1.0", Value::Integer(2)); // batteryNormal
+        self.set("1.3.6.1.2.1.33.1.2.3.0", Value::Integer(45)); // minutes remaining
+        self.set("1.3.6.1.2.1.33.1.2.4.0", Value::Integer(100)); // charge %
+        self.set("1.3.6.1.2.1.33.1.4.1.0", Value::Integer(3)); // outputSource normal
+        self.set("1.3.6.1.2.1.33.1.4.4.1.2.1", Value::Integer(230)); // output volts
+        self.set("1.3.6.1.2.1.33.1.4.4.1.5.1", Value::Integer(31)); // % load
+        self.set("1.3.6.1.2.1.33.1.6.1.0", Value::Gauge32(0)); // alarms present
+        self
+    }
+
+    /// The mains drop: on battery, low, six minutes left.
+    pub fn on_battery(&self) {
+        self.set("1.3.6.1.2.1.33.1.4.1.0", Value::Integer(5)); // battery
+        self.set("1.3.6.1.2.1.33.1.2.1.0", Value::Integer(3)); // batteryLow
+        self.set("1.3.6.1.2.1.33.1.2.3.0", Value::Integer(6));
+        self.set("1.3.6.1.2.1.33.1.2.4.0", Value::Integer(18));
+    }
+
+    /// An APC rPDU2 switched + metered outlet table with `n` outlets, all on.
+    pub fn with_pdu_outlets(self, n: u32) -> Self {
+        for i in 1..=n {
+            self.set(
+                &format!("1.3.6.1.4.1.318.1.1.26.9.2.3.1.3.{i}"),
+                text(&format!("outlet-{i}")),
+            );
+            self.set(
+                &format!("1.3.6.1.4.1.318.1.1.26.9.2.3.1.5.{i}"),
+                Value::Integer(2), // on
+            );
+            self.set(
+                &format!("1.3.6.1.4.1.318.1.1.26.9.4.3.1.6.{i}"),
+                Value::Integer(12), // 1.2 A
+            );
+        }
+        self.set("1.3.6.1.4.1.318.1.1.26.4.3.1.4.1", Value::Integer(2)); // normal load
+        self
+    }
+
     /// Synthetic IF-MIB ifTable + ifXTable with `n` interfaces (indexes 1..=n).
     ///
     /// Interfaces come up admin-up/oper-up at 100 Mb/s with zeroed counters;
@@ -179,14 +226,21 @@ impl SimAgent {
     }
 
     /// Start with a customized builder (v3 users, other communities, engine id).
-    /// The `127.0.0.1:0` bind and the mib-2 handler are pre-wired.
+    /// The `127.0.0.1:0` bind and the handlers are pre-wired.
     pub async fn start_with(
         mib: SimMib,
         configure: impl FnOnce(AgentBuilder) -> AgentBuilder,
     ) -> Self {
         let builder = Agent::builder()
             .bind("127.0.0.1:0")
-            .handler(oid("1.3.6.1.2.1"), Arc::new(mib));
+            // `1.3.6.1`, not `1.3.6.1.2.1`: the vendor profiles (#955) live
+            // under `1.3.6.1.4.1`, and a fixture the agent does not serve
+            // answers nothing at all — which every rule reading it would score
+            // as "healthy". A fake that agrees with any assertion is worse
+            // than no fake. One handler over both trees, because `get_next`
+            // walks the whole table and two roots make the agent's dispatch
+            // pick between them.
+            .handler(oid("1.3.6.1"), Arc::new(mib));
         // 0.18: an agent with inbound identities must say what they may
         // read — VACM, or everything. A simulator answers everything.
         let agent = Arc::new(
@@ -553,6 +607,26 @@ pub async fn rig_with_alerts(
         alert_sub,
         reporter,
     }
+}
+
+/// [`rig_with_alerts`] plus the shipped profiles (#955).
+///
+/// The UPS and PDU rules read what the `ups` / `pdu-*` profiles walk, so a
+/// test that pins one has to have both halves — which is the same thing a
+/// deployment has to have, and the reason this helper exists rather than the
+/// rules auto-adding their own columns to every device on the fleet.
+pub async fn rig_with_profiles_and_alerts(
+    device: DeviceConfig,
+    cfg: zensight_sensor_snmp::alerts::SnmpAlertsConfig,
+) -> AlertRig {
+    let mut rig = rig_with_alerts(device, cfg).await;
+    let set = zensight_sensor_snmp::profile::ProfileSet::builtin();
+    let mut resolver = MibResolver::new();
+    resolver.add_custom_mappings(&test_oid_names());
+    resolver.add_profile_mappings(&set.all_oid_names(), &set.all_oid_syntax());
+    rig.rig.poller.set_resolver(Arc::new(resolver));
+    rig.rig.poller.with_profiles(Arc::new(set));
+    rig
 }
 
 /// Declare a subscriber on every device's `InterfaceTable` state doc.

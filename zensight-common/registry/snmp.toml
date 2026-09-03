@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.9"
+version = "1.10"
 app = "zensight"
 convention = 1
 
@@ -411,6 +411,412 @@ type = "TelemetryPoint"
 cardinality = 1024
 since = "1.9"
 description = "used space in allocation units (hrStorageUsed)"
+
+
+# ── Families the shipped profiles have always published (#955) ───────────────
+#
+# Not new telemetry: `generic-device`, `entity-sensors` and `network-interfaces`
+# have emitted these since #531. They were riding the `{device}/{metric...}`
+# catch-all, which is exactly the blind spot the catch-all creates — the metric
+# guard passes any grammar-valid name, so nothing noticed. Registering them
+# gives the exporters a type and a help string, and it is what makes
+# `registry_conformance`'s profile-coverage test start from zero excuses.
+
+[[subject]]
+path = "{device}/system/descr"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "sysDescr — the device's own description string"
+
+[[subject]]
+path = "{device}/system/object_id"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "sysObjectID, the vendor OID the profile matcher selects on"
+
+[[subject]]
+path = "{device}/system/uptime"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "sysUpTime in seconds (TimeTicks/100); a step backwards is what fires `device_rebooted`"
+
+[[subject]]
+path = "{device}/system/contact"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "sysContact"
+
+[[subject]]
+path = "{device}/system/name"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "sysName"
+
+[[subject]]
+path = "{device}/system/location"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "sysLocation"
+
+[[subject]]
+path = "{device}/sensor/{index}/type"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.10"
+description = "ENTITY-SENSOR-MIB entPhySensorType: what physical quantity this row measures"
+
+[[subject]]
+path = "{device}/sensor/{index}/scale"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.10"
+description = "entPhySensorScale — the decimal exponent the value is expressed in"
+
+[[subject]]
+path = "{device}/sensor/{index}/value"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.10"
+description = "entPhySensorValue, in the units `type` and `scale` name between them"
+
+[[subject]]
+path = "{device}/sensor/{index}/oper_status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.10"
+description = "entPhySensorOperStatus: ok(1) unavailable(2) nonoperational(3) — 2 and 3 mean the reading beside it is NOT a measurement"
+
+[[subject]]
+path = "{device}/ifx/{index}/hc_in_ucast_pkts"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.10"
+description = "ifHCInUcastPkts"
+
+[[subject]]
+path = "{device}/ifx/{index}/hc_in_ucast_pkts.rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.10"
+description = "derived per-second rate of the counter above"
+
+[[subject]]
+path = "{device}/ifx/{index}/hc_out_ucast_pkts"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.10"
+description = "ifHCOutUcastPkts"
+
+[[subject]]
+path = "{device}/ifx/{index}/hc_out_ucast_pkts.rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.10"
+description = "derived per-second rate of the counter above"
+
+# ── UPS and PDU (#955, SYS-SUP-002 and the read half of -003) ────────────────
+#
+# Registered as real families rather than left to the `{device}/{metric...}`
+# catch-all above, for the reason the note at the top of this file gives: a
+# catch-all makes the metric guard vacuous and gives an exporter no `# TYPE`
+# and no help text. These are OUR vocabulary — RFC 1628 is a standard and the
+# three PDU trees are normalised onto one set of names — not an OID tree a
+# vendor owns.
+#
+# Two conventions worth knowing before adding to this block:
+#
+#   * A scale in the NAME, never in the value. `voltage_dv` is decivolts
+#     because that is what RFC 1628 puts on the wire; rescaling it in the
+#     poller would need a per-OID scale table, and a scale applied in the
+#     wrong place is a wrong number nobody can see. Milliamps and tenths of an
+#     amp are separate families for the same reason — summing them would be
+#     silently meaningless.
+#   * `{outlet}` is the table index VERBATIM. An Eaton ePDU indexes its outlet
+#     tables by `unit.outlet`, so a legal outlet id is `1.3` as well as `3`.
+
+[[subject]]
+path = "{device}/ups/ident/manufacturer"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "UPS manufacturer name (upsIdentManufacturer)"
+
+[[subject]]
+path = "{device}/ups/ident/model"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "UPS model name (upsIdentModel)"
+
+[[subject]]
+path = "{device}/ups/ident/name"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "operator-assigned UPS name (upsIdentName)"
+
+[[subject]]
+path = "{device}/ups/battery/status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "unknown(1) normal(2) low(3) depleted(4) — upsBatteryStatus; the `ups_battery_low` rule reads 3 and 4, and deliberately not 1"
+
+[[subject]]
+path = "{device}/ups/battery/seconds_on_battery"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "seconds since the UPS last switched to battery, 0 on mains (upsSecondsOnBattery)"
+
+[[subject]]
+path = "{device}/ups/battery/minutes_remaining"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "the UPS's own runtime estimate (upsEstimatedMinutesRemaining) — absent on a UPS that does not implement it, never zero"
+
+[[subject]]
+path = "{device}/ups/battery/charge_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "remaining battery charge (upsEstimatedChargeRemaining)"
+
+[[subject]]
+path = "{device}/ups/battery/voltage_dv"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "battery voltage in TENTHS of a volt DC, as RFC 1628 defines it (upsBatteryVoltage) — the suffix says so rather than the value being silently rescaled"
+
+[[subject]]
+path = "{device}/ups/battery/current_da"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "battery current in tenths of an amp DC (upsBatteryCurrent)"
+
+[[subject]]
+path = "{device}/ups/battery/temperature_c"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "battery temperature in degrees C (upsBatteryTemperature)"
+
+[[subject]]
+path = "{device}/ups/input/line_bads"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "count of times input went out of tolerance (upsInputLineBads)"
+
+[[subject]]
+path = "{device}/ups/input/line_bads.rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "derived per-second rate of the counter above"
+
+[[subject]]
+path = "{device}/ups/input/{line}/frequency_dhz"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "input frequency in tenths of a hertz (upsInputFrequency)"
+
+[[subject]]
+path = "{device}/ups/input/{line}/voltage_v"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "input RMS volts (upsInputVoltage)"
+
+[[subject]]
+path = "{device}/ups/input/{line}/current_da"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "input current in tenths of an amp (upsInputCurrent)"
+
+[[subject]]
+path = "{device}/ups/input/{line}/true_power_w"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "input true power in watts (upsInputTruePower)"
+
+[[subject]]
+path = "{device}/ups/output/source"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "other(1) none(2) normal(3) bypass(4) battery(5) booster(6) reducer(7) — upsOutputSource; anything but 3 fires `ups_on_battery`, bypass included, because a bypassed load is an unprotected one"
+
+[[subject]]
+path = "{device}/ups/output/frequency_dhz"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "output frequency in tenths of a hertz (upsOutputFrequency)"
+
+[[subject]]
+path = "{device}/ups/output/{line}/voltage_v"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "output RMS volts (upsOutputVoltage)"
+
+[[subject]]
+path = "{device}/ups/output/{line}/current_da"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "output current in tenths of an amp (upsOutputCurrent)"
+
+[[subject]]
+path = "{device}/ups/output/{line}/power_w"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "output true power in watts (upsOutputPower)"
+
+[[subject]]
+path = "{device}/ups/output/{line}/percent_load"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "output load as a percentage of capacity (upsOutputPercentLoad)"
+
+[[subject]]
+path = "{device}/ups/alarms_present"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "number of alarms the UPS is currently asserting (upsAlarmsPresent)"
+
+[[subject]]
+path = "{device}/pdu/outlet/{outlet}/name"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 2048
+since = "1.10"
+description = "outlet label as the PDU reports it. {outlet} is the table index VERBATIM — one integer on an APC or Raritan, two (`unit.outlet`) on an Eaton, whose outlet tables are indexed by both"
+
+[[subject]]
+path = "{device}/pdu/outlet/{outlet}/metered_name"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 2048
+since = "1.10"
+description = "the same outlet's label from the metered table, where a PDU serves switched and metered tables with different labels"
+
+[[subject]]
+path = "{device}/pdu/outlet/{outlet}/state"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 2048
+since = "1.10"
+description = "outlet on/off as the vendor spells it: APC off(1) on(2), Eaton off(0) on(1) pendingOff(2) pendingOn(3), Raritan off(0) on(1) cycling(2). The rules normalise it; the raw value is published so a transition is distinguishable from an outage"
+
+[[subject]]
+path = "{device}/pdu/outlet/{outlet}/current_da"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 2048
+since = "1.10"
+description = "per-outlet current in tenths of an amp (APC rPDU2OutletMeteredStatusCurrent)"
+
+[[subject]]
+path = "{device}/pdu/outlet/{outlet}/current_ma"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 2048
+since = "1.10"
+description = "per-outlet current in MILLIAMPS (Eaton outletCurrent, Raritan outletCurrent) — a different family from the APC one on purpose: two scales under one name is a wrong number waiting to be summed"
+
+[[subject]]
+path = "{device}/pdu/outlet/{outlet}/power_w"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 2048
+since = "1.10"
+description = "per-outlet power in watts (APC rPDU2OutletMeteredStatusPower)"
+
+[[subject]]
+path = "{device}/pdu/device/{index}/load_state"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "lowLoad(1) normal(2) nearOverload(3) overload(4) notsupported(5) — the PDU's own verdict against a rating this sensor does not know (APC rPDU2DeviceStatusLoadState). 5 is not a verdict and sets nothing"
+
+[[subject]]
+path = "{device}/pdu/device/{index}/power_dkw"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.10"
+description = "whole-PDU power in tenths of a kilowatt (APC rPDU2DeviceStatusPower)"
+
+[[subject]]
+path = "{device}/pdu/input/{index}/current_ma"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "PDU inlet current in milliamps (Eaton inputCurrent)"
+
+[[subject]]
+path = "{device}/pdu/input/{index}/percent_load"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.10"
+description = "PDU inlet load as a percentage (Eaton inputCurrentPercentLoad)"
 
 [[subject]]
 path = "health"

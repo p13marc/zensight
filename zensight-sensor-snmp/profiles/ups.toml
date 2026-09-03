@@ -1,0 +1,73 @@
+# UPS-MIB (RFC 1628, 1.3.6.1.2.1.33) — the vendor-neutral UPS tree (#955).
+#
+# SYS-SUP-002 asks for UPS state: charge, on-battery, remaining runtime. RFC
+# 1628 is the standard every networked UPS agent implements, so this profile —
+# not a vendor overlay — is what carries the alert rules. The vendor arcs below
+# match so an APC or Eaton card selects it; what they add on top of the
+# standard tree is theirs, and is NOT invented here (see the note in
+# docs/reference.md: a wrong OID publishes a wrong number, which is worse than
+# a missing one).
+#
+# Not a default: only a UPS answers this tree, and walking it against a switch
+# is thirty wasted PDUs a minute. Pin it (`profile: "ups"`) or let the
+# sysObjectID match do it.
+name = "ups"
+
+oids = [
+  "1.3.6.1.2.1.33.1.1.1.0", # upsIdentManufacturer
+  "1.3.6.1.2.1.33.1.1.2.0", # upsIdentModel
+  "1.3.6.1.2.1.33.1.1.5.0", # upsIdentName
+  "1.3.6.1.2.1.33.1.2.1.0", # upsBatteryStatus
+  "1.3.6.1.2.1.33.1.2.2.0", # upsSecondsOnBattery
+  "1.3.6.1.2.1.33.1.2.3.0", # upsEstimatedMinutesRemaining
+  "1.3.6.1.2.1.33.1.2.4.0", # upsEstimatedChargeRemaining
+  "1.3.6.1.2.1.33.1.2.5.0", # upsBatteryVoltage (0.1 V DC)
+  "1.3.6.1.2.1.33.1.2.6.0", # upsBatteryCurrent (0.1 A DC)
+  "1.3.6.1.2.1.33.1.2.7.0", # upsBatteryTemperature (deg C)
+  "1.3.6.1.2.1.33.1.3.1.0", # upsInputLineBads
+  "1.3.6.1.2.1.33.1.4.1.0", # upsOutputSource
+  "1.3.6.1.2.1.33.1.4.2.0", # upsOutputFrequency (0.1 Hz)
+  "1.3.6.1.2.1.33.1.6.1.0", # upsAlarmsPresent
+]
+
+walks = [
+  "1.3.6.1.2.1.33.1.3.3.1", # upsInputTable
+  "1.3.6.1.2.1.33.1.4.4.1", # upsOutputTable
+]
+
+[oid_names]
+"1.3.6.1.2.1.33.1.1.1.0" = "ups/ident/manufacturer"
+"1.3.6.1.2.1.33.1.1.2.0" = "ups/ident/model"
+"1.3.6.1.2.1.33.1.1.5.0" = "ups/ident/name"
+"1.3.6.1.2.1.33.1.2.1.0" = "ups/battery/status"
+"1.3.6.1.2.1.33.1.2.2.0" = "ups/battery/seconds_on_battery"
+"1.3.6.1.2.1.33.1.2.3.0" = "ups/battery/minutes_remaining"
+"1.3.6.1.2.1.33.1.2.4.0" = "ups/battery/charge_percent"
+"1.3.6.1.2.1.33.1.2.5.0" = "ups/battery/voltage_dv"
+"1.3.6.1.2.1.33.1.2.6.0" = "ups/battery/current_da"
+"1.3.6.1.2.1.33.1.2.7.0" = "ups/battery/temperature_c"
+"1.3.6.1.2.1.33.1.3.1.0" = "ups/input/line_bads"
+"1.3.6.1.2.1.33.1.3.3.1.2" = "ups/input/{index}/frequency_dhz"
+"1.3.6.1.2.1.33.1.3.3.1.3" = "ups/input/{index}/voltage_v"
+"1.3.6.1.2.1.33.1.3.3.1.4" = "ups/input/{index}/current_da"
+"1.3.6.1.2.1.33.1.3.3.1.5" = "ups/input/{index}/true_power_w"
+"1.3.6.1.2.1.33.1.4.1.0" = "ups/output/source"
+"1.3.6.1.2.1.33.1.4.2.0" = "ups/output/frequency_dhz"
+"1.3.6.1.2.1.33.1.4.4.1.2" = "ups/output/{index}/voltage_v"
+"1.3.6.1.2.1.33.1.4.4.1.3" = "ups/output/{index}/current_da"
+"1.3.6.1.2.1.33.1.4.4.1.4" = "ups/output/{index}/power_w"
+"1.3.6.1.2.1.33.1.4.4.1.5" = "ups/output/{index}/percent_load"
+"1.3.6.1.2.1.33.1.6.1.0" = "ups/alarms_present"
+
+[oid_syntax]
+"1.3.6.1.2.1.33.1.3.1.0" = "Counter32"
+[match]
+default = false
+# The generic tree, plus the two vendors that ship a network management card
+# implementing it. Neither arc adds OIDs here: an overlay that guesses a
+# vendor MIB from memory publishes wrong numbers under a right-looking name.
+sys_object_id = [
+  "1.3.6.1.2.1.33",       # a device whose sysObjectID is the UPS-MIB itself
+  "1.3.6.1.4.1.318.1.3.2", # APC UPS management cards
+  "1.3.6.1.4.1.534",       # Eaton / Powerware
+]

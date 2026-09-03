@@ -90,11 +90,21 @@ pub struct ProfileSet {
 }
 
 /// Shipped base profiles, embedded so a bare install has them.
-const BUILTIN_PROFILES: [&str; 4] = [
+///
+/// A slice, not a fixed-size array: adding a profile should be one line, not
+/// one line and a length nobody remembers to bump.
+const BUILTIN_PROFILES: &[&str] = &[
     include_str!("../profiles/generic-device.toml"),
     include_str!("../profiles/network-interfaces.toml"),
     include_str!("../profiles/host-resources.toml"),
     include_str!("../profiles/entity-sensors.toml"),
+    // UPS and PDU (#955, SYS-SUP-002/-003). Not defaults: only a UPS answers
+    // RFC 1628 and only a PDU answers a vendor outlet table, so walking them
+    // against a switch is wasted PDUs a minute. Pin, or let sysObjectID match.
+    include_str!("../profiles/ups.toml"),
+    include_str!("../profiles/pdu-apc.toml"),
+    include_str!("../profiles/pdu-eaton.toml"),
+    include_str!("../profiles/pdu-raritan.toml"),
 ];
 
 impl ProfileSet {

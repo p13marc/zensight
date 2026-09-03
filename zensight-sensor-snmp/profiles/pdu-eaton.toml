@@ -1,0 +1,30 @@
+# Eaton ePDU (EATON-EPDU-MIB, 1.3.6.1.4.1.534.6.6.7) — #955.
+#
+# Verified against the Marlin OID set NUT drives real hardware with. Note the
+# shape: Eaton's outlet tables are indexed by **two** integers, `unit.outlet`,
+# not one — the rules key an outlet by the whole index string for exactly this
+# reason, so `1.3` and `3` are both legal outlet ids and neither vendor has to
+# be special-cased downstream.
+#
+# `outletCurrent` and `inputCurrent` are in milliamps; the metric names say so
+# rather than being silently rescaled, because a scale applied in the wrong
+# place is a wrong number nobody can see.
+name = "pdu-eaton"
+
+walks = [
+  "1.3.6.1.4.1.534.6.6.7.6.1.1.6",  # outletDesignator
+  "1.3.6.1.4.1.534.6.6.7.6.6.1.2",  # outletControlStatus  off(0) on(1) pendingOff(2) pendingOn(3)
+  "1.3.6.1.4.1.534.6.6.7.6.4.1.3",  # outletCurrent (mA)
+  "1.3.6.1.4.1.534.6.6.7.3.3.1.4",  # inputCurrent (mA)
+  "1.3.6.1.4.1.534.6.6.7.3.3.1.11", # inputCurrentPercentLoad
+]
+
+[oid_names]
+"1.3.6.1.4.1.534.6.6.7.6.1.1.6" = "pdu/outlet/{index}/name"
+"1.3.6.1.4.1.534.6.6.7.6.6.1.2" = "pdu/outlet/{index}/state"
+"1.3.6.1.4.1.534.6.6.7.6.4.1.3" = "pdu/outlet/{index}/current_ma"
+"1.3.6.1.4.1.534.6.6.7.3.3.1.4" = "pdu/input/{index}/current_ma"
+"1.3.6.1.4.1.534.6.6.7.3.3.1.11" = "pdu/input/{index}/percent_load"
+[match]
+default = false
+sys_object_id = ["1.3.6.1.4.1.534.6.6.7"] # eatonEpdu

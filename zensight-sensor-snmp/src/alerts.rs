@@ -12,7 +12,7 @@
 //! `if_index`, `direction`, `kind`, `storage_index`, `cpu_index`) — live
 //! values ride the summary, so oscillation updates one alert in place.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,13 @@ const IF_UTILIZATION_RULE: &str = "interface_utilization";
 const REBOOT_RULE: &str = "device_rebooted";
 const STORAGE_RULE: &str = "storage_usage";
 const CPU_RULE: &str = "processor_load";
+// UPS / PDU (#955, SYS-SUP-002 and the read half of -003).
+const UPS_ON_BATTERY_RULE: &str = "ups_on_battery";
+const UPS_BATTERY_LOW_RULE: &str = "ups_battery_low";
+const UPS_RUNTIME_LOW_RULE: &str = "ups_runtime_low";
+const UPS_LOAD_HIGH_RULE: &str = "ups_load_high";
+const PDU_OUTLET_OFF_RULE: &str = "pdu_outlet_off";
+const PDU_OVERLOAD_RULE: &str = "pdu_overload";
 
 // ===========================================================================
 // Configuration
@@ -65,6 +72,24 @@ pub struct SnmpAlertsConfig {
     pub storage: PercentRule,
     #[serde(default)]
     pub processor: PercentRule,
+
+    // ── UPS / PDU (#955) ────────────────────────────────────────────────
+    //
+    // These read what the `ups` and `pdu-*` profiles walk. A device with
+    // neither profile produces no observation, so the rules fire nothing and
+    // reconcile empty — they cost a switch nothing beyond the empty sweep.
+    #[serde(default)]
+    pub ups_on_battery: SimpleRule,
+    #[serde(default)]
+    pub ups_battery_low: SimpleRule,
+    #[serde(default)]
+    pub ups_runtime_low: MinutesRule,
+    #[serde(default)]
+    pub ups_load_high: OptionalPercentRule,
+    #[serde(default)]
+    pub pdu_outlet_off: OutletRule,
+    #[serde(default)]
+    pub pdu_overload: OptionalPercentRule,
 }
 
 impl Default for SnmpAlertsConfig {
@@ -79,6 +104,12 @@ impl Default for SnmpAlertsConfig {
             reboot: RebootRule::default(),
             storage: PercentRule::default(),
             processor: PercentRule::default(),
+            ups_on_battery: SimpleRule::default(),
+            ups_battery_low: SimpleRule::default(),
+            ups_runtime_low: MinutesRule::default(),
+            ups_load_high: OptionalPercentRule::default(),
+            pdu_outlet_off: OutletRule::default(),
+            pdu_overload: OptionalPercentRule::default(),
         }
     }
 }
@@ -188,6 +219,76 @@ impl Default for RebootRule {
     }
 }
 
+/// Estimated runtime below a configured floor (#955).
+///
+/// **There is no default number**, and that is the rule, not an omission. A
+/// five-minute line-interactive UPS under a switch and a sixty-minute one under
+/// a rack have different answers, and a number invented here would page the
+/// whole fleet the first time it ran. Unset means the rule never fires; it
+/// migrates to #931's `ThresholdsConfig` when that lands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MinutesRule {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub minutes: Option<f64>,
+}
+
+impl Default for MinutesRule {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            minutes: None,
+        }
+    }
+}
+
+/// A percentage watermark with **no default** — see [`MinutesRule`] for why.
+///
+/// Distinct from [`PercentRule`], whose 90 % is a defensible universal for a
+/// filesystem. "Loaded" is a property of how a site sized its power, not of
+/// power.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionalPercentRule {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub percent: Option<f64>,
+}
+
+impl Default for OptionalPercentRule {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            percent: None,
+        }
+    }
+}
+
+/// Outlets that must read *on* (#955).
+///
+/// Empty is the default and fires nothing: which outlets matter is site
+/// knowledge, and a PDU with an outlet deliberately dark is as normal as one
+/// with all of them lit. Ids are the table index as the device reports it —
+/// `"3"` on an APC or a Raritan, `"1.3"` on an Eaton, whose outlet tables are
+/// indexed by `unit.outlet`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutletRule {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub expect_on: Vec<String>,
+}
+
+impl Default for OutletRule {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            expect_on: Vec::new(),
+        }
+    }
+}
+
 // ===========================================================================
 // Cycle observation (assembled by the poller)
 // ===========================================================================
@@ -205,6 +306,51 @@ pub struct CycleObservation {
     pub storage: HashMap<u32, StorageObservation>,
     /// hrProcessorLoad (percent), keyed by processor row index.
     pub cpu_load: HashMap<u32, f64>,
+    /// RFC 1628 UPS scalars, when the device answered the UPS tree (#955).
+    pub ups: UpsObservation,
+    /// Per-outlet PDU state, keyed by the table index **as the device reports
+    /// it** — `"3"` on an APC or Raritan, `"1.3"` on an Eaton, whose outlet
+    /// tables are indexed by `unit.outlet`. A `String` rather than a `u32` so
+    /// no vendor has to be special-cased above this line.
+    pub outlets: BTreeMap<String, OutletObservation>,
+    /// Whole-PDU load, however the vendor expresses it.
+    pub pdu: PduObservation,
+}
+
+/// RFC 1628 scalars the UPS rules read. Every field is `Option`: a UPS that
+/// does not implement `upsEstimatedMinutesRemaining` fires nothing rather than
+/// reading as zero minutes left.
+#[derive(Debug, Default)]
+pub struct UpsObservation {
+    /// `upsBatteryStatus`: unknown(1) normal(2) low(3) depleted(4).
+    pub battery_status: Option<i64>,
+    /// `upsOutputSource`: other(1) none(2) normal(3) bypass(4) battery(5)
+    /// booster(6) reducer(7).
+    pub output_source: Option<i64>,
+    pub minutes_remaining: Option<f64>,
+    pub charge_percent: Option<f64>,
+    /// `upsOutputPercentLoad` per output line.
+    pub percent_load: HashMap<u32, f64>,
+}
+
+#[derive(Debug, Default)]
+pub struct OutletObservation {
+    pub name: Option<String>,
+    /// `None` when the device reports a transitional state (Eaton's
+    /// pendingOn/pendingOff, Raritan's cycling) — mid-transition is not the
+    /// same fact as off, and firing on it would page every reboot.
+    pub on: Option<bool>,
+}
+
+#[derive(Debug, Default)]
+pub struct PduObservation {
+    /// A vendor that reports load as a percentage (Eaton `inputCurrentPercentLoad`).
+    pub percent_load: Option<f64>,
+    /// A vendor that reports it as a verdict (APC `rPDU2DeviceStatusLoadState`
+    /// in nearOverload(3)/overload(4)). The device already decided, against
+    /// the rating we do not know; overriding that with a percentage we made up
+    /// would be worse information, not more.
+    pub overloaded: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -234,6 +380,44 @@ const IF_TABLE: &str = "1.3.6.1.2.1.2.2.1";
 const IF_X_TABLE: &str = "1.3.6.1.2.1.31.1.1.1";
 const HR_STORAGE: &str = "1.3.6.1.2.1.25.2.3.1";
 const HR_PROCESSOR_LOAD: &str = "1.3.6.1.2.1.25.3.3.1.2";
+
+// ── RFC 1628 UPS-MIB scalars (#955). Exact OIDs, `.0` and all. ────────────
+const UPS_BATTERY_STATUS: &str = "1.3.6.1.2.1.33.1.2.1.0";
+const UPS_MINUTES_REMAINING: &str = "1.3.6.1.2.1.33.1.2.3.0";
+const UPS_CHARGE_REMAINING: &str = "1.3.6.1.2.1.33.1.2.4.0";
+const UPS_OUTPUT_SOURCE: &str = "1.3.6.1.2.1.33.1.4.1.0";
+/// `upsOutputPercentLoad`, a column of `upsOutputTable`.
+const UPS_OUTPUT_PERCENT_LOAD: &str = "1.3.6.1.2.1.33.1.4.4.1.5";
+
+// ── PDU outlet columns, per vendor (#955) ─────────────────────────────────
+//
+// There is no standard PDU MIB — RFC 1628 stops at the outlet — so the vendor
+// tree is the only place this data lives. Each entry is a full column OID
+// verified against the vendor MIB (APC PowerNet-MIB v4.5.8) or against the
+// OID set NUT drives real hardware with (Eaton Marlin, Raritan PX):
+// `(column oid, on-value, off-value)`.
+//
+// The suffix after the column is the outlet id verbatim, however many
+// integers it is — which is what makes the Eaton `unit.outlet` pair work
+// without a second code path.
+const PDU_OUTLET_NAME_COLUMNS: [&str; 3] = [
+    "1.3.6.1.4.1.318.1.1.26.9.2.3.1.3", // APC rPDU2OutletSwitchedStatusName
+    "1.3.6.1.4.1.534.6.6.7.6.1.1.6",    // Eaton outletDesignator
+    "1.3.6.1.4.1.13742.1.2.2.1.2",      // Raritan outletLabel
+];
+const PDU_OUTLET_STATE_COLUMNS: [(&str, i64, i64); 3] = [
+    // APC rPDU2OutletSwitchedStatusState: off(1) on(2)
+    ("1.3.6.1.4.1.318.1.1.26.9.2.3.1.5", 2, 1),
+    // Eaton outletControlStatus: off(0) on(1) pendingOff(2) pendingOn(3)
+    ("1.3.6.1.4.1.534.6.6.7.6.6.1.2", 1, 0),
+    // Raritan outletOperationalState: off(0) on(1) cycling(2)
+    ("1.3.6.1.4.1.13742.1.2.2.1.3", 1, 0),
+];
+/// Eaton `inputCurrentPercentLoad`.
+const PDU_PERCENT_LOAD_COLUMN: &str = "1.3.6.1.4.1.534.6.6.7.3.3.1.11";
+/// APC `rPDU2DeviceStatusLoadState`: lowLoad(1) normal(2) nearOverload(3)
+/// overload(4) notsupported(5).
+const PDU_LOAD_STATE_COLUMN: &str = "1.3.6.1.4.1.318.1.1.26.4.3.1.4";
 
 /// Walked columns the interface rules need. [`SnmpPoller`] auto-adds any of
 /// these not already covered by a configured walk when alerting is on.
@@ -326,8 +510,110 @@ impl CycleObservation {
             && let Value::Integer(n) = value
         {
             self.cpu_load.insert(index, f64::from(*n));
+        } else {
+            self.ingest_power(oid, value);
         }
     }
+
+    /// UPS (RFC 1628) and PDU (per vendor) columns — #955.
+    ///
+    /// Split out because it is a different tree, not because it is optional:
+    /// a device with neither profile simply never matches any of these.
+    fn ingest_power(&mut self, oid: &str, value: &async_snmp::Value) {
+        use async_snmp::Value;
+
+        match oid {
+            UPS_BATTERY_STATUS => self.ups.battery_status = as_int(value),
+            UPS_OUTPUT_SOURCE => self.ups.output_source = as_int(value),
+            UPS_MINUTES_REMAINING => {
+                self.ups.minutes_remaining = as_int(value).map(|n| n as f64);
+            }
+            UPS_CHARGE_REMAINING => {
+                self.ups.charge_percent = as_int(value).map(|n| n as f64);
+            }
+            _ => {
+                if let Some(index) = index_after(oid, UPS_OUTPUT_PERCENT_LOAD)
+                    && let Ok(line) = index.parse::<u32>()
+                    && let Some(n) = as_int(value)
+                {
+                    self.ups.percent_load.insert(line, n as f64);
+                    return;
+                }
+                for column in PDU_OUTLET_NAME_COLUMNS {
+                    if let Some(index) = index_after(oid, column)
+                        && let Value::OctetString(bytes) = value
+                    {
+                        self.outlets.entry(index).or_default().name =
+                            String::from_utf8(bytes.to_vec()).ok();
+                        return;
+                    }
+                }
+                for (column, on, off) in PDU_OUTLET_STATE_COLUMNS {
+                    if let Some(index) = index_after(oid, column)
+                        && let Some(n) = as_int(value)
+                    {
+                        // Anything that is neither the on nor the off value is
+                        // a transition (pendingOn, cycling) and stays `None`:
+                        // mid-reboot is not the same fact as off.
+                        let state = if n == on {
+                            Some(true)
+                        } else if n == off {
+                            Some(false)
+                        } else {
+                            None
+                        };
+                        self.outlets.entry(index).or_default().on = state;
+                        return;
+                    }
+                }
+                if index_after(oid, PDU_PERCENT_LOAD_COLUMN).is_some()
+                    && let Some(n) = as_int(value)
+                {
+                    // Several inlets: the busiest one is the PDU's load.
+                    let pct = n as f64;
+                    self.pdu.percent_load =
+                        Some(self.pdu.percent_load.map_or(pct, |cur| cur.max(pct)));
+                } else if index_after(oid, PDU_LOAD_STATE_COLUMN).is_some()
+                    && let Some(n) = as_int(value)
+                {
+                    // notsupported(5) is not a verdict — leave it unset rather
+                    // than reading "not supported" as "not overloaded".
+                    let verdict = match n {
+                        1 | 2 => Some(false),
+                        3 | 4 => Some(true),
+                        _ => None,
+                    };
+                    if let Some(v) = verdict {
+                        self.pdu.overloaded = Some(self.pdu.overloaded.unwrap_or(false) || v);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Any integral SNMP value as an `i64`. The UPS and PDU trees mix `Integer`,
+/// `Gauge32` and `Unsigned32` across vendors for the same quantity.
+fn as_int(value: &async_snmp::Value) -> Option<i64> {
+    use async_snmp::Value;
+    match value {
+        Value::Integer(n) => Some(i64::from(*n)),
+        Value::Gauge32(n) | Value::Counter32(n) | Value::UInteger32(n) => Some(i64::from(*n)),
+        Value::Counter64(n) => i64::try_from(*n).ok(),
+        _ => None,
+    }
+}
+
+/// The index suffix of `oid` under column `prefix`, verbatim.
+///
+/// Verbatim, and returned as a `String`, because an outlet index is one
+/// integer on an APC and two (`unit.outlet`) on an Eaton. Parsing it into a
+/// number would need a per-vendor code path for a value nothing does
+/// arithmetic on.
+fn index_after(oid: &str, prefix: &str) -> Option<String> {
+    let rest = oid.strip_prefix(prefix)?.strip_prefix('.')?;
+    (!rest.is_empty() && rest.split('.').all(|c| c.parse::<u32>().is_ok()))
+        .then(|| rest.to_string())
 }
 
 fn insert_rate(entry: &mut IfObservation, key: (&'static str, &'static str), rate: Option<f64>) {
@@ -571,6 +857,189 @@ fn evaluate(
             }
             out.push(RuleAlerts {
                 rule: CPU_RULE,
+                alerts,
+            });
+        }
+
+        // ── UPS / PDU (#955) ────────────────────────────────────────────
+        //
+        // Every one of these reads an `Option`. A device that does not serve
+        // the OID pushes an empty `RuleAlerts` — so the rule still reconciles
+        // (a recovered condition resolves) and still fires nothing. "Not
+        // measured" is never a zero: a UPS with no
+        // `upsEstimatedMinutesRemaining` is not a UPS with none left.
+
+        // --- ups_on_battery -------------------------------------------------
+        if cfg.ups_on_battery.enabled {
+            let mut alerts = Vec::new();
+            // normal(3) is the only "on mains" value. bypass(4) is not: the
+            // UPS is passing mains through with no protection, which is a
+            // thing to know about, so it fires like the rest.
+            if let Some(source) = obs.ups.output_source
+                && source != 3
+            {
+                let (severity, what) = match source {
+                    5 => (AlertSeverity::Critical, "running on battery"),
+                    2 => (AlertSeverity::Critical, "output off"),
+                    4 => (AlertSeverity::Warning, "on bypass (load unprotected)"),
+                    6 => (AlertSeverity::Warning, "boosting (mains low)"),
+                    7 => (AlertSeverity::Warning, "reducing (mains high)"),
+                    _ => (AlertSeverity::Warning, "output source not normal"),
+                };
+                alerts.push(
+                    base(
+                        UPS_ON_BATTERY_RULE,
+                        severity,
+                        format!("{device}: UPS {what} (upsOutputSource = {source})"),
+                    )
+                    .with_label("output_source", source.to_string()),
+                );
+            }
+            out.push(RuleAlerts {
+                rule: UPS_ON_BATTERY_RULE,
+                alerts,
+            });
+        }
+
+        // --- ups_battery_low ------------------------------------------------
+        if cfg.ups_battery_low.enabled {
+            let mut alerts = Vec::new();
+            // low(3) and depleted(4). unknown(1) is deliberately not a fault:
+            // it is the UPS saying it does not know, and paging on that is
+            // paging on a missing measurement.
+            if let Some(status) = obs.ups.battery_status
+                && (status == 3 || status == 4)
+            {
+                let charge = obs
+                    .ups
+                    .charge_percent
+                    .map(|c| format!(", {c:.0}% charge"))
+                    .unwrap_or_default();
+                alerts.push(
+                    base(
+                        UPS_BATTERY_LOW_RULE,
+                        AlertSeverity::Critical,
+                        format!(
+                            "{device}: UPS battery {}{charge}",
+                            if status == 4 { "depleted" } else { "low" }
+                        ),
+                    )
+                    .with_label("battery_status", status.to_string()),
+                );
+            }
+            out.push(RuleAlerts {
+                rule: UPS_BATTERY_LOW_RULE,
+                alerts,
+            });
+        }
+
+        // --- ups_runtime_low ------------------------------------------------
+        if cfg.ups_runtime_low.enabled {
+            let mut alerts = Vec::new();
+            if let (Some(floor), Some(left)) =
+                (cfg.ups_runtime_low.minutes, obs.ups.minutes_remaining)
+                && left < floor
+            {
+                alerts.push(
+                    base(
+                        UPS_RUNTIME_LOW_RULE,
+                        AlertSeverity::Critical,
+                        format!(
+                            "{device}: UPS estimates {left:.0} min of runtime left \
+                             (floor {floor:.0})"
+                        ),
+                    )
+                    .with_label("minutes_remaining", format!("{left:.0}")),
+                );
+            }
+            out.push(RuleAlerts {
+                rule: UPS_RUNTIME_LOW_RULE,
+                alerts,
+            });
+        }
+
+        // --- ups_load_high --------------------------------------------------
+        if cfg.ups_load_high.enabled {
+            let mut alerts = Vec::new();
+            if let Some(limit) = cfg.ups_load_high.percent {
+                for (line, load) in &obs.ups.percent_load {
+                    if *load > limit {
+                        alerts.push(
+                            base(
+                                UPS_LOAD_HIGH_RULE,
+                                AlertSeverity::Warning,
+                                format!("{device}: UPS output line {line} at {load:.0}% load"),
+                            )
+                            .with_label("output_line", line.to_string()),
+                        );
+                    }
+                }
+            }
+            out.push(RuleAlerts {
+                rule: UPS_LOAD_HIGH_RULE,
+                alerts,
+            });
+        }
+
+        // --- pdu_outlet_off -------------------------------------------------
+        if cfg.pdu_outlet_off.enabled {
+            let mut alerts = Vec::new();
+            for want in &cfg.pdu_outlet_off.expect_on {
+                // An outlet the device did not report is not an outlet that is
+                // off. A typo'd id, or a PDU that dropped a module, must not
+                // read as an outage.
+                let Some(outlet) = obs.outlets.get(want) else {
+                    continue;
+                };
+                if outlet.on == Some(false) {
+                    let name = outlet
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("outlet {want}"));
+                    alerts.push(
+                        base(
+                            PDU_OUTLET_OFF_RULE,
+                            AlertSeverity::Critical,
+                            format!("{device}: outlet {want} ({name}) is off but expected on"),
+                        )
+                        .with_label("outlet", want.clone())
+                        .with_label("outlet_name", name),
+                    );
+                }
+            }
+            out.push(RuleAlerts {
+                rule: PDU_OUTLET_OFF_RULE,
+                alerts,
+            });
+        }
+
+        // --- pdu_overload ---------------------------------------------------
+        if cfg.pdu_overload.enabled {
+            let mut alerts = Vec::new();
+            // Two vendors, two ways of saying it, one rule. APC's own verdict
+            // wins where it exists: it is measured against a rating this
+            // sensor does not know.
+            if obs.pdu.overloaded == Some(true) {
+                alerts.push(base(
+                    PDU_OVERLOAD_RULE,
+                    AlertSeverity::Warning,
+                    format!("{device}: PDU reports its load at or near overload"),
+                ));
+            } else if let (Some(limit), Some(load)) =
+                (cfg.pdu_overload.percent, obs.pdu.percent_load)
+                && load > limit
+            {
+                alerts.push(
+                    base(
+                        PDU_OVERLOAD_RULE,
+                        AlertSeverity::Warning,
+                        format!("{device}: PDU input at {load:.0}% load (limit {limit:.0})"),
+                    )
+                    .with_label("percent_load", format!("{load:.0}")),
+                );
+            }
+            out.push(RuleAlerts {
+                rule: PDU_OVERLOAD_RULE,
                 alerts,
             });
         }
@@ -859,6 +1328,330 @@ mod tests {
             find(&sweeps, IF_DOWN_RULE).is_none(),
             "disabled rule must not sweep"
         );
+    }
+
+    fn ups_cfg() -> SnmpAlertsConfig {
+        SnmpAlertsConfig {
+            ups_runtime_low: MinutesRule {
+                enabled: true,
+                minutes: Some(10.0),
+            },
+            ups_load_high: OptionalPercentRule {
+                enabled: true,
+                percent: Some(80.0),
+            },
+            pdu_overload: OptionalPercentRule {
+                enabled: true,
+                percent: Some(80.0),
+            },
+            pdu_outlet_off: OutletRule {
+                enabled: true,
+                expect_on: vec!["3".to_string(), "1.4".to_string()],
+            },
+            ..SnmpAlertsConfig::default()
+        }
+    }
+
+    fn fired(alerts: &[RuleAlerts], rule: &str) -> usize {
+        alerts
+            .iter()
+            .find(|r| r.rule == rule)
+            .map(|r| r.alerts.len())
+            .unwrap_or_else(|| panic!("{rule} did not reconcile — it must push even when empty"))
+    }
+
+    /// On mains, charged, unloaded: every UPS rule reconciles and none fires.
+    #[test]
+    fn a_healthy_ups_fires_nothing_and_still_reconciles() {
+        let mut obs = CycleObservation::default();
+        obs.ups.output_source = Some(3); // normal
+        obs.ups.battery_status = Some(2); // normal
+        obs.ups.minutes_remaining = Some(45.0);
+        obs.ups.charge_percent = Some(100.0);
+        obs.ups.percent_load.insert(1, 22.0);
+
+        let out = evaluate(
+            "ups01",
+            &ups_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        for rule in [
+            UPS_ON_BATTERY_RULE,
+            UPS_BATTERY_LOW_RULE,
+            UPS_RUNTIME_LOW_RULE,
+            UPS_LOAD_HIGH_RULE,
+        ] {
+            assert_eq!(fired(&out, rule), 0, "{rule} fired on a healthy UPS");
+        }
+    }
+
+    /// The mains dropped. `bypass` is a different severity from `battery`, and
+    /// both are worth knowing — a UPS on bypass is passing mains straight
+    /// through with the load unprotected.
+    #[test]
+    fn output_source_off_mains_fires_with_the_severity_of_what_happened() {
+        for (source, severity) in [
+            (5, AlertSeverity::Critical), // battery
+            (2, AlertSeverity::Critical), // none
+            (4, AlertSeverity::Warning),  // bypass
+            (6, AlertSeverity::Warning),  // booster
+        ] {
+            let mut obs = CycleObservation::default();
+            obs.ups.output_source = Some(source);
+            let out = evaluate(
+                "ups01",
+                &ups_cfg(),
+                &obs,
+                &mut EvalState::default(),
+                Instant::now(),
+            );
+            let a = &out
+                .iter()
+                .find(|r| r.rule == UPS_ON_BATTERY_RULE)
+                .unwrap()
+                .alerts;
+            assert_eq!(a.len(), 1, "source {source} should fire");
+            assert_eq!(a[0].severity, severity, "source {source}");
+            assert_eq!(
+                a[0].labels.get("output_source").map(String::as_str),
+                Some(source.to_string().as_str())
+            );
+        }
+    }
+
+    /// low(3) and depleted(4) fire. **unknown(1) does not**: that is the UPS
+    /// saying it does not know, and paging on a missing measurement is the
+    /// thing this codebase refuses to do.
+    #[test]
+    fn battery_low_fires_but_unknown_is_not_a_fault() {
+        for (status, expect) in [(2, 0), (3, 1), (4, 1), (1, 0)] {
+            let mut obs = CycleObservation::default();
+            obs.ups.battery_status = Some(status);
+            let out = evaluate(
+                "ups01",
+                &ups_cfg(),
+                &obs,
+                &mut EvalState::default(),
+                Instant::now(),
+            );
+            assert_eq!(fired(&out, UPS_BATTERY_LOW_RULE), expect, "status {status}");
+        }
+    }
+
+    /// The runtime floor is site knowledge. Under it fires; **unconfigured
+    /// never fires**, and neither does a UPS that does not serve the OID.
+    #[test]
+    fn runtime_low_needs_both_a_floor_and_a_reading() {
+        let mut obs = CycleObservation::default();
+        obs.ups.minutes_remaining = Some(4.0);
+        let out = evaluate(
+            "ups01",
+            &ups_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        assert_eq!(fired(&out, UPS_RUNTIME_LOW_RULE), 1);
+
+        // No configured floor: the default. Inventing one would page every
+        // small UPS on the fleet the first time it ran.
+        let out = evaluate(
+            "ups01",
+            &SnmpAlertsConfig::default(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        assert_eq!(fired(&out, UPS_RUNTIME_LOW_RULE), 0);
+
+        // A UPS that does not implement the OID is not a UPS with no runtime.
+        let out = evaluate(
+            "ups01",
+            &ups_cfg(),
+            &CycleObservation::default(),
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        assert_eq!(fired(&out, UPS_RUNTIME_LOW_RULE), 0);
+    }
+
+    /// An outlet that should be on and is not. An outlet the device never
+    /// reported — a typo'd id, a dropped module — is **not** an outage.
+    #[test]
+    fn outlet_off_fires_only_for_an_outlet_the_device_reported() {
+        let mut obs = CycleObservation::default();
+        obs.outlets.insert(
+            "3".to_string(),
+            OutletObservation {
+                name: Some("db-primary".to_string()),
+                on: Some(false),
+            },
+        );
+        // "1.4" is in expect_on but absent from the sweep.
+        let out = evaluate(
+            "pdu01",
+            &ups_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        let a = &out
+            .iter()
+            .find(|r| r.rule == PDU_OUTLET_OFF_RULE)
+            .unwrap()
+            .alerts;
+        assert_eq!(a.len(), 1);
+        assert!(a[0].summary.contains("db-primary"), "{}", a[0].summary);
+        assert_eq!(a[0].labels.get("outlet").map(String::as_str), Some("3"));
+
+        // Mid-transition (Eaton pendingOn, Raritan cycling) is not off.
+        obs.outlets.get_mut("3").unwrap().on = None;
+        let out = evaluate(
+            "pdu01",
+            &ups_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        assert_eq!(fired(&out, PDU_OUTLET_OFF_RULE), 0);
+    }
+
+    /// Two vendors say "overloaded" two ways. The device's own verdict wins
+    /// where it exists — it is measured against a rating we do not know.
+    #[test]
+    fn overload_reads_a_percentage_or_the_device_own_verdict() {
+        let mut obs = CycleObservation::default();
+        obs.pdu.percent_load = Some(91.0);
+        let out = evaluate(
+            "pdu01",
+            &ups_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        assert_eq!(fired(&out, PDU_OVERLOAD_RULE), 1);
+
+        let mut obs = CycleObservation::default();
+        obs.pdu.overloaded = Some(true);
+        let out = evaluate(
+            "pdu01",
+            &ups_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        assert_eq!(fired(&out, PDU_OVERLOAD_RULE), 1);
+
+        // Under the limit, and the device says it is fine.
+        let mut obs = CycleObservation::default();
+        obs.pdu.percent_load = Some(41.0);
+        obs.pdu.overloaded = Some(false);
+        let out = evaluate(
+            "pdu01",
+            &ups_cfg(),
+            &obs,
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        assert_eq!(fired(&out, PDU_OVERLOAD_RULE), 0);
+    }
+
+    /// The vendor OID tables, exercised through `ingest` with the real column
+    /// OIDs — the numbers verified against PowerNet-MIB v4.5.8 and against the
+    /// OID sets NUT drives Eaton and Raritan hardware with.
+    #[test]
+    fn power_columns_map_to_one_vendor_neutral_observation() {
+        use async_snmp::Value;
+        let mut obs = CycleObservation::default();
+
+        // RFC 1628 scalars.
+        obs.ingest("1.3.6.1.2.1.33.1.2.1.0", &Value::Integer(3), None);
+        obs.ingest("1.3.6.1.2.1.33.1.4.1.0", &Value::Integer(5), None);
+        obs.ingest("1.3.6.1.2.1.33.1.2.3.0", &Value::Integer(7), None);
+        obs.ingest("1.3.6.1.2.1.33.1.4.4.1.5.1", &Value::Integer(64), None);
+        assert_eq!(obs.ups.battery_status, Some(3));
+        assert_eq!(obs.ups.output_source, Some(5));
+        assert_eq!(obs.ups.minutes_remaining, Some(7.0));
+        assert_eq!(obs.ups.percent_load.get(&1), Some(&64.0));
+
+        // APC: single index, on(2)/off(1).
+        obs.ingest(
+            "1.3.6.1.4.1.318.1.1.26.9.2.3.1.3.4",
+            &Value::OctetString(b"web-01".to_vec().into()),
+            None,
+        );
+        obs.ingest(
+            "1.3.6.1.4.1.318.1.1.26.9.2.3.1.5.4",
+            &Value::Integer(1),
+            None,
+        );
+        assert_eq!(obs.outlets["4"].on, Some(false));
+        assert_eq!(obs.outlets["4"].name.as_deref(), Some("web-01"));
+
+        // Eaton: TWO indices (unit.outlet), on(1)/off(0). The composite id is
+        // what makes this work without a per-vendor code path.
+        obs.ingest(
+            "1.3.6.1.4.1.534.6.6.7.6.6.1.2.1.9",
+            &Value::Integer(1),
+            None,
+        );
+        assert_eq!(obs.outlets["1.9"].on, Some(true));
+        obs.ingest(
+            "1.3.6.1.4.1.534.6.6.7.6.6.1.2.1.10",
+            &Value::Integer(3),
+            None,
+        );
+        assert_eq!(obs.outlets["1.10"].on, None, "pendingOn is not off");
+
+        // Raritan: single index, on(1)/off(0), cycling(2) is neither.
+        obs.ingest("1.3.6.1.4.1.13742.1.2.2.1.3.6", &Value::Integer(2), None);
+        assert_eq!(obs.outlets["6"].on, None, "cycling is not off");
+
+        // Whole-PDU load, both dialects.
+        obs.ingest(
+            "1.3.6.1.4.1.534.6.6.7.3.3.1.11.1.1.1",
+            &Value::Gauge32(77),
+            None,
+        );
+        assert_eq!(obs.pdu.percent_load, Some(77.0));
+        obs.ingest("1.3.6.1.4.1.318.1.1.26.4.3.1.4.1", &Value::Integer(4), None);
+        assert_eq!(obs.pdu.overloaded, Some(true));
+    }
+
+    /// APC's `notsupported(5)` is not a verdict. Reading it as "not
+    /// overloaded" would be inventing an answer the device declined to give.
+    #[test]
+    fn a_load_state_of_notsupported_leaves_the_verdict_unset() {
+        use async_snmp::Value;
+        let mut obs = CycleObservation::default();
+        obs.ingest("1.3.6.1.4.1.318.1.1.26.4.3.1.4.1", &Value::Integer(5), None);
+        assert_eq!(obs.pdu.overloaded, None);
+    }
+
+    /// A device answering neither tree gets every power rule reconciled and
+    /// none fired — the shape that lets these rules default to enabled without
+    /// costing a switch anything.
+    #[test]
+    fn a_device_with_no_power_tree_reconciles_every_power_rule_empty() {
+        let out = evaluate(
+            "sw01",
+            &ups_cfg(),
+            &CycleObservation::default(),
+            &mut EvalState::default(),
+            Instant::now(),
+        );
+        for rule in [
+            UPS_ON_BATTERY_RULE,
+            UPS_BATTERY_LOW_RULE,
+            UPS_RUNTIME_LOW_RULE,
+            UPS_LOAD_HIGH_RULE,
+            PDU_OUTLET_OFF_RULE,
+            PDU_OVERLOAD_RULE,
+        ] {
+            assert_eq!(fired(&out, rule), 0, "{rule}");
+        }
     }
 
     #[test]

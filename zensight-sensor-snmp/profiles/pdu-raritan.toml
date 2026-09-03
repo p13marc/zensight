@@ -1,0 +1,23 @@
+# Raritan Dominion PX (PDU-MIB, 1.3.6.1.4.1.13742.1) — #955.
+#
+# The legacy tree, deliberately: it is what NUT drives real Raritan hardware
+# with, and a PX2 answers it as well as PDU2-MIB. Mapping the newer
+# `13742.6` tree needs a PX2 in front of us to check against — see the note in
+# docs/reference.md on why an unverified vendor OID is not shipped here.
+#
+# `outletCurrent` is in milliamps.
+name = "pdu-raritan"
+
+walks = [
+  "1.3.6.1.4.1.13742.1.2.2.1.2", # outletLabel
+  "1.3.6.1.4.1.13742.1.2.2.1.3", # outletOperationalState  off(0) on(1) cycling(2)
+  "1.3.6.1.4.1.13742.1.2.2.1.4", # outletCurrent (mA)
+]
+
+[oid_names]
+"1.3.6.1.4.1.13742.1.2.2.1.2" = "pdu/outlet/{index}/name"
+"1.3.6.1.4.1.13742.1.2.2.1.3" = "pdu/outlet/{index}/state"
+"1.3.6.1.4.1.13742.1.2.2.1.4" = "pdu/outlet/{index}/current_ma"
+[match]
+default = false
+sys_object_id = ["1.3.6.1.4.1.13742"] # Raritan

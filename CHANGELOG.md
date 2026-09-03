@@ -9,6 +9,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **UPS and PDU device profiles, and six rules that read them** (#955, epic
+  #952 — SYS-SUP-002 *UPS state*, and the read half of -003).
+
+  The SNMP sensor could poll a UPS by hand-written OID and had no shipped
+  names, no battery semantics and no rule that fires when the mains drop.
+  `ups.toml` is RFC 1628 in full — battery status, charge, the UPS's own
+  runtime estimate, the input and output tables, output source, alarms — and
+  `pdu-apc`, `pdu-eaton` and `pdu-raritan` map three vendor trees onto **one**
+  set of metric names, so a rule, a dashboard and a query never have to know
+  which brand answered.
+
+  Six rules, on the existing evaluator: `ups_on_battery`, `ups_battery_low`,
+  `ups_runtime_low`, `ups_load_high`, `pdu_outlet_off`, `pdu_overload`. What
+  they refuse to do is the interesting half:
+
+  - **`bypass(4)` fires.** A UPS on bypass is passing mains straight through
+    with the load unprotected — a different severity from `battery(5)`, not a
+    non-event.
+  - **`unknown(1)` does not.** That is the UPS saying it does not know, and
+    paging on a missing measurement is not the same as paging on a fault.
+  - **A transition is not an outage.** Eaton's `pendingOn` and Raritan's
+    `cycling` leave the outlet state `None`; without that, every outlet reboot
+    would page.
+  - **An outlet the device did not report is not off.** A typo'd id or a
+    dropped module must not read as an outage.
+  - **APC's `notsupported(5)` sets no verdict**, and its own near/overload
+    verdict *wins* over any percentage we could configure — it is measured
+    against a rating this sensor does not know.
+  - **`ups_runtime_low` and `pdu_overload`/`ups_load_high` ship with no
+    number.** A five-minute UPS under a switch and a sixty-minute one under a
+    rack have different answers, and "80 % loaded" is a property of how a site
+    sized its power. Unset never fires; both migrate to #931.
+
+  Three decisions worth keeping:
+
+  - **No vendor OID is shipped unverified.** Every number was read out of the
+    vendor MIB (APC PowerNet-MIB v4.5.8) or out of the OID set NUT drives that
+    hardware with (Eaton Marlin, Raritan PX). A guessed OID does not fail
+    loudly — it publishes a plausible number under a right-looking name. Which
+    is why `ups.toml` carries the APC and Eaton *match prefixes* but adds no
+    vendor OIDs on top of the standard tree, and why `pdu-raritan` maps the
+    legacy tree NUT actually drives rather than a remembered PDU2-MIB.
+  - **A scale lives in the name, never in the value.** `voltage_dv` is
+    decivolts because that is what RFC 1628 puts on the wire; `current_ma` and
+    `current_da` are separate families because summing them would be silently
+    meaningless.
+  - **An outlet index is the table index verbatim.** Eaton indexes its outlet
+    tables by `unit.outlet`, so `"1.3"` is as legal an outlet id as `"3"` —
+    one composite `String` key, no per-vendor code path above the ingest.
+
+  The power rules read only what a profile walked, and their columns are **not**
+  auto-added to the walk set the way the interface rules' are: a switch must not
+  pay for the UPS tree. So they can default to enabled, and on a device with
+  neither profile they reconcile empty every sweep and fire nothing — which an
+  e2e test pins.
+
+  **The fake agent now serves `1.3.6.1`, not just `mib-2`.** The vendor profiles
+  live under `1.3.6.1.4.1`, and a fixture the agent does not serve answers
+  nothing at all — which every rule reading it would have scored as "healthy".
+  A fake that agrees with any assertion is worse than no fake.
+
+  Registry: 47 new subject families and `version = "1.10"`. **Fourteen of them
+  are not new telemetry** — `system/*`, `entity-sensors`' `sensor/*` and two
+  `ifx` HC packet counters have been published since #531 while riding the
+  `{device}/{metric...}` catch-all, so no exporter gave them a type or a help
+  string and nothing noticed. A new `tests/registry_conformance.rs` is what
+  found them, and it had to be written twice: the obvious version used
+  `Subject::parse_metric`, which resolves through the catch-all and therefore
+  answers `Some` for *any* name. A test that cannot fail is theatre, and there
+  is now a test pinning that specific trap.
+
+  That file also carries an **allowlisted** write-surface guard. The plain
+  `!toml.contains("kind = \"write\"")` that `pve`, `probe` and `container`
+  use cannot work for a sensor with an artifact channel, so the claim is the
+  stronger one: *these two procedures, and nothing else.* Landing the gated
+  outlet cycle (#956) means editing that list deliberately rather than watching
+  a test keep passing.
+
+  **Not validated against hardware, and said so in three places** (the crate
+  docs' caveats, the profile section, this entry). The requirement itself notes
+  the UPSes are not yet on the network; a NUT/serial gateway would be a
+  different sensor. Treat first contact the way #947 treats Proxmox and podman.
+
 - **Every write procedure records its outcome on the host's own audit trail**
   (#957, epic #952 — SYS-SUP-019 *journal every user action*).
 
