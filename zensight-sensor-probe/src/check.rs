@@ -33,6 +33,7 @@ fn result(t: &Target, vantage: &str, outcome: ProbeOutcome, started: Instant) ->
         http: None,
         tls: None,
         dns: None,
+        burst: None,
         vantage: vantage.to_string(),
         observed_at_ms: zensight_common::current_timestamp_millis(),
     }
@@ -52,7 +53,115 @@ pub async fn run(
         ProbeKind::Dns => dns(t, vantage, timeout).await,
         ProbeKind::CertFile => certfile(t, vantage),
         ProbeKind::Icmp => icmp(t, vantage, timeout).await,
+        ProbeKind::Burst => burst(t, vantage, timeout).await,
     }
+}
+
+/// A burst of probes in one interval, reduced to delay variation and loss
+/// (#958).
+///
+/// A single-shot check per interval cannot produce a jitter figure at all —
+/// one sample has no variation — so this sends `count` probes spaced
+/// `spacing_ms` apart and reduces them.
+///
+/// **Every probe is timed individually and a timeout counts as lost**, not as
+/// a slow sample. Recording a timed-out probe at the timeout value would drag
+/// the average toward a number the link never produced and, worse, would make
+/// a dying link look merely slow.
+///
+/// The outcome of the *check* is separate from the loss inside it: the check
+/// fails only when nothing answered at all. A burst that lost half its probes
+/// succeeded at measuring 50% loss, and reporting that as a failed check would
+/// hide the number behind the failure.
+async fn burst(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
+    let started = Instant::now();
+    let count = t.burst_count();
+    let spacing = Duration::from_millis(t.burst_spacing_ms());
+    let transport = t.burst_transport().to_string();
+
+    let mut samples: Vec<Option<f64>> = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        if i > 0 {
+            tokio::time::sleep(spacing).await;
+        }
+        samples.push(one_burst_probe(t, &transport, timeout).await);
+    }
+
+    let reduced = zensight_common::probe::BurstResult::reduce(&samples, &transport);
+    // Nothing answered: the check failed. Anything else measured something.
+    let outcome = if reduced.received == 0 {
+        ProbeOutcome::Failed
+    } else {
+        ProbeOutcome::Ok
+    };
+    let mut r = result(t, vantage, outcome, started);
+    if reduced.received == 0 {
+        r.error = Some(format!(
+            "all {count} probes over {transport} were lost or timed out"
+        ));
+    }
+    r.burst = Some(reduced);
+    r
+}
+
+/// One probe of a burst: its RTT in milliseconds, or `None` if it did not
+/// answer.
+async fn one_burst_probe(t: &Target, transport: &str, timeout: Duration) -> Option<f64> {
+    let at = Instant::now();
+    match transport {
+        "icmp" => burst_icmp(t, timeout).await.then(|| ms(at)),
+        // Default and only other option. `tcp` connect RTT: works in a default
+        // build with no capability, which is what makes this measurable
+        // everywhere including CI.
+        _ => matches!(
+            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&t.target)).await,
+            Ok(Ok(_))
+        )
+        .then(|| ms(at)),
+    }
+}
+
+fn ms(at: Instant) -> f64 {
+    at.elapsed().as_secs_f64() * 1000.0
+}
+
+#[cfg(feature = "icmp")]
+async fn burst_icmp(t: &Target, timeout: Duration) -> bool {
+    let Ok(addr) = t.target.parse::<std::net::IpAddr>() else {
+        // Resolution failure is not packet loss, but from one probe's point of
+        // view it is indistinguishable, and the check-level error already says
+        // nothing answered.
+        return false;
+    };
+    let Ok(client) = surge_ping::Client::new(&surge_ping::Config::default()) else {
+        return false;
+    };
+    let mut pinger = client
+        .pinger(addr, surge_ping::PingIdentifier(rand_id()))
+        .await;
+    pinger.timeout(timeout);
+    pinger
+        .ping(surge_ping::PingSequence(0), &[0; 8])
+        .await
+        .is_ok()
+}
+
+#[cfg(not(feature = "icmp"))]
+async fn burst_icmp(_t: &Target, _timeout: Duration) -> bool {
+    // Unreachable in practice: startup refuses an icmp burst in a build
+    // without the feature, for the same reason it refuses a plain icmp target.
+    false
+}
+
+#[cfg(feature = "icmp")]
+fn rand_id() -> u16 {
+    // Distinct per probe so concurrent bursts do not read each other's
+    // replies; the value itself does not matter.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u16)
+        .unwrap_or(1)
 }
 
 /// How much of a response body is read when `expect_body` asks for a
@@ -453,6 +562,9 @@ mod tests {
 
     fn target(kind: ProbeKind, s: &str) -> Target {
         Target {
+            count: None,
+            spacing_ms: None,
+            transport: None,
             name: "t".into(),
             kind,
             target: s.into(),

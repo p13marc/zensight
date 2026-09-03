@@ -36,6 +36,9 @@ fn isolated_config() -> zenoh::Config {
 
 fn target(name: &str, kind: ProbeKind, t: &str) -> Target {
     Target {
+        count: None,
+        spacing_ms: None,
+        transport: None,
         name: name.into(),
         kind,
         target: t.into(),
@@ -369,4 +372,128 @@ async fn the_probe_contract_end_to_end() {
         again.is_empty(),
         "nothing is due yet — the per-target schedule is real"
     );
+}
+
+/// A burst against a live listener measures RTTs, jitter and zero loss; a
+/// burst against a dead port measures 100% loss and publishes **no RTT
+/// series** (#958).
+///
+/// The pair is the point. A test that only checked the happy path would not
+/// catch the failure that matters here — publishing zeros for a dead link,
+/// which reads on a chart as a perfect one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_measures_jitter_and_publishes_no_rtt_when_everything_is_lost() {
+    use zensight_common::probe::BurstResult;
+
+    // A real listener on a loopback port: accepts and drops, which is all a
+    // connect-RTT measurement needs.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let live = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            if listener.accept().await.is_err() {
+                break;
+            }
+        }
+    });
+    // A port nothing listens on: bind, read the address, drop the listener.
+    let dead = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap()
+    };
+
+    let mut cfg: ProbeConfig = serde_json::from_str("{}").expect("defaults");
+    cfg.interval_secs = 30;
+    cfg.timeout_secs = 1;
+    cfg.targets = vec![
+        burst_target("live", &live.to_string()),
+        burst_target("dead", &dead.to_string()),
+    ];
+
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "probe", zensight_common::Format::Json);
+    let health = Arc::new(zensight_sensor_core::SensorHealth::new("probe"));
+    let states = Arc::new(
+        zensight_sensor_core::AdvancedPublisherRegistry::new(
+            session.clone(),
+            zensight_sensor_core::v1::for_producer("probe").telemetry_prefix(),
+            zensight_common::Format::Json,
+            zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+        )
+        .with_qos(zensight_sensor_probe::poller::STATE_QOS),
+    );
+    let mut poller = Poller::new(
+        cfg,
+        publisher,
+        states,
+        None,
+        health,
+        zensight_sensor_core::relation::RelationSet::new(
+            "probe",
+            session.clone(),
+            zensight_common::Format::Json,
+        ),
+    )
+    .unwrap();
+
+    let results = poller.sweep().await;
+    let by_name: std::collections::HashMap<&str, &ProbeResult> =
+        results.iter().map(|r| (r.name.as_str(), r)).collect();
+
+    let live = by_name["live"].burst.as_ref().expect("a burst result");
+    assert_eq!(live.transport, "tcp");
+    assert_eq!(
+        live.sent, live.received,
+        "a loopback listener loses nothing"
+    );
+    assert_eq!(live.loss_pct, 0.0);
+    assert!(live.rtt_min_ms.is_some() && live.rtt_max_ms.is_some());
+    assert!(
+        live.jitter_ms.is_some(),
+        "ten consecutive successes must produce a delay-variation figure"
+    );
+    assert!(
+        live.rtt_min_ms.unwrap() <= live.rtt_avg_ms.unwrap()
+            && live.rtt_avg_ms.unwrap() <= live.rtt_max_ms.unwrap(),
+        "min <= avg <= max: {live:?}"
+    );
+
+    let dead = by_name["dead"].burst.as_ref().expect("a burst result");
+    assert_eq!(dead.received, 0);
+    assert_eq!(dead.loss_pct, 100.0);
+    // The whole point: absent, not zero.
+    assert!(dead.rtt_min_ms.is_none(), "{dead:?}");
+    assert!(dead.rtt_avg_ms.is_none(), "{dead:?}");
+    assert!(dead.jitter_ms.is_none(), "{dead:?}");
+    // And the check itself failed, with an error that says what happened.
+    assert_eq!(by_name["dead"].outcome, ProbeOutcome::Failed);
+    assert!(
+        by_name["dead"]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("were lost"),
+        "{:?}",
+        by_name["dead"].error
+    );
+
+    // The reducer and the checker agree about what a total loss looks like.
+    assert_eq!(
+        *dead,
+        BurstResult::reduce(&vec![None; dead.sent as usize], "tcp")
+    );
+}
+
+fn burst_target(name: &str, addr: &str) -> Target {
+    let mut t: Target = serde_json::from_str(&format!(
+        r#"{{"name":"{name}","kind":"burst","target":"{addr}"}}"#
+    ))
+    .expect("burst target");
+    // Five probes, 20 ms apart: enough for a jitter figure, fast enough that
+    // the test does not become a sleep.
+    t.count = Some(5);
+    t.spacing_ms = Some(20);
+    t
 }

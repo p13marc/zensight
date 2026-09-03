@@ -20,6 +20,16 @@ fn every_registered_family_has_an_emitter() {
         "forge/tls_days_to_expiry",
         "forge/tls_chain_valid",
         "forge/dns_answers",
+        // The burst kind (#958). Listed here as the *build* emits them; a
+        // deployment with no burst target simply has no burst series, which is
+        // a property of the config and not of the build — the distinction this
+        // file's header draws.
+        "forge/loss_pct",
+        "forge/rtt_min_ms",
+        "forge/rtt_avg_ms",
+        "forge/rtt_max_ms",
+        "forge/rtt_p95_ms",
+        "forge/jitter_ms",
         "targets/total",
         "targets/failing",
     ]
