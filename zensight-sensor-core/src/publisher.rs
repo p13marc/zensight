@@ -100,19 +100,26 @@ impl Publisher {
     }
 
     /// Publish a telemetry point with a full key (not using prefix).
+    ///
+    /// Routes through [`zensight_common::PublisherRegistry::put_point`] so an
+    /// installed threshold evaluator sees the point before it is encoded
+    /// (#930). With no observer installed that is one `Option` check.
     pub async fn publish_to_key(&self, key: &str, point: &TelemetryPoint) -> Result<()> {
-        let payload =
-            zensight_common::encode(point, self.format).map_err(|e| SensorError::Publish {
-                key: key.to_string(),
-                message: e.to_string(),
-            })?;
         self.control
-            .put_encoded(key, payload, QosClass::Telemetry, self.format.encoding())
+            .put_point(key, point, QosClass::Telemetry, self.format)
             .await
             .map_err(|e| SensorError::Publish {
                 key: key.to_string(),
                 message: e.to_string(),
             })
+    }
+
+    /// Install a point observer on this publisher's registry (#930).
+    pub fn set_observer(
+        &self,
+        observer: std::sync::Arc<dyn zensight_common::point_observer::PointObserver>,
+    ) {
+        self.control.set_observer(observer);
     }
 
     /// Publish a batch of telemetry points.

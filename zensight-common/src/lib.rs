@@ -40,6 +40,8 @@ pub mod media;
 pub mod metric_guard;
 pub mod outlet;
 pub mod pipeline_health;
+// The seam every telemetry point passes on its way to the bus (#930).
+pub mod point_observer;
 pub mod probe;
 pub mod publisher_registry;
 pub mod pve;

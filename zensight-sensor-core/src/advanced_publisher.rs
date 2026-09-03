@@ -111,6 +111,14 @@ pub struct AdvancedPublisherRegistry {
     qos: QosClass,
     /// Cached publishers by key expression.
     publishers: RwLock<HashMap<String, AdvancedPublisher<'static>>>,
+    /// Watches every point published here (#930).
+    ///
+    /// This registry is a **second** publish path, independent of
+    /// `PublisherRegistry` — and the one netlink, netring, snmp and logs
+    /// actually use for the bulk of their telemetry. A threshold evaluator
+    /// installed only on the other one would have missed most of the fleet's
+    /// points while looking like it saw them all.
+    observer: std::sync::OnceLock<Arc<dyn zensight_common::point_observer::PointObserver>>,
 }
 
 impl std::fmt::Debug for AdvancedPublisherRegistry {
@@ -138,6 +146,7 @@ impl AdvancedPublisherRegistry {
             format,
             qos: QosClass::Telemetry,
             publishers: RwLock::new(HashMap::new()),
+            observer: std::sync::OnceLock::new(),
         }
     }
 
@@ -226,14 +235,20 @@ impl AdvancedPublisherRegistry {
     /// The publisher for this key is created on first use and cached.
     pub async fn publish(&self, key_suffix: &str, point: &TelemetryPoint) -> Result<()> {
         let key = self.build_key(key_suffix);
-        let payload =
-            encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
-        self.put_raw(&key, payload).await
+        self.publish_to_key(&key, point).await
+    }
+
+    /// Install a point observer (#930). Idempotent-by-first-call.
+    pub fn set_observer(&self, observer: Arc<dyn zensight_common::point_observer::PointObserver>) {
+        let _ = self.observer.set(observer);
     }
 
     /// Publish a telemetry point to a full key (bypassing the prefix), via an
     /// advanced publisher created on first use for that key.
     pub async fn publish_to_key(&self, key: &str, point: &TelemetryPoint) -> Result<()> {
+        if let Some(observer) = self.observer.get() {
+            observer.observe_point(key, point);
+        }
         let payload =
             encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
         self.put_raw(key, payload).await

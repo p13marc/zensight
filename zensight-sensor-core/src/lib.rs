@@ -53,11 +53,13 @@ pub mod report;
 pub mod rpc;
 mod runner;
 pub mod scrub;
+// The threshold evaluator on the publish path (#930, epic #901).
 pub mod secret;
+pub mod threshold;
 pub mod v1;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
-pub use alert::{AlertReporter, serve_alerts_query};
+pub use alert::{AlertReporter, ReconcileOpts, serve_alerts_query};
 pub use args::SensorArgs;
 pub use artifact::{
     ArtifactChannel, ArtifactProducer, DeliveryKind, ProduceCtx, Produced, ProgressUpdate,
