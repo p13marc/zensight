@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Detection latency is measured and asserted** (#961, part of #952 —
+  SYS-SUP-004's timing half). The requirement puts a number on it — a newly
+  connected communication means detected and shown in under 10 seconds — and
+  **nothing measured or asserted that number anywhere**. A requirement with a
+  number in it needs a test with the same number.
+
+  Three legs, split because "10 seconds" means three different things and
+  conflating them is how a bound gets claimed for a path that does not meet it.
+  All of them measure what a **subscriber receives**, not what a sensor believes
+  it published, and all of them **print the measured figure** — a regression
+  from 400 ms to 8 s passes the assertion and is still a bug someone needs to
+  see.
+
+  | Leg | Measures | Measured |
+  |---|---|---|
+  | netlink, started | sensor start → first link-state sample | **5.8 ms** |
+  | netlink, new interface | interface appears → sample for it | needs `CAP_NET_ADMIN` |
+  | sysinfo, poller | **sample-to-sample gap** at a 5 s interval | **4.5 s** |
+
+  The poller leg deliberately times the *gap between* samples, not the time to
+  the first one. The first sample is immediate (the collector polls before it
+  sleeps), so timing it reports ~30 ms and claims a bound the poller does not
+  offer: a change occurring just after a poll is invisible until the next one,
+  so the **interval is the worst-case detection latency**. It also asserts the
+  gap is not far *below* the configured interval, which would mean the poller
+  is burning a core rather than respecting its config.
+
+  The privileged leg **skips with a printed reason** when unprivileged rather
+  than passing silently. A capability test that quietly passes without the
+  capability reports a bound nobody measured. It probes by trying, not by
+  checking `geteuid() == 0` — root is neither necessary (a file capability is
+  enough) nor sufficient (a user namespace without the network namespace is
+  not).
+
+  New `docs/latency.md` states the honest answer the tests support: **event-driven
+  sensors yes, pollers only if configured for it** — with a per-sensor table of
+  shipped defaults and which meet the bound (`netlink` events, `sysinfo` at 5 s,
+  `modbus` at 5–10 s do; `snmp` at 30–60 s, `probe` at 60 s, `pve` and
+  `container` at 30–60 s do not). It says plainly that **`snmp` should not be
+  configured to meet it** — a 5 s walk per device is a load an agent on a switch
+  will not thank you for, and traps are the SNMP-side answer.
+
+  It also states what detection *is* here, so the requirement is read correctly:
+  generic and IP-level (netring's asset inventory, netlink's neighbour table,
+  SNMP's propose-only discovery, the correlator's fusion). **There is no
+  protocol knowledge of RF, satellite or acoustic links**; such a device is an
+  SNMP or probe target like any other. If the requirement means *typed
+  classification* of a communication means, that is separate work and needs the
+  device list first.
+
 - **Documentation for the topology graph** (#920, closing #899).
   `docs/KEYSPACE.md` carries both families, the determinism rule, the
   structural-vs-traffic boundary and an explicit **RFC status note** — the

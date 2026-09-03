@@ -197,6 +197,12 @@ zensight/v1/
     └── @rpc/names?ip=<addr>
 ```
 
+**How fast a change is seen** is a per-sensor property, not a system-wide one:
+event-driven sensors are sub-second, pollers are bounded by their interval.
+[`latency.md`](latency.md) states which shipped defaults meet the 10 s
+requirement (SYS-SUP-004) and which do not, with measured figures from tests
+that time what a *subscriber* receives.
+
 **[KEYSPACE.md](KEYSPACE.md) is the one-screen summary of the deployed profile**;
 the normative spec is the RFC set in the [zenkey repo](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md),
 enforced by the `zenkey` registry + typed builders. This is only a sketch.
@@ -481,6 +487,7 @@ zensight/                            # Workspace root
 │   ├── README.md                    # docs index / hub
 │   ├── ARCHITECTURE.md              # this file
 │   ├── KEYSPACE.md                  # deployed keyspace profile (one screen)
+│   ├── latency.md                   # detection latency per sensor (#961)
 │   └── design/                      # archived design rationale
 │
 ├── zensight/                        # Iced frontend            (see zensight/docs/)
