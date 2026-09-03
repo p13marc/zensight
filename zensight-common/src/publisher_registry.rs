@@ -74,6 +74,12 @@ pub struct PublisherRegistry {
     session: Arc<Session>,
     publishers: RwLock<HashMap<String, Publisher<'static>>>,
     counters: Arc<PublishCounters>,
+    /// Watches every point published through [`Self::put_point`] (#930).
+    ///
+    /// A `OnceLock` rather than a lock: it is installed once at startup and
+    /// read on every publish, so the read must cost nothing. A registry with
+    /// no observer pays one `Option` check per point.
+    observer: std::sync::OnceLock<Arc<dyn crate::point_observer::PointObserver>>,
 }
 
 impl std::fmt::Debug for PublisherRegistry {
@@ -89,7 +95,14 @@ impl PublisherRegistry {
             session,
             publishers: RwLock::new(HashMap::new()),
             counters: Arc::new(PublishCounters::default()),
+            observer: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Install the point observer (#930). Idempotent-by-first-call: a second
+    /// install is ignored rather than replacing a live evaluator mid-flight.
+    pub fn set_observer(&self, observer: Arc<dyn crate::point_observer::PointObserver>) {
+        let _ = self.observer.set(observer);
     }
 
     /// The registry's publish counters (#811) — shared so the health doc can
@@ -159,6 +172,27 @@ impl PublisherRegistry {
             .encoding(encoding)
             .await?;
         Ok(())
+    }
+
+    /// Publish one telemetry point: observe, encode, put (#930).
+    ///
+    /// **The seam.** Every path that wants a threshold rule evaluated against
+    /// its points comes through here, because this is the last place the point
+    /// is still a `TelemetryPoint` rather than bytes. Callers that encode
+    /// themselves and call [`Self::put`] bypass it — deliberately visible, so
+    /// "does this sensor evaluate thresholds?" is answerable by grep.
+    pub async fn put_point(
+        &self,
+        key: &str,
+        point: &crate::TelemetryPoint,
+        qos: QosClass,
+        format: crate::serialization::Format,
+    ) -> Result<()> {
+        if let Some(observer) = self.observer.get() {
+            observer.observe_point(key, point);
+        }
+        let payload = crate::serialization::encode(point, format)?;
+        self.put_encoded(key, payload, qos, format.encoding()).await
     }
 
     /// Publish a serialized value on `key` (encode with `format`, stamp its

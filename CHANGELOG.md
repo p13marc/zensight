@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The threshold evaluator, on the publish path** (#930, epic #901).
+
+  One state machine, installed where a sensor's points already flow, evaluating
+  its `ThresholdsConfig` against every metric it emits — instead of thirteen
+  copies of the same machine in thirteen `alerts.rs` files, and instead of a
+  rule engine in a GUI whose alerts reached nothing.
+
+  **The epic's premise about where to hook it was wrong, and this says so.** It
+  states that `Publisher::publish_to_key` is "the single choke point every
+  telemetry point in all ten publishing sensors passes through". There are
+  three paths, and `Publisher::publish` appears **zero** times in sysinfo,
+  netlink, netring, snmp and logs *combined*: sysinfo encodes its own points
+  and calls `PublisherRegistry::put` directly, and the four highest-volume
+  sensors publish through `AdvancedPublisherRegistry`, an independent type with
+  its own publisher cache and its own encode. A hook on `Publisher` alone would
+  have covered the smallest share of the fleet's telemetry while looking
+  complete.
+
+  So the seam is a `PointObserver` trait in `zensight-common`, carried by
+  **both** registries, with an integration test per path proving a published
+  point becomes an alert on the bus. The third path — a caller that encodes its
+  own payload — bypasses it deliberately and visibly, so "does this sensor
+  evaluate thresholds?" stays answerable by grep.
+
+  Four decisions inside it:
+
+  - **Sync in, async out.** `observe_point` runs on the publish path of every
+    point, so it does the whole state machine synchronously and, only on a
+    *transition*, sends one message to a task that publishes. The channel is
+    bounded and drops on full **loudly** (at powers of two, so a runaway rule
+    reports without flooding): an alert transition is not worth stalling a
+    measurement loop for, and a silent drop is how a monitoring tool stops
+    monitoring.
+  - **`Pending` lives in the `AlertReporter`, not here.** `observe(alert, for)`
+    already implements "continuously observed for N", including the
+    forget-on-clear that makes it *continuous* rather than *seen once ≥ N ago*.
+    A second copy here would have been a subtly different debounce.
+  - **The measured value never becomes a label.** A label that changes every
+    sweep mints a new alert key every sweep — which restarts the `for` clock so
+    the rule can never fire, and leaves a Put/Delete pair on the bus per sample.
+    netlink's `MetricExpectation` does exactly that today; #932 retires it.
+  - **An empty rule set costs one relaxed atomic load per point.** The observer
+    stays installed even with no rules, because `@desired` and `@rpc` can add
+    them to a *running* sensor (#931) — so "was empty at startup" is not a
+    question the hot path may ask. What it asks instead is an
+    `AtomicBool`, and a sensor out of the box pays that and nothing else.
+  - **Deleting a rule retires its alerts.** Dropping the state silently would
+    leave whatever it had firing on the bus with nothing left to reconcile it
+    away: an alert nobody can clear, from a rule nobody can see. The same
+    problem `with_known_rules` solves across a restart, solved across an edit.
+
+  A **boolean is numeric** here: `link/up == 0` is the most natural rule anyone
+  will write, and refusing it would send them to write `up < 1` instead.
+
+  The three tests from the GUI engine moved here as the issue asked, and one of
+  them changed meaning in the move: the old `matches` used
+  `metric.contains(pattern)`, so a rule for `in_errors` also matched
+  `total_in_errors_dropped`. The glob does not, and a test now pins that.
+
 - **Time hysteresis in `AlertReporter` — `recover_after`** (#929, epic #901).
 
   Hysteresis existed nowhere in the tree as a generic facility. The sensor
