@@ -23,3 +23,21 @@ sized for those three; netring runs only where it earns its keep.
 The per-sensor images are built and pushed by every release
 (`zensight-sensor-<name>:<tag>`); mounts/capabilities per sensor are the
 same as the bundle's rows in `docs/DEPLOYMENT.md`.
+
+## Configuring them: one policy, not one file per host
+
+These units mount `/etc/zensight` read-only and each sensor reads its own
+config from it — which is the eighteen-files problem at container scale. What
+belongs in those files is the **local** half only: the Zenoh endpoint,
+credentials, TLS material, and the `desired.enabled` kill switch.
+
+Everything an operator authors *about* a host — thresholds, hostspec
+assertions, systemd and netlink expectations, log sentinel rules — belongs in
+the fleet policy, compiled by `zensight-desired` and reconciled by each sensor
+over its file baseline. See
+[`docs/DEPLOYMENT.md` §6](../../docs/DEPLOYMENT.md#6-day-two-one-policy-file-instead-of-eighteen)
+and [`zensight-desired/docs/policy.md`](../../zensight-desired/docs/policy.md).
+
+`state/<producer>/applied/<topic>` on each host says which writer won last —
+`file`, `desired` or `rpc` — which is where to look when a change does not
+appear to have taken.

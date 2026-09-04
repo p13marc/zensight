@@ -6,6 +6,10 @@ you want to monitor runs one **sensors container** — the five host sensors
 same demo-max defaults, bundled into a single image. The only thing you
 configure is the Zenoh endpoint the sensors connect to.
 
+Once it runs, [**§6**](#6-day-two-one-policy-file-instead-of-eighteen) is the
+part that keeps it maintainable: one `fleet-policy.json5`, compiled against the
+catalog, instead of editing thresholds and expectations on every host.
+
 > The parallax live-video sensor is **not** in this bundle image, on purpose —
 > but it is packaged (#512). It has its own component image,
 > `git.marcpardo.eu/marcpardo/zensight-sensor-parallax`, and its binary ships in
@@ -256,7 +260,108 @@ the exporter subscribes to a keyspace nobody publishes to.
 `just demo-prometheus` brings up the exporter, the sensors, Prometheus and a
 provisioned Grafana in one command.
 
-## 6. Verifying
+## 6. Day two: one policy file instead of eighteen
+
+Sections 1–5 got the fleet running. Everything above is **file config on each
+host** — and the moment there are six machines, keeping thresholds and
+expectations in step by editing files on all of them is the problem `@desired`
+exists to solve.
+
+`zensight-desired` is the fleet policy compiler (#938). It reads one
+`fleet-policy.json5`, asks `@catalog` what hosts exist and what they are, and
+publishes the per-host documents the sensors already know how to reconcile. It
+runs no command, copies no file and reaches no host — the hosts converge on the
+documents themselves, which is why a machine that was offline during a change
+picks it up when it comes back.
+
+**Run exactly one per deployment**, next to the correlator. `@desired` is a
+single-writer service origin; two compilers with different policies would
+overwrite each other every pass and every sensor would flap between them.
+
+```bash
+sudo install -m 755 zensight-desired /usr/local/bin/
+sudo install -D -m 644 configs/desired.json5 /etc/zensight/desired.json5
+sudo install -D -m 644 demo/fleet-policy.json5 /etc/zensight/fleet-policy.json5
+sudoedit /etc/zensight/fleet-policy.json5     # this is the file to review
+
+# Check it before it reaches anyone. Opens no session; exits 1 if invalid.
+zensight-desired --config /etc/zensight/desired.json5 plan --offline
+
+# Now with the bus: what would each host receive?
+zensight-desired --config /etc/zensight/desired.json5 plan
+zensight-desired --config /etc/zensight/desired.json5 render h-3fa9c2d41b7e
+
+sudo install -m 644 packaging/systemd/zensight-desired.service /etc/systemd/system/
+sudo systemctl enable --now zensight-desired
+```
+
+`plan --offline` needs no bus and exits non-zero on an invalid policy, so a
+policy change can be gated in CI the way code is. Do that before the first
+`apply`: a policy nobody can check before pushing is a policy checked by the
+fleet.
+
+### What the policy carries — and what stays on the host
+
+The split is not a style preference. It is the **never-list**, and it is the
+single most important constraint on this origin.
+
+| | |
+|---|---|
+| **Policy** (`fleet-policy.json5`) | thresholds per producer, hostspec assertions, systemd and netlink expectations, log sentinel rules — anything an operator authors *about* what a host should look like |
+| **The host's own file config** | the Zenoh block (`connect`, `listen`, `namespace`), TLS material, SNMP communities and v3 credentials, probe request headers, the PVE API token, and `desired.enabled` |
+
+**Nothing under `@desired` may carry a secret, or anything a sensor needs to
+reach the bus.** One bad desired publish must never lock the fleet out of its
+own supervision — the fix would have to travel over the bus it just broke. So
+endpoints, TLS and the namespace stay local, always, and credentials are
+referenced **by name** into each host's file config rather than carried.
+
+That is enforced three times over, which is deliberate rather than redundant:
+the payload types have no field for a credential; the compiler runs a
+never-list lint over every fragment before publishing (it tests the *value*, so
+`NetlinkExpectations`' `listen: 22` — a port — passes while
+`listen: "tcp/0.0.0.0:7447"` does not); and the sensor-side reconciler
+deserializes only its own sentinel's config type and writes only that
+sentinel's handle.
+
+The kill switch is `desired.enabled: false` in each sensor's **file** config —
+outside the mechanism it disarms.
+
+### What lands where
+
+A host reconciles a desired document over its file baseline and publishes
+`state/<producer>/applied/<topic>` saying which of three writers won last —
+`file`, `desired`, or `rpc` — what document is in force, and the most recent
+one it **refused**. That marker is where to look when a policy change does not
+appear to have taken:
+
+```bash
+zenctl get 'zensight/v1/*/state/*/applied/*'
+```
+
+A `DELETE` of a desired key reverts that host to its own config file, never to
+an empty set. And the compiler deletes a document only when the policy stops
+yielding it for a host the catalog **still shows**, after a grace of several
+passes — one slow catalog read must not revert the whole fleet at once.
+
+### Selectors read the catalog
+
+Classes select on facts `@catalog` resolved: `host_id`, a hostname glob, a
+sensor that runs there, an IP CIDR, `vendor`, `platform`. Two consequences
+worth knowing before writing the file:
+
+- **The correlator must be running.** With no catalog there are no entities, so
+  the compiler has no fleet, publishes nothing, and after the grace deletes
+  what it published. Run it alongside.
+- **`platform` selectors glob.** The value is `<ID>-<VERSION_ID>` —
+  `debian-13`, `proxmox-13` — so a class writes `debian-*`. An exact
+  `debian-13` silently stops matching after a point-release upgrade: nothing is
+  broken, no error is raised, the host simply stops receiving configuration.
+
+The file format, the overlay rules and the reasoning behind each are in
+[`zensight-desired/docs/policy.md`](../zensight-desired/docs/policy.md).
+
+## 7. Verifying
 
 On the GUI machine, after starting a container on another host you should see:
 

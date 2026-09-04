@@ -17,6 +17,23 @@ sudo systemctl enable --now zensight-sensor-sysinfo
 journalctl -u zensight-sensor-sysinfo -f
 ```
 
+## Configuring them: one policy, not one file per host
+
+Each unit reads its own config from `/etc/zensight`. What belongs there is the
+**local** half only: the Zenoh endpoint, credentials, TLS material, and the
+`desired.enabled` kill switch — the never-list is exactly the set of things
+that must never travel over the bus, because one bad publish would otherwise
+lock the fleet out of its own supervision.
+
+Everything an operator authors *about* a host — thresholds, hostspec
+assertions, systemd and netlink expectations, log sentinel rules — belongs in
+one `fleet-policy.json5`, compiled by `zensight-desired.service` and reconciled
+by each sensor over its file baseline. See
+[`docs/DEPLOYMENT.md` §6](../../docs/DEPLOYMENT.md#6-day-two-one-policy-file-instead-of-eighteen).
+
+Run **one** `zensight-desired` per deployment: `@desired` is a single-writer
+service origin.
+
 ## Privileges
 
 Every unit but one runs unprivileged under a transient `DynamicUser` with a
