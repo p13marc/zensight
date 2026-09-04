@@ -10,6 +10,7 @@ pub mod cli;
 pub mod config;
 pub mod discovery;
 pub mod evidence;
+pub mod fleet;
 pub mod interfaces;
 pub mod mib;
 pub mod oid;

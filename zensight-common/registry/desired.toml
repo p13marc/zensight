@@ -22,7 +22,7 @@
 # file-config baseline).
 
 [registry]
-version = "1.4"
+version = "1.5"
 app = "zensight"
 convention = 1
 
@@ -104,6 +104,40 @@ cardinality = 10000
 ttl_s = 0
 since = "1.4"
 description = "desired log sentinel ruleset for {host} (#543 — pattern→alert rules with windowed thresholds and rate limits)"
+
+# Runtime target sets (#936). The two sensors that poll things an operator
+# CHOSE, rather than whatever the host has: which SNMP devices, which synthetic
+# probes.
+#
+# Both payload types are deliberate SUBSETS of the sensors' own config types,
+# and that is the whole design. `DeviceConfig` carries a community string and
+# v3 passphrases; `Target` carries arbitrary HTTP headers, which is where an
+# `Authorization: Bearer ...` lives — and unlike SNMP's credentials that field
+# does not even go through the secret resolver. Either type on the wire whole
+# would put credentials on this origin, which is the never-list's central
+# prohibition. The #937 lint would NOT catch it: that tests key names, and here
+# the secret is a value nested under `headers`.
+#
+# So the wire references a NAME (`credentials`) or omits the field entirely
+# (probe has no header field), and the sensor resolves it against its own file
+# config — refusing a name it does not have.
+[[subject]]
+path = "{host}/snmp/targets"
+class = "state"
+type = "SnmpTargets"
+cardinality = 10000
+ttl_s = 0
+since = "1.5"
+description = "desired SNMP device set for {host} (#936): name, address, a credential NAME into the host's own file config, profile, oid group, poll interval. Never a community string or a v3 passphrase"
+
+[[subject]]
+path = "{host}/probe/targets"
+class = "state"
+type = "ProbeTargets"
+cardinality = 10000
+ttl_s = 0
+since = "1.5"
+description = "desired synthetic-probe target set for {host} (#936): the file-config target minus `headers`, which stays on the host because that is where a bearer token lives"
 
 [[subject]]
 path = "{host}/sysinfo/thresholds"

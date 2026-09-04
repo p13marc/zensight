@@ -692,3 +692,184 @@ mod tests {
         c.validate().expect("shipped config validates");
     }
 }
+
+// ── the wire set, applied over the file baseline (#936) ─────────────────────
+
+/// Turn the fleet-authored target set into runnable targets.
+///
+/// The wire type has no `headers` field, so the headers come from the **file**
+/// config's target of the same name — the sensor's own copy, resolved locally,
+/// never on the bus. That is the same shape SNMP's credentials-by-name has:
+/// a fleet says *which* target, the host says *what* the secret is.
+///
+/// A fleet-authored target with no file counterpart simply has no headers,
+/// which is right: an operator adding an authenticated endpoint has to say so
+/// on the host that will hold the token.
+pub fn targets_from_wire(
+    wire: &zensight_common::targets::ProbeTargets,
+    file_baseline: &[Target],
+) -> Vec<Target> {
+    wire.targets
+        .iter()
+        .map(|w| {
+            let headers = file_baseline
+                .iter()
+                .find(|f| f.name == w.name)
+                .map(|f| f.headers.clone())
+                .unwrap_or_default();
+            Target {
+                name: w.name.clone(),
+                kind: w.kind,
+                target: w.target.clone(),
+                interval_secs: w.interval_secs,
+                timeout_secs: w.timeout_secs,
+                expect_status: w.expect_status.clone(),
+                expect_body: w.expect_body.clone(),
+                follow_redirects: w.follow_redirects,
+                allow_offhost_redirect: w.allow_offhost_redirect,
+                method: w.method.clone(),
+                headers,
+                count: w.count,
+                spacing_ms: w.spacing_ms,
+                transport: w.transport.clone(),
+                server_name: w.server_name.clone(),
+                inspect_untrusted: w.inspect_untrusted,
+                resolver: w.resolver.clone(),
+                expect_addrs: w.expect_addrs.clone(),
+                enabled: w.enabled,
+            }
+        })
+        .collect()
+}
+
+/// The file target set as a wire set, for `@rpc/probe/targets` to answer with.
+///
+/// Headers are dropped on the way out, not just on the way in. A read
+/// procedure that returned them would put every configured bearer token on the
+/// bus in reply to an unauthenticated GET — the same leak as publishing them,
+/// arrived at from the other direction.
+pub fn targets_to_wire(targets: &[Target]) -> zensight_common::targets::ProbeTargets {
+    zensight_common::targets::ProbeTargets {
+        targets: targets
+            .iter()
+            .map(|t| zensight_common::targets::ProbeTarget {
+                name: t.name.clone(),
+                kind: t.kind,
+                target: t.target.clone(),
+                interval_secs: t.interval_secs,
+                timeout_secs: t.timeout_secs,
+                expect_status: t.expect_status.clone(),
+                expect_body: t.expect_body.clone(),
+                follow_redirects: t.follow_redirects,
+                allow_offhost_redirect: t.allow_offhost_redirect,
+                method: t.method.clone(),
+                count: t.count,
+                spacing_ms: t.spacing_ms,
+                transport: t.transport.clone(),
+                server_name: t.server_name.clone(),
+                inspect_untrusted: t.inspect_untrusted,
+                resolver: t.resolver.clone(),
+                expect_addrs: t.expect_addrs.clone(),
+                enabled: t.enabled,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use zensight_common::targets::{ProbeTarget, ProbeTargets};
+
+    fn file_target(name: &str, headers: Vec<(String, String)>) -> Target {
+        Target {
+            name: name.into(),
+            kind: zensight_common::probe::ProbeKind::Http,
+            target: "https://example.com".into(),
+            interval_secs: None,
+            timeout_secs: None,
+            expect_status: Vec::new(),
+            expect_body: None,
+            follow_redirects: true,
+            allow_offhost_redirect: false,
+            method: None,
+            headers,
+            count: None,
+            spacing_ms: None,
+            transport: None,
+            server_name: None,
+            inspect_untrusted: true,
+            resolver: None,
+            expect_addrs: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    fn wire(name: &str) -> ProbeTarget {
+        ProbeTarget {
+            name: name.into(),
+            kind: zensight_common::probe::ProbeKind::Http,
+            target: "https://example.com/new".into(),
+            interval_secs: Some(60),
+            timeout_secs: None,
+            expect_status: vec![200],
+            expect_body: None,
+            follow_redirects: true,
+            allow_offhost_redirect: false,
+            method: None,
+            count: None,
+            spacing_ms: None,
+            transport: None,
+            server_name: None,
+            inspect_untrusted: true,
+            resolver: None,
+            expect_addrs: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    /// The point of the split: a fleet may re-target and re-tune a check, and
+    /// the token that authenticates it never leaves the host.
+    #[test]
+    fn headers_come_from_the_file_not_the_wire() {
+        let baseline = vec![file_target(
+            "api",
+            vec![("Authorization".into(), "Bearer hunter2".into())],
+        )];
+        let set = ProbeTargets {
+            targets: vec![wire("api")],
+        };
+        let out = targets_from_wire(&set, &baseline);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].headers, baseline[0].headers, "kept from file config");
+        assert_eq!(
+            out[0].target, "https://example.com/new",
+            "wire won the rest"
+        );
+        assert_eq!(out[0].interval_secs, Some(60));
+    }
+
+    #[test]
+    fn a_fleet_target_with_no_local_counterpart_has_no_headers() {
+        let out = targets_from_wire(
+            &ProbeTargets {
+                targets: vec![wire("brand-new")],
+            },
+            &[],
+        );
+        assert!(out[0].headers.is_empty());
+    }
+
+    /// The read side leaks nothing either: a GET of the current set must not
+    /// return the tokens, or the protection is only half a protection.
+    #[test]
+    fn the_read_procedure_does_not_return_headers() {
+        let baseline = vec![file_target(
+            "api",
+            vec![("Authorization".into(), "Bearer hunter2".into())],
+        )];
+        let json = serde_json::to_string(&targets_to_wire(&baseline)).expect("encode");
+        assert!(!json.contains("hunter2"), "a token reached a reply: {json}");
+        assert!(!json.contains("Authorization"));
+    }
+}

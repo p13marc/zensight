@@ -98,8 +98,107 @@ async fn main() -> Result<()> {
          unreachable; this does not replace external outage monitoring."
     );
 
+    // The live target set (#936). Two writers replace it — the `@desired`
+    // reconciler with a fleet's whole set for this host, and
+    // `@rpc/probe/targets/set` with an operator's ad-hoc change — and
+    // `state/probe/applied/targets` says which went last. The file config is
+    // the baseline a `Delete` on the desired key reverts to.
+    let baseline_targets = pc.targets.clone();
+    let targets = zensight_sensor_probe::poller::TargetSet::new(baseline_targets.clone());
+
+    {
+        use zensight_sensor_probe::config::{targets_from_wire, targets_to_wire};
+        let desired_key = {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::probe_targets(
+                zensight_common::PROFILE.host_id(),
+            ))
+        };
+        let apply_set = targets.clone();
+        let apply_baseline = baseline_targets.clone();
+        let (marker, _reconcile) = zensight_sensor_core::desired::reconcile_topic(
+            runner.session().clone(),
+            runner.publisher(),
+            zensight_sensor_core::desired::DesiredTopic {
+                topic: "targets",
+                desired_key,
+            },
+            runner.config().desired.clone(),
+            targets_to_wire(&baseline_targets),
+            move |wire: zensight_common::targets::ProbeTargets| {
+                let set = apply_set.clone();
+                let baseline = apply_baseline.clone();
+                async move {
+                    // Refused whole before it applies: a duplicate or
+                    // non-slug-safe name becomes a key chunk and an alert key,
+                    // and neither failure is visible in the output.
+                    wire.validate()?;
+                    set.replace(targets_from_wire(&wire, &baseline));
+                    Ok(())
+                }
+            },
+        );
+
+        // The operator's half of the same set, with the marker so the two
+        // writers stay legible.
+        let rpc_set = targets.clone();
+        let rpc_baseline = baseline_targets.clone();
+        let status_set = targets.clone();
+        let ctx = zensight_sensor_core::v1::for_producer("probe");
+        let tasks = zensight_sensor_core::rpc::serve_topic::<
+            zensight_common::targets::ProbeTargets,
+            _,
+            _,
+            _,
+            _,
+        >(
+            runner.session().clone(),
+            &ctx,
+            "targets",
+            move |wire: zensight_common::targets::ProbeTargets| {
+                let set = rpc_set.clone();
+                let baseline = rpc_baseline.clone();
+                let marker = marker.clone();
+                async move {
+                    wire.validate()
+                        .map_err(zensight_sensor_core::rpc::RpcError::invalid_args)?;
+                    set.replace(targets_from_wire(&wire, &baseline));
+                    marker
+                        .publish(
+                            zensight_common::desired::AppliedSource::Rpc,
+                            &wire,
+                            None,
+                            None,
+                        )
+                        .await;
+                    Ok(())
+                }
+            },
+            move || {
+                let set = status_set.clone();
+                async move {
+                    serde_json::to_vec(&targets_to_wire(&set.snapshot())).map_err(|e| {
+                        zensight_sensor_core::rpc::RpcError::producer(
+                            "probe",
+                            "serialize",
+                            e.to_string(),
+                        )
+                    })
+                }
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        for t in tasks {
+            runner.spawn(async move {
+                let _ = t.await;
+            });
+        }
+    }
+
     let poller = Poller::new(
         pc.clone(),
+        targets.clone(),
         runner.publisher(),
         states,
         pc.alerts.enabled.then(|| reporter.clone()),

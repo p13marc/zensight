@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.13"
+version = "1.14"
 app = "zensight"
 convention = 1
 
@@ -1354,6 +1354,36 @@ reply = "ThresholdsConfig"
 idempotent = true
 since = "1.13"
 description = "the threshold rule set currently evaluated against this producer's own telemetry"
+
+# Runtime target sets (#936). Which devices this sensor polls stops being a
+# restart-only decision: `@desired` carries the whole set for this host and
+# these two carry an operator's ad-hoc change, with
+# `state/snmp/applied/targets` saying which went last.
+#
+# `fanout = "forbidden"` on the write, unlike `thresholds/set`. A threshold is
+# the same rule wherever it lands; a target set is NOT — every host would be
+# told to poll the same devices from every vantage, which for probe is
+# nonsense (the vantage is the measurement) and for SNMP is a fleet-wide
+# duplicate poll of every device. A fleet-wide target change is what
+# `@desired` is for, and it is per-host by construction there.
+#
+# `credentials` is a NAME into the host's own `snmp.credentials`; a name the host does not have is refused onto the marker. A community string or a v3 passphrase cannot be expressed by the type at all.
+[[procedure]]
+path = "targets"
+kind = "read"
+reply = "SnmpTargets"
+idempotent = true
+since = "1.14"
+description = "the target set this sensor is polling right now, as the wire type — which omits every credential"
+
+[[procedure]]
+path = "targets/set"
+kind = "write"
+fanout = "forbidden"
+request = "SnmpTargets"
+reply = "Ack"
+since = "1.14"
+description = "replace the target set without a restart; validated (names unique, slug-safe, non-empty; credential names known) before apply — refuses with error/invalid-args and the previous set keeps polling"
 
 [[procedure]]
 path = "thresholds/set"

@@ -36,6 +36,27 @@ const ALLOWED_WRITE_PROCEDURES: &[&str] = &[
     // buys the #957 audit record for "who changed the rules", which is the
     // right accountability for a procedure that changes what a host alerts on.
     "thresholds/set",
+    // #936. Reaches no device *as an action*, but it does change which devices
+    // this sensor talks to at all — so it is the entry on this list that most
+    // deserves the scrutiny the doc above asks for. Three things bound it:
+    //
+    //   1. The request type cannot carry a credential. `SnmpTargets` names a
+    //      credential SET; the community string and the v3 passphrases stay in
+    //      this host's own `snmp.credentials`, and a name the host does not
+    //      have is refused rather than falling back to a default. So the
+    //      procedure can say "poll that device with the credentials you
+    //      already hold" and can never say "poll it with these".
+    //   2. `fanout = "forbidden"`. A threshold is the same rule wherever it
+    //      lands; a device set is not — pushing one fleet-wide would have
+    //      every host poll every device. Fleet-wide target changes go through
+    //      `@desired`, which is per-host by construction.
+    //   3. It grants nothing an operator did not already have: every device it
+    //      can add is one they could have written into the config file and
+    //      restarted for. What it removes is the restart.
+    //
+    // The #957 audit record answers "who changed what this sensor polls",
+    // which is the accountability that matters here.
+    "targets/set",
 ];
 
 #[test]

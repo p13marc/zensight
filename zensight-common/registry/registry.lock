@@ -132,6 +132,8 @@ procedure	parallax	thresholds	read	-	ThresholdsConfig
 procedure	parallax	thresholds/set	write	ThresholdsConfig	Ack
 procedure	probe	describe	read	-	SchemaSet
 procedure	probe	introspect	read	-	RegistrySlice
+procedure	probe	targets	read	-	ProbeTargets
+procedure	probe	targets/set	write	ProbeTargets	Ack
 procedure	probe	thresholds	read	-	ThresholdsConfig
 procedure	probe	thresholds/set	write	ThresholdsConfig	Ack
 procedure	pve	describe	read	-	SchemaSet
@@ -147,6 +149,8 @@ procedure	snmp	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	snmp	artifact/status	read	-	ArtifactStatus
 procedure	snmp	describe	read	-	SchemaSet
 procedure	snmp	introspect	read	-	RegistrySlice
+procedure	snmp	targets	read	-	SnmpTargets
+procedure	snmp	targets/set	write	SnmpTargets	Ack
 procedure	snmp	thresholds	read	-	ThresholdsConfig
 procedure	snmp	thresholds/set	write	ThresholdsConfig	Ack
 procedure	sysinfo	artifact/cancel	write	-	Ack
@@ -249,8 +253,10 @@ subject	desired	{host}/netlink/expectations	state	NetlinkExpectations
 subject	desired	{host}/netlink/thresholds	state	ThresholdsConfig
 subject	desired	{host}/netring/thresholds	state	ThresholdsConfig
 subject	desired	{host}/parallax/thresholds	state	ThresholdsConfig
+subject	desired	{host}/probe/targets	state	ProbeTargets
 subject	desired	{host}/probe/thresholds	state	ThresholdsConfig
 subject	desired	{host}/pve/thresholds	state	ThresholdsConfig
+subject	desired	{host}/snmp/targets	state	SnmpTargets
 subject	desired	{host}/snmp/thresholds	state	ThresholdsConfig
 subject	desired	{host}/sysinfo/thresholds	state	ThresholdsConfig
 subject	desired	{host}/systemd/expectations	state	ExpectationsConfig

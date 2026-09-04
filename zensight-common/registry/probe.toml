@@ -24,7 +24,7 @@
 # acquire more than that.
 
 [registry]
-version = "1.4"
+version = "1.5"
 app = "zensight"
 convention = 1
 
@@ -302,6 +302,36 @@ reply = "ThresholdsConfig"
 idempotent = true
 since = "1.4"
 description = "the threshold rule set currently evaluated against this producer's own telemetry"
+
+# Runtime target sets (#936). Which devices this sensor polls stops being a
+# restart-only decision: `@desired` carries the whole set for this host and
+# these two carry an operator's ad-hoc change, with
+# `state/probe/applied/targets` saying which went last.
+#
+# `fanout = "forbidden"` on the write, unlike `thresholds/set`. A threshold is
+# the same rule wherever it lands; a target set is NOT — every host would be
+# told to poll the same devices from every vantage, which for probe is
+# nonsense (the vantage is the measurement) and for SNMP is a fleet-wide
+# duplicate poll of every device. A fleet-wide target change is what
+# `@desired` is for, and it is per-host by construction there.
+#
+# The wire type has no `headers` field, so a request cannot carry one and a reply cannot leak one — headers stay in the host's file config, matched to a target by name.
+[[procedure]]
+path = "targets"
+kind = "read"
+reply = "ProbeTargets"
+idempotent = true
+since = "1.5"
+description = "the target set this sensor is polling right now, as the wire type — which omits every credential"
+
+[[procedure]]
+path = "targets/set"
+kind = "write"
+fanout = "forbidden"
+request = "ProbeTargets"
+reply = "Ack"
+since = "1.5"
+description = "replace the target set without a restart; validated (names unique, slug-safe, non-empty; credential names known) before apply — refuses with error/invalid-args and the previous set keeps polling"
 
 [[procedure]]
 path = "thresholds/set"

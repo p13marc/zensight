@@ -74,3 +74,40 @@ guest for the hairpin view — the check that would have caught 2026-08-20; on a
 operator's workstation for the real user's view. Same sensor, same target list
 if you like, different `vantage`, and the disagreement between them is the
 information.
+
+## Runtime target sets (#936)
+
+Which targets this sensor polls is no longer a restart-only decision.
+
+| | |
+|---|---|
+| `@desired/state/<host>/probe/targets` | a fleet's whole set for this host |
+| `@rpc/probe/targets` | what it is polling **right now** |
+| `@rpc/probe/targets/set` | replace it, without a restart |
+| `state/probe/applied/targets` | which writer went last (`file` / `desired` / `rpc`), and the last refusal |
+
+A `Delete` on the desired key reverts this host to the target list in its own
+config file — never to an empty set.
+
+`targets/set` is `fanout = "forbidden"`, unlike `thresholds/set`. A threshold is
+the same rule wherever it lands; a target set is not. Pushing one fleet-wide
+would tell every host to poll the same things from every vantage. Fleet-wide
+target changes go through `@desired`, which is per-host by construction.
+
+### What the wire cannot carry
+
+`ProbeTargets` is the file-config target **minus `headers`**. That omission is
+the point of the type: a header is where an `Authorization: Bearer …` lives, and
+unlike SNMP's credentials it does not go through the secret resolver — what is
+in the file is the literal token. A payload that carries one is **refused**, not
+silently stripped, so an operator learns where headers belong instead of
+watching a probe run without them.
+
+Headers for a fleet-authored target come from **this host's** file-config target
+of the same name. A fleet says *which* endpoint to check and how; the host says
+what authenticates it.
+
+A set is refused **whole** if any name is empty, duplicated, or not a legal key
+chunk. A target's name becomes a key chunk and part of the alert key, so two
+targets sharing one collapse onto a single series and a single alert that flap
+over each other — and nothing anywhere reports it.

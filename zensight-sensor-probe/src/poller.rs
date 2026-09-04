@@ -19,8 +19,38 @@ use crate::telemetry_guard::checked_point;
 
 pub const STATE_QOS: QosClass = QosClass::HealthLiveness;
 
+/// The live target set, shared between the poller and whoever replaces it.
+///
+/// A handle rather than a field, because since #936 two writers can change it:
+/// the `@desired` reconciler (a fleet's whole set for this host) and
+/// `@rpc/probe/targets/set` (an operator's ad-hoc change). Both replace the
+/// set wholesale; `state/probe/applied/targets` says which went last.
+#[derive(Clone, Default)]
+pub struct TargetSet(Arc<std::sync::RwLock<Vec<Target>>>);
+
+impl TargetSet {
+    pub fn new(targets: Vec<Target>) -> Self {
+        TargetSet(Arc::new(std::sync::RwLock::new(targets)))
+    }
+
+    /// Replace the whole set. A partial update would need a merge rule, and
+    /// the one place a merge rule belongs is the policy compiler (#938) —
+    /// which sends the result here already merged.
+    pub fn replace(&self, targets: Vec<Target>) {
+        *self.0.write().expect("target set poisoned") = targets;
+    }
+
+    pub fn snapshot(&self) -> Vec<Target> {
+        self.0.read().expect("target set poisoned").clone()
+    }
+}
+
 pub struct Poller {
     cfg: ProbeConfig,
+    /// The targets to check, live. Read fresh every sweep — which the sweep
+    /// already did against `cfg.targets`, so making it swappable cost nothing
+    /// but the pruning below.
+    targets: TargetSet,
     vantage: String,
     source: String,
     client: reqwest::Client,
@@ -47,6 +77,7 @@ impl Poller {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: ProbeConfig,
+        targets: TargetSet,
         publisher: Publisher,
         states: Arc<AdvancedPublisherRegistry>,
         reporter: Option<Arc<AlertReporter>>,
@@ -65,6 +96,7 @@ impl Poller {
         Ok(Self {
             limit: Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent.max(1))),
             cfg,
+            targets,
             vantage,
             source,
             client,
@@ -98,9 +130,26 @@ impl Poller {
     /// Run every target that is due, concurrently but capped.
     pub async fn sweep(&mut self) -> Vec<ProbeResult> {
         let now = Instant::now();
-        let due: Vec<Target> = self
-            .cfg
-            .targets
+        let targets = self.targets.snapshot();
+
+        // Forget targets that are no longer in the set (#936).
+        //
+        // `last` is not a cache: [`Self::grade`] re-grades **every** entry in
+        // it each sweep, so that a rule does not resolve and re-fire on the
+        // targets that were not due this tick. That was safe while the set
+        // could only grow. Once a target can be removed, its final result
+        // would go on being graded forever — an alert for a check nobody asked
+        // for any more, on a device that may not exist, with nothing to clear
+        // it. `due` is pruned with it so a re-added name starts fresh rather
+        // than inheriting a schedule.
+        if self.last.len() + self.due.len() > 0 {
+            let live: std::collections::HashSet<&str> =
+                targets.iter().map(|t| t.name.as_str()).collect();
+            self.last.retain(|name, _| live.contains(name.as_str()));
+            self.due.retain(|name, _| live.contains(name.as_str()));
+        }
+
+        let due: Vec<Target> = targets
             .iter()
             .filter(|t| t.enabled)
             .filter(|t| self.due.get(&t.name).is_none_or(|at| *at <= now))
@@ -134,9 +183,7 @@ impl Poller {
                             r.error.as_deref().unwrap_or("check failed"),
                         );
                     }
-                    let interval = self
-                        .cfg
-                        .targets
+                    let interval = targets
                         .iter()
                         .find(|t| t.name == r.name)
                         .map_or(self.cfg.interval_secs, |t| {
@@ -153,7 +200,7 @@ impl Poller {
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         self.health
-            .set_devices_total(self.cfg.targets.iter().filter(|t| t.enabled).count() as u64);
+            .set_devices_total(targets.iter().filter(|t| t.enabled).count() as u64);
         out
     }
 
@@ -286,7 +333,7 @@ impl Poller {
             }
         }
 
-        let enabled = self.cfg.targets.iter().filter(|t| t.enabled).count();
+        let enabled = self.targets.snapshot().iter().filter(|t| t.enabled).count();
         let failing = self.last.values().filter(|r| !r.outcome.is_ok()).count();
         for (metric, value) in [
             ("targets/total", enabled as f64),

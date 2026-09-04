@@ -65,6 +65,7 @@ pub mod state;
 pub mod stream;
 pub mod subscribe;
 pub mod systemd;
+pub mod targets;
 pub mod telemetry;
 // Threshold rules a sensor owns (#928, epic #901).
 pub mod threshold;
@@ -205,4 +206,13 @@ pub fn init_tracing(config: &LoggingConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The serde default for a `bool` field whose absence means **yes**.
+///
+/// Shared because several wire types have one and a `#[serde(default)]` on a
+/// bool means `false` — which for `enabled`, `follow_redirects` and
+/// `inspect_untrusted` silently inverts the intent of an omitted field.
+pub(crate) fn default_true() -> bool {
+    true
 }

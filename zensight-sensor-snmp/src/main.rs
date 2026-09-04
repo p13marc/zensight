@@ -234,10 +234,6 @@ async fn main() -> Result<()> {
         )
     });
 
-    runner
-        .health()
-        .set_devices_total(snmp_config.devices.len() as u64);
-
     // Fleet-known IPs (#541): configured addresses now, evidence-observed
     // IPs as pollers learn them. Discovery never re-proposes any of these.
     let known_ips = Arc::new(std::sync::RwLock::new(
@@ -254,67 +250,226 @@ async fn main() -> Result<()> {
             .collect::<std::collections::HashSet<_>>(),
     ));
 
-    // Spawn device pollers
-    for device in snmp_config.devices.clone() {
-        let mut poller = SnmpPoller::new(
-            device.clone(),
-            session.clone(),
-            mib_resolver.clone(),
-            &snmp_config.oid_groups,
-            serialization,
+    // Device pollers, as a set that can change without a restart (#936).
+    //
+    // Everything a poller needs is captured once here; the supervisor
+    // (`fleet::DeviceFleet`) knows none of it and only decides who runs.
+    let spawn_device: zensight_sensor_snmp::fleet::SpawnDevice = {
+        let session = session.clone();
+        let mib_resolver = mib_resolver.clone();
+        let oid_groups = snmp_config.oid_groups.clone();
+        let default_alerts = snmp_config.alerts.clone();
+        let thresholds = thresholds.clone();
+        let alert_reporter = alert_reporter.clone();
+        let interfaces_registry = interfaces_registry.clone();
+        let profiles = profiles.clone();
+        let smi = smi.clone();
+        let evidence_registry = evidence_registry.clone();
+        let evidence_cycles = snmp_config.evidence.refresh_cycles;
+        let resilience = snmp_config.resilience;
+        let health = runner.health();
+        let known_ips = known_ips.clone();
+        std::sync::Arc::new(move |device: zensight_sensor_snmp::config::DeviceConfig| {
+            let session = session.clone();
+            let mib_resolver = mib_resolver.clone();
+            let oid_groups = oid_groups.clone();
+            let default_alerts = default_alerts.clone();
+            let thresholds = thresholds.clone();
+            let alert_reporter = alert_reporter.clone();
+            let interfaces_registry = interfaces_registry.clone();
+            let profiles = profiles.clone();
+            let smi = smi.clone();
+            let evidence_registry = evidence_registry.clone();
+            let health = health.clone();
+            let known_ips = known_ips.clone();
+            tokio::spawn(async move {
+                let mut poller = SnmpPoller::new(
+                    device.clone(),
+                    session,
+                    mib_resolver,
+                    &oid_groups,
+                    serialization,
+                );
+                poller.with_thresholds(thresholds);
+                {
+                    let cfg = device.alerts.clone().unwrap_or(default_alerts);
+                    if cfg.enabled {
+                        let evaluator = zensight_sensor_snmp::alerts::AlertEvaluator::new(
+                            device.name.clone(),
+                            cfg,
+                            alert_reporter,
+                        );
+                        poller.with_alerts(evaluator);
+                    }
+                }
+                if let Some(registry) = interfaces_registry {
+                    poller.with_interfaces_doc(registry);
+                }
+                if let Some(profiles) = profiles {
+                    poller.with_profiles(profiles);
+                }
+                if let Some(smi) = smi {
+                    poller.with_smi(smi);
+                }
+                if let Some(registry) = evidence_registry {
+                    poller.with_evidence(registry, evidence_cycles);
+                }
+                poller.with_resilience(resilience);
+                poller.with_health(health);
+                poller.with_known_ips(known_ips);
+
+                // Initialize the client. A failure no longer drops the device
+                // (#539): the poll loop keeps retrying with backoff, so a
+                // device that is offline at startup starts working when it
+                // comes online.
+                if let Err(e) = poller.init().await {
+                    tracing::warn!(
+                        device = %device.name,
+                        error = %e,
+                        "SNMP client init failed; will keep retrying with backoff"
+                    );
+                }
+                poller.run().await;
+            })
+        })
+    };
+
+    let fleet = std::sync::Arc::new(tokio::sync::Mutex::new(
+        zensight_sensor_snmp::fleet::DeviceFleet::new(spawn_device),
+    ));
+    {
+        let mut f = fleet.lock().await;
+        let change = f.apply(&snmp_config.devices);
+        tracing::info!(devices = change.added.len(), "SNMP device pollers started");
+        runner.health().set_devices_total(f.len() as u64);
+    }
+
+    // The two writers of the device set (#936). `@desired` carries a fleet's
+    // whole set for this host; `@rpc/snmp/targets/set` carries an operator's
+    // ad-hoc change. Both go through the same supervisor, and
+    // `state/snmp/applied/targets` says which went last.
+    //
+    // Credentials are resolved HERE, from this host's file config. The wire
+    // carries a name; a name this host does not have is refused onto the
+    // marker rather than falling back to a default community.
+    {
+        use zensight_sensor_snmp::config::{devices_from_wire, devices_to_wire};
+        let baseline_devices = snmp_config.devices.clone();
+        let credentials = snmp_config.credentials.clone();
+
+        let desired_key = {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::snmp_targets(
+                zensight_common::PROFILE.host_id(),
+            ))
+        };
+        let apply_fleet = fleet.clone();
+        let apply_baseline = baseline_devices.clone();
+        let apply_creds = credentials.clone();
+        let apply_health = runner.health();
+        let (marker, _reconcile) = zensight_sensor_core::desired::reconcile_topic(
+            runner.session().clone(),
+            runner.publisher(),
+            zensight_sensor_core::desired::DesiredTopic {
+                topic: "targets",
+                desired_key,
+            },
+            runner.config().desired.clone(),
+            devices_to_wire(&baseline_devices),
+            move |wire: zensight_common::targets::SnmpTargets| {
+                let fleet = apply_fleet.clone();
+                let baseline = apply_baseline.clone();
+                let creds = apply_creds.clone();
+                let health = apply_health.clone();
+                async move {
+                    let devices = devices_from_wire(&wire, &baseline, &creds)?;
+                    let mut f = fleet.lock().await;
+                    let change = f.apply(&devices);
+                    if !change.is_noop() {
+                        tracing::info!(
+                            added = ?change.added, restarted = ?change.restarted,
+                            removed = ?change.removed, unchanged = change.unchanged,
+                            "device set replaced from @desired"
+                        );
+                    }
+                    health.set_devices_total(f.len() as u64);
+                    Ok(())
+                }
+            },
         );
 
-        poller.with_thresholds(thresholds.clone());
-
-        {
-            let cfg = device
-                .alerts
-                .clone()
-                .unwrap_or_else(|| snmp_config.alerts.clone());
-            if cfg.enabled {
-                let evaluator = zensight_sensor_snmp::alerts::AlertEvaluator::new(
-                    device.name.clone(),
-                    cfg,
-                    alert_reporter.clone(),
-                );
-                poller.with_alerts(evaluator);
-            }
+        let rpc_fleet = fleet.clone();
+        let rpc_baseline = baseline_devices.clone();
+        let rpc_creds = credentials.clone();
+        let rpc_health = runner.health();
+        let status_fleet = fleet.clone();
+        let ctx = zensight_sensor_core::v1::for_producer("snmp");
+        let tasks = zensight_sensor_core::rpc::serve_topic::<
+            zensight_common::targets::SnmpTargets,
+            _,
+            _,
+            _,
+            _,
+        >(
+            runner.session().clone(),
+            &ctx,
+            "targets",
+            move |wire: zensight_common::targets::SnmpTargets| {
+                let fleet = rpc_fleet.clone();
+                let baseline = rpc_baseline.clone();
+                let creds = rpc_creds.clone();
+                let health = rpc_health.clone();
+                let marker = marker.clone();
+                async move {
+                    let devices = devices_from_wire(&wire, &baseline, &creds)
+                        .map_err(zensight_sensor_core::rpc::RpcError::invalid_args)?;
+                    let mut f = fleet.lock().await;
+                    let change = f.apply(&devices);
+                    tracing::info!(
+                        added = ?change.added, restarted = ?change.restarted,
+                        removed = ?change.removed,
+                        "device set replaced over @rpc"
+                    );
+                    health.set_devices_total(f.len() as u64);
+                    marker
+                        .publish(
+                            zensight_common::desired::AppliedSource::Rpc,
+                            &wire,
+                            None,
+                            None,
+                        )
+                        .await;
+                    Ok(())
+                }
+            },
+            move || {
+                let fleet = status_fleet.clone();
+                async move {
+                    // What is ACTUALLY being polled, from the supervisor —
+                    // not what the config file said at startup. Those differ
+                    // the moment a set is replaced, and answering with the
+                    // second would be answering a question nobody asked.
+                    //
+                    // `devices_to_wire` drops every secret on the way out, so
+                    // this GET returns credential *names* and nothing more.
+                    let devices = fleet.lock().await.devices();
+                    serde_json::to_vec(&devices_to_wire(&devices)).map_err(|e| {
+                        zensight_sensor_core::rpc::RpcError::producer(
+                            "snmp",
+                            "serialize",
+                            e.to_string(),
+                        )
+                    })
+                }
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        for t in tasks {
+            runner.spawn(async move {
+                let _ = t.await;
+            });
         }
-
-        if let Some(registry) = &interfaces_registry {
-            poller.with_interfaces_doc(registry.clone());
-        }
-
-        if let Some(profiles) = &profiles {
-            poller.with_profiles(profiles.clone());
-        }
-
-        if let Some(smi) = &smi {
-            poller.with_smi(smi.clone());
-        }
-
-        if let Some(registry) = &evidence_registry {
-            poller.with_evidence(registry.clone(), snmp_config.evidence.refresh_cycles);
-        }
-
-        poller.with_resilience(snmp_config.resilience);
-        poller.with_health(runner.health());
-        poller.with_known_ips(known_ips.clone());
-
-        // Initialize the client. A failure no longer drops the device
-        // (#539): the poll loop keeps retrying with backoff, so a device
-        // that is offline at startup starts working when it comes online.
-        if let Err(e) = poller.init().await {
-            tracing::warn!(
-                device = %device.name,
-                error = %e,
-                "SNMP client init failed; will keep retrying with backoff"
-            );
-        }
-
-        runner.spawn(async move {
-            poller.run().await;
-        });
     }
 
     // Subnet auto-discovery (#541): opt-in, propose-only.

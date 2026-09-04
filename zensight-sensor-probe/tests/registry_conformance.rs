@@ -68,7 +68,22 @@ fn every_registered_family_has_an_emitter() {
 /// surface. Asking the slice is stronger and immune to its own documentation.
 #[test]
 fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
-    const ALLOWED: &[&str] = &["thresholds/set"];
+    // Each entry is a decision, and the reason belongs next to it:
+    //
+    // - `thresholds/set` (#931) rewrites the rule set this sensor evaluates
+    //   against its OWN telemetry. It reaches no target.
+    // - `targets/set` (#936) changes WHICH targets this sensor checks — and
+    //   that is still not an action on a target: every check it can be told to
+    //   make is one an operator could already have put in the config file, and
+    //   the set is `fanout = "forbidden"` so it cannot be pushed fleet-wide
+    //   (the vantage IS the measurement; the same targets from every host is
+    //   not a fleet policy, it is a mistake). The request type carries no
+    //   headers, so it cannot smuggle a credential into an outbound request
+    //   either.
+    //
+    // Both buy the #957 audit record for "who changed this". Neither buys
+    // permission to act.
+    const ALLOWED: &[&str] = &["thresholds/set", "targets/set"];
     let toml = zensight_common::registry::probe::REGISTRY_TOML;
     let slice = zenkey::parse_slice(toml).expect("the shipped probe slice parses");
     let writes: Vec<&str> = slice
@@ -85,6 +100,7 @@ fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
         .collect();
     assert!(
         writes.is_empty(),
-        "probe declared write procedure(s) {writes:?}. This sensor is a client only (#820):          it opens connections an operator configured and does nothing else."
+        "probe declared write procedure(s) {writes:?}. This sensor is a client only (#820): \
+         it opens connections an operator configured and does nothing else."
     );
 }
