@@ -822,6 +822,7 @@ pub fn host_detail_view<'a>(ctx: DeviceViewCtx<'a, '_>) -> Element<'a, Message> 
         ctx.syslog_filter,
         ctx.host_logs,
         ctx.artifact,
+        ctx.entity,
     ));
     col.width(Length::Fill).height(Length::Fill).into()
 }
@@ -833,11 +834,12 @@ fn device_content<'a>(
     syslog_filter: &'a specialized::SyslogFilterState,
     host_logs: &[specialized::SyslogMessage],
     artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
+    entity: Option<&HostEntity>,
 ) -> Element<'a, Message> {
     if state.device_id.protocol == Protocol::Logs {
         return specialized::syslog_view(state, syslog_filter, host_logs);
     }
-    if let Some(view) = specialized::specialized_view(state, artifact) {
+    if let Some(view) = specialized::specialized_view(state, artifact, entity) {
         return view;
     }
     generic_device_body(state)
@@ -940,7 +942,7 @@ fn entity_identity_summary(entity: &HostEntity, expanded: bool) -> Element<'stat
 pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     // Try to use a specialized view for this protocol (bare path — no artifact
     // context, so contextual actions render their advert-less fallback).
-    if let Some(specialized_view) = specialized::specialized_view(state, None) {
+    if let Some(specialized_view) = specialized::specialized_view(state, None, None) {
         // Wrap it with the shared nav header so every device screen has a Back
         // button + consistent chrome (specialized views don't render their own).
         return with_device_nav(state, specialized_view);

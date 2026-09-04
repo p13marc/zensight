@@ -27,8 +27,11 @@ use crate::view::theme;
 use crate::view::tokens::space;
 
 /// Render the sysinfo host specialized view.
-pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let header = render_header(state);
+pub fn sysinfo_host_view<'a>(
+    state: &'a DeviceDetailState,
+    entity: Option<&zensight_common::HostEntity>,
+) -> Element<'a, Message> {
+    let header = render_header(state, entity);
     let system_overview = render_system_overview(state);
     let cpu_section = render_cpu_section(state);
     let memory_section = render_memory_section(state);
@@ -97,7 +100,10 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// Render the header with back button and host info.
-fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
+fn render_header<'a>(
+    state: &'a DeviceDetailState,
+    entity: Option<&zensight_common::HostEntity>,
+) -> Element<'a, Message> {
     use iced::widget::button;
 
     let back_button = button(
@@ -111,9 +117,28 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
     let host_name = text(&state.device_id.source).size(24);
 
-    // Try to get OS info
-    let os_info = get_metric_text(state, "system/os_name")
-        .or_else(|| get_metric_text(state, "system/kernel_version"))
+    // What this host is, from the catalog's entity document (#1019).
+    //
+    // This used to read two *metrics*, `system/os_name` and
+    // `system/kernel_version`, and **nothing in the workspace published
+    // either** — so it said "Unknown OS" on every host, forever, on a
+    // fallback chain of two dead lookups.
+    //
+    // Publishing them as metrics would have been the wrong repair twice over:
+    // an OS name does not vary with time and does not belong in a series, and
+    // the model already has the right home for it. `HostEvidence` and
+    // `HostEntity` carry `vendor` and `platform` as descriptive fields, the
+    // catalog prefers a host's self-report over a poller's guess, and #935
+    // fills them. So this reads the resolved entity and says "Unknown OS" only
+    // when the catalog genuinely has nothing — which is now a fact about the
+    // fleet rather than a fact about this line.
+    let os_info = entity
+        .and_then(|e| match (e.platform.as_deref(), e.vendor.as_deref()) {
+            (Some(p), Some(v)) => Some(format!("{p} · {v}")),
+            (Some(p), None) => Some(p.to_string()),
+            (None, Some(v)) => Some(v.to_string()),
+            (None, None) => None,
+        })
         .unwrap_or_else(|| "Unknown OS".to_string());
 
     let os_text = text(os_info).size(14).style(|t: &Theme| text::Style {
@@ -1532,7 +1557,7 @@ mod tests {
         let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01");
         let state = DeviceDetailState::new(device_id);
         // Just verify it doesn't panic
-        let _view = sysinfo_host_view(&state);
+        let _view = sysinfo_host_view(&state, None);
     }
 
     // ── Identity pivots (#313) ────────────────────────────────────────────────
