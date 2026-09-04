@@ -51,6 +51,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`desired::topics()` — one validation table for every `@desired` topic, and
+  a never-list lint that can tell a port from an endpoint** (#937, epic #902).
+
+  Until now the only thing that could reject a bad desired document was the
+  sensor that received it: the last possible moment, and the one place where
+  the operator is not looking. `zensight_common::desired::topics()` gives the
+  policy controller (#938), the GUI and the tests one shared answer to "is this
+  a valid document for `{host}/<producer>/<topic>`" — it deserializes into the
+  registered type, then runs the never-list lint.
+
+  **A new topic cannot ship without a validator.**
+  `every_desired_subject_has_a_validator` parses `registry/desired.toml` and
+  checks the two lists against each other **in both directions** — a subject
+  with no entry, and an entry naming no subject. Two lists of the same thing
+  diverge silently otherwise, and the first thing to notice would be a sensor
+  refusing a document on a host nobody is watching. (Verified by removing an
+  entry: the test fails.)
+
+  **The never-list lint tests the value, not just the key.** A blind key ban is
+  wrong, and two shipped types prove it: `NetlinkExpectations`' `listen:
+  Option<u16>` is the TCP port a socket expectation checks for a listener, and
+  `HostspecExpectations::listening` is a whole family of port assertions.
+  Neither is a bus endpoint, and refusing them would make two sentinels
+  unauthorable to protect against a spelling.
+
+  What separates them is the value. A secret, an endpoint, a TLS block and a
+  namespace are strings, arrays or objects; a port is a number. So a never-list
+  key is refused unless its value is a number or a boolean — and
+  `listen: "tcp/0.0.0.0:7447"` is still refused, which is the case worth
+  catching. A test asserts that every registered type survives its own
+  `Default` through the lint: if a shipped shape trips it, the lint is wrong,
+  not the type.
+
+  This is defence in depth and says so. The consumer side is already
+  structural — the reconciler deserializes only a sentinel's own config type
+  and writes only that sentinel's handle — and no registered type has a string
+  field with a never-list name today. The lint exists so that a type which
+  *grows* one is caught when it is proposed, rather than when a fleet stops
+  answering and the fix has to travel over the bus that just broke.
+
 - **The last two sentinels join `@desired`, so every sentinel in the tree is
   fleet-authorable** (#849, epic #902). netlink's expectation set and the log
   sentinel's ruleset move to `zensight-common` with real schemars schemas, and

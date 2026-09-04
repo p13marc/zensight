@@ -302,6 +302,17 @@ the reconciler deserializes only the sentinel's own config type and writes
 only that sentinel's handle. A per-sensor kill switch
 (`desired.enabled: false`) lives in FILE config.
 
+Since #937 the **author** side checks it too, before publishing:
+`zensight_common::desired::topics()` maps `(producer, topic)` to the registered
+type and a validator, and `never_list_lint` walks a candidate document for
+never-list keys. It tests the **value**, not only the key — a secret, an
+endpoint, a TLS block and a namespace are strings, arrays or objects, while
+`NetlinkExpectations`' `listen` is the TCP *port* a socket expectation checks
+for a listener. A blind key ban would have made two sentinels unauthorable to
+protect against a spelling. `every_desired_subject_has_a_validator` keeps the
+table and this registry in step in both directions, so a new topic cannot ship
+unchecked.
+
 **Two writers, one honest marker.** An operator's `@rpc/<producer>/<topic>/set`
 and the `@desired` reconciler both write the same sentinel handle; the rule
 is LWW by arrival, and `state/<producer>/applied/<topic>` (`AppliedConfig`)
