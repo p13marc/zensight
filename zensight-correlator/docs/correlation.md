@@ -319,6 +319,37 @@ ended or re-fired, and silences past `ends_at`. A silence also stops applying
 at the instant it ends whether or not the sweep has run, so a partitioned
 reader cannot keep an expired suppression alive.
 
+### Reading them back: the seed queryables
+
+Each of the three families answers a **storage-shaped GET** on its own state
+selector — one reply per document on its concrete key, stamped inside the state
+lock:
+
+| GET | answered by |
+|---|---|
+| `@catalog/state/entity/*` | `serve_entities` |
+| `@catalog/state/incident/*` | `serve_incidents` |
+| `@catalog/state/ack/*` | `serve_acks` |
+| `@catalog/state/silence/*` | `serve_silences` |
+
+This is not a convenience. It is the half of epic #900 that gives the epic its
+name, and it was missing until #925: acks and silences reach a live subscriber
+through the `put`, but `publish_ack` uses a plain publisher that is dropped at
+the end of the call, so there is no publisher cache for a subscriber's
+`history()` to recover from, and the deployment the `configs/` ship has no
+router storage either. A frontend opened *after* an ack was made — a second
+operator joining a running incident, or the same operator after a restart —
+issued its seed GET, received nothing, and rendered every acknowledged alert as
+unacknowledged. Nothing failed and nothing logged; a second operator simply
+started work someone was already doing, which is the exact failure the epic
+exists to remove.
+
+All four selectors are in `main.rs`'s `callable` list, so `alive ⇒ callable`
+(RFC 04 §5) covers them: the catalog does not announce presence until it can
+answer a seed. `zensight-correlator/tests/ack_survives_a_restart.rs` pins the
+property end to end over two real sessions — write the ack from one, close it,
+and read it back from a session that never saw the write.
+
 ### Not built, on purpose
 
 Notification routing, escalation, on-call rotations, repeat intervals. zenkey's
