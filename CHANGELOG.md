@@ -420,6 +420,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A probe e2e could fail in a PR that never touched the probe** (#1004).
+  `a_burst_measures_jitter_and_publishes_no_rtt_when_everything_is_lost` picked
+  its "dead" target by binding `127.0.0.1:0`, reading the address, and dropping
+  the listener — which hands the port straight back to the kernel's ephemeral
+  allocator, and then asserts nothing else takes it.
+
+  Under a full `cargo test --workspace` something does: many crates' Zenoh
+  peers and listeners start at once, and every outgoing connection draws from
+  the same `ip_local_port_range` (32768–60999 on the runner). The probe then
+  connects to what the test called dead, and it fails `left: 1, right: 0` in a
+  crate the offending PR never touched — the worst kind of flake, because it
+  reddens unrelated work and trains people to re-run CI without reading it.
+
+  The dead port is now chosen from **below** the ephemeral range, where the
+  allocator cannot hand it out, and it is **scanned rather than assumed**: if
+  the whole 20000–20099 window is occupied the test says so instead of
+  reporting a probe bug.
+
+  The test itself was right — its comment explains exactly why the live/dead
+  pair matters ("publishing zeros for a dead link, which reads on a chart as a
+  perfect one"). Only the port selection was unsound.
+
 - **The `deny` gate was red four runs in six, and it was never about this
   tree** (#950). The job log — reachable all along through Forgejo's *web*
   handler, which is the second thing this issue got wrong — says it in one
