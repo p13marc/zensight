@@ -828,3 +828,43 @@ used, never below — below is what would re-open a replay window.
   the same reason: an OID guessed from memory publishes a plausible number
   under a right-looking name, and nothing downstream can tell. Extending
   either needs the vendor MIB, or a device to check against.
+
+## Runtime target sets (#936)
+
+Which targets this sensor polls is no longer a restart-only decision.
+
+| | |
+|---|---|
+| `@desired/state/<host>/snmp/targets` | a fleet's whole set for this host |
+| `@rpc/snmp/targets` | what it is polling **right now** |
+| `@rpc/snmp/targets/set` | replace it, without a restart |
+| `state/snmp/applied/targets` | which writer went last (`file` / `desired` / `rpc`), and the last refusal |
+
+A `Delete` on the desired key reverts this host to the target list in its own
+config file — never to an empty set.
+
+`targets/set` is `fanout = "forbidden"`, unlike `thresholds/set`. A threshold is
+the same rule wherever it lands; a target set is not. Pushing one fleet-wide
+would tell every host to poll the same things from every vantage. Fleet-wide
+target changes go through `@desired`, which is per-host by construction.
+
+### What the wire cannot carry
+
+`SnmpTargets` names a credential **set** — a key into this host's own
+`snmp.credentials`. A community string or a v3 passphrase cannot be expressed by
+the type, so it cannot ride the bus.
+
+A credential name this host does not have is **refused**, and the refusal rides
+the marker. It does not fall back to the default community: polling with the
+wrong credential reads, on every chart, as a device that stopped answering,
+which is the most expensive possible way to be told about a typo. The error
+names the sets the host does have.
+
+Unnamed fields — `oids`, `walks`, timeouts, rate caps — come from the local
+device of the same name when there is one, so a fleet may retarget or reprofile
+a device without discarding tuning an operator did on that host.
+
+A set is refused **whole** if any name is empty, duplicated, or not a legal key
+chunk. A target's name becomes a key chunk and part of the alert key, so two
+targets sharing one collapse onto a single series and a single alert that flap
+over each other — and nothing anywhere reports it.

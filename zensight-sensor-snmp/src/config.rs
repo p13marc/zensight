@@ -294,12 +294,7 @@ impl SnmpConfig {
                         device.name
                     ))
                 })?;
-                if let Some(community) = &set.community {
-                    device.community = community.clone();
-                }
-                if let Some(security) = &set.security {
-                    device.security = Some(security.clone());
-                }
+                apply_credential_set(device, set);
             }
             // Inline values may use indirection too.
             device.community = resolve_secret(&device.community)?;
@@ -1324,5 +1319,211 @@ mod shipped_config {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/snmp.json5");
         let _config =
             crate::config::SnmpSensorConfig::load(path).expect("configs/snmp.json5 must load");
+    }
+}
+
+/// Copy a named credential set onto a device.
+///
+/// Shared by the file path (`resolve_credentials`) and the wire path
+/// (`devices_from_wire`) since #936, so a fleet-authored device and a
+/// file-configured one that name the same set are credentialed identically.
+/// Two copies of this would be two chances for them to differ, and the
+/// difference would show as one device mysteriously not answering.
+fn apply_credential_set(device: &mut DeviceConfig, set: &CredentialSet) {
+    if let Some(community) = &set.community {
+        device.community = community.clone();
+    }
+    if let Some(security) = &set.security {
+        device.security = Some(security.clone());
+    }
+}
+
+// ── the wire set, resolved against local credentials (#936) ─────────────────
+
+/// Turn a fleet-authored device set into pollable devices.
+///
+/// **Credentials are resolved here, from this host's own file config.** The
+/// wire carries a *name*; the community string and the v3 passphrases live in
+/// `snmp.credentials` and never leave the machine. A name this host does not
+/// have is an error, not a fallback to the default community — polling with
+/// the wrong credential reads, on every chart, as a device that stopped
+/// answering, and that is the most expensive way to be told about a typo.
+///
+/// Unnamed fields (`oids`, `walks`, timeouts, rate caps) come from the file
+/// config's device of the same name when there is one, so a fleet may retarget
+/// or reprofile a device an operator tuned locally without discarding the
+/// tuning.
+pub fn devices_from_wire(
+    wire: &zensight_common::targets::SnmpTargets,
+    file_baseline: &[DeviceConfig],
+    credentials: &HashMap<String, CredentialSet>,
+) -> Result<Vec<DeviceConfig>, String> {
+    wire.validate()?;
+    let mut out = Vec::with_capacity(wire.targets.len());
+    for t in &wire.targets {
+        let Some(cred) = credentials.get(&t.credentials) else {
+            let mut known: Vec<&str> = credentials.keys().map(String::as_str).collect();
+            known.sort();
+            return Err(format!(
+                "target {:?} names credential set {:?}, which this host does not have.                  It has {:?}. The wire carries a NAME; the secret stays in this host's                  own `snmp.credentials`",
+                t.name, t.credentials, known
+            ));
+        };
+        // Start from the local device of the same name when there is one, so
+        // locally-tuned oids/walks/limits survive a fleet retarget.
+        let mut d = file_baseline
+            .iter()
+            .find(|d| d.name == t.name)
+            .cloned()
+            .unwrap_or_else(|| DeviceConfig {
+                name: t.name.clone(),
+                address: t.address.clone(),
+                ..default_device()
+            });
+        d.name = t.name.clone();
+        d.address = t.address.clone();
+        d.credentials = Some(t.credentials.clone());
+        if let Some(p) = &t.profile {
+            d.profile = Some(p.clone());
+        }
+        if let Some(g) = &t.oid_group {
+            d.oid_group = Some(g.clone());
+        }
+        if let Some(i) = t.poll_interval_secs {
+            d.poll_interval_secs = i;
+        }
+        apply_credential_set(&mut d, cred);
+        out.push(d);
+    }
+    Ok(out)
+}
+
+/// The device set as a wire set, for `@rpc/snmp/targets` to answer with.
+///
+/// Every field that could hold a secret is dropped on the way out, not just on
+/// the way in: a read procedure returning `community` would put every
+/// configured community string on the bus in reply to a GET — the same leak as
+/// publishing them, reached from the other direction.
+pub fn devices_to_wire(devices: &[DeviceConfig]) -> zensight_common::targets::SnmpTargets {
+    zensight_common::targets::SnmpTargets {
+        targets: devices
+            .iter()
+            .map(|d| zensight_common::targets::SnmpTarget {
+                name: d.name.clone(),
+                address: d.address.clone(),
+                credentials: d.credentials.clone().unwrap_or_default(),
+                profile: d.profile.clone(),
+                oid_group: d.oid_group.clone(),
+                poll_interval_secs: Some(d.poll_interval_secs),
+            })
+            .collect(),
+    }
+}
+
+fn default_device() -> DeviceConfig {
+    serde_json::from_value(serde_json::json!({ "name": "", "address": "" }))
+        .expect("a device with a name and an address is valid")
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use zensight_common::targets::{SnmpTarget, SnmpTargets};
+
+    fn creds() -> HashMap<String, CredentialSet> {
+        let mut m = HashMap::new();
+        m.insert(
+            "ro".to_string(),
+            serde_json::from_value(serde_json::json!({ "community": "s3cret" }))
+                .expect("credential set"),
+        );
+        m
+    }
+
+    fn target(name: &str, cred: &str) -> SnmpTarget {
+        SnmpTarget {
+            name: name.into(),
+            address: "10.0.0.1:161".into(),
+            credentials: cred.into(),
+            profile: None,
+            oid_group: None,
+            poll_interval_secs: Some(60),
+        }
+    }
+
+    #[test]
+    fn a_credential_name_resolves_from_local_config() {
+        let out = devices_from_wire(
+            &SnmpTargets {
+                targets: vec![target("sw1", "ro")],
+            },
+            &[],
+            &creds(),
+        )
+        .expect("resolves");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].community, "s3cret", "the secret came from the host");
+        assert_eq!(out[0].poll_interval_secs, 60);
+    }
+
+    /// Falling back to the default community would poll every device with the
+    /// wrong credential and read, on every chart, as a device that stopped
+    /// answering — the most expensive possible way to learn about a typo.
+    #[test]
+    fn an_unknown_credential_name_is_refused_and_lists_what_exists() {
+        let err = devices_from_wire(
+            &SnmpTargets {
+                targets: vec![target("sw1", "typo")],
+            },
+            &[],
+            &creds(),
+        )
+        .expect_err("unknown credential");
+        assert!(err.contains("typo"), "{err}");
+        assert!(
+            err.contains("\"ro\""),
+            "it should say what IS available: {err}"
+        );
+    }
+
+    /// A fleet may retarget a device without discarding the oids an operator
+    /// tuned on that host.
+    #[test]
+    fn local_tuning_survives_a_fleet_retarget() {
+        let mut local: DeviceConfig = serde_json::from_value(serde_json::json!({
+            "name": "sw1", "address": "10.0.0.99", "oids": ["1.3.6.1.2.1.1.3.0"]
+        }))
+        .expect("local device");
+        local.max_repetitions = 42;
+
+        let out = devices_from_wire(
+            &SnmpTargets {
+                targets: vec![target("sw1", "ro")],
+            },
+            std::slice::from_ref(&local),
+            &creds(),
+        )
+        .expect("resolves");
+        assert_eq!(out[0].address, "10.0.0.1:161", "the wire retargeted it");
+        assert_eq!(out[0].oids, local.oids, "and kept the local oid list");
+        assert_eq!(out[0].max_repetitions, 42);
+    }
+
+    #[test]
+    fn the_read_procedure_returns_no_secret() {
+        let devices = devices_from_wire(
+            &SnmpTargets {
+                targets: vec![target("sw1", "ro")],
+            },
+            &[],
+            &creds(),
+        )
+        .expect("resolves");
+        let json = serde_json::to_string(&devices_to_wire(&devices)).expect("encode");
+        assert!(
+            !json.contains("s3cret"),
+            "a community string reached a reply: {json}"
+        );
+        assert!(json.contains("\"ro\""), "the NAME is what a reader gets");
     }
 }

@@ -278,6 +278,17 @@ types, which is what the RFC 08 §7 schema gate requires of a state-class
 payload and what a sensor-crate type can never be (zensight-common cannot
 depend on a sensor, so `describe` could only carry a stub).
 
+Since #936 it also carries the two **target sets** —
+`{host}/snmp/targets` and `{host}/probe/targets` — which is where the
+never-list stops being a rule about key names and becomes a rule about types.
+Both payloads are deliberate *subsets* of the sensors' own config types:
+`SnmpTarget` names a credential **set** (the community string and the v3
+passphrases stay in the host's file config, and a name the host does not have
+is refused rather than defaulted), and `ProbeTarget` has **no header field at
+all**, because that is where a bearer token lives and, unlike SNMP's
+credentials, it does not even go through the secret resolver. The #937 lint
+would not have caught either: it tests key names, and both secrets are values.
+
 netlink's registry name is `NetlinkExpectations` rather than
 `ExpectationsConfig`: the type table is a flat namespace and systemd's set
 holds that name on a shipped path. Nothing broke — netlink's

@@ -152,8 +152,10 @@ async fn the_probe_contract_end_to_end() {
     );
     let health = Arc::new(zensight_sensor_core::SensorHealth::new("probe"));
 
+    let targets_for_poller = cfg.targets.clone();
     let mut poller = Poller::new(
         cfg,
+        zensight_sensor_probe::poller::TargetSet::new(targets_for_poller.clone()),
         publisher,
         states,
         Some(reporter.clone()),
@@ -439,8 +441,10 @@ async fn a_burst_measures_jitter_and_publishes_no_rtt_when_everything_is_lost() 
         )
         .with_qos(zensight_sensor_probe::poller::STATE_QOS),
     );
+    let targets_for_poller = cfg.targets.clone();
     let mut poller = Poller::new(
         cfg,
+        zensight_sensor_probe::poller::TargetSet::new(targets_for_poller.clone()),
         publisher,
         states,
         None,
@@ -520,8 +524,10 @@ async fn an_ntp_check_reads_a_servers_answer_and_believes_its_refusal() {
     cfg.targets = vec![ntp_target("good", &good), ntp_target("kod", &kod)];
 
     let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let targets_for_poller = cfg.targets.clone();
     let mut poller = Poller::new(
         cfg,
+        zensight_sensor_probe::poller::TargetSet::new(targets_for_poller.clone()),
         Publisher::new(session.clone(), "probe", zensight_common::Format::Json),
         Arc::new(
             zensight_sensor_core::AdvancedPublisherRegistry::new(

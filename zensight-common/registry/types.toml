@@ -141,6 +141,12 @@ kind = "json-schema"
 [types.NetlinkExpectations]
 kind = "json-schema"
 
+[types.ProbeTargets]
+kind = "json-schema"
+
+[types.SnmpTargets]
+kind = "json-schema"
+
 [types.RulesStatus]
 kind = "json-schema"
 

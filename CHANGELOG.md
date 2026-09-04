@@ -51,6 +51,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Which devices a sensor polls stops being a restart-only decision** (#936,
+  epic #902). `@desired/state/{host}/{snmp,probe}/targets` carry a fleet's
+  whole target set for a host; `@rpc/{snmp,probe}/targets{,/set}` carry an
+  operator's ad-hoc change; `state/<producer>/applied/targets` says which went
+  last. A `Delete` on the desired key reverts that host to its own config file.
+
+  **The wire types are deliberate subsets, and that is the whole design.**
+  `DeviceConfig` carries a community string and v3 passphrases. `Target`
+  carries arbitrary HTTP headers — which is where an `Authorization: Bearer …`
+  lives, and unlike SNMP's credentials that field does **not** go through
+  `zensight_sensor_core::secret`, so what is in the file is the literal token.
+  Either type on the wire whole would put credentials on `@desired`, which is
+  the never-list's central prohibition (#816).
+
+  **#937's lint would not have caught it.** That lint tests key *names* —
+  `password`, `community`, `token` — and here the key is `headers` and the
+  secret is a value nested under it. The protection had to be the type.
+
+  So `SnmpTarget` names a credential **set**, and `ProbeTarget` has no header
+  field at all. Both are `deny_unknown_fields`, which is not tidiness: without
+  it serde would *ignore* a `headers` key rather than refuse it, and an
+  operator who put a token in the policy would watch the probe run, watch it
+  succeed against an unauthenticated endpoint, and never learn the header was
+  dropped. Refusing teaches; ignoring misleads. The read side drops secrets
+  too — a `targets` GET returning `community` would be the same leak reached
+  from the other direction.
+
+  `probe_target_spec_is_the_file_target_minus_headers` pins the two probe types
+  together: a field added to one and not the other fails it, naming `headers`
+  as the only permitted difference. That test is what made the split
+  affordable — the alternative, `#[serde(flatten)]`, moved ninety field
+  accesses in the probe crate for the same guarantee.
+
+  **An unknown credential name is refused, not defaulted.** Falling back to the
+  default community would poll every device with the wrong credential and read,
+  on every chart, as a device that stopped answering — the most expensive
+  possible way to learn about a typo. The error lists the names the host does
+  have.
+
+  **The SNMP device set became a supervised map** (`fleet::DeviceFleet`).
+  `main.rs` used to spawn one poller per device in a `for` loop and keep no
+  handle to any of them. Now a removed device's poller is aborted, a changed
+  one is restarted, and an unchanged one is left alone — which matters because
+  a reconcile happens on every reconnect, and restarting every device each time
+  would make the sensor useless on a flapping link. "Changed" compares the
+  device's **whole serialized config**, because the poller reads all of it at
+  construction and a partial comparison would leave one running against a
+  config nobody can see; serialized rather than `Debug`, because `Debug`
+  redacts credentials (#538) and a changed password is exactly the change that
+  must restart a poller. `health().set_devices_total` was a startup-fixed
+  number and is now the supervisor's count.
+
+  **The probe poller now prunes.** `last` is not a cache — every entry in it is
+  re-graded each sweep so a rule does not resolve and re-fire on targets that
+  were not due. Safe while the set could only grow; once a target can be
+  removed, its final result would go on being graded forever, alerting for a
+  check nobody asked for any more with nothing to clear it. `due` is pruned
+  with it so a re-added name starts fresh.
+
+  **`fanout = "forbidden"` on both writes**, unlike `thresholds/set`. A
+  threshold is the same rule wherever it lands; a target set is not. Pushing
+  one fleet-wide would have every host poll every device — which for probe is
+  nonsense, because the vantage *is* the measurement. Fleet-wide target changes
+  go through `@desired`, which is per-host by construction.
+
+  Both sensors' `registry_conformance.rs` write-surface guards fired on this
+  change, as designed — snmp's says in so many words that adding one "is a
+  decision to make explicitly … not one to land by editing a registry file".
+  Each list now carries the reasoning beside the entry.
+
 - **`zensight-desired` — `@desired` has an author** (#938, epic #902). One
   `fleet-policy.json5` in, the per-host documents every sensor reconciles out.
 

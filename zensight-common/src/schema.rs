@@ -150,6 +150,12 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         // and keeps it. The new name names a type the registry did not have.
         .json::<crate::netlink::NetlinkExpectations>("NetlinkExpectations")
         .json::<crate::logs::LogRulesConfig>("LogRulesConfig")
+        // Runtime target sets (#936). Deliberate SUBSETS of the two sensors'
+        // own config types — the wire references a credential by NAME and has
+        // no header field at all — so the schema a fleet author reads is
+        // exactly what it may say, and the credentials are not in it.
+        .json::<crate::targets::SnmpTargets>("SnmpTargets")
+        .json::<crate::targets::ProbeTargets>("ProbeTargets")
         .json::<crate::desired::AppliedConfig>("AppliedConfig")
         .json::<crate::hostspec::HostspecEvaluation>("HostspecEvaluation")
         // pve's state documents (#818). Real schemas, not summaries: these are

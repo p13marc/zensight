@@ -263,6 +263,26 @@ pub fn topics() -> Vec<TopicSpec> {
             },
         },
         TopicSpec {
+            producer: "snmp",
+            topic: "targets",
+            type_name: "SnmpTargets",
+            parse: parses_as::<crate::targets::SnmpTargets>,
+            key: |h| {
+                use crate::registry::desired;
+                desired::key(&desired::Subject::snmp_targets(h))
+            },
+        },
+        TopicSpec {
+            producer: "probe",
+            topic: "targets",
+            type_name: "ProbeTargets",
+            parse: parses_as::<crate::targets::ProbeTargets>,
+            key: |h| {
+                use crate::registry::desired;
+                desired::key(&desired::Subject::probe_targets(h))
+            },
+        },
+        TopicSpec {
             producer: "logs",
             topic: "rules",
             type_name: "LogRulesConfig",
