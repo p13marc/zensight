@@ -179,6 +179,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one process's memory, and lives on the bus now, where the exporters, the
   historian, a notifier and every other GUI can read it.
 
+  It also states what makes the documents *readable*: a consumer's seed GET is
+  only half of a recovery, and the catalog's four state seed queryables are the
+  other half. That pairing is written down because getting it wrong is silent —
+  #925 shipped a seed GET for `ack/*` that nothing answered, and nothing failed.
+
   Also the **not-built list**, in the one place a reader looking for it would
   go: routing, escalation, on-call rotations and repeat intervals belong to a
   notifier. zenkey's `zenwatch` scoped them out on the same reasoning and

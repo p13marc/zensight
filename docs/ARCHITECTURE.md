@@ -526,6 +526,17 @@ the audited seam. The lifecycle rules are normative
 precisely so a consumer that is *not* the catalog — an exporter, a notifier, a
 second GUI — reaches the catalog's conclusion from the documents alone.
 
+Reading them back is the half that gives the epic its name, and it needs two
+independent things to be true: the consumer issues a startup GET, **and**
+something answers it. The catalog serves each family's state selector
+storage-shaped — `entity/*`, `incident/*`, `ack/*`, `silence/*`, all four in
+its `callable` set so `alive ⇒ callable` (RFC 04 §5) covers them. Without that
+second half a consumer's seed returns nothing and it is silently wrong until
+the next re-emit, which the content-hash gate makes deliberately rare: an
+acknowledged incident is typically the most stable document on the bus. That
+is not hypothetical — it is exactly what #925 shipped and #1017 fixed, and
+`zensight-correlator/tests/ack_survives_a_restart.rs` is what keeps it now.
+
 **The through-line:** an operator's judgement — this number matters, I am on
 this, do not tell me until Tuesday — used to live in one process's memory. It
 lives on the bus now, where the exporters, the historian, a notifier and every
