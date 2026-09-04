@@ -112,6 +112,16 @@
     // Log sentinel (#543): declarative pattern→alert rules, also managed at
     // runtime via @rpc/logs/rules/set. The 4 journald known-events ship as
     // built-in rules (they ride journald.detect_events). Add your own:
+    //
+    // This block SEEDS the ruleset. The same ruleset is authorable fleet-wide
+    // on v1/@desired/state/<this-host>/logs/rules (#849); whichever writer
+    // went last is visible on state/logs/applied/rules (source: file |
+    // desired | rpc), and a DELETE of the desired key reverts this host to
+    // exactly what is below. The sentinel runs whether or not this block has
+    // rules, so a host with none still receives a fleet ruleset — and
+    // @rpc/logs/rules answers rather than staying silent. A desired ruleset is
+    // refused WHOLE if any regex fails to compile; a file one skips the rule
+    // and warns, because here there is someone reading the warning.
     sentinel: {
       include_builtins: true,
       // Built-in kernel pattern rules (#824): EXT4-fs error, XFS corruption,

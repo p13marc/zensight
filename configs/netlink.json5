@@ -109,6 +109,13 @@
     // evaluates these and emits alerts (state/netlink/alert/*) on
     // deviation, auto-resolving when satisfied again. Expectations added live
     // from the GUI (Expectations view) are merged with these.
+    //
+    // This block SEEDS the set. The same set is authorable fleet-wide on
+    // v1/@desired/state/<this-host>/netlink/expectations (#849) and per-host
+    // over @rpc/netlink/expectations/set; whichever wrote last is visible on
+    // state/netlink/applied/expectations (source: file | desired | rpc), and a
+    // DELETE of the desired key reverts this host to exactly what is below.
+    // The kill switch is the `desired` block further down, in FILE config.
     expectations: {
       eval_interval_secs: 3,
       default_for_secs: 3,         // debounce: violated continuously for N s
