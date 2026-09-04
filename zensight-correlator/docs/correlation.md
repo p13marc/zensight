@@ -223,3 +223,105 @@ time. Replacing on each sample would keep only the latest name; instead each
 observation add-or-refreshes a `(name, provenance)` entry (bumping `last_seen`
 in place, capped per IP and globally). `entity.names` and the names queryable
 return the ranked full set.
+
+## Incidents, acknowledgement and silence (#900)
+
+The catalog also answers *"what is on fire, whose problem is it, and is anyone
+on it"* — because it is the only participant that has run the union-find, and
+therefore the only one that can say *this alert and that one are about the same
+machine*.
+
+```
+@catalog/state/incident/{incident_id}    firing alerts grouped BY ENTITY
+@catalog/state/ack/{alert_ref}           an operator has this one
+@catalog/state/silence/{id}              a suppression window
+```
+
+### Why here and not a new service
+
+A `zensight-incidents` would need its own service origin, claim protocol,
+storage stanza and package, for a **bounded** subscription: alert keys are LWW
+and a host publishes a handful. The revisit trigger is incidents needing HA
+independent of the catalog.
+
+It lives strictly *beside* the merge, never inside it. `incidents.rs` has its
+own store, its own pass and its own output channel, and a grep test pins that
+`merge.rs` never learns alerts exist — the same isolation `edges.rs` has, for
+the same reason: the identity merge is a pure function of host evidence, and an
+alert that could make two machines the same machine would be an identity claim
+wearing a different hat.
+
+### Three passes, in order
+
+`recompute` → `recompute_edges` → `recompute_incidents`. Each reads the
+finished answer of the one before, so an incident can never name an entity
+retired in the same pass or attribute through an edge that no longer exists.
+All three carry a content-hash gate: a restart with an unchanged fleet
+publishes **nothing**, rather than looking to every subscriber like the whole
+fleet changing at once.
+
+### Grouping by entity, and the join that makes it possible
+
+An incident is `inc-<entity_id>`, or `inc-<origin>` where the origin resolves to
+no entity. A host that publishes under three origins — its own sensors, a
+hypervisor polling it, a prober checking it — is **one** incident.
+
+There is no `origin` field on a `HostEntity` and there usefully cannot be one:
+the origin is a key chunk, never in the payload, because a claim relayed by a
+third party would carry the wrong one. So the join follows the way the evidence
+went — an origin published a **self-report**, the merge attached that report to
+an entity as a `MemberClaim`, and `(sensor, source)` is the hinge. Third-party
+claims are skipped: a hypervisor observing a guest publishes under the
+*hypervisor's* origin, and treating that as "this origin is the guest" would
+file the hypervisor's own alerts under the guest it happens to watch.
+
+The fallback is `inc-<origin>`, never `inc-<source>` — two unfused machines
+sharing a `source` name would otherwise merge into one incident.
+
+### `symptom_of`, and why liveliness is subscribed
+
+Attribution (`impact::attribute`, #918) needs to know which entities are
+**down**, and a machine that stopped answering publishes no alert of its own —
+the absence of its liveliness token is the only evidence it is the cause. So
+the catalog subscribes the liveliness plane and maps dead origins to entities
+through the same evidence join the incidents use, which is what stops "this
+entity is down" and "this alert belongs to this entity" disagreeing about who
+is who.
+
+An incident is a symptom only when **every** member is. One unexplained alert
+means an operator still has to look; an incident filed under "caused by the
+hypervisor" that also carries a failing disk is how the disk gets missed.
+
+### Ack and silence
+
+Both are operator writes on `@catalog/@rpc`, behind the same
+`allow_operator_assertions` gate as `link`/`unlink` and on the same audited
+seam — "who silenced this, and when" is exactly what an incident review asks.
+
+An **ack** names an occurrence: `fired_at` is the alert's timestamp, and the
+projection rule every consumer applies is *"an ack applies only while a firing
+alert with `timestamp <= fired_at` exists"*. Two things follow. An orphan left
+by a dead catalog is **inert** rather than a silent suppression, and a **re-fire
+pages again**. `ack` refuses with `error/catalog/not-firing` when nothing is
+firing, because an ack for a problem nobody has is a suppression waiting to
+apply the next time that alert fires.
+
+A **silence** is the other thing and holds across re-fires — that is what a
+maintenance window means. It matches on origin / producer / source / rule /
+`labels.*` with `Eq` or `Regex`, and is validated before it applies: at least
+one matcher (an empty set matches **nothing** here — the vacuous reading is how
+one typo mutes a fleet), every field matchable, every regex compiling,
+`ends_at` after `starts_at`, and an author from `?actor=` and never from the
+body.
+
+The catalog owns both lifecycles: a sweep tombstones acks whose occurrence
+ended or re-fired, and silences past `ends_at`. A silence also stops applying
+at the instant it ends whether or not the sweep has run, so a partitioned
+reader cannot keep an expired suppression alive.
+
+### Not built, on purpose
+
+Notification routing, escalation, on-call rotations, repeat intervals. zenkey's
+zenwatch (#387–#390) scoped those out deliberately — *"if a deployment needs
+those it needs an on-call product, and webhook is how it gets there."* These
+families are the documents such a tool would read.

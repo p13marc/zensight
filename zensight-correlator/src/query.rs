@@ -292,6 +292,413 @@ pub async fn serve_assertions(
     Ok(())
 }
 
+/// Serve `ack`, `unack`, `silence` and `unsilence` until shutdown (#924).
+///
+/// The same shape as [`serve_assertions`] and behind the **same gate**: all
+/// six change what the fleet believes about itself on an operator's say-so,
+/// and all six ride the audited write seam (#957), which has no unrecorded way
+/// to answer. "Who silenced this, and when" is precisely the question an
+/// incident review asks and the one a `HashSet` in a GUI could never answer.
+///
+/// When gated they still reply `error/gated` rather than timing out, so an
+/// operator learns the feature exists and is switched off.
+pub async fn serve_ack_and_silence(
+    session: Arc<Session>,
+    state: SharedState,
+    format: Format,
+    allowed: bool,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let ack_key = catalog_rpc_key("ack");
+    let unack_key = catalog_rpc_key("unack");
+    let silence_key = catalog_rpc_key("silence");
+    let unsilence_key = catalog_rpc_key("unsilence");
+    let ack_q = zensight_common::served::serve_write_queryable(&session, &ack_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare ack queryable: {e}"))?;
+    let unack_q = zensight_common::served::serve_write_queryable(&session, &unack_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare unack queryable: {e}"))?;
+    let silence_q = zensight_common::served::serve_write_queryable(&session, &silence_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare silence queryable: {e}"))?;
+    let unsilence_q = zensight_common::served::serve_write_queryable(&session, &unsilence_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare unsilence queryable: {e}"))?;
+    info!(gated = !allowed, "ack/silence procedures ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = ack_q.recv_async() => {
+                let Ok(query) = query else { break };
+                handle_ack(&session, &state, format, allowed, &ack_key, query).await;
+            }
+            query = unack_q.recv_async() => {
+                let Ok(query) = query else { break };
+                handle_unack(&session, &state, allowed, &unack_key, query).await;
+            }
+            query = silence_q.recv_async() => {
+                let Ok(query) = query else { break };
+                handle_silence(&session, &state, format, allowed, &silence_key, query).await;
+            }
+            query = unsilence_q.recv_async() => {
+                let Ok(query) = query else { break };
+                handle_unsilence(&session, &state, allowed, &unsilence_key, query).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Tombstone acks whose occurrence has ended and silences whose window has
+/// closed (#924).
+///
+/// Both are lifecycle the catalog owns, not the operator: an ack that outlived
+/// its alert and a silence past `ends_at` are documents that say something
+/// untrue, and a fleet reading them — a GUI, an exporter, a notifier — would
+/// act on it. The projection rule already makes a stale ack *inert*, so this
+/// is not a correctness backstop; it is the difference between "inert" and
+/// "gone", which is what an operator sees when they list what is
+/// acknowledged.
+///
+/// Runs on a timer rather than on every change, and deliberately: the input is
+/// a clock (`ends_at`) as much as it is an event, and a silence must expire
+/// even on a fleet where nothing else is happening.
+pub async fn run_lifecycle_sweep(
+    session: Arc<Session>,
+    state: SharedState,
+    interval: std::time::Duration,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick.tick().await; // consume the immediate first tick
+    info!(
+        interval_secs = interval.as_secs(),
+        "ack/silence sweep started"
+    );
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            _ = tick.tick() => {
+                let now = zensight_common::current_timestamp_millis();
+                let (stale, expired) = {
+                    let st = state.lock().unwrap();
+                    (st.stale_acks(), st.expired_silences(now))
+                };
+                for r in stale {
+                    state
+                        .lock()
+                        .unwrap()
+                        .apply(EvidenceMsg::RemoveAck(Box::new(r.clone())));
+                    if let Err(e) = crate::publisher::retire_ack(&session, &r).await {
+                        warn!(error = %e, "retiring a stale ack failed");
+                    }
+                }
+                for id in expired {
+                    state
+                        .lock()
+                        .unwrap()
+                        .apply(EvidenceMsg::RemoveSilence { id: id.clone() });
+                    if let Err(e) = crate::publisher::retire_silence(&session, &id).await {
+                        warn!(error = %e, "retiring an expired silence failed");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The gate all four share. `None` = allowed.
+fn write_gate(allowed: bool) -> Option<RpcError> {
+    (!allowed).then(|| {
+        RpcError::gated(
+            "operator writes are disabled; set `allow_operator_assertions: true` in the \
+             correlator config. Acknowledging and silencing change what the fleet believes \
+             about itself, so they share the gate that guards `link`/`unlink`",
+        )
+        .with_refused_by("allow_operator_assertions")
+    })
+}
+
+/// `?ref=` as a parsed [`AlertRef`], or the refusal the caller gets back.
+fn ref_param(req: &RpcRequest) -> Result<zensight_common::alert::AlertRef, RpcError> {
+    let raw = req
+        .param("ref")
+        .ok_or_else(|| RpcError::invalid_args("missing ?ref=<origin>.<producer>.<alert_key>"))?;
+    zensight_common::alert::AlertRef::parse(&raw)
+        .map_err(|e| RpcError::invalid_args(format!("`{raw}` is not an alert ref: {e}")))
+}
+
+async fn handle_ack(
+    session: &Session,
+    state: &SharedState,
+    format: Format,
+    allowed: bool,
+    reply_key: &str,
+    query: zensight_common::served::WriteQuery,
+) {
+    let req = query.request();
+    let target = req.param("ref");
+    let outcome = (|| {
+        if let Some(gated) = write_gate(allowed) {
+            return Err(gated);
+        }
+        let r = ref_param(&req)?;
+        // The gate that matters (#900): an ack for a problem nobody is
+        // reporting would sit on the key, inert by the projection rule, and
+        // then quietly apply the moment that exact alert next fired within its
+        // `fired_at`. Refusing here is refusing a suppression nobody asked for.
+        let firing = state.lock().unwrap().firing_alert(&r).ok_or_else(|| {
+            RpcError::new(
+                "error/catalog/not-firing",
+                format!(
+                    "no firing alert for {r}. An acknowledgement names an occurrence \
+                     someone looked at; there is nothing here to have looked at."
+                ),
+            )
+        })?;
+        Ok(zensight_common::ack::AlertAck {
+            alert_ref: r,
+            // The occurrence, not the moment of clicking: this is what makes a
+            // re-fire page again.
+            fired_at: firing.timestamp,
+            by: req.actor().unwrap_or_else(|| "unknown".to_string()),
+            note: req.param("note").unwrap_or_default(),
+            at: zensight_common::current_timestamp_millis(),
+        })
+    })();
+
+    match outcome {
+        Ok(ack) => {
+            // Apply locally *and* publish, exactly as an assertion does: the
+            // local apply makes the next recompute see it without waiting for
+            // our own subscriber to loop the put back.
+            state
+                .lock()
+                .unwrap()
+                .apply(EvidenceMsg::Ack(Box::new(ack.clone())));
+            if let Err(e) = crate::publisher::publish_ack(session, format, &ack).await {
+                warn!(error = %e, "publishing the ack failed");
+                let err = RpcError::new("error/catalog/publish", e.to_string());
+                let _ = query.refused(&err, target.as_deref()).await;
+                return;
+            }
+            reply_doc(query, reply_key, &ack, target.as_deref()).await;
+        }
+        Err(e) => {
+            if let Err(e) = query.refused(&e, target.as_deref()).await {
+                warn!(error = %e, "ack reply_err failed");
+            }
+        }
+    }
+}
+
+async fn handle_unack(
+    session: &Session,
+    state: &SharedState,
+    allowed: bool,
+    reply_key: &str,
+    query: zensight_common::served::WriteQuery,
+) {
+    let req = query.request();
+    let target = req.param("ref");
+    let outcome = (|| {
+        if let Some(gated) = write_gate(allowed) {
+            return Err(gated);
+        }
+        ref_param(&req)
+    })();
+    match outcome {
+        Ok(r) => {
+            // Idempotent: unacking what is not acked is a no-op, not an error.
+            // An operator clearing a stale ack should not have to know whether
+            // the sweep beat them to it.
+            state
+                .lock()
+                .unwrap()
+                .apply(EvidenceMsg::RemoveAck(Box::new(r.clone())));
+            if let Err(e) = crate::publisher::retire_ack(session, &r).await {
+                warn!(error = %e, "retiring the ack failed");
+            }
+            if let Err(e) = query
+                .executed(reply_key, Vec::<u8>::new(), target.as_deref())
+                .await
+            {
+                warn!(error = %e, "unack reply failed");
+            }
+        }
+        Err(e) => {
+            if let Err(e) = query.refused(&e, target.as_deref()).await {
+                warn!(error = %e, "unack reply_err failed");
+            }
+        }
+    }
+}
+
+async fn handle_silence(
+    session: &Session,
+    state: &SharedState,
+    format: Format,
+    allowed: bool,
+    reply_key: &str,
+    query: zensight_common::served::WriteQuery,
+) {
+    let req = query.request();
+    let outcome = (|| {
+        if let Some(gated) = write_gate(allowed) {
+            return Err(gated);
+        }
+        build_silence(&req)
+    })();
+    match outcome {
+        Ok(silence) => {
+            let target = silence.id.clone();
+            state
+                .lock()
+                .unwrap()
+                .apply(EvidenceMsg::Silence(Box::new(silence.clone())));
+            if let Err(e) = crate::publisher::publish_silence(session, format, &silence).await {
+                warn!(error = %e, "publishing the silence failed");
+                let err = RpcError::new("error/catalog/publish", e.to_string());
+                let _ = query.refused(&err, Some(&target)).await;
+                return;
+            }
+            reply_doc(query, reply_key, &silence, Some(&target)).await;
+        }
+        Err(e) => {
+            if let Err(e) = query.refused(&e, None).await {
+                warn!(error = %e, "silence reply_err failed");
+            }
+        }
+    }
+}
+
+async fn handle_unsilence(
+    session: &Session,
+    state: &SharedState,
+    allowed: bool,
+    reply_key: &str,
+    query: zensight_common::served::WriteQuery,
+) {
+    let req = query.request();
+    let target = req.param("id");
+    let outcome = (|| {
+        if let Some(gated) = write_gate(allowed) {
+            return Err(gated);
+        }
+        req.param("id")
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| RpcError::invalid_args("missing ?id=<ulid>"))
+    })();
+    match outcome {
+        Ok(id) => {
+            state
+                .lock()
+                .unwrap()
+                .apply(EvidenceMsg::RemoveSilence { id: id.clone() });
+            if let Err(e) = crate::publisher::retire_silence(session, &id).await {
+                warn!(error = %e, "retiring the silence failed");
+            }
+            if let Err(e) = query
+                .executed(reply_key, Vec::<u8>::new(), target.as_deref())
+                .await
+            {
+                warn!(error = %e, "unsilence reply failed");
+            }
+        }
+        Err(e) => {
+            if let Err(e) = query.refused(&e, target.as_deref()).await {
+                warn!(error = %e, "unsilence reply_err failed");
+            }
+        }
+    }
+}
+
+/// Pure: request body → silence, or the refusal the caller gets back.
+///
+/// Validated **before** it applies, because the failure mode is asymmetric: a
+/// refused silence costs a page, and a silence that matches everything costs
+/// an outage nobody hears about.
+pub fn build_silence(req: &RpcRequest) -> Result<zensight_common::silence::Silence, RpcError> {
+    let mut silence: zensight_common::silence::Silence = req.json()?;
+
+    if silence.matchers.is_empty() {
+        return Err(RpcError::invalid_args(
+            "a silence needs at least one matcher. An empty set matches nothing here — the \
+             vacuous reading, 'all zero conditions hold', is how one typo mutes a fleet",
+        ));
+    }
+    for m in &silence.matchers {
+        let known = matches!(m.name.as_str(), "origin" | "producer" | "source" | "rule")
+            || m.name.starts_with("labels.");
+        if !known {
+            return Err(RpcError::invalid_args(format!(
+                "`{}` is not a matchable field. Use origin, producer, source, rule, or \
+                 labels.<name>",
+                m.name
+            )));
+        }
+        if m.op == zensight_common::silence::MatchOp::Regex
+            && let Err(e) = regex::Regex::new(&m.value)
+        {
+            // Refused here rather than at match time, where a bad pattern
+            // silently matches nothing and the operator believes they muted
+            // something they did not.
+            return Err(RpcError::invalid_args(format!(
+                "matcher `{}` has an invalid regex: {e}",
+                m.name
+            )));
+        }
+    }
+    if silence.ends_at <= silence.starts_at {
+        return Err(RpcError::invalid_args(
+            "ends_at must be after starts_at — a window that closes before it opens \
+             suppresses nothing and reads as if it does",
+        ));
+    }
+    // The author is required and comes from `?actor=`, never from the body: a
+    // silence whose author is self-reported is a silence nobody can be asked
+    // about, and "who muted this" is the first question of any review.
+    let by = req.actor().filter(|a| !a.is_empty()).ok_or_else(|| {
+        RpcError::invalid_args(
+            "missing ?actor= — a silence records who opened it, and the caller is the \
+                 only party that knows",
+        )
+    })?;
+    silence.by = by;
+    if silence.id.is_empty() {
+        silence.id = ulid::Ulid::generate().to_string().to_ascii_lowercase();
+    }
+    Ok(silence)
+}
+
+async fn reply_doc<T: serde::Serialize>(
+    query: zensight_common::served::WriteQuery,
+    reply_key: &str,
+    doc: &T,
+    target: Option<&str>,
+) {
+    match serde_json::to_vec(doc) {
+        Ok(payload) => {
+            if let Err(e) = query.executed(reply_key, payload, target).await {
+                warn!(error = %e, "reply failed");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "serialize reply failed");
+            let err = RpcError::new("error/catalog/serialize", e.to_string());
+            let _ = query.refused(&err, target).await;
+        }
+    }
+}
+
 /// Validate, record, publish, reply. Failures ride `reply_err` with a
 /// machine-readable name (RFC 05 §3) — a value reply always means it worked.
 async fn handle_assertion(
@@ -521,5 +928,154 @@ mod tests {
         let payload = serde_json::to_vec(&names).unwrap();
         let back: Vec<NameVal> = serde_json::from_slice(&payload).unwrap();
         assert_eq!(back, names);
+    }
+}
+
+#[cfg(test)]
+mod ack_silence_tests {
+    use super::*;
+    use zensight_common::silence::{MatchOp, Matcher, Silence};
+    use zensight_common::{AlertKind, AlertSeverity, Protocol};
+
+    fn req(params: &str, body: &str) -> RpcRequest {
+        RpcRequest::new(body.as_bytes().to_vec(), params.to_string())
+    }
+
+    fn alert(source: &str, rule: &str) -> zensight_common::alert::Alert {
+        zensight_common::alert::Alert::new(
+            source,
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            rule,
+            AlertSeverity::Critical,
+            "x",
+        )
+    }
+
+    // ---- silence validation ---------------------------------------------
+
+    /// **The asymmetric-harm gate.** A refused silence costs a page; a silence
+    /// that matches everything costs an outage nobody hears about.
+    #[test]
+    fn a_silence_with_no_matchers_is_refused() {
+        let e = build_silence(&req(
+            "actor=marc",
+            r#"{"id":"","matchers":[],"starts_at":0,"ends_at":10,"by":""}"#,
+        ))
+        .expect_err("an empty matcher set must be refused");
+        assert_eq!(e.error, "error/invalid-args");
+        assert!(e.message.contains("at least one matcher"), "{}", e.message);
+    }
+
+    /// A bad regex is refused at WRITE time, not at match time — where it
+    /// silently matches nothing and the operator believes they muted something
+    /// they did not.
+    #[test]
+    fn a_silence_with_an_invalid_regex_is_refused() {
+        let e = build_silence(&req(
+            "actor=marc",
+            r#"{"id":"","matchers":[{"name":"source","op":"regex","value":"web("}],
+               "starts_at":0,"ends_at":10,"by":""}"#,
+        ))
+        .expect_err("an uncompilable regex must be refused");
+        assert!(e.message.contains("invalid regex"), "{}", e.message);
+    }
+
+    /// A field nobody can match on is a typo, and a typo that silently
+    /// suppresses nothing is worse than an error.
+    #[test]
+    fn a_silence_on_an_unknown_field_is_refused() {
+        let e = build_silence(&req(
+            "actor=marc",
+            r#"{"id":"","matchers":[{"name":"hostname","op":"eq","value":"web01"}],
+               "starts_at":0,"ends_at":10,"by":""}"#,
+        ))
+        .expect_err("an unmatchable field must be refused");
+        assert!(e.message.contains("not a matchable field"), "{}", e.message);
+        // `labels.*` is the escape hatch and must still work.
+        assert!(
+            build_silence(&req(
+                "actor=marc",
+                r#"{"id":"","matchers":[{"name":"labels.unit","op":"eq","value":"sshd"}],
+                   "starts_at":0,"ends_at":10,"by":""}"#,
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_window_that_closes_before_it_opens_is_refused() {
+        let e = build_silence(&req(
+            "actor=marc",
+            r#"{"id":"","matchers":[{"name":"source","op":"eq","value":"web01"}],
+               "starts_at":10,"ends_at":10,"by":""}"#,
+        ))
+        .expect_err("ends_at must be after starts_at");
+        assert!(e.message.contains("after starts_at"), "{}", e.message);
+    }
+
+    /// **The author comes from `?actor=`, never the body.** A silence whose
+    /// author is self-reported is a silence nobody can be asked about, and
+    /// "who muted this" is the first question of any review.
+    #[test]
+    fn the_author_comes_from_the_caller_not_the_body() {
+        let body = r#"{"id":"","matchers":[{"name":"source","op":"eq","value":"web01"}],
+                       "starts_at":0,"ends_at":10,"by":"someone-else"}"#;
+        let e = build_silence(&req("", body)).expect_err("actor is required");
+        assert!(e.message.contains("?actor="), "{}", e.message);
+
+        let s = build_silence(&req("actor=marc", body)).expect("with an actor");
+        assert_eq!(s.by, "marc", "the body's `by` must not win");
+        assert!(!s.id.is_empty(), "a silence gets a ULID when none is given");
+    }
+
+    // ---- the matcher semantics the procedures gate --------------------
+
+    /// A `labels.*` matcher mutes only alerts carrying that label.
+    #[test]
+    fn a_label_matcher_mutes_only_matching_alerts() {
+        let s = Silence {
+            id: "s1".into(),
+            matchers: vec![Matcher {
+                name: "labels.unit".into(),
+                op: MatchOp::Eq,
+                value: "sshd.service".into(),
+            }],
+            starts_at: 0,
+            ends_at: 10_000,
+            by: "marc".into(),
+            note: String::new(),
+        };
+        let matching = alert("web01", "unit-failed").with_label("unit", "sshd.service");
+        let other = alert("web01", "unit-failed").with_label("unit", "nginx.service");
+        let unlabelled = alert("web01", "disk-full");
+        assert!(s.matches(1_000, "h-1", "systemd", &matching));
+        assert!(!s.matches(1_000, "h-1", "systemd", &other));
+        assert!(!s.matches(1_000, "h-1", "systemd", &unlabelled));
+    }
+
+    // ---- the gate --------------------------------------------------------
+
+    /// Gated procedures **reply** rather than time out, and the refusal names
+    /// the switch that refused it (#866).
+    #[test]
+    fn a_gated_write_names_the_switch() {
+        let e = write_gate(false).expect("gated");
+        assert_eq!(e.error, "error/gated");
+        assert_eq!(e.refused_by.as_deref(), Some("allow_operator_assertions"));
+        assert!(write_gate(true).is_none());
+    }
+
+    // ---- ref parsing -----------------------------------------------------
+
+    #[test]
+    fn a_missing_or_malformed_ref_is_refused() {
+        assert!(ref_param(&req("", "")).is_err(), "missing ?ref=");
+        assert!(
+            ref_param(&req("ref=not-a-ref", "")).is_err(),
+            "a ref with too few components"
+        );
+        let r = ref_param(&req("ref=h-3fa9c2d41b7e.netlink.a1b2c3d4", "")).expect("a good ref");
+        assert_eq!(r.producer, "netlink");
     }
 }

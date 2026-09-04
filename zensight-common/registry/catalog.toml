@@ -10,7 +10,7 @@
 # nothing serves — the mirror image of the advertised-but-unserved finding in #467.
 
 [registry]
-version = "1.4"
+version = "1.5"
 app = "zensight"
 convention = 1
 
@@ -143,9 +143,34 @@ ttl_s = 0
 since = "1.4"
 description = "a suppression window: matchers over origin/producer/source/rule/labels.*, with starts_at, ends_at and an author. Tombstoned at ends_at or by unsilence. Distinct from an ack — a silence holds across re-fires, which is what a maintenance window means"
 
-# The `ack`/`unack`/`silence`/`unsilence` procedures land with the code that
-# serves them (#924), not here. A declared procedure nobody answers fails the
-# conformance judge's `alive ⇒ callable` check — correctly: the registry is a
-# promise the fleet reads, and a promise this build cannot keep is worse than
-# a missing feature. The three SUBJECTS above are different: a state family
-# nobody has published into yet reads as empty, which is what it is.
+[[procedure]]
+path = "ack"
+kind = "write"
+reply = "AlertAck"
+idempotent = true
+since = "1.5"
+description = "acknowledge a firing alert (?ref=<origin>.<producer>.<alert_key>&note=...); gated by the same switch as link/unlink. Refuses with error/catalog/not-firing when nothing is firing for that ref — an ack for a problem nobody has is a suppression waiting to happen"
+
+[[procedure]]
+path = "unack"
+kind = "write"
+reply = "AlertAck"
+idempotent = true
+since = "1.5"
+description = "retire an acknowledgement (?ref=...); gated. Idempotent: unacking what is not acked is a no-op, not an error"
+
+[[procedure]]
+path = "silence"
+kind = "write"
+request = "Silence"
+reply = "Silence"
+since = "1.5"
+description = "open a suppression window; gated. Validated before it applies (at least one matcher, ends_at after starts_at, every regex compiles) — an empty matcher set would otherwise mute the fleet"
+
+[[procedure]]
+path = "unsilence"
+kind = "write"
+reply = "Silence"
+idempotent = true
+since = "1.5"
+description = "close a suppression window early (?id=<ulid>); gated"

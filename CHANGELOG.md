@@ -51,6 +51,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Acknowledging and silencing are operator writes on the bus** (#924,
+  epic #900) — `@catalog/@rpc/{ack,unack,silence,unsilence}`.
+
+  Four gated write procedures on the `serve_assertions` template, behind the
+  same `allow_operator_assertions` switch as `link`/`unlink` and on the same
+  audited seam (#957). All six change what the fleet believes about itself on
+  an operator's say-so, and **"who silenced this, and when" is exactly what an
+  incident review asks** — the question a `HashSet` in one GUI could never
+  answer. Gated, they reply `error/gated` **naming the switch** (#866) rather
+  than timing out.
+
+  - **`ack` refuses when nothing is firing** (`error/catalog/not-firing`). An
+    acknowledgement names an occurrence someone looked at; one for a problem
+    nobody has would sit on the key, inert by the projection rule, and then
+    quietly apply the next time that exact alert fired within its `fired_at`.
+  - **A silence is validated before it applies**, because the harm is
+    asymmetric: at least one matcher (an empty set matches *nothing* here —
+    the vacuous reading is how one typo mutes a fleet), every field matchable,
+    every regex compiling *at write time* rather than silently matching
+    nothing at match time, and `ends_at` after `starts_at`.
+  - **The author comes from `?actor=`, never the body.** A silence whose
+    author is self-reported is a silence nobody can be asked about.
+  - **The catalog owns both lifecycles.** A sweep tombstones acks whose
+    occurrence ended or re-fired and silences past `ends_at`; a silence also
+    stops applying at the instant it ends whether or not the sweep has run, so
+    a partitioned reader cannot keep an expired suppression alive. On a timer,
+    because `ends_at` is a clock and a window must close on a fleet where
+    nothing else is happening.
+
+  The four keys join `main.rs`'s `callable` list, so `alive ⇒ callable` holds.
+  Registry: `catalog` 1.4 → 1.5.
+
 - **The incident engine** (#923, epic #900) — the catalog now publishes
   `@catalog/state/incident/*`.
 
