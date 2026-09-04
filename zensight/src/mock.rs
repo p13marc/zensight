@@ -838,6 +838,7 @@ fn mock_entity(
         ips: ips.iter().map(|s| s.to_string()).collect(),
         macs: macs.iter().map(|s| s.to_string()).collect(),
         container_ids: vec![],
+        origins: Vec::new(),
         hostname: Some(name.to_string()),
         fqdn: Some(format!("{name}.lab.example")),
         names: vec![],

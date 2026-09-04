@@ -250,7 +250,10 @@ impl CorrelatorState {
         self.evidence.sweep(now_ms, ttl_ms);
         self.names.sweep(now_ms, ttl_ms);
 
-        let live = self.evidence.live(now_ms, ttl_ms);
+        // Origin-tagged, because `HostEntity::origins` is a conclusion this
+        // pass draws (#1007): the origin is in the *key* a claim arrived on
+        // and in no payload field, so the merge has to be handed it.
+        let live = self.evidence.live_with_origin(now_ms, ttl_ms);
         let mut entities = merge::correlate(&live, &self.config.rules, &self.assertions());
 
         for e in &mut entities {

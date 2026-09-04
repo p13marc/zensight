@@ -1011,6 +1011,7 @@ mod tests {
             ips: vec!["10.0.0.5".into()],
             macs: vec![],
             container_ids: vec![],
+            origins: Vec::new(),
             hostname: Some("host1".into()),
             fqdn: None,
             names: vec![],

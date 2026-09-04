@@ -218,6 +218,7 @@ mod tests {
             ips: vec![],
             macs: vec![],
             container_ids: vec![],
+            origins: Vec::new(),
             hostname: Some("web-01".into()),
             fqdn: None,
             names: vec![],

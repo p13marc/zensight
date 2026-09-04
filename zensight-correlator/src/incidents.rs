@@ -142,34 +142,58 @@ impl AlertStore {
 
 /// Map each publishing **origin** to the entity the catalog fused it into.
 ///
-/// There is no `origin` field on a `HostEntity` and there cannot usefully be
-/// one: the origin is a key chunk, never in the payload (a claim relayed by a
-/// third party would carry the wrong one). The join goes the way the evidence
-/// went — an origin published a **self-report**, the merge attached that report
-/// to an entity as a `MemberClaim`, so `(sensor, source)` is the hinge.
+/// Since #1007 this is a **read of a published field**. `HostEntity::origins`
+/// carries the origins the merge resolved into that entity, self-reports only,
+/// joined by member index rather than by matching `(sensor, source)` — which
+/// is what RFC 06 §5.1 step 3 always said the join was, and what it now is.
 ///
-/// Third-party claims (`observer.is_some()`) are skipped deliberately: a
-/// hypervisor observing a guest publishes under the *hypervisor's* origin, and
-/// treating that as "this origin is the guest" would file the hypervisor's own
-/// alerts under the guest it happens to watch.
+/// # The evidence walk is still here, and is not dead code
 ///
-/// Built by sorted iteration, because the result reaches a content hash
-/// through the incident id: an origin claimed by two entities must resolve to
-/// the same one across restarts. Ambiguity is unavoidable here; *unstable*
-/// ambiguity is not — the same argument `edges::Resolver` makes.
+/// An entity published by a catalog older than #1007 has an **empty**
+/// `origins`, and `serde(default)` means that arrives as absence rather than
+/// as an error. The fallback below reconstructs the join for exactly those:
+/// an origin published a self-report, the merge attached that report as a
+/// `MemberClaim`, so `(sensor, source)` is the hinge. It is a heuristic — which
+/// member matched decides the answer — and that is why it is the fallback and
+/// no longer the path.
+///
+/// Third-party claims (`observer.is_some()`) are skipped in both paths, for
+/// the same reason: a hypervisor observing a guest publishes under the
+/// *hypervisor's* origin, and treating that as "this origin is the guest"
+/// would file the hypervisor's own alerts under the guest it watches.
+///
+/// Built by sorted iteration in both paths, because the result reaches a
+/// content hash through the incident id: an origin claimed by two entities
+/// must resolve to the same one across restarts. Ambiguity is unavoidable
+/// here; *unstable* ambiguity is not — the same argument `edges::Resolver`
+/// makes.
 pub fn origins_by_entity(
     evidence: &[(String, HostEvidence)],
     entities: &[HostEntity],
 ) -> HashMap<String, String> {
-    let mut by_member: BTreeMap<(&str, &str), &str> = BTreeMap::new();
     let mut sorted: Vec<&HostEntity> = entities.iter().collect();
     sorted.sort_by(|a, b| a.entity_id.cmp(&b.entity_id));
-    for e in sorted {
-        for m in &e.members {
-            by_member
-                .entry((m.sensor.as_str(), m.source.as_str()))
-                .or_insert(e.entity_id.as_str());
+
+    let mut out: HashMap<String, String> = HashMap::new();
+    let mut by_member: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    for e in &sorted {
+        for o in &e.origins {
+            if !o.is_empty() {
+                out.entry(o.clone()).or_insert_with(|| e.entity_id.clone());
+            }
         }
+        // Only entities that published no origins need the reconstruction, so
+        // a mixed fleet mid-upgrade costs the fallback exactly where it must.
+        if e.origins.is_empty() {
+            for m in &e.members {
+                by_member
+                    .entry((m.sensor.as_str(), m.source.as_str()))
+                    .or_insert(e.entity_id.as_str());
+            }
+        }
+    }
+    if by_member.is_empty() {
+        return out;
     }
 
     let mut sorted_ev: Vec<&(String, HostEvidence)> = evidence.iter().collect();
@@ -180,7 +204,6 @@ pub fn origins_by_entity(
             b.1.source.as_str(),
         ))
     });
-    let mut out: HashMap<String, String> = HashMap::new();
     for (origin, ev) in sorted_ev {
         if ev.observer.is_some() || origin.is_empty() {
             continue;
@@ -420,6 +443,7 @@ mod tests {
             ips: Vec::new(),
             macs: Vec::new(),
             container_ids: Vec::new(),
+            origins: Vec::new(),
             hostname: None,
             fqdn: None,
             names: Vec::new(),
@@ -586,6 +610,66 @@ mod tests {
             map.get("h-hypervisor0").map(String::as_str),
             Some("h_hyp"),
             "the hypervisor's origin is the hypervisor's, not its guest's"
+        );
+    }
+
+    /// The published field and the evidence walk must agree, or #1007 traded a
+    /// heuristic for a *different* answer rather than for the same one.
+    ///
+    /// A mixed fleet is the real case for a while: some entities carry
+    /// `origins`, some were published by a catalog that did not have the
+    /// field. Both halves resolve here, in one call.
+    #[test]
+    fn the_published_origins_and_the_evidence_walk_agree() {
+        let mut with_field = entity("h_new", &[("sysinfo", "web01")]);
+        with_field.origins = vec!["h-000000000001".into()];
+        let without_field = entity("h_old", &[("sysinfo", "db01")]);
+
+        let evidence = vec![
+            self_report("h-000000000001", "sysinfo", "web01"),
+            self_report("h-000000000002", "sysinfo", "db01"),
+        ];
+
+        // Both paths, one call.
+        let mixed = origins_by_entity(&evidence, &[with_field.clone(), without_field.clone()]);
+        assert_eq!(
+            mixed.get("h-000000000001").map(String::as_str),
+            Some("h_new")
+        );
+        assert_eq!(
+            mixed.get("h-000000000002").map(String::as_str),
+            Some("h_old")
+        );
+
+        // And the field alone reaches the same answer the walk alone does for
+        // the same entity: strip the field, and the fallback restores it.
+        let stripped = origins_by_entity(&evidence, &[entity("h_new", &[("sysinfo", "web01")])]);
+        assert_eq!(
+            stripped.get("h-000000000001").map(String::as_str),
+            Some("h_new"),
+            "the fallback must reconstruct exactly what the field publishes"
+        );
+    }
+
+    /// The published field is preferred, and it is preferred *for the entity
+    /// that published it* — an entity carrying origins must not also be
+    /// reachable through the evidence walk, or one stale `MemberClaim` would
+    /// silently outvote the catalog's own conclusion.
+    #[test]
+    fn a_published_origin_is_not_second_guessed_by_the_evidence() {
+        let mut e = entity("h_real", &[("sysinfo", "web01")]);
+        e.origins = vec!["h-aaaaaaaaaaaa".into()];
+        // Evidence that would map the *same* member to a different origin.
+        let evidence = vec![self_report("h-bbbbbbbbbbbb", "sysinfo", "web01")];
+
+        let map = origins_by_entity(&evidence, &[e]);
+        assert_eq!(
+            map.get("h-aaaaaaaaaaaa").map(String::as_str),
+            Some("h_real")
+        );
+        assert!(
+            !map.contains_key("h-bbbbbbbbbbbb"),
+            "an entity that published its origins is not re-derived from evidence"
         );
     }
 

@@ -37,6 +37,7 @@ fn demo_entity() -> HostEntity {
         ips: vec!["10.0.0.5".into()],
         macs: vec![],
         container_ids: vec![],
+        origins: Vec::new(),
         hostname: Some(demo::metrics::SOURCE.into()),
         fqdn: None,
         names: vec![],

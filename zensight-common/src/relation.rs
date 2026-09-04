@@ -418,6 +418,64 @@ mod tests {
         }
     }
 
+    /// The RFC's published test vectors (zenkey RFC 11 §3.3, v1.30).
+    ///
+    /// The spec says "implementations MUST reproduce this". Nothing enforced
+    /// that until this test: a refactor of `repr`, of the separator, or of the
+    /// hash would keep every *other* test in this file green — they all check
+    /// self-consistency — while silently re-keying the entire edge family and
+    /// diverging from the document two implementations agree through.
+    #[test]
+    fn the_rfc_test_vectors_still_hold() {
+        // A pve node hosts a guest that resolved to an entity.
+        //   triple = "hosts" 1f "e:h-3fa9c2d41b7e" 1f "e:h-9d02aa17c44f"
+        let node = entity("h-3fa9c2d41b7e");
+        let guest = entity("h-9d02aa17c44f");
+        assert_eq!(
+            Edge::edge_id(RelationKind::Hosts, &node, &guest),
+            "e-2879d4667f9d946d"
+        );
+        // Direction and kind are both in the hash, and the RFC pins both.
+        assert_eq!(
+            Edge::edge_id(RelationKind::Hosts, &guest, &node),
+            "e-37f51d33d897f9b3"
+        );
+        assert_eq!(
+            Edge::edge_id(RelationKind::Runs, &node, &guest),
+            "e-f5a68bdecd893aa2"
+        );
+
+        // The claim that produced it: pve self-claims its own host_id and
+        // names the guest by device slug and name.
+        //   repr(from) = "h-3fa9c2d41b7e||||"
+        //   repr(to)   = "|vm-101|||db01"
+        let claim = RelationshipEvidence {
+            sensor: "pve".into(),
+            source: "pve01".into(),
+            kind: RelationKind::Hosts,
+            from: EndpointClaim {
+                host_id: Some("h-3fa9c2d41b7e".into()),
+                ..Default::default()
+            },
+            to: EndpointClaim {
+                device: Some("vm-101".into()),
+                name: Some("db01".into()),
+                ..Default::default()
+            },
+            attrs: BTreeMap::new(),
+            last_updated: 0,
+        };
+        assert_eq!(claim.relation_id(), "r-f5f9a2edb9601155");
+        // Neither the sensor, the source, the attrs nor the clock reach the
+        // id — the RFC requires that, and a vector cannot show it alone.
+        let mut other = claim.clone();
+        other.sensor = "container".into();
+        other.source = "somewhere-else".into();
+        other.last_updated = 1_700_000_000_000;
+        other.attrs.insert("bridge".into(), "vmbr0".into());
+        assert_eq!(other.relation_id(), claim.relation_id());
+    }
+
     #[test]
     fn edge_id_is_stable_and_direction_sensitive() {
         let a = entity("h-0123456789ab");

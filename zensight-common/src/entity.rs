@@ -183,6 +183,28 @@ pub struct HostEntity {
     /// and never a merge key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub container_ids: Vec<String>,
+    /// The origin chunks that resolved to this entity — the keys its evidence
+    /// arrived on (sorted, deduped). RFC 06 §5.1, normative since v1.30.
+    ///
+    /// **Self-reports only.** An origin lands here when a producer on it
+    /// claimed *its own* host (`HostEvidence.observer == None`), never when it
+    /// claimed someone else's: a hypervisor publishing
+    /// `evidence/device/<guest>` would otherwise bind the *hypervisor's*
+    /// origin to the guest's entity, and every consumer would inherit that
+    /// error.
+    ///
+    /// This is the origin → entity join, published rather than reconstructed
+    /// (#1007). The RFC named the field from v1.0 and required it from v1.2,
+    /// and it did not exist; consumers walked the evidence subtree and matched
+    /// `(sensor, source)` against [`HostEntity::members`] instead — a
+    /// heuristic, over a subscription far larger than the entity family, which
+    /// a consumer holding only entity documents does not have at all.
+    ///
+    /// Additive: an entity published before this field carries an empty vector,
+    /// and a consumer falls back to grouping by bare origin — the same "one
+    /// join weaker" degradation as a catalog that is down.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origins: Vec<String>,
 
     // --- descriptive (display only) ---
     /// Representative hostname (self-report preferred over third-party claim).
@@ -215,9 +237,9 @@ pub struct HostEntity {
 
 impl HostEntity {
     /// Sort the multi-valued fields (`ips`, `macs`, `container_ids`,
-    /// `members`, `aliases`, `names`) into a canonical order so two entities
-    /// built from the same evidence in different input orders serialize
-    /// byte-identically.
+    /// `origins`, `members`, `aliases`, `names`) into a canonical order so two
+    /// entities built from the same evidence in different input orders
+    /// serialize byte-identically.
     ///
     /// The correlator calls this before publishing; determinism tests pin it.
     pub fn canonicalize(&mut self) {
@@ -227,6 +249,8 @@ impl HostEntity {
         self.macs.dedup();
         self.container_ids.sort();
         self.container_ids.dedup();
+        self.origins.sort();
+        self.origins.dedup();
         self.aliases.sort();
         self.aliases.dedup();
         self.members.sort_by(|a, b| {
@@ -256,6 +280,7 @@ mod tests {
             ips: vec!["10.0.0.5".into()],
             macs: vec![],
             container_ids: vec![],
+            origins: Vec::new(),
             hostname: Some("host1".into()),
             fqdn: None,
             names: vec![NameVal {
@@ -317,6 +342,7 @@ mod tests {
             ips: vec![],
             macs: vec![],
             container_ids: vec![],
+            origins: Vec::new(),
             hostname: None,
             fqdn: None,
             names: vec![],
@@ -349,6 +375,7 @@ mod tests {
             ips: vec!["10.0.0.9".into(), "10.0.0.1".into(), "10.0.0.9".into()],
             macs: vec!["bb:bb".into(), "aa:aa".into()],
             container_ids: vec!["cccc".into(), "aaaa".into(), "cccc".into()],
+            origins: Vec::new(),
             hostname: None,
             fqdn: None,
             names: vec![],

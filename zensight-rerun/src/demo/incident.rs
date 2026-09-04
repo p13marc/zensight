@@ -193,6 +193,7 @@ pub fn incident_entity(base_ts: i64) -> HostEntity {
         ips: vec!["10.0.0.5".into()],
         macs: vec!["aa:bb:cc:dd:ee:ff".into()],
         container_ids: vec![],
+        origins: Vec::new(),
         hostname: Some(SOURCE.into()),
         fqdn: None,
         names: vec![],
