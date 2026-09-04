@@ -166,6 +166,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store would have shown one of them. A resolved alert *and* a tombstone both
   remove the member — an incident is what is firing, and a resolved member that
   stayed would keep it alive after the problem ended.
+- **The milestone's alerting story, written down once** (#927, epic #900).
+
+  `docs/ARCHITECTURE.md` gains a section tying #900 and #901 together, because
+  each half only makes sense with the other: #901 deleted the GUI's rule engine
+  and moved threshold evaluation to the sensor that publishes the metric; #900
+  moved acknowledgement, silence and incidents out of that same GUI's memory
+  and onto the bus.
+
+  The through-line is one sentence: an operator's judgement — *this number
+  matters*, *I am on this*, *do not tell me until Tuesday* — used to live in
+  one process's memory, and lives on the bus now, where the exporters, the
+  historian, a notifier and every other GUI can read it.
+
+  It also states what makes the documents *readable*: a consumer's seed GET is
+  only half of a recovery, and the catalog's four state seed queryables are the
+  other half. That pairing is written down because getting it wrong is silent —
+  #925 shipped a seed GET for `ack/*` that nothing answered, and nothing failed.
+
+  Also the **not-built list**, in the one place a reader looking for it would
+  go: routing, escalation, on-call rotations and repeat intervals belong to a
+  notifier. zenkey's `zenwatch` scoped them out on the same reasoning and
+  reaches an on-call product by webhook. This milestone produces the documents
+  such a tool reads.
+
+  (The per-area documentation shipped with the code it describes:
+  `docs/KEYSPACE.md` in #922, `zensight-correlator/docs/correlation.md` in
+  #924, `zensight/docs/views.md` in #925, and both exporters' references in
+  #926.)
+
 - **The exporters mirror incidents and acknowledgement** (#926, epic #900).
 
   Headless consumers could see every alert and **could not tell an

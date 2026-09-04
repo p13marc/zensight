@@ -484,10 +484,69 @@ default) each exporter **also** declares a dedicated subscriber on
 `zensight/v1/*/state/*/alert/*` and mirrors firing sensor alerts out: Prometheus renders a
 `<prefix>_alert` gauge (`1` while firing, series absent once resolved —
 Alertmanager-compatible), and the OTel exporter emits OTLP log records on the
-`zensight.alerts` scope. The rest of the state plane is not subscribed at
-all. The sysinfo host metrics are additionally mapped to OpenTelemetry
+`zensight.alerts` scope. Since #926 both also mirror the catalog's
+**incidents** — Prometheus as a `<prefix>_incident` gauge with a `symptom_of`
+label, OTel on a `zensight.incidents` scope — and stamp `zensight_alert` with
+`acked`, so a headless consumer can finally tell an acknowledged alert from a
+new one. The rest of the state plane is not subscribed at all. The sysinfo host metrics are additionally mapped to OpenTelemetry
 host-metrics semantic conventions via `zensight_common::semconv` (see
 [Keyspace §6](KEYSPACE.md#6-exporter-semconv-mapping--zensight_commonsemconv-100)).
+
+## Where alerting lives, after 0.14 (#900/#901)
+
+Two epics in this milestone moved the same thing in the same direction, and it
+is worth stating together because each half only makes sense with the other.
+
+**#901 — alert rules live at the edge.** ZenSight had two alerting
+authorities. One ran in every sensor: `for` windows, adopt-on-restart, a seed
+queryable, and alerts published to the bus. The other ran in one GUI process,
+had a flat 60-second cooldown keyed on `protocol/source/metric` — origin-blind,
+so two hosts sharing a `source` name shared one slot — persisted to a JSON file
+on one laptop, and its alerts reached **nothing**: not the bus, not the
+exporters, not the notifier.
+
+That second engine is **deleted**. Every producer now evaluates an operator's
+`ThresholdsConfig` on its own publish path, authorable in file config,
+fleet-wide on `@desired`, or per host over
+`@rpc/<producer>/thresholds/set`; `state/<producer>/applied/thresholds` says
+which of the three is in force. "Promote this metric to an alert" in the GUI
+writes a rule to the sensor that publishes the metric, addressed to that one
+host.
+
+**#900 — incidents, ack and silence are bus state.** The same shape, one level
+up. Acknowledging an alert was a `HashSet` insert in that same GUI; silencing
+one was a `HashMap` insert beside it; an incident was a pure function nobody
+else could call. Close the window and all three were gone.
+
+They are documents now, on `@catalog`: `incident/{incident_id}` (grouped by
+**entity**, so a host publishing under three origins is one incident),
+`ack/{alert_ref}` and `silence/{id}`, written through four gated procedures on
+the audited seam. The lifecycle rules are normative
+([RFC 06 §5.5](https://github.com/p13marc/zenkey/blob/main/rfcs/06-identity.md))
+precisely so a consumer that is *not* the catalog — an exporter, a notifier, a
+second GUI — reaches the catalog's conclusion from the documents alone.
+
+Reading them back is the half that gives the epic its name, and it needs two
+independent things to be true: the consumer issues a startup GET, **and**
+something answers it. The catalog serves each family's state selector
+storage-shaped — `entity/*`, `incident/*`, `ack/*`, `silence/*`, all four in
+its `callable` set so `alive ⇒ callable` (RFC 04 §5) covers them. Without that
+second half a consumer's seed returns nothing and it is silently wrong until
+the next re-emit, which the content-hash gate makes deliberately rare: an
+acknowledged incident is typically the most stable document on the bus. That
+is not hypothetical — it is exactly what #925 shipped and #1017 fixed, and
+`zensight-correlator/tests/ack_survives_a_restart.rs` is what keeps it now.
+
+**The through-line:** an operator's judgement — this number matters, I am on
+this, do not tell me until Tuesday — used to live in one process's memory. It
+lives on the bus now, where the exporters, the historian, a notifier and every
+other GUI can read it.
+
+**Deliberately not built:** notification routing, escalation, on-call
+rotations, repeat intervals. Those belong to a notifier — zenkey's `zenwatch`
+scoped them out on the same reasoning and reaches an on-call product by
+webhook. This milestone produces the documents such a tool reads; it does not
+compete with one.
 
 ## Directory Structure
 
