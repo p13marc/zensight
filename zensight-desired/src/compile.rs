@@ -59,6 +59,19 @@ pub struct Compiled {
 /// weak evidence alone has none. Publishing under an entity id that is not a
 /// host id would build a key no sensor reconciles.
 pub fn compile(policy: &Policy, fleet: &[HostEntity]) -> Compiled {
+    compile_with(policy, fleet, &crate::overrides::Overrides::default())
+}
+
+/// Compile with recorded per-host overrides applied **last** (#939).
+///
+/// After every class and after the policy's own `hosts` section: an explicit
+/// adoption, made through `override/set` by someone who was looking at that
+/// host, is the most specific statement there is.
+pub fn compile_with(
+    policy: &Policy,
+    fleet: &[HostEntity],
+    overrides: &crate::overrides::Overrides,
+) -> Compiled {
     let mut out = Compiled::default();
 
     let mut sorted: Vec<&HostEntity> = fleet.iter().collect();
@@ -76,7 +89,7 @@ pub fn compile(policy: &Policy, fleet: &[HostEntity]) -> Compiled {
         let classes = policy.classes_for(e);
         let host_override = policy.override_for(e);
 
-        if classes.is_empty() && host_override.is_none() {
+        if classes.is_empty() && host_override.is_none() && !overrides.hosts.contains_key(host) {
             out.unmatched.push(host.to_string());
             continue;
         }
@@ -89,6 +102,8 @@ pub fn compile(policy: &Policy, fleet: &[HostEntity]) -> Compiled {
         if let Some(o) = host_override {
             keys.extend(o.docs.keys().cloned());
         }
+        let adopted = overrides.for_host(host);
+        keys.extend(adopted.keys().cloned());
         keys.sort();
         keys.dedup();
 
@@ -113,6 +128,10 @@ pub fn compile(policy: &Policy, fleet: &[HostEntity]) -> Compiled {
                 }
             }
             if let Some(frag) = host_override.and_then(|o| o.docs.get(&key)) {
+                doc = overlay(doc, frag.clone());
+                contributed = true;
+            }
+            if let Some(frag) = adopted.get(&key) {
                 doc = overlay(doc, frag.clone());
                 contributed = true;
             }
@@ -342,6 +361,73 @@ mod tests {
             without.docs[&("h-pve1".into(), "sysinfo".into(), "thresholds".into())].canonical,
             "asking for classes it already matches changes nothing"
         );
+    }
+
+    /// An adoption overlays after **everything** — every class, and the
+    /// policy's own host section. Someone pressed a button while looking at
+    /// that host; that is the most specific statement there is.
+    #[test]
+    fn an_override_overlays_last() {
+        let mut ov = crate::overrides::Overrides::default();
+        ov.apply(&zensight_common::desired::DesiredOverride {
+            host: "h-noisy".into(),
+            producer: "sysinfo".into(),
+            topic: "thresholds".into(),
+            doc: Some(serde_json::json!({ "rules": [{ "name": "load", "value": 128 }] })),
+            by: Some("alice".into()),
+            note: None,
+            at: 0,
+        });
+        let out = compile_with(
+            &policy(),
+            &[entity("noisy", "noisy01", Some("proxmox-13"), &["sysinfo"])],
+            &ov,
+        );
+        assert!(out.rejected.is_empty(), "{:?}", out.rejected);
+        // The policy's own `hosts` section already set load to 64 here; the
+        // adoption wins, and the inherited disk-full rule survives both.
+        assert_eq!(
+            rules(&out, "h-noisy"),
+            vec![("disk-full".into(), 80.0), ("load".into(), 128.0)]
+        );
+    }
+
+    /// A host no class matches still gets its adoption. Otherwise adopting a
+    /// device on a machine the policy says nothing about — which is exactly
+    /// the discovery case #940 is for — would silently do nothing.
+    #[test]
+    fn an_override_reaches_a_host_no_class_matches() {
+        let mut p = policy();
+        p.classes.clear();
+        let mut ov = crate::overrides::Overrides::default();
+        ov.apply(&zensight_common::desired::DesiredOverride {
+            host: "h-lonely".into(),
+            producer: "sysinfo".into(),
+            topic: "thresholds".into(),
+            // A WHOLE rule: with no class to inherit from, the adoption is
+            // the entire document, and the compiler refuses a partial one —
+            // which is what it should do, and what the first draft of this
+            // test discovered the hard way.
+            doc: Some(serde_json::json!({ "rules": [{
+                "name": "disk-full", "metric": "disk/used_pct",
+                "op": "GreaterThan", "value": 95
+            }] })),
+            by: None,
+            note: None,
+            at: 0,
+        });
+        let out = compile_with(
+            &p,
+            &[entity(
+                "lonely",
+                "lonely01",
+                Some("debian-13"),
+                &["sysinfo"],
+            )],
+            &ov,
+        );
+        assert_eq!(rules(&out, "h-lonely"), vec![("disk-full".into(), 95.0)]);
+        assert!(out.unmatched.is_empty(), "adopted, so not unmatched");
     }
 
     /// The same inputs must produce the same bytes, or a restart rewrites the

@@ -52,6 +52,7 @@ passes, one sample.
 | `plan` | Validate and show what would change. Publishes nothing. **`plan --offline` opens no session at all** — a policy nobody can check before pushing is a policy checked by the fleet. Exits 1 on an invalid policy, so CI can gate a policy change the way it gates code. |
 | `apply` | Compile once, publish the difference, exit. |
 | `run` | Stay up. Recompiles on catalog change, with a periodic floor — in practice the cadence is the correlator's re-emit (~60 s), and the floor is what remains if the subscription is unavailable. Affordable because an unchanged pass publishes nothing. |
+| `override/set` (RPC) | Record a per-host adoption durably (#939). Writes `fleet-policy.overrides.json5`, **never** the policy — see [`docs/policy.md`](docs/policy.md). Gated by `allow_overrides`, off by default. |
 | `render <host>` | Print the documents one host would receive, as the sensor will see them. An empty result says **which** kind of empty it is: no catalog at all, a host the catalog does not know, or a policy that selects it for nothing. |
 
 ```bash

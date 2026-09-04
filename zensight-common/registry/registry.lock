@@ -20,6 +20,9 @@ procedure	container	describe	read	-	SchemaSet
 procedure	container	introspect	read	-	RegistrySlice
 procedure	container	thresholds	read	-	ThresholdsConfig
 procedure	container	thresholds/set	write	ThresholdsConfig	Ack
+procedure	desired	describe	read	-	SchemaSet
+procedure	desired	introspect	read	-	RegistrySlice
+procedure	desired	override/set	write	DesiredOverride	Ack
 procedure	gnmi	artifact/cancel	write	-	Ack
 procedure	gnmi	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	gnmi	artifact/status	read	-	ArtifactStatus

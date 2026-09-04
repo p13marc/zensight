@@ -9,13 +9,16 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use zensight_desired::compile::compile;
 use zensight_desired::config::DesiredDaemonConfig;
 use zensight_desired::policy::Policy;
 
 /// How long a one-shot catalog GET waits. Short: a compiler with no fleet
 /// answers "no hosts", which is a *report*, not a hang.
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long to wait for every declared procedure to be serving before saying
+/// `alive`. The same two seconds `SensorRunner` waits.
+const DECLARATION_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Parser, Debug)]
 #[command(name = "zensight-desired")]
@@ -83,22 +86,34 @@ async fn main() -> Result<()> {
         anyhow::bail!("policy is invalid");
     }
 
+    // Adoptions are part of what a host gets, so `plan` and `render` must see
+    // them too — a render that showed only the policy would be a confident
+    // answer to the wrong question.
+    let overrides = zensight_desired::overrides::Overrides::load(std::path::Path::new(
+        &config.desired.overrides,
+    ))
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     match args.command {
         Command::Plan { offline } => {
             if offline {
-                println!("{policy_path}: valid ({} classes)", policy.classes.len());
+                println!(
+                    "{policy_path}: valid ({} classes, {} adopted host(s))",
+                    policy.classes.len(),
+                    overrides.hosts.len()
+                );
                 return Ok(());
             }
             let session = connect(&config).await?;
             let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
-            report(&policy, &fleet, &policy_path);
+            report(&policy, &fleet, &overrides, &policy_path);
             let _ = session.close().await;
             Ok(())
         }
         Command::Apply => {
             let session = connect(&config).await?;
             let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
-            let compiled = compile(&policy, &fleet);
+            let compiled = zensight_desired::compile::compile_with(&policy, &fleet, &overrides);
             log_rejections(&compiled);
             if config.desired.dry_run {
                 println!("dry_run: {} document(s) withheld", compiled.docs.len());
@@ -125,7 +140,7 @@ async fn main() -> Result<()> {
         Command::Render { host } => {
             let session = connect(&config).await?;
             let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
-            let compiled = compile(&policy, &fleet);
+            let compiled = zensight_desired::compile::compile_with(&policy, &fleet, &overrides);
             let mut found = false;
             for (h, d) in compiled.docs.iter().map(|((h, _, _), d)| (h, d)) {
                 if *h != host {
@@ -200,6 +215,62 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
     );
     pubr.seed(CATALOG_TIMEOUT).await;
 
+    // Per-host adoptions (#939), and the procedure that records them.
+    let overrides_path = std::path::PathBuf::from(&config.desired.overrides);
+    let overrides = Arc::new(tokio::sync::Mutex::new(
+        zensight_desired::overrides::Overrides::load(&overrides_path)
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+    ));
+    let (wake_tx, mut wake_rx) = tokio::sync::watch::channel(0u64);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let serve_task = {
+        let ctx = Arc::new(zensight_desired::serve::OverrideCtx {
+            overrides: overrides.clone(),
+            path: overrides_path.clone(),
+            allowed: config.desired.allow_overrides,
+            wake: wake_tx,
+        });
+        let s = session.clone();
+        let rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = zensight_desired::serve::serve(s, ctx, rx).await {
+                tracing::error!(error = %e, "the @desired procedures stopped");
+            }
+        })
+    };
+
+    // `alive` LAST, after every queryable is actually serving. RFC 04 §5 is
+    // `alive ⇒ callable`, and a producer that says so before it can answer is
+    // lying for the width of that window — which for this daemon means a GUI
+    // enabling an Adopt button against nothing.
+    //
+    // The list comes from the registry slice, not from a hand-written array.
+    // The correlator's equivalent is hand-maintained and its own source
+    // records that three families were missing from it at some point.
+    let missing = zensight_common::served::await_served(
+        &zensight_desired::serve::declared_rpc_keys(),
+        DECLARATION_GRACE,
+    )
+    .await;
+    if !missing.is_empty() {
+        tracing::error!(
+            missing = ?missing,
+            "declaring `alive` with procedures still undeclared — a caller will get \
+             silence from those, which `alive ⇒ callable` forbids"
+        );
+    }
+    let _alive = match session
+        .liveliness()
+        .declare_token(zensight_common::keyexpr::desired_alive_key())
+        .await
+    {
+        Ok(token) => Some(token),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to declare the @desired alive token");
+            None
+        }
+    };
+
     let period = Duration::from_secs(config.desired.refresh_secs.max(1));
     let mut tick = tokio::time::interval(period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -208,7 +279,8 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
     loop {
         let compiled = {
             let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
-            compile(&policy, &fleet)
+            let ov = overrides.lock().await;
+            zensight_desired::compile::compile_with(&policy, &fleet, &ov)
         };
         log_rejections(&compiled);
         if config.desired.dry_run {
@@ -248,6 +320,9 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
         tokio::select! {
             _ = &mut shutdown => break,
             _ = tick.tick() => {}
+            // An adoption converges in seconds rather than at the next
+            // refresh: someone is watching the screen they pressed it on.
+            _ = wake_rx.changed() => {}
             _ = async {
                 match &entity_sub {
                     Some(sub) => { let _ = sub.recv_async().await; }
@@ -264,14 +339,27 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
         }
     }
 
+    let _ = shutdown_tx.send(true);
+    serve_task.abort();
     let _ = session.close().await;
     Ok(())
 }
 
-fn report(policy: &Policy, fleet: &[zensight_common::HostEntity], path: &str) {
-    let compiled = compile(policy, fleet);
+fn report(
+    policy: &Policy,
+    fleet: &[zensight_common::HostEntity],
+    overrides: &zensight_desired::overrides::Overrides,
+    path: &str,
+) {
+    let compiled = zensight_desired::compile::compile_with(policy, fleet, overrides);
     println!("{path}: valid");
     println!("  fleet: {} entities", fleet.len());
+    if !overrides.is_empty() {
+        println!(
+            "  adoptions: {} host(s) with a recorded override",
+            overrides.hosts.len()
+        );
+    }
     println!("  documents: {}", compiled.docs.len());
     for (host, producer, topic) in compiled.docs.keys() {
         println!("    {host}  {producer}/{topic}");

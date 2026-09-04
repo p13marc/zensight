@@ -44,6 +44,27 @@
     // with no upper bound on its blast radius, so it gets two guards.
     delete_grace_periods: 2,
 
+    // Where `override/set` records what a GUI adopted (#939).
+    //
+    // A SEPARATE file from the policy, and the separation is the design.
+    // fleet-policy.json5 is hand-written, commented and hand-ordered — its
+    // class order IS the overlay order — and a serde round trip would strip
+    // every comment and normalise that order the first time someone pressed an
+    // Adopt button. A machine may only write a file whose whole content it
+    // owns. Deleting an entry here reverts that host to what the policy alone
+    // yields.
+    overrides: "/etc/zensight/fleet-policy.overrides.json5",
+
+    // Whether @rpc/@desired/override/set is answered or refused.
+    //
+    // OFF by default. An override changes what a host is told to do on an
+    // operator's say-so and is DURABLE — it outlives the session that made it
+    // — so it is the same class of thing as the catalog's link/unlink and gets
+    // the same treatment. When off the procedure is still SERVED and replies
+    // `error/gated`, so an operator learns the feature exists and is switched
+    // off rather than learning nothing from a timeout.
+    allow_overrides: false,
+
     // Compile and report, publish nothing. The disarm switch lives HERE and
     // not in the policy, for the same reason the sensors' `desired.enabled`
     // does: the mechanism that could misbehave has to be disarmable from

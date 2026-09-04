@@ -51,6 +51,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`@rpc/@desired/override/set` — a per-host adoption, recorded durably**
+  (#939, epic #902). The controller gains its first three procedures
+  (`override/set`, `introspect`, `describe`) and a liveliness token, declared
+  **last**, after `await_served` confirms every one of them is answering.
+
+  This is what turns the GUI's SNMP discovery from *"copy this JSON5 onto the
+  right host by hand"* into one click. The proposal becomes an override, the
+  override becomes a document, and the sensor reconciles it.
+
+  **It writes a separate file, and the plan said otherwise.** #902 specified
+  the override as *"persisted into the policy's `hosts` section"*. That does
+  not work: `fleet-policy.json5` is hand-written, **commented** and
+  hand-ordered — its class order *is* the overlay order — so deserializing it,
+  mutating `hosts` and re-serializing would strip every comment and normalise
+  the ordering. The first press of an Adopt button would turn a document an
+  operator maintains into one a machine emitted, which is worse than not having
+  the feature.
+
+  Adoptions live in `fleet-policy.overrides.json5`, whose entire content the
+  daemon owns and where a round trip is lossless by construction. The
+  reviewable file stays exactly as written; what a GUI adopted is separable
+  from what a human decided; and an adoption is reverted by deleting an entry
+  rather than by un-editing a merge. Written atomically, because a truncating
+  write interrupted half way leaves a file the next start refuses to parse —
+  which for this daemon means starting with **no** overrides, silently
+  un-adopting every device anyone ever added.
+
+  Overrides overlay **last**, after every class and after the policy's own
+  `hosts` section: someone pressed a button while looking at that host. A host
+  that matches no class still receives its adoption — otherwise adopting a
+  device on a machine the policy says nothing about, which is exactly the
+  discovery case, would silently do nothing.
+
+  **The callable list is derived from the registry slice**, not hand-written.
+  The correlator's equivalent is a hand-maintained array, and its own source
+  records that `incident`, `ack` and `silence` were each missing from it at
+  some point — *"which is exactly how a GUI came to issue three seed GETs of
+  which two were answered by nothing at all"*. A list read from the slice
+  cannot drift from it.
+
+  `override/set` rides the audited write seam (#957) — recording a per-host
+  exception is the operator action SYS-SUP-019 asks to be journalled — and is
+  gated by `allow_overrides`, off by default, still served when off so a caller
+  gets `error/gated` rather than silence. `by` comes from the call's `?actor=`,
+  never from the body. A refusal to *persist* is a refusal to *accept*: an
+  override that is not on disk is one that vanishes at the next restart, and
+  the operator would have been told it landed.
+
+
 - **Which devices a sensor polls stops being a restart-only decision** (#936,
   epic #902). `@desired/state/{host}/{snmp,probe}/targets` carry a fleet's
   whole target set for a host; `@rpc/{snmp,probe}/targets{,/set}` carry an
@@ -747,6 +796,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same thing, with the alert clearing after the sum of them.
 
 ### Fixed
+
+- **#937's registry conformance test grepped for `path = "`**, which was fine
+  while the `@desired` slice had only subjects and broke the moment #939 gave
+  it procedures — `override/set` is a path too. It parses the slice now, the
+  same argument the sensors' write-surface guards make about being "immune to
+  its own documentation".
 
 - **The sysinfo device header said "Unknown OS" on every host, forever**
   (#1019). It read two *metrics*, `system/os_name` and

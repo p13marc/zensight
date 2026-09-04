@@ -150,3 +150,60 @@ expectation checks for a listener, and a port is a number. `listen:
 
 Credentials are referenced by **name** into each host's own config file, never
 carried here. That is a property of the payload types, not only of the lint.
+
+## Adoptions: `@rpc/@desired/override/set` (#939)
+
+A per-host exception, recorded durably. This is what turns the GUI's SNMP
+discovery from *"copy this JSON5 onto the right host by hand"* into one click:
+the proposal becomes an override, the override becomes a document, and the
+sensor reconciles it — the workflow this epic exists to delete.
+
+```
+GET zensight/v1/@desired/@rpc/override/set?actor=alice
+    { "host": "h-3fa9c2d41b7e", "producer": "snmp", "topic": "targets",
+      "doc": { "targets": [ … ] }, "note": "adopted from discovery" }
+```
+
+`doc: null` **removes** the override — the same deletion idiom the overlay uses
+for a field, so there is one rule rather than two. `by` comes from the call's
+`?actor=`, never from the body: an author who reports themselves is an author
+nobody can be asked about.
+
+Gated by `desired.allow_overrides`, off by default. When off the procedure is
+still **served** and replies `error/gated`, so an operator learns the feature
+exists and is switched off rather than learning nothing from a timeout.
+
+### It writes a separate file, and that is deliberate
+
+#902 specified this as *"persisted into the policy's `hosts` section"*. That
+does not work. `fleet-policy.json5` is hand-written, **commented**, and
+hand-ordered — its class order *is* the overlay order — and deserializing it,
+mutating `hosts` and re-serializing would strip every comment and normalise the
+ordering. The first press of an Adopt button would turn a document an operator
+maintains into one a machine emitted.
+
+So adoptions go in `fleet-policy.overrides.json5`, whose entire content the
+daemon owns, and where a serde round trip is lossless by construction. What
+that buys beyond not destroying anything:
+
+- the reviewable file stays exactly as written, so `git diff` on it means what
+  it means;
+- what a GUI adopted is visible in one place, separable from what a human
+  decided;
+- an adoption is reverted by deleting an entry, not by un-editing a merge.
+
+Written atomically — temp file, then rename. A truncating write interrupted
+half way would leave a file the next start refuses to parse, which for this
+daemon means starting with **no overrides**: silently un-adopting every device
+anyone ever added.
+
+### Where they overlay
+
+**Last** — after every class, and after the policy's own `hosts` section.
+Someone pressed a button while looking at that host; that is the most specific
+statement there is. `render <host>` shows the result, so the merged view is
+still one command away.
+
+A host that matches no class still receives its adoption. Otherwise adopting a
+device on a machine the policy says nothing about — exactly the discovery
+case — would silently do nothing.
