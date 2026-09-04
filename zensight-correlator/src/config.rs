@@ -69,6 +69,24 @@ pub struct CorrelatorConfig {
     /// instead of learning nothing.
     #[serde(default)]
     pub allow_operator_assertions: bool,
+
+    /// Incident evaluation (#900): group firing alerts by entity, attribute
+    /// them over the relationship graph, and publish
+    /// `@catalog/state/incident/*`.
+    ///
+    /// **On by default**, unlike `allow_operator_assertions`, and the
+    /// difference is the point: assertions let an operator override the one
+    /// guard standing between the catalog and fusing two real machines, so
+    /// they are off until someone chooses them. Incidents only *read* — they
+    /// group alerts that already exist and publish a conclusion, exactly as
+    /// entity and edge documents do, and turning them off makes the fleet's
+    /// triage surface silently absent rather than safe.
+    ///
+    /// The switch exists because the mechanism that could misbehave must be
+    /// disarmable from outside itself: an incident pass that churns or leaks
+    /// should be stoppable without stopping the catalog.
+    #[serde(default = "default_true")]
+    pub incidents_enabled: bool,
 }
 
 fn default_evidence_ttl() -> u64 {
@@ -94,6 +112,7 @@ impl Default for CorrelatorConfig {
             rules: RulesConfig::default(),
             logging: LoggingConfig::default(),
             allow_operator_assertions: false,
+            incidents_enabled: true,
         }
     }
 }

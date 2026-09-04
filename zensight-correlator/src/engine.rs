@@ -73,6 +73,35 @@ pub enum EvidenceMsg {
         origin: String,
         relation_id: String,
     },
+    /// A sensor's alert changed state (`state/<producer>/alert/<key>`, #923).
+    ///
+    /// Carries the ref built from the KEY — origin and producer are key
+    /// chunks, and an `Alert`'s `source` is the polled device for a proxy
+    /// sensor (#883), so the payload alone cannot say which host published it.
+    /// `alert: None` is a tombstone.
+    Alert {
+        r: Box<zensight_common::alert::AlertRef>,
+        alert: Option<Box<zensight_common::alert::Alert>>,
+    },
+    /// An operator acknowledgement (`@catalog/state/ack/<alert_ref>`, #922).
+    ///
+    /// Subscribed from the catalog's **own** published state, exactly as
+    /// assertions are: it is what keeps the catalog a pure function of the
+    /// bus, and it means a restarted correlator re-seeds acks through the same
+    /// path a live one takes rather than through a second recovery path.
+    Ack(Box<zensight_common::ack::AlertAck>),
+    /// An acknowledgement was retired (a `Delete` on its key).
+    RemoveAck(Box<zensight_common::alert::AlertRef>),
+    /// A suppression window (`@catalog/state/silence/<id>`, #922).
+    Silence(Box<zensight_common::silence::Silence>),
+    /// A suppression window was closed (a `Delete` on its key).
+    RemoveSilence { id: String },
+    /// A sensor's liveliness token appeared or vanished.
+    ///
+    /// The input to `down`, which is what makes `symptom_of` mean anything: a
+    /// machine that stopped answering publishes no alert of its own, so the
+    /// only evidence it is the cause is the absence of its token.
+    Liveliness { origin: String, alive: bool },
 }
 
 /// A change to publish on the entity keyspace.
@@ -111,6 +140,24 @@ pub struct CorrelatorState {
     relations: crate::edges::RelationStore,
     /// The published edge set and its change gate.
     edges: crate::edges::EdgeState,
+    /// Firing alerts (#923). Like `relations`, deliberately **not** an input
+    /// to the merge: an alert cannot make two machines the same machine.
+    alerts: crate::incidents::AlertStore,
+    /// Operator acknowledgements, keyed by the alert they name.
+    acks: std::collections::BTreeMap<
+        zensight_common::alert::AlertRef,
+        zensight_common::ack::AlertAck,
+    >,
+    /// Live suppression windows.
+    silences: std::collections::BTreeMap<String, zensight_common::silence::Silence>,
+    /// The published incident set and its change gate.
+    incidents: crate::incidents::IncidentState,
+    /// Origins whose liveliness token is currently absent.
+    ///
+    /// Held as *origins* rather than entities because that is what the token's
+    /// key carries; `recompute_incidents` maps them to entities through the
+    /// same evidence join the incidents use, so the two cannot disagree.
+    dead_origins: std::collections::BTreeSet<String>,
 }
 
 impl CorrelatorState {
@@ -124,6 +171,11 @@ impl CorrelatorState {
             assertions: HashMap::new(),
             relations: crate::edges::RelationStore::default(),
             edges: crate::edges::EdgeState::default(),
+            alerts: crate::incidents::AlertStore::default(),
+            acks: std::collections::BTreeMap::new(),
+            silences: std::collections::BTreeMap::new(),
+            incidents: crate::incidents::IncidentState::default(),
+            dead_origins: std::collections::BTreeSet::new(),
         }
     }
 
@@ -139,6 +191,26 @@ impl CorrelatorState {
                 self.assertions.insert(a.id.clone(), a);
             }
             EvidenceMsg::Relation { origin, ev } => self.relations.upsert(origin, *ev),
+            EvidenceMsg::Alert { r, alert } => self.alerts.observe(*r, alert.map(|a| *a)),
+            EvidenceMsg::Ack(ack) => {
+                self.acks.insert(ack.alert_ref.clone(), *ack);
+            }
+            EvidenceMsg::RemoveAck(r) => {
+                self.acks.remove(&r);
+            }
+            EvidenceMsg::Silence(s) => {
+                self.silences.insert(s.id.clone(), *s);
+            }
+            EvidenceMsg::RemoveSilence { id } => {
+                self.silences.remove(&id);
+            }
+            EvidenceMsg::Liveliness { origin, alive } => {
+                if alive {
+                    self.dead_origins.remove(&origin);
+                } else {
+                    self.dead_origins.insert(origin);
+                }
+            }
             EvidenceMsg::RemoveRelation {
                 sensor,
                 origin,
@@ -228,6 +300,66 @@ impl CorrelatorState {
         let entities: Vec<HostEntity> = self.last.values().map(|r| r.entity.clone()).collect();
         self.edges
             .diff(crate::edges::resolve(&live, &entities, now_ms))
+    }
+
+    /// Recompute the **incident** set at `now_ms` and return the ops (#923).
+    ///
+    /// Runs after both other passes for the same reason edges run after
+    /// entities: it reads the entity set *and* the edge set as just published,
+    /// so an incident can never name an entity id retired in the same pass or
+    /// attribute through an edge that no longer exists.
+    ///
+    /// `down` is the set of entities the catalog believes are not alive.
+    /// Resolving that is the caller's job — it needs the liveliness plane and
+    /// a clock, neither of which belongs in a pure pass.
+    pub fn recompute_incidents(&mut self, now_ms: i64) -> Vec<crate::incidents::IncidentOp> {
+        let ttl_ms = self.config.evidence_ttl_secs as i64 * 1000;
+        self.alerts.sweep(now_ms, ttl_ms);
+        // A silence past its window stops applying whether or not its
+        // tombstone has arrived, so a partitioned catalog cannot keep an
+        // expired suppression alive.
+        self.silences.retain(|_, s| now_ms < s.ends_at);
+        let firing = self.alerts.firing();
+        let evidence = self.evidence.live_with_origin(now_ms, ttl_ms);
+        let entities: Vec<HostEntity> = self.last.values().map(|r| r.entity.clone()).collect();
+        let edges = self.edges.current();
+        let silences: Vec<_> = self.silences.values().cloned().collect();
+        // Origins → entities, through the same evidence join the incidents
+        // use, so "this entity is down" and "this alert belongs to this
+        // entity" can never disagree about who is who.
+        let entity_of = crate::incidents::origins_by_entity(&evidence, &entities);
+        let down: std::collections::BTreeSet<String> = self
+            .dead_origins
+            .iter()
+            .filter_map(|o| entity_of.get(o).cloned())
+            .collect();
+        self.incidents.diff(crate::incidents::resolve(
+            crate::incidents::Pass {
+                firing: &firing,
+                evidence: &evidence,
+                entities: &entities,
+                edges: &edges,
+                acks: &self.acks,
+                silences: &silences,
+                down: &down,
+            },
+            now_ms,
+        ))
+    }
+
+    /// Re-publish every current incident with a refreshed `last_updated`.
+    pub fn reemit_incidents(&mut self, now_ms: i64) -> Vec<crate::incidents::IncidentOp> {
+        self.incidents.reemit(now_ms)
+    }
+
+    /// The current published incident set (serves the incidents queryable).
+    pub fn current_incidents(&self) -> Vec<zensight_common::incident::Incident> {
+        self.incidents.current()
+    }
+
+    /// Number of firing alerts held, for health reporting.
+    pub fn firing_alerts(&self) -> usize {
+        self.alerts.len()
     }
 
     /// Re-publish every current edge with a refreshed `last_updated`, the
@@ -367,6 +499,14 @@ pub struct Engine {
     /// `None` disables edge publishing entirely, which is what the demo feed
     /// and every entity-only test use.
     edge_out: Option<mpsc::Sender<crate::edges::EdgeOp>>,
+    /// Optional sink for incidents (`@catalog/state/incident/*`, #923).
+    ///
+    /// A third output channel for the third key family, for the same reason
+    /// edges got the second: three lifecycles, three subscriber sets, and an
+    /// incident pass that lags must not delay an entity publish. `None`
+    /// disables incidents entirely — the `incidents.enabled` kill switch, and
+    /// what every entity-only test uses.
+    incident_out: Option<mpsc::Sender<crate::incidents::IncidentOp>>,
     debounce: Duration,
     reemit: Duration,
 }
@@ -392,6 +532,7 @@ impl Engine {
             out,
             pdns_out: None,
             edge_out: None,
+            incident_out: None,
             debounce,
             reemit,
         }
@@ -411,6 +552,18 @@ impl Engine {
     /// edges and publishes none, which is what the `--demo` feed wants.
     pub fn with_edges(mut self, edge_out: mpsc::Sender<crate::edges::EdgeOp>) -> Self {
         self.edge_out = Some(edge_out);
+        self
+    }
+
+    /// Attach the incident sink (`@catalog/state/incident/*`, #923).
+    ///
+    /// Opt-in like the other two: an engine without it computes no incidents
+    /// and publishes none.
+    pub fn with_incidents(
+        mut self,
+        incident_out: mpsc::Sender<crate::incidents::IncidentOp>,
+    ) -> Self {
+        self.incident_out = Some(incident_out);
         self
     }
 
@@ -471,34 +624,64 @@ impl Engine {
                 _ = async { sleep_until(deadline.unwrap()).await }, if deadline.is_some() => {
                     deadline = None;
                     let now = current_timestamp_millis();
-                    let (ops, edge_ops) = {
+                    let (ops, edge_ops, incident_ops) = {
                         let mut st = self.state.lock().unwrap();
-                        // Entities first, then edges: resolution reads the
-                        // entity set the merge just produced, so this ordering
-                        // is what stops an edge referring to an entity id that
-                        // was retired in the same pass.
+                        // Entities, then edges, then incidents: each pass
+                        // reads the finished answer of the one before it, so
+                        // an edge can never name an entity retired in the same
+                        // pass and an incident can never attribute through an
+                        // edge that no longer exists.
                         let ops = st.recompute(now);
                         let edge_ops = st.recompute_edges(now);
-                        (ops, edge_ops)
+                        let incident_ops = if self.incident_out.is_some() {
+                            st.recompute_incidents(now)
+                        } else {
+                            Vec::new()
+                        };
+                        (ops, edge_ops, incident_ops)
                     };
-                    debug!(ops = ops.len(), edges = edge_ops.len(), "recompute produced ops");
+                    debug!(
+                        ops = ops.len(),
+                        edges = edge_ops.len(),
+                        incidents = incident_ops.len(),
+                        "recompute produced ops"
+                    );
                     self.forward(ops).await;
                     self.forward_edges(edge_ops).await;
+                    self.forward_incidents(incident_ops).await;
                 }
                 _ = reemit.tick() => {
                     let now = current_timestamp_millis();
-                    let (ops, edge_ops) = {
+                    let (ops, edge_ops, incident_ops) = {
                         let mut st = self.state.lock().unwrap();
-                        (st.reemit(now), st.reemit_edges(now))
+                        (st.reemit(now), st.reemit_edges(now), st.reemit_incidents(now))
                     };
-                    debug!(ops = ops.len(), edges = edge_ops.len(), "re-emit");
+                    debug!(
+                        ops = ops.len(),
+                        edges = edge_ops.len(),
+                        incidents = incident_ops.len(),
+                        "re-emit"
+                    );
                     self.forward(ops).await;
                     self.forward_edges(edge_ops).await;
+                    self.forward_incidents(incident_ops).await;
                 }
             }
         }
         info!("correlation engine stopped");
         Ok(())
+    }
+
+    async fn forward_incidents(&self, ops: Vec<crate::incidents::IncidentOp>) {
+        let Some(out) = &self.incident_out else {
+            return;
+        };
+        for op in ops {
+            if out.send(op).await.is_err() {
+                debug!("incident-op channel closed");
+                return;
+            }
+        }
     }
 
     async fn forward_edges(&self, ops: Vec<crate::edges::EdgeOp>) {

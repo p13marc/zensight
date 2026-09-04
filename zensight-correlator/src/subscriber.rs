@@ -78,6 +78,56 @@ pub async fn run(
         .await
         .map_err(|e| anyhow::anyhow!("failed to declare assertion subscriber: {e}"))?;
 
+    // Alerts (#923). Every producer's alert family across the fleet — LWW, a
+    // handful of documents per host, which is what made a subscription inside
+    // the catalog the right call rather than a separate service.
+    let alert_key = zensight_common::keyexpr::all_alerts_wildcard();
+    info!(key = %alert_key, "subscribing to sensor alerts");
+    let alert_sub = session
+        .declare_subscriber(&alert_key)
+        .with(flume::unbounded())
+        .history(HistoryConfig::default().detect_late_publishers())
+        .recovery(RecoveryConfig::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to declare alert subscriber: {e}"))?;
+
+    // The catalog's own acks and silences (#922), for the same reason as
+    // assertions above: a restarted correlator re-learns the operator's
+    // decisions through the same path a live one takes.
+    let ack_key = zensight_common::keyexpr::all_acks_wildcard();
+    info!(key = %ack_key, "subscribing to acknowledgements");
+    let ack_sub = session
+        .declare_subscriber(&ack_key)
+        .with(flume::unbounded())
+        .history(HistoryConfig::default().detect_late_publishers())
+        .recovery(RecoveryConfig::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to declare ack subscriber: {e}"))?;
+
+    let silence_key = zensight_common::keyexpr::all_silences_wildcard();
+    info!(key = %silence_key, "subscribing to silences");
+    let silence_sub = session
+        .declare_subscriber(&silence_key)
+        .with(flume::unbounded())
+        .history(HistoryConfig::default().detect_late_publishers())
+        .recovery(RecoveryConfig::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to declare silence subscriber: {e}"))?;
+
+    // Liveliness (#923). The input to `down`, and the only evidence that a
+    // machine which stopped answering is the *cause* of what its guests are
+    // reporting — a dead host publishes no alert of its own. `history(true)`
+    // delivers the currently-alive tokens through this same subscriber, so the
+    // initial state and live transitions share one ordered path.
+    let liveliness_key = zensight_common::keyexpr::all_liveliness_wildcard();
+    info!(key = %liveliness_key, "subscribing to sensor liveliness");
+    let liveliness_sub = session
+        .liveliness()
+        .declare_subscriber(liveliness_key.as_str())
+        .history(true)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to declare liveliness subscriber: {e}"))?;
+
     info!("evidence subscribers ready");
 
     loop {
@@ -104,6 +154,30 @@ pub async fn run(
                 match sample {
                     Ok(sample) => handle_assertion(&sample, &tx).await,
                     Err(e) => warn!(error = %e, "assertion recv error"),
+                }
+            }
+            sample = alert_sub.recv_async() => {
+                match sample {
+                    Ok(sample) => handle_alert(&sample, &tx).await,
+                    Err(e) => warn!(error = %e, "alert recv error"),
+                }
+            }
+            sample = ack_sub.recv_async() => {
+                match sample {
+                    Ok(sample) => handle_ack(&sample, &tx).await,
+                    Err(e) => warn!(error = %e, "ack recv error"),
+                }
+            }
+            sample = silence_sub.recv_async() => {
+                match sample {
+                    Ok(sample) => handle_silence(&sample, &tx).await,
+                    Err(e) => warn!(error = %e, "silence recv error"),
+                }
+            }
+            sample = liveliness_sub.recv_async() => {
+                match sample {
+                    Ok(sample) => handle_liveliness(&sample, &tx).await,
+                    Err(e) => warn!(error = %e, "liveliness recv error"),
                 }
             }
         }
@@ -304,6 +378,118 @@ async fn handle_assertion(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
         }
         None => warn!(key = %key, "failed to decode OperatorAssertion"),
     }
+}
+
+/// A sensor alert (#923).
+///
+/// The ref is built from the **key**, never the payload: origin and producer
+/// are key chunks, and an `Alert`'s `source` is the polled device for a proxy
+/// sensor (#883) — so the document alone cannot say which host published it,
+/// which is exactly the join an incident needs.
+async fn handle_alert(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
+    let key = sample.key_expr().as_str();
+    let Some(r) = alert_ref_from_key(key) else {
+        warn!(key = %key, "alert key did not parse into an alert ref");
+        return;
+    };
+    // A tombstone and a `Resolved` document mean the same thing to an
+    // incident, and both arrive: the sensor publishes the resolution, then
+    // deletes the key. Either removes the member.
+    let alert = is_put(sample)
+        .then(|| decode::<zensight_common::alert::Alert>(&sample.payload().to_bytes()))
+        .flatten();
+    if is_put(sample) && alert.is_none() {
+        warn!(key = %key, "failed to decode Alert");
+        return;
+    }
+    let _ = tx
+        .send(EvidenceMsg::Alert {
+            r: Box::new(r),
+            alert: alert.map(Box::new),
+        })
+        .await;
+}
+
+/// Build an [`AlertRef`] from a base-relative alert key.
+///
+/// Structural, not positional: the registry knows where an origin and a
+/// producer live in a key, and re-deriving that with `split('/')` is exactly
+/// what RFC 08 §1 exists to delete.
+fn alert_ref_from_key(key: &str) -> Option<zensight_common::alert::AlertRef> {
+    let parsed = zensight_common::keyexpr::parse_key(key)?;
+    let origin = match &parsed.origin {
+        zenkey::grammar::Origin::Host(h) => h.as_str().to_string(),
+        // A service origin publishes no per-sensor alerts; if one ever did, an
+        // incident could not attribute it to a host anyway.
+        zenkey::grammar::Origin::Service(_) => return None,
+    };
+    let producer = parsed.producer()?.name().to_string();
+    let alert_key = parsed.subject.last()?.to_string();
+    if alert_key.is_empty() {
+        return None;
+    }
+    zensight_common::alert::AlertRef::parse(&format!("{origin}.{producer}.{alert_key}")).ok()
+}
+
+async fn handle_ack(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
+    let key = sample.key_expr().as_str();
+    if !is_put(sample) {
+        if let Some(r) = key
+            .rsplit('/')
+            .next()
+            .and_then(|c| zensight_common::alert::AlertRef::parse(c).ok())
+        {
+            let _ = tx.send(EvidenceMsg::RemoveAck(Box::new(r))).await;
+        }
+        return;
+    }
+    match decode::<zensight_common::ack::AlertAck>(&sample.payload().to_bytes()) {
+        Some(a) => {
+            let _ = tx.send(EvidenceMsg::Ack(Box::new(a))).await;
+        }
+        None => warn!(key = %key, "failed to decode AlertAck"),
+    }
+}
+
+async fn handle_silence(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
+    let key = sample.key_expr().as_str();
+    if !is_put(sample) {
+        if let Some(id) = key.rsplit('/').next().filter(|id| !id.is_empty()) {
+            let _ = tx
+                .send(EvidenceMsg::RemoveSilence { id: id.to_string() })
+                .await;
+        }
+        return;
+    }
+    match decode::<zensight_common::silence::Silence>(&sample.payload().to_bytes()) {
+        Some(s) => {
+            let _ = tx.send(EvidenceMsg::Silence(Box::new(s))).await;
+        }
+        None => warn!(key = %key, "failed to decode Silence"),
+    }
+}
+
+/// A liveliness token appearing or vanishing (#923).
+///
+/// One token per *sensor*, and a host runs several — so an origin is down only
+/// when the last of its tokens goes, which the engine's set handles by keying
+/// on the origin: any surviving sensor's Put removes it from `dead_origins`.
+/// A host that has genuinely stopped loses every token, which is the case that
+/// matters.
+async fn handle_liveliness(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
+    let key = sample.key_expr().as_str();
+    let Some(parsed) = zensight_common::keyexpr::parse_key(key) else {
+        return;
+    };
+    let zenkey::grammar::Origin::Host(h) = &parsed.origin else {
+        return;
+    };
+    let _ = tx
+        .send(EvidenceMsg::Liveliness {
+            origin: h.as_str().to_string(),
+            alive: is_put(sample),
+        })
+        .await;
 }
 
 async fn handle_name(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
