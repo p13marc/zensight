@@ -100,6 +100,58 @@ impl TelemetrySubscriber {
         seeded
     }
 
+    /// Fetch the current incident and acknowledgement sets with one GET each,
+    /// so a restarted exporter does not start blind (#926).
+    ///
+    /// The exact counterpart of [`Self::seed_alerts`], and needed for a sharper
+    /// reason. `acked` is a **label on `zensight_alert`**: an exporter that
+    /// restarts mid-incident and misses the acks renders every acknowledged
+    /// alert as `acked="false"`, so Alertmanager re-pages for work someone is
+    /// already doing — the exact failure epic #900 exists to remove, reproduced
+    /// one layer out. The catalog re-emits only on a content change, so
+    /// "it will correct itself shortly" is false: an incident that is stable
+    /// (which is what an acknowledged one usually is) never re-emits at all.
+    ///
+    /// Both seeds reuse the live sample handlers, so there is one decode path
+    /// rather than a live one and a recovery one.
+    async fn seed_catalog(&self, session: &zenoh::Session) -> (usize, usize) {
+        const SEED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+        let mut counts = (0usize, 0usize);
+        for (key, is_incident) in [
+            (zensight_common::keyexpr::all_incidents_wildcard(), true),
+            (zensight_common::keyexpr::all_acks_wildcard(), false),
+        ] {
+            let replies = match session
+                .get(&key)
+                .target(zenoh::query::QueryTarget::All)
+                .timeout(SEED_TIMEOUT)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    // Not fatal: a deployment with no catalog running has
+                    // nothing to answer, and that is a normal deployment.
+                    warn!(key = %key, error = %e, "Catalog seed GET failed");
+                    continue;
+                }
+            };
+            while let Ok(reply) = replies.recv_async().await {
+                let Ok(sample) = reply.result() else { continue };
+                if sample.kind() == SampleKind::Delete {
+                    continue;
+                }
+                if is_incident {
+                    self.handle_incident_sample(sample);
+                    counts.0 += 1;
+                } else {
+                    self.handle_ack_sample(sample);
+                    counts.1 += 1;
+                }
+            }
+        }
+        counts
+    }
+
     /// Run the subscriber until the shutdown signal is received.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
         info!("Connecting to Zenoh...");
@@ -150,16 +202,21 @@ impl TelemetrySubscriber {
         // subscriber, and gated on the same switch: an exporter that mirrors
         // no alerts has nothing to acknowledge.
         let catalog_subscriber = if self.collector.export_alerts() {
-            let key = zensight_common::keyexpr::all_incidents_wildcard();
-            info!(key_expr = %key, "Subscribing to catalog incidents");
-            let ack_key = zensight_common::keyexpr::all_acks_wildcard();
-            info!(key_expr = %ack_key, "Subscribing to catalog acknowledgements");
+            let incidents_key = zensight_common::keyexpr::all_incidents_wildcard();
+            info!(key_expr = %incidents_key, "Subscribing to catalog incidents");
+            let acks_key = zensight_common::keyexpr::all_acks_wildcard();
+            info!(key_expr = %acks_key, "Subscribing to catalog acknowledgements");
+            // Plain subscribers, like `alerts_key` above and for the same
+            // reason: these are LWW catalog documents, not a recoverable
+            // stream. The #763 guard names them explicitly, and the price of
+            // that exemption is `seed_catalog` below — a plain subscriber
+            // WITHOUT a startup seed is precisely the blindness #763 is about.
             let inc = session
-                .declare_subscriber(&key)
+                .declare_subscriber(&incidents_key)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to create incident subscriber: {}", e))?;
             let ack = session
-                .declare_subscriber(&ack_key)
+                .declare_subscriber(&acks_key)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to create ack subscriber: {}", e))?;
             Some((inc, ack))
@@ -208,6 +265,14 @@ impl TelemetrySubscriber {
             let seeded = Self::seed_alerts(&session, &self.collector).await;
             if seeded > 0 {
                 info!(seeded, "Seeded firing alerts from the bus");
+            }
+            // The catalog's view of those same alerts (#926): which are
+            // acknowledged, and how they group. Without this the `acked` label
+            // reads `false` for every acknowledged alert until the catalog next
+            // re-emits, which its content-hash gate makes deliberately rare.
+            let (incidents, acks) = self.seed_catalog(&session).await;
+            if incidents > 0 || acks > 0 {
+                info!(incidents, acks, "Seeded catalog state from the bus");
             }
         }
 

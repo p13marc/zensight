@@ -131,11 +131,24 @@ impl TelemetrySubscriber {
         // The catalog's incidents (#926), on the same switch as alerts: they
         // are the catalog's conclusion *about* alerts.
         let incident_subscriber = if self.exporter.wants_alert_stream() {
-            let key = zensight_common::keyexpr::all_incidents_wildcard();
-            info!(key_expr = %key, "Subscribing to catalog incidents");
+            let incidents_key = zensight_common::keyexpr::all_incidents_wildcard();
+            info!(key_expr = %incidents_key, "Subscribing to catalog incidents");
+            // Plain, and deliberately WITHOUT a startup seed — the opposite of
+            // the Prometheus exporter's choice on this same key, for a reason
+            // that is worth stating.
+            //
+            // Prometheus renders a *gauge*: an incident it has not seen is a
+            // missing series and an ack it has not seen makes `acked` read
+            // `false`, so it must seed or it is wrong until the next re-emit.
+            // Here an incident is a *log record* — one per transition — and
+            // `record_incident_resolved` needs no prior state to emit. Seeding
+            // would re-emit "incident opened" for every incident an earlier
+            // incarnation already shipped, duplicating history rather than
+            // recovering it. Same discipline as the traces seed, which primes
+            // the tracker without re-emitting a log record for what it primes.
             Some(
                 session
-                    .declare_subscriber(&key)
+                    .declare_subscriber(&incidents_key)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to create incident subscriber: {}", e))?,
             )

@@ -192,6 +192,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `incident.state="resolved"` event — otherwise "this incident is over" would
   be nothing at all.
 
+  **Prometheus seeds both at startup; OTel deliberately does not.** The
+  Prometheus exporter GETs `@catalog/state/{incident,ack}/*` once before its
+  loop, alongside the alert seed it has done since #758. It has to: `acked` is
+  a *label*, so an exporter restarted mid-incident would render every
+  acknowledged alert as `acked="false"` and Alertmanager would re-page for work
+  someone is already doing — and "it corrects itself on the next update" is
+  false, because the catalog re-emits only on a content change and an
+  acknowledged incident is typically the most stable thing on the bus. OTel
+  emits a log record per transition instead, where a seed would re-emit
+  "incident opened" for every incident an earlier incarnation already shipped —
+  duplicating history rather than recovering it, which is the same call its
+  traces seed already makes.
+
+  CI's #763 guard is what surfaced this: it bans a raw `declare_subscriber` in
+  an exporter and exempts LWW keys **by name**, one at a time, so the exemption
+  has to be claimed deliberately. `incidents_key`/`acks_key` reached it with no
+  seed behind them and the build went red. The guard's roster now names them,
+  and its comment records that the price of the exemption is the seed.
+
   The `acked` label applies the **projection rule** (RFC 06 §5.5) rather than
   reporting whether an ack document exists: an orphan reads as unacknowledged,
   and a re-fire pages again. That rule is normative precisely so a consumer

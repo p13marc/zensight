@@ -183,6 +183,33 @@ zensight_incident{incident="inc-h_guest",entity="h_guest",severity="critical",
 Empty-string labels mean "the catalog did not say" — an incident with no entity
 or no attributed cause — rather than a value.
 
+### Both are seeded at startup
+
+The exporter GETs `@catalog/state/incident/*` and `@catalog/state/ack/*` once
+before entering its loop, alongside the alert seed it has done since #758, and
+feeds the replies through the same handlers a live sample takes.
+
+This is not an optimisation. `acked` is a **label on `zensight_alert`**, so an
+exporter that restarts mid-incident and takes only live `Put`s renders every
+acknowledged alert as `acked="false"` and Alertmanager re-pages for work
+someone is already doing. "It will correct itself on the next update" is false
+here: the catalog re-emits only on a **content change**, and an acknowledged
+incident is typically the most stable thing on the bus — it may not re-emit for
+hours.
+
+The subscribers themselves stay plain (`declare_subscriber`, not the
+history/recovery helper) because these are LWW documents rather than a
+recoverable stream, which is the same call the alert and liveliness
+subscribers make. CI's #763 guard holds that line by naming the exempt keys
+one at a time, so a plain subscriber cannot slide in unnoticed — it caught this
+one before it merged, with the seed missing.
+
+The **OTel exporter deliberately does the opposite** on the same key: there an
+incident is a log record per transition, not a gauge, so seeding would re-emit
+"incident opened" for every incident an earlier incarnation already shipped —
+duplicating history instead of recovering it. Same discipline as its traces
+seed, which primes the tracker without re-emitting.
+
 ## Why `/metrics` is untimestamped and remote-write is not
 
 The two paths deliberately disagree about timestamps, and the asymmetry is not

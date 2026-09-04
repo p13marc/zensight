@@ -71,6 +71,16 @@ absence *is* the resolve signal and a tombstone simply removes the series. A log
 stream has no notion of a series vanishing, so an incident ending has to be an
 event or it is nothing at all.
 
+**No startup seed, deliberately** — and this is the second place the two
+exporters disagree on the same key, for the same underlying reason. Prometheus
+renders an incident as a *gauge* and `acked` as a *label*, so an exporter that
+misses the current state is actively wrong until the next re-emit and must seed.
+Here an incident is a log record per transition, and a resolution needs no prior
+state to emit. Seeding would re-emit "incident opened" for every incident an
+earlier incarnation already shipped: duplicated history, not recovered history.
+The traces seed above makes the same call for the same reason — it primes the
+tracker precisely so it does *not* re-emit what it primes.
+
 ## Metrics
 
 Emitted on the `zensight` meter scope. Metric names follow
