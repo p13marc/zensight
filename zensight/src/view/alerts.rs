@@ -1,6 +1,6 @@
 //! Alerts view for threshold-based notifications.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use iced::widget::{Column, Row, column, container, row, rule, scrollable, text, tooltip};
 use iced::{Alignment, Element, Length, Theme};
@@ -115,18 +115,48 @@ pub struct AlertsState {
     /// alert's stable `alert_key`. Lifecycle-managed: firing inserts/updates,
     /// resolved removes. Rendered alongside rule-triggered alerts (Plan 07).
     pub external: HashMap<String, SensorAlert>,
-    /// `alert_key`s of external alerts the user has acknowledged. Acknowledged
-    /// alerts stay visible (dimmed) but drop out of the active count / badge.
-    acknowledged_external: HashSet<String>,
+    /// Acknowledgements, **as published by the catalog** (#925).
+    ///
+    /// This was `acknowledged_external: HashSet<String>` — an ack lived in this
+    /// process, died with the window, was invisible to a second GUI, and could
+    /// not be told from a new alert by either exporter. It is a projection of
+    /// `@catalog/state/ack/*` now; the GUI writes through `@rpc/@catalog/ack`
+    /// and reads back what the catalog decided.
+    ///
+    /// The **projection rule** (RFC 06 §5.5) is applied on read, in
+    /// [`AlertsState::is_acked`], never on ingest: an ack applies only while a
+    /// firing alert with `timestamp <= fired_at` exists. So an orphan is inert
+    /// and a re-fire is not acknowledged, without this map having to be
+    /// pruned in step with the alert feed.
+    acks: BTreeMap<zensight_common::alert::AlertRef, zensight_common::ack::AlertAck>,
     /// The publishing origin chunk (`h-<12hex>`) of each firing external
     /// alert, by its in-GUI key — read from the key the alert arrived on.
     /// A Delete tombstone carries no payload, so the origin and the hash are
     /// all it has; this is what lets it find the `(source, hash)` entry.
     external_origins: HashMap<String, String>,
-    /// Silenced sources (#26, Alertmanager model): `source` -> expiry epoch ms.
-    /// While silenced, that source's incidents are hidden and excluded from the
-    /// active count, with a muted-count chip surfaced instead.
-    silenced_sources: HashMap<String, i64>,
+    /// Suppression windows, **as published by the catalog** (#925).
+    ///
+    /// This was `silenced_sources: HashMap<String, i64>` — whole-source only,
+    /// no matchers, no author, and local to one window. A `Silence` matches on
+    /// origin / producer / source / rule / `labels.*`, which is what "mute the
+    /// disk alerts on rack 3 while the SAN is down" needs and a source list
+    /// never could.
+    silences: Vec<zensight_common::silence::Silence>,
+    /// The catalog's incident documents, by id (#925).
+    ///
+    /// Preferred over the local grouping when present, because the catalog
+    /// keys by **entity** — a host that publishes under three origins is one
+    /// incident there and three here. The local `group_incidents` stays as the
+    /// **offline fallback**: a GUI with no catalog must still show what is on
+    /// fire, one join weaker, which is exactly what RFC 06 §5 promises
+    /// consumers.
+    catalog_incidents: BTreeMap<String, zensight_common::incident::Incident>,
+    /// Whether `@catalog/state/alive` is present.
+    ///
+    /// The catalog is the only writer of acks and silences, so with it gone
+    /// the GUI cannot acknowledge anything — and must **say so** rather than
+    /// offering a button that quietly does nothing. `None` = not yet known.
+    pub catalog_alive: Option<bool>,
     /// Per-`alert_key` incident timeline: firing→resolved transitions (#26).
     /// Bounded to the most recent transitions so it never grows unbounded.
     timelines: HashMap<String, VecDeque<TransitionEvent>>,
@@ -220,11 +250,14 @@ impl AlertsState {
         match alert.state {
             SensorAlertState::Resolved => {
                 if self.external.remove(&key).is_some() {
-                    // An acknowledgement is of THIS firing. Leaving it behind
-                    // made the next firing of the same condition arrive
-                    // pre-acked — dimmed, no badge, a re-fired critical that
-                    // nobody saw.
-                    self.acknowledged_external.remove(&key);
+                    // The ack projection needs no pruning here (#925): an ack
+                    // applies only while a firing alert with
+                    // `timestamp <= fired_at` exists, so a resolve makes it
+                    // stop applying by itself. That is the same property the
+                    // old `HashSet` needed this line to fake — and faked
+                    // incompletely, because it could not see a *re-fire*.
+                    // The catalog tombstones the document; until it does, the
+                    // rule already reads it as not-acked.
                     self.external_origins.remove(&key);
                     self.record_transition(&key, SensorAlertState::Resolved, alert.timestamp);
                     ExternalAlertOutcome::Resolved
@@ -267,46 +300,144 @@ impl AlertsState {
             .unwrap_or_default()
     }
 
-    /// Silence (mute) a source until `now + duration_ms` (#26). While silenced,
-    /// its incidents are hidden and excluded from the active count.
-    pub fn silence_source(&mut self, source: &str, now_ms: i64, duration_ms: i64) {
-        self.silenced_sources
-            .insert(source.to_string(), now_ms + duration_ms);
+    /// A firing external alert's **wire ref** (#925), or `None` when the GUI
+    /// never saw the origin its key arrived on.
+    ///
+    /// The three components come from three places, and none of them is the
+    /// payload's `source`: the origin from the key the alert arrived on, the
+    /// producer from its protocol, the hash from the in-GUI key. `source` is
+    /// the polled device for a proxy sensor (#883), so building a ref from it
+    /// would address the wrong host.
+    ///
+    /// `None` is honest rather than a guess: the ack the GUI would write goes
+    /// on `ack/<alert_ref>`, and a ref naming the wrong origin is an ack for
+    /// somebody else's alert.
+    pub fn alert_ref_for(&self, in_gui_key: &str) -> Option<zensight_common::alert::AlertRef> {
+        let alert = self.external.get(in_gui_key)?;
+        let origin = self.external_origins.get(in_gui_key)?;
+        let hash = in_gui_key.rsplit('/').next()?;
+        zensight_common::alert::AlertRef::parse(&format!("{origin}.{}.{hash}", alert.protocol)).ok()
     }
 
-    /// Lift a silence on a source immediately.
-    pub fn unsilence_source(&mut self, source: &str) {
-        self.silenced_sources.remove(source);
+    /// Replace the ack projection from the bus (#925).
+    pub fn set_acks(
+        &mut self,
+        acks: BTreeMap<zensight_common::alert::AlertRef, zensight_common::ack::AlertAck>,
+    ) {
+        self.acks = acks;
     }
 
-    /// Whether `source` is currently silenced at `now_ms` (expired silences are
-    /// treated as lifted; callers may also prune via [`Self::prune_silences`]).
-    pub fn is_silenced(&self, source: &str, now_ms: i64) -> bool {
-        self.silenced_sources
-            .get(source)
-            .is_some_and(|&expiry| expiry > now_ms)
+    /// Apply one ack document (a live sample).
+    pub fn ingest_ack(&mut self, ack: zensight_common::ack::AlertAck) {
+        self.acks.insert(ack.alert_ref.clone(), ack);
     }
 
-    /// Drop expired silences. Call on tick. Returns how many were lifted.
-    pub fn prune_silences(&mut self, now_ms: i64) -> usize {
-        let before = self.silenced_sources.len();
-        self.silenced_sources
-            .retain(|_, &mut expiry| expiry > now_ms);
-        before - self.silenced_sources.len()
+    /// Apply an ack tombstone.
+    pub fn retire_ack(&mut self, r: &zensight_common::alert::AlertRef) {
+        self.acks.remove(r);
     }
 
-    /// Count of currently-silenced sources at `now_ms` (for the muted chip).
+    /// Replace the silence projection from the bus (#925).
+    pub fn set_silences(&mut self, silences: Vec<zensight_common::silence::Silence>) {
+        self.silences = silences;
+    }
+
+    /// Apply one silence document.
+    pub fn ingest_silence(&mut self, s: zensight_common::silence::Silence) {
+        self.silences.retain(|x| x.id != s.id);
+        self.silences.push(s);
+    }
+
+    /// Apply a silence tombstone.
+    pub fn retire_silence(&mut self, id: &str) {
+        self.silences.retain(|x| x.id != id);
+    }
+
+    /// Whether any live silence suppresses this firing alert at `now_ms`
+    /// (#925).
+    ///
+    /// Evaluated per **alert**, not per source: a `Silence` matches on
+    /// origin / producer / source / rule / `labels.*`, and collapsing that to
+    /// "is this source muted" would throw away every matcher that made the
+    /// window worth opening.
+    pub fn is_silenced_alert(&self, in_gui_key: &str, now_ms: i64) -> bool {
+        let Some(alert) = self.external.get(in_gui_key) else {
+            return false;
+        };
+        let origin = self
+            .external_origins
+            .get(in_gui_key)
+            .map(String::as_str)
+            .unwrap_or_default();
+        let producer = alert.protocol.to_string();
+        zensight_common::silence::Silence::any_matches(
+            &self.silences,
+            now_ms,
+            origin,
+            &producer,
+            alert,
+        )
+    }
+
+    /// How many firing alerts a live silence is currently suppressing (the
+    /// muted chip).
     pub fn silenced_count(&self, now_ms: i64) -> usize {
-        self.silenced_sources
-            .values()
-            .filter(|&&e| e > now_ms)
+        self.external
+            .keys()
+            .filter(|k| self.is_silenced_alert(k, now_ms))
             .count()
+    }
+
+    /// The live silence windows, for the authoring pane.
+    pub fn silences(&self) -> &[zensight_common::silence::Silence] {
+        &self.silences
+    }
+
+    /// Apply one incident document.
+    pub fn ingest_incident(&mut self, inc: zensight_common::incident::Incident) {
+        self.catalog_incidents.insert(inc.id.clone(), inc);
+    }
+
+    /// Apply an incident tombstone — no member is firing any more.
+    pub fn retire_incident(&mut self, id: &str) {
+        self.catalog_incidents.remove(id);
+    }
+
+    /// The catalog's incidents, worst-first, or empty when it has published
+    /// none (which is also what "no catalog" looks like).
+    pub fn catalog_incidents(&self) -> Vec<&zensight_common::incident::Incident> {
+        let mut v: Vec<_> = self.catalog_incidents.values().collect();
+        v.sort_by(|a, b| {
+            b.severity
+                .cmp(&a.severity)
+                .then(b.open().cmp(&a.open()))
+                .then(b.last_change.cmp(&a.last_change))
+                .then(a.id.cmp(&b.id))
+        });
+        v
+    }
+
+    /// Whether the incident list is the catalog's or this GUI's fallback.
+    ///
+    /// Rendered, not hidden: an operator reading a triage surface should know
+    /// whether they are looking at the fleet's conclusion or their own
+    /// window's approximation of it.
+    pub fn incidents_are_from_catalog(&self) -> bool {
+        !self.catalog_incidents.is_empty()
+    }
+
+    /// Whether the GUI can write an ack or a silence right now.
+    ///
+    /// The catalog is the only writer of both, so with it absent the buttons
+    /// must be disabled and say why — an ack that silently does nothing is
+    /// worse than one that refuses.
+    pub fn can_write(&self) -> bool {
+        self.catalog_alive.unwrap_or(false)
     }
 
     /// Clear an external alert by its in-GUI key (`<source>/<hash>`). Returns
     /// the removed alert, if any.
     pub fn clear_external(&mut self, key: &str) -> Option<SensorAlert> {
-        self.acknowledged_external.remove(key);
         self.external_origins.remove(key);
         self.external.remove(key)
     }
@@ -343,16 +474,24 @@ impl AlertsState {
         self.clear_external(&key)
     }
 
-    /// The sources currently silenced at `now_ms`, sorted — so the mute can
-    /// be lifted from the UI, one source at a time.
+    /// The sources a live **source-wide** silence currently mutes, sorted —
+    /// so that mute can be lifted from the UI, one source at a time (#925).
+    ///
+    /// Only single-`source` matcher sets appear here, because that is what the
+    /// per-source Mute button opens and what its Unmute can honestly lift. A
+    /// window matching `labels.unit` across a rack is not a "silenced source"
+    /// and rendering it as one would offer an Unmute that lifted far more than
+    /// it named; those live in the silences pane instead.
     pub fn silenced_sources_at(&self, now_ms: i64) -> Vec<String> {
         let mut out: Vec<String> = self
-            .silenced_sources
+            .silences
             .iter()
-            .filter(|(_, e)| **e > now_ms)
-            .map(|(s, _)| s.clone())
+            .filter(|s| now_ms >= s.starts_at && now_ms < s.ends_at)
+            .filter(|s| s.matchers.len() == 1 && s.matchers[0].name == "source")
+            .map(|s| s.matchers[0].value.clone())
             .collect();
         out.sort();
+        out.dedup();
         out
     }
 
@@ -365,8 +504,8 @@ impl AlertsState {
     /// telling this GUI, which is the only alerting there is.
     pub fn unacknowledged_external(&self) -> usize {
         self.external
-            .values()
-            .filter(|a| !self.acknowledged_external.contains(&Self::external_key(a)))
+            .keys()
+            .filter(|k| !self.is_external_acked(k))
             .count()
     }
 
@@ -380,24 +519,52 @@ impl AlertsState {
         v
     }
 
-    /// Has this external alert been acknowledged?
-    pub fn is_external_acked(&self, alert_key: &str) -> bool {
-        self.acknowledged_external.contains(alert_key)
+    /// Has this external alert been acknowledged — **by the projection rule**
+    /// (RFC 06 §5.5), not merely by an ack document existing?
+    ///
+    /// An ack applies only while a firing alert with `timestamp <= fired_at`
+    /// exists. So an orphan left by a dead catalog reads as *not
+    /// acknowledged*, and an alert that cleared and came back is not
+    /// acknowledged either — the operator said "I am on this" about a
+    /// different occurrence. The rule is applied here rather than on ingest so
+    /// this map never has to be pruned in step with the alert feed.
+    pub fn is_external_acked(&self, in_gui_key: &str) -> bool {
+        let Some(alert) = self.external.get(in_gui_key) else {
+            return false;
+        };
+        self.alert_ref_for(in_gui_key)
+            .and_then(|r| self.acks.get(&r))
+            .is_some_and(|ack| ack.applies_to(Some(alert)))
     }
 
-    /// Acknowledge every currently-firing external alert from `source`.
-    pub fn acknowledge_external_source(&mut self, source: &str) {
-        for (key, alert) in &self.external {
-            if alert.source == source {
-                self.acknowledged_external.insert(key.clone());
-            }
-        }
+    /// The ack document for a firing alert, when one applies (for the "acked
+    /// by <who>" chip — the fact a `HashSet` could never carry).
+    pub fn ack_for(&self, in_gui_key: &str) -> Option<&zensight_common::ack::AlertAck> {
+        let alert = self.external.get(in_gui_key)?;
+        let r = self.alert_ref_for(in_gui_key)?;
+        self.acks.get(&r).filter(|a| a.applies_to(Some(alert)))
     }
 
-    /// Acknowledge all currently-firing external alerts.
-    pub fn acknowledge_all_external(&mut self) {
-        self.acknowledged_external
-            .extend(self.external.keys().cloned());
+    /// The refs of every firing alert from `source` — what an "Ack" button on
+    /// an incident sends to `@rpc/@catalog/ack`, one call each (#925).
+    ///
+    /// It returns refs rather than acknowledging anything: since #925 this GUI
+    /// is not the authority. An alert whose origin the GUI never saw is
+    /// **skipped**, not guessed at — see [`AlertsState::alert_ref_for`].
+    pub fn refs_for_source(&self, source: &str) -> Vec<zensight_common::alert::AlertRef> {
+        self.external
+            .iter()
+            .filter(|(_, a)| a.source == source)
+            .filter_map(|(k, _)| self.alert_ref_for(k))
+            .collect()
+    }
+
+    /// The refs of every firing alert.
+    pub fn all_refs(&self) -> Vec<zensight_common::alert::AlertRef> {
+        self.external
+            .keys()
+            .filter_map(|k| self.alert_ref_for(k))
+            .collect()
     }
 
     /// Group currently-firing alerts into unified [`Incident`]s (#129), excluding
@@ -412,10 +579,17 @@ impl AlertsState {
     /// Clock-injected form of [`Self::incidents`] (testable).
     pub fn incidents_at(&self, now_ms: i64) -> Vec<crate::view::incident::Incident> {
         let firing: Vec<&SensorAlert> = self
-            .active_external()
-            .into_iter()
-            .filter(|a| !self.is_silenced(&a.source, now_ms))
+            .external
+            .iter()
+            .filter(|(k, _)| !self.is_silenced_alert(k, now_ms))
+            .map(|(_, a)| a)
             .collect();
+        let mut firing = firing;
+        firing.sort_by(|a, b| {
+            b.severity
+                .cmp(&a.severity)
+                .then(b.timestamp.cmp(&a.timestamp))
+        });
         crate::view::incident::group_incidents(
             &firing,
             |k| self.is_external_acked(k),
@@ -440,8 +614,8 @@ impl AlertsState {
     /// at `now_ms` are excluded (#26). Pure given the clock.
     pub fn external_by_source_at(&self, now_ms: i64) -> Vec<ExternalIncident<'_>> {
         let mut by_source: HashMap<&str, Vec<&SensorAlert>> = HashMap::new();
-        for alert in self.external.values() {
-            if self.is_silenced(&alert.source, now_ms) {
+        for (key, alert) in &self.external {
+            if self.is_silenced_alert(key, now_ms) {
                 continue;
             }
             if !self.passes_external_filters(alert) {
@@ -459,7 +633,7 @@ impl AlertsState {
                 });
                 let unacked = alerts
                     .iter()
-                    .filter(|a| !self.acknowledged_external.contains(&Self::external_key(a)))
+                    .filter(|a| !self.is_external_acked(&Self::external_key(a)))
                     .count();
                 let top_severity = alerts.iter().map(|a| a.severity).max();
                 ExternalIncident {
@@ -567,9 +741,9 @@ impl AlertsState {
     pub fn external_sources(&self, now_ms: i64) -> Vec<&str> {
         let mut sources: Vec<&str> = self
             .external
-            .values()
-            .filter(|a| !self.is_silenced(&a.source, now_ms))
-            .map(|a| a.source.as_str())
+            .iter()
+            .filter(|(k, _)| !self.is_silenced_alert(k, now_ms))
+            .map(|(_, a)| a.source.as_str())
             .collect();
         sources.sort_unstable();
         sources.dedup();
@@ -580,11 +754,8 @@ impl AlertsState {
     pub fn external_count(&self) -> usize {
         let now = now_ms();
         self.external
-            .values()
-            .filter(|a| {
-                !self.acknowledged_external.contains(&Self::external_key(a))
-                    && !self.is_silenced(&a.source, now)
-            })
+            .keys()
+            .filter(|k| !self.is_external_acked(k) && !self.is_silenced_alert(k, now))
             .count()
     }
 }
@@ -1017,13 +1188,20 @@ fn render_incident<'a>(
                 .style(iced::widget::button::secondary),
         );
     }
+    // Both actions are catalog WRITES since #925, so both are disabled when
+    // the catalog is not there to record them — `on_press` omitted, which is
+    // how iced greys a button — with the reason beside them rather than a
+    // control that quietly does nothing.
+    let can_write = state.can_write();
     if incident.unacked > 0 {
-        let ack = button(text("Ack").size(font::CAPTION))
-            .on_press(Message::AcknowledgeExternalSource(
-                incident.source.to_string(),
-            ))
+        let mut ack = button(text("Ack").size(font::CAPTION))
             .padding([space::XS, space::SM])
             .style(iced::widget::button::secondary);
+        if can_write {
+            ack = ack.on_press(Message::AcknowledgeExternalSource(
+                incident.source.to_string(),
+            ));
+        }
         header = header.push(ack);
     }
     for (label, dur) in [
@@ -1031,11 +1209,21 @@ fn render_incident<'a>(
         ("4h", 14_400_000),
         ("24h", 86_400_000),
     ] {
+        let mut b = button(text(label).size(font::CAPTION))
+            .padding([space::XS, space::SM])
+            .style(iced::widget::button::text);
+        if can_write {
+            b = b.on_press(Message::SilenceSource(incident.source.to_string(), dur));
+        }
+        header = header.push(b);
+    }
+    if !can_write {
         header = header.push(
-            button(text(label).size(font::CAPTION))
-                .on_press(Message::SilenceSource(incident.source.to_string(), dur))
-                .padding([space::XS, space::SM])
-                .style(iced::widget::button::text),
+            text("catalog offline — cannot acknowledge or silence")
+                .size(font::CAPTION)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                }),
         );
     }
 
@@ -1045,6 +1233,21 @@ fn render_incident<'a>(
         let acked = state.is_external_acked(&key);
         let focused = state.focused_external.as_deref() == Some(key.as_str());
         col = col.push(render_external_alert_row(alert, acked, focused));
+        // WHO acknowledged it, and what they said — the fact a `HashSet`
+        // could not carry, and the next operator's first question.
+        if let Some(ack) = state.ack_for(&key) {
+            let mut line = format!("acknowledged by {}", ack.by);
+            if !ack.note.is_empty() {
+                line.push_str(&format!(" — {}", ack.note));
+            }
+            col = col.push(
+                text(line)
+                    .size(font::CAPTION)
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                    }),
+            );
+        }
         // Incident timeline strip: firing→resolved transitions (#26).
         let tl = state.timeline(&AlertsState::external_key(alert));
         if tl.len() > 1 {
@@ -1356,23 +1559,105 @@ mod tests {
         assert!(state.clear_external_from("h-dddddddddddd", &hash).is_some());
     }
 
-    /// An ack is of one firing. It must not survive the resolve and greet the
-    /// next firing of the same condition pre-acked.
+    /// Ingest a firing alert with a known origin and hand back its in-GUI key
+    /// and its wire ref — the pair every ack test needs (#925).
+    fn ingest_with_origin(
+        state: &mut AlertsState,
+        origin: &str,
+        alert: SensorAlert,
+    ) -> (String, zensight_common::alert::AlertRef) {
+        let key = AlertsState::external_key(&alert);
+        state.ingest_external_from(Some(origin.to_string()), alert);
+        let r = state
+            .alert_ref_for(&key)
+            .expect("a known origin yields a ref");
+        (key, r)
+    }
+
+    fn ack_doc(
+        r: &zensight_common::alert::AlertRef,
+        fired_at: i64,
+    ) -> zensight_common::ack::AlertAck {
+        zensight_common::ack::AlertAck {
+            alert_ref: r.clone(),
+            fired_at,
+            by: "marc".into(),
+            note: String::new(),
+            at: fired_at,
+        }
+    }
+
+    /// **The projection rule, in the GUI** (#925). An ack is of one
+    /// occurrence: a re-fire must arrive un-acknowledged, and this now falls
+    /// out of `fired_at` rather than out of a `HashSet` the ingest path had to
+    /// remember to prune.
     #[test]
     fn an_ack_does_not_outlive_its_firing() {
         use zensight_common::AlertSeverity;
         let mut state = AlertsState::new();
-        let a = ext_alert("ssh-listening", AlertSeverity::Critical);
-        let key = AlertsState::external_key(&a);
-        state.ingest_external(a.clone());
-        state.acknowledge_external_source("host1");
+        let mut a = ext_alert("ssh-listening", AlertSeverity::Critical);
+        a.timestamp = 1_000;
+        let (key, r) = ingest_with_origin(&mut state, "h-aaaaaaaaaaaa", a.clone());
+        state.ingest_ack(ack_doc(&r, 1_000));
         assert!(state.is_external_acked(&key));
+
+        // Cleared, then fired again — a LATER occurrence.
         state.ingest_external(a.clone().resolved());
-        state.ingest_external(a);
+        let mut again = a;
+        again.timestamp = 2_000;
+        state.ingest_external_from(Some("h-aaaaaaaaaaaa".into()), again);
         assert!(
             !state.is_external_acked(&key),
             "a re-fired alert is a new incident, not a pre-acked one"
         );
+    }
+
+    /// **An orphan is inert.** An ack whose alert is not firing — a catalog
+    /// died holding it — must read as nothing, never as a suppression.
+    #[test]
+    fn an_ack_with_no_firing_alert_applies_to_nothing() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        let mut a = ext_alert("ssh-listening", AlertSeverity::Critical);
+        a.timestamp = 1_000;
+        let (key, r) = ingest_with_origin(&mut state, "h-aaaaaaaaaaaa", a.clone());
+        state.ingest_ack(ack_doc(&r, 1_000));
+        state.ingest_external(a.resolved());
+        assert!(!state.is_external_acked(&key));
+        assert_eq!(state.external_count(), 0);
+    }
+
+    /// An alert whose origin the GUI never saw has no ref, so the GUI declines
+    /// to acknowledge it rather than addressing an ack to a guessed host.
+    #[test]
+    fn an_alert_without_a_known_origin_has_no_ref() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        let a = ext_alert("ssh-listening", AlertSeverity::Critical);
+        let key = AlertsState::external_key(&a);
+        state.ingest_external(a); // no origin
+        assert!(state.alert_ref_for(&key).is_none());
+        assert!(state.refs_for_source("host1").is_empty());
+    }
+
+    fn source_silence(
+        id: &str,
+        source: &str,
+        starts: i64,
+        ends: i64,
+    ) -> zensight_common::silence::Silence {
+        zensight_common::silence::Silence {
+            id: id.into(),
+            matchers: vec![zensight_common::silence::Matcher {
+                name: "source".into(),
+                op: zensight_common::silence::MatchOp::Eq,
+                value: source.into(),
+            }],
+            starts_at: starts,
+            ends_at: ends,
+            by: "marc".into(),
+            note: String::new(),
+        }
     }
 
     #[test]
@@ -1382,27 +1667,75 @@ mod tests {
         state.ingest_external(ext_alert("ssh", AlertSeverity::Critical));
         assert_eq!(state.external_by_source_at(0).len(), 1);
 
-        // Silence host1 for 1h at t=0.
-        state.silence_source("host1", 0, 3_600_000);
-        assert!(state.is_silenced("host1", 1_000));
+        state.ingest_silence(source_silence("s1", "host1", 0, 3_600_000));
         assert_eq!(state.silenced_count(1_000), 1);
-        // Hidden while silenced.
         assert!(state.external_by_source_at(1_000).is_empty());
-        // Expired after the window: visible again, count 0.
-        assert!(!state.is_silenced("host1", 3_600_001));
+
+        // Past `ends_at` it stops applying **without a tombstone** — a
+        // partitioned reader cannot keep an expired suppression alive
+        // (RFC 06 §5.5).
         assert_eq!(state.external_by_source_at(3_600_001).len(), 1);
-        // Prune drops the expired silence.
-        assert_eq!(state.prune_silences(3_600_001), 1);
         assert_eq!(state.silenced_count(3_600_001), 0);
+    }
+
+    /// **The thing a source list could not do.** A matcher set mutes one
+    /// rule across every host, and leaves the rest of those hosts audible.
+    #[test]
+    fn a_label_matcher_mutes_across_hosts_and_spares_the_rest() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        state.ingest_external(ext_alert_from(
+            "hostA",
+            "disk-full",
+            AlertSeverity::Critical,
+        ));
+        state.ingest_external(ext_alert_from(
+            "hostB",
+            "disk-full",
+            AlertSeverity::Critical,
+        ));
+        state.ingest_external(ext_alert_from("hostA", "ssh-down", AlertSeverity::Critical));
+        assert_eq!(state.external_count(), 3);
+
+        state.ingest_silence(zensight_common::silence::Silence {
+            id: "s1".into(),
+            matchers: vec![zensight_common::silence::Matcher {
+                name: "rule".into(),
+                op: zensight_common::silence::MatchOp::Eq,
+                value: "disk-full".into(),
+            }],
+            starts_at: 0,
+            ends_at: i64::MAX,
+            by: "marc".into(),
+            note: String::new(),
+        });
+        assert_eq!(state.silenced_count(1_000), 2, "both disk alerts");
+        // hostA is not silenced as a *source*: its ssh alert still shows.
+        let groups = state.external_by_source_at(1_000);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].source, "hostA");
+        assert_eq!(groups[0].alerts.len(), 1);
     }
 
     #[test]
     fn unsilence_lifts_immediately() {
         let mut state = AlertsState::new();
-        state.silence_source("h", 0, 3_600_000);
-        assert!(state.is_silenced("h", 10));
-        state.unsilence_source("h");
-        assert!(!state.is_silenced("h", 10));
+        state.ingest_silence(source_silence("s1", "h", 0, 3_600_000));
+        assert_eq!(state.silenced_sources_at(10), vec!["h".to_string()]);
+        state.retire_silence("s1");
+        assert!(state.silenced_sources_at(10).is_empty());
+    }
+
+    /// The catalog is the only writer, so with it gone the GUI must not offer
+    /// to write.
+    #[test]
+    fn writes_are_refused_when_the_catalog_is_absent() {
+        let mut state = AlertsState::new();
+        assert!(!state.can_write(), "unknown is not permission");
+        state.catalog_alive = Some(false);
+        assert!(!state.can_write());
+        state.catalog_alive = Some(true);
+        assert!(state.can_write());
     }
 
     fn ext_alert_from(
@@ -1569,9 +1902,18 @@ mod tests {
             )
         };
         let mut state = AlertsState::new();
-        state.ingest_external(mk("hostA", "r1", AlertSeverity::Warning));
-        state.ingest_external(mk("hostA", "r2", AlertSeverity::Critical));
-        state.ingest_external(mk("hostB", "r3", AlertSeverity::Info));
+        for (host, rule, sev) in [
+            ("hostA", "r1", AlertSeverity::Warning),
+            ("hostA", "r2", AlertSeverity::Critical),
+            ("hostB", "r3", AlertSeverity::Info),
+        ] {
+            let origin = if host == "hostA" {
+                "h-aaaaaaaaaaaa"
+            } else {
+                "h-bbbbbbbbbbbb"
+            };
+            state.ingest_external_from(Some(origin.into()), mk(host, rule, sev));
+        }
 
         // Two source groups; hostA (Critical) sorts first with 2 alerts.
         let groups = state.external_by_source();
@@ -1581,15 +1923,34 @@ mod tests {
         assert_eq!(groups[0].unacked, 2);
         assert_eq!(state.external_count(), 3);
 
-        // Acknowledging hostA drops it from the count and below the un-acked hostB.
-        state.acknowledge_external_source("hostA");
+        // Acknowledging hostA drops it from the count and below the un-acked
+        // hostB. Since #925 the GUI does not do this itself: it asks the
+        // catalog, and renders the documents that come back — which is what
+        // `refs_for_source` + `ingest_ack` model here.
+        for r in state.refs_for_source("hostA") {
+            let fired = state
+                .active_external()
+                .iter()
+                .find(|a| a.source == "hostA")
+                .map(|a| a.timestamp)
+                .unwrap_or(0);
+            state.ingest_ack(ack_doc(&r, fired));
+        }
         assert_eq!(state.external_count(), 1);
         let groups = state.external_by_source();
         assert_eq!(groups[0].source, "hostB");
         let host_a = groups.iter().find(|g| g.source == "hostA").unwrap();
         assert_eq!(host_a.unacked, 0);
 
-        state.acknowledge_all_external();
+        for r in state.all_refs() {
+            let fired = state
+                .active_external()
+                .iter()
+                .map(|a| a.timestamp)
+                .max()
+                .unwrap_or(0);
+            state.ingest_ack(ack_doc(&r, fired));
+        }
         assert_eq!(state.external_count(), 0);
     }
 }

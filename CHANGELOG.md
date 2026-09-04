@@ -51,6 +51,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Acknowledgement and silence are a projection of the bus** (#925,
+  epic #900) — **breaking**.
+
+  `acknowledged_external: HashSet<String>` and `silenced_sources:
+  HashMap<String, i64>` are gone. The alerts view subscribes
+  `@catalog/state/{ack,silence,incident}/*` with a late-joiner seed GET, and
+  writes through the gated `@rpc/@catalog/{ack,unack,silence,unsilence}`. The
+  GUI is no longer the authority; it asks, and renders what the catalog
+  publishes back.
+
+  - **The projection rule is applied on read** (`is_external_acked`), never on
+    ingest: an ack applies only while a firing alert with
+    `timestamp <= fired_at` exists. So an orphan from a dead catalog is inert
+    and a re-fire is not acknowledged — properties the old `HashSet` faked
+    with a line in the ingest path that could see a *resolve* but not a
+    *re-fire*.
+  - **Silences match per alert, not per source.** Collapsing a matcher set to
+    "is this source muted" would throw away the thing that made the window
+    worth opening; a new test mutes one rule across two hosts and leaves the
+    rest of both audible, which the old model could not express at all.
+  - **The catalog's absence disables both buttons**, with "catalog offline —
+    cannot acknowledge or silence" beside them. An unknown state counts as
+    absent. A control that silently does nothing is worse than one that
+    refuses, because the operator believes someone is on it.
+  - **An alert whose origin the GUI never saw is skipped, not guessed at.**
+    The `AlertRef` is built from the origin (the key), the producer (the
+    protocol) and the hash — never the payload's `source`, which for a proxy
+    sensor is the polled device (#883). An ack addressed to a guessed origin
+    is an ack for somebody else's alert.
+  - The ack chip names **who** acknowledged it and what they said — the fact a
+    `HashSet` could not carry, and the next operator's first question.
+
+  Incidents prefer the catalog's documents, keyed by **entity**: a host
+  publishing under three origins is one incident there and three in the local
+  fallback. `group_incidents` stays as that fallback, because a GUI with no
+  catalog must still show what is on fire, one join weaker.
+
+  `parse_sensor_liveliness` no longer drops `@catalog/state/alive` on the
+  floor — it yields `CatalogAlive`, which is what the disabled buttons key
+  off. Its test asserted `is_none()`, which was right when nothing could act
+  on the answer; it now pins the distinction instead of the silence.
+
 - **Acknowledging and silencing are operator writes on the bus** (#924,
   epic #900) — `@catalog/@rpc/{ack,unack,silence,unsilence}`.
 

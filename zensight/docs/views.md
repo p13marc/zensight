@@ -138,6 +138,44 @@ from the nav rail.
 **Alerts** (`view/alerts.rs`) — everything the sensors publish: anomalies,
 expectation violations, and the operator's threshold rules (#931).
 
+**Acknowledgement and silence are projections of the bus** (#925). They were
+`acknowledged_external: HashSet<String>` and `silenced_sources: HashMap<String,
+i64>` — an ack that died with the window, invisible to a second GUI, and
+indistinguishable from a new alert to either exporter. The view now subscribes
+`@catalog/state/{ack,silence,incident}/*` (with a late-joiner seed GET) and
+writes through the gated `@rpc/@catalog/{ack,unack,silence,unsilence}`.
+
+Three consequences worth knowing:
+
+- **The projection rule is applied on read**, in `is_external_acked`: an ack
+  applies only while a firing alert with `timestamp <= fired_at` exists
+  (RFC 06 §5.5). So an orphan from a dead catalog is inert, and a re-fire is
+  not acknowledged — the ingest path no longer has to remember to prune, which
+  is what it used to do incompletely (it could see a resolve, not a re-fire).
+- **Silences are matched per alert, not per source.** A `Silence` matches on
+  origin / producer / source / rule / `labels.*`; collapsing that to "is this
+  source muted" would throw away every matcher that made the window worth
+  opening. The per-source Mute button still opens a single-`source` matcher,
+  and only those appear in `silenced_sources_at` — a window matching a rule
+  across a rack is not a "silenced source", and offering an Unmute for it
+  would lift far more than it named.
+- **The catalog is the only writer, so its absence disables both buttons**,
+  with "catalog offline — cannot acknowledge or silence" beside them. An
+  unknown state counts as absent: a GUI that has just started and heard
+  nothing must not offer to write. A control that silently does nothing is
+  worse than one that refuses, because the operator believes someone is on it.
+
+An alert whose publishing origin the GUI never saw has **no `AlertRef`**, so it
+is skipped rather than acknowledged: the ref is built from the origin (the key),
+the producer (the protocol) and the hash — never from the payload's `source`,
+which for a proxy sensor is the polled device (#883). An ack addressed to a
+guessed origin is an ack for somebody else's alert.
+
+Incidents prefer the catalog's documents, which are keyed by **entity** — a
+host publishing under three origins is one incident there and three in the
+local fallback. `group_incidents` stays as that fallback, because a GUI with no
+catalog must still show what is on fire, one join weaker.
+
 There is nothing local here any more (#934). This view used to carry a second
 alerting authority: a rule form, a rule list and an alert history evaluated in
 this process, persisted to one laptop, with a flat 60-second cooldown keyed on

@@ -7619,3 +7619,104 @@ fn the_gui_evaluates_no_thresholds_of_its_own() {
         );
     }
 }
+
+/// Acknowledging and silencing are catalog writes now (#925), so the buttons
+/// must reflect whether there is a catalog to write to.
+mod catalog_projection_ui {
+    use super::simulator;
+    use zensight::message::Message;
+    use zensight::view::alerts::{AlertsState, alerts_view};
+    use zensight_common::{AlertKind, AlertSeverity, Protocol};
+
+    fn firing(state: &mut AlertsState) -> String {
+        let alert = zensight_common::Alert::new(
+            "web01",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "socket:sshd",
+            AlertSeverity::Critical,
+            "sshd is not listening",
+        );
+        let key = AlertsState::external_key(&alert);
+        state.ingest_external_from(Some("h-aaaaaaaaaaaa".into()), alert);
+        key
+    }
+
+    /// With the catalog alive, Ack submits.
+    #[test]
+    fn ack_submits_when_the_catalog_is_alive() {
+        let mut state = AlertsState::new();
+        firing(&mut state);
+        state.catalog_alive = Some(true);
+
+        let mut ui = simulator(alerts_view(&state));
+        let _ = ui.click("Ack");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Message::AcknowledgeExternalSource(s) if s == "web01")),
+            "got {msgs:?}"
+        );
+    }
+
+    /// **Without one, the button is disabled and says why.** A control that
+    /// silently does nothing is worse than one that refuses: the operator
+    /// believes someone is on it.
+    #[test]
+    fn ack_is_disabled_and_explained_when_the_catalog_is_gone() {
+        let mut state = AlertsState::new();
+        firing(&mut state);
+        state.catalog_alive = Some(false);
+
+        let mut ui = simulator(alerts_view(&state));
+        assert!(
+            ui.find("catalog offline — cannot acknowledge or silence")
+                .is_ok(),
+            "the reason must be on screen"
+        );
+        // Clicking a disabled button emits nothing.
+        let _ = ui.click("Ack");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| matches!(m, Message::AcknowledgeExternalSource(_))),
+            "a disabled Ack must not submit, got {msgs:?}"
+        );
+    }
+
+    /// An unknown catalog state is not permission. A GUI that has just started
+    /// and heard nothing must not offer to write.
+    #[test]
+    fn an_unknown_catalog_state_disables_writes() {
+        let mut state = AlertsState::new();
+        firing(&mut state);
+        assert_eq!(state.catalog_alive, None);
+        let mut ui = simulator(alerts_view(&state));
+        assert!(
+            ui.find("catalog offline — cannot acknowledge or silence")
+                .is_ok()
+        );
+    }
+
+    /// The ack chip names **who**, which is the fact the old `HashSet` could
+    /// not carry and the next operator's first question.
+    #[test]
+    fn an_acknowledged_alert_names_who_acknowledged_it() {
+        let mut state = AlertsState::new();
+        let key = firing(&mut state);
+        state.catalog_alive = Some(true);
+        let r = state.alert_ref_for(&key).expect("a known origin");
+        let fired = state.active_external()[0].timestamp;
+        state.ingest_ack(zensight_common::ack::AlertAck {
+            alert_ref: r,
+            fired_at: fired,
+            by: "marc".into(),
+            note: "restarting it".into(),
+            at: fired,
+        });
+
+        let mut ui = simulator(alerts_view(&state));
+        assert!(ui.find("acknowledged by marc — restarting it").is_ok());
+    }
+}
