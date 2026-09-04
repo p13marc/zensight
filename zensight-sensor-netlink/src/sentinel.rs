@@ -10,9 +10,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
-use zensight_common::{Alert, AlertKind, AlertSeverity, ComparisonOp, Protocol};
+use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
 use zensight_sensor_core::AlertReporter;
 
 use nlink::netlink::{Connection, Route, SockDiag};
@@ -20,278 +19,20 @@ use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 
 use crate::collector::MetricCache;
 
-fn default_eval_interval() -> u64 {
-    10
-}
-fn default_for_secs() -> u64 {
-    15
-}
-
-/// Declared expectations for a host.
-///
-/// `Default` is hand-written rather than derived (#932): `main.rs` reaches it
-/// through `expectations.clone().unwrap_or_default()`, and a derived `Default`
-/// gave `eval_interval_secs = 0` and `default_for_secs = 0` — disagreeing with
-/// the serde defaults a *file* gets for the same absent fields. A host with no
-/// `expectations` block silently ran a different sentinel from one with an
-/// empty `{}`. hostspec and systemd hand-wrote theirs to avoid exactly this.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExpectationsConfig {
-    #[serde(default = "default_eval_interval")]
-    pub eval_interval_secs: u64,
-    #[serde(default = "default_for_secs")]
-    pub default_for_secs: u64,
-    /// Set-wide recovery hold (#932): how long every expectation must be
-    /// **continuously clear** before its alert resolves, unless the
-    /// expectation overrides it. `0` — the default — resolves on the first
-    /// clear sweep, which is the behaviour before this field existed.
-    ///
-    /// This is *time* hysteresis. The value hysteresis a numeric rule wants —
-    /// "fire above 90, clear below 80" — is `ThresholdRule::clear` (#928), on
-    /// the threshold rules this sensor also evaluates.
-    #[serde(default)]
-    pub default_recover_after_secs: u64,
-    #[serde(default)]
-    pub sockets: Vec<SocketExpectation>,
-    #[serde(default)]
-    pub links: Vec<LinkExpectation>,
-    #[serde(default)]
-    pub neighbors: Vec<NeighborExpectation>,
-    #[serde(default)]
-    pub routes: Vec<RouteExpectation>,
-    #[serde(default)]
-    pub metrics: Vec<MetricExpectation>,
-    /// Rate-of-change expectations (#113): "metric must not increase by > N/min".
-    #[serde(default)]
-    pub rates: Vec<RateExpectation>,
-    /// Delivery-rate floor expectations (#113): per socket-group throughput floor.
-    #[serde(default)]
-    pub delivery: Vec<DeliveryFloorExpectation>,
-    /// Route-flap expectations (#113): default route changing too often in a window.
-    #[serde(default)]
-    pub route_flaps: Vec<RouteFlapExpectation>,
-    /// Policy-routing rule expectations (#323): forbid non-baseline `ip rule`
-    /// entries (traffic-diversion detection) or require a known rule to exist.
-    #[serde(default)]
-    pub rules: Vec<RuleExpectation>,
-}
-
-impl Default for ExpectationsConfig {
-    fn default() -> Self {
-        ExpectationsConfig {
-            eval_interval_secs: default_eval_interval(),
-            default_for_secs: default_for_secs(),
-            default_recover_after_secs: 0,
-            sockets: Vec::new(),
-            links: Vec::new(),
-            neighbors: Vec::new(),
-            routes: Vec::new(),
-            metrics: Vec::new(),
-            rates: Vec::new(),
-            delivery: Vec::new(),
-            route_flaps: Vec::new(),
-            rules: Vec::new(),
-        }
-    }
-}
-
-impl ExpectationsConfig {
-    pub fn is_empty(&self) -> bool {
-        self.sockets.is_empty()
-            && self.links.is_empty()
-            && self.neighbors.is_empty()
-            && self.routes.is_empty()
-            && self.metrics.is_empty()
-            && self.rates.is_empty()
-            && self.delivery.is_empty()
-            && self.route_flaps.is_empty()
-            && self.rules.is_empty()
-    }
-}
-
-fn default_severity() -> AlertSeverity {
-    AlertSeverity::Warning
-}
-
-/// A socket/connection expectation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SocketExpectation {
-    /// Human label, e.g. "sshd". Forms the rule slug `socket:<name>`.
-    pub name: String,
-    /// Port that must be LISTENing.
-    #[serde(default)]
-    pub listen: Option<u16>,
-    /// `host:port` that must have at least `min` ESTABLISHED connections.
-    #[serde(default)]
-    pub established_to: Option<String>,
-    #[serde(default = "one")]
-    pub min: usize,
-    /// Port that must NOT be listening.
-    #[serde(default)]
-    pub forbid_listen: Option<u16>,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    /// Per-expectation debounce override (seconds).
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
-}
-
-fn one() -> usize {
-    1
-}
-
-/// An interface expectation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LinkExpectation {
-    pub iface: String,
-    /// The interface must be up (default true).
-    #[serde(default = "default_true")]
-    pub up: bool,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// A neighbor (gateway/peer) reachability expectation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NeighborExpectation {
-    /// IP address that must be a reachable neighbor (ARP/NDP).
-    pub ip: String,
-    /// Must be reachable (default true).
-    #[serde(default = "default_true")]
-    pub reachable: bool,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
-}
-
-/// A default-route expectation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteExpectation {
-    /// Label for the rule slug `route:<name>` (e.g. "default").
-    pub name: String,
-    /// A default route must be present.
-    #[serde(default = "default_true")]
-    pub default_present: bool,
-    /// If set, the default route must go via this gateway IP.
-    #[serde(default)]
-    pub default_via: Option<String>,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
-}
-
-/// A generic metric-threshold expectation: "metric `<op>` value should hold".
-///
-/// **Superseded by [`ThresholdRule`] (#931/#932).** This is the same idea in a
-/// worse place: it lives in a sensor crate, so it can never carry a real
-/// schemars schema and can never be a `@desired` document (`zensight-common`
-/// cannot depend on a sensor — the #815 gate refused exactly that); it exists
-/// only for netlink, so an operator has to learn a different vocabulary per
-/// sensor; and it has no value hysteresis, so a metric sitting on the
-/// threshold flaps.
-///
-/// `ThresholdsConfig` has all three, is evaluated on netlink's own publish
-/// path since #931, and is authorable fleet-wide on `@desired`. A rule here:
-///
-/// ```json5
-/// { name: "retrans", metric: "sockets/tcp/retransmits_total",
-///   op: "LessOrEqual", value: 100.0 }
-/// ```
-///
-/// becomes, under `thresholds.rules`, the same rule with the comparison the
-/// right way round (a threshold rule states the FIRING condition, an
-/// expectation states the healthy one) plus a `clear` if you want hysteresis:
-///
-/// ```json5
-/// { name: "retrans", metric: "sockets/tcp/retransmits_total",
-///   op: "GreaterThan", value: 100.0, clear: 80.0 }
-/// ```
-///
-/// Kept working for now; removed one release after 0.13. Nothing else in the
-/// expectation set is deprecated — the other eight kinds assert things about
-/// the *host* that no metric threshold can express.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetricExpectation {
-    /// Label for the rule slug `metric:<name>`.
-    pub name: String,
-    /// Metric path to watch, e.g. `sockets/tcp/retransmits_total`.
-    pub metric: String,
-    /// Comparison operator the metric value must satisfy.
-    pub op: ComparisonOp,
-    /// Right-hand side of the comparison.
-    pub value: f64,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
-}
-
-fn default_delivery_metric() -> String {
-    "sockets/tcp/delivery_rate_p50".to_string()
-}
-
-fn default_flap_metric() -> String {
-    "events/route/removed_total".to_string()
-}
-
-fn default_flap_window() -> u64 {
-    60
-}
-
-/// A rate-of-change expectation (#113): "metric `<name>` must not *increase* by
-/// more than `max_increase_per_min` per minute".
-///
-/// This is the missing primitive: it needs two samples of the metric at known
-/// instants to compute a delta/interval rate. The previous sample is retained in
-/// the [`Evaluator`] (per-rule), *not* in the [`MetricCache`]: the rate is
-/// measured between consecutive sentinel sweeps (the natural evaluation cadence)
-/// and the cache stays a simple latest-value store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RateExpectation {
-    /// Label for the rule slug `rate:<name>`.
-    pub name: String,
-    /// Metric path to watch, e.g. `interfaces/eth0/rx_errors` or
-    /// `sockets/tcp/retransmits_total`.
-    pub metric: String,
-    /// Maximum permitted increase per minute before the rule fires.
-    pub max_increase_per_min: f64,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
-}
+// The expectation vocabulary moved to zensight-common in #849 so it could get
+// a real schemars schema and join `@desired` (RFC 08 §7's gate refuses a
+// summary stub, and this crate can never supply more than one). The checking
+// logic below is unchanged and still owns the observation types.
+//
+// `ExpectationsConfig` is re-exported under its old name inside this module:
+// the sensor's own config file, its `@rpc` handler and its tests all spell it
+// that way, and renaming it here as well as on the wire would put two
+// unrelated changes in one diff.
+pub use zensight_common::netlink::{
+    DeliveryFloorExpectation, LinkExpectation, MetricExpectation, NeighborExpectation,
+    NetlinkExpectations as ExpectationsConfig, RateExpectation, RouteExpectation,
+    RouteFlapExpectation, RuleExpectation, RuleSense, SocketExpectation,
+};
 
 /// A consecutive pair of samples for a rate-of-change check, plus the wall-clock
 /// interval between them. Built by the [`Evaluator`] from its retained previous
@@ -304,97 +45,6 @@ pub struct RateSample {
     pub previous: f64,
     /// Seconds elapsed between the two samples.
     pub interval_secs: f64,
-}
-
-/// A delivery-rate floor expectation (#113): alert when a socket-group's
-/// delivery-rate percentile (from the enriched tcp_info, #108) falls below a
-/// floor. Defaults to the `sockets/tcp/delivery_rate_p50` metric.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeliveryFloorExpectation {
-    /// Label for the rule slug `delivery:<name>`.
-    pub name: String,
-    /// Delivery-rate metric path to watch (default
-    /// `sockets/tcp/delivery_rate_p50`).
-    #[serde(default = "default_delivery_metric")]
-    pub metric: String,
-    /// Minimum delivery rate (bytes/sec) that must hold; fire strictly below it.
-    pub floor: f64,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
-}
-
-/// A route-flap expectation (#113): alert when the default route changes or
-/// withdraws more than `max_flaps` times within `window_secs`. Reads a cumulative
-/// route-event counter (default `events/route/removed_total`) and compares its
-/// increase over a sliding window — the windowing state lives in the
-/// [`Evaluator`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteFlapExpectation {
-    /// Label for the rule slug `route_flap:<name>`.
-    pub name: String,
-    /// Cumulative flap counter to watch (default `events/route/removed_total`).
-    #[serde(default = "default_flap_metric")]
-    pub metric: String,
-    /// Maximum flaps permitted within the window before the rule fires.
-    pub max_flaps: u64,
-    /// Sliding window length in seconds (default 60).
-    #[serde(default = "default_flap_window")]
-    pub window_secs: u64,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
-}
-
-/// Whether a rule expectation forbids or requires its matching rules (#323).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RuleSense {
-    /// Fire when a matching **non-baseline** policy rule exists — the
-    /// traffic-diversion guard ("table main not bypassed"). The kernel's three
-    /// baseline lookup rules (priority 0 / 32766 / 32767) never count.
-    #[default]
-    Forbid,
-    /// Fire when **no** matching policy rule exists — pins an expected rule
-    /// (e.g. a VPN/mark rule that must stay installed).
-    Require,
-}
-
-/// A policy-routing rule expectation (#323): forbid or require an `ip rule`
-/// entry, matched by priority and/or lookup table (an unset field matches any).
-/// An `ip rule add` that diverts traffic through another table re-evaluates this
-/// instantly via the event wake path.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleExpectation {
-    /// Label for the rule slug `rules:<name>` (e.g. "no-diversion").
-    pub name: String,
-    /// Match rules with this priority (`None` = any priority).
-    #[serde(default)]
-    pub priority: Option<u32>,
-    /// Match rules looking up this table id (`None` = any table).
-    #[serde(default)]
-    pub table: Option<u32>,
-    /// Forbid (default) or require the matching rules.
-    #[serde(default)]
-    pub sense: RuleSense,
-    #[serde(default = "default_severity")]
-    pub severity: AlertSeverity,
-    #[serde(default)]
-    pub for_secs: Option<u64>,
-    /// Per-expectation override of
-    /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
-    #[serde(default)]
-    pub recover_after_secs: Option<u64>,
 }
 
 /// One observed policy-routing rule, reduced to the facts the checks match on.
@@ -460,6 +110,54 @@ pub struct SocketObservation {
 // ---- Pure checks ------------------------------------------------------------
 
 /// Evaluate a socket expectation against observed state.
+/// Refuse an expectation set that could not be reported on (#849).
+///
+/// Every expectation's `name` becomes the second half of its alert rule slug
+/// (`sockets:<name>`, `rules:<name>`), which is hashed into the `alert_key`
+/// (RFC 11 §3.1). Two expectations sharing a name within a family therefore
+/// share one alert key: they fire and resolve over each other, and an
+/// operator sees one alert flapping instead of two conditions. An empty name
+/// produces the bare slug `sockets:` — every unnamed expectation in that
+/// family collapsing into one.
+///
+/// Neither is caught anywhere else, and neither is visible in the output: the
+/// set applies, the sweep runs, and the alerts are simply wrong. So the
+/// `@desired` path refuses the whole document, which keeps the previous good
+/// set running and puts the reason on the `applied/<topic>` marker.
+pub fn validate(cfg: &ExpectationsConfig) -> Result<(), String> {
+    fn family<'a>(kind: &str, names: impl Iterator<Item = &'a str>) -> Result<(), String> {
+        let mut seen = HashSet::new();
+        for name in names {
+            if name.trim().is_empty() {
+                return Err(format!("{kind}: an expectation has an empty name"));
+            }
+            if !seen.insert(name) {
+                return Err(format!("{kind}: duplicate expectation name {name:?}"));
+            }
+        }
+        Ok(())
+    }
+    family("sockets", cfg.sockets.iter().map(|e| e.name.as_str()))?;
+    // links and neighbors are keyed by the thing they watch, not by a label:
+    // their rule slugs are `links:<iface>` and `neighbors:<ip>`. Same
+    // collision, different field.
+    family("links", cfg.links.iter().map(|e| e.iface.as_str()))?;
+    family("neighbors", cfg.neighbors.iter().map(|e| e.ip.as_str()))?;
+    family("routes", cfg.routes.iter().map(|e| e.name.as_str()))?;
+    family("metrics", cfg.metrics.iter().map(|e| e.name.as_str()))?;
+    family("rates", cfg.rates.iter().map(|e| e.name.as_str()))?;
+    family("delivery", cfg.delivery.iter().map(|e| e.name.as_str()))?;
+    family(
+        "route_flaps",
+        cfg.route_flaps.iter().map(|e| e.name.as_str()),
+    )?;
+    family("rules", cfg.rules.iter().map(|e| e.name.as_str()))?;
+    if cfg.eval_interval_secs == 0 {
+        return Err("eval_interval_secs must be > 0 — a zero interval is a spin".to_string());
+    }
+    Ok(())
+}
+
 pub fn check_socket(exp: &SocketExpectation, obs: &SocketObservation) -> Vec<Violation> {
     let mut v = Vec::new();
     if let Some(port) = exp.listen
@@ -1434,6 +1132,7 @@ async fn observe_routes(conn: &Connection<Route>) -> nlink::netlink::Result<Rout
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zensight_common::ComparisonOp;
 
     fn obs_with(listening: &[u16], established: &[&str]) -> SocketObservation {
         SocketObservation {
@@ -1862,5 +1561,98 @@ mod tests {
         // `rules:` removal must not disturb `route:`/`route_flap:` slugs.
         handle.remove("route:default").await;
         assert_eq!(handle.snapshot().await.rules.len(), 1);
+    }
+    fn socket_exp() -> SocketExpectation {
+        SocketExpectation {
+            name: String::new(),
+            listen: Some(22),
+            established_to: None,
+            min: 1,
+            forbid_listen: None,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+            recover_after_secs: None,
+        }
+    }
+
+    fn route_exp() -> RouteExpectation {
+        RouteExpectation {
+            name: String::new(),
+            default_present: true,
+            default_via: None,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+            recover_after_secs: None,
+        }
+    }
+
+    /// Two expectations sharing a name within a family share one `alert_key`
+    /// (RFC 11 §3.1 hashes the rule slug), so they fire and resolve over each
+    /// other and an operator sees one alert flapping instead of two
+    /// conditions. Nothing else catches it and nothing in the output shows it
+    /// (#849).
+    #[test]
+    fn validate_refuses_a_name_collision_within_a_family() {
+        let cfg = ExpectationsConfig {
+            sockets: vec![
+                SocketExpectation {
+                    name: "ssh".into(),
+                    ..socket_exp()
+                },
+                SocketExpectation {
+                    name: "ssh".into(),
+                    ..socket_exp()
+                },
+            ],
+            ..Default::default()
+        };
+        let err = validate(&cfg).expect_err("two `sockets:ssh` are one alert key");
+        assert!(err.contains("sockets") && err.contains("ssh"), "{err}");
+    }
+
+    /// An empty name yields the bare slug `sockets:` — every unnamed
+    /// expectation in that family collapsing into one.
+    #[test]
+    fn validate_refuses_an_empty_name() {
+        let cfg = ExpectationsConfig {
+            sockets: vec![SocketExpectation {
+                name: "   ".into(),
+                ..socket_exp()
+            }],
+            ..Default::default()
+        };
+        assert!(validate(&cfg).unwrap_err().contains("empty name"));
+    }
+
+    /// The same name in *different* families is two different slugs and is
+    /// fine — the check must not be fleet-wide-unique.
+    #[test]
+    fn validate_allows_one_name_across_two_families() {
+        let cfg = ExpectationsConfig {
+            sockets: vec![SocketExpectation {
+                name: "gw".into(),
+                ..socket_exp()
+            }],
+            routes: vec![RouteExpectation {
+                name: "gw".into(),
+                ..route_exp()
+            }],
+            ..Default::default()
+        };
+        assert!(validate(&cfg).is_ok(), "sockets:gw and routes:gw differ");
+    }
+
+    #[test]
+    fn validate_refuses_a_zero_eval_interval() {
+        let cfg = ExpectationsConfig {
+            eval_interval_secs: 0,
+            ..Default::default()
+        };
+        assert!(validate(&cfg).unwrap_err().contains("spin"));
+    }
+
+    #[test]
+    fn validate_accepts_the_default_set() {
+        assert!(validate(&ExpectationsConfig::default()).is_ok());
     }
 }

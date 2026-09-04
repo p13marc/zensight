@@ -29,142 +29,23 @@ use zensight_common::alert::{Alert, AlertKind, AlertSeverity};
 use zensight_common::telemetry::Protocol;
 use zensight_sensor_core::AlertReporter;
 
-use crate::parser::SyslogMessage;
+// The rule vocabulary moved to zensight-common in #849, for the schema gate
+// and `@desired` (RFC 08 §7). Compilation and matching stay here — a rule's
+// `regex` is a string on the wire and a compiled `Regex` in `CompiledRule`.
+//
+// Re-exported under their old paths: the sensor's config file, its `@rpc`
+// handler and its tests all spell them `sentinel::LogRule`, and moving the
+// definition should not move every use of it in the same diff.
+#[allow(unused_imports)]
+pub use zensight_common::logs::{LogMatch, LogRule, LogRulesConfig, RateLimit, Threshold};
 
-fn default_eval_interval() -> u64 {
-    10
-}
-fn default_for_secs() -> u64 {
-    300
-}
+/// Message-summary truncation width. Stays here: it bounds the alert text
+/// this sentinel formats, and is not a serde default for anything on the wire.
 fn default_summary_max() -> usize {
     160
 }
 
-/// The full sentinel ruleset — seeded from config, hot-swapped at runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogRulesConfig {
-    /// How often (seconds) expired alerts are reconciled / windows pruned.
-    #[serde(default = "default_eval_interval")]
-    pub eval_interval_secs: u64,
-    /// Include the shipped built-in known-event rules (coredump/OOM/unit-failed).
-    /// On by default so upgrading keeps the known-events working unchanged.
-    #[serde(default = "crate::config::default_true")]
-    pub include_builtins: bool,
-    /// Include the built-in **kernel pattern** rules (#824): EXT4-fs error,
-    /// md/RAID disk failure, block-device I/O error — the handful of lines
-    /// that mean a machine is dying. **Off by default** (the quiet-alerts
-    /// stance: silence unless asked), and pattern-based, so unlike
-    /// `include_builtins` they work on any source, not just journald.
-    #[serde(default)]
-    pub include_kernel_builtins: bool,
-    /// Operator-declared rules.
-    #[serde(default)]
-    pub rules: Vec<LogRule>,
-}
-
-impl Default for LogRulesConfig {
-    fn default() -> Self {
-        Self {
-            eval_interval_secs: default_eval_interval(),
-            include_builtins: true,
-            include_kernel_builtins: false,
-            rules: Vec::new(),
-        }
-    }
-}
-
-/// One declarative rule: match criteria → an alert.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogRule {
-    /// Stable id — the alert `rule` namespace and the hit-counter key. Must be
-    /// unique; later duplicates are dropped at compile with a warning.
-    pub id: String,
-    /// Human description (optional; surfaced in the read RPC).
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Match criteria (all present fields must hold — AND).
-    #[serde(default, rename = "match")]
-    pub matcher: LogMatch,
-    /// Optional `count >= N within window` threshold to avoid single-line noise.
-    #[serde(default)]
-    pub threshold: Option<Threshold>,
-    /// Alert severity when the rule fires.
-    #[serde(default)]
-    pub severity: AlertSeverity,
-    /// Summary template. `{message}`, `{unit}`, `{app}`, `{host}`, `{count}`,
-    /// `{severity}` and regex capture groups `{1}`..`{9}` / `{name}` are
-    /// substituted. Defaults to `"<id>: <truncated message>"`.
-    #[serde(default)]
-    pub summary: Option<String>,
-    /// Journald / structured-data fields to lift into the alert labels (e.g.
-    /// `coredump_exe`), on top of the always-included `unit`/`app`.
-    #[serde(default)]
-    pub labels_from: Vec<String>,
-    /// Auto-resolve TTL: the alert clears this long after its last match
-    /// (the "quiet period"). Defaults to 300s.
-    ///
-    /// **This is already the recovery window** (#932), which is why this
-    /// sensor gained no `recover_after_secs` while netlink, hostspec and
-    /// systemd did. A log rule has no "currently violated" state to debounce —
-    /// a line either matched or it did not — so `for_secs` here means "must
-    /// stay quiet this long", implemented in this module's own `active` map
-    /// with an expiry sweep, and `observe` is called with `Some(Duration::ZERO)`
-    /// precisely because the reporter's debounce is meaningless for it.
-    ///
-    /// A second hold stacked on top would be two timers meaning the same
-    /// thing, with the alert clearing after the sum of them.
-    #[serde(default = "default_for_secs")]
-    pub for_secs: u64,
-    /// Cap on *fires* per window (#824): at most `max_fires` alert
-    /// publications within `per_secs`, further fires suppressed (and counted)
-    /// until the window frees. Distinct from `threshold`, which delays the
-    /// first fire; this bounds how often a flapping rule can page. `None` =
-    /// no cap.
-    #[serde(default)]
-    pub rate_limit: Option<RateLimit>,
-}
-
-/// A `max_fires per per_secs` cap on alert publications for one rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RateLimit {
-    pub max_fires: u64,
-    pub per_secs: u64,
-}
-
-/// Match criteria for a [`LogRule`]. An empty matcher matches everything.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LogMatch {
-    /// Regex tested against the message text (unanchored).
-    #[serde(default)]
-    pub pattern: Option<String>,
-    /// Match lines at least this severe: syslog severity number `<=` this
-    /// (0=emerg … 7=debug, lower is worse). `Some(4)` = warning-and-worse.
-    #[serde(default)]
-    pub min_severity: Option<u8>,
-    /// Exact facility slug (e.g. `auth`).
-    #[serde(default)]
-    pub facility: Option<String>,
-    /// Exact `_SYSTEMD_UNIT` (journald `unit` structured field).
-    #[serde(default)]
-    pub unit: Option<String>,
-    /// Exact app / program name (syslog tag).
-    #[serde(default)]
-    pub app: Option<String>,
-    /// Exact mined `template_id` (requires templating on).
-    #[serde(default)]
-    pub template_id: Option<String>,
-    /// Exact journald `MESSAGE_ID` (32-char hex, case-insensitive).
-    #[serde(default)]
-    pub message_id: Option<String>,
-}
-
-/// A `count >= N within window` threshold.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Threshold {
-    pub count: u64,
-    pub within_secs: u64,
-}
+use crate::parser::SyslogMessage;
 
 // ---- compiled form -------------------------------------------------------
 
@@ -237,6 +118,48 @@ fn journald_field(msg: &SyslogMessage, field: &str) -> Option<String> {
 struct Compiled {
     eval_interval: Duration,
     rules: Vec<CompiledRule>,
+}
+
+/// Refuse a ruleset that would not apply whole (#849).
+///
+/// [`compile`] drops a rule whose regex does not compile, with a warning, and
+/// carries on. That is right for a *file* the operator is watching the log of,
+/// and wrong for a `@desired` document: the reconciler's contract is that an
+/// invalid document is refused loudly, the previous good ruleset keeps
+/// running, and the refusal rides the `applied/<topic>` marker where a fleet
+/// tool can see it. A ruleset that quietly lost three of its ten rules looks
+/// applied and is not — the operator believes those patterns are watched.
+///
+/// So the `@desired` path validates first and applies nothing on failure. The
+/// file and `@rpc` paths keep `compile`'s skip-and-warn, because they have a
+/// human in the loop who can read the warning.
+pub fn validate(cfg: &LogRulesConfig) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for rule in &cfg.rules {
+        if rule.id.trim().is_empty() {
+            return Err("a rule has an empty id".to_string());
+        }
+        if !seen.insert(rule.id.as_str()) {
+            return Err(format!("duplicate rule id {:?}", rule.id));
+        }
+        if let Some(p) = &rule.matcher.pattern
+            && let Err(e) = Regex::new(p)
+        {
+            return Err(format!("rule {:?}: bad regex: {e}", rule.id));
+        }
+        if let Some(t) = &rule.threshold {
+            if t.count == 0 {
+                return Err(format!("rule {:?}: threshold count must be > 0", rule.id));
+            }
+            if t.within_secs == 0 {
+                return Err(format!(
+                    "rule {:?}: threshold window must be > 0 seconds",
+                    rule.id
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Compile a config into the active ruleset: user rules override built-ins by
@@ -866,7 +789,7 @@ mod tests {
             severity: AlertSeverity::Warning,
             summary: None,
             labels_from: vec![],
-            for_secs: default_for_secs(),
+            for_secs: zensight_common::logs::default_for_secs(),
             rate_limit: None,
         }
     }
@@ -1265,5 +1188,93 @@ mod tests {
                 .evaluate(&msg(lines[0]), Instant::now())
                 .is_empty()
         );
+    }
+    /// The `@desired` path refuses a ruleset whole; the file path skips and
+    /// warns. The difference is deliberate (#849) — a fleet push has nobody
+    /// reading the warning.
+    #[test]
+    fn validate_refuses_what_compile_would_silently_drop() {
+        let bad = LogRulesConfig {
+            rules: vec![rule(
+                "unclosed",
+                LogMatch {
+                    pattern: Some("oops(".to_string()),
+                    ..Default::default()
+                },
+                None,
+            )],
+            ..Default::default()
+        };
+        let err = validate(&bad).expect_err("an uncompilable regex is not a ruleset");
+        assert!(err.contains("unclosed"), "the error names the rule: {err}");
+
+        // And this is exactly what `compile` does instead: keeps going with
+        // one fewer rule than the operator wrote.
+        let compiled = compile(&bad);
+        assert!(
+            compiled.rules.iter().all(|r| r.rule.id != "unclosed"),
+            "compile drops it rather than refusing"
+        );
+    }
+
+    #[test]
+    fn validate_refuses_duplicate_and_empty_ids() {
+        let dup = LogRulesConfig {
+            rules: vec![
+                rule("same", LogMatch::default(), None),
+                rule("same", LogMatch::default(), None),
+            ],
+            ..Default::default()
+        };
+        assert!(validate(&dup).unwrap_err().contains("duplicate"));
+
+        let empty = LogRulesConfig {
+            rules: vec![rule("  ", LogMatch::default(), None)],
+            ..Default::default()
+        };
+        assert!(validate(&empty).unwrap_err().contains("empty id"));
+    }
+
+    /// A `count >= 0 within 0s` threshold is not a threshold — it fires on the
+    /// first line, forever, which is the opposite of what the field is for.
+    #[test]
+    fn validate_refuses_a_vacuous_threshold() {
+        for t in [
+            Threshold {
+                count: 0,
+                within_secs: 60,
+            },
+            Threshold {
+                count: 5,
+                within_secs: 0,
+            },
+        ] {
+            let cfg = LogRulesConfig {
+                rules: vec![rule("r", LogMatch::default(), Some(t))],
+                ..Default::default()
+            };
+            assert!(validate(&cfg).is_err());
+        }
+    }
+
+    /// A well-formed ruleset passes, or the guard above is a guard against
+    /// everything.
+    #[test]
+    fn validate_accepts_a_good_ruleset() {
+        let cfg = LogRulesConfig {
+            rules: vec![rule(
+                "disk-errors",
+                LogMatch {
+                    pattern: Some("I/O error".to_string()),
+                    ..Default::default()
+                },
+                Some(Threshold {
+                    count: 3,
+                    within_secs: 60,
+                }),
+            )],
+            ..Default::default()
+        };
+        assert!(validate(&cfg).is_ok());
     }
 }

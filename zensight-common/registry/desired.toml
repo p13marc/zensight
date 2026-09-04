@@ -22,7 +22,7 @@
 # file-config baseline).
 
 [registry]
-version = "1.3"
+version = "1.4"
 app = "zensight"
 convention = 1
 
@@ -37,9 +37,17 @@ description = "fleet desired-state author (#816): per-host runtime policy, targe
 # a sensor, so `describe` could only carry a summary stub. #815's gate refused
 # exactly that, correctly.
 #
-# hostspec (#816) and systemd (#849) migrated their `expectations` sets.
-# netlink's and logs' sets still live in their sensor crates and are the
-# remainder there.
+# hostspec (#816), systemd, netlink and logs (#849) have all migrated their
+# sentinel vocabularies to `zensight-common`. That was the whole of #849, and
+# with it every sentinel in the tree is fleet-authorable.
+#
+# netlink's set is registered as `NetlinkExpectations` rather than
+# `ExpectationsConfig`: the type table is flat and systemd's set holds that
+# name. Nothing breaks — netlink's shipped `@rpc/netlink/expectations/set`
+# declares `ExpectationCommand`, a tagged enum of incremental operations that
+# is a genuinely different shape, and keeps it. `LogRulesConfig` keeps its
+# name; it only stops being a summary stub and becomes a real schema, which is
+# what #815's gate requires before a type may carry a state-class subject.
 #
 # `thresholds` (#931) needed no migration: `ThresholdsConfig` was written in
 # `zensight-common` from the start (#928) and is schema-registered, so every
@@ -70,6 +78,32 @@ cardinality = 10000
 ttl_s = 0
 since = "1.1"
 description = "desired systemd unit-expectation set for {host} (#277 — services/targets active, timer freshness and success, restart rates, forbid-failed)"
+
+# netlink's expectation set (#113, #323, #849). The type name is
+# `NetlinkExpectations` because the flat type table already holds
+# `ExpectationsConfig` for systemd's; the wire payload is netlink's own plain
+# set, the same one `expectations/set` applies after unwrapping its command
+# envelope.
+[[subject]]
+path = "{host}/netlink/expectations"
+class = "state"
+type = "NetlinkExpectations"
+cardinality = 10000
+ttl_s = 0
+since = "1.4"
+description = "desired netlink expectation set for {host} (#113, #323 — sockets, links, neighbours, routes, rates, delivery floors, route flaps, policy rules)"
+
+# logs' sentinel ruleset (#543, #849). Same type name `@rpc/logs/rules/set` has
+# advertised since 2.2 — the bytes do not change, only the schema behind the
+# name becomes real.
+[[subject]]
+path = "{host}/logs/rules"
+class = "state"
+type = "LogRulesConfig"
+cardinality = 10000
+ttl_s = 0
+since = "1.4"
+description = "desired log sentinel ruleset for {host} (#543 — pattern→alert rules with windowed thresholds and rate limits)"
 
 [[subject]]
 path = "{host}/sysinfo/thresholds"

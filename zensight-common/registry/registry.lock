@@ -241,9 +241,11 @@ subject	desired	{host}/container/thresholds	state	ThresholdsConfig
 subject	desired	{host}/gnmi/thresholds	state	ThresholdsConfig
 subject	desired	{host}/hostspec/expectations	state	HostspecExpectations
 subject	desired	{host}/hostspec/thresholds	state	ThresholdsConfig
+subject	desired	{host}/logs/rules	state	LogRulesConfig
 subject	desired	{host}/logs/thresholds	state	ThresholdsConfig
 subject	desired	{host}/modbus/thresholds	state	ThresholdsConfig
 subject	desired	{host}/netflow/thresholds	state	ThresholdsConfig
+subject	desired	{host}/netlink/expectations	state	NetlinkExpectations
 subject	desired	{host}/netlink/thresholds	state	ThresholdsConfig
 subject	desired	{host}/netring/thresholds	state	ThresholdsConfig
 subject	desired	{host}/parallax/thresholds	state	ThresholdsConfig

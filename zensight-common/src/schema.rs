@@ -120,11 +120,36 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::hostspec::ExpectationsConfig>("HostspecExpectations")
         // systemd's, for the same reason (#849). The registry name stays
         // `ExpectationsConfig` — the name a shipped `@rpc/systemd/expectations/set`
-        // already advertises — because nothing collides with it: netlink's
-        // set procedure takes `ExpectationCommand` and logs' takes
+        // already advertises — because nothing collides with it on the wire:
+        // netlink's set procedure takes `ExpectationCommand` and logs' takes
         // `LogRulesConfig`, so renaming would break a shipped path for a
-        // payload whose bytes do not change.
+        // payload whose bytes do not change. It does mean systemd holds this
+        // name in the table, which is why netlink's own set is registered
+        // below as `NetlinkExpectations`.
         .json::<crate::systemd::ExpectationsConfig>("ExpectationsConfig")
+        // netlink's and logs' sets complete #849. netlink's takes the
+        // producer-prefixed name it could not have before: the type table is a
+        // flat namespace, systemd's set already holds `ExpectationsConfig` on
+        // a shipped path, and two shapes cannot share one entry. That rename
+        // is a breaking registry change on `@rpc/netlink/expectations/set`,
+        // handled by retire-and-sibling per RFC 08 §3.
+        // netlink's and logs' sets complete #849 — the last two sentinel
+        // vocabularies still defined inside a sensor crate.
+        //
+        // `LogRulesConfig` keeps its registry name: `@rpc/logs/rules/set` has
+        // advertised it since 2.2, the bytes do not change, and it merely
+        // stops being a summary stub and becomes a real schema — which is what
+        // #815's gate needs before the type may carry a state-class `@desired`
+        // subject.
+        //
+        // netlink's takes a NEW name, `NetlinkExpectations`, because the type
+        // table is a flat namespace and systemd's set already holds
+        // `ExpectationsConfig`. Nothing breaks: netlink's shipped
+        // `@rpc/netlink/expectations/set` declares `ExpectationCommand` — a
+        // tagged enum of incremental operations, a genuinely different shape —
+        // and keeps it. The new name names a type the registry did not have.
+        .json::<crate::netlink::NetlinkExpectations>("NetlinkExpectations")
+        .json::<crate::logs::LogRulesConfig>("LogRulesConfig")
         .json::<crate::desired::AppliedConfig>("AppliedConfig")
         .json::<crate::hostspec::HostspecEvaluation>("HostspecEvaluation")
         // pve's state documents (#818). Real schemas, not summaries: these are
@@ -170,7 +195,6 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .entry("CaptureDiskCommand", summary("netring capture-to-disk command — defined in zensight-sensor-netring::command"))
         .entry("CaptureDiskStatus", summary("netring capture-to-disk status — defined in zensight-sensor-netring::command"))
         .entry("ExpectationCommand", summary("netlink sentinel expectation command — defined in zensight-sensor-netlink::command"))
-        .entry("LogRulesConfig", summary("log sentinel ruleset (pattern→alert rules) — defined in zensight-sensor-logs::sentinel"))
         .entry("RulesStatus", summary("log sentinel ruleset + per-rule hit counters — defined in zensight-sensor-logs::sentinel"))
         .entry("Vec<EventRecord>", summary("event ring records — defined in zensight-sensor-{netlink,systemd}::events"))
         .entry("Vec<AddressRecord>", summary("netlink address records — defined in zensight-sensor-netlink"))

@@ -263,12 +263,20 @@ subscription as the accelerator. A `Delete` reverts the target to its
 file-config baseline. This is convergence; durable pub/sub *commands* are
 the permanently forbidden alternative (RFC 12).
 
-What it carries: the hostspec assertion set (`HostspecExpectations`, #816),
-the systemd unit-expectation set (`ExpectationsConfig`, #849), and a
-`thresholds` set per producer (`ThresholdsConfig`, #931) — all real schemars
+What it carries: **every sentinel vocabulary in the tree, and a threshold set
+per producer** — the hostspec assertion set (`HostspecExpectations`, #816), the
+systemd unit-expectation set (`ExpectationsConfig`), the netlink expectation set
+(`NetlinkExpectations`) and the log sentinel ruleset (`LogRulesConfig`) (#849),
+plus `thresholds` per producer (`ThresholdsConfig`, #931) — all real schemars
 types, which is what the RFC 08 §7 schema gate requires of a state-class
 payload and what a sensor-crate type can never be (zensight-common cannot
 depend on a sensor, so `describe` could only carry a stub).
+
+netlink's registry name is `NetlinkExpectations` rather than
+`ExpectationsConfig`: the type table is a flat namespace and systemd's set
+holds that name on a shipped path. Nothing broke — netlink's
+`@rpc/netlink/expectations/set` declares `ExpectationCommand`, a tagged enum of
+incremental operations that is a genuinely different shape, and keeps it.
 
 The two *expectation* topics joined one sensor at a time, as each set's type
 migrated into zensight-common; the netlink and logs sentinels still hold
