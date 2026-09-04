@@ -398,11 +398,26 @@ async fn a_burst_measures_jitter_and_publishes_no_rtt_when_everything_is_lost() 
             }
         }
     });
-    // A port nothing listens on: bind, read the address, drop the listener.
-    let dead = {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        l.local_addr().unwrap()
-    };
+    // A port nothing listens on — chosen from **below** the ephemeral range
+    // (#1004).
+    //
+    // The obvious way to get one is to bind `:0`, read the address and drop
+    // the listener. That hands the port straight back to the kernel's
+    // ephemeral allocator, and then asserts nothing else takes it. Under a
+    // full `cargo test --workspace` — many crates' Zenoh peers and listeners
+    // starting at once, every outgoing connection drawing from the same range
+    // — something does, the probe connects, and this test fails with
+    // `left: 1, right: 0` in a crate the offending PR never touched. That is
+    // the worst kind of flake: it reddens unrelated work and trains people to
+    // re-run CI without reading it.
+    //
+    // `ip_local_port_range` starts at 32768 on the runner, so a port below it
+    // cannot be handed out. Scan rather than assume: if the whole window is
+    // occupied the test says so, instead of reporting a probe bug.
+    let dead: std::net::SocketAddr = (20_000..20_100)
+        .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)))
+        .find(|addr| std::net::TcpStream::connect_timeout(addr, Duration::from_millis(50)).is_err())
+        .expect("a closed loopback port below the ephemeral range (20000-20099 all answered)");
 
     let mut cfg: ProbeConfig = serde_json::from_str("{}").expect("defaults");
     cfg.interval_secs = 30;
