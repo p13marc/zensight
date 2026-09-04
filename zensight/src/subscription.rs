@@ -225,6 +225,37 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 tracing::warn!("Failed to create entity subscriber (host entities)");
             }
 
+            // Ack / silence subscribers (#925): the catalog's record of who is
+            // on what, and what is deliberately quiet. Same shape as the
+            // entity subscriber — one verbatim service origin, a plain
+            // unbounded subscriber, puts are documents and deletes are
+            // tombstones. These are what turn the GUI's ack from a HashSet
+            // insert into a projection of a fact the whole fleet can see.
+            let ack_sub = session
+                .declare_subscriber(&zensight_common::keyexpr::all_acks_wildcard())
+                .with(flume::unbounded())
+                .await
+                .ok();
+            if ack_sub.is_none() {
+                tracing::warn!("Failed to create ack subscriber");
+            }
+            let silence_sub = session
+                .declare_subscriber(&zensight_common::keyexpr::all_silences_wildcard())
+                .with(flume::unbounded())
+                .await
+                .ok();
+            if silence_sub.is_none() {
+                tracing::warn!("Failed to create silence subscriber");
+            }
+            let incident_sub = session
+                .declare_subscriber(&zensight_common::keyexpr::all_incidents_wildcard())
+                .with(flume::unbounded())
+                .await
+                .ok();
+            if incident_sub.is_none() {
+                tracing::warn!("Failed to create incident subscriber");
+            }
+
             // Edge subscriber (#919): the catalog's resolved topology graph on
             // `zensight/v1/@catalog/state/edge/*`. Same shape as the entity
             // subscriber for the same reason — one verbatim service origin, a
@@ -330,6 +361,53 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
                 if !seeded.is_empty() {
                     yield Message::EntitySeed(seeded);
+                }
+            }
+
+            // Late-joiner ack / silence / incident seed (#925). Without it a
+            // GUI opened mid-session shows every acknowledged alert as
+            // unacknowledged until the catalog next re-emits — which the
+            // change gate makes deliberately rare. An operator who joins a
+            // running incident must see that someone is already on it.
+            for (key, kind) in [
+                (zensight_common::keyexpr::all_acks_wildcard(), "ack"),
+                (zensight_common::keyexpr::all_silences_wildcard(), "silence"),
+                (zensight_common::keyexpr::all_incidents_wildcard(), "incident"),
+            ] {
+                if let Ok(replies) = session
+                    .get(&key)
+                    .target(zenoh::query::QueryTarget::All)
+                    .timeout(seed_timeout)
+                    .await
+                {
+                    while let Ok(reply) = replies.recv_async().await {
+                        let Ok(sample) = reply.result() else { continue };
+                        let payload = sample.payload().to_bytes();
+                        match kind {
+                            "ack" => {
+                                if let Ok(a) = decode_auto::<zensight_common::ack::AlertAck>(
+                                    &payload,
+                                ) {
+                                    yield Message::AckReceived(Box::new(a));
+                                }
+                            }
+                            "silence" => {
+                                if let Ok(x) = decode_auto::<zensight_common::silence::Silence>(
+                                    &payload,
+                                ) {
+                                    yield Message::SilenceReceived(Box::new(x));
+                                }
+                            }
+                            _ => {
+                                if let Ok(i) = decode_auto::<
+                                    zensight_common::incident::Incident,
+                                >(&payload)
+                                {
+                                    yield Message::IncidentReceived(Box::new(i));
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -583,6 +661,75 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         }
                     }
 
+                    // Ack / silence / incident planes (#925). All three take
+                    // the same shape as the entity plane above: a Delete is a
+                    // tombstone, a Put is a document.
+                    result = async {
+                        match &ack_sub {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let key = sample.key_expr().as_str();
+                            // The ref is the last key chunk; a tombstone has
+                            // no payload, so the key is all it has.
+                            if let Some(r) = key
+                                .rsplit('/')
+                                .next()
+                                .and_then(|c| zensight_common::alert::AlertRef::parse(c).ok())
+                            {
+                                if sample.kind() == SampleKind::Delete {
+                                    yield Message::AckRetired(r);
+                                } else if let Ok(ack) = decode_auto::<
+                                    zensight_common::ack::AlertAck,
+                                >(&sample.payload().to_bytes()) {
+                                    yield Message::AckReceived(Box::new(ack));
+                                }
+                            }
+                        }
+                    }
+
+                    result = async {
+                        match &silence_sub {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let key = sample.key_expr().as_str();
+                            if let Some(id) = key.rsplit('/').next().filter(|i| !i.is_empty()) {
+                                if sample.kind() == SampleKind::Delete {
+                                    yield Message::SilenceRetired(id.to_string());
+                                } else if let Ok(sil) = decode_auto::<
+                                    zensight_common::silence::Silence,
+                                >(&sample.payload().to_bytes()) {
+                                    yield Message::SilenceReceived(Box::new(sil));
+                                }
+                            }
+                        }
+                    }
+
+                    result = async {
+                        match &incident_sub {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let key = sample.key_expr().as_str();
+                            if let Some(id) = key.rsplit('/').next().filter(|i| !i.is_empty()) {
+                                if sample.kind() == SampleKind::Delete {
+                                    yield Message::IncidentRetired(id.to_string());
+                                } else if let Ok(inc) = decode_auto::<
+                                    zensight_common::incident::Incident,
+                                >(&sample.payload().to_bytes()) {
+                                    yield Message::IncidentReceived(Box::new(inc));
+                                }
+                            }
+                        }
+                    }
+
                     // Entity plane (#306): host-entity docs. Delete = tombstone
                     // → EntityRemoved; Put = HostEntity doc → EntityReceived.
                     result = async {
@@ -652,8 +799,22 @@ fn push_sorted(msg: Message, telemetry: &mut Vec<Reading>, others: &mut Vec<Mess
 /// it as a subject chunk on purpose (RFC 03 §3) — so this stays structural.
 fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     let parsed = parse_key(key)?;
-    // `@catalog/state/alive` is a service token, not a sensor.
+    // `@catalog/state/alive` is a SERVICE token, not a sensor — but the GUI
+    // does care about it since #925: the catalog is the only writer of acks
+    // and silences, so its absence is what disables those buttons and puts a
+    // reason on them. This used to fall through to `None` and the GUI simply
+    // did not know.
     let Origin::Host(_) = parsed.origin else {
+        if matches!(&parsed.origin, Origin::Service(svc) if svc.as_str() == "@catalog")
+            && parsed.subject == ["alive"]
+        {
+            if is_alive {
+                tracing::info!("catalog came online");
+            } else {
+                tracing::warn!("catalog went offline — acks and silences cannot be written");
+            }
+            return Some(Message::CatalogAlive(is_alive));
+        }
         return None;
     };
     if parsed.subject != ["alive"] {
@@ -1077,12 +1238,26 @@ mod tests {
         ));
     }
 
+    /// The catalog's token is not a *sensor* — but the GUI does care about it
+    /// since #925, because the catalog is the only writer of acks and
+    /// silences and its absence is what disables those buttons.
+    ///
+    /// This test used to assert `is_none()`, and that was right when nothing
+    /// in the GUI could act on the answer. It now pins the distinction rather
+    /// than the silence: `CatalogAlive`, never `SensorOnline`.
     #[test]
-    fn test_parse_sensor_liveliness_ignores_catalog_token() {
-        // The catalog's alive/claim tokens are service machinery, not sensors
-        // (they also never match the `*`-origin selector — D4 — but the
-        // parser guards regardless).
-        assert!(parse_sensor_liveliness("v1/@catalog/state/alive", true).is_none());
+    fn the_catalog_token_is_not_a_sensor_but_is_not_ignored() {
+        assert!(matches!(
+            parse_sensor_liveliness("v1/@catalog/state/alive", true),
+            Some(Message::CatalogAlive(true))
+        ));
+        assert!(matches!(
+            parse_sensor_liveliness("v1/@catalog/state/alive", false),
+            Some(Message::CatalogAlive(false))
+        ));
+        // The catalog's *other* service tokens stay ignored: only `alive`
+        // means "the catalog can be written to".
+        assert!(parse_sensor_liveliness("v1/@catalog/state/claim/abc", true).is_none());
     }
 
     #[test]

@@ -1140,6 +1140,29 @@ pub enum Message {
     /// Close the alerts view.
     CloseAlerts,
 
+    /// The catalog's liveliness token appeared or vanished (#925).
+    ///
+    /// The catalog is the only writer of acks and silences, so its absence is
+    /// what disables those buttons — with a reason on them, rather than a
+    /// button that quietly does nothing.
+    CatalogAlive(bool),
+    /// One `@catalog/state/ack/*` document arrived (#925).
+    AckReceived(Box<zensight_common::ack::AlertAck>),
+    /// An ack was tombstoned by the catalog.
+    AckRetired(zensight_common::alert::AlertRef),
+    /// One `@catalog/state/silence/*` document arrived (#925).
+    SilenceReceived(Box<zensight_common::silence::Silence>),
+    /// A silence was tombstoned (its window closed, or it was lifted).
+    SilenceRetired(String),
+    /// One `@catalog/state/incident/*` document arrived (#925).
+    ///
+    /// The catalog's grouping, which is keyed by **entity** — a host that
+    /// publishes under three origins is one incident. The GUI's own
+    /// `group_incidents` stays as the offline fallback, keyed by source,
+    /// because a GUI with no catalog must still show what is on fire.
+    IncidentReceived(Box<zensight_common::incident::Incident>),
+    /// An incident was tombstoned — no member is firing any more.
+    IncidentRetired(String),
     /// Acknowledge all firing external (sensor-pushed) alerts from one source.
     AcknowledgeExternalSource(String),
     /// Acknowledge all firing external alerts.

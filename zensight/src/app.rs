@@ -2325,6 +2325,27 @@ impl ZenSight {
                 self.rederive_entities();
             }
 
+            Message::CatalogAlive(alive) => {
+                self.alerts.catalog_alive = Some(alive);
+            }
+            Message::AckReceived(ack) => {
+                self.alerts.ingest_ack(*ack);
+            }
+            Message::AckRetired(r) => {
+                self.alerts.retire_ack(&r);
+            }
+            Message::SilenceReceived(s) => {
+                self.alerts.ingest_silence(*s);
+            }
+            Message::SilenceRetired(id) => {
+                self.alerts.retire_silence(&id);
+            }
+            Message::IncidentReceived(inc) => {
+                self.alerts.ingest_incident(*inc);
+            }
+            Message::IncidentRetired(id) => {
+                self.alerts.retire_incident(&id);
+            }
             Message::EntityReceived(entity) => {
                 self.entities.upsert(entity);
                 self.rederive_entities();
@@ -3252,24 +3273,80 @@ impl ZenSight {
                 self.save_current_view();
             }
 
+            // Acknowledging and silencing are catalog WRITES since #925. The
+            // GUI is no longer the authority: it calls the gated procedure and
+            // renders what the catalog publishes back. What used to be a
+            // `HashSet` insert that died with the window is now a document a
+            // second operator, an exporter and a notifier can all read.
             Message::AcknowledgeExternalSource(source) => {
-                self.alerts.acknowledge_external_source(&source);
+                let refs = self.alerts.refs_for_source(&source);
+                return self.ack_refs(refs, format!("Acknowledged {source}"));
             }
             Message::AcknowledgeAllExternal => {
-                self.alerts.acknowledge_all_external();
+                let refs = self.alerts.all_refs();
+                let n = refs.len();
+                return self.ack_refs(refs, format!("Acknowledged {n} alert(s)"));
             }
 
             Message::SilenceSource(source, duration_ms) => {
-                self.alerts.silence_source(&source, now_ms(), duration_ms);
-                self.toasts.push(
-                    ToastSeverity::Info,
+                let now = now_ms();
+                let silence = zensight_common::silence::Silence {
+                    // The catalog mints the id; an empty one asks it to.
+                    id: String::new(),
+                    // A source matcher, because that is what this button
+                    // means. The authoring pane is where an operator writes a
+                    // matcher set by hand.
+                    matchers: vec![zensight_common::silence::Matcher {
+                        name: "source".into(),
+                        op: zensight_common::silence::MatchOp::Eq,
+                        value: source.clone(),
+                    }],
+                    starts_at: now,
+                    ends_at: now + duration_ms,
+                    // Set by the catalog from `?actor=`; never trusted from
+                    // here, so sending it would be theatre.
+                    by: String::new(),
+                    note: String::new(),
+                };
+                return self.call_catalog_write(
+                    "silence",
+                    &[],
+                    Some(silence),
                     format!("Silenced {source} for {}", fmt_duration_ms(duration_ms)),
                 );
             }
             Message::UnsilenceSource(source) => {
-                self.alerts.unsilence_source(&source);
-                self.toasts
-                    .push(ToastSeverity::Info, format!("Unsilenced {source}"));
+                // The button names a source; the document has an id. Close
+                // every live window whose matchers are exactly this source —
+                // which is what this button opened.
+                let ids: Vec<String> = self
+                    .alerts
+                    .silences()
+                    .iter()
+                    .filter(|s| {
+                        s.matchers.len() == 1
+                            && s.matchers[0].name == "source"
+                            && s.matchers[0].value == source
+                    })
+                    .map(|s| s.id.clone())
+                    .collect();
+                if ids.is_empty() {
+                    self.toasts.push(
+                        ToastSeverity::Info,
+                        format!("No source-wide silence on {source} to lift"),
+                    );
+                    return Task::none();
+                }
+                let mut task = Task::none();
+                for id in ids {
+                    task = task.chain(self.call_catalog_write::<()>(
+                        "unsilence",
+                        &[("id", &id)],
+                        None,
+                        format!("Unsilenced {source}"),
+                    ));
+                }
+                return task;
             }
 
             Message::SetAlertSeverityFilter(sev) => {
@@ -5278,6 +5355,90 @@ impl ZenSight {
         // the read and this push. What comes back is what is running.
         self.send_command(key, &self.expectations.thresholds, ok_message)
             .chain(self.query_thresholds())
+    }
+
+    /// Call one gated `@catalog` write procedure (#925).
+    ///
+    /// The GUI is not the authority for an ack or a silence — it asks, and
+    /// renders what the catalog publishes back. `?actor=` carries the operator
+    /// so the catalog can record who: a silence whose author is self-reported
+    /// is a silence nobody can be asked about, and "who muted this" is the
+    /// first question of any review.
+    fn call_catalog_write<T: serde::Serialize>(
+        &self,
+        procedure: &str,
+        params: &[(&str, &str)],
+        body: Option<T>,
+        ok_message: String,
+    ) -> Task<Message> {
+        // Refuse locally rather than time out remotely. With no catalog there
+        // is nobody to record the decision, and a button that silently does
+        // nothing is worse than one that says why.
+        if !self.alerts.can_write() {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "catalog offline — cannot acknowledge or silence".to_string(),
+            });
+        }
+        let mut key = zensight_common::catalog_rpc_key(procedure);
+        let mut q: Vec<String> = params
+            .iter()
+            .map(|(k, v)| format!("{k}={}", urlencode(v)))
+            .collect();
+        q.push(format!("actor={}", urlencode(&self.operator_name())));
+        key.push('?');
+        key.push_str(&q.join(";"));
+
+        match body {
+            Some(b) => self.send_command(key, &b, ok_message),
+            // `send_command` always sends a payload; an empty object is the
+            // body a bodyless procedure ignores.
+            None => self.send_command(key, &serde_json::json!({}), ok_message),
+        }
+    }
+
+    /// Acknowledge a set of alerts — one call each, because `ack` names one
+    /// alert and batching would hide which of them failed (#925).
+    fn ack_refs(
+        &self,
+        refs: Vec<zensight_common::alert::AlertRef>,
+        ok_message: String,
+    ) -> Task<Message> {
+        if refs.is_empty() {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "nothing to acknowledge — no firing alert here has a known origin"
+                    .to_string(),
+            });
+        }
+        let last = refs.len() - 1;
+        let mut task = Task::none();
+        for (i, r) in refs.into_iter().enumerate() {
+            let msg = if i == last {
+                ok_message.clone()
+            } else {
+                String::new()
+            };
+            task = task.chain(self.call_catalog_write::<()>(
+                "ack",
+                &[("ref", &r.to_string())],
+                None,
+                msg,
+            ));
+        }
+        task
+    }
+
+    /// Who this GUI says it is, for `?actor=`.
+    ///
+    /// The OS user, which is the only identity a desktop GUI actually has. It
+    /// is recorded, never trusted: the catalog is free to reject or override
+    /// it, and an auditable deployment puts a real identity in front of the
+    /// bus rather than believing this string.
+    fn operator_name(&self) -> String {
+        std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "unknown".to_string())
     }
 
     fn query_thresholds(&self) -> Task<Message> {
@@ -9163,8 +9324,10 @@ impl ZenSight {
             tracing::info!(evicted, "Evicted stale devices from dashboard");
         }
 
-        // Expire alert silences whose window has passed (#26).
-        self.alerts.prune_silences(now);
+        // Silences expire by their own `ends_at` when read (#925), and the
+        // catalog tombstones them; there is nothing local to prune. `now` is
+        // still used below.
+        let _ = now;
 
         // Rebuild the per-source firing-alert rollup for host cards (#306)
         // and the per-protocol rollup for the overview tiles (#582).
@@ -10966,4 +11129,22 @@ fn slugify_rule_name(metric: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+/// Percent-encode a query-parameter value (#925).
+///
+/// A selector's parameters are `;`-separated `k=v` pairs, so a value carrying
+/// `;`, `=`, `?` or a space would silently split into something else. An
+/// operator's name and note are exactly the values that can contain those.
+fn urlencode(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for b in v.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
