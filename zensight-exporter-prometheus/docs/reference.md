@@ -116,10 +116,72 @@ one `<prefix>_alert` gauge series with value 1:
 zensight_alert{source="host01",rule="socket-missing",severity="critical",…} 1
 ```
 
-Labels carry the alert's `source`, `rule`, `severity`, and its own labels (reserved
-names are not overridden). The series disappears when the alert resolves or its
-sensor tombstones it, so Alertmanager treats absence as resolved. Alerts are also
-staleness-swept like metrics.
+Labels carry the alert's `source`, `rule`, `severity`, its own labels (reserved
+names are not overridden), and **`acked`** (#926 — see below). The series
+disappears when the alert resolves or its sensor tombstones it, so Alertmanager
+treats absence as resolved.
+
+Alerts are **not** staleness-swept, unlike metrics, and the difference is
+load-bearing (#758). Sensors publish alerts edge-triggered: a firing alert is
+put once, and again only to resolve. A 300 s sweep therefore removed every
+alert older than five minutes — and since absence *is* the resolve signal, that
+closed live incidents in Alertmanager. A firing alert now leaves the store for
+three reasons, all of them real events: a `Resolved` put, a `Delete` tombstone,
+or its sensor's **liveliness token vanishing**.
+
+The store is keyed by **`(origin, alert_key)`**, not by the hash alone. Since
+epic #453 the hash excludes the source — the wire key's origin chunk scopes it
+— so two hosts firing the identical rule share an `alert_key`, and a
+hash-keyed store showed one of them.
+
+## Incidents and acknowledgement (#926)
+
+The catalog groups firing alerts **by entity** and publishes the result
+(RFC 06 §5.5). With `export_alerts` on, this exporter mirrors both halves.
+
+`zensight_alert` gains an **`acked`** label:
+
+```
+zensight_alert{acked="true",source="host01",rule="socket-missing",…} 1
+```
+
+It reports whether an ack **applies**, not whether an ack document exists. The
+projection rule is *"an ack applies only while a firing alert with
+`timestamp <= fired_at` exists"*, so an orphan left by a dead catalog reads as
+`false`, and an alert that cleared and came back reads `false` too — the
+operator acknowledged a different occurrence. Without a catalog every alert
+reads `acked="false"`, which is the honest answer: nobody has said they are on
+it.
+
+Each incident is one `<prefix>_incident` gauge:
+
+```
+# HELP zensight_incident ZenSight incident: firing alerts grouped by entity
+#      (value = members neither acknowledged nor silenced).
+# TYPE zensight_incident gauge
+zensight_incident{incident="inc-h_guest",entity="h_guest",severity="critical",
+                  origins="h-3fa9c2d41b7e,h-7c1e0a5b93d2",symptom_of="h_hyp"} 2
+```
+
+- **The value is the open member count** — neither acknowledged nor silenced,
+  which is an operator's actual queue. A fully-handled incident reads `0`
+  *without vanishing*, so a dashboard can still show that it exists; only a
+  tombstone (no member firing) removes the series.
+- **`origins` is plural**, comma-joined. That plurality is the point of keying
+  by entity: a host that publishes under its own sensor, a hypervisor polling
+  it and a prober checking it is *one* incident.
+- **`symptom_of`** names the entity this incident is downstream of, when the
+  catalog attributed one. An Alertmanager deployment gets
+  inhibition-by-label from it directly:
+
+  ```yaml
+  inhibit_rules:
+    - source_matchers: [ 'zensight_incident' ]
+      target_matchers: [ 'symptom_of!=""' ]
+  ```
+
+Empty-string labels mean "the catalog did not say" — an incident with no entity
+or no attributed cause — rather than a value.
 
 ## Why `/metrics` is untimestamped and remote-write is not
 

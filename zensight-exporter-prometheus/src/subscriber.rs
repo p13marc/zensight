@@ -146,6 +146,27 @@ impl TelemetrySubscriber {
             None
         };
 
+        // The catalog's acks and incidents (#926). Same shape as the alert
+        // subscriber, and gated on the same switch: an exporter that mirrors
+        // no alerts has nothing to acknowledge.
+        let catalog_subscriber = if self.collector.export_alerts() {
+            let key = zensight_common::keyexpr::all_incidents_wildcard();
+            info!(key_expr = %key, "Subscribing to catalog incidents");
+            let ack_key = zensight_common::keyexpr::all_acks_wildcard();
+            info!(key_expr = %ack_key, "Subscribing to catalog acknowledgements");
+            let inc = session
+                .declare_subscriber(&key)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create incident subscriber: {}", e))?;
+            let ack = session
+                .declare_subscriber(&ack_key)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create ack subscriber: {}", e))?;
+            Some((inc, ack))
+        } else {
+            None
+        };
+
         // Liveliness, which is how a departed sensor's alerts are dropped
         // (#758). RFC 04 §5: a producer holds a token at
         // `…/state/<producer>/alive`, so the token vanishing IS "the sensor
@@ -201,6 +222,32 @@ impl TelemetrySubscriber {
                         break;
                     }
                 }
+
+                    // The catalog's incidents (#926).
+                    sample = async {
+                        match &catalog_subscriber {
+                            Some((inc, _)) => inc.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match sample {
+                            Ok(sample) => self.handle_incident_sample(&sample),
+                            Err(e) => warn!(error = %e, "incident subscriber ended"),
+                        }
+                    }
+
+                    // The catalog's acknowledgements (#926).
+                    sample = async {
+                        match &catalog_subscriber {
+                            Some((_, ack)) => ack.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match sample {
+                            Ok(sample) => self.handle_ack_sample(&sample),
+                            Err(e) => warn!(error = %e, "ack subscriber ended"),
+                        }
+                    }
 
                 // Receive sensor alerts (only polled when export_alerts is on).
                 sample = async { alert_subscriber.as_ref().unwrap().recv_async().await },
@@ -328,6 +375,49 @@ impl TelemetrySubscriber {
     /// liveliness token share.
     fn origin_of(key: &str) -> Option<String> {
         zensight_common::keyexpr::parse_key(key).map(|parsed| parsed.origin.to_string())
+    }
+
+    /// Decode a catalog incident sample (#926). A `Delete` is a tombstone —
+    /// no member is firing — and removes the series.
+    fn handle_incident_sample(&self, sample: &Sample) {
+        let key = sample.key_expr().as_str();
+        let Some(id) = key.rsplit('/').next().filter(|i| !i.is_empty()) else {
+            return;
+        };
+        if sample.kind() == SampleKind::Delete {
+            self.collector.remove_incident(id);
+            return;
+        }
+        match zensight_common::decode_auto::<zensight_common::incident::Incident>(
+            &sample.payload().to_bytes(),
+        ) {
+            Ok(inc) => self.collector.record_incident(inc),
+            Err(e) => warn!(key = %key, error = %e, "failed to decode Incident"),
+        }
+    }
+
+    /// Decode a catalog acknowledgement (#926).
+    fn handle_ack_sample(&self, sample: &Sample) {
+        let key = sample.key_expr().as_str();
+        // The ref IS the last key chunk, and a tombstone carries no payload —
+        // so the key is the only place it can come from.
+        let Some(r) = key
+            .rsplit('/')
+            .next()
+            .and_then(|c| zensight_common::alert::AlertRef::parse(c).ok())
+        else {
+            return;
+        };
+        if sample.kind() == SampleKind::Delete {
+            self.collector.remove_ack(&r);
+            return;
+        }
+        match zensight_common::decode_auto::<zensight_common::ack::AlertAck>(
+            &sample.payload().to_bytes(),
+        ) {
+            Ok(ack) => self.collector.record_ack(ack),
+            Err(e) => warn!(key = %key, error = %e, "failed to decode AlertAck"),
+        }
     }
 
     /// Decode an alert sample and feed it to the collector. A `Delete` tombstone

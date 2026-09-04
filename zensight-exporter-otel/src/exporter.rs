@@ -257,6 +257,13 @@ pub struct OtelExporter {
     logger_provider: Option<SdkLoggerProvider>,
     /// Cached logger instance (avoids re-creating on every log).
     logger: Option<SdkLogger>,
+    /// Cached logger for catalog incidents (scope `zensight.incidents`, #926).
+    ///
+    /// Its own scope, not `zensight.alerts`: an incident is the catalog's
+    /// conclusion about a *group* of alerts on one entity, and a backend that
+    /// wants one and not the other should be able to say so with a scope
+    /// filter rather than by inspecting event names.
+    incident_logger: Option<opentelemetry_sdk::logs::SdkLogger>,
     /// Cached logger for sensor alerts (scope `zensight.alerts`).
     alert_logger: Option<SdkLogger>,
     /// Span processor for synthesized alert-lifecycle spans (traces signal).
@@ -339,12 +346,16 @@ impl OtelExporter {
         let alert_logger = logger_provider
             .as_ref()
             .map(|lp| lp.logger("zensight.alerts"));
+        let incident_logger = logger_provider
+            .as_ref()
+            .map(|lp| lp.logger("zensight.incidents"));
         Self {
             meter_provider,
             meter,
             logger_provider,
             logger,
             alert_logger,
+            incident_logger,
             event_logger: None,
             export_events: false,
             span_processor: None,
@@ -439,6 +450,16 @@ impl OtelExporter {
         } else {
             None
         };
+        // Incidents ride the alert switch: they are the catalog's conclusion
+        // about alerts, so an exporter that mirrors no alerts has no
+        // incidents to report either.
+        let incident_logger = if otel_config.export_alerts {
+            logger_provider
+                .as_ref()
+                .map(|lp| lp.logger("zensight.incidents"))
+        } else {
+            None
+        };
         let event_logger = if otel_config.export_events {
             logger_provider
                 .as_ref()
@@ -458,6 +479,7 @@ impl OtelExporter {
             logger_provider,
             logger,
             alert_logger,
+            incident_logger,
             span_processor,
             span_scope: InstrumentationScope::builder("zensight.alerts").build(),
             alert_spans,
@@ -1256,6 +1278,81 @@ impl OtelExporter {
 
         let mut stats = self.stats.write();
         stats.alerts_exported += 1;
+    }
+
+    /// Emit a catalog incident as a log event on the `zensight.incidents`
+    /// scope (#926).
+    ///
+    /// A log event rather than a metric, because an incident is a *document*
+    /// with a summary and a cause — the things a person reads — and the
+    /// numeric view of the same fact is the Prometheus exporter's
+    /// `zensight_incident` gauge.
+    ///
+    /// `incident.symptom_of` is the attribute that earns its keep: an
+    /// Alertmanager-shaped consumer gets inhibition-by-label from it for
+    /// free, and a human reading the log sees "this is downstream of that"
+    /// without opening the graph.
+    pub fn record_incident(&self, incident: &zensight_common::incident::Incident) {
+        if !self.export_alerts {
+            return;
+        }
+        let Some(logger) = &self.incident_logger else {
+            return;
+        };
+        let mut rec = logger.create_log_record();
+        rec.set_event_name("zensight.incident");
+        rec.set_timestamp(ms_to_system_time(incident.last_change));
+        rec.set_observed_timestamp(SystemTime::now());
+        rec.set_body(incident.summary.clone().into());
+        rec.set_severity_number(alert_severity_to_otel(incident.severity));
+        rec.set_severity_text(incident.severity.as_str());
+
+        rec.add_attribute("incident.id", incident.id.clone());
+        if let Some(e) = &incident.entity_id {
+            rec.add_attribute("incident.entity", e.clone());
+        }
+        // Plural by design — that is what keying by entity buys — and joined
+        // because an attribute is one value.
+        rec.add_attribute("incident.origins", incident.origins.join(","));
+        rec.add_attribute("incident.severity", incident.severity.as_str());
+        rec.add_attribute("incident.alerts", incident.alerts.len() as i64);
+        rec.add_attribute("incident.acked", incident.acked as i64);
+        rec.add_attribute("incident.silenced", incident.silenced as i64);
+        // What an operator's queue actually is.
+        rec.add_attribute("incident.open", incident.open() as i64);
+        rec.add_attribute("incident.started", incident.started);
+        if let Some(cause) = &incident.symptom_of {
+            rec.add_attribute("incident.symptom_of", cause.entity_id().to_string());
+        }
+        if !incident.impacted.is_empty() {
+            rec.add_attribute("incident.impacted", incident.impacted.join(","));
+        }
+
+        logger.emit(rec);
+        trace!(id = %incident.id, "Recorded incident");
+    }
+
+    /// Emit an incident tombstone — no member is firing any more (#926).
+    ///
+    /// Explicit rather than implied by absence: a log stream has no notion of
+    /// a series vanishing, so "this incident is over" has to be an event or it
+    /// is nothing at all. That is the opposite of the Prometheus exporter,
+    /// where absence *is* the resolve signal.
+    pub fn record_incident_resolved(&self, id: &str) {
+        if !self.export_alerts {
+            return;
+        }
+        let Some(logger) = &self.incident_logger else {
+            return;
+        };
+        let mut rec = logger.create_log_record();
+        rec.set_event_name("zensight.incident");
+        rec.set_observed_timestamp(SystemTime::now());
+        rec.set_body(format!("incident {id} resolved").into());
+        rec.add_attribute("incident.id", id.to_string());
+        rec.add_attribute("incident.state", "resolved");
+        logger.emit(rec);
+        trace!(id = %id, "Recorded incident resolution");
     }
 
     /// Convert a completed [`AlertSpan`] to OTel [`SpanData`] and hand it to the

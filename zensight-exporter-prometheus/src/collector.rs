@@ -268,6 +268,10 @@ pub struct MetricCollector {
     filter: MetricFilter,
     /// Currently-firing sensor alerts (rendered as a `<prefix>_alert` gauge).
     alerts: crate::alerts::AlertStore,
+    /// The catalog's acks and incidents (#926). Populated only when
+    /// `export_alerts` is on — an alert exporter that mirrors no alerts has
+    /// nothing to acknowledge.
+    catalog: crate::alerts::CatalogStore,
     /// Statistics.
     stats: RwLock<CollectorStats>,
 }
@@ -312,6 +316,7 @@ impl MetricCollector {
             aggregation_config,
             filter: MetricFilter::new(&filter_config),
             alerts: crate::alerts::AlertStore::new(),
+            catalog: crate::alerts::CatalogStore::new(),
             stats: RwLock::new(CollectorStats::default()),
         }
     }
@@ -330,6 +335,39 @@ impl MetricCollector {
         if self.prometheus_config.export_alerts {
             self.alerts.apply_from(origin, alert);
         }
+    }
+
+    /// Apply a catalog acknowledgement (#926).
+    pub fn record_ack(&self, ack: zensight_common::ack::AlertAck) {
+        if self.prometheus_config.export_alerts {
+            self.catalog.apply_ack(ack);
+        }
+    }
+
+    /// Retire an acknowledgement (a Zenoh `Delete` tombstone).
+    pub fn remove_ack(&self, r: &zensight_common::alert::AlertRef) {
+        if self.prometheus_config.export_alerts {
+            self.catalog.remove_ack(r);
+        }
+    }
+
+    /// Apply a catalog incident document (#926).
+    pub fn record_incident(&self, inc: zensight_common::incident::Incident) {
+        if self.prometheus_config.export_alerts {
+            self.catalog.apply_incident(inc);
+        }
+    }
+
+    /// Retire an incident — no member is firing any more.
+    pub fn remove_incident(&self, id: &str) {
+        if self.prometheus_config.export_alerts {
+            self.catalog.remove_incident(id);
+        }
+    }
+
+    /// Number of incidents currently mirrored (diagnostics).
+    pub fn incident_count(&self) -> usize {
+        self.catalog.incidents()
     }
 
     /// Clear a firing alert by its publishing origin and `alert_key` (a Zenoh
@@ -656,10 +694,17 @@ impl MetricCollector {
             stats.render_errors += render_errors;
         }
 
-        // Append firing sensor alerts as a `<prefix>_alert` gauge.
+        // Append firing sensor alerts as a `<prefix>_alert` gauge, and the
+        // catalog's incidents as `<prefix>_incident` (#926).
         if self.prometheus_config.export_alerts {
             let _ = writeln!(output);
-            self.alerts
+            self.alerts.render(
+                &self.prometheus_config.prefix,
+                Some(&self.catalog),
+                &mut output,
+            );
+            let _ = writeln!(output);
+            self.catalog
                 .render(&self.prometheus_config.prefix, &mut output);
         }
 
