@@ -204,6 +204,7 @@ mod tests {
             ips: ips.into_iter().map(String::from).collect(),
             macs: vec![],
             container_ids: vec![],
+            origins: Vec::new(),
             hostname: None,
             fqdn: None,
             names: vec![],

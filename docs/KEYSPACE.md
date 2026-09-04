@@ -119,9 +119,12 @@ the operator who needs to know whose alert this is.
 
 **An incident is keyed by entity**, not by `alert.source`. A host that
 publishes under three origins — its own sensors, a hypervisor polling it, a
-prober checking it — is one incident. An alert whose origin the catalog has not
-fused falls back to `inc-<origin>`, never `inc-<source>`: two unfused machines
-sharing a `source` name would otherwise merge. Incidents are tombstoned when no
+prober checking it — is one incident. The origin → entity join is
+`HostEntity.origins` (#1007, RFC 06 §5.1 — self-reported origins only, so a
+hypervisor's origin never binds to a guest it observes); a consumer needs the
+entity family and nothing else to do it. An alert whose origin the catalog has
+not fused falls back to `inc-<origin>`, never `inc-<source>`: two unfused
+machines sharing a `source` name would otherwise merge. Incidents are tombstoned when no
 member is firing. The **timeline is history**, the historian's and the GUI's,
 deliberately not carried in an LWW document with a TTL.
 

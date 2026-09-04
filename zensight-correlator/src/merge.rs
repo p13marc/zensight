@@ -283,14 +283,27 @@ fn node_key(ev: &HostEvidence) -> String {
 
 /// Merge the evidence snapshot into entities. `names`/`status`/`aliases` are
 /// left for the engine to fill; this produces the identifying + membership core.
+///
+/// Each claim arrives **paired with the origin it was published from** — the
+/// key's origin chunk, which no `HostEvidence` field carries. That pairing is
+/// what lets `HostEntity::origins` be a conclusion this function draws
+/// (#1007, RFC 06 §5.1) rather than something a consumer reconstructs by
+/// matching `(sensor, source)` against `members[]` afterwards. An empty origin
+/// string means "not known", and contributes nothing.
 pub fn correlate(
-    evidence: &[HostEvidence],
+    evidence: &[(String, HostEvidence)],
     rules: &RulesConfig,
     assertions: &Assertions,
 ) -> Vec<HostEntity> {
     if evidence.is_empty() {
         return Vec::new();
     }
+
+    // Split once, so the body below is unchanged and index `i` means the same
+    // claim in both slices — which is the whole reason the origin join is
+    // exact here and a heuristic anywhere else.
+    let origins: Vec<&str> = evidence.iter().map(|(o, _)| o.as_str()).collect();
+    let evidence: &[HostEvidence] = &evidence.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>();
 
     // Operator links (#473) are applied *here*, as a rewrite of each node's
     // host_id — before a single bridge is generated. Everything downstream (the
@@ -322,7 +335,7 @@ pub fn correlate(
         }
     }
 
-    let mut entities = build_entities(evidence, &mut uf, &node_rule, &node_host_ids);
+    let mut entities = build_entities(evidence, &origins, &mut uf, &node_rule, &node_host_ids);
 
     // An id an operator linked away is an id consumers may still hold. Recording
     // it in `aliases` is what makes the publisher emit the `alias/<old>` record
@@ -514,6 +527,7 @@ fn ips_overlap(a: &[String], b: &[String]) -> bool {
 /// Build one [`HostEntity`] per union-find set.
 fn build_entities(
     evidence: &[HostEvidence],
+    origins: &[&str],
     uf: &mut UnionFind,
     node_rule: &[Option<(Rule, f32)>],
     node_host_ids: &[Option<String>],
@@ -527,7 +541,7 @@ fn build_entities(
 
     let mut entities: Vec<HostEntity> = sets
         .into_values()
-        .map(|members| build_entity(evidence, &members, node_rule, node_host_ids))
+        .map(|members| build_entity(evidence, origins, &members, node_rule, node_host_ids))
         .collect();
 
     // Sort entities by id for a stable output ordering.
@@ -537,6 +551,7 @@ fn build_entities(
 
 fn build_entity(
     evidence: &[HostEvidence],
+    origins: &[&str],
     members: &[usize],
     node_rule: &[Option<(Rule, f32)>],
     node_host_ids: &[Option<String>],
@@ -629,6 +644,23 @@ fn build_entity(
         .max()
         .unwrap_or(0);
 
+    // The origins that resolved to this entity (#1007, RFC 06 §5.1).
+    //
+    // **Self-reports only.** A third-party claim says "the box I am looking at
+    // is X" — it does not say the *claimant's* origin is X. Including one
+    // would bind a hypervisor's origin to every guest it observes, and every
+    // consumer of the entity document would inherit that.
+    //
+    // The join is by member index, so it is exact: `origins[i]` is the key
+    // `evidence[i]` arrived on, not a match on `(sensor, source)`.
+    let origins: Vec<String> = members
+        .iter()
+        .filter(|&&i| evidence[i].observer.is_none())
+        .filter_map(|&i| origins.get(i))
+        .filter(|o| !o.is_empty())
+        .map(|o| (*o).to_string())
+        .collect();
+
     let entity_id = entity_id_for(&host_id, &fqdn, &macs, &hostname, &ips, evidence, members);
 
     let mut entity = HostEntity {
@@ -639,6 +671,7 @@ fn build_entity(
         ips,
         macs,
         container_ids,
+        origins,
         hostname,
         fqdn,
         names: Vec::new(),
@@ -728,6 +761,16 @@ fn entity_id_for(
 mod tests {
     use super::*;
 
+    /// Origin-tag a claim set for [`correlate`] when the test is not about
+    /// origins.
+    ///
+    /// An empty origin contributes nothing to [`HostEntity::origins`], so
+    /// every assertion these tests already made still means what it meant.
+    /// The tests that *are* about origins name real ones.
+    fn anon(evidence: Vec<HostEvidence>) -> Vec<(String, HostEvidence)> {
+        evidence.into_iter().map(|e| (String::new(), e)).collect()
+    }
+
     fn ev(sensor: &str, source: &str) -> HostEvidence {
         HostEvidence {
             sensor: sensor.into(),
@@ -767,7 +810,11 @@ mod tests {
         a.host_id = Some(hid(0xab));
         let mut b = ev("netlink", "host1");
         b.host_id = Some(hid(0xab));
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].members.len(), 2);
         assert!(ents[0].members.iter().all(|m| m.rule == "host_id"));
@@ -792,7 +839,7 @@ mod tests {
         netring.ips = vec!["10.0.0.9".into()];
 
         let ents = correlate(
-            &[snmp, netring],
+            &anon(vec![snmp, netring]),
             &RulesConfig::default(),
             &Assertions::default(),
         );
@@ -809,7 +856,11 @@ mod tests {
         a.cloud = Some(cloud("aws", "i-0abc"));
         let mut b = ev("netlink", "vm1");
         b.cloud = Some(cloud("aws", "i-0abc"));
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 1);
         assert!(ents[0].members.iter().all(|m| m.rule == "cloud_instance"));
         assert!((ents[0].members[0].confidence - 0.95).abs() < 1e-5);
@@ -822,7 +873,11 @@ mod tests {
         a.cloud = Some(cloud("aws", "12345"));
         let mut b = ev("sysinfo", "b");
         b.cloud = Some(cloud("gcp", "12345"));
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(
             ents.len(),
             2,
@@ -840,7 +895,7 @@ mod tests {
             cloud_instance: false,
             ..RulesConfig::default()
         };
-        let ents = correlate(&[a, b], &rules, &Assertions::default());
+        let ents = correlate(&anon(vec![a, b]), &rules, &Assertions::default());
         assert_eq!(ents.len(), 2);
     }
 
@@ -854,7 +909,11 @@ mod tests {
         let mut b = ev("sysinfo", "b");
         b.host_id = Some(hid(0x22));
         b.cloud = Some(cloud("aws", "i-0abc"));
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 2);
     }
 
@@ -866,7 +925,11 @@ mod tests {
         a.container_id = Some("c".repeat(64));
         let mut b = ev("sysinfo", "b");
         b.container_id = Some("c".repeat(64));
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 2, "container_id must never be a merge key");
 
         // ... but within one host, members' container ids union onto the entity.
@@ -879,7 +942,11 @@ mod tests {
         let mut z = ev("netring", "h");
         z.host_id = Some(hid(0x55));
         z.container_id = Some("a".repeat(64)); // duplicate → deduped
-        let ents = correlate(&[x, y, z], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![x, y, z]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].container_ids, vec!["a".repeat(64), "b".repeat(64)]);
     }
@@ -892,7 +959,11 @@ mod tests {
         let mut b = ev("netring", "b");
         b.macs = vec!["aa:bb:cc:dd:ee:ff".into()];
         b.ips = vec!["10.0.0.1".into()];
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 1, "shared MAC+IP must merge");
         assert!(ents[0].members.iter().any(|m| m.rule == "mac_ip"));
     }
@@ -903,7 +974,11 @@ mod tests {
         a.ips = vec!["10.0.0.1".into()];
         let mut b = ev("netring", "b");
         b.ips = vec!["10.0.0.1".into()];
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 2, "shared IP alone (DHCP reuse) must NOT merge");
     }
 
@@ -915,7 +990,11 @@ mod tests {
         let mut b = ev("netring", "b");
         b.macs = vec!["aa:bb:cc:dd:ee:ff".into()];
         b.ips = vec!["10.0.0.2".into()]; // different IP
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 2, "shared MAC alone (VM clone) must NOT merge");
     }
 
@@ -925,7 +1004,11 @@ mod tests {
         a.fqdn = Some("Host1.Example.COM".into());
         let mut b = ev("s", "b");
         b.fqdn = Some("host1.example.com".into());
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 1);
         assert!(ents[0].members.iter().any(|m| m.rule == "fqdn"));
     }
@@ -940,7 +1023,7 @@ mod tests {
             hostname_enabled: false,
             ..RulesConfig::default()
         };
-        let ents = correlate(&[a, b], &rules, &Assertions::default());
+        let ents = correlate(&anon(vec![a, b]), &rules, &Assertions::default());
         assert_eq!(ents.len(), 2, "hostname rule disabled → no hostname bridge");
     }
 
@@ -954,7 +1037,11 @@ mod tests {
         let mut b = ev("sysinfo", "b");
         b.host_id = Some(hid(0x22));
         b.hostname = Some("web".into());
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 2, "distinct host_ids must stay separate");
     }
 
@@ -967,7 +1054,11 @@ mod tests {
         let mut b = ev("netring", "b");
         b.macs = vec!["aa:bb:cc:dd:ee:ff".into()];
         b.ips = vec!["10.0.0.1".into()];
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 1);
         let c = ents[0]
             .members
@@ -985,7 +1076,11 @@ mod tests {
     fn entity_id_host_id_path_is_pinned_prefix() {
         let mut a = ev("sysinfo", "host1");
         a.host_id = Some(hid(0xab)); // "abab…" (64 hex); first 12 chars → "abababababab"
-        let ents = correlate(&[a], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents[0].entity_id, "h-abababababab");
     }
 
@@ -994,7 +1089,11 @@ mod tests {
         // fqdn-only set → id = h_<sha256("host1.example.com")[..12]>.
         let mut a = ev("s", "a");
         a.fqdn = Some("host1.example.com".into());
-        let ents = correlate(&[a], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         let expected = format!("h-{}", sha256_12("host1.example.com"));
         assert_eq!(ents[0].entity_id, expected);
     }
@@ -1013,7 +1112,11 @@ mod tests {
         let mut c = ev("netring", "c");
         c.macs = vec!["aa:aa:aa:aa:aa:aa".into()];
         c.ips = vec!["10.0.0.5".into()];
-        let ents = correlate(&[a, b, c], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b, c]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].members.len(), 3);
     }
@@ -1029,11 +1132,15 @@ mod tests {
         let mut c = ev("netring", "c");
         c.fqdn = Some("other.example.com".into());
         let forward = correlate(
-            &[a.clone(), b.clone(), c.clone()],
+            &anon(vec![a.clone(), b.clone(), c.clone()]),
             &RulesConfig::default(),
             &Assertions::default(),
         );
-        let reversed = correlate(&[c, b, a], &RulesConfig::default(), &Assertions::default());
+        let reversed = correlate(
+            &anon(vec![c, b, a]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         let fj = serde_json::to_string(&forward).unwrap();
         let rj = serde_json::to_string(&reversed).unwrap();
         assert_eq!(fj, rj, "shuffled input must serialize byte-identically");
@@ -1068,7 +1175,11 @@ mod tests {
         b.host_id = Some(origin(2));
         b.hostname = Some("web01".into());
 
-        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        let ents = correlate(
+            &anon(vec![a, b]),
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
         assert_eq!(
             ents.len(),
             2,
@@ -1088,7 +1199,7 @@ mod tests {
         b.host_id = Some(origin(2));
 
         let asserts = Assertions::new([assertion(AssertionKind::Link, &origin(1), &origin(2))]);
-        let ents = correlate(&[a, b], &RulesConfig::default(), &asserts);
+        let ents = correlate(&anon(vec![a, b]), &RulesConfig::default(), &asserts);
 
         assert_eq!(ents.len(), 1, "the operator said these are one machine");
         assert_eq!(
@@ -1119,7 +1230,7 @@ mod tests {
             assertion(AssertionKind::Link, &origin(1), &origin(2)),
             assertion(AssertionKind::Unlink, &origin(1), &origin(2)),
         ]);
-        let ents = correlate(&[a, b], &RulesConfig::default(), &asserts);
+        let ents = correlate(&anon(vec![a, b]), &RulesConfig::default(), &asserts);
 
         assert_eq!(ents.len(), 2, "the veto splits them back apart");
         assert!(
@@ -1145,13 +1256,13 @@ mod tests {
             assertion(AssertionKind::Link, &origin(1), &origin(2)),
         ]);
         let ents = correlate(
-            std::slice::from_ref(&a),
+            &anon(vec![a.clone()]),
             &RulesConfig::default(),
             &unlink_first,
         );
         assert_eq!(ents.len(), 1);
 
-        let ents = correlate(&[a, b], &RulesConfig::default(), &unlink_first);
+        let ents = correlate(&anon(vec![a, b]), &RulesConfig::default(), &unlink_first);
         assert_eq!(
             ents.len(),
             2,
@@ -1176,7 +1287,7 @@ mod tests {
             assertion(AssertionKind::Link, &origin(2), &origin(3)),
             assertion(AssertionKind::Unlink, &origin(1), &origin(2)),
         ]);
-        let ents = correlate(&[a, b, c], &RulesConfig::default(), &asserts);
+        let ents = correlate(&anon(vec![a, b, c]), &RulesConfig::default(), &asserts);
 
         let merged: Vec<_> = ents.iter().filter(|e| e.members.len() > 1).collect();
         for e in &merged {
@@ -1210,5 +1321,98 @@ mod tests {
         ]);
         assert_eq!(asserts.canon(&origin(1)), origin(3));
         assert_eq!(asserts.aliases_of(&origin(3)), vec![origin(1), origin(2)]);
+    }
+    /// The origins a merge resolved are published, not left to be
+    /// reconstructed (#1007, RFC 06 §5.1).
+    #[test]
+    fn a_fused_entity_publishes_the_origins_it_merged() {
+        let mut a = ev("sysinfo", "web01");
+        a.host_id = Some("abc123abc123".into());
+        let mut b = ev("netlink", "web01");
+        b.host_id = Some("abc123abc123".into());
+
+        let ents = correlate(
+            &[
+                ("h-000000000001".to_string(), a),
+                ("h-000000000001".to_string(), b),
+            ],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        assert_eq!(ents.len(), 1, "one host_id, one entity");
+        assert_eq!(
+            ents[0].origins,
+            vec!["h-000000000001".to_string()],
+            "two sensors on one origin contribute that origin once"
+        );
+    }
+
+    /// A third-party claim carries the *observer's* origin. Binding it to the
+    /// observed entity would file a hypervisor's own alerts under each guest
+    /// it watches — the failure this filter exists to prevent.
+    #[test]
+    fn a_third_party_claim_contributes_no_origin() {
+        let mut host = ev("sysinfo", "pve01");
+        host.host_id = Some("aaaaaaaaaaaa".into());
+
+        let mut guest = ev("pve", "vm-101");
+        guest.observer = Some("pve".into());
+        guest.host_id = Some("bbbbbbbbbbbb".into());
+
+        let ents = correlate(
+            &[
+                ("h-hypervisor0".to_string(), host),
+                ("h-hypervisor0".to_string(), guest),
+            ],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        assert_eq!(ents.len(), 2, "distinct host_ids do not merge");
+        let guest_ent = ents
+            .iter()
+            .find(|e| e.host_id.as_deref() == Some("bbbbbbbbbbbb"))
+            .expect("the observed guest");
+        assert!(
+            guest_ent.origins.is_empty(),
+            "the observer's origin is not the observed entity's"
+        );
+        let host_ent = ents
+            .iter()
+            .find(|e| e.host_id.as_deref() == Some("aaaaaaaaaaaa"))
+            .expect("the hypervisor");
+        assert_eq!(host_ent.origins, vec!["h-hypervisor0".to_string()]);
+    }
+
+    /// `origins` must not make a rebuild non-deterministic: the whole document
+    /// is content-hashed, so an unsorted vector would churn the entity set on
+    /// every restart.
+    #[test]
+    fn origins_are_canonical_regardless_of_input_order() {
+        let mut a = ev("sysinfo", "h1");
+        a.host_id = Some("cccccccccccc".into());
+        let mut b = ev("netlink", "h2");
+        b.host_id = Some("cccccccccccc".into());
+
+        let forward = correlate(
+            &[
+                ("h-zzzzzzzzzzzz".to_string(), a.clone()),
+                ("h-aaaaaaaaaaaa".to_string(), b.clone()),
+            ],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        let reversed = correlate(
+            &[
+                ("h-aaaaaaaaaaaa".to_string(), b),
+                ("h-zzzzzzzzzzzz".to_string(), a),
+            ],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        assert_eq!(forward, reversed);
+        assert_eq!(
+            forward[0].origins,
+            vec!["h-aaaaaaaaaaaa".to_string(), "h-zzzzzzzzzzzz".to_string()]
+        );
     }
 }

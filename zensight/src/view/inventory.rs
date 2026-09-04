@@ -773,6 +773,7 @@ mod tests {
             ips: vec!["10.0.0.5".into()],
             macs: vec!["aa:bb:cc:dd:ee:ff".into()],
             container_ids: vec![],
+            origins: Vec::new(),
             hostname: Some("web01".into()),
             fqdn: None,
             names: vec![],

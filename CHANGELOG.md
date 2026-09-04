@@ -51,6 +51,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`entity.origins[]` — the join the RFC always described, published rather
+  than reconstructed** (#1007, RFC 06 §5.1 as amended in zenkey v1.30).
+
+  RFC 06 §5.1 step 3 has told consumers to map origin → entity through
+  `entity.origins[]` since v1.0, and §6.4 has *required* the field since v1.2.
+  `HostEntity` did not have it. Two chapters requiring a field is not the same
+  as a field existing, and the gap only started costing anything when #900 made
+  that join load-bearing twice over: an incident is keyed by entity, and
+  `impact::attribute` needs the down **entities** while the liveliness plane
+  reports dead **origins**.
+
+  `HostEntity` now carries `origins: Vec<String>` — the origin chunks the merge
+  resolved into that entity, **self-reports only**. The origin is a key chunk
+  and appears in no payload field, so `merge::correlate` is handed each claim
+  paired with the origin it arrived on and joins by **member index**: exact,
+  rather than a match on `(sensor, source)`.
+
+  **Why self-reports only.** A third-party claim says "the box I am looking at
+  is X"; it does not say the claimant's origin is X. Including one would bind a
+  hypervisor's origin to every guest it observes, and every consumer of the
+  entity document would inherit that. The exclusion used to live in each
+  consumer, where getting it wrong was silent; it now lives in the one writer.
+
+  **What it replaces.** `origins_by_entity` walked the *evidence* store and
+  matched `(sensor, source)` against `members[]`. That is wrong in the two ways
+  §5.1 is careful about elsewhere: it is a heuristic where step 2 promises a
+  lookup — which member matched decides the answer — and it needs the evidence
+  subtree, which is far larger than the entity family and which a headless
+  consumer (an exporter, a notifier) does not subscribe at all. Such a consumer
+  simply could not perform the join.
+
+  **The walk is still there, as the fallback.** `origins` is
+  `#[serde(default)]`, so an entity from an older catalog arrives with an empty
+  vector rather than an error, and the reconstruction runs for exactly those —
+  a mixed fleet mid-upgrade pays for it only where it must. A test pins both
+  paths to the same answer: trading a heuristic for a *different* answer would
+  not have been an improvement.
+
+  **Not changed, on purpose.** `edges::Resolver` still resolves an
+  `EndpointClaim` through host_id / ip / mac / name / member source, because a
+  relationship claim never carries an origin — different vocabulary, not a
+  weaker version of this one. And the GUI, which #1007 listed as a third
+  reconstruction, turns out to join by *device* (`entity_for_device`,
+  `entity_for_ip`), not by origin; it needed no change and the issue's account
+  of it was imprecise.
+
+  Also pinned here: **zenkey RFC 11 §3.3's published `edge_id` / `relation_id`
+  test vectors**, as a test in `zensight-common`. The spec says implementations
+  MUST reproduce them and nothing checked it — every other test in that module
+  verifies self-consistency, so a change to `repr`, to the separator or to the
+  hash would have stayed green while silently re-keying the entire edge family.
+
 - **Acknowledgement and silence are a projection of the bus** (#925,
   epic #900) — **breaking**.
 

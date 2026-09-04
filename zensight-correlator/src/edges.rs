@@ -445,6 +445,7 @@ mod tests {
             ips: ips.iter().map(|s| s.to_string()).collect(),
             macs: macs.iter().map(|s| s.to_string()).collect(),
             container_ids: Vec::new(),
+            origins: Vec::new(),
             hostname: None,
             fqdn: None,
             names: Vec::new(),

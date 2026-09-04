@@ -266,14 +266,28 @@ An incident is `inc-<entity_id>`, or `inc-<origin>` where the origin resolves to
 no entity. A host that publishes under three origins — its own sensors, a
 hypervisor polling it, a prober checking it — is **one** incident.
 
-There is no `origin` field on a `HostEntity` and there usefully cannot be one:
-the origin is a key chunk, never in the payload, because a claim relayed by a
-third party would carry the wrong one. So the join follows the way the evidence
-went — an origin published a **self-report**, the merge attached that report to
-an entity as a `MemberClaim`, and `(sensor, source)` is the hinge. Third-party
-claims are skipped: a hypervisor observing a guest publishes under the
-*hypervisor's* origin, and treating that as "this origin is the guest" would
-file the hypervisor's own alerts under the guest it happens to watch.
+The join is a **read of `HostEntity.origins`** (#1007, RFC 06 §5.1). The
+origin is a key chunk and appears in no payload field, so the merge is handed
+it alongside each claim and publishes the set it resolved — self-reports only.
+Third-party claims contribute nothing: a hypervisor observing a guest publishes
+under the *hypervisor's* origin, and treating that as "this origin is the
+guest" would file the hypervisor's own alerts under the guest it happens to
+watch.
+
+That this is a published field rather than a derivation is the whole point.
+Before #1007 every consumer reconstructed it, by walking the **evidence**
+subtree and matching `(sensor, source)` against `members[]` — a heuristic
+(which member matched decides the answer) over a subscription far larger than
+the entity family, which a headless consumer holding only entity documents does
+not have at all. The RFC had named the field since v1.0 and required it since
+v1.2; it simply never existed.
+
+The reconstruction is still in `origins_by_entity`, as the fallback for an
+entity published by a catalog older than #1007 — `origins` is
+`serde(default)`, so an old document arrives as absence rather than as an
+error, and the fallback runs for exactly those entities. A test pins the two
+paths to the same answer, because trading a heuristic for a *different* answer
+would not be an improvement.
 
 The fallback is `inc-<origin>`, never `inc-<source>` — two unfused machines
 sharing a `source` name would otherwise merge into one incident.
@@ -284,9 +298,10 @@ Attribution (`impact::attribute`, #918) needs to know which entities are
 **down**, and a machine that stopped answering publishes no alert of its own —
 the absence of its liveliness token is the only evidence it is the cause. So
 the catalog subscribes the liveliness plane and maps dead origins to entities
-through the same evidence join the incidents use, which is what stops "this
-entity is down" and "this alert belongs to this entity" disagreeing about who
-is who.
+through the same join the incidents use, which is what stops "this entity is
+down" and "this alert belongs to this entity" disagreeing about who is who.
+That the two share one join is why it was worth publishing rather than
+deriving twice.
 
 An incident is a symptom only when **every** member is. One unexplained alert
 means an operator still has to look; an incident filed under "caused by the

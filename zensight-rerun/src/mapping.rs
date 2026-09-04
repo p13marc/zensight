@@ -324,6 +324,7 @@ mod tests {
             ips: vec![],
             macs: vec![],
             container_ids: vec![],
+            origins: Vec::new(),
             hostname: None,
             fqdn: None,
             names: vec![],
