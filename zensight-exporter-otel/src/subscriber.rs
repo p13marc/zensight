@@ -89,7 +89,9 @@ impl TelemetrySubscriber {
                 zensight_common::decode_auto::<zensight_common::Alert>(&sample.payload().to_bytes())
                 && alert.state == zensight_common::AlertState::Firing
             {
-                exporter.prime_alert(&alert);
+                let origin = zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
+                    .map(|p| p.origin.to_string());
+                exporter.prime_alert(origin.as_deref(), &alert);
                 primed += 1;
             }
         }

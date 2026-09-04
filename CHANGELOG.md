@@ -214,6 +214,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Both exporters lost one of two hosts firing the same rule** (epic #453
+  fallout) — and, worse, closed a live incident.
+
+  Since #453 the alert key hash no longer includes the source: the wire key's
+  origin chunk scopes it. So **two hosts firing the identical rule have the
+  identical `alert_key`** — which neither exporter's store accounted for.
+
+  **Prometheus.** `AlertStore` keyed by `alert_key` alone, so the second host
+  overwrote the first and `zensight_alert` carried one series with whichever
+  `source` label arrived last. And because **absence is the resolve signal**
+  for this exporter (stated in its own module doc), the surviving host
+  resolving removed the series — and Alertmanager closed the *other* host's
+  live incident. The tombstone path had the same hole from the other side: it
+  passed only the hash, so one host's `Delete` retired every host's identical
+  alert.
+
+  **OTel.** `AlertSpanTracker` keyed the same way, so host B's firing edge was
+  swallowed by `or_insert`, host A's resolve consumed the single entry, and
+  host B's resolve found nothing and synthesized **no span at all** — an
+  incident that never reached the trace backend. The span ids are seeded from
+  the origin as well as the hash now, so the two incidents also stop
+  collapsing into one trace.
+
+  Both are keyed by `(origin, alert_key)`, which both stores already had to
+  hand: Prometheus kept the origin for `drop_origin`, and the OTel exporter
+  reads it off the key it is already parsing. Four regression tests, each
+  checked against the unfixed code.
+
+  Found while building #926 on top of `AlertStore`, which needs exactly that
+  key for its `acked` label.
+
 - **hostspec's e2e treated "nobody answered" as a failure** — the flake that
   reddened the #900 stack.
 
