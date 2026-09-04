@@ -9,6 +9,12 @@ authors.workspace = true
 description = "Cross-sensor identity correlation service for ZenSight — the single writer of the host-entity keyspace"
 
 [dependencies]
+# Silence matchers and ids (#924): a `Regex` matcher is validated at write time
+# rather than at match time, where a bad pattern silently matches nothing and
+# the operator believes they muted something they did not.
+regex.workspace = true
+ulid.workspace = true
+
 # Internal crates
 zensight-common = { path = "../zensight-common" }
 zenkey = { workspace = true }
