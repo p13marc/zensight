@@ -556,6 +556,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The sysinfo device header said "Unknown OS" on every host, forever**
+  (#1019). It read two *metrics*, `system/os_name` and
+  `system/kernel_version`, and **nothing in the workspace publishes either** —
+  a grep across every `.rs` and every registry TOML returns the two lookups and
+  no producer. The `.or_else` fallback chain was two dead reads and a constant.
+
+  The obvious repair — have `zensight-sensor-sysinfo` publish them — would have
+  been wrong twice. An OS name does not vary with time and does not belong in a
+  series; publishing it on every collector tick spends a sample per interval,
+  forever, to restate a constant, and the historian would faithfully store two
+  days of minute buckets of it. And the model already has the right home: both
+  `HostEvidence` and `HostEntity` carry `vendor` and `platform` as descriptive
+  fields, joined to the *entity* rather than to one protocol's device row, with
+  the catalog preferring a host's self-report over a poller's guess.
+
+  So the header reads the resolved entity, which #935 now fills, and renders
+  `platform · vendor` ("debian-13 · Dell Inc."). "Unknown OS" survives as the
+  answer when the catalog genuinely has nothing — which is now a fact about the
+  fleet rather than a fact about this line, and a test pins both halves.
+
+  `specialized_view` gains an `entity` parameter beside its existing optional
+  `artifact` one; `DeviceViewCtx` already carried the entity, so nothing new
+  had to be resolved.
+
 - **A probe e2e could fail in a PR that never touched the probe** (#1004).
   `a_burst_measures_jitter_and_publishes_no_rtt_when_everything_is_lost` picked
   its "dead" target by binding `127.0.0.1:0`, reading the address, and dropping

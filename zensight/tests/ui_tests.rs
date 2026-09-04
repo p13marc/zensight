@@ -4395,7 +4395,7 @@ fn test_systemd_specialized_view_tabs() {
         ));
     }
 
-    let view = specialized_view(&state, None).expect("systemd specialized view");
+    let view = specialized_view(&state, None, None).expect("systemd specialized view");
     let mut ui = simulator(view);
 
     // Tab strip + overview content.
@@ -4426,7 +4426,7 @@ fn test_systemd_units_tab_fetches_on_demand() {
     let mut state = DeviceDetailState::new(id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
 
-    let view = specialized_view(&state, None).expect("systemd view");
+    let view = specialized_view(&state, None, None).expect("systemd view");
     let mut ui = simulator(view);
     // Idle fetch panel offers a Load button.
     let _ = ui.click("Load");
@@ -4450,7 +4450,7 @@ fn test_systemd_units_action_confirm_flow() {
     let mut state = systemd_units_state(&["nginx.service"], gate_allowing(&["nginx.service"]));
 
     // Step 1: the row offers the advertised verbs; clicking "start" arms it.
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(ui.find("restart").is_ok());
     let _ = ui.click("start");
     let messages: Vec<Message> = ui.into_messages().collect();
@@ -4463,7 +4463,7 @@ fn test_systemd_units_action_confirm_flow() {
     // Step 2: with the action armed, the row swaps to confirm/cancel and
     // "confirm" emits the send.
     state.systemd_detail.pending_action = Some((Verb::Start, "nginx.service".to_string()));
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(ui.find("start?").is_ok());
     let _ = ui.click("confirm");
     let messages: Vec<Message> = ui.into_messages().collect();
@@ -4474,7 +4474,7 @@ fn test_systemd_units_action_confirm_flow() {
     );
 
     // Cancel path emits the disarm.
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     let _ = ui.click("cancel");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
@@ -4539,7 +4539,7 @@ fn test_systemd_actions_absent_on_a_read_only_host() {
         &["nginx.service"],
         zensight_common::action::ActionCapability::disabled(30),
     );
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(ui.find("restart").is_err(), "no live verb buttons");
     assert!(
         ui.find("Service control is disabled on this host — the sensor is read-only.")
@@ -4560,7 +4560,7 @@ fn test_systemd_gate_note_prefers_the_hosts_own_reason() {
             "actions.enabled is false in this sensor's config (configs/systemd.json5).",
         ),
     );
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(
         ui.find("actions.enabled is false in this sensor's config (configs/systemd.json5).")
             .is_ok(),
@@ -4578,7 +4578,7 @@ fn test_systemd_gate_note_prefers_the_hosts_own_reason() {
 #[test]
 fn test_systemd_actions_inert_for_an_unallowlisted_unit() {
     let state = systemd_units_state(&["nginx.service"], gate_allowing(&["app-*.service"]));
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(ui.find("not allowlisted").is_ok());
     // A button with no on_press emits nothing.
     let _ = ui.click("start");
@@ -4599,7 +4599,7 @@ fn test_systemd_units_table_filters_and_sorts() {
         &["nginx.service", "sshd.service", "postgres.service"],
         gate_allowing(&[]),
     );
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(ui.find("showing 3 of 3 units").is_ok());
 
     let _ = ui.click("Unit");
@@ -4617,7 +4617,7 @@ fn test_systemd_units_table_filters_and_sorts() {
         .systemd_detail
         .units_table
         .set_filter("nginx".to_string());
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(ui.find("showing 1 of 1 units").is_ok());
     assert!(ui.find("nginx.service").is_ok());
     assert!(ui.find("sshd.service").is_err(), "filtered out");
@@ -4627,7 +4627,7 @@ fn test_systemd_units_table_filters_and_sorts() {
 #[test]
 fn test_systemd_units_table_defaults_to_services() {
     let state = systemd_units_state(&["nginx.service", "logrotate.timer"], gate_allowing(&[]));
-    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(
         ui.find("showing 1 of 1 units").is_ok(),
         "the .timer is filtered out by the default type chip"
@@ -5829,7 +5829,7 @@ fn tier2_sysinfo_disk_rows_render() {
         ),
     ]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(
         ui.find("home").is_ok(),
@@ -5864,12 +5864,12 @@ fn tier2_sysinfo_network_rows_render_and_do_not_invent_an_iface() {
         ),
     ]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(ui.find("eth0").is_ok(), "eth0 must render as an interface");
 
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(
         ui.find("network/tcp").is_err(),
@@ -5892,7 +5892,7 @@ fn tier2_sysinfo_disk_io_rows_render() {
         ),
     ]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(
         ui.find("sda").is_ok(),
@@ -5909,7 +5909,7 @@ fn tier2_sysinfo_temperature_rows_render() {
         zensight_common::TelemetryValue::Gauge(45.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     // The row is `{chip}/{label}` — both variables named by the registry rather
     // than read off parts[1]/parts[2].
@@ -5946,7 +5946,7 @@ fn sysinfo_fan_at_zero_rpm_renders_as_a_reading_not_absence() {
     )]);
 
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(
         ui.find("dell_ddv/cpu_fan").is_ok(),
@@ -5974,7 +5974,7 @@ fn sysinfo_rapl_absent_is_distinct_from_zero_watts() {
         zensight_common::TelemetryValue::Gauge(3000.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &absent,
+        &absent, None,
     ));
     assert!(
         ui.find(
@@ -5997,7 +5997,7 @@ fn sysinfo_rapl_absent_is_distinct_from_zero_watts() {
         zensight_common::TelemetryValue::Gauge(0.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &zero,
+        &zero, None,
     ));
     assert!(
         ui.find("0.0 W").is_ok(),
@@ -6026,7 +6026,7 @@ fn sysinfo_rapl_zone_prefers_name_label_over_raw_zone() {
         &[("zone", "intel-rapl:0"), ("name", "package-0")],
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &labeled,
+        &labeled, None,
     ));
     assert!(
         ui.find("package-0").is_ok(),
@@ -6040,7 +6040,7 @@ fn sysinfo_rapl_zone_prefers_name_label_over_raw_zone() {
         zensight_common::TelemetryValue::Gauge(14.2),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &bare,
+        &bare, None,
     ));
     assert!(
         ui.find("intel-rapl_0").is_ok(),
@@ -6063,7 +6063,7 @@ fn sysinfo_battery_capacity_and_status_are_independently_optional() {
         ),
     ]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &both,
+        &both, None,
     ));
     assert!(ui.find("bat0").is_ok());
     assert!(ui.find("82%").is_ok());
@@ -6078,6 +6078,7 @@ fn sysinfo_battery_capacity_and_status_are_independently_optional() {
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &capacity_only,
+        None,
     ));
     assert!(ui.find("bat0").is_ok());
     assert!(ui.find("82%").is_ok());
@@ -6088,6 +6089,7 @@ fn sysinfo_battery_capacity_and_status_are_independently_optional() {
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &status_only,
+        None,
     ));
     assert!(ui.find("bat0").is_ok());
     assert!(ui.find("Full").is_ok());
@@ -6105,7 +6107,7 @@ fn sysinfo_temperatures_card_is_hidden_when_only_fans_are_present() {
         zensight_common::TelemetryValue::Gauge(3000.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(
         ui.find("No temperature sensors found").is_err(),
@@ -6130,7 +6132,7 @@ fn sysinfo_power_panel_opens_on_entropy_alone() {
         zensight_common::TelemetryValue::Gauge(256.0),
     )]);
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(
         ui.find("Fans & power").is_ok(),
@@ -6279,11 +6281,71 @@ fn demo_points_render_the_fans_power_panel() {
     assert!(ui.find("No temperature sensors found").is_err());
 }
 
+/// The sysinfo header said "Unknown OS" on every host, forever (#1019): it read
+/// `system/os_name` and `system/kernel_version`, two metrics **nothing in the
+/// workspace publishes**, on a fallback chain of two dead lookups.
+///
+/// It now reads the catalog's entity document, which #935 fills.
+#[test]
+fn the_sysinfo_header_names_the_os_from_the_entity() {
+    let state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "web01"));
+    let entity = zensight_common::HostEntity {
+        platform: Some("debian-13".to_string()),
+        vendor: Some("Dell Inc.".to_string()),
+        ..test_entity("h_web01", "web01", &[("sysinfo", "web01")])
+    };
+
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+        Some(&entity),
+    ));
+    assert!(
+        ui.find("debian-13 · Dell Inc.").is_ok(),
+        "the header shows what the catalog resolved"
+    );
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+        Some(&entity),
+    ));
+    assert!(
+        ui.find("Unknown OS").is_err(),
+        "and stops saying Unknown OS when it is not unknown"
+    );
+}
+
+/// With no catalog — or a catalog that has genuinely nothing — the honest
+/// answer is still "Unknown OS". The bug was that it was the *only* answer.
+#[test]
+fn the_sysinfo_header_still_admits_when_it_does_not_know() {
+    let state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "web01"));
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state, None,
+    ));
+    assert!(ui.find("Unknown OS").is_ok());
+
+    // `test_entity` fills a `platform`, so build one that genuinely has
+    // neither field — the case a catalog produces before any sensor on that
+    // host has reported (or from a build older than #935).
+    let bare = zensight_common::HostEntity {
+        platform: None,
+        vendor: None,
+        ..test_entity("h_web01", "web01", &[("sysinfo", "web01")])
+    };
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+        Some(&bare),
+    ));
+    assert!(
+        ui.find("Unknown OS").is_ok(),
+        "an entity with neither field is not an answer"
+    );
+}
+
 fn simulator_for(
     state: &DeviceDetailState,
 ) -> iced_test::Simulator<'_, zensight::message::Message> {
     simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        state,
+        state, None,
     ))
 }
 
@@ -6500,18 +6562,18 @@ fn sysinfo_latency_panel_renders_percentiles() {
     }));
 
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(ui.find("Run-queue delay (runqlat)").is_ok());
 
     // p50 is sub-millisecond → µs; p99 is a 40 ms stall → ms. A mean would have
     // hidden the second behind the first, which is the whole reason for the panel.
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(ui.find("20 µs").is_ok(), "p50 renders in µs");
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(ui.find("40.0 ms").is_ok(), "p99 renders in ms");
 }
@@ -6530,6 +6592,7 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
     }));
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &unavailable,
+        None,
     ));
     assert!(
         ui.find(
@@ -6546,7 +6609,7 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
         .sysinfo_detail
         .apply_latency(Err("No sysinfo sensor responded".into()));
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &failed,
+        &failed, None,
     ));
     assert!(ui.find("Fetch failed: No sysinfo sensor responded").is_ok());
 }
@@ -6567,7 +6630,7 @@ fn sysinfo_latency_panel_says_when_a_window_had_no_samples() {
     }));
 
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(
         ui.find(
@@ -6582,7 +6645,7 @@ fn sysinfo_latency_panel_says_when_a_window_had_no_samples() {
     // And it must NOT borrow the unavailable-collector copy: "attached but
     // quiet" and "cannot measure at all" are different problems.
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
-        &state,
+        &state, None,
     ));
     assert!(
         ui.find("The sensor is not collecting these").is_err(),

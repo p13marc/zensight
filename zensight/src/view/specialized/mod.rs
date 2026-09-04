@@ -137,13 +137,18 @@ pub fn metric_trend_and_alert<'a>(state: &DeviceDetailState, metric: &str) -> El
 /// `artifact` threads the app's shared artifact state into views with
 /// contextual actions (#351) — today only netring's Capture tab consumes it;
 /// `None` renders those views without the in-context controls.
+/// `entity` is the resolved `HostEntity` for this device when the catalog has
+/// one (#1019). Optional for the same reason `artifact` is: the bare path and
+/// the tests have neither, and a view that needs one renders its honest
+/// fallback rather than inventing a value.
 pub fn specialized_view<'a>(
     state: &'a DeviceDetailState,
     artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
+    entity: Option<&zensight_common::HostEntity>,
 ) -> Option<Element<'a, Message>> {
     match state.device_id.protocol {
         Protocol::Snmp => Some(snmp::snmp_device_view(state)),
-        Protocol::Sysinfo => Some(sysinfo::sysinfo_host_view(state)),
+        Protocol::Sysinfo => Some(sysinfo::sysinfo_host_view(state, entity)),
         Protocol::Logs => None, // Syslog needs filter state, handled separately
         Protocol::Modbus => Some(modbus::modbus_plc_view(state)),
         Protocol::Netflow => Some(netflow::netflow_traffic_view(state)),
