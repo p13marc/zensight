@@ -128,6 +128,34 @@ impl TelemetrySubscriber {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to create subscriber: {}", e))?;
 
+        // The catalog's incidents (#926), on the same switch as alerts: they
+        // are the catalog's conclusion *about* alerts.
+        let incident_subscriber = if self.exporter.wants_alert_stream() {
+            let incidents_key = zensight_common::keyexpr::all_incidents_wildcard();
+            info!(key_expr = %incidents_key, "Subscribing to catalog incidents");
+            // Plain, and deliberately WITHOUT a startup seed — the opposite of
+            // the Prometheus exporter's choice on this same key, for a reason
+            // that is worth stating.
+            //
+            // Prometheus renders a *gauge*: an incident it has not seen is a
+            // missing series and an ack it has not seen makes `acked` read
+            // `false`, so it must seed or it is wrong until the next re-emit.
+            // Here an incident is a *log record* — one per transition — and
+            // `record_incident_resolved` needs no prior state to emit. Seeding
+            // would re-emit "incident opened" for every incident an earlier
+            // incarnation already shipped, duplicating history rather than
+            // recovering it. Same discipline as the traces seed, which primes
+            // the tracker without re-emitting a log record for what it primes.
+            Some(
+                session
+                    .declare_subscriber(&incidents_key)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create incident subscriber: {}", e))?,
+            )
+        } else {
+            None
+        };
+
         // Firing alerts are state, not telemetry (`…/state/<producer>/alert/*`),
         // so the telemetry class selector never sees them — they need their
         // own subscriber on the alerts selector.
@@ -174,6 +202,19 @@ impl TelemetrySubscriber {
                     if *shutdown.borrow() {
                         info!("Shutdown signal received, stopping subscriber");
                         break;
+                    }
+                }
+
+                // Catalog incidents (#926). Unlike an alert tombstone, an
+                // incident Delete IS emitted: a log stream has no notion of a
+                // series vanishing, so "this incident is over" has to be an
+                // event or it is nothing at all.
+                sample = async { incident_subscriber.as_ref().unwrap().recv_async().await },
+                    if incident_subscriber.is_some() =>
+                {
+                    match sample {
+                        Ok(sample) => self.handle_incident_sample(&sample),
+                        Err(e) => warn!("Error receiving incident sample: {}", e),
                     }
                 }
 
@@ -307,6 +348,23 @@ impl TelemetrySubscriber {
                 error = %e,
                 "Failed to decode events-class record"
             ),
+        }
+    }
+
+    /// Decode a catalog incident and emit it (#926).
+    fn handle_incident_sample(&self, sample: &Sample) {
+        let key = sample.key_expr().as_str();
+        if sample.kind() == SampleKind::Delete {
+            if let Some(id) = key.rsplit('/').next().filter(|i| !i.is_empty()) {
+                self.exporter.record_incident_resolved(id);
+            }
+            return;
+        }
+        match zensight_common::decode_auto::<zensight_common::incident::Incident>(
+            &sample.payload().to_bytes(),
+        ) {
+            Ok(inc) => self.exporter.record_incident(&inc),
+            Err(e) => warn!(key = %key, error = %e, "failed to decode Incident"),
         }
     }
 

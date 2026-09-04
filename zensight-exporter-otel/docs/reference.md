@@ -2,7 +2,8 @@
 
 The exporter subscribes to ZenSight telemetry over Zenoh and exports it via OTLP
 (gRPC on 4317 or HTTP/protobuf on 4318) to any OpenTelemetry-compatible backend.
-It emits up to four signals — **metrics**, **logs**, **alerts** (as logs), and an
+It emits up to five signals — **metrics**, **logs**, **alerts** (as logs),
+**incidents** (as logs, #926), and an
 opt-in **traces** signal — each independently toggled. Config lives in
 [`../../configs/otel-exporter.json5`](../../configs/otel-exporter.json5); this page
 is the mapping/behavior reference.
@@ -31,14 +32,54 @@ apply as a post-receive filter.
 flowchart LR
     T["telemetry subscriber — zensight/v1/*/telemetry/**"] --> Filt
     Al["alerts subscriber — zensight/v1/*/state/*/alert/*"] --> Filt
+    In["incidents subscriber — zensight/v1/@catalog/state/incident/*"] --> Map
 
     Filt{"post-receive filter — include/exclude protocol/source"} --> Map["map"]
 
     Map --> Met["metrics — Counter/Gauge/Boolean"]
     Map --> Log["logs — syslog severity to OTEL severity"]
     Map --> AlLog["alerts as logs — zensight.alerts scope"]
+    Map --> InLog["incidents as logs — zensight.incidents scope"]
     Map --> Tr["traces (opt-in) — firing → resolved pair = one span"]
 ```
+
+## Incidents (#926)
+
+The catalog groups firing alerts **by entity** and publishes the result
+(RFC 06 §5.5). With `export_alerts` on, each incident document becomes one log
+event on its **own scope**, `zensight.incidents`:
+
+| attribute | |
+|---|---|
+| `incident.id` | `inc-<entity_id>`, or `inc-<origin>` for an unfused origin |
+| `incident.entity` | the entity, when the catalog resolved one |
+| `incident.origins` | every origin contributing a firing alert, comma-joined |
+| `incident.severity` | worst across members |
+| `incident.alerts` / `.acked` / `.silenced` | member counts |
+| `incident.open` | members neither acknowledged nor silenced — an operator's actual queue |
+| `incident.symptom_of` | the entity this is downstream of, when attributed |
+| `incident.impacted` | entities downstream of this one, when it is a root |
+
+**Its own scope, not `zensight.alerts`.** An incident is the catalog's
+conclusion about a *group* of alerts on one entity; a backend that wants one
+and not the other should say so with a scope filter rather than by inspecting
+event names.
+
+**Resolution is an explicit event**, `incident.state="resolved"`, and this is
+the one place this exporter deliberately differs from the Prometheus one. There,
+absence *is* the resolve signal and a tombstone simply removes the series. A log
+stream has no notion of a series vanishing, so an incident ending has to be an
+event or it is nothing at all.
+
+**No startup seed, deliberately** — and this is the second place the two
+exporters disagree on the same key, for the same underlying reason. Prometheus
+renders an incident as a *gauge* and `acked` as a *label*, so an exporter that
+misses the current state is actively wrong until the next re-emit and must seed.
+Here an incident is a log record per transition, and a resolution needs no prior
+state to emit. Seeding would re-emit "incident opened" for every incident an
+earlier incarnation already shipped: duplicated history, not recovered history.
+The traces seed above makes the same call for the same reason — it primes the
+tracker precisely so it does *not* re-emit what it primes.
 
 ## Metrics
 
@@ -95,11 +136,18 @@ end = resolved timestamp — the span duration is *how long the condition was
 violated*. Alert flap patterns, durations, and overlaps become first-class in a
 tracing backend (Tempo/Jaeger) with no sensor-side changes.
 
-- Trace/span ids are derived **deterministically** from the alert key + firing
-  timestamp (FNV-1a with domain separation), so re-processing the same lifecycle
-  (e.g. an exporter restart replaying history) yields the same ids instead of
-  duplicate spans. This is *synthesis, not propagation* — the ids correlate
-  replays of the same lifecycle; they do not link to any sensor-side trace.
+- Trace/span ids are derived **deterministically** from the publishing origin,
+  the alert key and the firing timestamp (FNV-1a with domain separation), so
+  re-processing the same lifecycle (e.g. an exporter restart replaying history)
+  yields the same ids instead of duplicate spans. This is *synthesis, not
+  propagation* — the ids correlate replays of the same lifecycle; they do not
+  link to any sensor-side trace.
+
+  The **origin** is part of the identity, and the lifecycle map is keyed by it
+  too. Since epic #453 the alert key excludes the source, so two hosts firing
+  the identical rule share an `alert_key`: keyed by the hash alone, the second
+  host's firing edge was swallowed, the first host's resolve consumed the only
+  entry, and the second host's incident synthesized **no span at all**.
 - A refresh `Put` of an already-firing alert does not move the span start.
 - At startup the exporter GETs the alerts selector once and **primes** the
   tracker with every alert already firing (no log record is re-emitted for

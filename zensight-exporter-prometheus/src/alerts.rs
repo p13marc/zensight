@@ -53,7 +53,9 @@ use std::io::Write;
 use std::time::Instant;
 
 use parking_lot::RwLock;
-use zensight_common::alert::{Alert, AlertState};
+use zensight_common::ack::AlertAck;
+use zensight_common::alert::{Alert, AlertRef, AlertState};
+use zensight_common::incident::Incident;
 
 use crate::collector::escape_label_value;
 use crate::mapping::sanitize_label_name;
@@ -62,6 +64,7 @@ use crate::mapping::sanitize_label_name;
 /// labels are skipped if they would collide with one of these.
 const RESERVED: &[&str] = &[
     "alert_key",
+    "acked",
     "source",
     "protocol",
     "rule",
@@ -79,6 +82,122 @@ struct StoredAlert {
     alert: Alert,
     #[allow(dead_code)]
     received: Instant,
+}
+
+/// The catalog's acknowledgements and incidents (#926).
+///
+/// Kept beside the alert store rather than inside it because they have
+/// different writers and different lifecycles: an alert comes from a sensor
+/// and an ack from the catalog, and an ack can legitimately arrive for an
+/// alert this exporter has not seen (it started mid-incident) or outlive one
+/// it has.
+#[derive(Default)]
+pub struct CatalogStore {
+    acks: RwLock<HashMap<AlertRef, AlertAck>>,
+    incidents: RwLock<HashMap<String, Incident>>,
+}
+
+impl CatalogStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn apply_ack(&self, ack: AlertAck) {
+        self.acks.write().insert(ack.alert_ref.clone(), ack);
+    }
+
+    pub fn remove_ack(&self, r: &AlertRef) {
+        self.acks.write().remove(r);
+    }
+
+    pub fn apply_incident(&self, inc: Incident) {
+        self.incidents.write().insert(inc.id.clone(), inc);
+    }
+
+    pub fn remove_incident(&self, id: &str) {
+        self.incidents.write().remove(id);
+    }
+
+    pub fn incidents(&self) -> usize {
+        self.incidents.read().len()
+    }
+
+    /// Whether an ack applies to this firing alert — the **projection rule**
+    /// (RFC 06 §5.5), applied here so a scrape never reports an orphan as an
+    /// acknowledgement.
+    ///
+    /// This is the rule's whole point: it is stated normatively in the RFC so
+    /// that a consumer which is not the catalog reaches the same conclusion
+    /// the catalog does, from the documents alone. This exporter is exactly
+    /// such a consumer.
+    pub fn is_acked(&self, origin: Option<&str>, alert: &Alert) -> bool {
+        let Some(origin) = origin else {
+            // No origin, no ref, no ack. Guessing one would attribute another
+            // host's acknowledgement to this alert.
+            return false;
+        };
+        let Ok(r) = AlertRef::parse(&format!(
+            "{origin}.{}.{}",
+            alert.protocol,
+            alert.alert_key()
+        )) else {
+            return false;
+        };
+        self.acks
+            .read()
+            .get(&r)
+            .is_some_and(|ack| ack.applies_to(Some(alert)))
+    }
+
+    /// Append the incident series (#926).
+    ///
+    /// One gauge per incident, valued at its **open** member count — the
+    /// members that are neither acknowledged nor silenced, which is what an
+    /// operator's queue actually is. `symptom_of` rides as a label, so an
+    /// Alertmanager deployment gets inhibition-by-label for free: an incident
+    /// explained by an upstream failure is one an inhibit rule can suppress.
+    pub fn render(&self, prefix: &str, out: &mut Vec<u8>) {
+        let map = self.incidents.read();
+        if map.is_empty() {
+            return;
+        }
+        let name = format!("{prefix}_incident");
+        let _ = writeln!(
+            out,
+            "# HELP {name} ZenSight incident: firing alerts grouped by entity \
+             (value = members neither acknowledged nor silenced)."
+        );
+        let _ = writeln!(out, "# TYPE {name} gauge");
+
+        let mut ids: Vec<&String> = map.keys().collect();
+        ids.sort();
+        for id in ids {
+            let i = &map[id];
+            let mut labels: Vec<(String, String)> = vec![
+                ("incident".into(), i.id.clone()),
+                ("entity".into(), i.entity_id.clone().unwrap_or_default()),
+                ("severity".into(), i.severity.as_str().to_string()),
+                // The origins are plural by design — that is what keying by
+                // entity buys — and a label must be one value, so they are
+                // joined. A consumer that wants one origin has the incident
+                // id and the catalog's document.
+                ("origins".into(), i.origins.join(",")),
+                (
+                    "symptom_of".into(),
+                    i.symptom_of
+                        .as_ref()
+                        .map(|c| c.entity_id().to_string())
+                        .unwrap_or_default(),
+                ),
+            ];
+            labels.sort_by(|a, b| a.0.cmp(&b.0));
+            let rendered: Vec<String> = labels
+                .iter()
+                .map(|(k, v)| format!("{k}=\"{}\"", escape_label_value(v)))
+                .collect();
+            let _ = writeln!(out, "{name}{{{}}} {}", rendered.join(","), i.open());
+        }
+    }
 }
 
 /// Thread-safe store of currently-firing alerts, keyed by
@@ -180,7 +299,11 @@ impl AlertStore {
     }
 
     /// Append the alert series to a Prometheus exposition buffer.
-    pub fn render(&self, prefix: &str, out: &mut Vec<u8>) {
+    ///
+    /// `catalog` supplies the `acked` label (#926). `None` — no catalog
+    /// configured, or none seen — renders `acked="false"` on every alert,
+    /// which is the honest answer: nobody has said they are on it.
+    pub fn render(&self, prefix: &str, catalog: Option<&CatalogStore>, out: &mut Vec<u8>) {
         let map = self.alerts.read();
         if map.is_empty() {
             return;
@@ -201,8 +324,14 @@ impl AlertStore {
 
         for id in ids {
             let a = &map[id].alert;
+            let acked = catalog.is_some_and(|c| c.is_acked(id.0.as_deref(), a));
             let mut labels: Vec<(String, String)> = vec![
                 ("alert_key".into(), id.1.clone()),
+                // The fact every headless consumer was missing: an
+                // acknowledged alert and a new one looked identical here, so
+                // an on-call tool could not tell "someone is on this" from
+                // "nobody has seen this yet".
+                ("acked".into(), acked.to_string()),
                 ("source".into(), a.source.clone()),
                 ("protocol".into(), a.protocol.to_string()),
                 ("rule".into(), a.rule.clone()),
@@ -251,7 +380,7 @@ mod tests {
 
     fn render(store: &AlertStore) -> String {
         let mut out = Vec::new();
-        store.render("zensight", &mut out);
+        store.render("zensight", None, &mut out);
         String::from_utf8(out).unwrap()
     }
 
@@ -441,5 +570,196 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert_eq!(store.drop_origin("unrelated"), 0);
         assert_eq!(store.len(), 1);
+    }
+
+    fn aref(origin: &str, a: &Alert) -> AlertRef {
+        AlertRef::parse(&format!("{origin}.{}.{}", a.protocol, a.alert_key())).unwrap()
+    }
+
+    fn ack_of(r: &AlertRef, fired_at: i64) -> AlertAck {
+        AlertAck {
+            alert_ref: r.clone(),
+            fired_at,
+            by: "marc".into(),
+            note: String::new(),
+            at: fired_at,
+        }
+    }
+
+    /// **The fact every headless consumer was missing.** An acknowledged alert
+    /// and a new one looked identical in `zensight_alert`, so an on-call tool
+    /// could not tell "someone is on this" from "nobody has seen this yet".
+    #[test]
+    fn an_acknowledged_alert_carries_acked_true() {
+        let store = AlertStore::new();
+        let catalog = CatalogStore::new();
+        let mut a = firing();
+        a.timestamp = 1_000;
+        let r = aref("h-aaaaaaaaaaaa", &a);
+        store.apply_from(Some("h-aaaaaaaaaaaa".into()), a);
+
+        let mut out = Vec::new();
+        store.render("zensight", Some(&catalog), &mut out);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains(r#"acked="false""#), "{s}");
+
+        catalog.apply_ack(ack_of(&r, 1_000));
+        let mut out = Vec::new();
+        store.render("zensight", Some(&catalog), &mut out);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains(r#"acked="true""#), "{s}");
+    }
+
+    /// **The projection rule reaches the exporter** (RFC 06 §5.5). It is
+    /// normative precisely so a consumer that is not the catalog reaches the
+    /// catalog's conclusion from the documents alone — and this exporter is
+    /// exactly such a consumer.
+    #[test]
+    fn a_re_fire_is_not_acknowledged() {
+        let store = AlertStore::new();
+        let catalog = CatalogStore::new();
+        let mut a = firing();
+        a.timestamp = 1_000;
+        let r = aref("h-aaaaaaaaaaaa", &a);
+        catalog.apply_ack(ack_of(&r, 1_000));
+
+        // The occurrence that was acknowledged.
+        store.apply_from(Some("h-aaaaaaaaaaaa".into()), a.clone());
+        let mut out = Vec::new();
+        store.render("zensight", Some(&catalog), &mut out);
+        assert!(String::from_utf8(out).unwrap().contains(r#"acked="true""#));
+
+        // It cleared and came back — a different problem, and it must page.
+        let mut again = a;
+        again.timestamp = 2_000;
+        store.apply_from(Some("h-aaaaaaaaaaaa".into()), again);
+        let mut out = Vec::new();
+        store.render("zensight", Some(&catalog), &mut out);
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains(r#"acked="false""#),
+            "a re-fire is not acked: {s}"
+        );
+    }
+
+    /// An ack for one host does not acknowledge another host's identical rule
+    /// — the same collision this store's key fixes, one layer up.
+    #[test]
+    fn an_ack_does_not_cross_hosts() {
+        let store = AlertStore::new();
+        let catalog = CatalogStore::new();
+        let mut a = firing();
+        a.timestamp = 1_000;
+        catalog.apply_ack(ack_of(&aref("h-aaaaaaaaaaaa", &a), 1_000));
+        store.apply_from(Some("h-bbbbbbbbbbbb".into()), a);
+
+        let mut out = Vec::new();
+        store.render("zensight", Some(&catalog), &mut out);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains(r#"acked="false""#), "{s}");
+    }
+
+    /// An incident renders with its entity, its origins and — when it has one
+    /// — what it is a symptom **of**, which is what buys an Alertmanager
+    /// deployment inhibition-by-label for free.
+    #[test]
+    fn an_incident_renders_with_symptom_of() {
+        use zensight_common::impact::{AlertSite, Cause};
+        let catalog = CatalogStore::new();
+        catalog.apply_incident(Incident {
+            id: "inc-h_guest".into(),
+            entity_id: Some("h_guest".into()),
+            origins: vec!["h-aaaaaaaaaaaa".into(), "h-bbbbbbbbbbbb".into()],
+            severity: zensight_common::AlertSeverity::Critical,
+            started: 1,
+            last_change: 2,
+            summary: "probe-down on vm101".into(),
+            alerts: Vec::new(),
+            symptom_of: Some(Cause::Alert(AlertSite {
+                entity_id: "h_hyp".into(),
+                origin: "h-cccccccccccc".into(),
+                alert_key: "k1".into(),
+            })),
+            impacted: Vec::new(),
+            acked: 0,
+            silenced: 0,
+            last_updated: 3,
+        });
+
+        let mut out = Vec::new();
+        catalog.render("zensight", &mut out);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("zensight_incident{"), "{s}");
+        assert!(s.contains(r#"entity="h_guest""#), "{s}");
+        assert!(s.contains(r#"symptom_of="h_hyp""#), "{s}");
+        assert!(
+            s.contains(r#"origins="h-aaaaaaaaaaaa,h-bbbbbbbbbbbb""#),
+            "both origins, which is what keying by entity buys: {s}"
+        );
+    }
+
+    /// The gauge's value is the **open** member count — what is neither
+    /// acknowledged nor silenced, which is an operator's actual queue. A
+    /// fully-handled incident reads 0 without vanishing, so a dashboard can
+    /// still show that it exists.
+    #[test]
+    fn the_incident_gauge_counts_the_open_members() {
+        let catalog = CatalogStore::new();
+        let mk = |acked, silenced| Incident {
+            id: "inc-x".into(),
+            entity_id: None,
+            origins: vec!["h-aaaaaaaaaaaa".into()],
+            severity: zensight_common::AlertSeverity::Warning,
+            started: 1,
+            last_change: 2,
+            summary: "x".into(),
+            alerts: vec![
+                AlertRef::new("h-aaaaaaaaaaaa", "netlink", "k1"),
+                AlertRef::new("h-aaaaaaaaaaaa", "netlink", "k2"),
+                AlertRef::new("h-aaaaaaaaaaaa", "netlink", "k3"),
+            ],
+            symptom_of: None,
+            impacted: Vec::new(),
+            acked,
+            silenced,
+            last_updated: 3,
+        };
+        catalog.apply_incident(mk(0, 0));
+        let mut out = Vec::new();
+        catalog.render("zensight", &mut out);
+        assert!(String::from_utf8(out).unwrap().trim_end().ends_with(" 3"));
+
+        catalog.apply_incident(mk(1, 1));
+        let mut out = Vec::new();
+        catalog.render("zensight", &mut out);
+        assert!(String::from_utf8(out).unwrap().trim_end().ends_with(" 1"));
+    }
+
+    /// A tombstone removes the series — the same "absence is resolved"
+    /// contract the alert gauge has.
+    #[test]
+    fn an_incident_tombstone_removes_the_series() {
+        let catalog = CatalogStore::new();
+        catalog.apply_incident(Incident {
+            id: "inc-x".into(),
+            entity_id: None,
+            origins: vec!["h-aaaaaaaaaaaa".into()],
+            severity: zensight_common::AlertSeverity::Warning,
+            started: 1,
+            last_change: 2,
+            summary: "x".into(),
+            alerts: Vec::new(),
+            symptom_of: None,
+            impacted: Vec::new(),
+            acked: 0,
+            silenced: 0,
+            last_updated: 3,
+        });
+        assert_eq!(catalog.incidents(), 1);
+        catalog.remove_incident("inc-x");
+        assert_eq!(catalog.incidents(), 0);
+        let mut out = Vec::new();
+        catalog.render("zensight", &mut out);
+        assert!(out.is_empty(), "no incidents, no HELP/TYPE preamble either");
     }
 }

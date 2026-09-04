@@ -166,6 +166,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store would have shown one of them. A resolved alert *and* a tombstone both
   remove the member — an incident is what is firing, and a resolved member that
   stayed would keep it alive after the problem ended.
+- **The exporters mirror incidents and acknowledgement** (#926, epic #900).
+
+  Headless consumers could see every alert and **could not tell an
+  acknowledged one from a new one** — the gap that made "someone is on this"
+  a fact only one GUI held.
+
+  **Prometheus** gains an `acked` label on `zensight_alert` and a
+  `zensight_incident` gauge beside it. The gauge's value is the incident's
+  **open** member count — neither acknowledged nor silenced, which is an
+  operator's actual queue — so a fully-handled incident reads `0` without
+  vanishing, and a dashboard can still show that it exists. `symptom_of` rides
+  as a label, which is what buys an Alertmanager deployment
+  inhibition-by-label for free.
+
+  **OTel** gains a `zensight.incidents` scope carrying incident documents as
+  log events, with `incident.symptom_of` among the attributes. Its own scope,
+  not `zensight.alerts`: an incident is the catalog's conclusion about a
+  *group* of alerts, and a backend that wants one and not the other should say
+  so with a scope filter rather than by inspecting event names.
+
+  The two exporters treat resolution **oppositely, on purpose**. For Prometheus
+  absence is the resolve signal, so a tombstone removes the series. A log
+  stream has no notion of a series vanishing, so OTel emits an explicit
+  `incident.state="resolved"` event — otherwise "this incident is over" would
+  be nothing at all.
+
+  **Prometheus seeds both at startup; OTel deliberately does not.** The
+  Prometheus exporter GETs `@catalog/state/{incident,ack}/*` once before its
+  loop, alongside the alert seed it has done since #758. It has to: `acked` is
+  a *label*, so an exporter restarted mid-incident would render every
+  acknowledged alert as `acked="false"` and Alertmanager would re-page for work
+  someone is already doing — and "it corrects itself on the next update" is
+  false, because the catalog re-emits only on a content change and an
+  acknowledged incident is typically the most stable thing on the bus. OTel
+  emits a log record per transition instead, where a seed would re-emit
+  "incident opened" for every incident an earlier incarnation already shipped —
+  duplicating history rather than recovering it, which is the same call its
+  traces seed already makes.
+
+  CI's #763 guard is what surfaced this: it bans a raw `declare_subscriber` in
+  an exporter and exempts LWW keys **by name**, one at a time, so the exemption
+  has to be claimed deliberately. `incidents_key`/`acks_key` reached it with no
+  seed behind them and the build went red. The guard's roster now names them,
+  and its comment records that the price of the exemption is the seed.
+
+  The `acked` label applies the **projection rule** (RFC 06 §5.5) rather than
+  reporting whether an ack document exists: an orphan reads as unacknowledged,
+  and a re-fire pages again. That rule is normative precisely so a consumer
+  which is not the catalog reaches the catalog's conclusion from the documents
+  alone — and this exporter is exactly such a consumer, which is the first
+  time that has been true of anything.
 
 - **Incidents, acknowledgement and silence, as documents** (#922, epic #900) —
   the model half. Nothing publishes these yet; #923 is the engine.

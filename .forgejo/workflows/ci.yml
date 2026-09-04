@@ -397,13 +397,22 @@ jobs:
           # plain `declare_subscriber`, so one started after the sensors got no
           # backfill and a sample dropped in flight was simply lost (#763).
           #
-          # The alert, liveliness and events subscribers are deliberately plain:
-          # they carry LWW state or append-only records, not a recoverable
-          # stream, so they are matched out by name below.
+          # The alert, liveliness, events, incident and ack subscribers are
+          # deliberately plain: they carry LWW state or append-only records,
+          # not a recoverable stream, so they are matched out by name below.
+          #
+          # The roster is a name list on purpose. Adding a key to it is a
+          # claim -- "this one is LWW state, and it is seeded at startup or it
+          # does not need to be" -- that someone has to make deliberately,
+          # rather than a plain subscriber sliding in unnoticed. #926 is what
+          # that is worth: `incidents_key`/`acks_key` reached this guard with
+          # no seed behind them, which would have made the Prometheus `acked`
+          # label read `false` for every acknowledged alert after a restart,
+          # until a re-emit the content-hash gate makes deliberately rare.
           hits=$(grep -rn '\.declare_subscriber(' \
             zensight-exporter-*/src \
             --include='*.rs' \
-            | grep -vE 'alerts_key|alive_key|events_key|/tests/|mod tests' || true)
+            | grep -vE 'alerts_key|alive_key|events_key|incidents_key|acks_key|/tests/|mod tests' || true)
           if [ -n "$hits" ]; then
             echo "::error::Raw declare_subscriber in an exporter — use zensight_common::subscribe::declare_telemetry_subscriber so history/recovery cannot silently regress (#763):"
             echo "$hits"

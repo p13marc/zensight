@@ -100,6 +100,58 @@ impl TelemetrySubscriber {
         seeded
     }
 
+    /// Fetch the current incident and acknowledgement sets with one GET each,
+    /// so a restarted exporter does not start blind (#926).
+    ///
+    /// The exact counterpart of [`Self::seed_alerts`], and needed for a sharper
+    /// reason. `acked` is a **label on `zensight_alert`**: an exporter that
+    /// restarts mid-incident and misses the acks renders every acknowledged
+    /// alert as `acked="false"`, so Alertmanager re-pages for work someone is
+    /// already doing — the exact failure epic #900 exists to remove, reproduced
+    /// one layer out. The catalog re-emits only on a content change, so
+    /// "it will correct itself shortly" is false: an incident that is stable
+    /// (which is what an acknowledged one usually is) never re-emits at all.
+    ///
+    /// Both seeds reuse the live sample handlers, so there is one decode path
+    /// rather than a live one and a recovery one.
+    async fn seed_catalog(&self, session: &zenoh::Session) -> (usize, usize) {
+        const SEED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+        let mut counts = (0usize, 0usize);
+        for (key, is_incident) in [
+            (zensight_common::keyexpr::all_incidents_wildcard(), true),
+            (zensight_common::keyexpr::all_acks_wildcard(), false),
+        ] {
+            let replies = match session
+                .get(&key)
+                .target(zenoh::query::QueryTarget::All)
+                .timeout(SEED_TIMEOUT)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    // Not fatal: a deployment with no catalog running has
+                    // nothing to answer, and that is a normal deployment.
+                    warn!(key = %key, error = %e, "Catalog seed GET failed");
+                    continue;
+                }
+            };
+            while let Ok(reply) = replies.recv_async().await {
+                let Ok(sample) = reply.result() else { continue };
+                if sample.kind() == SampleKind::Delete {
+                    continue;
+                }
+                if is_incident {
+                    self.handle_incident_sample(sample);
+                    counts.0 += 1;
+                } else {
+                    self.handle_ack_sample(sample);
+                    counts.1 += 1;
+                }
+            }
+        }
+        counts
+    }
+
     /// Run the subscriber until the shutdown signal is received.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
         info!("Connecting to Zenoh...");
@@ -146,6 +198,32 @@ impl TelemetrySubscriber {
             None
         };
 
+        // The catalog's acks and incidents (#926). Same shape as the alert
+        // subscriber, and gated on the same switch: an exporter that mirrors
+        // no alerts has nothing to acknowledge.
+        let catalog_subscriber = if self.collector.export_alerts() {
+            let incidents_key = zensight_common::keyexpr::all_incidents_wildcard();
+            info!(key_expr = %incidents_key, "Subscribing to catalog incidents");
+            let acks_key = zensight_common::keyexpr::all_acks_wildcard();
+            info!(key_expr = %acks_key, "Subscribing to catalog acknowledgements");
+            // Plain subscribers, like `alerts_key` above and for the same
+            // reason: these are LWW catalog documents, not a recoverable
+            // stream. The #763 guard names them explicitly, and the price of
+            // that exemption is `seed_catalog` below — a plain subscriber
+            // WITHOUT a startup seed is precisely the blindness #763 is about.
+            let inc = session
+                .declare_subscriber(&incidents_key)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create incident subscriber: {}", e))?;
+            let ack = session
+                .declare_subscriber(&acks_key)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create ack subscriber: {}", e))?;
+            Some((inc, ack))
+        } else {
+            None
+        };
+
         // Liveliness, which is how a departed sensor's alerts are dropped
         // (#758). RFC 04 §5: a producer holds a token at
         // `…/state/<producer>/alive`, so the token vanishing IS "the sensor
@@ -188,6 +266,14 @@ impl TelemetrySubscriber {
             if seeded > 0 {
                 info!(seeded, "Seeded firing alerts from the bus");
             }
+            // The catalog's view of those same alerts (#926): which are
+            // acknowledged, and how they group. Without this the `acked` label
+            // reads `false` for every acknowledged alert until the catalog next
+            // re-emits, which its content-hash gate makes deliberately rare.
+            let (incidents, acks) = self.seed_catalog(&session).await;
+            if incidents > 0 || acks > 0 {
+                info!(incidents, acks, "Seeded catalog state from the bus");
+            }
         }
 
         info!("Subscriber started, waiting for telemetry...");
@@ -201,6 +287,32 @@ impl TelemetrySubscriber {
                         break;
                     }
                 }
+
+                    // The catalog's incidents (#926).
+                    sample = async {
+                        match &catalog_subscriber {
+                            Some((inc, _)) => inc.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match sample {
+                            Ok(sample) => self.handle_incident_sample(&sample),
+                            Err(e) => warn!(error = %e, "incident subscriber ended"),
+                        }
+                    }
+
+                    // The catalog's acknowledgements (#926).
+                    sample = async {
+                        match &catalog_subscriber {
+                            Some((_, ack)) => ack.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match sample {
+                            Ok(sample) => self.handle_ack_sample(&sample),
+                            Err(e) => warn!(error = %e, "ack subscriber ended"),
+                        }
+                    }
 
                 // Receive sensor alerts (only polled when export_alerts is on).
                 sample = async { alert_subscriber.as_ref().unwrap().recv_async().await },
@@ -328,6 +440,49 @@ impl TelemetrySubscriber {
     /// liveliness token share.
     fn origin_of(key: &str) -> Option<String> {
         zensight_common::keyexpr::parse_key(key).map(|parsed| parsed.origin.to_string())
+    }
+
+    /// Decode a catalog incident sample (#926). A `Delete` is a tombstone —
+    /// no member is firing — and removes the series.
+    fn handle_incident_sample(&self, sample: &Sample) {
+        let key = sample.key_expr().as_str();
+        let Some(id) = key.rsplit('/').next().filter(|i| !i.is_empty()) else {
+            return;
+        };
+        if sample.kind() == SampleKind::Delete {
+            self.collector.remove_incident(id);
+            return;
+        }
+        match zensight_common::decode_auto::<zensight_common::incident::Incident>(
+            &sample.payload().to_bytes(),
+        ) {
+            Ok(inc) => self.collector.record_incident(inc),
+            Err(e) => warn!(key = %key, error = %e, "failed to decode Incident"),
+        }
+    }
+
+    /// Decode a catalog acknowledgement (#926).
+    fn handle_ack_sample(&self, sample: &Sample) {
+        let key = sample.key_expr().as_str();
+        // The ref IS the last key chunk, and a tombstone carries no payload —
+        // so the key is the only place it can come from.
+        let Some(r) = key
+            .rsplit('/')
+            .next()
+            .and_then(|c| zensight_common::alert::AlertRef::parse(c).ok())
+        else {
+            return;
+        };
+        if sample.kind() == SampleKind::Delete {
+            self.collector.remove_ack(&r);
+            return;
+        }
+        match zensight_common::decode_auto::<zensight_common::ack::AlertAck>(
+            &sample.payload().to_bytes(),
+        ) {
+            Ok(ack) => self.collector.record_ack(ack),
+            Err(e) => warn!(key = %key, error = %e, "failed to decode AlertAck"),
+        }
     }
 
     /// Decode an alert sample and feed it to the collector. A `Delete` tombstone
