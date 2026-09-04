@@ -17,6 +17,33 @@ runtime over `@rpc/logs/rules/set` (fleet-fanout allowed) — no restart, no cod
 change per condition. The read side `@rpc/logs/rules` returns the active ruleset
 plus per-rule lifetime hit counters.
 
+**The sentinel is always running** (#849). It used to exist only when the file
+declared rules, the journald known-events were on, or the kernel pattern
+built-ins were opted in — which meant `@rpc/logs/rules` and `rules/set` were
+*declared* in the registry but *served* only sometimes, so a caller asking a
+host with no configured rules got silence rather than an answer. RFC 04 §5 is
+`alive ⇒ callable`. The cost on a rule-less host is one reconcile loop ticking
+over an empty ruleset.
+
+### Fleet authoring — `@desired` (#849)
+
+The whole ruleset can be published per host at
+`zensight/v1/@desired/state/<host>/logs/rules` (type `LogRulesConfig`;
+[`docs/KEYSPACE.md`](../../docs/KEYSPACE.md) §`@desired`), reconciled on connect
+and reconnect. A `Delete` reverts the host to the `syslog.sentinel` block in its
+own config file, never to an empty ruleset. `state/logs/applied/rules`
+(`AppliedConfig`) says which of the three writers — `file`, `desired`, `rpc` —
+won last, and carries the most recent *rejected* desired document.
+
+**A desired ruleset is refused whole**, unlike the file and `@rpc` paths. Those
+skip a rule whose regex does not compile and log a warning, which is right when
+a human is reading that log; a fleet push has nobody reading it, and a ruleset
+that quietly lost three of its ten rules looks applied and is not — the
+operator believes those patterns are watched. Validation also refuses duplicate
+or empty rule ids and a vacuous threshold (`count: 0`, or a zero window).
+
+The kill switch is `desired.enabled: false` in **file** config.
+
 ```json5
 sentinel: {
   eval_interval_secs: 10,   // reconcile / window-prune cadence

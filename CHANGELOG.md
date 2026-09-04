@@ -51,6 +51,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The last two sentinels join `@desired`, so every sentinel in the tree is
+  fleet-authorable** (#849, epic #902). netlink's expectation set and the log
+  sentinel's ruleset move to `zensight-common` with real schemars schemas, and
+  gain `@desired/state/{host}/netlink/expectations` and
+  `@desired/state/{host}/logs/rules`.
+
+  This closes #849 and with it the gap `@desired` shipped with in 0.12.0:
+  hostspec and systemd could be authored fleet-wide, netlink and logs could
+  not, because a state-class payload needs a real schema (RFC 08 §7) and a
+  sensor-crate type can never provide one — `zensight-common` cannot depend on
+  a sensor, so `describe` could only ever carry a summary stub, which #815's
+  gate refused, correctly.
+
+  **It turned out to be additive.** #849 planned a breaking rename and a
+  retire-and-sibling, on the theory that netlink's `expectations/set` and
+  systemd's collided on `ExpectationsConfig`. They do not: netlink's shipped
+  procedure declares **`ExpectationCommand`**, a tagged enum of incremental
+  operations (`add_socket`, `add_link`, …) that is a genuinely different shape
+  from a plain set, and it keeps it. The collision was only ever in the flat
+  type table, where systemd holds the name — so netlink's *new* subject takes
+  the new name `NetlinkExpectations` and nothing shipped moves.
+  `LogRulesConfig` keeps its name too; it merely stops being a summary stub.
+
+  **A desired document is refused whole, not partially applied.**
+
+  - **logs**: `compile` skips a rule whose regex does not compile and logs a
+    warning. That is right for a file an operator is watching the log of, and
+    wrong for a fleet push, which has nobody reading it: a ruleset that quietly
+    lost three of its ten rules looks applied and is not, and the operator
+    believes those patterns are watched. The `@desired` path validates first —
+    every regex compiles, ids unique and non-empty, no vacuous threshold — and
+    applies nothing on failure. The file and `@rpc` paths keep skip-and-warn.
+  - **netlink**: an expectation with an empty or duplicated name *within its
+    family* is refused. Both are otherwise invisible — the name becomes the
+    rule slug (`sockets:<name>`) hashed into the `alert_key` (RFC 11 §3.1), so
+    two expectations sharing one collapse onto a single alert that fires and
+    resolves over itself, and an operator sees one condition flapping instead
+    of two. An empty name collapses every unnamed expectation in that family
+    into one.
+
+  In both cases the previous good config keeps running and the refusal rides
+  `state/<producer>/applied/<topic>`, where a fleet tool can see it.
+
+
 - **Every sensor now says who made the machine and what it runs** (#935, epic
   #902). `zensight-sensor-core` publishes `vendor` and `platform` on its
   self-report instead of two hard-coded `None`s.
@@ -493,6 +537,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The test itself was right — its comment explains exactly why the live/dead
   pair matters ("publishing zeros for a dead link, which reads on a chart as a
   perfect one"). Only the port selection was unsound.
+
+- **`@rpc/logs/rules` and `rules/set` answered nothing on a host with no
+  configured rules** (found while doing #849). The two procedures are declared
+  **unconditionally** in the registry and carry no `conditional.lock` line, but
+  were served only when the log sentinel existed — and it existed only when the
+  file declared rules, the journald known-events were on, or the kernel pattern
+  built-ins were opted in. A caller asking any other host got **silence**,
+  which RFC 04 §5's `alive ⇒ callable` forbids and which is emitted equally by
+  a shut gate, an offline host and an older build. It is exactly the case
+  `conditional.lock`'s own header says must not exist.
+
+  The sentinel now always runs. The cost on a rule-less host is one reconcile
+  loop ticking over an empty ruleset; the three gates still decide which
+  *families* evaluate. It is also what makes fleet authoring possible at all: a
+  sentinel that only appears once the local file already declared rules cannot
+  receive a fleet ruleset, which is the situation `@desired` exists for.
 
 - **The `deny` gate was red four runs in six, and it was never about this
   tree** (#950). The job log — reachable all along through Forgejo's *web*

@@ -138,6 +138,9 @@ kind = "json-schema"
 [types.LogRulesConfig]
 kind = "json-schema"
 
+[types.NetlinkExpectations]
+kind = "json-schema"
+
 [types.RulesStatus]
 kind = "json-schema"
 

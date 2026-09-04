@@ -106,6 +106,10 @@ async fn main() -> Result<()> {
     use std::time::Duration;
     use zensight_sensor_core::{AlertReporter, Protocol};
     let exp_cfg = netlink_config.expectations.clone().unwrap_or_default();
+    // The file baseline, kept for the `@desired` reconciler: a `Delete` on the
+    // desired key reverts this host to what its own config says, never to an
+    // empty set.
+    let baseline_expectations = exp_cfg.clone();
     let reporter = AlertReporter::new(runner.publisher(), Protocol::Netlink, format)
         .with_debounce(Duration::from_secs(exp_cfg.default_for_secs));
     let reporter = match runner.identity() {
@@ -264,15 +268,53 @@ async fn main() -> Result<()> {
         )
         .with_wake(sentinel_wake);
         let handle = evaluator.handle();
+        let desired_handle = handle.clone();
+        let desired_cfg = runner.config().desired.clone();
+        let baseline = baseline_expectations;
         let cmd_session = runner.session().clone();
         let cmd_producer = "netlink".to_string();
         runner.spawn(async move {
             evaluator.run().await;
         });
         runner.spawn(async move {
-            zensight_sensor_netlink::command::run(cmd_session, cmd_producer, handle).await;
+            zensight_sensor_netlink::command::run(cmd_session, cmd_producer, handle.clone()).await;
         });
-        tracing::info!("Sentinel + expectation command channel enabled");
+
+        // The fleet author's half of the same handle (#849). `@desired`
+        // carries the whole set for this host; `@rpc/netlink/expectations/set`
+        // carries an operator's ad-hoc change. Both write here, LWW by
+        // arrival, and `state/netlink/applied/expectations` says which source
+        // won last — the two-writers contract `@desired` has had since #816.
+        let desired_key = {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::netlink_expectations(
+                zensight_common::PROFILE.host_id(),
+            ))
+        };
+        let apply_handle = desired_handle;
+        let (_marker, _reconcile) = zensight_sensor_core::desired::reconcile_topic(
+            runner.session().clone(),
+            runner.publisher(),
+            zensight_sensor_core::desired::DesiredTopic {
+                topic: "expectations",
+                desired_key,
+            },
+            desired_cfg,
+            baseline,
+            move |cfg: zensight_common::netlink::NetlinkExpectations| {
+                let h = apply_handle.clone();
+                async move {
+                    // Refused before it applies: a duplicate or empty
+                    // expectation name collapses two conditions onto one
+                    // alert key, which is invisible in the output.
+                    zensight_sensor_netlink::sentinel::validate(&cfg)?;
+                    h.replace(cfg).await;
+                    Ok(())
+                }
+            },
+        );
+
+        tracing::info!("Sentinel + expectation command channel + @desired enabled");
     }
 
     let metadata = serde_json::json!({

@@ -96,3 +96,30 @@ GETs on the `@rpc` plane (there is no pub-sub command channel):
 
 A separate `@rpc/netlink/collection` (+ `.../collection/set`) procedure pair
 toggles the `collect.*` collectors at runtime.
+
+## Fleet authoring — `@desired` (#849)
+
+The same set can be published **per host** by a fleet author, at
+`zensight/v1/@desired/state/<host>/netlink/expectations`
+(type `NetlinkExpectations`; [`docs/KEYSPACE.md`](../../docs/KEYSPACE.md)
+§`@desired`). The sensor reconciles on connect and reconnect — a GET seed
+against the storage plus a periodic re-GET, with the live subscription as the
+accelerator — so a host that was offline during a change picks it up when it
+returns. A `Delete` reverts it to the `netlink.expectations` block in its own
+config file, never to an empty set.
+
+**Two writers, one honest marker.** `@rpc/.../expectations/set` and the
+`@desired` reconciler write the same handle; the rule is LWW by arrival, and
+`state/netlink/applied/expectations` (`AppliedConfig`) says which source won
+last (`file | desired | rpc`), what set is in force, and the most recent
+*rejected* desired document.
+
+**A desired document is refused whole.** An expectation with an empty or
+duplicated name within its family is rejected before it applies, and the reason
+rides the marker. Both are otherwise invisible: the name becomes the rule slug
+(`sockets:<name>`) that is hashed into the `alert_key`, so two expectations
+sharing one collapse onto a single alert that fires and resolves over itself,
+and an operator sees one condition flapping instead of two.
+
+The per-sensor kill switch is `desired.enabled: false` in **file** config — the
+mechanism that could misbehave has to be disarmable from outside itself.

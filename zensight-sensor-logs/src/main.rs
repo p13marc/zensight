@@ -200,13 +200,29 @@ async fn main() -> Result<()> {
     let journald_events_on =
         matches!(&syslog_config.journald, Some(j) if j.enabled && j.detect_events);
     let budget_alerts_on = syslog_config.derived && syslog_config.error_budget.enabled;
-    // Log sentinel (#543): on when the operator declared rules, the built-in
-    // known-events are active (they ride the journald `detect_events` gate),
-    // or the kernel pattern built-ins are opted in (#824 — those are
-    // pattern-based and source-agnostic, so they take no journald gate).
-    let sentinel_on = journald_events_on
-        || !syslog_config.sentinel.rules.is_empty()
-        || syslog_config.sentinel.include_kernel_builtins;
+    // Log sentinel (#543). **Unconditional since #849**, for the same reason
+    // the alert reporter became unconditional in #931 — and for one more.
+    //
+    // It used to exist only when the operator had declared rules, the journald
+    // known-events were active, or the kernel pattern built-ins were opted in.
+    // Two things were wrong with that:
+    //
+    //   1. `@rpc/logs/rules` and `rules/set` are declared **unconditionally**
+    //      in the registry and carry no `conditional.lock` line, but were
+    //      served only when this gate was open. A caller asking a host that
+    //      had configured no rules got **silence** — which RFC 04 §5's
+    //      `alive ⇒ callable` forbids, and which is emitted equally by a shut
+    //      gate, an offline host and an older build. That is precisely the
+    //      case `conditional.lock`'s own header says must not exist.
+    //   2. `@desired` (#849) publishes a ruleset to a host that by definition
+    //      has none yet. A sentinel that only appears once the local file
+    //      already declared rules cannot receive a fleet ruleset, which is the
+    //      situation fleet authoring exists for.
+    //
+    // The cost on a host with no rules is one reconcile loop ticking over an
+    // empty ruleset. The three gates below still decide which *families*
+    // evaluate: `include_builtins` still rides journald's `detect_events`.
+
     //
     // Unconditional since #931: it used to exist only when one of those three
     // families was on, but an operator can now push a threshold rule to a
@@ -255,38 +271,77 @@ async fn main() -> Result<()> {
     // Log sentinel (#543): declarative pattern→alert rules evaluated per intake
     // line, folding the journald known-events (#61) in as built-in rules. Runs
     // whenever there is something to evaluate.
-    let log_sentinel: Option<Arc<LogSentinel>> =
-        sentinel_on.then_some(&alert_reporter).map(|reporter| {
-            let mut rules_cfg = syslog_config.sentinel.clone();
-            // Built-in known-events ride the journald `detect_events` gate: keep
-            // them off when journald detection is off, preserving the old opt-out.
-            rules_cfg.include_builtins = rules_cfg.include_builtins && journald_events_on;
-            let sentinel = Arc::new(LogSentinel::new(source.clone(), rules_cfg));
-            runner.spawn(sentinel.clone().run_reconcile_loop(reporter.clone()));
-            runner.spawn(sentinel::serve_rules(
-                session.clone(),
-                "logs".to_string(),
-                sentinel.handle(),
-            ));
-            // #543 deprecation: the journald known-event severity override is
-            // gone; point operators at the sentinel-rule replacement.
-            if let Some(j) = &syslog_config.journald
-                && !j.event_severity.is_empty()
-            {
-                tracing::warn!(
-                    "journald.event_severity is deprecated and ignored (#543); \
+    let log_sentinel: Option<Arc<LogSentinel>> = Some(&alert_reporter).map(|reporter| {
+        let mut rules_cfg = syslog_config.sentinel.clone();
+        // Built-in known-events ride the journald `detect_events` gate: keep
+        // them off when journald detection is off, preserving the old opt-out.
+        rules_cfg.include_builtins = rules_cfg.include_builtins && journald_events_on;
+        // The file baseline for the reconciler: a `Delete` on the desired
+        // key reverts this host to its own config, never to an empty
+        // ruleset.
+        let baseline_rules = rules_cfg.clone();
+        let sentinel = Arc::new(LogSentinel::new(source.clone(), rules_cfg));
+        runner.spawn(sentinel.clone().run_reconcile_loop(reporter.clone()));
+        runner.spawn(sentinel::serve_rules(
+            session.clone(),
+            "logs".to_string(),
+            sentinel.handle(),
+        ));
+
+        // The fleet author's half of the same handle (#849). `@desired`
+        // carries the whole ruleset for this host, `@rpc/logs/rules/set`
+        // carries an operator's ad-hoc change; both write the handle, LWW
+        // by arrival, and `state/logs/applied/rules` says which won last.
+        let desired_key = {
+            use zensight_common::registry::desired;
+            desired::key(&desired::Subject::logs_rules(
+                zensight_common::PROFILE.host_id(),
+            ))
+        };
+        let apply_handle = sentinel.handle();
+        let (_marker, _reconcile) = zensight_sensor_core::desired::reconcile_topic(
+            runner.session().clone(),
+            runner.publisher(),
+            zensight_sensor_core::desired::DesiredTopic {
+                topic: "rules",
+                desired_key,
+            },
+            runner.config().desired.clone(),
+            baseline_rules.clone(),
+            move |cfg: zensight_common::logs::LogRulesConfig| {
+                let h = apply_handle.clone();
+                async move {
+                    // Refused whole, unlike the file and `@rpc` paths:
+                    // `compile` skips a rule whose regex does not compile
+                    // and warns, which is right with a human reading the
+                    // log and wrong for a fleet push — a ruleset that
+                    // quietly lost three of its ten rules looks applied
+                    // and is not.
+                    sentinel::validate(&cfg)?;
+                    h.replace(cfg);
+                    Ok(())
+                }
+            },
+        );
+        // #543 deprecation: the journald known-event severity override is
+        // gone; point operators at the sentinel-rule replacement.
+        if let Some(j) = &syslog_config.journald
+            && !j.event_severity.is_empty()
+        {
+            tracing::warn!(
+                "journald.event_severity is deprecated and ignored (#543); \
                      override a known-event by adding a sentinel rule with the \
                      same id (coredump/unit-failed/oomd-kill/kernel-oom)"
-                );
-            }
-            let rule_count = syslog_config.sentinel.rules.len();
-            tracing::info!(
-                rules = rule_count,
-                builtins = journald_events_on,
-                "log sentinel enabled"
             );
-            sentinel
-        });
+        }
+        let rule_count = syslog_config.sentinel.rules.len();
+        tracing::info!(
+            rules = rule_count,
+            builtins = journald_events_on,
+            "log sentinel enabled"
+        );
+        sentinel
+    });
 
     // journald robustness monitor (#62): periodically snapshot the reader's
     // read/published/dropped/sampled counters; on sustained loss raise an
