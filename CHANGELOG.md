@@ -51,6 +51,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-desired` — `@desired` has an author** (#938, epic #902). One
+  `fleet-policy.json5` in, the per-host documents every sensor reconciles out.
+
+  `@desired` shipped in 0.12.0 as *"fleet configuration as desired state
+  instead of eighteen hand-edited JSON5 files across six machines"*. The
+  reconciler shipped with it, the router storage shipped with it, the
+  never-list shipped with it — and **nothing in this repository published a
+  document**. The author was a private script somewhere else, which meant the
+  mechanism built to replace eighteen files could only be driven by a
+  nineteenth that nobody could review.
+
+  **Classes select hosts by facts the catalog already knows** — `host_id`,
+  hostname glob, a sensor that runs there, an IP CIDR, `vendor`, `platform` —
+  each class contributes document fragments, and a host's effective document is
+  the ordered overlay of every matching class (each preceded by what it
+  `extends`) followed by its own override.
+
+  **Two properties make it safe to leave running.**
+
+  - *A pass with unchanged inputs publishes nothing.* Compilation is pure,
+    output is canonical JSON (keys sorted, so two policies that mean the same
+    thing produce the same bytes), and publication is gated on a content diff
+    **seeded at startup from the storage itself** — so a restart is a no-op
+    too. Without that, every refresh would rewrite every document on every
+    host, and an operator reading the `applied/<topic>` markers could not tell
+    a real change from a bounce. `an_unchanged_pass_publishes_nothing` asserts
+    it against a real bus: three passes, one sample.
+  - *A document is deleted only when the policy stops yielding it for a host
+    the catalog **still shows***, and then only after a grace of several
+    passes. The host check is the load-bearing half: a failed catalog GET
+    produces an empty fleet, indistinguishable on the wire from a fleet that
+    really is empty, so without it every document ever published becomes a
+    deletion candidate in one pass and after `grace × refresh` — ten minutes on
+    the shipped defaults — the whole fleet reverts to its file baselines. A key
+    whose host is not in this pass's catalog is held indefinitely and does not
+    even accrue grace. `delete_grace_periods: 0` is refused at startup.
+
+  **Named lists merge, they do not replace.** Every list in these payloads is a
+  set of independent rules, and what a class hierarchy is for is "everything
+  the base watches, *plus* these". With replacement, `hypervisors` adding one
+  expectation silently drops the twelve `all-hosts` contributed — a well-formed
+  document the sensor accepts, with twelve conditions no longer watched.
+  Concatenation was rejected too: a class could then only add a same-named rule,
+  never adjust one, and two rules sharing a name share one alert key (RFC 11
+  §3.1) — the collision #849's validators exist to refuse. `null` deletes,
+  because otherwise the only escape from an inherited field is not to use the
+  class.
+
+  **`plan --offline` opens no session.** A policy nobody can check before
+  pushing is a policy checked by the fleet; `plan` exits 1 on an invalid one so
+  CI can gate a policy change the way it gates code. It reports **every**
+  problem at once — cycles named by their loop, unknown classes, undeclared
+  topics, never-list hits with their JSON path — because one error at a time
+  turns a review into a compile-fix-recompile loop over a file whose problems
+  are all visible in one read.
+
+  **What it is not**, stated in the crate docs because each of these was a real
+  fork in the road: not a configuration-management system (it runs no command
+  and reaches no host — hosts converge on documents themselves, RFC 12's
+  distinction); not a second identity service (it asks `@catalog`, the only
+  component that ran the union-find); not a template engine (classes compose by
+  overlay, and an expression language is how a policy stops being reviewable);
+  and structurally unable to carry a secret.
+
+  A **class with no matcher selects nobody**, and `always: true` has to be
+  spelled out — the safe reading of "I forgot to say who this is for" is
+  nobody, and an empty `all: []` would be a vacuous truth nobody intended.
+
+  One host's bad override does not stop the other forty converging: the
+  document is refused, logged at `error` (a refused document is a host *not*
+  getting the policy someone wrote, and the sensor will never mention it —
+  nothing reached it), and the pass continues. Publishing nothing is the
+  failure mode with no upper bound on its blast radius.
+
+  **Four things the tests found before a fleet did**, every one of them
+  producing a well-formed document a sensor would accept — which is why none
+  would have shown up in a log, a diff or a review.
+
+  The deletion guard above was the worst of them: the first implementation
+  deleted a key the moment the policy stopped yielding it, *whatever* the
+  catalog had said, so a ten-minute catalog outage would have reverted the
+  fleet. #902 had written the rule down — "never because the catalog stopped
+  showing the host" — and the code implemented the weaker sentence.
+  `a_silent_catalog_deletes_nothing_ever` fails without the guard.
+ The `platform`/`hostname`
+  glob was the obvious three-line recursion, which backtracks exponentially:
+  `**********b` against a 64-character hostname never finishes. That is not a
+  hypothetical input — `**` is the *idiom* everywhere else in this system (key
+  expressions use it for "any depth"), so an operator writing a policy has
+  every reason to type it, and the cost would be a daemon that hangs without
+  saying why, while holding the fleet's configuration. It is a two-pointer
+  match now, bounded at O(pattern x input), with the pathological patterns as
+  tests.
+
+  `extends` on a **host override** expanded only one level, so a host opting
+  into `hypervisors` got that class's rules and not the `all-hosts` rules it is
+  built on — the same word meaning two things in one file, with the shortfall
+  invisible: a well-formed document, one rule missing. It expands the same way
+  as a class's now, and a class reached twice is applied once.
+
+  And: `fleet::fetch` read the
+  catalog with zenoh's default consolidation, which collapses replies **by key
+  expression** — so with two catalogs mid-handover answering for the same
+  entity, the document that survived was chosen by arrival order and the
+  `last_updated` comparison in the loop never ran. Harmless in a UI that
+  upserts into a store; not harmless in a compiler whose output is
+  content-hashed and published on a diff, where a fleet that differed between
+  two passes for no reason but the network would rewrite the documents of every
+  affected host on an unpredictable schedule. Consolidation is off there now,
+  and `last_updated` decides. `Publisher0::seed` deliberately keeps the default
+  — a stale prior value there costs one extra publish and is self-correcting.
+
+  **CI executes it.** `demo-verify.sh` gains a phase 3 that runs the real
+  binary against `demo/fleet-policy.json5` — the same lesson as #845's
+  exporters and #912's historian, a third time. `cargo test` covers the overlay
+  rules and the publish diff, and the e2e covers the bus properties, but
+  neither runs the binary, parses the shipped policy, or would notice it going
+  stale — and a shipped policy that no longer validates is the first thing an
+  operator copies. The phase also feeds it a policy carrying a bus endpoint and
+  requires a refusal, because a validator that passes everything would pass the
+  shipped policy too and the check would be theatre.
+
 - **`desired::topics()` — one validation table for every `@desired` topic, and
   a never-list lint that can tell a port from an endpoint** (#937, epic #902).
 

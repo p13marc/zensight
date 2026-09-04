@@ -1,6 +1,7 @@
 # ZenSight systemd units
 
-One unit per sensor / exporter (plus the correlator). These units ship inside each
+One unit per sensor / exporter (plus the correlator, the historian and the
+fleet policy compiler). These units ship inside each
 release's `zensight-<ver>-linux-amd64.tar.gz` (deb/rpm packaging was retired with
 the move to Forgejo releases) — install by hand:
 
@@ -45,9 +46,10 @@ $ for f in packaging/systemd/*.service; do
     systemd-analyze security --offline=true "$f" | tail -1
   done | sort -k1
 
-5.6   correlator, both exporters, gnmi, modbus, netflow, snmp, sysinfo, systemd,
-      hostspec (ProtectHome=read-only — an operator may assert on /home paths;
-      everything hostspec reads, it reads read-only, and it executes nothing)
+5.6   correlator, desired, both exporters, gnmi, modbus, netflow, snmp,
+      sysinfo, systemd, hostspec (ProtectHome=read-only — an operator may
+      assert on /home paths; everything hostspec reads, it reads read-only,
+      and it executes nothing)
 5.6   probe, pve      (empty set; both are clients — nothing on the host to reach)
 5.7   parallax        (empty set, plus DeviceAllow — see below)
 5.8   logs            CAP_NET_BIND_SERVICE

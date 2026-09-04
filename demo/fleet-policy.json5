@@ -1,0 +1,70 @@
+// A minimal fleet policy for the demo bus (#938).
+//
+// Two classes, one of them extending the other, so `just desired-plan` shows
+// the overlay actually doing something rather than a single flat document.
+//
+// This is the file to read before running `just desired`: it decides what
+// every host in the fleet is told to do. The daemon publishes nothing else.
+{
+  classes: [
+    // Everything the catalog knows about.
+    {
+      name: "all-hosts",
+      matches: { always: true },
+      docs: {
+        "sysinfo/thresholds": {
+          default_for_secs: 60,
+          rules: [
+            {
+              name: "disk-full",
+              metric: "disk/*/used_percent",
+              op: "GreaterThan",
+              value: 90,
+              clear: 85,
+              severity: "warning",
+              summary: "{metric} is {value}% on {source}",
+            },
+          ],
+        },
+      },
+    },
+
+    // Hypervisors run other people's machines, so they get the same rule at a
+    // tighter bound — and one of their own.
+    //
+    // `proxmox-*`, not `proxmox`: `platform` is `<ID>-<VERSION_ID>` since
+    // #935, so an exact match would select nobody and nothing would say so.
+    {
+      name: "hypervisors",
+      extends: ["all-hosts"],
+      matches: { any: [{ platform: "proxmox-*" }] },
+      docs: {
+        "sysinfo/thresholds": {
+          rules: [
+            // Named the same as the inherited rule, so it ADJUSTS it — the
+            // metric, the clear point and the summary all survive. A merge
+            // that replaced the list instead would silently drop disk-full.
+            { name: "disk-full", value: 80 },
+            {
+              name: "load",
+              metric: "load/avg1",
+              op: "GreaterThan",
+              value: 32,
+              severity: "warning",
+              summary: "load {value} on {source}",
+            },
+          ],
+        },
+      },
+    },
+  ],
+
+  // Per-host overrides, applied after every class. This is the "tag": it is
+  // versioned with the policy and shows up in a diff, which a bus-side tag
+  // would not.
+  hosts: {
+    // "h-3fa9c2d41b7e": {
+    //   docs: { "sysinfo/thresholds": { rules: [{ name: "load", value: 64 }] } },
+    // },
+  },
+}

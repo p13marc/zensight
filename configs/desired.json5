@@ -1,0 +1,55 @@
+// zensight-desired — the fleet policy compiler (#938, epic #902).
+//
+// This daemon is the AUTHOR of `@desired`. It reads one fleet-policy.json5,
+// asks @catalog what hosts exist and what they are, and publishes the per-host
+// documents the sensors reconcile. It runs no commands, copies no files and
+// reaches no host: the hosts converge on the documents themselves, which is
+// the difference RFC 12 draws between convergence and durable imperatives, and
+// the reason a host offline during a change picks it up when it returns.
+//
+// Run ONE of these per deployment. `@desired` is a single-writer service
+// origin; two compilers with different policies would overwrite each other's
+// documents on every pass, and every sensor in the fleet would flap between
+// them.
+{
+  zenoh: {
+    mode: "peer",
+    // The deployment base, if this bus has one. All participants must agree.
+    // namespace: "zensight",
+    connect: ["tcp/localhost:7447"],
+    listen: [],
+  },
+
+  serialization: "cbor",
+
+  desired: {
+    // The policy. THIS is the file to review, version and diff; everything
+    // below is only how to reach the bus and how often to look.
+    policy: "/etc/zensight/fleet-policy.json5",
+
+    // Level-triggered floor. The catalog subscription is the accelerator —
+    // a new host converges in seconds — and this is what survives a missed
+    // sample or a reconnect, the same shape the sensor-side reconciler's
+    // re-GET has.
+    refresh_secs: 300,
+
+    // How many refresh periods a document must go unproduced before it is
+    // DELETED. Never zero.
+    //
+    // A document is deleted only when the policy stops yielding it for a host
+    // the catalog STILL SHOWS — never because the catalog stopped showing the
+    // host. The grace is the second guard: without it, one slow catalog pass
+    // during a restart would delete the fleet's configuration, and every
+    // sensor would revert to its file baseline at once. That is the failure
+    // with no upper bound on its blast radius, so it gets two guards.
+    delete_grace_periods: 2,
+
+    // Compile and report, publish nothing. The disarm switch lives HERE and
+    // not in the policy, for the same reason the sensors' `desired.enabled`
+    // does: the mechanism that could misbehave has to be disarmable from
+    // outside itself.
+    dry_run: false,
+  },
+
+  logging: { level: "info" },
+}

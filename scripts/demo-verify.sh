@@ -81,7 +81,7 @@ die() {
 
 echo "==> building"
 cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-exporter-otel \
-    -p zensight-sensor-sysinfo -p zensight-historian >/dev/null
+    -p zensight-sensor-sysinfo -p zensight-historian -p zensight-desired >/dev/null
 # The one-shot @rpc client the historian phase queries with (#912). An
 # example, not a binary: it is a test fixture with a `main`, and shipping it
 # in the release tarball would suggest otherwise.
@@ -89,7 +89,7 @@ cargo build $relflag --locked -p zensight-historian --example historian-query >/
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
 require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" \
-    "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-historian" \
+    "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-historian" "$BIN/zensight-desired" \
     "$BIN/examples/historian-query"
 
 tmp="$(mktemp -d)"
@@ -418,3 +418,45 @@ exports=$(grep -c '^/v1/metrics ' "$tmp/otlp-sink.log" || true)
 echo
 echo "OK — sysinfo -> Zenoh -> otel exporter -> OTLP/HTTP sink"
 echo "     $exports metrics export(s) delivered, protobuf content-type, non-empty body."
+
+# ---------------------------------------------------------------------------
+# Phase 3 (#938): the fleet policy compiler, EXECUTED against the policy this
+# repository ships.
+#
+# The same lesson a third time. `cargo test` covers the overlay rules and the
+# publish diff, and the e2e covers the bus properties — but neither runs the
+# BINARY, neither parses `demo/fleet-policy.json5`, and neither would notice
+# the file going stale. A shipped policy that no longer validates is exactly
+# the thing an operator copies first.
+#
+# `plan --offline` opens no session, so this costs a subsecond and needs no
+# bus: it parses the daemon config, parses the policy, and runs every check —
+# class names, extends cycles, topic spellings against the live registry, and
+# the never-list over every fragment. A topic renamed out from under the demo
+# policy fails here.
+echo
+echo "==> phase 3: the fleet policy compiler, on the shipped demo policy"
+if ! plan_out=$("$BIN/zensight-desired" \
+        --config "$tmp/desired.json5" \
+        --policy "$ROOT/demo/fleet-policy.json5" \
+        plan --offline 2>&1); then
+    die "demo/fleet-policy.json5 no longer validates:
+$plan_out"
+fi
+echo "$plan_out" | grep -q ": valid" \
+    || die "plan --offline exited 0 without reporting the policy valid: $plan_out"
+
+# And the compiler must still REFUSE a bad policy — a validator that passes
+# everything passes a shipped policy too, and this phase would be theatre.
+cat > "$tmp/bad-policy.json5" <<'BADPOLICY'
+{ classes: [ { name: "leaky", matches: { always: true },
+    docs: { "sysinfo/thresholds": { zenoh: { connect: ["tcp/10.0.0.1:7447"] } } } } ],
+  hosts: {} }
+BADPOLICY
+if "$BIN/zensight-desired" --config "$tmp/desired.json5" \
+        --policy "$tmp/bad-policy.json5" plan --offline >/dev/null 2>&1; then
+    die "the policy compiler accepted a document carrying a bus endpoint — the \
+@desired never-list is not being enforced (#816)"
+fi
+
+echo "OK — demo/fleet-policy.json5 validates, and a never-list violation is refused."

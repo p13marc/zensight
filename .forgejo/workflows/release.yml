@@ -121,7 +121,7 @@ jobs:
           for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd hostspec pve bmc container probe parallax; do
             pkgs="$pkgs -p zensight-sensor-$s"
           done
-          pkgs="$pkgs -p zensight-exporter-prometheus -p zensight-exporter-otel -p zensight-correlator -p zensight-historian"
+          pkgs="$pkgs -p zensight-exporter-prometheus -p zensight-exporter-otel -p zensight-correlator -p zensight-historian -p zensight-desired"
           cargo build --release --locked $pkgs
       - name: Stage binaries for Dockerfiles
         run: |
@@ -131,7 +131,7 @@ jobs:
             cp "target/release/zensight-sensor-$s" docker-bins/docker-binaries-amd64/
           done
           cp target/release/zensight-exporter-prometheus target/release/zensight-exporter-otel \
-             target/release/zensight-correlator target/release/zensight-historian \
+             target/release/zensight-correlator target/release/zensight-historian target/release/zensight-desired \
              docker-bins/docker-binaries-amd64/
       - name: Assemble linux-amd64 tarball
         run: |
@@ -160,7 +160,8 @@ jobs:
                    zensight-sensor-probe \
                    zensight-sensor-parallax \
                    zensight-exporter-prometheus zensight-exporter-otel zensight-correlator \
-                   zensight-historian; do
+                   zensight-historian \
+                   zensight-desired; do
             image="$REGISTRY/marcpardo/$c"
             buildah --storage-driver vfs build $labels \
               --build-arg "BINARY_PACKAGE=$c" --build-arg TARGETARCH=amd64 \
@@ -181,6 +182,9 @@ jobs:
           # before anything here noticed.
           ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-historian:${RELEASE_TAG}")
           buildah --storage-driver vfs run "$ctr" -- /usr/local/bin/zensight-historian --help >/dev/null
+          buildah --storage-driver vfs rm "$ctr"
+          ctr=$(buildah --storage-driver vfs from "$REGISTRY/marcpardo/zensight-desired:${RELEASE_TAG}")
+          buildah --storage-driver vfs run "$ctr" -- /usr/local/bin/zensight-desired --help >/dev/null
           buildah --storage-driver vfs rm "$ctr"
 
           # smoke, part 2: START the sensors image, do not just ask it for help
@@ -309,6 +313,7 @@ jobs:
                    zensight-sensor-parallax \
                    zensight-exporter-prometheus zensight-exporter-otel zensight-correlator \
                    zensight-historian \
+                   zensight-desired \
                    zensight-sensors; do
             image="$REGISTRY/marcpardo/$c"
             buildah --storage-driver vfs push --tls-verify=false "$image:${RELEASE_TAG}"

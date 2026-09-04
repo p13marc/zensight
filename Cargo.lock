@@ -14416,6 +14416,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zensight-desired"
+version = "0.13.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flume",
+ "json5 1.3.1",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zenkey",
+ "zenoh",
+ "zensight-common",
+]
+
+[[package]]
 name = "zensight-exporter-otel"
 version = "0.13.0"
 dependencies = [
