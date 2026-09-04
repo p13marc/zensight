@@ -269,37 +269,86 @@ jobs:
       - uses: https://github.com/taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-deny
-      # The advisory-db clone persists in the runner lane's cargo home, and a
-      # clone corrupted mid-fetch ("expected flush after ref listing") fails
-      # every later run ON THAT LANE as `advisories FAILED` — intermittent by
-      # lane, and without job logs indistinguishable from a real advisory.
+      # `deny` was the one job with no cache, so it re-fetched the crates.io
+      # index AND re-cloned the RustSec advisory database from github.com on
+      # every run. The job log for run #429 (#950) says what that costs:
       #
-      # TRY, THEN RESET AND RETRY ONCE. Two earlier shapes were both wrong:
+      #   failed to clone: ["clone", "--depth=1", ... "advisory-db" ...]
+      #   fatal: could not read Username for 'https://github.com'
       #
-      #   1. `rm -rf ~/.cargo/advisory-dbs` before every run. cargo-deny moved
-      #      its cache directory under it — 0.18 and earlier used the plural,
-      #      0.20 uses `advisory-db` — and install-action installs the latest,
-      #      so the step was deleting a directory nothing writes to and the
-      #      wedge it existed to clear survived.
+      # A credential prompt for a PUBLIC repository is github.com refusing an
+      # anonymous request — the shape an unauthenticated rate limit takes over
+      # git-HTTPS from a shared egress IP. Nothing about this tree. It failed
+      # on four of six runs while `cargo deny check` was clean locally at those
+      # exact commits, and the 18-seconds-later retry hit the same wall, which
+      # is what distinguishes a rate limit from a flake.
       #
-      #   2. `rm -rf` BOTH before every run. That cleared the wedge, and made
-      #      every run re-clone the whole advisory database from github.com,
-      #      so a single network flake became a red merge gate. It failed on
-      #      three of the four runs after it landed while `cargo deny check`
-      #      was clean locally at those exact commits — the cache had been the
-      #      thing absorbing that, and removing it unconditionally removed the
-      #      resilience along with the staleness.
+      # `cache-directories` carries the advisory database across runs so the
+      # clone happens rarely rather than always, and `cache-on-failure` keeps a
+      # database that WAS fetched even when the check then failed on a finding.
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          cache-targets: false
+          cache-on-failure: true
+          cache-directories: |
+            ~/.cargo/advisory-dbs
+            ~/.cargo/advisory-db
+      # Three distinct failures wear the same red X, and only one of them is
+      # about this repository. The step separates them:
       #
-      # So: use the cache, and reset it only when something actually went
-      # wrong. A wedged clone heals on the retry, a flaked fetch gets a second
-      # chance, and a REAL advisory fails both attempts and still gates.
-      - name: cargo deny (reset the advisory-db cache and retry on failure)
+      #   1. THE FETCH WAS REFUSED (the #950 shape). Re-check against the
+      #      cached database and pass with a warning. This is safe because
+      #      `--offline` with no cached database EXITS 1 — verified: it fails
+      #      with "failed to get 'FETCH_HEAD' metadata", it does not report
+      #      `advisories ok` over an empty directory. So the fallback cannot
+      #      green a run that checked nothing.
+      #   2. A WEDGED CLONE ("expected flush after ref listing") poisons the
+      #      lane's cargo home until something deletes it. Reset and retry.
+      #      Both cache spellings are removed: 0.18 and earlier used
+      #      `advisory-dbs`, and the note that 0.20 had moved to the singular
+      #      was wrong — 0.20.2 writes `~/.cargo/advisory-dbs/advisory-db-<hash>`,
+      #      as run #429's own clone path shows.
+      #   3. A REAL ADVISORY, BAN, LICENSE OR SOURCE FINDING. Fails, gates,
+      #      and leaves the cache alone — which is the whole point of the job,
+      #      and the reason the reset is no longer the catch-all arm it was.
+      #
+      # The cached database is at most as old as the cache entry, and the
+      # weekly `deny-fresh` run checks a fresh one with the ignore list
+      # stripped — so staleness has its own gate and does not need this one.
+      - name: cargo deny (cached advisory database, fetch failure isolated)
+        env:
+          # A credential challenge must fail immediately and say so, not block
+          # on a terminal that is not there.
+          GIT_TERMINAL_PROMPT: "0"
         run: |
+          set -uo pipefail
           cargo deny --version
-          if cargo deny check; then exit 0; fi
-          echo "::warning::cargo deny failed; resetting the advisory-db cache and retrying once"
-          rm -rf ~/.cargo/advisory-db ~/.cargo/advisory-dbs "${CARGO_HOME:-$HOME/.cargo}/advisory-db" "${CARGO_HOME:-$HOME/.cargo}/advisory-dbs"
-          cargo deny check
+          log=$(mktemp)
+          if cargo deny check 2>&1 | tee "$log"; then exit 0; fi
+
+          if grep -q "failed to fetch advisory database" "$log"; then
+            echo "::warning::advisory-db fetch refused by github.com (#950); re-checking against the cached database"
+            if cargo deny --offline check; then
+              echo "::warning::advisories checked against the CACHED database, not a freshly fetched one — the weekly deny-fresh run checks a fresh one"
+              exit 0
+            fi
+            echo "::error::advisory database is neither fetchable nor cached; nothing was checked"
+            exit 1
+          fi
+
+          if grep -qE "expected flush after ref listing|failed to get 'FETCH_HEAD'|failed to open advisory database" "$log"; then
+            echo "::warning::the lane's advisory-db clone is wedged; resetting it and retrying once"
+            rm -rf ~/.cargo/advisory-db ~/.cargo/advisory-dbs "${CARGO_HOME:-$HOME/.cargo}/advisory-db" "${CARGO_HOME:-$HOME/.cargo}/advisory-dbs"
+            cargo deny check
+            exit $?
+          fi
+
+          # A finding. Fail WITHOUT touching the cache: `cache-on-failure` saves
+          # after this step, so deleting the database here would hand the next
+          # run an empty cache and put it straight back into the clone that
+          # started all this.
+          echo "::error::cargo deny reported a finding; see the output above"
+          exit 1
 
   lint:
     runs-on: ubuntu-24.04

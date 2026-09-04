@@ -368,6 +368,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `deny` gate was red four runs in six, and it was never about this
+  tree** (#950). The job log — reachable all along through Forgejo's *web*
+  handler, which is the second thing this issue got wrong — says it in one
+  line:
+
+  ```
+  failed to clone: ["clone", "--depth=1", ... "advisory-db" ...]
+  fatal: could not read Username for 'https://github.com'
+  ```
+
+  A credential prompt for a **public** repository is github.com refusing an
+  anonymous request: the shape an unauthenticated rate limit takes over
+  git-HTTPS from a shared egress IP. `deny` was the only job with no cache, so
+  it re-cloned the whole RustSec database every run and was the only job
+  standing in front of that wall. The retry eighteen seconds later hit the same
+  wall, which is what tells a rate limit from a flake.
+
+  Three fixes, none of them "retry harder":
+
+  - **The database is cached** across runs (`rust-cache`'s `cache-directories`,
+    with `cache-on-failure` so a database that *was* fetched survives a run
+    that then failed on a finding). The clone now happens rarely instead of
+    always.
+  - **A refused fetch is isolated from a finding.** It re-checks with
+    `--offline` against the cached database and passes with a warning. This is
+    only safe because `cargo deny --offline` with no cached database **exits
+    1** — verified, it reports a missing `FETCH_HEAD`, it does not print
+    `advisories ok` over an empty directory. A fallback that could green a run
+    which checked nothing would be worse than the flake it replaced.
+  - **The reset is no longer the catch-all arm.** It fires only on a wedged
+    clone now. It used to run on *any* failure, which with the new cache would
+    have deleted the database on a real advisory and handed the next run the
+    empty cache that started all this.
+
+  Also corrected: the note claiming cargo-deny 0.20 moved to a singular
+  `~/.cargo/advisory-db`. It did not — 0.20.2 writes
+  `~/.cargo/advisory-dbs/advisory-db-<hash>`, as run #429's own clone path
+  shows. Both spellings are still removed on a reset, so the wrong note cost
+  nothing beyond a wrong theory to chase.
+
 - **An acknowledgement did not survive the GUI that made it** (#925, epic #900).
 
   Epic #900 exists to move ack and silence out of one GUI's memory and onto the
