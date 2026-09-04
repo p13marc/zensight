@@ -284,9 +284,240 @@ fn sanitize_name(s: &str) -> String {
     s.replace(['\n', '='], "_")
 }
 
+/// A firing alert's identity, as **one key chunk** (#922).
+///
+/// `"<origin>.<producer>.<alert_key>"` — `h-3fa9c2d41b7e.netlink.a1b2c3d4e5f60718`.
+/// It names the document at
+/// `v1/<origin>/state/<producer>/alert/<alert_key>` without being that key,
+/// which is the point: it has to fit in the **last chunk** of
+/// `@catalog/state/ack/{alert_ref}`, and a key cannot nest inside a key.
+///
+/// # Why a readable triple rather than a hash
+///
+/// A hash would be shorter and equally unique. It would also be opaque in
+/// `zenctl topic` output, in a storage listing, and in whatever an on-call
+/// tool renders — and the operator reading it is exactly the person who needs
+/// to know *which host's netlink sensor* is being acknowledged. There is no
+/// collision benefit either: the triple is already the alert's full identity.
+///
+/// # Why `.`
+///
+/// It is the one separator that is legal inside a chunk and already appears
+/// there (`if/eth0/in_errors.rate`), so no component needs escaping and the
+/// key grammar is untouched. `/` would make three chunks, `:` and `@` are
+/// reserved elsewhere in the grammar.
+///
+/// The `alert_key` component may itself contain dots, so parsing splits on the
+/// **first two** separators and keeps the rest — `splitn(3, '.')`. Origin and
+/// producer cannot contain a dot (both are grammar chunks with a narrower
+/// alphabet), so that is unambiguous rather than merely conventional.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AlertRef {
+    /// The origin that publishes the alert (`h-<12hex>`).
+    pub origin: String,
+    /// The producer whose slice the alert belongs to (`netlink`, `sysinfo`).
+    pub producer: String,
+    /// The RFC 11 §3.1 alert key.
+    pub alert_key: String,
+}
+
+impl AlertRef {
+    /// Build a ref. The components are **not** validated here — see
+    /// [`AlertRef::parse`], which is where a ref coming off the wire is
+    /// checked.
+    pub fn new(
+        origin: impl Into<String>,
+        producer: impl Into<String>,
+        alert_key: impl Into<String>,
+    ) -> Self {
+        AlertRef {
+            origin: origin.into(),
+            producer: producer.into(),
+            alert_key: alert_key.into(),
+        }
+    }
+
+    /// Parse `"<origin>.<producer>.<alert_key>"`.
+    ///
+    /// Refuses anything that would not round-trip or would not be legal as a
+    /// key chunk: fewer than three components, an empty component, or a
+    /// character outside the chunk alphabet. A malformed ref must not become
+    /// an `ack/` key — the write would either fail at the router or, worse,
+    /// succeed on a key nothing can address back.
+    pub fn parse(s: &str) -> Result<Self, AlertRefError> {
+        let mut parts = s.splitn(3, '.');
+        let (Some(origin), Some(producer), Some(alert_key)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(AlertRefError::Shape);
+        };
+        if origin.is_empty() || producer.is_empty() || alert_key.is_empty() {
+            return Err(AlertRefError::Empty);
+        }
+        // The chunk alphabet, minus `.` which is our separator and already
+        // handled by the split. Anything else would need escaping to survive
+        // a key, and a ref that needs escaping is a ref that will be wrong
+        // somewhere.
+        let legal = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+        for (name, part) in [("origin", origin), ("producer", producer)] {
+            if part.contains('.') || !part.chars().all(legal) {
+                return Err(AlertRefError::Illegal {
+                    field: name,
+                    value: part.to_string(),
+                });
+            }
+        }
+        if !alert_key.chars().all(legal) {
+            return Err(AlertRefError::Illegal {
+                field: "alert_key",
+                value: alert_key.to_string(),
+            });
+        }
+        Ok(AlertRef::new(origin, producer, alert_key))
+    }
+}
+
+/// Why an [`AlertRef`] was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlertRefError {
+    /// Fewer than three `.`-separated components.
+    Shape,
+    /// A component was empty.
+    Empty,
+    /// A component carried a character that cannot appear in a key chunk.
+    Illegal { field: &'static str, value: String },
+}
+
+impl std::fmt::Display for AlertRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AlertRefError::Shape => write!(
+                f,
+                "an alert ref is <origin>.<producer>.<alert_key> — three dot-separated parts"
+            ),
+            AlertRefError::Empty => write!(f, "an alert ref has no empty component"),
+            AlertRefError::Illegal { field, value } => write!(
+                f,
+                "{field} {value:?} is not legal in a key chunk (letters, digits, - and _)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AlertRefError {}
+
+impl std::fmt::Display for AlertRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.origin, self.producer, self.alert_key)
+    }
+}
+
+impl std::str::FromStr for AlertRef {
+    type Err = AlertRefError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        AlertRef::parse(s)
+    }
+}
+
+impl TryFrom<String> for AlertRef {
+    type Error = AlertRefError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        AlertRef::parse(&s)
+    }
+}
+
+impl From<AlertRef> for String {
+    fn from(r: AlertRef) -> String {
+        r.to_string()
+    }
+}
+
+// A `@catalog` document is state-class, so #815 wants a real schema for it.
+// The wire form is the string, not the struct, which is what `schema_for`
+// must be told.
+impl schemars::JsonSchema for AlertRef {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AlertRef".into()
+    }
+    fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = String::json_schema(g);
+        schema.insert(
+            "description".into(),
+            "<origin>.<producer>.<alert_key> — one slug-safe key chunk naming a firing alert"
+                .into(),
+        );
+        schema.insert(
+            "pattern".into(),
+            r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\..+$".into(),
+        );
+        schema
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `AlertRef` round-trips through its string form — which is the form on
+    /// the wire, in the key chunk, and in the JSON.
+    #[test]
+    fn an_alert_ref_round_trips() {
+        let r = AlertRef::new("h-3fa9c2d41b7e", "netlink", "a1b2c3d4e5f60718");
+        assert_eq!(r.to_string(), "h-3fa9c2d41b7e.netlink.a1b2c3d4e5f60718");
+        assert_eq!(AlertRef::parse(&r.to_string()).unwrap(), r);
+        // Serde uses the string, not the struct: the document field and the
+        // key chunk are then the same bytes, which is what makes an ack
+        // findable from the alert and vice versa.
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, "\"h-3fa9c2d41b7e.netlink.a1b2c3d4e5f60718\"");
+        assert_eq!(serde_json::from_str::<AlertRef>(&json).unwrap(), r);
+    }
+
+    /// An `alert_key` may itself contain dots (`if/eth0/in_errors.rate` is a
+    /// legal metric, and a rule slug can carry one), so the split takes the
+    /// FIRST two separators and keeps the rest. Origin and producer cannot
+    /// contain a dot, which is what makes that unambiguous.
+    #[test]
+    fn the_alert_key_may_contain_dots() {
+        let r = AlertRef::parse("h-3fa9c2d41b7e.netlink.threshold.rx.errors").unwrap();
+        assert_eq!(r.origin, "h-3fa9c2d41b7e");
+        assert_eq!(r.producer, "netlink");
+        assert_eq!(r.alert_key, "threshold.rx.errors");
+        assert_eq!(r.to_string(), "h-3fa9c2d41b7e.netlink.threshold.rx.errors");
+    }
+
+    /// A malformed ref must not become an `ack/` key: the write would either
+    /// fail at the router or, worse, land on a key nothing can address back.
+    #[test]
+    fn a_malformed_ref_is_refused() {
+        for bad in [
+            "h-3fa9c2d41b7e",             // one component
+            "h-3fa9c2d41b7e.netlink",     // two
+            ".netlink.abc",               // empty origin
+            "h-3fa9.netlink.",            // empty key
+            "h-3fa9/x.netlink.abc",       // a chunk separator
+            "h-3fa9c2d41b7e.net*ink.abc", // a wildcard
+            "h-3fa9c2d41b7e.netlink.a b", // a space
+        ] {
+            assert!(
+                AlertRef::parse(bad).is_err(),
+                "{bad:?} should not parse into an alert ref"
+            );
+        }
+    }
+
+    /// The type is the one that goes in a key chunk, so its `Display` must
+    /// never produce something a key cannot hold.
+    #[test]
+    fn a_parsed_ref_is_always_a_legal_chunk() {
+        let r = AlertRef::parse("h-3fa9c2d41b7e.netlink.a1b2c3d4").unwrap();
+        let s = r.to_string();
+        assert!(!s.contains('/'), "{s}");
+        assert!(!s.contains('*'), "{s}");
+        assert!(!s.contains('?'), "{s}");
+        assert!(!s.contains('#'), "{s}");
+    }
 
     /// **The RFC 11 §3.1 test vector**, which every implementation MUST
     /// reproduce: rule `link_down`, labels `{peer: r2, port: eth0, host: …}`.

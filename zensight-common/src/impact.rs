@@ -63,8 +63,16 @@ pub const MAX_DEPTH: usize = 4;
 /// job and the caller has already done it — asking this function to redo it
 /// would mean handing it the entity set too, and it would stop being a
 /// function of the graph.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct AlertRef {
+///
+/// Renamed from `AlertRef` in #922, which is what this doc comment's first
+/// line has always called it. [`crate::alert::AlertRef`] is now the *wire*
+/// identifier — one slug-safe key chunk, `Display`/`FromStr` — and the two
+/// cannot share a name: a type whose `Display` drops a field (`entity_id`) is
+/// a round-trip trap, and `entity_id` has no business in a key chunk anyway.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct AlertSite {
     /// The entity this alert is about.
     pub entity_id: String,
     /// The origin that published it.
@@ -74,7 +82,12 @@ pub struct AlertRef {
 }
 
 /// What a symptom is a symptom *of*.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+///
+/// `JsonSchema` since #922: it rides an `Incident`, which is a state-class
+/// `@catalog` document, and the #815 gate wants a real schema for one.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Cause {
     /// The root entity is down, and has no firing alert of its own to point
@@ -83,7 +96,7 @@ pub enum Cause {
     Entity { entity_id: String },
     /// The root entity is down *and* is firing an alert, so the operator can
     /// be sent straight to the page that describes it.
-    Alert(AlertRef),
+    Alert(AlertSite),
 }
 
 impl Cause {
@@ -103,7 +116,7 @@ pub struct Impact {
     ///
     /// An alert on a root is **absent** — it is a cause, not a symptom. So an
     /// operator's queue is exactly the firing set minus these keys.
-    pub symptoms: BTreeMap<AlertRef, Cause>,
+    pub symptoms: BTreeMap<AlertSite, Cause>,
     /// Each root and everything downstream of it, root excluded.
     ///
     /// Present even for a root with no firing alerts anywhere beneath it: "the
@@ -114,7 +127,7 @@ pub struct Impact {
 
 impl Impact {
     /// Whether this alert is explained by something else.
-    pub fn is_symptom(&self, r: &AlertRef) -> bool {
+    pub fn is_symptom(&self, r: &AlertSite) -> bool {
         self.symptoms.contains_key(r)
     }
 }
@@ -124,7 +137,11 @@ impl Impact {
 /// See the module docs for the guarantees. `down` is the caller's decision;
 /// entity ids in it that appear nowhere in `edges` are still roots (an
 /// isolated host that went down is its own cause), they simply impact nothing.
-pub fn attribute(edges: &[Edge], firing: &[(AlertRef, &Alert)], down: &BTreeSet<String>) -> Impact {
+pub fn attribute(
+    edges: &[Edge],
+    firing: &[(AlertSite, &Alert)],
+    down: &BTreeSet<String>,
+) -> Impact {
     // Containment only, both ends resolved. An `External` end cannot be in
     // `down` — the caller decides downness per entity, and an endpoint with no
     // entity has no liveliness to lose — so an edge touching one can neither
@@ -209,7 +226,7 @@ pub fn attribute(edges: &[Edge], firing: &[(AlertRef, &Alert)], down: &BTreeSet<
 /// make on its own. The most severe alert on the root is chosen instead, ties
 /// broken by `alert_key` ascending so the pick is deterministic. If an
 /// availability vocabulary is added later, this is the one place that changes.
-fn cause_for(root: &str, firing: &[(AlertRef, &Alert)]) -> Cause {
+fn cause_for(root: &str, firing: &[(AlertSite, &Alert)]) -> Cause {
     firing
         .iter()
         .filter(|(r, _)| r.entity_id == root)
@@ -312,8 +329,8 @@ mod tests {
         }
     }
 
-    fn aref(entity: &str, key: &str) -> AlertRef {
-        AlertRef {
+    fn aref(entity: &str, key: &str) -> AlertSite {
+        AlertSite {
             entity_id: entity.into(),
             origin: entity.into(),
             alert_key: key.into(),

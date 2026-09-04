@@ -51,6 +51,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Incidents, acknowledgement and silence, as documents** (#922, epic #900) —
+  the model half. Nothing publishes these yet; #923 is the engine.
+
+  Acknowledging an alert in ZenSight was a `HashSet` insert in one GUI
+  process; silencing one was a `HashMap` insert beside it, whole-source only;
+  an incident was a pure function nobody but that GUI could call. Close the
+  window and all three were gone, a second operator never saw them, and the
+  Prometheus and OTel mirrors — which carry every alert — could not tell an
+  acknowledged one from a new one.
+
+  `zensight-common` gains `alert::AlertRef`, `ack::AlertAck`,
+  `silence::{Silence, Matcher, MatchOp}` and `incident::{Incident,
+  group_incidents}`, plus the `@catalog` subjects `incident/{incident_id}`,
+  `ack/{alert_ref}` and `silence/{id}` and the four gated write procedures.
+
+  Four decisions worth naming:
+
+  - **`AlertRef` is a readable triple, not a hash.**
+    `<origin>.<producer>.<alert_key>` — one slug-safe chunk, because it has to
+    fit in the *last* chunk of `ack/{alert_ref}` and a key cannot nest inside a
+    key. A hash would be shorter and equally unique, and opaque in `zenctl`
+    output to exactly the operator who needs to know *whose* alert is being
+    acknowledged. `.` is the one separator already legal inside a chunk
+    (`in_errors.rate`), so nothing needs escaping; the `alert_key` may carry
+    its own dots, so parsing splits on the first two.
+  - **An ack applies only while a firing alert with `timestamp <= fired_at`
+    exists.** One projection rule, one implementation
+    (`AlertAck::applies_to`), and two properties fall out of it: an **orphan
+    from a dead catalog is inert** rather than a silent suppression, and a
+    **re-fire pages again** — which is the difference between an ack and a
+    silence, said in a field rather than in prose.
+  - **An empty matcher set silences nothing.** The other reading — vacuous
+    truth, "all zero conditions hold" — is how a fat-fingered silence mutes a
+    fleet, and the harm is asymmetric: refusing to suppress costs a page,
+    suppressing everything costs an outage nobody hears about. A regex that
+    does not compile suppresses nothing either, for the same reason.
+  - **`group_incidents` keys by entity, not by `alert.source`.** The GUI's
+    version (#129) groups by the payload field, which for a proxy sensor is the
+    polled device — so a host that publishes under three origins is three
+    incidents, and two hosts sharing a `source` name are one. Keyed by the
+    entity the catalog already fused, a host down is one incident whether its
+    own sensor, the hypervisor polling it or a prober noticed. An unresolved
+    origin falls back to `inc-<origin>` and never to `inc-<source>`, because
+    that fallback is exactly where the collision would land.
+
+  The **timeline stays behind**: an `Incident` that carried every transition
+  would grow without bound on a TTL'd key. It is history — the historian's and
+  the GUI's — and the epic says so.
+
+  `impact::AlertRef` is renamed to **`impact::AlertSite`**, which is what its
+  own doc comment's first line has always called it ("Where a firing alert
+  lives"). The two cannot share a name: a type whose `Display` drops a field
+  (`entity_id`) is a round-trip trap, and `entity_id` has no business in a key
+  chunk. It had no caller outside its own file. The ack document is `AlertAck`
+  rather than `Ack` for the same reason: `Ack` is already the generic "the
+  write landed" reply twenty-odd procedures declare.
+
+  Registry: `catalog` 1.3 → 1.4, all additive — the three **subjects** only.
+  The `ack`/`unack`/`silence`/`unsilence` procedures land with the code that
+  serves them (#924): a declared procedure nobody answers fails the conformance
+  judge's `alive ⇒ callable` check, correctly — the registry is a promise the
+  fleet reads. A state family nobody has published into yet is different: it
+  reads as empty, which is what it is.
+
 - **Promote any metric to a sensor-owned threshold** (#933, epic #901).
 
   `PromoteMetricToAlert` used to branch on `protocol == Netlink`: netlink got
@@ -3454,8 +3518,6 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
     rather than wrong — the store refills on the next fetch. It also gained
     the `hashes()`/`remove()` that the 0.2 `ContentStore` trait requires.
 
-
-
 - **Metric names come from the registry, not the payload** (#764). Neither
   exporter parsed the key: both named from `point.protocol` + `point.metric`, so
   a per-entity subject landed in the metric **name** — `disk/root/inodes_total`
@@ -4662,7 +4724,6 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
     tier spec — and the GUI renders all four as the tile's real state. The doc
     now says which is which and points at where a real measurement lives.
 
-
 - **`introspect` can no longer ship lies** (#484). RFC 08 §6.1's MUST — every
   registered procedure is served by the build advertising it — is now checked at
   run time, immediately before the `alive` token. Debug builds panic; release
@@ -5176,7 +5237,6 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
     refusing would turn an upgrade into an outage.
   - A stored `boots` latched at the RFC maximum mints a **new** engine id;
     restarting into a latched engine rejects all authenticated inbound.
-
 
 - **Tier-2 artifact fetches were trust-on-first-use** (RFC 07 §2.1/§2.3).
   `Delivery::Tree` named the snapshot by a caller-minted ULID, and the root

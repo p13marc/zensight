@@ -9,6 +9,7 @@
 //! - [`keyexpr`] - Key expression builders and parsers
 //! - [`error`] - Error types
 
+pub mod ack;
 pub mod action;
 pub mod alert;
 pub mod artifact;
@@ -34,6 +35,7 @@ pub mod health;
 pub mod history;
 pub mod hostspec;
 pub mod impact;
+pub mod incident;
 pub mod interfaces;
 pub mod keyexpr;
 pub mod media;
@@ -56,6 +58,7 @@ pub mod semconv;
 pub mod serialization;
 pub mod served;
 pub mod session;
+pub mod silence;
 pub mod state;
 pub mod stream;
 pub mod subscribe;

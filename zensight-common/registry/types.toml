@@ -15,6 +15,12 @@ kind = "json-schema"
 [types.Alert]
 kind = "json-schema"
 
+[types.AlertAck]
+kind = "json-schema"
+
+[types.AlertRef]
+kind = "json-schema"
+
 [types.AliasRecord]
 kind = "json-schema"
 
@@ -84,6 +90,9 @@ kind = "json-schema"
 [types.HealthSnapshot]
 kind = "json-schema"
 
+[types.Incident]
+kind = "json-schema"
+
 [types.InterfaceTable]
 kind = "json-schema"
 
@@ -115,6 +124,9 @@ kind = "json-schema"
 kind = "json-schema"
 
 [types.ServiceAction]
+kind = "json-schema"
+
+[types.Silence]
 kind = "json-schema"
 
 [types.StreamStatus]

@@ -92,6 +92,57 @@ zensight/v1/@desired/state/<host>/<producer>/<topic>     fleet desired state (#8
   the raw lifetime counter — a dot-suffix on the leaf chunk, not an extra
   subject chunk, so it stays inside the registered `{metric...}` family.
 
+## Incidents, acknowledgement and silence are bus state (#900)
+
+Three families on the catalog's origin, and between them the answer to
+"is anyone on this, and did anybody choose not to hear about it":
+
+```
+zensight/v1/@catalog/state/incident/{incident_id}    firing alerts grouped BY ENTITY
+zensight/v1/@catalog/state/ack/{alert_ref}           an operator has this one
+zensight/v1/@catalog/state/silence/{id}              a suppression window
+```
+
+All three lived in one GUI process before #900: an ack was a `HashSet` insert,
+a silence a `HashMap` insert beside it, an incident a pure function nobody else
+could call. Closing the window lost all three, a second operator never saw
+them, and the Prometheus and OTel mirrors — which carry every alert — could not
+tell an acknowledged one from a new one.
+
+**`{alert_ref}` is `<origin>.<producer>.<alert_key>`** — one slug-safe chunk,
+because it has to be the *last chunk* of `ack/{alert_ref}` and a key cannot
+nest inside a key. `.` is the one separator already legal inside a chunk
+(`in_errors.rate`), so nothing needs escaping and the grammar is untouched; the
+`alert_key` may carry its own dots, so a parser splits on the first two. A hash
+would be shorter and equally unique, and opaque in `zenctl` output to exactly
+the operator who needs to know whose alert this is.
+
+**An incident is keyed by entity**, not by `alert.source`. A host that
+publishes under three origins — its own sensors, a hypervisor polling it, a
+prober checking it — is one incident. An alert whose origin the catalog has not
+fused falls back to `inc-<origin>`, never `inc-<source>`: two unfused machines
+sharing a `source` name would otherwise merge. Incidents are tombstoned when no
+member is firing. The **timeline is history**, the historian's and the GUI's,
+deliberately not carried in an LWW document with a TTL.
+
+**The ack projection rule, for every consumer:** an ack applies only while a
+firing alert with `timestamp <= fired_at` exists. So an orphan left by a dead
+catalog is *inert* rather than a silent suppression, and a re-fire pages again
+— which is what distinguishes an ack from a silence. A silence holds across
+re-fires, because that is what a maintenance window means; it matches on
+origin / producer / source / rule / `labels.*` with `Eq` or `Regex`, and an
+**empty matcher set matches nothing**, since the vacuous reading is how one
+typo mutes a fleet.
+
+`ack`, `unack`, `silence` and `unsilence` are `kind = "write"` procedures on
+`@catalog/@rpc`, behind the same gate as `link`/`unlink`. There are no bare
+puts: `session.put` is CI-banned and the GUI is not the authority.
+
+**Not built, on purpose:** notification routing, escalation, on-call rotations,
+repeat intervals. zenkey's zenwatch (#387–#390) scoped those out deliberately —
+*"if a deployment needs those it needs an on-call product, and webhook is how it
+gets there."* These families are the documents such a tool would read.
+
 ## The relationship graph rides the bus (#899/#915)
 
 Two new state families, and between them the whole graph:
