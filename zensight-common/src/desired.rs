@@ -126,6 +126,16 @@ pub struct TopicSpec {
     /// that type; it does **not** mean the document is sensible, which is the
     /// receiving sentinel's own `validate`.
     parse: fn(&serde_json::Value) -> Result<(), String>,
+    /// The `v1/@desired/state/<host>/<producer>/<topic>` key for a target
+    /// host.
+    ///
+    /// Here rather than in the publisher, so "which topics exist", "what is a
+    /// valid document for one" and "what key does it ride" are **one** list.
+    /// The generated `Subject` constructors are named per topic, so building
+    /// the key needs a match; a second match somewhere else would be a second
+    /// list to keep in step, and the conformance test below already keeps
+    /// this one honest.
+    key: fn(&zenkey::origin::HostId) -> zenkey::Key,
 }
 
 impl TopicSpec {
@@ -139,6 +149,11 @@ impl TopicSpec {
     pub fn validate(&self, json: &serde_json::Value) -> Result<(), String> {
         (self.parse)(json)?;
         never_list_lint(json)
+    }
+
+    /// The concrete key this topic rides for `host`.
+    pub fn key(&self, host: &zenkey::origin::HostId) -> zenkey::Key {
+        (self.key)(host)
     }
 }
 
@@ -180,6 +195,36 @@ const THRESHOLD_PRODUCERS: &[&str] = &[
     "systemd",
 ];
 
+/// The `thresholds` key builder for one producer.
+///
+/// A match rather than a format string, because the generated `Subject`
+/// constructors are the only sanctioned way to build a key — an ad-hoc
+/// `format!` is exactly what the v1 grammar exists to prevent, and the
+/// registry's H4 lint could not see it.
+fn thresholds_key_for(producer: &str) -> fn(&zenkey::origin::HostId) -> zenkey::Key {
+    use crate::registry::desired::{Subject, key};
+    match producer {
+        "bmc" => |h| key(&Subject::bmc_thresholds(h)),
+        "container" => |h| key(&Subject::container_thresholds(h)),
+        "gnmi" => |h| key(&Subject::gnmi_thresholds(h)),
+        "hostspec" => |h| key(&Subject::hostspec_thresholds(h)),
+        "logs" => |h| key(&Subject::logs_thresholds(h)),
+        "modbus" => |h| key(&Subject::modbus_thresholds(h)),
+        "netflow" => |h| key(&Subject::netflow_thresholds(h)),
+        "netlink" => |h| key(&Subject::netlink_thresholds(h)),
+        "netring" => |h| key(&Subject::netring_thresholds(h)),
+        "parallax" => |h| key(&Subject::parallax_thresholds(h)),
+        "probe" => |h| key(&Subject::probe_thresholds(h)),
+        "pve" => |h| key(&Subject::pve_thresholds(h)),
+        "snmp" => |h| key(&Subject::snmp_thresholds(h)),
+        "sysinfo" => |h| key(&Subject::sysinfo_thresholds(h)),
+        "systemd" => |h| key(&Subject::systemd_thresholds(h)),
+        // Unreachable via `topics()`, whose list is THRESHOLD_PRODUCERS, and
+        // pinned by `every_desired_subject_has_a_validator` besides.
+        other => unreachable!("no thresholds subject for producer {other:?}"),
+    }
+}
+
 /// Every `@desired` topic and its validator.
 ///
 /// Kept in step with `registry/desired.toml` by
@@ -192,24 +237,40 @@ pub fn topics() -> Vec<TopicSpec> {
             topic: "expectations",
             type_name: "HostspecExpectations",
             parse: parses_as::<crate::hostspec::ExpectationsConfig>,
+            key: |h| {
+                use crate::registry::desired;
+                desired::key(&desired::Subject::hostspec_expectations(h))
+            },
         },
         TopicSpec {
             producer: "systemd",
             topic: "expectations",
             type_name: "ExpectationsConfig",
             parse: parses_as::<crate::systemd::ExpectationsConfig>,
+            key: |h| {
+                use crate::registry::desired;
+                desired::key(&desired::Subject::systemd_expectations(h))
+            },
         },
         TopicSpec {
             producer: "netlink",
             topic: "expectations",
             type_name: "NetlinkExpectations",
             parse: parses_as::<crate::netlink::NetlinkExpectations>,
+            key: |h| {
+                use crate::registry::desired;
+                desired::key(&desired::Subject::netlink_expectations(h))
+            },
         },
         TopicSpec {
             producer: "logs",
             topic: "rules",
             type_name: "LogRulesConfig",
             parse: parses_as::<crate::logs::LogRulesConfig>,
+            key: |h| {
+                use crate::registry::desired;
+                desired::key(&desired::Subject::logs_rules(h))
+            },
         },
     ];
     out.extend(THRESHOLD_PRODUCERS.iter().map(|p| TopicSpec {
@@ -217,6 +278,7 @@ pub fn topics() -> Vec<TopicSpec> {
         topic: "thresholds",
         type_name: "ThresholdsConfig",
         parse: parses_as::<crate::threshold::ThresholdsConfig>,
+        key: thresholds_key_for(p),
     }));
     out
 }
@@ -371,6 +433,28 @@ mod topic_table_tests {
                     .iter()
                     .any(|(p, t)| p == spec.producer && t == spec.topic),
                 "`desired::topics()` has {}/{} , which `desired.toml` does not declare",
+                spec.producer,
+                spec.topic
+            );
+        }
+    }
+
+    /// Every topic can build its key, and the key is the one the registry
+    /// declares — not a `format!` that merely looks like it.
+    #[test]
+    fn every_topic_builds_the_key_the_registry_declares() {
+        let host = zenkey::origin::HostId::from_machine_id(
+            "0123456789abcdef0123456789abcdef",
+            crate::PROFILE.salt(),
+        );
+        for spec in topics() {
+            let key = spec.key(&host);
+            let s = key.to_string();
+            assert!(
+                s.contains("@desired/state/")
+                    && s.ends_with(&format!("/{}/{}", spec.producer, spec.topic))
+                    && s.contains(host.as_str()),
+                "{}/{} built {s}",
                 spec.producer,
                 spec.topic
             );

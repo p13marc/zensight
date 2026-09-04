@@ -1,0 +1,31 @@
+[Unit]
+Description=ZenSight desired — the fleet policy compiler, author of @desired
+Documentation=https://github.com/p13marc/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-desired --config /etc/zensight/desired.json5 run
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+# Run unprivileged under a transient system user, with a minimal sandbox.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+# It reads two files and writes none: the daemon config and the policy, both
+# under /etc/zensight. There is no StateDirectory on purpose — this daemon
+# keeps no database. Its only state is what it published, and it re-reads that
+# from the @desired storage on startup, which is what makes a restart a no-op
+# rather than a fleet-wide rewrite.
+ReadOnlyPaths=/etc/zensight
+# Needs no capabilities: a bus client that opens a session, GETs the catalog
+# and publishes documents. It runs no command, copies no file and reaches no
+# host — the hosts converge on the documents themselves.
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

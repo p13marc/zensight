@@ -96,6 +96,36 @@ and a correlator outage. The GUI's local store is now a **cache** of the same
 tiers under the same names: a chart reads the fleet's history when a historian is
 alive and falls back to the cache when none is, saying which it is showing.
 
+## The fleet's desired state has an author (#938)
+
+`@desired` shipped in 0.12.0 with a reconciler on every sensor, a router
+storage, a never-list and an `applied/<topic>` marker — and **nothing in the
+tree that published a document**. The author of the fleet's desired state was a
+private script somewhere else, which meant the one mechanism designed to
+replace "eighteen hand-edited JSON5 files across six machines" could only be
+driven by a nineteenth file nobody could review.
+
+`zensight-desired` is the author. It reads one `fleet-policy.json5`, asks
+`@catalog` what hosts exist and what they are, overlays the classes that match
+each host, and publishes the per-host documents that follow. A **single-writer
+service origin** like `@catalog`, so exactly one runs per deployment.
+
+Two properties make it safe to leave running:
+
+- **A pass with unchanged inputs publishes nothing.** Compilation is pure,
+  output is canonical JSON, and publication is gated on a content diff seeded
+  at startup from the storage itself — so a *restart* is a no-op too. Without
+  it, every refresh would rewrite every document on every host and the
+  `applied/<topic>` markers would show a fleet permanently reconverging.
+- **A document is deleted only when the policy stops yielding it for a host
+  the catalog still shows**, and then only after a grace of several passes.
+  One slow catalog GET must not revert the whole fleet to its file baselines.
+
+It runs no command, copies no file and reaches no host: hosts converge on the
+documents themselves, which is the distinction RFC 12 draws between
+convergence and durable pub/sub imperatives — and the reason a host offline
+during a change picks it up when it returns.
+
 ## Crate Dependencies
 
 ```mermaid

@@ -246,6 +246,12 @@ is opt-in (`collect.timesync`) because reading it shells out.
 
 ## `@desired` — fleet configuration as desired state (#816)
 
+**The controller is `zensight-desired`** (#938), in this repository: it reads
+one `fleet-policy.json5`, asks `@catalog` what hosts exist, and publishes what
+follows. Exactly one runs per deployment — `@desired` is single-writer, and two
+compilers with different policies would overwrite each other every pass. Before
+#938 nothing in-tree published here at all.
+
 A controller publishes per-host runtime POLICY under the `@desired` service
 origin, the **target host id as the first subject chunk** (RFC 07 §3's G1
 proxy rule; zenkey-build's H4 lint enforces the ordering):

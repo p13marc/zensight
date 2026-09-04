@@ -320,6 +320,13 @@ cp -f "$configs_dir/correlator.json5" "$outdir/correlator.json5"
 # ~/.local/state/zensight otherwise, so a generated config needs no rewriting.
 cp -f "$configs_dir/historian.json5" "$outdir/historian.json5"
 
+# desired: the fleet policy compiler (#938). Machine-agnostic — it reads a
+# policy and the catalog, holds no state and writes no file. The generated
+# config points at the repo's demo policy rather than /etc, because a
+# generated run happens out of the working tree; `just desired` overrides it
+# on the command line anyway.
+cp -f "$configs_dir/desired.json5" "$outdir/desired.json5"
+
 # ── Exporters (--exporters; the `just demo-prometheus` / `demo-otel` stacks) ──
 #
 # Off by default so the sensors container image — which runs neither exporter —
@@ -426,4 +433,4 @@ notes=""
 [[ "$exclude_chips" != "[]" ]]  && notes+=" hwmon-exclude=$exclude_chips"
 detectors="detectors on"
 [[ "$profile" == "production" ]] && detectors="detectors OFF, sized down (halved tables)"
-echo "Configured ($profile): netring iface='$iface' (L7 on, $detectors), netlink, logs=journald, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator, historian$notes  (configs in $outdir/)"
+echo "Configured ($profile): netring iface='$iface' (L7 on, $detectors), netlink, logs=journald, sysinfo=+thermal/fans/cgroups, systemd=full, parallax=test-pattern, correlator, historian, desired-policy$notes  (configs in $outdir/)"

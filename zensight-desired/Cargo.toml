@@ -1,0 +1,29 @@
+[package]
+name = "zensight-desired"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Fleet policy compiler for ZenSight — compiles one fleet-policy.json5 against the catalog and publishes the per-host @desired documents the sensors reconcile."
+
+[dependencies]
+zenkey = { workspace = true }
+zensight-common.workspace = true
+
+clap = { workspace = true }
+json5 = { workspace = true }
+tokio = { workspace = true, features = ["full", "sync", "time"] }
+zenoh.workspace = true
+flume = { workspace = true }
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+flume = { workspace = true }
+json5 = { workspace = true }
+zenkey = { workspace = true }

@@ -68,6 +68,15 @@ members = [
     # zenkey-fleet, as does `zensight` for the fleet view (#745) — the
     # invariant is that no crate a SENSOR links may; see its README,
     # "The boundary", and the note on the dependency below.
+    # The fleet policy compiler (#938, epic #902). `@desired` shipped in
+    # 0.12.0 with a consumer, a storage stanza and a never-list, and nothing
+    # in-tree that PUBLISHED a desired document — the author was a private
+    # script somewhere else. This is the author: it reads one
+    # fleet-policy.json5, asks @catalog what hosts exist, and publishes the
+    # per-host documents that follow. A single-writer SERVICE origin, not a
+    # producer, so it is the correlator's shape rather than the historian's.
+    # It must not link zenkey-fleet (see the note on that dependency).
+    "zensight-desired",
     "zensight-conformance",
 ]
 

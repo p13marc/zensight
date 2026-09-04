@@ -9,6 +9,8 @@
 #   just sensors        # run just the 6 sensors, no GUI/correlator (Ctrl-C stops them)
 #                       # (just sensors connect=tcp/<gui-host>:7447 to feed a remote GUI)
 #   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | hostspec | parallax | correlator | historian)
+#   just desired-plan   # validate the fleet policy and show what it would publish
+#   just desired        # run the fleet policy compiler (#938) — it WRITES @desired
 #   just container      # the container sensor (#819) — needs a runtime socket
 #   just probe          # the outside-in probe sensor (#820) — needs targets
 #   just pve            # the Proxmox VE sensor (#818) — needs a PVE endpoint
@@ -173,6 +175,7 @@ build:
         -p zensight-sensor-parallax \
         -p zensight-correlator \
         -p zensight-historian \
+        -p zensight-desired \
         {{ebpf_features}}
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
@@ -380,6 +383,27 @@ correlator: build configure
 # names a path, so it survives a restart of this recipe.
 historian: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-historian --config {{rundir}}/historian.json5
+
+# Run the fleet policy compiler (#938): compile fleet-policy.json5 against the
+# catalog and publish the per-host @desired documents.
+#
+# Not in `just run`, and not by accident. This daemon WRITES the desired state
+# every sensor reconciles, so starting it with a policy you have not read would
+# reconfigure the whole demo fleet. Look first:
+#
+#   just desired-plan     # validate + show what would change, publishes nothing
+#   just desired          # actually publish
+#
+# The demo policy in demo/fleet-policy.json5 sets one sysinfo threshold on
+# every host, which is enough to watch a document land on a sensor's
+# state/<producer>/applied/<topic> marker.
+desired: build configure
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-desired --config {{rundir}}/desired.json5 --policy demo/fleet-policy.json5 run
+
+# Validate the demo policy and print what it would publish. Needs no bus for
+# the policy half; with one, it also lists the documents per host.
+desired-plan: build configure
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-desired --config {{rundir}}/desired.json5 --policy demo/fleet-policy.json5 plan
 
 # Optional Rerun sidecar (evaluation prototype, epic #415), standalone — or add
 # it to the full stack with `just run rerun=live|record|both`.
