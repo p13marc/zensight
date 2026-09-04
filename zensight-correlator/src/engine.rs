@@ -357,6 +357,19 @@ impl CorrelatorState {
         self.incidents.current()
     }
 
+    /// The current acknowledgement set (serves the ack seed queryable, #925).
+    ///
+    /// Sorted by ref so the seed is deterministic, the same reason
+    /// [`Self::current_assertions`] sorts by id.
+    pub fn current_acks(&self) -> Vec<zensight_common::ack::AlertAck> {
+        self.acks.values().cloned().collect()
+    }
+
+    /// The current suppression set (serves the silence seed queryable, #925).
+    pub fn current_silences(&self) -> Vec<zensight_common::silence::Silence> {
+        self.silences.values().cloned().collect()
+    }
+
     /// The firing alert for `r`, if it is firing right now (#924).
     ///
     /// The gate on `ack`: acknowledging something nobody is reporting is a

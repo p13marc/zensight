@@ -189,6 +189,119 @@ pub async fn serve_incidents(
     Ok(())
 }
 
+/// Serve the acknowledgement seed until shutdown (#925).
+///
+/// # Why this exists
+///
+/// The whole point of epic #900 is that an ack outlives the process that made
+/// it. That needs two things and #924 shipped only one: a live subscriber sees
+/// the `put`, but a GUI that starts *afterwards* — a second operator joining a
+/// running incident, or the same operator after a restart — has nothing to
+/// read. [`crate::publisher::publish_ack`] uses a plain publisher that is
+/// dropped at the end of the call, so there is no publisher cache for the
+/// subscriber's `history()` to recover from, and in the deployment the
+/// `configs/` ship there is no router storage either. The seed GET the
+/// frontend already issues simply returned nothing, silently: every
+/// acknowledged alert came back unacknowledged, and a second operator started
+/// work someone was already doing.
+///
+/// So the catalog answers for its own acks, exactly as it does for assertions
+/// ([`serve_assertions`]) and incidents ([`serve_incidents`]) — storage-shaped,
+/// one reply per document on its concrete key.
+pub async fn serve_acks(
+    session: Arc<Session>,
+    state: SharedState,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::all_acks_wildcard();
+    let queryable = zensight_common::served::serve_state_queryable(&session, &key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare acks queryable: {e}"))?;
+    info!(key = %key, "acks seed queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                // Stamped inside the lock, the same hazard as every other
+                // seed: an ack retired by the sweep mid-loop would have its
+                // live tombstone stamped earlier than this loop's stale copy,
+                // and LWW would resurrect it.
+                let (acks, stamp) = {
+                    let guard = state.lock().unwrap();
+                    (
+                        guard.current_acks(),
+                        zensight_common::served::seed_stamp(&session),
+                    )
+                };
+                for ack in acks {
+                    let key = zensight_common::keyexpr::ack_key(&ack.alert_ref);
+                    match serde_json::to_vec(&ack) {
+                        Ok(payload) => {
+                            if let Err(e) = query.reply_state(&key, payload, stamp).await {
+                                warn!(error = %e, "acks seed reply failed");
+                            }
+                        }
+                        Err(e) => warn!(error = %e, "serialize ack failed"),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Serve the suppression seed until shutdown (#925).
+///
+/// The counterpart to [`serve_acks`], and broken for the same reason before
+/// this existed. A silence matters *more* to a late joiner than an ack does: a
+/// GUI that cannot see the window renders alerts an operator deliberately
+/// quieted, which is the noise the silence was created to remove.
+pub async fn serve_silences(
+    session: Arc<Session>,
+    state: SharedState,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::all_silences_wildcard();
+    let queryable = zensight_common::served::serve_state_queryable(&session, &key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare silences queryable: {e}"))?;
+    info!(key = %key, "silences seed queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                let (silences, stamp) = {
+                    let guard = state.lock().unwrap();
+                    (
+                        guard.current_silences(),
+                        zensight_common::served::seed_stamp(&session),
+                    )
+                };
+                for silence in silences {
+                    let key = zensight_common::keyexpr::silence_key(&silence.id);
+                    match serde_json::to_vec(&silence) {
+                        Ok(payload) => {
+                            if let Err(e) = query.reply_state(&key, payload, stamp).await {
+                                warn!(error = %e, "silences seed reply failed");
+                            }
+                        }
+                        Err(e) => warn!(error = %e, "serialize silence failed"),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Serve the on-demand names queryable until shutdown.
 pub async fn serve_names(
     session: Arc<Session>,

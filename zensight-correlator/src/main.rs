@@ -185,6 +185,26 @@ async fn main() -> anyhow::Result<()> {
             }
         })
     };
+    let acks_query_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_acks(s, st, sh).await {
+                error!(error = %e, "acks queryable error");
+            }
+        })
+    };
+    let silences_query_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_silences(s, st, sh).await {
+                error!(error = %e, "silences queryable error");
+            }
+        })
+    };
     let names_task = {
         let s = session.clone();
         let st = state.clone();
@@ -302,6 +322,13 @@ async fn main() -> anyhow::Result<()> {
     let callable = [
         entities_query_key(),
         names_query_key(),
+        // The three state seeds a late-joining frontend GETs. `entity` was
+        // always here; `incident` was missed by #923 and `ack`/`silence` did
+        // not exist until #925, which is exactly how a GUI came to issue three
+        // seed GETs of which two were answered by nothing at all.
+        zensight_common::keyexpr::all_incidents_wildcard(),
+        zensight_common::keyexpr::all_acks_wildcard(),
+        zensight_common::keyexpr::all_silences_wildcard(),
         catalog_rpc_key("introspect"),
         catalog_rpc_key("describe"),
         catalog_rpc_key("link"),
@@ -343,6 +370,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = edge_task.await;
         let _ = incident_task.await;
         let _ = incidents_query_task.await;
+        let _ = acks_query_task.await;
+        let _ = silences_query_task.await;
         let _ = ack_task.await;
         let _ = sweep_task.await;
         let _ = pdns_task.await;

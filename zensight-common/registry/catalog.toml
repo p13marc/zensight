@@ -149,7 +149,7 @@ kind = "write"
 reply = "AlertAck"
 idempotent = true
 since = "1.5"
-description = "acknowledge a firing alert (?ref=<origin>.<producer>.<alert_key>&note=...); gated by the same switch as link/unlink. Refuses with error/catalog/not-firing when nothing is firing for that ref — an ack for a problem nobody has is a suppression waiting to happen"
+description = "acknowledge a firing alert (?ref=<origin>.<producer>.<alert_key>;note=...); gated by the same switch as link/unlink. Refuses with error/catalog/not-firing when nothing is firing for that ref — an ack for a problem nobody has is a suppression waiting to happen"
 
 [[procedure]]
 path = "unack"

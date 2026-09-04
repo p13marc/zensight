@@ -288,6 +288,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An acknowledgement did not survive the GUI that made it** (#925, epic #900).
+
+  Epic #900 exists to move ack and silence out of one GUI's memory and onto the
+  bus, so a second operator — or the same operator after a restart — can see
+  that someone is already on a problem. Only half of that shipped. A session
+  subscribed *before* the write saw it; a session that started *afterwards* saw
+  nothing at all. `publish_ack` uses a plain publisher dropped at the end of the
+  call, so a subscriber's `history()` has no publisher cache to recover from,
+  and the deployment the `configs/` ship has no router storage either. The
+  frontend already issued a seed GET on all three families and the catalog
+  answered only `incident/*`, so two of the three returned zero replies —
+  silently. Every acknowledged alert came back unacknowledged.
+
+  The catalog now serves `serve_acks` and `serve_silences` on
+  `@catalog/state/{ack,silence}/*`, storage-shaped and HLC-stamped inside the
+  state lock, exactly as it already did for entities, assertions and incidents.
+  All three state seeds join `main.rs`'s `callable` list — `incident/*` had been
+  missing there since #923, which is how a GET nothing answered went unnoticed
+  by `alive ⇒ callable` (RFC 04 §5).
+
+  `zensight-correlator/tests/ack_survives_a_restart.rs` pins it over two real
+  sessions: ack from one, close it, read it back from a session that never saw
+  the write. Against the previous code the live half passes and both late-joiner
+  cases return zero — which is how the defect was found.
+
+  Also fixed: the `ack` procedure's registry description advertised
+  `?ref=...&note=...`. Selector parameters are semicolon-separated
+  (`RpcRequest::param` splits on `;`), as every other procedure in the registry
+  correctly documents, so a caller following that description had its `note`
+  swallowed into the ref and got `error/invalid-args`.
+
+
 - **Both exporters lost one of two hosts firing the same rule** (epic #453
   fallout) — and, worse, closed a live incident.
 
