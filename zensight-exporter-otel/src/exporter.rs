@@ -1186,16 +1186,20 @@ impl OtelExporter {
     /// restart resolved without a span, because the tracker never saw its
     /// firing edge — and since #882 a restarted producer adopts its firing
     /// set rather than re-publishing it, so nothing re-supplied the edge.
-    pub fn prime_alert(&self, alert: &Alert) {
+    pub fn prime_alert(&self, origin: Option<&str>, alert: &Alert) {
         if let Some(tracker) = &self.alert_spans {
-            tracker.lock().on_alert(alert);
+            tracker.lock().on_alert(origin, alert);
         }
     }
 
     pub fn record_alert(&self, key: &str, alert: &Alert) {
         // Traces signal: fold the lifecycle into a span (independent of logs).
         if let Some(tracker) = &self.alert_spans {
-            let completed = tracker.lock().on_alert(alert);
+            // The origin comes from the key, which is the only place it is:
+            // without it two hosts' identical rule is one lifecycle, and the
+            // second host's incident synthesizes no span at all.
+            let origin = zensight_common::keyexpr::parse_key(key).map(|p| p.origin.to_string());
+            let completed = tracker.lock().on_alert(origin.as_deref(), alert);
             if let Some(span) = completed {
                 self.emit_alert_span(span);
             }

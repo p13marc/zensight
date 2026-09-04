@@ -74,8 +74,15 @@ impl AlertSpan {
 ///   `None` — the start time is unknown, so no span can be synthesized.
 #[derive(Debug, Default)]
 pub struct AlertSpanTracker {
-    /// alert_key → first firing timestamp (epoch millis).
-    firing: HashMap<String, i64>,
+    /// `(origin, alert_key)` → first firing timestamp (epoch millis).
+    ///
+    /// Not `alert_key` alone: since epic #453 the hash no longer includes the
+    /// source, so **two hosts firing the identical rule share one**. Keyed by
+    /// the hash, the second host's firing edge was swallowed by `or_insert`,
+    /// the first host's resolve consumed the entry, and the second host's
+    /// resolve then found nothing and synthesized **no span at all** — an
+    /// incident that never reached the trace backend.
+    firing: HashMap<(Option<String>, String), i64>,
 }
 
 impl AlertSpanTracker {
@@ -89,8 +96,13 @@ impl AlertSpanTracker {
     }
 
     /// Apply one alert transition; returns a completed span on resolve.
-    pub fn on_alert(&mut self, alert: &Alert) -> Option<AlertSpan> {
-        let key = alert.alert_key();
+    ///
+    /// `origin` is the chunk of the key the alert arrived on — the caller has
+    /// it and the payload does not, and without it two hosts' identical rule
+    /// is one lifecycle. `None` (a test, or an unparseable key) keys under
+    /// its own bucket rather than colliding with every real host.
+    pub fn on_alert(&mut self, origin: Option<&str>, alert: &Alert) -> Option<AlertSpan> {
+        let key = (origin.map(str::to_string), alert.alert_key());
         match alert.state {
             AlertState::Firing => {
                 if !self.firing.contains_key(&key) && self.firing.len() >= MAX_PENDING {
@@ -108,10 +120,17 @@ impl AlertSpanTracker {
                 let start_ms = self.firing.remove(&key)?;
                 // Guard against clock skew between the two transitions.
                 let end_ms = alert.timestamp.max(start_ms);
-                let (trace_id, span_id) = deterministic_ids(&key, start_ms);
+                // The ids are derived from the ORIGIN and the hash together
+                // (they are the span's identity), so two hosts' identical rule
+                // gets two traces rather than colliding on one.
+                let seed = match &key.0 {
+                    Some(o) => format!("{o}.{}", key.1),
+                    None => key.1.clone(),
+                };
+                let (trace_id, span_id) = deterministic_ids(&seed, start_ms);
 
                 let mut attributes = vec![
-                    ("alert.key".to_string(), key),
+                    ("alert.key".to_string(), key.1.clone()),
                     ("alert.source".to_string(), alert.source.clone()),
                     ("alert.protocol".to_string(), alert.protocol.to_string()),
                     ("alert.rule".to_string(), alert.rule.clone()),
@@ -220,10 +239,16 @@ mod tests {
     #[test]
     fn lifecycle_produces_one_span_with_alert_timestamps() {
         let mut tracker = AlertSpanTracker::new();
-        assert!(tracker.on_alert(&firing_at(1_000)).is_none());
+        assert!(
+            tracker
+                .on_alert(Some("h-aaaaaaaaaaaa"), &firing_at(1_000))
+                .is_none()
+        );
         assert_eq!(tracker.pending(), 1);
 
-        let span = tracker.on_alert(&resolved_at(5_000)).expect("span");
+        let span = tracker
+            .on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(5_000))
+            .expect("span");
         assert_eq!(tracker.pending(), 0);
         assert_eq!(span.name, "alert:ssh-listening");
         assert_eq!(span.start_ms, 1_000);
@@ -234,8 +259,10 @@ mod tests {
     #[test]
     fn attributes_carry_alert_context() {
         let mut tracker = AlertSpanTracker::new();
-        tracker.on_alert(&firing_at(1_000));
-        let span = tracker.on_alert(&resolved_at(2_000)).unwrap();
+        tracker.on_alert(Some("h-aaaaaaaaaaaa"), &firing_at(1_000));
+        let span = tracker
+            .on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(2_000))
+            .unwrap();
 
         let get = |k: &str| {
             span.attributes
@@ -256,11 +283,13 @@ mod tests {
     #[test]
     fn firing_refresh_keeps_original_start() {
         let mut tracker = AlertSpanTracker::new();
-        tracker.on_alert(&firing_at(1_000));
-        tracker.on_alert(&firing_at(3_000)); // refresh Put — must not restart
+        tracker.on_alert(Some("h-aaaaaaaaaaaa"), &firing_at(1_000));
+        tracker.on_alert(Some("h-aaaaaaaaaaaa"), &firing_at(3_000)); // refresh Put — must not restart
         assert_eq!(tracker.pending(), 1);
 
-        let span = tracker.on_alert(&resolved_at(5_000)).unwrap();
+        let span = tracker
+            .on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(5_000))
+            .unwrap();
         assert_eq!(span.start_ms, 1_000);
     }
 
@@ -268,7 +297,11 @@ mod tests {
     fn resolved_without_firing_yields_no_span() {
         // Exporter joined mid-lifecycle: start time unknown, nothing to emit.
         let mut tracker = AlertSpanTracker::new();
-        assert!(tracker.on_alert(&resolved_at(5_000)).is_none());
+        assert!(
+            tracker
+                .on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(5_000))
+                .is_none()
+        );
         assert_eq!(tracker.pending(), 0);
     }
 
@@ -276,8 +309,10 @@ mod tests {
     fn end_never_precedes_start() {
         // Clock skew: resolved carries an earlier timestamp than firing.
         let mut tracker = AlertSpanTracker::new();
-        tracker.on_alert(&firing_at(5_000));
-        let span = tracker.on_alert(&resolved_at(4_000)).unwrap();
+        tracker.on_alert(Some("h-aaaaaaaaaaaa"), &firing_at(5_000));
+        let span = tracker
+            .on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(4_000))
+            .unwrap();
         assert_eq!(span.start_ms, 5_000);
         assert_eq!(span.end_ms, 5_000, "end clamps to start");
     }
@@ -309,13 +344,15 @@ mod tests {
         // synthesize the identical span identity for the identical lifecycle.
         let span_a = {
             let mut t = AlertSpanTracker::new();
-            t.on_alert(&firing_at(1_000));
-            t.on_alert(&resolved_at(2_000)).unwrap()
+            t.on_alert(Some("h-aaaaaaaaaaaa"), &firing_at(1_000));
+            t.on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(2_000))
+                .unwrap()
         };
         let span_b = {
             let mut t = AlertSpanTracker::new();
-            t.on_alert(&firing_at(1_000));
-            t.on_alert(&resolved_at(2_000)).unwrap()
+            t.on_alert(Some("h-aaaaaaaaaaaa"), &firing_at(1_000));
+            t.on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(2_000))
+                .unwrap()
         };
         assert_eq!(span_a.trace_id, span_b.trace_id);
         assert_eq!(span_a.span_id, span_b.span_id);
@@ -334,13 +371,45 @@ mod tests {
         );
         other.timestamp = 500;
 
-        tracker.on_alert(&firing_at(1_000));
-        tracker.on_alert(&other);
+        tracker.on_alert(Some("h-aaaaaaaaaaaa"), &firing_at(1_000));
+        tracker.on_alert(Some("h-aaaaaaaaaaaa"), &other);
         assert_eq!(tracker.pending(), 2);
 
         // Resolving one leaves the other open.
-        let span = tracker.on_alert(&resolved_at(2_000)).unwrap();
+        let span = tracker
+            .on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(2_000))
+            .unwrap();
         assert_eq!(span.attributes[1].1, "host01");
         assert_eq!(tracker.pending(), 1);
+    }
+
+    /// **Two hosts firing one rule are two lifecycles** (epic #453).
+    ///
+    /// The alert-key hash no longer includes the source, so keyed by the hash
+    /// alone: host B's firing edge was swallowed by `or_insert`, host A's
+    /// resolve consumed the single entry, and **host B's resolve synthesized
+    /// no span at all** — an incident that never reached the trace backend.
+    #[test]
+    fn two_hosts_firing_one_rule_are_two_lifecycles() {
+        let mut tracker = AlertSpanTracker::new();
+        let a = firing_at(1_000);
+        let b = firing_at(1_000);
+        assert_eq!(a.alert_key(), b.alert_key(), "the premise of this test");
+
+        tracker.on_alert(Some("h-aaaaaaaaaaaa"), &a);
+        tracker.on_alert(Some("h-bbbbbbbbbbbb"), &b);
+        assert_eq!(tracker.pending(), 2, "two hosts, two open lifecycles");
+
+        let span_a = tracker
+            .on_alert(Some("h-aaaaaaaaaaaa"), &resolved_at(5_000))
+            .expect("host A's span");
+        let span_b = tracker
+            .on_alert(Some("h-bbbbbbbbbbbb"), &resolved_at(6_000))
+            .expect("host B's span — this used to be None");
+        assert_eq!(tracker.pending(), 0);
+
+        // Distinct traces: the ids are seeded from the origin as well as the
+        // hash, so the two incidents do not collapse into one trace either.
+        assert_ne!(span_a.trace_id, span_b.trace_id);
     }
 }

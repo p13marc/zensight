@@ -77,20 +77,31 @@ const RESERVED: &[&str] = &[
 /// edge-triggered publisher.
 struct StoredAlert {
     alert: Alert,
-    /// The origin chunk (`h-<12hex>`) of the key the alert arrived on —
-    /// the same chunk a liveliness token carries, which is what makes
-    /// [`AlertStore::drop_origin`] able to match one against the other.
-    /// `Alert::source` is a *hostname* and can never equal it.
-    origin: Option<String>,
     #[allow(dead_code)]
     received: Instant,
 }
 
-/// Thread-safe store of currently-firing alerts, keyed by `alert_key`.
+/// Thread-safe store of currently-firing alerts, keyed by
+/// **`(origin, alert_key)`**.
+///
+/// Not by `alert_key` alone, and the difference is not academic. Since epic
+/// #453 the key hash no longer includes the source — the wire key's origin
+/// chunk scopes it — so **two hosts firing the identical rule have the
+/// identical `alert_key`**. Keyed by the hash alone this store showed one of
+/// them, with whichever `source` label arrived last; and because absence is
+/// the resolve signal, the surviving host resolving removed the series and
+/// Alertmanager closed the *other* host's live incident.
+///
+/// An alert that arrived with no origin (a test, or a sample whose key did not
+/// parse) keys under `None`, which keeps those distinct from every real host
+/// rather than lumping them together.
 #[derive(Default)]
 pub struct AlertStore {
-    alerts: RwLock<HashMap<String, StoredAlert>>,
+    alerts: RwLock<HashMap<AlertId, StoredAlert>>,
 }
+
+/// The store's key: the publishing origin and the RFC 11 §3.1 hash.
+type AlertId = (Option<String>, String);
 
 impl AlertStore {
     pub fn new() -> Self {
@@ -106,26 +117,35 @@ impl AlertStore {
     /// [`apply`](Self::apply), recording the origin chunk of the key the
     /// alert arrived on so a departed sensor's alerts can be found again.
     pub fn apply_from(&self, origin: Option<String>, alert: Alert) {
-        let key = alert.alert_key();
+        // The origin lives in the KEY now, not beside the alert: it is what
+        // distinguishes two hosts firing the identical rule, and a copy in the
+        // value would be a second place for the same fact to drift.
+        let id: AlertId = (origin, alert.alert_key());
         let mut map = self.alerts.write();
         if alert.state == AlertState::Resolved {
-            map.remove(&key);
+            map.remove(&id);
         } else {
             map.insert(
-                key,
+                id,
                 StoredAlert {
                     alert,
-                    origin,
                     received: Instant::now(),
                 },
             );
         }
     }
 
-    /// Clear an alert by its `alert_key` (the last key-expression segment of a
-    /// Zenoh `Delete` tombstone).
-    pub fn remove(&self, alert_key: &str) {
-        self.alerts.write().remove(alert_key);
+    /// Clear an alert by the origin it was published from and its `alert_key`
+    /// (both read from the key of a Zenoh `Delete` tombstone).
+    ///
+    /// The origin is required for the same reason it is part of the store's
+    /// key: two hosts firing the identical rule share an `alert_key`, so a
+    /// tombstone that named only the hash would retire **both** — one of them
+    /// still firing, and silently gone from Prometheus.
+    pub fn remove(&self, origin: Option<&str>, alert_key: &str) {
+        self.alerts
+            .write()
+            .remove(&(origin.map(str::to_string), alert_key.to_string()));
     }
 
     /// Number of firing alerts.
@@ -155,7 +175,7 @@ impl AlertStore {
     pub fn drop_origin(&self, origin: &str) -> usize {
         let mut map = self.alerts.write();
         let before = map.len();
-        map.retain(|_, a| a.origin.as_deref() != Some(origin));
+        map.retain(|(o, _), _| o.as_deref() != Some(origin));
         before - map.len()
     }
 
@@ -173,14 +193,16 @@ impl AlertStore {
         );
         let _ = writeln!(out, "# TYPE {name} gauge");
 
-        // Deterministic output order so scrapes/diffs are stable.
-        let mut keys: Vec<&String> = map.keys().collect();
-        keys.sort();
+        // Deterministic output order so scrapes/diffs are stable. Sorting by
+        // the whole id, not just the hash, keeps two hosts' identical rule in
+        // a stable order relative to each other.
+        let mut ids: Vec<&AlertId> = map.keys().collect();
+        ids.sort();
 
-        for key in keys {
-            let a = &map[key].alert;
+        for id in ids {
+            let a = &map[id].alert;
             let mut labels: Vec<(String, String)> = vec![
-                ("alert_key".into(), key.clone()),
+                ("alert_key".into(), id.1.clone()),
                 ("source".into(), a.source.clone()),
                 ("protocol".into(), a.protocol.to_string()),
                 ("rule".into(), a.rule.clone()),
@@ -260,13 +282,77 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_removes_by_alert_key() {
+    fn tombstone_removes_by_origin_and_alert_key() {
         let store = AlertStore::new();
         let a = firing();
         let key = a.alert_key();
-        store.apply(a);
-        store.remove(&key);
+        store.apply_from(Some("h-aaaaaaaaaaaa".into()), a);
+        // A tombstone from a DIFFERENT host does not retire this one.
+        store.remove(Some("h-bbbbbbbbbbbb"), &key);
+        assert_eq!(store.len(), 1, "another host's tombstone is not ours");
+        store.remove(Some("h-aaaaaaaaaaaa"), &key);
         assert_eq!(store.len(), 0);
+    }
+
+    /// **Two hosts firing the identical rule are two series** (epic #453).
+    ///
+    /// The alert-key hash no longer includes the source — the wire key's
+    /// origin chunk scopes it — so keyed by the hash alone this store showed
+    /// one of them, with whichever `source` label arrived last. And because
+    /// **absence is the resolve signal**, the surviving host resolving removed
+    /// the series and Alertmanager closed the other host's live incident.
+    #[test]
+    fn two_hosts_firing_one_rule_are_two_series() {
+        let store = AlertStore::new();
+        let mk = |source: &str| {
+            Alert::new(
+                source,
+                zensight_common::Protocol::Netlink,
+                zensight_common::AlertKind::Expectation,
+                "socket:sshd",
+                zensight_common::AlertSeverity::Critical,
+                "sshd is not listening",
+            )
+        };
+        let (a, b) = (mk("web01"), mk("web02"));
+        assert_eq!(a.alert_key(), b.alert_key(), "the premise of this test");
+        let key = a.alert_key();
+        store.apply_from(Some("h-aaaaaaaaaaaa".into()), a);
+        store.apply_from(Some("h-bbbbbbbbbbbb".into()), b);
+        assert_eq!(store.len(), 2);
+
+        let out = render(&store);
+        assert!(out.contains(r#"source="web01""#), "{out}");
+        assert!(out.contains(r#"source="web02""#), "{out}");
+
+        // web02 resolving must leave web01 firing — the failure that closed a
+        // live incident in Alertmanager.
+        store.remove(Some("h-bbbbbbbbbbbb"), &key);
+        let out = render(&store);
+        assert!(out.contains(r#"source="web01""#), "{out}");
+        assert!(!out.contains(r#"source="web02""#), "{out}");
+    }
+
+    /// The same, through the liveliness path: one host's sensor dying does not
+    /// retire the other's identical alert.
+    #[test]
+    fn dropping_one_origin_leaves_the_others_identical_alert() {
+        let store = AlertStore::new();
+        let mk = |source: &str| {
+            Alert::new(
+                source,
+                zensight_common::Protocol::Netlink,
+                zensight_common::AlertKind::Expectation,
+                "socket:sshd",
+                zensight_common::AlertSeverity::Critical,
+                "sshd is not listening",
+            )
+        };
+        store.apply_from(Some("h-aaaaaaaaaaaa".into()), mk("web01"));
+        store.apply_from(Some("h-bbbbbbbbbbbb".into()), mk("web02"));
+        assert_eq!(store.drop_origin("h-aaaaaaaaaaaa"), 1);
+        assert_eq!(store.len(), 1);
+        assert!(render(&store).contains(r#"source="web02""#));
     }
 
     #[test]

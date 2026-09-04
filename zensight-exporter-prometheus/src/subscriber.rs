@@ -343,7 +343,11 @@ impl TelemetrySubscriber {
                     subject.common_state()
             {
                 trace!(key = %key, "Alert tombstone");
-                self.collector.remove_alert(alert_key);
+                // The origin as well as the hash: a tombstone that named only
+                // the hash would retire the identical rule on every other host
+                // too (epic #453 — the hash no longer includes the source).
+                self.collector
+                    .remove_alert(Self::origin_of(key).as_deref(), alert_key);
             }
             return;
         }

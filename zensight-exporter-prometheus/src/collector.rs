@@ -332,10 +332,11 @@ impl MetricCollector {
         }
     }
 
-    /// Clear a firing alert by its `alert_key` (a Zenoh `Delete` tombstone).
-    pub fn remove_alert(&self, alert_key: &str) {
+    /// Clear a firing alert by its publishing origin and `alert_key` (a Zenoh
+    /// `Delete` tombstone). Both come from the key.
+    pub fn remove_alert(&self, origin: Option<&str>, alert_key: &str) {
         if self.prometheus_config.export_alerts {
-            self.alerts.remove(alert_key);
+            self.alerts.remove(origin, alert_key);
         }
     }
 
