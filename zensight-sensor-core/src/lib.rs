@@ -44,6 +44,7 @@ mod error;
 pub mod event;
 pub mod governor;
 mod health;
+pub mod hostfacts;
 mod identity;
 mod liveliness;
 pub mod procutil;

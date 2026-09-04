@@ -51,6 +51,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every sensor now says who made the machine and what it runs** (#935, epic
+  #902). `zensight-sensor-core` publishes `vendor` and `platform` on its
+  self-report instead of two hard-coded `None`s.
+
+  They were `None` for the life of the crate and nothing failed, because
+  nothing joins on them: `HostIdentity` answers *who is this host* and the
+  catalog merges on those fields, while `vendor` and `platform` are
+  descriptive. The visible symptom was a catalog that showed a **self-reporting
+  host** with no vendor and no platform while showing an **SNMP-polled switch**
+  with both — the machine that could speak for itself said the least about
+  itself. It stopped being cosmetic when fleet policy (#902) proposed selecting
+  classes of host by `platform`: a selector over a field nothing populates
+  matches nothing at all.
+
+  `zensight_sensor_core::hostfacts` reads both once at startup — neither
+  changes while a process runs, and re-reading them on the DHCP refresh would
+  spend two file reads a minute to learn nothing.
+
+  - **`vendor`** ← DMI `sys_vendor`. On a VM this is the most direct statement
+    that it *is* one (`"QEMU"`, `"VMware, Inc."`). Placeholders are refused —
+    `"To Be Filled By O.E.M."` in a vendor column is worse than a blank one: it
+    looks like an answer, and a policy class keyed on vendor would select every
+    unbranded machine in the fleet under one manufacturer that does not exist.
+  - **`platform`** ← `<ID>-<VERSION_ID>` from `/etc/os-release`, slugged:
+    `"debian-13"`, `"ubuntu-24.04"`. `"proxmox-<version>"` when `/etc/pve` is
+    present, because a PVE node's own os-release says `debian` and the thing a
+    fleet needs to select on is that it is a hypervisor.
+
+    **The version is in it, and #902's epic body writes the selector as
+    `platform = "proxmox"`.** A class wanting the family globs `proxmox-*`,
+    which is cheaper than a class that silently stops matching after a
+    point-release upgrade. Flagged on #902 rather than decided quietly.
+    `PRETTY_NAME` is used only when `ID` is missing: it carries spaces,
+    parentheses and a codename that moves independently of anything a policy
+    cares about.
+
+  **Only world-readable, descriptive DMI is read.** `product_uuid` and
+  `product_serial` are mode 0400 *and identifying* — they would be a second
+  machine identity travelling beside the hashed one, which is precisely what
+  `host_id` exists to avoid. A test fails if any code path in that module names
+  them; it strips comments first, so the module header can still explain why
+  they are refused.
+
+  `product_name` ("PowerEdge R740") is read by nothing: `platform` is the OS on
+  a self-report and there is no field for a hardware model. When something
+  needs one it gets a field, not a second meaning for this one.
+
+  The self-report's construction moved out of the identity task's closure into
+  `runner::self_evidence`, because a closure inside a `tokio::spawn` cannot be
+  asserted on — which is how two fields stayed `None` for a year with a full
+  test suite passing.
+
 - **`entity.origins[]` — the join the RFC always described, published rather
   than reconstructed** (#1007, RFC 06 §5.1 as amended in zenkey v1.30).
 

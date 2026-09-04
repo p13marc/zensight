@@ -1415,4 +1415,62 @@ mod tests {
             vec!["h-aaaaaaaaaaaa".to_string(), "h-zzzzzzzzzzzz".to_string()]
         );
     }
+    /// The catalog shows what a host says about itself (#935 acceptance).
+    ///
+    /// `vendor` and `platform` are descriptive — nothing joins on them — so
+    /// nothing failed while they were unset, and they were unset on every
+    /// self-report for the life of the sensor framework. This is the assertion
+    /// that was missing.
+    #[test]
+    fn a_self_reported_vendor_and_platform_reach_the_entity() {
+        let mut a = ev("sysinfo", "web01");
+        a.host_id = Some("abc123abc123".into());
+        a.vendor = Some("Dell Inc.".into());
+        a.platform = Some("debian-13".into());
+
+        let ents = correlate(
+            &[("h-000000000001".to_string(), a)],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        assert_eq!(ents.len(), 1);
+        assert_eq!(ents[0].vendor.as_deref(), Some("Dell Inc."));
+        assert_eq!(ents[0].platform.as_deref(), Some("debian-13"));
+    }
+
+    /// And it prefers the host's own account of itself over a neighbour's.
+    ///
+    /// An SNMP poller derives `platform` from a device's `sysDescr` and a
+    /// `vendor` from its enterprise OID; a host that can speak for itself
+    /// should not be described by whatever was polling it.
+    #[test]
+    fn a_self_report_outranks_a_third_party_claim_on_platform() {
+        let mut mine = ev("sysinfo", "web01");
+        mine.host_id = Some("abc123abc123".into());
+        mine.platform = Some("debian-13".into());
+        mine.vendor = Some("Dell Inc.".into());
+
+        let mut theirs = ev("snmp", "web01");
+        theirs.observer = Some("snmp".into());
+        theirs.host_id = Some("abc123abc123".into());
+        theirs.platform = Some("Linux web01 4.19.0 #1 SMP".into());
+        theirs.vendor = Some("net-snmp".into());
+
+        let ents = correlate(
+            &[
+                ("h-000000000001".to_string(), mine),
+                ("h-000000000002".to_string(), theirs),
+            ],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        assert_eq!(ents.len(), 1, "one host_id, one entity");
+        assert_eq!(ents[0].platform.as_deref(), Some("debian-13"));
+        assert_eq!(ents[0].vendor.as_deref(), Some("Dell Inc."));
+        assert_eq!(
+            ents[0].origins,
+            vec!["h-000000000001".to_string()],
+            "and the observer's origin is not the observed host's (#1007)"
+        );
+    }
 }

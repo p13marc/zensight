@@ -107,6 +107,42 @@ pub struct SensorRunner<C: SensorConfig> {
     tasks: Vec<JoinHandle<()>>,
 }
 
+/// The self-report this sensor publishes on `state/<producer>/evidence/self`.
+///
+/// A free function rather than fourteen lines inside the identity task's
+/// closure, because it is the only place `observer: None` is set and therefore
+/// the only place a self-report's *content* is decided — and because for the
+/// life of the crate two of its fields were hard-coded `None` with nothing
+/// able to notice (#935). A closure inside a `tokio::spawn` cannot be asserted
+/// on; this can.
+fn self_evidence(
+    sensor: &str,
+    source: &str,
+    id: crate::identity::HostIdentity,
+    facts: &crate::hostfacts::HostFacts,
+    now: i64,
+) -> zensight_common::HostEvidence {
+    zensight_common::HostEvidence {
+        sensor: sensor.to_string(),
+        source: source.to_string(),
+        // A self-report. Everything downstream ranks these above third-party
+        // claims — `merge::representative`, and `HostEntity::origins` since
+        // #1007 — so this field is not a label, it is the claim's authority.
+        observer: None,
+        host_id: id.host_id,
+        boot_id: id.boot_id,
+        hostname: Some(id.hostname),
+        fqdn: id.fqdn,
+        ips: id.ips,
+        macs: id.macs,
+        vendor: facts.vendor.clone(),
+        platform: facts.platform.clone(),
+        container_id: id.container_id,
+        cloud: id.cloud,
+        last_updated: now,
+    }
+}
+
 impl<C: SensorConfig> SensorRunner<C> {
     /// Create a new sensor runner.
     ///
@@ -595,6 +631,19 @@ impl<C: SensorConfig> SensorRunner<C> {
                         None => tracing::debug!("cloud metadata probe: no provider found"),
                     }
                 }
+                // Vendor and platform (#935), read ONCE. Unlike the address
+                // set, neither changes while the process runs: a machine does
+                // not change manufacturer, and a distribution upgrade that
+                // moved `platform` also restarted every service on the host.
+                // Re-reading them on the DHCP refresh would spend two file
+                // reads a minute to learn nothing.
+                let facts = crate::hostfacts::HostFacts::detect();
+                tracing::debug!(
+                    vendor = ?facts.vendor,
+                    platform = ?facts.platform,
+                    "host facts"
+                );
+
                 let info_key = v1_ctx.sensor_info_key();
                 let evidence_key = v1_ctx.evidence_self_key();
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -622,22 +671,7 @@ impl<C: SensorConfig> SensorRunner<C> {
                         metadata: metadata.clone(),
                         last_updated: now,
                     };
-                    let evidence = zensight_common::HostEvidence {
-                        sensor: name.clone(),
-                        source: source.clone(),
-                        observer: None, // self-report
-                        host_id: id.host_id,
-                        boot_id: id.boot_id,
-                        hostname: Some(id.hostname),
-                        fqdn: id.fqdn,
-                        ips: id.ips,
-                        macs: id.macs,
-                        vendor: None,
-                        platform: None,
-                        container_id: id.container_id,
-                        cloud: id.cloud,
-                        last_updated: now,
-                    };
+                    let evidence = self_evidence(&name, &source, id, &facts, now);
                     if let Err(e) = registry.publish_serializable(&info_key, &info).await {
                         tracing::warn!(error = %e, "Failed to publish sensor registration");
                     }
@@ -819,6 +853,54 @@ async fn wait_for_shutdown() {
 
 #[cfg(test)]
 mod tests {
-    // Runner tests require a Zenoh session, which we can't easily mock.
-    // Integration tests should cover the runner functionality.
+    // Most of the runner needs a Zenoh session, which is what the integration
+    // tests are for. What *can* be asserted here is the content of what it
+    // publishes — see [`self_evidence`].
+    use super::*;
+
+    fn identity() -> crate::identity::HostIdentity {
+        crate::identity::HostIdentity {
+            host_id: Some("h-3fa9c2d41b7e".into()),
+            hostname: "web01".into(),
+            ..Default::default()
+        }
+    }
+
+    /// The regression this exists for: `vendor` and `platform` were literal
+    /// `None` on every self-report for the life of the crate, so the catalog
+    /// showed a self-reporting host as having neither while showing an
+    /// SNMP-polled switch as having both (#935).
+    #[test]
+    fn a_self_report_carries_the_host_facts() {
+        let facts = crate::hostfacts::HostFacts {
+            vendor: Some("Dell Inc.".into()),
+            platform: Some("debian-13".into()),
+        };
+        let ev = self_evidence("sysinfo", "web01", identity(), &facts, 42);
+
+        assert_eq!(ev.vendor.as_deref(), Some("Dell Inc."));
+        assert_eq!(ev.platform.as_deref(), Some("debian-13"));
+        assert!(
+            ev.observer.is_none(),
+            "a self-report is what makes these outrank a third-party claim"
+        );
+        assert_eq!(ev.host_id.as_deref(), Some("h-3fa9c2d41b7e"));
+        assert_eq!(ev.last_updated, 42);
+    }
+
+    /// A host with no DMI and no `/etc/os-release` is common — a container, a
+    /// minimal image, a non-Linux target. Absent must stay absent rather than
+    /// becoming an empty string that reads as an answer.
+    #[test]
+    fn a_host_with_no_facts_reports_none_not_empty() {
+        let ev = self_evidence(
+            "sysinfo",
+            "web01",
+            identity(),
+            &crate::hostfacts::HostFacts::default(),
+            0,
+        );
+        assert_eq!(ev.vendor, None);
+        assert_eq!(ev.platform, None);
+    }
 }

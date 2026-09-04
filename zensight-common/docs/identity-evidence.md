@@ -77,6 +77,37 @@ Merge strength of the identifying fields (strongest first): `host_id` >
   authoritative: cloned images duplicate machine-ids, but a cloud control plane
   never hands out an instance id twice.
 
+### The descriptive pair, on a self-report (#935)
+
+`vendor` and `platform` are joined on by nothing, which is why for the life of
+the framework every sensor published them as `None` and nothing failed: the
+catalog showed a self-reporting host with no vendor and no platform while
+showing an SNMP-polled switch with both.
+
+`zensight_sensor_core::hostfacts` fills them once at startup:
+
+- **`vendor`** — DMI `sys_vendor` (`"QEMU"`, `"Dell Inc."`, `"VMware, Inc."`).
+  On a virtual machine this is the most direct statement that it *is* one.
+  Vendor placeholders (`"To Be Filled By O.E.M."`, `"System manufacturer"`,
+  `"Default string"`) are refused: a placeholder in a vendor column looks like
+  an answer and groups every unbranded machine in a fleet under one
+  manufacturer that does not exist.
+- **`platform`** — `<ID>-<VERSION_ID>` from `/etc/os-release` (`"debian-13"`,
+  `"ubuntu-24.04"`), slugged so it does not depend on how a distribution
+  capitalised its own name this release; `"proxmox-<version>"` when `/etc/pve`
+  is present, because a PVE node's own os-release says `debian` and what a
+  fleet needs to select on is that it is a hypervisor.
+
+Only world-readable, descriptive DMI files are read. `product_uuid` and
+`product_serial` are mode 0400 **and identifying** — they would be a second
+machine identity travelling beside the hashed one, which is exactly what
+`host_id` exists to avoid — and a test in that module fails if any code path
+names them.
+
+A self-report outranks a third-party claim for both fields (`merge::
+representative`), so a host that can speak for itself is not described by
+whatever happened to be polling it.
+
 ## RelationshipEvidence
 
 The third thing under `evidence/**`, and the one that is **not about identity** (#915).
