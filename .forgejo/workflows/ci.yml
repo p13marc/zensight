@@ -649,23 +649,36 @@ jobs:
           # and check that everything it prints is documented. Nothing ever ran
           # it. This is that check, reduced to the part a machine can decide:
           # IF there is a conventional-commit `!` in range, THEN the section
-          # being written must have the breaking heading. It cannot tell whether
-          # the entry under that heading describes THIS commit — a human still
-          # has to read it — but "seventeen breaking changes and no heading" is
+          # being written must carry the breaking heading. It cannot tell
+          # whether the entry under that heading describes THIS commit — a human
+          # still reads it — but "seventeen breaking changes and no heading" is
           # exactly the failure it exists to make impossible.
           #
           # The section to look in depends on where HEAD is. On a branch or a
           # push to master it is [Unreleased]. On a TAG push the release commit
           # has already renamed [Unreleased] to [X.Y.Z] and opened a fresh empty
-          # one, so looking in [Unreleased] would fail every breaking release
-          # at exactly the moment it is cut. Hence the tag lookup below.
+          # one, so looking in [Unreleased] would fail every breaking release at
+          # exactly the moment it is cut. Hence the tag lookup below. Checked
+          # against history: 0.11.0's 28 marked commits pass, 0.12.0 and 0.13.0
+          # have none and exit early.
+          #
+          # EVERYTHING GOES THROUGH FILES ON PURPOSE. The first version held
+          # the changelog section in a shell variable and tested it with
+          # `printf '%s\n' "$section" | grep -qxF`. It passed locally and failed
+          # here on identical bytes, the same mawk and the same locale, because
+          # that pipeline is a RACE: the section is ~220 KB, the pipe buffer is
+          # 64 KB, and `grep -q` exits the moment it matches — about 190 KB in.
+          # Whatever `printf` had left then goes into a closed pipe, so it
+          # returns non-zero, and under the runner's `pipefail` the pipeline
+          # fails while grep had in fact found the heading. Which side wins is
+          # scheduling. Files have no pipe to close.
           set -u
           name="Unreleased"
           current=$(git tag --points-at HEAD --list '[0-9]*.[0-9]*.[0-9]*' | head -1)
           if [ -n "$current" ]; then name="$current"; fi
 
-          # The newest release tag that is not HEAD's own. Compared by commit,
-          # not by name: an annotated tag and its commit are different objects.
+          # The newest release tag that is not HEAD's own, compared by COMMIT:
+          # an annotated tag and the commit it points at are different objects.
           prev=""
           for t in $(git tag --list '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname); do
             if [ "$(git rev-parse "$t^{commit}")" = "$(git rev-parse 'HEAD^{commit}')" ]; then
@@ -680,27 +693,41 @@ jobs:
           fi
 
           # Conventional-commit breaking marker: `type!:` or `type(scope)!:`.
-          # Merge commits ("Merge pull request '...'") do not match and do not
-          # need to: git log walks the merged commits themselves.
-          breaking=$(git log --format='%s' "$prev"..HEAD \
-            | grep -E '^[a-z]+(\([^)]*\))?!:' || true)
-          if [ -z "$breaking" ]; then
+          # Merge commits ("Merge pull request '...'") do not match and need
+          # not: git log walks the merged commits themselves.
+          git log --format='%s' "$prev"..HEAD > /tmp/changelog-subjects.txt
+          grep -E '^[a-z]+(\([^)]*\))?!:' /tmp/changelog-subjects.txt \
+            > /tmp/changelog-breaking.txt || true
+          if [ ! -s /tmp/changelog-breaking.txt ]; then
             echo "no breaking commits since $prev"
             exit 0
           fi
 
-          section=$(awk -v want="## [$name]" '
+          awk -v want="## [$name]" '
             index($0, want) == 1 { f = 1; next }
             /^## \[/ { f = 0 }
-            f' CHANGELOG.md)
-          if [ -z "$section" ]; then
-            echo "::error::CHANGELOG.md has no '## [$name]' section, but there are breaking commits since $prev:"
-            echo "$breaking"
+            f' CHANGELOG.md > /tmp/changelog-section.md
+
+          if [ ! -s /tmp/changelog-section.md ]; then
+            echo "::error::CHANGELOG.md has no '## [$name]' section, but these commits since $prev are marked breaking:"
+            cat /tmp/changelog-breaking.txt
             exit 1
           fi
-          if ! printf '%s\n' "$section" | grep -qxF '### Changed — BREAKING'; then
-            echo "::error::These commits since $prev are marked breaking, but '## [$name]' has no '### Changed — BREAKING' section. Every breaking change is listed under that heading (docs/COMPATIBILITY.md) — write the entry there, or index it there if it is written up under another heading:"
-            echo "$breaking"
-            exit 1
+
+          if grep -qxF '### Changed — BREAKING' /tmp/changelog-section.md; then
+            echo "$(wc -l < /tmp/changelog-breaking.txt) breaking commit(s) since $prev; '## [$name]' has the heading"
+            exit 0
           fi
-          echo "$(printf '%s\n' "$breaking" | wc -l) breaking commit(s) since $prev; '## [$name]' has the heading"
+
+          echo "::error::These commits since $prev are marked breaking, but '## [$name]' has no '### Changed — BREAKING' section. Every breaking change is listed under that heading (docs/COMPATIBILITY.md) — write the entry there, or index it there if it is written up under another heading:"
+          cat /tmp/changelog-breaking.txt
+          # A guard that only says "no" is a guard someone disables. These three
+          # lines are what the first failure of this step needed and did not
+          # have: which section was read, what it contained, and the actual
+          # bytes of every breaking heading in the file — because the canonical
+          # spelling contains an em dash and "looks right" is not a comparison.
+          echo "--- '## [$name]' is $(wc -l < /tmp/changelog-section.md) lines; its headings:"
+          grep -n '^#\{2,\} ' /tmp/changelog-section.md || echo "(no headings at all)"
+          echo "--- every breaking heading in CHANGELOG.md, as bytes:"
+          grep -n -m 20 'BREAKING' CHANGELOG.md | cat -A
+          exit 1

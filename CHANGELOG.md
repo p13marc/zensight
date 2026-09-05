@@ -109,7 +109,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The `lint` checkout gains `fetch-depth: 0` for this and only this: the
   default shallow clone has no tags, so the second guard would have degraded to
-  "there are no commits" — a check that passes because it cannot see. Both
+  "there are no commits" — a check that passes because it cannot see. The
+  guard's own first CI run failed while passing locally, on identical bytes: it
+  tested the section through `printf … | grep -q`, and that pipeline is a race —
+  `grep -q` exits at the match ~190 KB into a ~220 KB section, whatever `printf`
+  has left goes into a closed pipe, and under `pipefail` the pipeline fails
+  while grep had in fact found the heading. It now reads and writes files, and
+  its failure path prints the section it read, that section's headings, and the
+  bytes of every breaking heading in the file — because the canonical spelling
+  contains an em dash and "looks right" is not a comparison. Both
   guards' comments record what they *cannot* see either: `paths-ignore` skips
   CI entirely for a prose-only PR, so they fire on the PR that introduces a
   breaking commit (which always touches code) and not on a later docs-only one
