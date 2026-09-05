@@ -19,6 +19,7 @@ pub mod annexb;
 pub mod catalog;
 pub mod command;
 pub mod config;
+pub mod discovery;
 pub mod egress;
 pub mod hotplug;
 pub mod pipeline;

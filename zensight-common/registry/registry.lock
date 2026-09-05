@@ -528,6 +528,7 @@ subject	netring	tls/pq_ratio	telemetry	TelemetryPoint
 subject	parallax	alert/{alert_key}	state	Alert
 subject	parallax	applied/{topic}	state	AppliedConfig
 subject	parallax	artifact/{kind}	state	ArtifactStatus
+subject	parallax	discovery	state	StreamDiscoveryReport
 subject	parallax	errors	state	ErrorReport
 subject	parallax	evidence/self	state	HostEvidence
 subject	parallax	health	state	HealthSnapshot

@@ -132,6 +132,9 @@ kind = "json-schema"
 [types.Silence]
 kind = "json-schema"
 
+[types.StreamDiscoveryReport]
+kind = "json-schema"
+
 [types.StreamStatus]
 kind = "json-schema"
 

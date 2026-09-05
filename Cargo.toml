@@ -126,6 +126,11 @@ glob = "0.3"
 # validation. The GUI's own regex dep is version-pinned separately.
 regex = "1"
 
+# mDNS service browse for the parallax sensor's opt-in camera discovery
+# (#410). No async runtime of its own — it runs its own thread and hands
+# events over a `flume` channel, which is already a workspace dependency.
+mdns-sd = "0.21"
+
 # Configuration
 json5 = "1.0"
 # TOML, for the two places that read a registry file as data rather than

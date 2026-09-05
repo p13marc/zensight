@@ -10,7 +10,7 @@
 # gauge.
 
 [registry]
-version = "1.10"
+version = "1.11"
 app = "zensight"
 convention = 1
 
@@ -180,6 +180,14 @@ cardinality = 16
 ttl_s = 900
 since = "1.0"
 description = "stream catalogue + status doc (open?, per-tier applied params + viewers, and why the last tier stopped); tombstone on removal from config, NOT on close (RFC 05 §5)"
+[[subject]]
+path = "discovery"
+class = "state"
+type = "StreamDiscoveryReport"
+ttl_s = 7200
+since = "1.11"
+description = "camera-discovery report (#410): mDNS/WS-Discovery responders that are not configured streams, proposed for adoption (opt-in, propose-only — nothing here is captured or published)"
+
 [[subject]]
 path = "health"
 common = "health"

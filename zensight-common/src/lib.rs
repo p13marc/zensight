@@ -93,7 +93,7 @@ pub use config::{
     IdentityConfig, LinkProfile, LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config,
     parse_config,
 };
-pub use discovery::{DiscoveredDevice, DiscoveryReport};
+pub use discovery::{DiscoveredDevice, DiscoveredStream, DiscoveryReport, StreamDiscoveryReport};
 pub use entity::{
     AliasRecord, AssertionKind, HostEntity, MemberClaim, NameVal, OperatorAssertion, PdnsRecord,
 };
