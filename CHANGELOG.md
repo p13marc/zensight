@@ -51,6 +51,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Adopt, on the SNMP discovery card** (#940, epic #902). The card has
+  proposed unmonitored devices since #541, and its adopt path ended in
+  **Copy snippet**: the operator pasted JSON5 into a file on the right host and
+  restarted a sensor. #936 and #939 built the two procedures that delete that
+  workflow, and this wires the button to them.
+
+  **Two destinations, and the card names which one it is offering before the
+  click.** With a policy controller alive, Adopt sends an override through
+  `@rpc/@desired/override/set` — recorded in the overrides file, re-published,
+  surviving the sensor's restart. Without one, it falls back to
+  `@rpc/snmp/targets/set` on that host and says so beside the button: *"not
+  durable — no policy controller alive; Adopt writes this host only."* The
+  device is monitored now and gone on that sensor's next restart, which is
+  worth having and worth being told.
+
+  **The set is whole, so Adopt reads before it writes.** `snmp/targets` is a
+  whole-set topic: sending the one discovered device would have deleted every
+  other device that host polls. So the click first GETs `@rpc/snmp/targets` on
+  the proposing origin, appends, validates with #937's table locally, and
+  pushes the result. A GET that goes unanswered **refuses** rather than
+  adopting into an assumed-empty set — the failure that would look like a
+  successful adoption and read, on every chart, as a fleet that stopped
+  answering.
+
+  **Per-origin, never the fleet selector.** #933 states the rule for a
+  threshold rule; it binds harder here, because a fanned-out target set tells
+  every host to poll every device. The origin is carried from the report that
+  proposed the device to the key that is written, and `RemoteOrigin` — "always
+  one concrete host, which is what keeps a fan-out write unspellable" — is the
+  type that makes it a compile error rather than a comment.
+
+  A proposal whose **credential set is unknown** cannot be adopted at all, and
+  the row says so with the button greyed rather than failing after the click:
+  the wire carries a credential *name* into that host's own config, and a
+  guessed `public` polls the device with the wrong community — which reads, on
+  every chart, as a device that never answered. A device already monitored
+  under that name is refused too, once the current set is in hand.
+
+  The `applied/targets` marker renders beside the card: which writer is in
+  force (`file | desired | rpc`) and the last refusal the sensor recorded.
+  Without it, an adoption that lost a race with `@desired` is indistinguishable
+  from one that did nothing.
+
+  `Message::SnmpDiscoveryReport`'s `source` field is renamed **`origin`**. It
+  has always held the publishing origin; a field named `source` that holds one
+  is the exact confusion #1007 was filed about, and for a proxy SNMP sensor
+  (#883) the two are genuinely different things.
+
 - **`@rpc/@desired/override/set` — a per-host adoption, recorded durably**
   (#939, epic #902). The controller gains its first three procedures
   (`override/set`, `introspect`, `describe`) and a liveliness token, declared

@@ -753,7 +753,11 @@ pub enum Message {
     /// Subnet-discovery report (#579) off `state/snmp/discovery` — LWW per
     /// publishing sensor origin; proposals only, nothing auto-adds (#541).
     SnmpDiscoveryReport {
-        source: String,
+        /// The **origin** that published this report — the sensor's host, not
+        /// the evidence source. Named `source` until #940, which is the exact
+        /// confusion #1007 was filed about, and the field #940's Adopt needs:
+        /// a target set is written to one host's sensor by name.
+        origin: String,
         report: zensight_common::DiscoveryReport,
     },
     /// Toggle the SNMP overview's discovery card between the one-line count
@@ -1153,6 +1157,38 @@ pub enum Message {
     /// rather than promise (#940). Subscribed by name for the same reason the
     /// catalog's is: `*` cannot match a verbatim `@` chunk.
     DesiredAlive(bool),
+    /// Adopt a discovered SNMP device into the monitored set (#940).
+    ///
+    /// The sweep proposes (#541, propose-only, never auto-adds); this is what
+    /// accepts. `origin` is the host whose sensor found it — the target set is
+    /// written to that one sensor, and the key is the only thing that says
+    /// which. `durable` is whether the policy controller was alive when the
+    /// button was drawn: with it, the adoption becomes an override the
+    /// controller keeps; without it, an `@rpc` write that lasts until that
+    /// sensor restarts.
+    AdoptDiscovered {
+        origin: String,
+        device: Box<zensight_common::DiscoveredDevice>,
+        durable: bool,
+    },
+    /// The current SNMP target set for one origin, in reply to the GET that
+    /// an adopt issues first (#940).
+    ///
+    /// A target set is replaced **wholesale**, so adopting means "the set the
+    /// sensor last reported, plus this one" — the same shape #933 uses for
+    /// thresholds. Adding one device to a set this build has not seen would
+    /// delete every other.
+    SnmpTargetsForAdopt {
+        origin: String,
+        device: Box<zensight_common::DiscoveredDevice>,
+        durable: bool,
+        current: String,
+    },
+    /// The `state/snmp/applied/targets` marker for one origin (#936).
+    SnmpTargetsApplied {
+        origin: String,
+        json: String,
+    },
     /// One `@catalog/state/ack/*` document arrived (#925).
     AckReceived(Box<zensight_common::ack::AlertAck>),
     /// An ack was tombstoned by the catalog.
