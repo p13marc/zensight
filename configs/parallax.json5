@@ -33,6 +33,25 @@
     // Headless hosts simply contribute nothing.
     enumerate_v4l2: true,
 
+    // Camera discovery (#410). ABSENT = NO DISCOVERY, EVER — the block's
+    // presence is the opt-in, as for snmp.discovery (#541).
+    //
+    // What it finds is PROPOSED on state/parallax/discovery with a
+    // copy-pasteable rtsp[] snippet, and nothing else: a discovered camera
+    // never enters the catalogue, gets no liveliness token, and is never
+    // captured, encoded or published. There is no auto_add and there will not
+    // be one — a monitoring system that starts pulling video off hardware
+    // nobody configured has done something categorically different from
+    // noticing that it exists.
+    //
+    // mDNS is multicast on a network you may not own, and it is traffic an IDS
+    // can flag. Keep it to networks you operate.
+    // discovery: {
+    //   mdns: true,           // browse _rtsp._tcp (each probe named explicitly)
+    //   browse_secs: 10,      // how long one round listens
+    //   interval_secs: 3600,  // between rounds
+    // },
+
     // Remote RTSP cameras. Each entry becomes one catalogue stream.
     rtsp: [
       // { name: "door", url: "rtsp://cam.local:554/stream1",

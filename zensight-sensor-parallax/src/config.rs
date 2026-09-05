@@ -92,6 +92,13 @@ pub struct ParallaxConfig {
     /// Interval between per-stream stats telemetry points (fps/kbps/drops).
     #[serde(default = "default_stats_interval")]
     pub stats_interval_secs: u64,
+
+    /// Opt-in camera discovery (#410). **Absent = no discovery, ever** — the
+    /// block's presence is the opt-in, as for `snmp.discovery` (#541). What it
+    /// finds is *proposed* on `state/parallax/discovery`; nothing discovered is
+    /// ever added to the catalogue or opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<crate::discovery::DiscoveryConfig>,
 }
 
 impl Default for ParallaxConfig {
@@ -105,6 +112,7 @@ impl Default for ParallaxConfig {
             video: VideoConfig::default(),
             idle_timeout_secs: default_idle_timeout(),
             stats_interval_secs: default_stats_interval(),
+            discovery: None,
         }
     }
 }
@@ -460,6 +468,15 @@ impl ParallaxSensorConfig {
                     "duplicate stream name {name:?}"
                 )));
             }
+        }
+
+        // Discovery (#410): refuse at startup rather than publishing an empty
+        // report forever, which reads as "no cameras" and not as "nothing was
+        // enabled".
+        if let Some(discovery) = &p.discovery {
+            discovery
+                .validate()
+                .map_err(|e| ConfigError::Validation(e.to_string()))?;
         }
 
         if p.preview.fps == 0 {

@@ -112,6 +112,44 @@ the offending field named.
 Test sources ride the identical catalogue/command/encode/egress path as real
 cameras, so they double as demo mode and CI fixtures.
 
+## `discovery` block (#410) — opt-in, propose-only
+
+**Absent means no discovery, ever.** The block's presence is the opt-in, the
+same shape `snmp.discovery` uses (#541).
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `mdns` | `false` | browse `_rtsp._tcp` over mDNS |
+| `browse_secs` | `10` | how long one round listens |
+| `interval_secs` | `3600` | seconds between rounds (floored at 60) |
+
+Note that `mdns` defaults to **false even inside the block**: each probe is
+named explicitly, so enabling discovery never turns on a protocol the operator
+did not ask for. A block that enables nothing is refused at startup rather than
+publishing an empty report forever — which would read as "there are no cameras"
+instead of "you did not turn anything on".
+
+**What it does, and the line it does not cross.** Responders that are not
+already configured streams are published on `state/parallax/discovery` as a
+`StreamDiscoveryReport`, each with a copy-pasteable JSON5 `rtsp[]` snippet. That
+is all. A discovered camera does not enter the catalogue, gets no liveliness
+token, and is never captured, encoded or published. **There is no `auto_add`
+and there will not be one**: a camera is a device with a view of a room, and a
+monitoring system that starts pulling video off hardware nobody configured has
+done something categorically different from noticing that it exists.
+
+Most responders arrive **without a URL**, and that is not a defect: mDNS gives a
+service address, and only a `path` TXT record (RFC 6763 §6.5, which most cameras
+omit) turns that into a stream URL. The suggested snippet then carries a visible
+`rtsp://<address>/<path>` placeholder — an operator must be able to see that
+something is missing, because a guessed path would look configured and fail at
+connect time.
+
+**Operational note.** mDNS is multicast on a network you may not own, and it is
+traffic an IDS can flag — the same caution the SNMP subnet sweep carries. Keep
+it to networks you operate. Rounds are capped at 256 responders: this document
+is LWW state a GUI renders, not a log.
+
 ## Validation
 
 Startup fails (with a clear message) on: duplicate or empty stream names,
@@ -121,6 +159,11 @@ names containing `/` or `*`, `preview.fps == 0`, `preview.quality` outside
 name or duplicate tier names, a tier with `fps == 0` or `bitrate_kbps == 0` or
 `max_height < 2`, a `default_tier` naming no tier, `idle_timeout_secs == 0`,
 `stats_interval_secs == 0`.
+
+A `discovery` block is also validated: it must enable at least one probe (an
+empty block that silently does nothing is worse than no block), `browse_secs`
+must be > 0, and `interval_secs` must be at least `browse_secs` — otherwise the
+next round would start before this one finished.
 
 ## Environment overrides
 

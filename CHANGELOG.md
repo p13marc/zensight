@@ -51,6 +51,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **parallax: opt-in mDNS camera discovery, propose-only** (#410).
+
+  A `parallax.discovery` block browses `_rtsp._tcp` and publishes what answered
+  on `state/parallax/discovery` — a new `StreamDiscoveryReport` subject —
+  with a copy-pasteable JSON5 `rtsp[]` snippet per responder. **Absent block =
+  no discovery, ever**, the same shape `snmp.discovery` (#541) uses, and `mdns`
+  defaults to false even inside the block so enabling discovery never turns on a
+  protocol nobody asked for.
+
+  **It proposes and stops.** A discovered camera does not enter the catalogue,
+  gets no liveliness token, and is never captured, encoded or published. There
+  is no `auto_add` and there will not be one: a camera is a device with a view
+  of a room, and a monitoring system that starts pulling video off hardware
+  nobody configured has done something categorically different from noticing
+  that it exists.
+
+  Most responders arrive **without a URL**, which is not a defect — mDNS gives a
+  service address, and only a `path` TXT record (RFC 6763 §6.5, which most
+  cameras omit) turns that into a stream URL. The suggestion then carries a
+  visible `rtsp://<address>/<path>` placeholder rather than a guess: an operator
+  must be able to see what is missing, because a guessed path looks configured
+  and fails at connect time.
+
+  Bounded on every axis a network can push: rounds are capped at 256 responders
+  (this is LWW state a GUI renders, not a log), a block enabling no probe is
+  refused at startup rather than publishing an empty report that reads as "no
+  cameras", and `interval_secs` below `browse_secs` is refused because the next
+  round would start before this one finished. The mDNS daemon is created and
+  dropped per round — a browse that runs once an hour has no reason to hold a
+  socket for the other fifty-nine minutes.
+
+  The doc carries the same caution the SNMP sweep does: mDNS is multicast on a
+  network you may not own, and it is traffic an IDS can flag.
+
 - **parallax: the stream catalogue is live — camera hotplug** (#410).
 
   Plug a USB camera into a running sensor and it is advertised within half a

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use zensight_common::v1::V1ContextExt;
 use zensight_sensor_core::{Format, Protocol, SensorArgs, SensorConfig, SensorRunner};
 
 use zensight_sensor_parallax::catalog::Catalog;
@@ -224,6 +225,83 @@ async fn main() -> Result<()> {
         let q_handle = session_handle.clone();
         runner.spawn(async move {
             query::run(q_session, q_producer, q_catalog, q_tiers, q_handle).await;
+        });
+    }
+
+    // Camera discovery (#410): opt-in, propose-only. Absent block = never runs.
+    //
+    // It publishes a document and nothing else. A discovered camera does not
+    // enter the catalogue, gets no liveliness token and is never opened —
+    // `auto_add` is deliberately not implemented, exactly as for the SNMP
+    // subnet sweep (#541). A monitoring system that starts pulling video off
+    // hardware nobody configured has done something categorically different
+    // from noticing that it exists.
+    if let Some(discovery_config) = parallax_config.discovery.clone() {
+        // Already-configured RTSP streams are never re-proposed: a proposal the
+        // operator has already accepted is noise, and noise in this document
+        // trains them to stop reading it.
+        let configured: std::collections::HashSet<String> = catalog
+            .entries()
+            .iter()
+            .filter_map(|e| match &e.kind {
+                zensight_sensor_parallax::catalog::SourceKind::Rtsp { url, .. } => {
+                    Some(url.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        let interval = std::time::Duration::from_secs(discovery_config.interval_secs.max(60));
+        tracing::info!(
+            mdns = discovery_config.mdns,
+            browse_secs = discovery_config.browse_secs,
+            interval_secs = interval.as_secs(),
+            "parallax camera discovery enabled (propose-only)"
+        );
+
+        let report_registry = zensight_sensor_core::AdvancedPublisherRegistry::new(
+            session.clone(),
+            zensight_sensor_core::v1::for_producer("parallax").telemetry_prefix(),
+            Format::Json,
+            zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+        )
+        .with_qos(zensight_common::QosClass::HealthLiveness);
+        let report_key: String = zensight_sensor_core::v1::for_producer("parallax")
+            .const_state_key(&["discovery"])
+            .into();
+
+        runner.spawn(async move {
+            loop {
+                let mut methods = Vec::new();
+                let mut discovered = Vec::new();
+                if discovery_config.mdns {
+                    methods.push("mdns".to_string());
+                    match zensight_sensor_parallax::discovery::browse_mdns(
+                        discovery_config.browse_secs,
+                        &configured,
+                    )
+                    .await
+                    {
+                        Ok(mut found) => discovered.append(&mut found),
+                        // A browse that failed is not a browse that found
+                        // nothing: `methods` still names it, so the document
+                        // does not read as "mDNS ran and the network is empty".
+                        Err(e) => tracing::warn!(error = %e, "discovery: mDNS browse failed"),
+                    }
+                }
+                let report = zensight_sensor_parallax::discovery::report(methods, discovered);
+                tracing::info!(
+                    discovered = report.discovered.len(),
+                    "camera discovery round complete"
+                );
+                if let Err(e) = report_registry
+                    .publish_serializable(&report_key, &report)
+                    .await
+                {
+                    tracing::warn!(error = %e, "discovery report publish failed");
+                }
+                tokio::time::sleep(interval).await;
+            }
         });
     }
 

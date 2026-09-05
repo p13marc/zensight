@@ -43,6 +43,7 @@ parallax-pipeline = { workspace = true, features = [
     "image-jpeg",
 ] }
 
+mdns-sd = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 zenoh.workspace = true
 serde = { workspace = true, features = ["derive"] }
