@@ -306,3 +306,161 @@ async fn the_kill_switch_applies_nothing_and_says_file() {
     assert!(applied.lock().unwrap().is_empty(), "kill switch means OFF");
     task.abort();
 }
+
+/// A consumer that was not listening can still ask (#1034).
+///
+/// Every other assertion in this file reads the marker through a subscriber
+/// declared *before* the reconciler starts, which is the one arrangement under
+/// which a fire-and-forget publication is visible. The GUI is not in that
+/// arrangement: it reads the marker with a GET, in two places, and until this
+/// seed existed both got zero replies on a perfectly healthy fleet.
+///
+/// So this test does what a late consumer does — opens a session **after**
+/// everything has already happened, and asks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_get_is_answered_by_the_marker_seed() {
+    let port = candidate_port();
+    let sensor = Arc::new(
+        zenoh::open(session_config(Some(&format!("tcp/127.0.0.1:{port}")), None))
+            .await
+            .expect("sensor session"),
+    );
+    let key = desired_key();
+
+    let (_marker, task) = reconcile_topic(
+        sensor.clone(),
+        Publisher::new(sensor.clone(), "hostspec", Format::Json),
+        DesiredTopic {
+            topic: "expectations",
+            desired_key: key.clone(),
+        },
+        DesiredConfig::default(),
+        doc("from-file"),
+        move |_cfg: ExpectationsConfig| async move { Ok(()) },
+    );
+    // Let the baseline marker go out and the seed queryable come up.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The late consumer. It never subscribed to anything.
+    let reader = Arc::new(
+        zenoh::open(session_config(None, Some(&format!("tcp/127.0.0.1:{port}"))))
+            .await
+            .expect("reader session"),
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let m = get_marker(&reader)
+        .await
+        .expect("the seed answered the GET");
+    assert_eq!(
+        m.source,
+        AppliedSource::File,
+        "with no desired doc the baseline is the answer — and it is an ANSWER, \
+         not silence"
+    );
+    let eff: ExpectationsConfig =
+        serde_json::from_str(&m.effective_json).expect("effective parses");
+    assert_eq!(
+        eff.absent[0].name, "from-file",
+        "the seed must carry the effective document, not an empty marker"
+    );
+    assert!(
+        m.applied_at > 0,
+        "a seed that dropped applied_at answers 'when' with a blank"
+    );
+
+    // Now a writer wins, and the same late GET must see the NEW answer rather
+    // than a snapshot taken when the seed was declared.
+    let publisher = sensor
+        .declare_publisher(key.to_string())
+        .await
+        .expect("publisher");
+    publisher
+        .put(serde_json::to_vec(&doc("from-desired")).unwrap())
+        .await
+        .expect("desired put");
+
+    let mut saw = None;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Some(m) = get_marker(&reader).await
+            && m.source == AppliedSource::Desired
+        {
+            saw = Some(m);
+            break;
+        }
+    }
+    let m = saw.expect("the seed still answers after a desired doc is applied");
+    let eff: ExpectationsConfig =
+        serde_json::from_str(&m.effective_json).expect("effective parses");
+    assert_eq!(eff.absent[0].name, "from-desired");
+    assert!(
+        m.desired_timestamp.is_some(),
+        "the LWW handle must ride the seed as it rides the live sample"
+    );
+
+    task.abort();
+}
+
+/// The kill switch does not silence the seed.
+///
+/// "Disabled never reads as silent" is this module's own rule, and it held
+/// only for a consumer that was already listening. A fleet where the
+/// reconciler has been disarmed on one host is exactly when someone GETs the
+/// marker to find out why nothing is converging.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_kill_switch_still_answers_a_get() {
+    let port = candidate_port();
+    let sensor = Arc::new(
+        zenoh::open(session_config(Some(&format!("tcp/127.0.0.1:{port}")), None))
+            .await
+            .expect("sensor session"),
+    );
+    let (_marker, task) = reconcile_topic(
+        sensor.clone(),
+        Publisher::new(sensor.clone(), "hostspec", Format::Json),
+        DesiredTopic {
+            topic: "expectations",
+            desired_key: desired_key(),
+        },
+        DesiredConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        doc("from-file"),
+        move |_cfg: ExpectationsConfig| async move { Ok(()) },
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let reader = Arc::new(
+        zenoh::open(session_config(None, Some(&format!("tcp/127.0.0.1:{port}"))))
+            .await
+            .expect("reader session"),
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let m = get_marker(&reader)
+        .await
+        .expect("a disarmed reconciler still answers what is in force");
+    assert_eq!(m.source, AppliedSource::File);
+    task.abort();
+}
+
+/// One GET on the marker selector, decoded. `None` when nobody answered —
+/// which is the failure these two tests exist to catch.
+async fn get_marker(session: &Arc<zenoh::Session>) -> Option<AppliedConfig> {
+    let replies = session
+        .get("v1/*/state/hostspec/applied/expectations")
+        .target(zenoh::query::QueryTarget::All)
+        .timeout(Duration::from_secs(3))
+        .await
+        .ok()?;
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.result()
+            && let Ok(m) = serde_json::from_slice::<AppliedConfig>(&sample.payload().to_bytes())
+        {
+            return Some(m);
+        }
+    }
+    None
+}

@@ -251,6 +251,13 @@ Discipline (each of these is load-bearing):
 - **Kill switch first**: `desired.enabled = false` in file config declares
   nothing and applies nothing — but still publishes the marker
   (`source: file`), because "disabled" must never read as "silent".
+- **The marker is seeded, not only published** (#1034): `reconcile_topic`
+  declares a queryable on the marker's own state key and answers a GET with the
+  last published record, the same RFC 05 §4 shape as the alert seed. Without it
+  the marker is a fire-and-forget `put` — read by whoever happened to be
+  listening and by nobody else — and every consumer that GETs it (the GUI does,
+  in two views) sees silence on a healthy fleet. The seed answers under the
+  kill switch too, for the same reason the marker is published under it.
 - **The structural never-list**: this module deserializes only your `Doc`
   type and calls only your `apply` — session endpoints/TLS/namespace have no
   writer here.
