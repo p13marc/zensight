@@ -648,6 +648,26 @@ demo-stop: stop
 demo-verify:
     scripts/demo-verify.sh
 
+# ── Fleet sizing ─────────────────────────────────────────────────────────────
+
+# Eleven quadlet units say "MemoryMax below is a STARTING POINT … measure
+# yours", and every sensor has published exactly those numbers in its health
+# document since #811. This is the reading of them, as one command.
+#
+# Defaults to ten minutes against a local bus, which is a smoke test of the
+# harness rather than a sizing run. The window is the whole point — #944 asks
+# for fourteen days on the reference fleet:
+#
+#   WINDOW_SECS=1209600 HUB=tcp/<router>:7447 just fleet-sizing
+#
+# Run a soak under something that outlives your shell (systemd-run --user,
+# tmux, nohup); the capture is written line by line, so a run killed on day
+# nine still reports nine days.
+
+# Measure what each sensor actually uses and print the sizing table (#944)
+fleet-sizing *ARGS:
+    scripts/fleet-sizing.sh {{ARGS}}
+
 # ── Tests that need a flag you would not guess ───────────────────────────────
 
 # The GUI test suite, on a renderer that survives 169 concurrent wgpu devices.

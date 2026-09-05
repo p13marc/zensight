@@ -14,6 +14,7 @@
 # second one on the same bus stores the same samples twice and answers the same
 # questions twice. Two are ordinary RFC 05 §2.1 fan-in and legal; two by
 # accident are just cost.
+# Measure yours with `just fleet-sizing`; see docs/ops/SIZING.md.
 [Unit]
 Description=ZenSight historian
 After=network-online.target

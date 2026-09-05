@@ -12,6 +12,7 @@
 #
 # It needs only outbound HTTPS to each BMC. There is no action surface at all:
 # no chassis reset, no IPMI power command, no write procedure.
+# Measure yours with `just fleet-sizing`; see docs/ops/SIZING.md.
 [Unit]
 Description=ZenSight BMC sensor
 After=network-online.target

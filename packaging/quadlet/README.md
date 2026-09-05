@@ -9,8 +9,9 @@ explained the incident.
 One `.container` file per sensor, each with:
 
 - **its own `MemoryMax`**, sized to that sensor (the placeholders below are
-  the reference fleet's starting points — measure yours via each sensor's
-  health doc `self_stats`);
+  the reference fleet's starting points — measure yours with
+  `just fleet-sizing`, which reads exactly the `self_stats` those numbers
+  should have come from; see [`docs/ops/SIZING.md`](../../docs/ops/SIZING.md));
 - its own `Restart=on-failure` policy;
 - its own on/off switch (`systemctl enable/disable`).
 

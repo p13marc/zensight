@@ -8,6 +8,7 @@
 #     security posture that depends on the code being right is not one.
 #   * the host cgroup hierarchy, read-only, for the per-container memory / OOM
 #     / PSI numbers the runtime does not report.
+# Measure yours with `just fleet-sizing`; see docs/ops/SIZING.md.
 [Unit]
 Description=ZenSight container sensor
 After=network-online.target
