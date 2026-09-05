@@ -51,6 +51,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CI watches a policy document travel policy → bus → a sensor** (#941, epic
+  #902). `scripts/demo-verify.sh` gains a fourth phase, and it is the
+  assertion the whole epic was missing: start a correlator, run
+  `zensight-desired apply` against `demo/fleet-policy.json5`, and wait for the
+  running sysinfo sensor's `state/sysinfo/applied/thresholds` to read
+  `source: desired` — carrying the shipped policy's own `disk-full` rule, so
+  *"a document arrived"* cannot pass for *"THE document arrived"*.
+
+  #938's phase 3 stops at `plan --offline`: it proves the compiler parses, and
+  publishes nothing. Every other part of the path was covered in isolation —
+  the overlay rules and the publish diff in unit tests, the bus properties in
+  the e2e — and nothing anywhere had watched them work together. The same shape
+  as the two exporter gaps this script already exists for, one epic on.
+
+  A correlator is started because none of the earlier phases does, and the
+  compiler asks `@catalog` what hosts exist: with no catalog it compiles for a
+  fleet of zero, publishes nothing, and **exits 0**. A phase that skipped it
+  would have asserted nothing while passing.
+
+- **The generated run directory carries its own policy** (#941).
+  `scripts/gen-configs.sh` copies `demo/fleet-policy.json5` into the run
+  directory and rewrites the generated `desired.json5` to point at that copy
+  and its overrides file — the shipped config names `/etc`, which is right for
+  a package and wrong for a run out of the working tree, where a stale `/etc`
+  policy is the failure that looks like a working controller compiling somebody
+  else's fleet. The rewrite is checked rather than assumed, and **conditional**:
+  the sensors container image installs only `configs/*.json5` and runs no
+  controller, so where there is no policy beside them the shipped `/etc` paths
+  are left alone. `just desired` and
+  `just desired-plan` drop their `--policy` override to match, so one file is
+  in force and it is the one the daemon names.
+
+- **`just run desired=1`** (#941) starts the whole stack with the policy
+  controller in it, via a new `WITH_DESIRED` in `scripts/run-sensors.sh`
+  (beside `WITH_CORRELATOR` / `WITH_HISTORIAN`). **Opt-in, and it stays
+  opt-in**: this daemon writes the desired state every sensor in the run
+  reconciles, so starting it by default would reconfigure the demo fleet from a
+  policy nobody had read. `run-sensors.sh` warns when it is asked for the
+  controller without the correlator, because that combination publishes
+  nothing and says so nowhere.
 - **Adopt, on the SNMP discovery card** (#940, epic #902). The card has
   proposed unmonitored devices since #541, and its adopt path ended in
   **Copy snippet**: the operator pasted JSON5 into a file on the right host and
@@ -842,6 +882,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sentinel's own `active` map with an expiry sweep, which is why `observe` is
   called there with a zero debounce. A second hold would be two timers meaning
   the same thing, with the alert clearing after the sum of them.
+
+### Changed
+
+- **`rpc_get` is a client, and it sniffs** (#941). The debug GET example opened
+  a **peer** session with gossip off, which knows only the endpoint it dialled
+  and does not route a query on past it — so a GET aimed at a sensor one hop
+  behind the endpoint returned `0 replies`, indistinguishable from a queryable
+  that does not exist. `historian-query` reaches the same fleet as a client;
+  this now does too. It also decodes with the first-byte sniff every other
+  reader uses, rather than reporting a perfectly good CBOR `state/**` document
+  as "not JSON" — it takes any selector, and only `@rpc` replies are
+  guaranteed JSON.
 
 ### Fixed
 

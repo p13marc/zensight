@@ -81,16 +81,20 @@ die() {
 
 echo "==> building"
 cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-exporter-otel \
-    -p zensight-sensor-sysinfo -p zensight-historian -p zensight-desired >/dev/null
+    -p zensight-sensor-sysinfo -p zensight-historian -p zensight-desired \
+    -p zensight-correlator >/dev/null
 # The one-shot @rpc client the historian phase queries with (#912). An
 # example, not a binary: it is a test fixture with a `main`, and shipping it
 # in the release tarball would suggest otherwise.
 cargo build $relflag --locked -p zensight-historian --example historian-query >/dev/null
+# The one-shot GET phase 4 reads the sensor's applied marker with. Same
+# reasoning: a test fixture with a `main`, not something to ship.
+cargo build $relflag --locked -p zensight-common --example rpc_get >/dev/null
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
 require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" \
     "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-historian" "$BIN/zensight-desired" \
-    "$BIN/examples/historian-query"
+    "$BIN/zensight-correlator" "$BIN/examples/historian-query" "$BIN/examples/rpc_get"
 
 tmp="$(mktemp -d)"
 echo "==> generating configs into $tmp"
@@ -460,3 +464,107 @@ if "$BIN/zensight-desired" --config "$tmp/desired.json5" \
 fi
 
 echo "OK — demo/fleet-policy.json5 validates, and a never-list violation is refused."
+
+# ---------------------------------------------------------------------------
+# Phase 4 (#941): the policy loop, END TO END.
+#
+# Phase 3 proves the compiler parses. It publishes nothing, and *nothing
+# anywhere* has ever watched a document travel policy -> bus -> the sensor that
+# reconciles it. Every part of that path is covered in isolation — the overlay
+# rules in unit tests, the publish diff in unit tests, the bus properties in
+# the e2e — and the one assertion that says "this mechanism works" did not
+# exist. That is the same shape as the two exporter gaps above, one epic on.
+#
+# The assertion is the sensor's own `applied/thresholds` marker reading
+# `source: desired`. Not the presence of the `@desired` key — a key exists the
+# moment the controller publishes it, whether or not any sensor ever accepted
+# it, and a check that stops there is green on a fleet where every reconciler
+# is refusing the document.
+#
+# A correlator is needed and none of the phases above starts one: the compiler
+# asks @catalog what hosts exist, and with no catalog it compiles for a fleet
+# of zero, publishes nothing, and exits 0. A phase that skipped it would assert
+# nothing while passing.
+# ---------------------------------------------------------------------------
+echo
+echo "==> phase 4: policy -> bus -> the sensor's applied marker"
+echo "==> starting correlator"
+ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
+    "$BIN/zensight-correlator" --config "$tmp/correlator.json5" \
+    >"$tmp/correlator.log" 2>&1 &
+pids+=($!)
+
+# Wait for the catalog to actually know a host. `plan` (online) is the
+# compiler's own read of the fleet, so this waits on exactly what `apply` will
+# see rather than on a proxy for it.
+fleet_seen=0
+for _ in $(seq 60); do
+    if plan_out=$(ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
+            "$BIN/zensight-desired" --config "$tmp/desired.json5" \
+            --policy "$ROOT/demo/fleet-policy.json5" plan 2>>"$tmp/desired.log"); then
+        # `documents: N` is what `apply` will publish; `fleet: N entities`
+        # can be non-zero while every host matched no class. Wait on the
+        # thing being asserted, not on a precondition of it.
+        if grep -qE '^ +[^ ]+ +sysinfo/thresholds$' <<<"$plan_out"; then
+            fleet_seen=1
+            break
+        fi
+    fi
+    still_running "${pids[@]:-}" || break
+    sleep 1
+done
+if [[ "$fleet_seen" != 1 ]]; then
+    keep_logs_on_failure
+    die "the policy compiler never saw a host in @catalog, so it would publish nothing.
+What the last plan reported (its own read of the fleet, minus the log noise):
+$(grep -E '^ +(fleet|documents|adoptions|matched|REFUSED)|sysinfo/thresholds' <<<"$plan_out" || echo "  <nothing — the plan printed no report at all>")$(logs_note "$tmp" "$tmp/correlator.log" "$tmp/sysinfo.log" "$tmp/desired.log")"
+fi
+
+echo "==> applying the policy"
+apply_out=$(ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
+    "$BIN/zensight-desired" --config "$tmp/desired.json5" \
+    --policy "$ROOT/demo/fleet-policy.json5" apply 2>>"$tmp/desired.log") \
+    || die "zensight-desired apply failed$(logs_note "$tmp" "$tmp/desired.log")"
+# The daemon logs to STDOUT, so `apply_out` is its tracing output with the
+# result line at the end. Pull the line out rather than echoing a screen of
+# INFO — and rather than pasting it into a failure message, where it buries
+# the sentence that says what went wrong.
+apply_line=$(grep -E '^added [0-9]+ changed [0-9]+' <<<"$apply_out" | tail -1)
+echo "    ${apply_line:-<no result line — see $tmp/desired.log>}"
+grep -qE '^added [1-9]|changed [1-9]' <<<"$apply_line" \
+    || die "apply published nothing: ${apply_line:-<no result line>}
+A compiler that reports no document is a compiler this phase cannot test."
+
+# The marker is a state key, so it is read the way any consumer reads one: a
+# GET against the seed queryable the sensor serves. The sensor's reconciler is
+# already subscribed, so this is a live-path convergence, seconds not minutes.
+echo "==> waiting for sysinfo to report the document applied"
+applied=""
+for _ in $(seq 45); do
+    applied=$(PROBE_CONNECT="$HUB" PROBE_TIMEOUT_SECS=3 \
+        "$BIN/examples/rpc_get" 'v1/*/state/sysinfo/applied/thresholds' \
+        2>>"$tmp/rpc-get.log" || true)
+    grep -q '"source": *"desired"' <<<"$applied" && break
+    still_running "${pids[@]:-}" || break
+    sleep 1
+done
+if ! grep -q '"source": *"desired"' <<<"$applied"; then
+    keep_logs_on_failure
+    die "the sysinfo sensor never reported the @desired document in force.
+
+The controller published (\"$apply_line\") and the sensor did not take it, so the
+failure is on the reconcile side, not the compile side. What the marker says
+now:
+${applied:-<no reply at all — the state seed queryable did not answer>}
+$(logs_note "$tmp" "$tmp/sysinfo.log" "$tmp/desired.log" "$tmp/rpc-get.log")"
+fi
+
+# `disk-full` is the rule the shipped policy carries, and asserting it by name
+# is what separates "a document arrived" from "THE document arrived". A marker
+# reading `desired` over somebody else's rules would pass the check above.
+grep -q 'disk-full' <<<"$applied" \
+    || die "the marker says a @desired document is in force, but it is not the
+shipped policy's — no disk-full rule in the effective config:
+$applied"
+
+echo "OK — demo/fleet-policy.json5 -> @desired -> sysinfo applied/thresholds (source: desired)."

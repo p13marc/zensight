@@ -387,23 +387,26 @@ historian: build configure
 # Run the fleet policy compiler (#938): compile fleet-policy.json5 against the
 # catalog and publish the per-host @desired documents.
 #
-# Not in `just run`, and not by accident. This daemon WRITES the desired state
-# every sensor reconciles, so starting it with a policy you have not read would
-# reconfigure the whole demo fleet. Look first:
+# Opt-in in `just run`, and not by accident. This daemon WRITES the desired
+# state every sensor reconciles, so starting it with a policy you have not read
+# would reconfigure the whole demo fleet. Look first:
 #
 #   just desired-plan     # validate + show what would change, publishes nothing
-#   just desired          # actually publish
+#   just desired          # actually publish, standalone
+#   just run desired=1    # the whole stack, controller included
 #
-# The demo policy in demo/fleet-policy.json5 sets one sysinfo threshold on
-# every host, which is enough to watch a document land on a sensor's
-# state/<producer>/applied/<topic> marker.
+# The policy is {{rundir}}/fleet-policy.json5, copied there from demo/ by
+# `just configure` — which also points the generated desired.json5 at that
+# copy, so ONE file is in force and it is the one the daemon names. It sets one
+# sysinfo threshold on every host, which is enough to watch a document land on
+# a sensor's state/<producer>/applied/<topic> marker.
 desired: build configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-desired --config {{rundir}}/desired.json5 --policy demo/fleet-policy.json5 run
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-desired --config {{rundir}}/desired.json5 run
 
 # Validate the demo policy and print what it would publish. Needs no bus for
 # the policy half; with one, it also lists the documents per host.
 desired-plan: build configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-desired --config {{rundir}}/desired.json5 --policy demo/fleet-policy.json5 plan
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-desired --config {{rundir}}/desired.json5 plan
 
 # Optional Rerun sidecar (evaluation prototype, epic #415), standalone — or add
 # it to the full stack with `just run rerun=live|record|both`.
@@ -430,7 +433,9 @@ sensors connect=hub: setup configure
 #   just run rerun=live     # stream to a Rerun viewer (auto-started if installed)
 #   just run rerun=record   # headless → {{rundir}}/zensight.rrd (replay later)
 #   just run rerun=both     # both at once
-run rerun="": setup configure
+# Or the fleet policy controller (#941):
+#   just run desired=1      # also start zensight-desired against demo/fleet-policy.json5
+run rerun="" desired="": setup configure
     #!/usr/bin/env bash
     set -euo pipefail
     # Optional Rerun sidecar. `just` recipe args are positional, so accept both
@@ -439,6 +444,19 @@ run rerun="": setup configure
     case "$rerun_mode" in
         ""|live|record|both) ;;
         *) echo "error: rerun mode must be live|record|both, got '$rerun_mode'" >&2; exit 1 ;;
+    esac
+    # The policy controller. OPT-IN, and it stays that way: this daemon writes
+    # the desired state every sensor in the run reconciles, so starting it by
+    # default would reconfigure the demo fleet from a file nobody had read.
+    # {{rundir}}/fleet-policy.json5 is that file — `just configure` copies it
+    # from demo/ and points the generated desired.json5 at the copy.
+    with_desired="{{trim_start_match(desired, 'desired=')}}"
+    case "$with_desired" in
+        ""|0) with_desired=0 ;;
+        1)   with_desired=1
+             echo "Policy controller ON — it will publish @desired from" \
+                  "{{rundir}}/fleet-policy.json5 to every host the catalog knows." ;;
+        *) echo "error: desired must be 0 or 1, got '$with_desired'" >&2; exit 1 ;;
     esac
     # Build it up front (on-demand — it pulls the arrow/tonic stack) so the
     # sensors and GUI start together afterwards.
@@ -450,7 +468,8 @@ run rerun="": setup configure
     # trap below reaps them when the GUI exits or on Ctrl-C). They connect to
     # the GUI's loopback rendezvous (no multicast needed); logs in {{rundir}}/.
     BINDIR="{{bindir}}" CONFDIR="{{rundir}}" LOGDIR="{{rundir}}" \
-    CONNECT="{{hub}}" WITH_CORRELATOR=1 WITH_HISTORIAN=1 scripts/run-sensors.sh &
+    CONNECT="{{hub}}" WITH_CORRELATOR=1 WITH_HISTORIAN=1 WITH_DESIRED="$with_desired" \
+    scripts/run-sensors.sh &
     # Stop all sensors when the GUI exits (or on Ctrl-C).
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
     if [[ -n "$rerun_mode" ]]; then
