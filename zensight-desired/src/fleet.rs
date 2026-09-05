@@ -65,3 +65,153 @@ pub async fn fetch(session: &Arc<Session>, timeout: std::time::Duration) -> Vec<
     }
     by_id.into_values().collect()
 }
+
+/// Retry `fetch_once` while it comes back empty, until `deadline` elapses.
+///
+/// **Why one GET is not enough, even after `await_peer` (#1045).** `await_peer`
+/// returns as soon as the session has a neighbour, and that proves a *link* —
+/// not a route to a queryable. Zenoh declares queryables to a new session after
+/// the link comes up, so there is a window in which a session is connected,
+/// `@catalog` is running, and a GET still reaches nobody. `fetch` returns
+/// `vec![]` for that and for a genuinely empty fleet, and the caller cannot
+/// tell them apart. #1039 made `apply` refuse the ambiguity loudly instead of
+/// publishing nothing under exit 0; this makes it stop hitting the ambiguity
+/// for a reason that resolves itself in under a second.
+///
+/// **Empty stays a legitimate answer.** A fleet with no hosts still comes back
+/// empty — after the deadline, having actually looked. That is the cost of the
+/// distinction and it is paid only by deployments that have nothing to compile
+/// for, which are the ones about to be told so.
+///
+/// It is written over a closure rather than a `Session` so the window it exists
+/// for can be tested without a bus: a source that answers empty twice and then
+/// non-empty is exactly the sequence CI hits.
+pub async fn settle<F, Fut>(
+    mut fetch_once: F,
+    deadline: std::time::Duration,
+    poll: std::time::Duration,
+) -> Vec<HostEntity>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Vec<HostEntity>>,
+{
+    let give_up = tokio::time::Instant::now() + deadline;
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let fleet = fetch_once().await;
+        if !fleet.is_empty() {
+            if attempts > 1 {
+                tracing::info!(
+                    attempts,
+                    hosts = fleet.len(),
+                    "@catalog answered after the session settled"
+                );
+            }
+            return fleet;
+        }
+        if tokio::time::Instant::now() + poll >= give_up {
+            tracing::debug!(
+                attempts,
+                deadline_ms = deadline.as_millis() as u64,
+                "@catalog stayed empty for the whole settle window"
+            );
+            return fleet;
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn entity(id: &str) -> HostEntity {
+        HostEntity {
+            entity_id: id.to_string(),
+            aliases: Vec::new(),
+            host_id: Some(id.to_string()),
+            boot_id: None,
+            ips: Vec::new(),
+            macs: Vec::new(),
+            container_ids: Vec::new(),
+            origins: vec![id.to_string()],
+            hostname: None,
+            fqdn: None,
+            names: Vec::new(),
+            vendor: None,
+            platform: None,
+            members: Vec::new(),
+            status: None,
+            last_updated: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_arrives_late_is_still_an_answer() {
+        // The #1045 window: the session has a link, the queryable is not yet
+        // visible on it, and one GET would have concluded "no hosts".
+        let calls = Mutex::new(0u32);
+        let fleet = settle(
+            || async {
+                let mut n = calls.lock().unwrap();
+                *n += 1;
+                if *n < 3 {
+                    Vec::new()
+                } else {
+                    vec![entity("h-1")]
+                }
+            },
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(fleet.len(), 1);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            3,
+            "should stop as soon as it answers"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_answer_is_taken_without_waiting() {
+        // The ordinary path must cost nothing: a settled session answers on
+        // attempt one and the deadline is never involved.
+        let calls = Mutex::new(0u32);
+        let fleet = settle(
+            || async {
+                *calls.lock().unwrap() += 1;
+                vec![entity("h-1")]
+            },
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(fleet.len(), 1);
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_genuinely_empty_fleet_still_comes_back_empty() {
+        // The distinction this makes must not become a way of never saying no.
+        // An empty fleet is a real answer; it just has to be waited for.
+        let calls = Mutex::new(0u32);
+        let fleet = settle(
+            || async {
+                *calls.lock().unwrap() += 1;
+                Vec::new()
+            },
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        assert!(fleet.is_empty());
+        // It retried rather than giving up after one look, and it stopped
+        // rather than spinning: with a 200 ms deadline and a 50 ms poll that is
+        // a handful of attempts, not one and not forever.
+        let n = *calls.lock().unwrap();
+        assert!((2..=5).contains(&n), "attempts = {n}");
+    }
+}

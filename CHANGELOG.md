@@ -1024,6 +1024,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`zensight-desired apply` still raced the catalog: a link is not a route to
+  a queryable** (#1045). Caught by `demo-smoke` on a branch that changes no Rust
+  the phase executes, and green on master minutes earlier — a timing bug.
+
+  #1039 fixed the *silence*, not the race. Before it, `apply` published nothing
+  and exited 0; now it refuses loudly, which is the part that did its job. But
+  `connect()` waits for a **neighbour**, and `await_peer` returns as soon as
+  `peers_zid()` or `routers_zid()` yields anything. Zenoh declares queryables to
+  a new session *after* the link comes up, so a session can have a peer while
+  `@catalog` is still invisible on it, and the single GET that follows returns
+  zero replies — which `fetch` cannot distinguish from an empty fleet.
+
+  The give-away is in `demo-verify.sh` itself: phase 4 waits up to 60 s for
+  `plan` to see a host before running `apply`. So `plan` **succeeded**, in a
+  process whose session had settled, and `apply` — a new process, a second later
+  — saw nothing. The window is between a link coming up and a queryable being
+  visible on it, and every one-shot command opens a fresh session into it.
+
+  `fetch` stays one GET; its doc is right that this is the level-triggered read
+  the compile pass needs. What was wrong was doing it *once*. `fleet::settle`
+  retries while the answer is empty, for up to 10 s, and `apply`'s refusal now
+  says how long it asked — so "no hosts" means the fleet is empty rather than
+  that the session was young. It costs nothing on the ordinary path: a settled
+  session answers on the first attempt.
+
+  Written over a closure rather than a `Session` so the window can be tested
+  without a bus: a source that answers empty twice and then non-empty is exactly
+  the sequence CI hits, and a source that is always empty must still return
+  empty — after having actually looked.
+
+  `plan` and `run` deliberately do **not** settle, and now say so in the code.
+  `plan` means *what can you see right now* and is looped by callers, including
+  that phase-4 loop; making each call wait would change the command. `run`
+  re-fetches every `refresh_secs` and tombstones a key only after
+  `delete_grace_periods` consecutive passes without it, so one empty pass cannot
+  wipe a fleet's desired state.
+
+
 - **`zensight-desired apply` could compile against a fleet of zero and call it
   success** (#1039). Caught by #941's new `demo-verify` phase on the master
   push run — the same phase had passed on the pull request minutes earlier,
