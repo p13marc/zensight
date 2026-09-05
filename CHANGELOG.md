@@ -897,6 +897,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`zensight-desired apply` could compile against a fleet of zero and call it
+  success** (#1039). Caught by #941's new `demo-verify` phase on the master
+  push run — the same phase had passed on the pull request minutes earlier,
+  which is what a timing bug looks like:
+
+  ```
+  FAIL: apply published nothing: added 0 changed 0 deleted 0 unchanged 0
+  ```
+
+  Every one-shot command opened a session and **immediately** GET the catalog.
+  `zenoh::open` returns as soon as the runtime is up; the link to a `connect`
+  endpoint is established after that, so the GET reached nobody.
+  `fleet::fetch` cannot tell *"no reply"* from *"the fleet is empty"* — both
+  are `vec![]` — so the compiler yielded no documents, published nothing, and
+  printed `added 0 …` under **exit 0**. An operator running `apply` from a
+  deploy script got no change and no indication that anything had gone wrong,
+  which is the worst outcome available. `examples/rpc_get` already slept
+  500 ms before its GET with a comment saying exactly this.
+
+  Two parts, because either alone leaves the race with a longer fuse.
+  `zensight_common::session::await_peer` polls `peers_zid`/`routers_zid` up to
+  a budget and **reports rather than fails** — a process started before its hub
+  must still come up, and for a long-lived one this is only a head start, since
+  the periodic re-read is the correctness path. And `apply` now **exits 1 on an
+  empty fleet**, naming both causes it cannot distinguish (no catalog
+  answering, or a catalog that has fused no host yet).
+
+  Its two tests are a pair on purpose: one asserts a dialled endpoint becomes a
+  neighbour, the other that an unreachable one does not and that the wait is
+  bounded by its own timeout. Either alone passes against a stub that always
+  answers the same way.
+
 - **The `applied/<topic>` marker is served, not only published** (#1034). The
   marker that says which of the three writers (`file | desired | rpc`) is
   actually in force went out as a fire-and-forget `put` — once at startup, then

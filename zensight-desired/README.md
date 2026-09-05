@@ -50,10 +50,17 @@ passes, one sample.
 | | |
 |---|---|
 | `plan` | Validate and show what would change. Publishes nothing. **`plan --offline` opens no session at all** — a policy nobody can check before pushing is a policy checked by the fleet. Exits 1 on an invalid policy, so CI can gate a policy change the way it gates code. |
-| `apply` | Compile once, publish the difference, exit. |
+| `apply` | Compile once, publish the difference, exit. **Exits 1 when `@catalog` reports no hosts** (#1039) — `fetch` returns an empty list both when the catalog says "no hosts" and when nobody answered, and this command is read by deploy scripts. Publishing nothing under exit 0 is the one outcome nobody can act on. |
 | `run` | Stay up. Recompiles on catalog change, with a periodic floor — in practice the cadence is the correlator's re-emit (~60 s), and the floor is what remains if the subscription is unavailable. Affordable because an unchanged pass publishes nothing. |
 | `override/set` (RPC) | Record a per-host adoption durably (#939). Writes `fleet-policy.overrides.json5`, **never** the policy — see [`docs/policy.md`](docs/policy.md). Gated by `allow_overrides`, off by default. |
 | `render <host>` | Print the documents one host would receive, as the sensor will see them. An empty result says **which** kind of empty it is: no catalog at all, a host the catalog does not know, or a policy that selects it for nothing. |
+
+Every command that opens a session waits (up to 5 s) for it to have a
+neighbour before asking the catalog anything. `zenoh::open` returns before the
+link to a `connect` endpoint is up, so a GET issued straight away reaches
+nobody and answers with zero replies — which this crate would read as a fleet
+of zero (#1039). The wait is never fatal: a controller started before its hub
+still comes up and converges on the next refresh.
 
 ```bash
 zensight-desired --config /etc/zensight/desired.json5 plan --offline
