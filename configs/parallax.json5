@@ -47,7 +47,10 @@
     // mDNS is multicast on a network you may not own, and it is traffic an IDS
     // can flag. Keep it to networks you operate.
     // discovery: {
-    //   mdns: true,           // browse _rtsp._tcp (each probe named explicitly)
+    //   mdns: true,           // browse _rtsp._tcp
+    //   ws_discovery: true,   // ONVIF WS-Discovery Probe (each probe named
+    //                         //   explicitly: enabling the block turns on
+    //                         //   nothing you did not ask for)
     //   browse_secs: 10,      // how long one round listens
     //   interval_secs: 3600,  // between rounds
     // },

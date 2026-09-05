@@ -254,6 +254,7 @@ async fn main() -> Result<()> {
         let interval = std::time::Duration::from_secs(discovery_config.interval_secs.max(60));
         tracing::info!(
             mdns = discovery_config.mdns,
+            ws_discovery = discovery_config.ws_discovery,
             browse_secs = discovery_config.browse_secs,
             interval_secs = interval.as_secs(),
             "parallax camera discovery enabled (propose-only)"
@@ -287,6 +288,20 @@ async fn main() -> Result<()> {
                         // nothing: `methods` still names it, so the document
                         // does not read as "mDNS ran and the network is empty".
                         Err(e) => tracing::warn!(error = %e, "discovery: mDNS browse failed"),
+                    }
+                }
+                if discovery_config.ws_discovery {
+                    methods.push("ws-discovery".to_string());
+                    match zensight_sensor_parallax::discovery::probe_ws_discovery(
+                        discovery_config.browse_secs,
+                        &configured,
+                    )
+                    .await
+                    {
+                        Ok(mut found) => discovered.append(&mut found),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "discovery: WS-Discovery probe failed")
+                        }
                     }
                 }
                 let report = zensight_sensor_parallax::discovery::report(methods, discovered);

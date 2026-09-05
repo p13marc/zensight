@@ -51,6 +51,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **parallax: ONVIF WS-Discovery, written out rather than bought** (#410).
+  A second probe under the same `parallax.discovery` block, `ws_discovery`, off
+  by default like `mdns`: one SOAP `Probe` for `NetworkVideoTransmitter` to the
+  WS-Discovery multicast group, and the `ProbeMatches` parsed into the same
+  propose-only report.
+
+  **No `onvif-rs`.** #410 names it, and it is git-only and unreleased: this
+  workspace has zero git dependencies and `deny.toml` sets
+  `unknown-git = "deny"`, so taking it would have meant a permanent exemption
+  for an unreleased crate. WS-Discovery is one datagram and a reply, so it is
+  written out. `quick-xml` parses the reply, because a hand-rolled tag matcher
+  over hostile network input is how a probe becomes a vulnerability.
+
+  What that costs is stated rather than hidden: **WS-Discovery never yields a
+  stream URL.** `XAddrs` is the device's *service* endpoint, and turning it into
+  a stream URI is an ONVIF Media `GetStreamUri` call — a different protocol
+  surface, with authentication. The library would not have changed that; it
+  would only have made the missing half look closer. So a find is proposed with
+  its service address and a visible `<path>` placeholder, and the operator
+  completes it.
+
+  Parsed on **local names, ignoring namespace prefixes**, because vendors
+  disagree about whether the discovery namespace is `d:`, `wsd:`, `tds:` or
+  unprefixed — and a parser that insisted on one would find nothing on half the
+  cameras on the market, silently, since "no reply" and "a reply I could not
+  read" look identical. `Hello`/`Bye` announcements share the group and are
+  rejected: treating one as a probe reply would add a device the probe never
+  asked about, at whatever moment it happened to boot. Malformed XML, non-UTF-8
+  and empty datagrams are ignored rather than fatal — this parser is fed by
+  anything that can reach a UDP port.
+
+  ONVIF scopes carry the human-facing bits, so `name` and `hardware` are lifted
+  out and percent-decoded (`Front%20Door` in a proposal is the kind of detail
+  that makes an operator distrust the whole document); the raw scopes stay
+  beside them rather than being replaced by this crate's reading of them.
+
+  It joins **no multicast group** — a `Probe` goes *to* the group from an
+  ephemeral port and devices answer unicast to it, so receiving needs nothing
+  more, and joining would subscribe the host to every other WS-Discovery
+  conversation on the segment. Multicast TTL is 1: WS-Discovery is link-local by
+  design, and a probe that escapes the segment is a probe on someone else's
+  network.
+
+  The destination is injectable so the **socket** path is tested too — send,
+  receive, parse, propose against a responder on loopback, which also asserts
+  that the datagram sent really is a `Probe` for `NetworkVideoTransmitter`
+  (a probe that asks the wrong question finds cameras by accident and printers
+  on purpose). "The parser is correct" is not the same claim as "the probe
+  works", and shipping the second on the evidence of the first is how the half
+  that talks to the network goes untested.
+
 - **parallax: opt-in mDNS camera discovery, propose-only** (#410).
 
   A `parallax.discovery` block browses `_rtsp._tcp` and publishes what answered

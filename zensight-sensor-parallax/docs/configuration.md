@@ -120,12 +120,13 @@ same shape `snmp.discovery` uses (#541).
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `mdns` | `false` | browse `_rtsp._tcp` over mDNS |
+| `ws_discovery` | `false` | send an ONVIF WS-Discovery `Probe` and collect `ProbeMatches` |
 | `browse_secs` | `10` | how long one round listens |
 | `interval_secs` | `3600` | seconds between rounds (floored at 60) |
 
-Note that `mdns` defaults to **false even inside the block**: each probe is
-named explicitly, so enabling discovery never turns on a protocol the operator
-did not ask for. A block that enables nothing is refused at startup rather than
+Note that both probes default to **false even inside the block**: each is named
+explicitly, so enabling discovery never turns on a protocol the operator did not
+ask for. A block that enables nothing is refused at startup rather than
 publishing an empty report forever — which would read as "there are no cameras"
 instead of "you did not turn anything on".
 
@@ -138,16 +139,34 @@ and there will not be one**: a camera is a device with a view of a room, and a
 monitoring system that starts pulling video off hardware nobody configured has
 done something categorically different from noticing that it exists.
 
-Most responders arrive **without a URL**, and that is not a defect: mDNS gives a
+Most responders arrive **without a URL**, and that is not a defect. mDNS gives a
 service address, and only a `path` TXT record (RFC 6763 §6.5, which most cameras
-omit) turns that into a stream URL. The suggested snippet then carries a visible
-`rtsp://<address>/<path>` placeholder — an operator must be able to see that
+omit) turns that into a stream URL. **WS-Discovery never gives one at all**: its
+`XAddrs` is the device's *service* endpoint, and turning that into a stream URI
+is an ONVIF Media `GetStreamUri` call — a different protocol surface, with
+authentication. So the suggested snippet carries a visible
+`rtsp://<address>/<path>` placeholder: an operator must be able to see that
 something is missing, because a guessed path would look configured and fail at
 connect time.
 
-**Operational note.** mDNS is multicast on a network you may not own, and it is
-traffic an IDS can flag — the same caution the SNMP subnet sweep carries. Keep
-it to networks you operate. Rounds are capped at 256 responders: this document
+There is no `onvif-rs` dependency behind `ws_discovery`. The obvious library is
+git-only and unreleased, this workspace has zero git dependencies, and
+`deny.toml` sets `unknown-git = "deny"` — while WS-Discovery itself is one SOAP
+datagram to a multicast group and a reply to parse. A camera's `ProbeMatch`
+carries its ONVIF scopes, from which the name and hardware model are lifted
+(percent-decoded) into the report; the raw scopes are kept beside them rather
+than replaced by this crate's reading of them.
+
+The probe joins **no multicast group**: it sends *to* the group from an
+ephemeral port and devices answer unicast to that port, so receiving needs
+nothing more. Joining would additionally subscribe the host to every other
+WS-Discovery conversation on the segment. Multicast TTL is 1, because
+WS-Discovery is link-local by design and a probe that escapes the segment is a
+probe on somebody else's network.
+
+**Operational note.** Both probes are multicast on a network you may not own,
+and they are traffic an IDS can flag — the same caution the SNMP subnet sweep
+carries. Keep them to networks you operate. Rounds are capped at 256 responders: this document
 is LWW state a GUI renders, not a log.
 
 ## Validation
