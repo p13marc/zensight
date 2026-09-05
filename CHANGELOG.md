@@ -845,6 +845,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `applied/<topic>` marker is served, not only published** (#1034). The
+  marker that says which of the three writers (`file | desired | rpc`) is
+  actually in force went out as a fire-and-forget `put` — once at startup, then
+  only on a change — and **nothing anywhere answered a GET for it**. A
+  consumer that was not already subscribed at the moment a writer won never
+  learned the answer, on a perfectly healthy fleet.
+
+  That consumer is the GUI, in two places: the expectations view's threshold
+  marker (#933) and, since #940, the SNMP discovery card's `applied/targets`.
+  Both read it with a GET and both were getting zero replies. Each treats an
+  empty reply as *"nobody is keeping it"* — correct for a marker that is
+  genuinely absent, and the wrong picture of one that exists and cannot be
+  asked. So the operator whose rule the sensor **refused**, and the operator
+  whose adoption **lost a race** to the controller, saw nothing exactly where
+  the answer was meant to be.
+
+  `reconcile_topic` now declares a seed queryable on the marker's own state key
+  through the #782 stamping seam — the same RFC 05 §4 shape as the alert seed
+  one module over — and answers with the whole last-published record, stamped,
+  in the marker's own JSON encoding (#830's rule: a seed in a different
+  encoding from the live samples on its key is schema drift a consumer can only
+  see as a decode failure). It answers under the **kill switch** too, because
+  a disarmed reconciler is exactly when someone asks why nothing is converging,
+  and *"disabled never reads as silent"* was already this module's rule — it
+  simply held only for a consumer that was already listening.
+
+  The registry has declared `applied/{topic}` as `class = "state"` with
+  `ttl_s = 900` for every producer since #931; a state subject published once
+  per process lifetime and served by nobody was not meeting its own
+  declaration.
+
+  Same shape as #1031: a well-formed producer, a well-formed consumer, and no
+  test asserting the join. The two new e2e cases are that assertion — they open
+  a session **after** everything has already happened and ask, which is what
+  every existing case in that file could not do, because each declares its
+  subscriber before the reconciler starts. Both were seen to fail against the
+  code as it stood.
 - **The logs TLS e2e was flaky, and its sibling was green while asserting
   nothing** (#1036). `tls_delivers_and_cleartext_is_rejected` failed on an
   unrelated pull request with

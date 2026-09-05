@@ -62,19 +62,18 @@ pub struct AppliedMarker {
     publisher: Publisher,
     key: String,
     topic: &'static str,
-    /// What is actually in force right now, as last published by EITHER
-    /// writer. Owned by the marker, not by the reconciler, because the
-    /// reconciler is only one of the two writers: when it restates the
-    /// effective config beside a rejection it must restate what the RPC
-    /// writer put there, not what it last applied itself.
-    effective: std::sync::Arc<std::sync::Mutex<Effective>>,
-}
-
-#[derive(Clone)]
-struct Effective {
-    source: AppliedSource,
-    json: String,
-    desired_timestamp: Option<String>,
+    /// The marker as last published by EITHER writer. Owned by the marker,
+    /// not by the reconciler, because the reconciler is only one of the two
+    /// writers: when it restates the effective config beside a rejection it
+    /// must restate what the RPC writer put there, not what it last applied
+    /// itself.
+    ///
+    /// The WHOLE record since #1034, not the three fields `reject` needs:
+    /// [`serve_seed`](AppliedMarker::serve_seed) answers a GET with it, and a
+    /// seed that dropped `applied_at` or `last_rejected` would answer the two
+    /// questions the marker is asked — *when did this take effect* and *what
+    /// did the sensor refuse* — with a blank.
+    last: std::sync::Arc<std::sync::Mutex<Option<AppliedConfig>>>,
 }
 
 impl AppliedMarker {
@@ -88,11 +87,61 @@ impl AppliedMarker {
             publisher,
             key,
             topic,
-            effective: std::sync::Arc::new(std::sync::Mutex::new(Effective {
-                source: AppliedSource::File,
-                json: "null".to_string(),
-                desired_timestamp: None,
-            })),
+            last: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Serve the late-joiner seed for this marker (#1034) — the same RFC 05 §4
+    /// shape as the alert seed one module over: a queryable on the marker's own
+    /// state key, replying the last published record.
+    ///
+    /// Without it the marker is written once at startup and on each change, and
+    /// **read by nobody who was not already listening**. That is not a
+    /// hypothetical: the GUI reads it with a GET in two places — the
+    /// expectations view's threshold marker (#933) and the SNMP discovery
+    /// card's `applied/targets` (#940) — and both were getting zero replies on
+    /// a healthy fleet. An operator whose adoption lost a race to `@desired`,
+    /// and an operator whose rule the sensor refused, saw nothing exactly where
+    /// the answer was meant to be.
+    ///
+    /// Silence before the first publish is honest: the marker has not been
+    /// established yet. Every code path publishes the `file` baseline within
+    /// milliseconds of the reconciler starting, kill switch or not.
+    pub async fn serve_seed(&self, session: std::sync::Arc<zenoh::Session>) {
+        let queryable =
+            match zensight_common::served::serve_state_queryable(&session, &self.key).await {
+                Ok(q) => q,
+                Err(e) => {
+                    tracing::error!(error = %e, key = %self.key,
+                        "failed to declare the applied-marker seed queryable");
+                    return;
+                }
+            };
+        tracing::info!(key = %self.key, topic = self.topic, "applied marker seed ready");
+        while let Ok(query) = queryable.recv_async().await {
+            // Stamp taken WITH the snapshot, never per reply (#782).
+            let (snapshot, stamp) = (
+                self.last.lock().unwrap().clone(),
+                zensight_common::served::seed_stamp(&session),
+            );
+            let Some(marker) = snapshot else {
+                // Nothing published yet: answer nothing rather than inventing a
+                // baseline. A `file` marker with no `applied_at` is a claim
+                // about a config that has not been put in force.
+                continue;
+            };
+            // JSON, because `publish_raw` publishes JSON. A seed in a different
+            // encoding from the live samples on the same key is schema drift a
+            // consumer can only see as a decode failure (#830).
+            match serde_json::to_vec(&marker) {
+                Ok(payload) => {
+                    if let Err(e) = query.reply_state(&self.key, payload, stamp).await {
+                        tracing::warn!(error = %e, key = %self.key,
+                            "failed to reply the applied-marker seed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to serialize the applied marker"),
+            }
         }
     }
 
@@ -116,9 +165,15 @@ impl AppliedMarker {
     /// a refused desired document restates the RPC document, not the one
     /// the reconciler applied before it.
     pub async fn reject(&self, rejected: RejectedDesired) {
-        let e = self.effective.lock().unwrap().clone();
-        self.publish_raw(e.source, e.json, e.desired_timestamp, Some(rejected))
-            .await;
+        let last = self.last.lock().unwrap().clone();
+        // Before any publish there is nothing to restate, and the file
+        // baseline is the honest answer: nothing this reconciler accepted is
+        // in force.
+        let (source, json, ts) = last.map_or_else(
+            || (AppliedSource::File, "null".to_string(), None),
+            |m| (m.source, m.effective_json, m.desired_timestamp),
+        );
+        self.publish_raw(source, json, ts, Some(rejected)).await;
     }
 
     async fn publish_raw(
@@ -128,11 +183,6 @@ impl AppliedMarker {
         desired_timestamp: Option<String>,
         last_rejected: Option<RejectedDesired>,
     ) {
-        *self.effective.lock().unwrap() = Effective {
-            source,
-            json: json.clone(),
-            desired_timestamp: desired_timestamp.clone(),
-        };
         let marker = AppliedConfig {
             topic: self.topic.to_string(),
             source,
@@ -141,6 +191,7 @@ impl AppliedMarker {
             effective_json: json,
             last_rejected,
         };
+        *self.last.lock().unwrap() = Some(marker.clone());
         if let Err(e) = self
             .publisher
             .publish_json(&self.key, &marker, QosClass::Command)
@@ -172,8 +223,19 @@ where
 {
     let marker = AppliedMarker::new(publisher, spec.topic);
     let m = marker.clone();
+    let seed = marker.clone();
+    let seed_session = session.clone();
     let task = tokio::spawn(async move {
-        run(session, spec, cfg, baseline, apply, m).await;
+        // Both halves live as long as the session. Joined into ONE task rather
+        // than spawned separately so the seed cannot outlive the reconciler
+        // that feeds it — and so the kill switch, which returns early from
+        // `run`, still leaves the marker answerable. "Disabled" must never
+        // read as "silent" (#1034); that is this module's own rule, and until
+        // now it held only for a consumer that was already listening.
+        tokio::join!(
+            run(session, spec, cfg, baseline, apply, m),
+            seed.serve_seed(seed_session),
+        );
     });
     (marker, task)
 }
