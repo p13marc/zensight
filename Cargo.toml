@@ -126,6 +126,12 @@ glob = "0.3"
 # validation. The GUI's own regex dep is version-pinned separately.
 regex = "1"
 
+# WS-Discovery response parsing for the parallax sensor's opt-in camera
+# discovery (#410). A SOAP ProbeMatches is XML from a device on the network,
+# so it is parsed rather than scraped: a hand-rolled tag matcher over hostile
+# input is how a probe becomes a vulnerability.
+quick-xml = "0.42"
+
 # mDNS service browse for the parallax sensor's opt-in camera discovery
 # (#410). No async runtime of its own — it runs its own thread and hands
 # events over a `flume` channel, which is already a workspace dependency.

@@ -44,6 +44,7 @@ parallax-pipeline = { workspace = true, features = [
 ] }
 
 mdns-sd = { workspace = true }
+quick-xml = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 zenoh.workspace = true
 serde = { workspace = true, features = ["derive"] }
