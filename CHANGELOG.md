@@ -845,6 +845,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The logs TLS e2e was flaky, and its sibling was green while asserting
+  nothing** (#1036). `tls_delivers_and_cleartext_is_rejected` failed on an
+  unrelated pull request with
+  `InvalidCertificate(BadSignature)` — a crate that change could not touch.
+
+  The harness's `free_tcp_port` bound `127.0.0.1:0`, read the port and dropped
+  the listener, handing it straight back to the kernel's ephemeral allocator.
+  The two TLS tests run concurrently in one binary with their own self-signed
+  certs; given the same port, one rig's listener wins the bind and the other's
+  loses — and `start_listeners` **spawns** each listener and only *logs* a bind
+  failure, returning `Ok` regardless. So the losing rig started with nothing
+  listening, its client connected to the port anyway, completed a handshake
+  against the *other* rig's server, and rejected a certificate it had never
+  seen. Forcing the port to a constant reproduces it exactly.
+
+  Same defect as #1004 one crate over, where it showed up as a "dead" port that
+  answered; that fix moved one test's port below the ephemeral range and this
+  harness kept the old pattern.
+
+  `free_tcp_port` / `free_udp_port` now scan a window below the ephemeral range
+  and hand each port out **at most once per process** — a port that is merely
+  unoccupied is not enough when the caller has not bound it yet.
+
+  The other half is worse and is also fixed: **`mtls_refuses_client_without_cert`
+  passed in the broken state**. It asserts a client without a certificate is
+  refused, and a connection nobody accepts is also a connection nobody let
+  through — so it reported `ok` in every reproduction while its listener did
+  not exist. The rig now waits until its stream listener actually accepts and
+  panics naming the cause otherwise. (Verified to fire; it does not catch the
+  collision case, where the other rig *is* accepting, which is why the port fix
+  is the fix.)
+
 - **Ack and Silence were disabled on every running deployment** (#1031). #925 built
   them, #1017 gave them a seed queryable, both exporters mirror them — and the
   buttons have been greyed out since the day they shipped, with "catalog offline —
