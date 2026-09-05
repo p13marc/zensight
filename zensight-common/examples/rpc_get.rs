@@ -18,9 +18,13 @@
 //! ZENSIGHT_ZENOH_SCOUTING=false`.
 //!
 //! The selector is a full wire key (a debug tool sees the un-namespaced wire,
-//! RFC 09 §5), so it starts at `v1/` on a base-less deployment. Every `@rpc`
-//! reply on the sensors goes out through `reply_json`, so plain JSON decoding
-//! is right — there is no CBOR sniff to do.
+//! RFC 09 §5), so it starts at `v1/` on a base-less deployment.
+//!
+//! Every `@rpc` reply goes out through `reply_json`, but a **state** seed does
+//! not: it is whatever the deployment's `serialization` says, CBOR by default.
+//! Since this takes any selector, it sniffs the first byte the way every other
+//! reader in the tree does (`decode_auto`) rather than reporting a perfectly
+//! good `state/*/applied/*` document as "not JSON".
 
 use std::time::Duration;
 
@@ -40,6 +44,12 @@ async fn main() {
         .unwrap_or(5);
 
     let mut config = zenoh::Config::default();
+    // A CLIENT, not a peer. A peer with gossip off knows only the one endpoint
+    // it dialled and does not route a query on past it — so a GET aimed at a
+    // sensor sitting one hop behind the endpoint returns "0 replies", which is
+    // indistinguishable from a queryable that does not exist. `historian-query`
+    // reaches the same fleet the same way, for the same reason.
+    config.insert_json5("mode", "\"client\"").unwrap();
     // Scouting fully off: this dials exactly one endpoint and joins nothing
     // else, so a validation run cannot accidentally answer from some other
     // sensor on the LAN.
@@ -70,13 +80,17 @@ async fn main() {
             Ok(sample) => {
                 answered += 1;
                 let bytes = sample.payload().to_bytes();
-                match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                match zensight_common::decode_auto::<serde_json::Value>(&bytes) {
                     Ok(v) => println!(
                         "{}\n{}",
                         sample.key_expr(),
                         serde_json::to_string_pretty(&v).unwrap()
                     ),
-                    Err(_) => println!("{} => {} bytes, not JSON", sample.key_expr(), bytes.len()),
+                    Err(e) => println!(
+                        "{} => {} bytes, decoded as neither JSON nor CBOR ({e})",
+                        sample.key_expr(),
+                        bytes.len()
+                    ),
                 }
             }
             // An RPC error reply is an answer too — print it and keep going.

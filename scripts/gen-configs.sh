@@ -320,12 +320,42 @@ cp -f "$configs_dir/correlator.json5" "$outdir/correlator.json5"
 # ~/.local/state/zensight otherwise, so a generated config needs no rewriting.
 cp -f "$configs_dir/historian.json5" "$outdir/historian.json5"
 
-# desired: the fleet policy compiler (#938). Machine-agnostic — it reads a
-# policy and the catalog, holds no state and writes no file. The generated
-# config points at the repo's demo policy rather than /etc, because a
-# generated run happens out of the working tree; `just desired` overrides it
-# on the command line anyway.
+# desired: the fleet policy compiler (#938, #941).
+#
+# The shipped config points at /etc, which is right for a package and wrong for
+# a generated run: a run directory that does not carry its own policy is one
+# `zensight-desired` cannot start from, and the daemon reads TWO files — the
+# policy and the overrides `override/set` writes. So both paths are rewritten
+# to $outdir and the demo policy is copied in beside them.
+#
+# The policy is the file to review before running the controller: it decides
+# what every host in the fleet is told to do. Copied rather than referenced so
+# that editing the run directory's copy cannot alter the repository's.
 cp -f "$configs_dir/desired.json5" "$outdir/desired.json5"
+# The demo policy lives beside `configs/`, and `--configs-dir` is the only path
+# this script is given, so derive the repo root from it rather than guessing at
+# $PWD — a generated run may be invoked from anywhere.
+#
+# CONDITIONAL, and that is the point: the sensors container image installs only
+# `configs/*.json5` under /usr/share/zensight and runs no controller, so there
+# is no demo/ beside it. Copying unconditionally would fail under `set -e` and
+# take the image's startup with it. Where there is no policy to point at, the
+# shipped /etc paths are left alone — which is exactly right for a package.
+demo_policy="$(dirname "$configs_dir")/demo/fleet-policy.json5"
+if [[ -f "$demo_policy" ]]; then
+    cp -f "$demo_policy" "$outdir/fleet-policy.json5"
+    sed -i \
+        -e "s#policy: \"/etc/zensight/fleet-policy.json5\"#policy: \"$outdir/fleet-policy.json5\"#" \
+        -e "s#overrides: \"/etc/zensight/fleet-policy.overrides.json5\"#overrides: \"$outdir/fleet-policy.overrides.json5\"#" \
+        "$outdir/desired.json5"
+    grep -q "policy: \"$outdir/fleet-policy.json5\"" "$outdir/desired.json5" || {
+        # A silent sed miss would leave the generated config pointing at /etc,
+        # where a stale policy may well exist — the failure that looks like a
+        # working controller compiling somebody else's fleet.
+        echo "gen-configs: could not rewrite the desired policy path in $outdir/desired.json5" >&2
+        exit 1
+    }
+fi
 
 # ── Exporters (--exporters; the `just demo-prometheus` / `demo-otel` stacks) ──
 #

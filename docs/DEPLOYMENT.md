@@ -339,10 +339,36 @@ appear to have taken:
 zenctl get 'zensight/v1/*/state/*/applied/*'
 ```
 
+That GET answers because the marker is **seeded** (#1034), not merely
+published: a consumer that was not listening when the writer won can still ask.
+
 A `DELETE` of a desired key reverts that host to its own config file, never to
 an empty set. And the compiler deletes a document only when the policy stops
 yielding it for a host the catalog **still shows**, after a grace of several
 passes — one slow catalog read must not revert the whole fleet at once.
+
+### Trying the whole loop on one machine
+
+`just run desired=1` starts the stack with the controller in it (#941).
+`just configure` copies `demo/fleet-policy.json5` into `.run/` and points the
+generated `desired.json5` at that copy, so the file the daemon names is the
+file you edit. It is **opt-in and stays opt-in**: this daemon writes the
+desired state every sensor in the run reconciles, and starting it by default
+would reconfigure the demo fleet from a policy nobody had read.
+
+Watch it land:
+
+```bash
+just desired-plan                                    # publishes nothing
+just run desired=1
+zenctl get 'zensight/v1/*/state/sysinfo/applied/thresholds'   # source: desired
+```
+
+CI runs that same loop on every pull request — `scripts/demo-verify.sh` phase 4
+starts a correlator, applies the shipped policy and waits for a real sensor's
+marker to read `source: desired`. Compiling a policy and *publishing* one that
+a host actually accepts are different claims, and only the second one is worth
+making.
 
 ### Selectors read the catalog
 

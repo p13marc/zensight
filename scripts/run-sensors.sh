@@ -21,6 +21,11 @@
 #                                                       (default tcp/127.0.0.1:7447)
 #   WITH_CORRELATOR  1 = also run zensight-correlator   (default 0)
 #   WITH_HISTORIAN   1 = also run zensight-historian    (default 0)
+#   WITH_DESIRED     1 = also run zensight-desired      (default 0)
+#                    OPT-IN, and it stays opt-in: this daemon is the AUTHOR of
+#                    @desired — it publishes the documents every sensor above
+#                    reconciles. Starting it by default would reconfigure the
+#                    demo fleet from a policy file nobody had read.
 #   ZENSIGHT_SENSORS comma/space-separated subset to run (#813) — e.g.
 #                    "sysinfo,systemd,logs" on a box where netring holds
 #                    319 MB to watch no traffic. Default: all present.
@@ -40,6 +45,7 @@ LOGDIR="${LOGDIR:-.run}"
 CONNECT="${CONNECT:-tcp/127.0.0.1:7447}"
 WITH_CORRELATOR="${WITH_CORRELATOR:-0}"
 WITH_HISTORIAN="${WITH_HISTORIAN:-0}"
+WITH_DESIRED="${WITH_DESIRED:-0}"
 ZENSIGHT_SENSORS="${ZENSIGHT_SENSORS:-}"
 MAX_RESTARTS="${MAX_RESTARTS:-5}"
 
@@ -70,6 +76,10 @@ export ZENSIGHT_ZENOH_SCOUTING="${ZENSIGHT_ZENOH_SCOUTING:-false}"
 # four that would explain it (#813).
 supervise() {
     local bin="$1" cfg="$2" name attempt=0 delay rc
+    shift 2
+    # Trailing args, for the one child that takes a subcommand
+    # (`zensight-desired … run`). Everything else passes none.
+    local -a args=("$@")
     name="${cfg%.json5}"
     while true; do
         # `set -e` is script-global and would kill THIS supervisor at the
@@ -78,12 +88,12 @@ supervise() {
         if [[ "$LOGDIR" == "-" ]]; then
             # Interleave on stdout with a per-sensor prefix (container mode).
             set +e
-            "$BINDIR/$bin" --config "$CONFDIR/$cfg" 2>&1 | sed -u "s/^/[$name] /"
+            "$BINDIR/$bin" --config "$CONFDIR/$cfg" "${args[@]}" 2>&1 | sed -u "s/^/[$name] /"
             rc=${PIPESTATUS[0]}
             set -e
         else
             set +e
-            "$BINDIR/$bin" --config "$CONFDIR/$cfg" >> "$LOGDIR/$name.log" 2>&1
+            "$BINDIR/$bin" --config "$CONFDIR/$cfg" "${args[@]}" >> "$LOGDIR/$name.log" 2>&1
             rc=$?
             set -e
         fi
@@ -101,11 +111,12 @@ supervise() {
 spawn() {
     local bin="$1" cfg="$2" name
     name="${cfg%.json5}"
+    shift 2
     if ! selected "$name"; then
         echo "run-sensors: $name not in ZENSIGHT_SENSORS — skipped"
         return 0
     fi
-    supervise "$bin" "$cfg" &
+    supervise "$bin" "$cfg" "$@" &
 }
 
 # Kill the whole process group on TERM/INT/EXIT so no sensor outlives the
@@ -115,6 +126,7 @@ trap 'trap - TERM INT EXIT; kill 0 2>/dev/null' TERM INT EXIT
 extra=""
 [[ "$WITH_CORRELATOR" == 1 ]] && extra=" + correlator"
 [[ "$WITH_HISTORIAN" == 1 ]] && extra="$extra + historian"
+[[ "$WITH_DESIRED" == 1 ]] && extra="$extra + desired"
 sel="${ZENSIGHT_SENSORS:-all}"
 echo "Starting sensors [$sel]$extra (connecting to $CONNECT)…"
 spawn zensight-sensor-sysinfo sysinfo.json5
@@ -139,6 +151,26 @@ if [[ "$WITH_HISTORIAN" == 1 ]]; then
     # queries over it (#898). Its database lands under ~/.local/state/zensight,
     # so it survives a restart of this script — which is the point of it.
     spawn zensight-historian historian.json5
+fi
+if [[ "$WITH_DESIRED" == 1 ]]; then
+    # The policy compiler (#938): reads $CONFDIR/fleet-policy.json5 and the
+    # catalog, and publishes the per-host documents the sensors above
+    # reconcile. Needs the correlator — with no catalog it compiles for a
+    # fleet of zero and publishes nothing, silently.
+    if [[ "$WITH_CORRELATOR" != 1 ]]; then
+        echo "run-sensors: WITH_DESIRED=1 without WITH_CORRELATOR=1 — the policy \
+compiler asks @catalog what hosts exist, and with no catalog it will compile for \
+a fleet of zero and publish nothing." >&2
+    fi
+    # Not in the sensors container image (it runs no controller), so say the
+    # binary is missing rather than spending the restart budget discovering it
+    # — the same shape as the parallax check above.
+    if [[ -x "$BINDIR/zensight-desired" ]]; then
+        spawn zensight-desired desired.json5 run
+    else
+        echo "run-sensors: WITH_DESIRED=1 but $BINDIR/zensight-desired is not \
+here — this build ships no policy controller." >&2
+    fi
 fi
 
 # Each child is supervised individually; the script itself only ends on
