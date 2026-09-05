@@ -51,6 +51,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`docs/COMPATIBILITY.md` — what is stable before 1.0, what may break, and
+  what 1.0 would have to mean** (#943, epic #903).
+
+  The only compatibility statement in the tree was `RELEASING.md`'s "the minor
+  is the breaking slot", and a parenthesis promising this file. Meanwhile 0.11.0
+  shipped seventeen breaking entries (three breaking a *deployment*), 0.12.0
+  one, 0.13.0 none, and nothing said which of those a reader should have
+  expected to be possible.
+
+  The page is a surface table, and its rule is that a promise is only as good
+  as what defends it: the keyspace grammar and the registry are defended by
+  machines (`registry.lock` refuses an incompatible edit; the append-only
+  `deprecated.lock` means a retired path is never re-used), the wire encoding
+  by `decode_auto`'s first-byte sniff, the `@desired` never-list by a lint plus
+  the structural fact that a reconciler only deserializes its own type. Series
+  names, config shapes and the GUI's local store get the opposite treatment,
+  said plainly: they may break with a minor, and the local store is a cache
+  that is moved aside rather than migrated.
+
+  The config hazard gets its own paragraph because it is the one that bites
+  silently: with no `deny_unknown_fields` and `#[serde(default)]` everywhere,
+  **a removed setting still loads** — it does not error, it stops being
+  honoured. A config that "still works" after an upgrade is not evidence that
+  nothing changed.
+
+  The deprecation window is one minor, retire-and-sibling, never a silent
+  rename — and, generalised from the `netlink.expectations.metrics`
+  deprecation, **announced at runtime and not only in rustdoc**, because the
+  operator with a live config never opens rustdoc.
+
+  The 1.0 criteria are carried over from `RELEASING.md` with the point made
+  explicit rather than implied: every criterion this repository can satisfy on
+  its own is listed as *necessary and not sufficient*, under the one it cannot
+  — that fleets outside this project have run it in production. The list is
+  therefore not a checklist that ends in a tag, and `RELEASING.md` now points
+  at the file instead of apologising for its absence.
+
+  **And the one machine-checkable part of it is now checked.** `RELEASING.md`
+  is blunt that the changelog is a purely human artifact — "CI never reads
+  CHANGELOG.md. Nothing fails if it is wrong" — which is exactly why the rule
+  the new page states needed an enforcer. Two guards join the nine already in
+  the `lint` job:
+
+  - the breaking heading has **one** spelling. Six releases wrote
+    `### Changed — BREAKING` and 0.7.0 wrote `### Changed (BREAKING)`, which is
+    now normalized; two spellings mean a reader grepping for one silently
+    misses a release.
+  - **`RELEASING.md` §1's `git log <prev-tag>..HEAD | grep '!'` check, run.** If
+    a conventional-commit `!` exists in range, the section being written must
+    carry the heading. It cannot judge whether the entry describes *that*
+    commit — a human still reads it — but "seventeen breaking changes and no
+    heading" stops being possible. Checked against every historical release:
+    0.11.0's 28 `!` commits, 0.12.0 and 0.13.0's zero. On a tag push it reads
+    the `[X.Y.Z]` section rather than `[Unreleased]`, because the release
+    commit has already renamed it.
+
+  The `lint` checkout gains `fetch-depth: 0` for this and only this: the
+  default shallow clone has no tags, so the second guard would have degraded to
+  "there are no commits" — a check that passes because it cannot see. The
+  guard's own first CI run failed while passing locally, on identical bytes: it
+  tested the section through `printf … | grep -q`, and that pipeline is a race —
+  `grep -q` exits at the match ~190 KB into a ~220 KB section, whatever `printf`
+  has left goes into a closed pipe, and under `pipefail` the pipeline fails
+  while grep had in fact found the heading. It now reads and writes files, and
+  its failure path prints the section it read, that section's headings, and the
+  bytes of every breaking heading in the file — because the canonical spelling
+  contains an em dash and "looks right" is not a comparison. Both
+  guards' comments record what they *cannot* see either: `paths-ignore` skips
+  CI entirely for a prose-only PR, so they fire on the PR that introduces a
+  breaking commit (which always touches code) and not on a later docs-only one
+  that removes the heading again.
+
+  `[Unreleased]` also gains an index under its breaking heading for the three
+  breaking changes written up under `### Removed`, `### Added` and
+  `### Changed` — #934, #925 and #919. They stay where they are written; the
+  heading now lists them, so it is what the page claims it is.
+
+- **`docs/POSITIONING.md` — what ZenSight is for, who runs it, and what it is
+  deliberately not** (#942, epic #903).
+
+  The project had 15 releases, a real production fleet and no page saying what
+  problem it solves or who should run it. The README was an excellent reference
+  and no pitch: no problem statement, no audience, and zero occurrences of
+  "instead of", "compared to", Zabbix, Netdata, Nagios, Checkmk or LibreNMS
+  anywhere in the repository's markdown.
+
+  The page states the target plainly — **infrastructure, published**: built for
+  and proven on one fleet (a Proxmox host and six 1–2 GB VMs on links you do not
+  control), released because that shape is common. It anchors every claim to a
+  mechanism that exists rather than an aspiration: the one-bus keyspace and its
+  disjoint classes, one entity per host from ranked evidence, structural edges,
+  `symptom_of` on incidents, the read-only sensor stance **with both of its
+  gated exceptions named and their honest limit stated** (a write is auditable,
+  not attributable, until a caller identity exists), and the table of what stays
+  in Prometheus / Grafana / Alertmanager / OTel through the shipped exporters.
+
+  It also says who should *not* run it yet — no RBAC, no multi-tenancy, no
+  supported product — because a positioning page that only recruits is a
+  brochure, and this one has to survive contact with a stranger's fleet.
+
+  The README gains a five-line pitch above the fold linking to it, and its
+  components table stops omitting five crates it had drifted past
+  (`zensight-store`, `zensight-sensor-bmc`, `zensight-historian`,
+  `zensight-desired`, `zensight-conformance`). `docs/README.md`'s index gains
+  the same crates plus `parallax`, `DEPLOYMENT.md` and `TOPOLOGY-REDESIGN.md`,
+  and its `KEYSPACE.md` row stops describing the pre-v1 keyspace that
+  `KEYSPACE.md` itself says is retired.
+
+
 - **CI watches a policy document travel policy → bus → a sensor** (#941, epic
   #902). `scripts/demo-verify.sh` gains a fourth phase, and it is the
   assertion the whole epic was missing: start a correlator, run
@@ -3006,6 +3115,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step.
 
 ### Changed — BREAKING
+
+Three further breaking changes in this release are written up under the section
+they belong to rather than here. They are indexed below so that this heading is
+the complete list of what breaks — which is what `docs/COMPATIBILITY.md` says it
+is, and what the CI guard checks for:
+
+- **The GUI's alert rule engine is removed** (#934, epic #901) — under
+  `### Removed`.
+- **Acknowledgement and silence become a projection of the bus** (#925, epic
+  #900) — under `### Added`.
+- **The GUI's topology graph is read from the catalog, not derived in the view**
+  (#919, epic #899) — under `### Changed`.
 
 - **The GUI's metric cache is rebuilt on first launch after this** (#904).
   Schema v3 re-types two tables and changes what a series is called, so a v2
@@ -6729,7 +6850,7 @@ deployment (host-scoped state keys, a sensors-only container image, and
 **Changed (BREAKING)** and the per-entry mixed-version notes; upgrade sensors
 and frontend together.
 
-### Changed (BREAKING)
+### Changed — BREAKING
 
 - **Per-sensor state keys are now host-scoped:
   `zensight/<protocol>/<source>/@/{health,errors,status,alive,devices/**}`.**

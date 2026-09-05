@@ -354,7 +354,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      # fetch-depth: 0 is for the CHANGELOG guards at the end of this job and
+      # nothing else. The default shallow clone has no tags and no history, so
+      # `git tag --list` comes back empty and "every breaking commit since the
+      # last release is documented" degrades to "there are no commits" —
+      # a check that passes because it cannot see. Only this job pays for it.
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev
       - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
@@ -601,3 +608,126 @@ jobs:
             echo "$hits"
             exit 1
           fi
+
+      # --- CHANGELOG guards (#943) -------------------------------------------
+      #
+      # These two are the only machine-checkable part of a purely human
+      # artifact. RELEASING.md is blunt about the rest: "forgejo-release does
+      # not generate a release body and CI never reads CHANGELOG.md. Nothing
+      # fails if it is wrong." docs/COMPATIBILITY.md turns one sentence of that
+      # into a rule — every breaking change appears under `### Changed —
+      # BREAKING` in its release's section — and a rule nothing enforces is a
+      # preference. So: enforce the two halves that a grep can actually see.
+      #
+      # WHAT THESE CANNOT SEE. ci.yml carries
+      # `paths-ignore: ['**.md', 'docs/**', 'LICENSE*']`, and `**.md` matches
+      # CHANGELOG.md. A pull request that touches ONLY prose runs no jobs at
+      # all, so neither guard fires on it. That is survivable because of which
+      # direction each one guards: a `!` commit always touches code, so the PR
+      # that introduces the obligation always runs the check. What slips
+      # through is a later docs-only PR that removes the heading again — the
+      # next code PR catches it, one merge late. Do not read these as total.
+      - name: the CHANGELOG has one spelling for the breaking heading (#943)
+        run: |
+          # Six releases wrote `### Changed — BREAKING` and 0.7.0 wrote
+          # `### Changed (BREAKING)`. Two spellings mean the second guard below
+          # has to guess, and a reader grepping for the first one silently
+          # misses a release. The em dash is the canonical form because it is
+          # what six of the seven already used.
+          hits=$(grep -nE '^#+ .*[Bb][Rr][Ee][Aa][Kk][Ii][Nn][Gg]' CHANGELOG.md \
+            | grep -vE '^[0-9]+:### Changed — BREAKING$' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::A CHANGELOG heading spells the breaking section some other way. The canonical spelling is exactly '### Changed — BREAKING' (em dash), per docs/COMPATIBILITY.md:"
+            echo "$hits"
+            exit 1
+          fi
+
+      - name: every breaking commit since the last release is documented (#943)
+        run: |
+          # RELEASING.md §1 tells the releaser to run
+          #     git log --oneline <prev-tag>..HEAD | grep '!'
+          # and check that everything it prints is documented. Nothing ever ran
+          # it. This is that check, reduced to the part a machine can decide:
+          # IF there is a conventional-commit `!` in range, THEN the section
+          # being written must carry the breaking heading. It cannot tell
+          # whether the entry under that heading describes THIS commit — a human
+          # still reads it — but "seventeen breaking changes and no heading" is
+          # exactly the failure it exists to make impossible.
+          #
+          # The section to look in depends on where HEAD is. On a branch or a
+          # push to master it is [Unreleased]. On a TAG push the release commit
+          # has already renamed [Unreleased] to [X.Y.Z] and opened a fresh empty
+          # one, so looking in [Unreleased] would fail every breaking release at
+          # exactly the moment it is cut. Hence the tag lookup below. Checked
+          # against history: 0.11.0's 28 marked commits pass, 0.12.0 and 0.13.0
+          # have none and exit early.
+          #
+          # EVERYTHING GOES THROUGH FILES ON PURPOSE. The first version held
+          # the changelog section in a shell variable and tested it with
+          # `printf '%s\n' "$section" | grep -qxF`. It passed locally and failed
+          # here on identical bytes, the same mawk and the same locale, because
+          # that pipeline is a RACE: the section is ~220 KB, the pipe buffer is
+          # 64 KB, and `grep -q` exits the moment it matches — about 190 KB in.
+          # Whatever `printf` had left then goes into a closed pipe, so it
+          # returns non-zero, and under the runner's `pipefail` the pipeline
+          # fails while grep had in fact found the heading. Which side wins is
+          # scheduling. Files have no pipe to close.
+          set -u
+          name="Unreleased"
+          current=$(git tag --points-at HEAD --list '[0-9]*.[0-9]*.[0-9]*' | head -1)
+          if [ -n "$current" ]; then name="$current"; fi
+
+          # The newest release tag that is not HEAD's own, compared by COMMIT:
+          # an annotated tag and the commit it points at are different objects.
+          prev=""
+          for t in $(git tag --list '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname); do
+            if [ "$(git rev-parse "$t^{commit}")" = "$(git rev-parse 'HEAD^{commit}')" ]; then
+              continue
+            fi
+            prev="$t"
+            break
+          done
+          if [ -z "$prev" ]; then
+            echo "no release tag reachable — nothing to compare against, skipping"
+            exit 0
+          fi
+
+          # Conventional-commit breaking marker: `type!:` or `type(scope)!:`.
+          # Merge commits ("Merge pull request '...'") do not match and need
+          # not: git log walks the merged commits themselves.
+          git log --format='%s' "$prev"..HEAD > /tmp/changelog-subjects.txt
+          grep -E '^[a-z]+(\([^)]*\))?!:' /tmp/changelog-subjects.txt \
+            > /tmp/changelog-breaking.txt || true
+          if [ ! -s /tmp/changelog-breaking.txt ]; then
+            echo "no breaking commits since $prev"
+            exit 0
+          fi
+
+          awk -v want="## [$name]" '
+            index($0, want) == 1 { f = 1; next }
+            /^## \[/ { f = 0 }
+            f' CHANGELOG.md > /tmp/changelog-section.md
+
+          if [ ! -s /tmp/changelog-section.md ]; then
+            echo "::error::CHANGELOG.md has no '## [$name]' section, but these commits since $prev are marked breaking:"
+            cat /tmp/changelog-breaking.txt
+            exit 1
+          fi
+
+          if grep -qxF '### Changed — BREAKING' /tmp/changelog-section.md; then
+            echo "$(wc -l < /tmp/changelog-breaking.txt) breaking commit(s) since $prev; '## [$name]' has the heading"
+            exit 0
+          fi
+
+          echo "::error::These commits since $prev are marked breaking, but '## [$name]' has no '### Changed — BREAKING' section. Every breaking change is listed under that heading (docs/COMPATIBILITY.md) — write the entry there, or index it there if it is written up under another heading:"
+          cat /tmp/changelog-breaking.txt
+          # A guard that only says "no" is a guard someone disables. These three
+          # lines are what the first failure of this step needed and did not
+          # have: which section was read, what it contained, and the actual
+          # bytes of every breaking heading in the file — because the canonical
+          # spelling contains an em dash and "looks right" is not a comparison.
+          echo "--- '## [$name]' is $(wc -l < /tmp/changelog-section.md) lines; its headings:"
+          grep -n '^#\{2,\} ' /tmp/changelog-section.md || echo "(no headings at all)"
+          echo "--- every breaking heading in CHANGELOG.md, as bytes:"
+          grep -n -m 20 'BREAKING' CHANGELOG.md | cat -A
+          exit 1
