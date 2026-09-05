@@ -13,8 +13,8 @@ reference fleet cannot. Every other criterion — the feature milestones landed,
 consecutive minors with no breaking change, the sizing measured, the demo runnable by a
 stranger — is something this repository can satisfy on its own, which is precisely why none
 of them is sufficient. A 1.0 is a promise made *to* other people; it cannot be earned by
-talking to yourself. (The full list belongs in `docs/COMPATIBILITY.md`, which #943 will
-write; until it exists, this paragraph is the statement of record.)
+talking to yourself. (The full list, and what each surface actually promises today, is
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — #943.)
 
 So: **do not schedule a 1.0, and do not milestone one.** The readiness work that has to
 happen first is milestoned `0.18.0` (#903), and it is deliberately not called 1.0. Keep
