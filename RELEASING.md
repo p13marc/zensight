@@ -7,6 +7,20 @@ the Forgejo pipeline during 0.9.0 prep — keep it current.
 Versioning is pre-1.0 `0.MINOR.PATCH`: **the minor is the breaking slot.** Any `!` commit
 since the last tag means the minor moves.
 
+**There is no 1.0 until the software has been battle-tested by the community.** Not until
+fleets outside this project have run it in production, long enough to have found what one
+reference fleet cannot. Every other criterion — the feature milestones landed, two
+consecutive minors with no breaking change, the sizing measured, the demo runnable by a
+stranger — is something this repository can satisfy on its own, which is precisely why none
+of them is sufficient. A 1.0 is a promise made *to* other people; it cannot be earned by
+talking to yourself. (The full list belongs in `docs/COMPATIBILITY.md`, which #943 will
+write; until it exists, this paragraph is the statement of record.)
+
+So: **do not schedule a 1.0, and do not milestone one.** The readiness work that has to
+happen first is milestoned `0.18.0` (#903), and it is deliberately not called 1.0. Keep
+cutting `0.MINOR` releases until the evidence exists, then write the release notes that
+say what the evidence was.
+
 CI is **Forgejo Actions** (`.forgejo/workflows/`), releases live on the Forgejo instance
 (`https://git.marcpardo.eu/marcpardo/zensight`), GitHub is a passive push mirror. `gh`
 does not talk to this forge — use the Actions tab / releases page in the web UI (over the
