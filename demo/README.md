@@ -186,3 +186,45 @@ records what a future dashboard would have to match.
 `dashboards-blocked/` is a **sibling** of `dashboards/`, not a child, because a
 Grafana file provider walks subdirectories — a `blocked/` folder inside the
 mounted path would be provisioned as a folder full of empty panels.
+
+## The incident demo (#945)
+
+`just demo-incident` is the one demo that shows what ZenSight does that a pile
+of series does not.
+
+**The setup.** Two synthetic hosts go on the bus — `pve01` hosting `vm101` — and
+`vm101` has a firing alert. For the first thirty seconds that alert is
+*unexplained*: nothing is down, so nothing can be its cause. Then `pve01`'s
+liveliness token drops, and the catalog re-files the guest's alert as a
+`symptom_of` `pve01`.
+
+**The comparison is the demo**, and it needs two windows:
+
+```bash
+just demo-incident                                    # terminal 1
+ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17450 \
+  ZENSIGHT_ZENOH_SCOUTING=false just gui              # terminal 2 (needs a display)
+just demo-prometheus                                  # terminal 3, optional
+```
+
+The GUI's incident view shows the root-cause candidate and the alert it
+explains. Grafana, given the same series, shows the same lines going flat and
+**no relationship at all** — because a relationship is not a series, and that is
+the entire argument for the catalog.
+
+**Nothing is mocked.** The fault publisher puts real `HostEvidence`,
+`RelationshipEvidence` and `Alert` documents on the wire in their shipped shapes
+and declares real liveliness tokens; a real correlator subscribes them, runs the
+real union-find, resolves the real edge and publishes the real incident. There
+is no path in the demo that can produce an incident a fleet could not.
+
+**The same fault, as an assertion.** `just demo-incident-verify` runs it with no
+GUI and an exit code, and CI runs it on every PR — so the story cannot quietly
+stop being true. It checks four things, and the fourth is the one that makes the
+others mean anything:
+
+1. an incident exists for the guest;
+2. it names the hypervisor as its cause;
+3. the cause is not itself filed as a symptom;
+4. and **before** the fault, nothing is a symptom of anything — without which a
+   correlator that attributed everything to everything would pass 1–3.

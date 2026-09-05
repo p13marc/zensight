@@ -28,6 +28,13 @@ Run with no `--config` to use built-in defaults (peer mode, 900 s evidence TTL,
 engine/store/publisher pipeline, so the frontend can develop against a live
 correlator without any sensors.
 
+**To watch attribution actually happen**, `--demo` is the wrong tool — it
+publishes identity evidence only, so there is no edge, no alert and nothing to
+attribute. Use `just demo-incident` (#945): a hypervisor hosting a guest, an
+alert on the guest, and then the hypervisor's liveliness token dropping, so the
+catalog re-files that alert as its `symptom_of`. `just demo-incident-verify`
+is the same fault with an exit code, and it runs in CI.
+
 Catalog ownership is an explicit claim protocol (`guard.rs`): every candidate
 declares a liveliness claim at `zensight/v1/@catalog/state/claim/<zid>`, the
 lexically-lowest claim wins the election, and losers exit rather than

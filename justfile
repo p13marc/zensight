@@ -648,6 +648,61 @@ demo-stop: stop
 demo-verify:
     scripts/demo-verify.sh
 
+# ── The incident demo (#945) ─────────────────────────────────────────────────
+
+# Prove the incident story in CI: a hypervisor dies, and the catalog says which alert that explains (#945)
+demo-incident-verify:
+    scripts/demo-incident-verify.sh
+
+# WHAT THE INCIDENT DEMO IS FOR
+#
+# It is the one demo that shows what ZenSight does that a pile of series does
+# not. On a healthy fleet the two look identical; the difference only appears
+# when something breaks and one of them can say WHICH thing broke.
+#
+# Two synthetic hosts go on the bus — pve01 hosting vm101 — with a firing alert
+# on the guest. For the first twenty seconds that alert is unexplained, which is
+# exactly what Grafana would show you forever. Then pve01's liveliness token
+# drops, and the catalog re-files the guest's alert as a `symptom_of` pve01.
+#
+# Run the GUI beside it to watch that happen (needs a display):
+#
+#   just demo-incident              # terminal 1: correlator + historian + the fault
+#   just gui listen=tcp/127.0.0.1:17450   # terminal 2 — wrong: it must CONNECT
+#   ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17450 ZENSIGHT_ZENOH_SCOUTING=false \
+#     just gui                      # terminal 2, joining the demo bus
+#
+# and `just demo-prometheus` in a third to see the same series with no
+# relationship at all. That comparison is the demo.
+#
+# For the assertion rather than the picture, use `just demo-incident-verify` —
+# it is the same fault with no GUI and an exit code, and it is what CI runs.
+
+# A hypervisor dies and takes a guest with it — the five-minute demo (#945)
+demo-incident: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    hub="tcp/127.0.0.1:17450"
+    echo "==> building the scripted fault"
+    cargo build --locked -p zensight-correlator --example demo-incident >/dev/null
+    trap 'kill $(jobs -p) 2>/dev/null || true' EXIT INT TERM
+    echo "==> correlator (the catalog, and the rendezvous) on $hub"
+    ZENSIGHT_ZENOH_MODE=peer ZENSIGHT_ZENOH_LISTEN="$hub" ZENSIGHT_ZENOH_CONNECT= \
+        ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-correlator --config {{rundir}}/correlator.json5 &
+    sleep 3
+    echo "==> historian (so the incident has a timeline behind it)"
+    ZENSIGHT_ZENOH_CONNECT="$hub" ZENSIGHT_ZENOH_SCOUTING=false \
+        {{bindir}}/zensight-historian --config {{rundir}}/historian.json5 &
+    sleep 2
+    echo
+    echo "    Open the GUI against this bus to watch it happen:"
+    echo "      ZENSIGHT_ZENOH_CONNECT=$hub ZENSIGHT_ZENOH_SCOUTING=false just gui"
+    echo
+    DEMO_CONNECT="$hub" FAULT_AFTER_SECS="${FAULT_AFTER_SECS:-30}" \
+        HOLD_SECS="${HOLD_SECS:-300}" \
+        cargo run --locked -q -p zensight-correlator --example demo-incident
+
 # ── Fleet sizing ─────────────────────────────────────────────────────────────
 
 # Eleven quadlet units say "MemoryMax below is a STARTING POINT … measure
