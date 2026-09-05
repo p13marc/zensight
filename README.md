@@ -1,7 +1,16 @@
 # ZenSight
 
-A unified observability platform that sensors legacy monitoring protocols into
-[Zenoh](https://zenoh.io/)'s pub/sub infrastructure.
+Fleet monitoring for people who own the fleet: **one [Zenoh](https://zenoh.io/) bus**
+carrying telemetry, control, media, bulk transfer and desired state, fed by read-only
+protocol sensors that publish instead of waiting to be scraped. The correlator fuses their
+identity evidence into **one entity per host**, resolves the relationships between those
+hosts into a graph, and an incident says what it is a *symptom of* rather than paging six
+times for one dead hypervisor. Long-range analytics, dashboards and paging stay in
+Prometheus / Grafana / Alertmanager, through the exporters that ship with it.
+
+Built for a Proxmox host and six 1–2 GB VMs on links you do not control; published because
+that shape is common. **What it is for, who should run it, and what it deliberately is
+not: [docs/POSITIONING.md](docs/POSITIONING.md).**
 
 ## Overview
 
@@ -20,6 +29,7 @@ each. The canonical cross-cutting references live in [`docs/`](docs/).
 |-------|------|
 | [`zensight`](zensight/) | Iced 0.14 desktop frontend (host/incident-centric viewer) |
 | [`zensight-common`](zensight-common/) | Shared model — telemetry, alert/command, identity/evidence/entity, artifact, QoS, keyspace helpers |
+| [`zensight-store`](zensight-store/) | Tiered time-series store — hot ring + redb minute/hour tiers, logs/events/chunks; shared by the GUI and the historian |
 | [`zensight-sensor-core`](zensight-sensor-core/) | Shared sensor framework — runner, publishers, health, alerting, identity, artifacts |
 | [`zensight-sensor-snmp`](zensight-sensor-snmp/) | SNMP v1/v2c/v3 polling + trap receiver |
 | [`zensight-sensor-logs`](zensight-sensor-logs/) | Network syslog (RFC 3164/5424, UDP/TCP/Unix) + systemd journald |
@@ -34,10 +44,14 @@ each. The canonical cross-cutting references live in [`docs/`](docs/).
 | [`zensight-sensor-container`](zensight-sensor-container/) | the whole workload on a Quadlet fleet: per-container memory/OOM/restart, image digest, healthcheck state including the never-ran case; read-only, no action surface |
 | [`zensight-sensor-probe`](zensight-sensor-probe/) | the outside-in view: HTTP/TLS/DNS/TCP checks and local certificate expiry, with a timeout as its own outcome and the vantage point on every result |
 | [`zensight-sensor-pve`](zensight-sensor-pve/) | the hypervisor as a hypervisor — guest `onboot`/firewall config, thin-pool over-commitment, vzdump outcomes and size trend; read-only, no action surface |
+| [`zensight-sensor-bmc`](zensight-sensor-bmc/) | out-of-band hardware health over Redfish — power supplies, fans, thermal, chassis rollup; the only view of a physical fault the host sensors never see. Read-only, no action surface |
 | [`zensight-correlator`](zensight-correlator/) | Fuses identity evidence → one `HostEntity` per host |
+| [`zensight-historian`](zensight-historian/) | Durable fleet telemetry history — ingests `v1/*/telemetry/**` into the store's tiers under a resource budget, serves bounded range queries |
+| [`zensight-desired`](zensight-desired/) | The fleet policy compiler — one `fleet-policy.json5` in, the per-host `@desired` documents every sensor reconciles out |
 | [`zensight-exporter-prometheus`](zensight-exporter-prometheus/) | Prometheus `/metrics` + remote-write |
 | [`zensight-exporter-otel`](zensight-exporter-otel/) | OpenTelemetry OTLP metrics/logs/traces |
 | [`zensight-sensor-parallax`](zensight-sensor-parallax/) | live video (V4L2/RTSP/test pattern) → H.264 + JPEG previews on `@media` |
+| [`zensight-conformance`](zensight-conformance/) | CI harness — stands a deployment up and runs `zenkey-fleet`'s RFC judges against the live bus |
 | [`zblob`](https://github.com/p13marc/zblob) | Resumable content-addressed large-data transfer over Zenoh (external crate) |
 
 ## Key expressions
@@ -189,8 +203,11 @@ pub struct TelemetryPoint {
 ## Documentation
 
 - **[docs/](docs/)** — cross-cutting references:
+  [POSITIONING](docs/POSITIONING.md) (what it is for, who runs it, what it is not) ·
+  [COMPATIBILITY](docs/COMPATIBILITY.md) (what is stable before 1.0, what may break) ·
   [ARCHITECTURE](docs/ARCHITECTURE.md) (system overview, data flow, lifecycle) ·
   [KEYSPACE](docs/KEYSPACE.md) (the canonical Zenoh key contract) ·
+  [DEPLOYMENT](docs/DEPLOYMENT.md) (running it on a fleet) ·
   [design/](docs/design/) (archived design rationale).
 - **Per-crate docs** — each crate's `README.md` + `docs/` is the authoritative reference for
   that crate (see the Components table above).

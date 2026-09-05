@@ -51,6 +51,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`docs/POSITIONING.md` — what ZenSight is for, who runs it, and what it is
+  deliberately not** (#942, epic #903).
+
+  The project had 15 releases, a real production fleet and no page saying what
+  problem it solves or who should run it. The README was an excellent reference
+  and no pitch: no problem statement, no audience, and zero occurrences of
+  "instead of", "compared to", Zabbix, Netdata, Nagios, Checkmk or LibreNMS
+  anywhere in the repository's markdown.
+
+  The page states the target plainly — **infrastructure, published**: built for
+  and proven on one fleet (a Proxmox host and six 1–2 GB VMs on links you do not
+  control), released because that shape is common. It anchors every claim to a
+  mechanism that exists rather than an aspiration: the one-bus keyspace and its
+  disjoint classes, one entity per host from ranked evidence, structural edges,
+  `symptom_of` on incidents, the read-only sensor stance **with both of its
+  gated exceptions named and their honest limit stated** (a write is auditable,
+  not attributable, until a caller identity exists), and the table of what stays
+  in Prometheus / Grafana / Alertmanager / OTel through the shipped exporters.
+
+  It also says who should *not* run it yet — no RBAC, no multi-tenancy, no
+  supported product — because a positioning page that only recruits is a
+  brochure, and this one has to survive contact with a stranger's fleet.
+
+  The README gains a five-line pitch above the fold linking to it, and its
+  components table stops omitting five crates it had drifted past
+  (`zensight-store`, `zensight-sensor-bmc`, `zensight-historian`,
+  `zensight-desired`, `zensight-conformance`). `docs/README.md`'s index gains
+  the same crates plus `parallax`, `DEPLOYMENT.md` and `TOPOLOGY-REDESIGN.md`,
+  and its `KEYSPACE.md` row stops describing the pre-v1 keyspace that
+  `KEYSPACE.md` itself says is retired.
+
+
 - **CI watches a policy document travel policy → bus → a sensor** (#941, epic
   #902). `scripts/demo-verify.sh` gains a fourth phase, and it is the
   assertion the whole epic was missing: start a correlator, run
