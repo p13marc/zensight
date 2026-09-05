@@ -2117,9 +2117,9 @@ impl ZenSight {
                     self.dashboard.push_snmp_event(record);
                 }
             }
-            Message::SnmpDiscoveryReport { source, report } => {
+            Message::SnmpDiscoveryReport { origin, report } => {
                 // LWW per publishing sensor origin (#579).
-                self.dashboard.snmp_discovery.insert(source, report);
+                self.dashboard.snmp_discovery.insert(origin, report);
             }
             Message::ToggleSnmpDiscovery => {
                 self.dashboard.snmp_discovery_open = !self.dashboard.snmp_discovery_open;
@@ -2330,6 +2330,37 @@ impl ZenSight {
             }
             Message::DesiredAlive(alive) => {
                 self.dashboard.desired_alive = Some(alive);
+            }
+            Message::AdoptDiscovered {
+                origin,
+                device,
+                durable,
+            } => {
+                // Ask what that host is polling before changing it: the topic
+                // is whole-set, so adopting without the current set would
+                // delete every other device (#940).
+                return self.query_snmp_targets(origin, device, durable);
+            }
+            Message::SnmpTargetsForAdopt {
+                origin,
+                device,
+                durable,
+                current,
+            } => {
+                return self.push_adopted_target(origin, &device, durable, &current);
+            }
+            Message::SnmpTargetsApplied { origin, json } => {
+                match serde_json::from_str(&json) {
+                    Ok(cfg) => {
+                        self.dashboard.snmp_targets_applied.insert(origin, cfg);
+                    }
+                    // A marker that does not parse is not a reason to keep a
+                    // stale one on screen claiming a writer that may no longer
+                    // hold.
+                    Err(_) => {
+                        self.dashboard.snmp_targets_applied.remove(&origin);
+                    }
+                }
             }
             Message::AckReceived(ack) => {
                 self.alerts.ingest_ack(*ack);
@@ -5442,6 +5473,278 @@ impl ZenSight {
         std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "unknown".to_string())
+    }
+
+    /// Ask one host's SNMP sensor for the target set it is polling, so an
+    /// adopt can append to it (#940).
+    ///
+    /// **Per-origin, never the fleet selector** — the same rule
+    /// [`Self::query_thresholds`] states for thresholds, and harder here: a
+    /// fanned-out target set would tell every host to poll every device, which
+    /// is why `@rpc/snmp/targets/set` is declared `fanout = "forbidden"` in the
+    /// first place.
+    ///
+    /// The marker rides along on a second leg, as it does there. Silence on it
+    /// is "nobody is keeping it", not a failure, so it reports nothing rather
+    /// than manufacturing an error beside a good reply.
+    fn query_snmp_targets(
+        &self,
+        origin: String,
+        device: Box<zensight_common::DiscoveredDevice>,
+        durable: bool,
+    ) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        // `RemoteOrigin` is "always one concrete host, which is what keeps a
+        // fan-out write unspellable (G2)". Parsing here is what makes the
+        // per-origin rule a type error rather than a comment.
+        let Some(remote) = Self::remote_origin_of(&origin) else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: format!(
+                    "{origin} is not a host origin — a target set is written to one host's \
+                     sensor, and there is no host here to write to"
+                ),
+            });
+        };
+        let targets_key = zensight_common::keyexpr::origin_rpc_key(&remote, "snmp", "targets");
+        let applied_key = zensight_common::keyexpr::origin_state_subtree(
+            &remote,
+            "snmp",
+            &["applied", "targets"],
+        );
+        let s2 = session.clone();
+        let marker_origin = origin.clone();
+
+        let current = Task::future(async move {
+            match session
+                .get(&targets_key)
+                .target(zenoh::query::QueryTarget::All)
+                .timeout(std::time::Duration::from_secs(5))
+                .await
+            {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        return Message::SnmpTargetsForAdopt {
+                            origin,
+                            device,
+                            durable,
+                            current: String::from_utf8_lossy(&sample.payload().to_bytes())
+                                .to_string(),
+                        };
+                    }
+                    // No reply is not an empty set. Adopting on that
+                    // assumption would publish a one-device set and delete
+                    // every device the sensor is actually polling.
+                    Message::CommandFeedback {
+                        success: false,
+                        message: "That host's SNMP sensor did not report its target set — \
+                                  not adopting, because replacing a set this build has not \
+                                  seen would drop every other device"
+                            .to_string(),
+                    }
+                }
+                Err(e) => Message::CommandFeedback {
+                    success: false,
+                    message: format!("Target query failed: {e}"),
+                },
+            }
+        });
+
+        let applied = Task::future(async move {
+            if let Ok(replies) = s2
+                .get(&applied_key)
+                .target(zenoh::query::QueryTarget::All)
+                .await
+                && let Ok(reply) = replies.recv_async().await
+                && let Ok(sample) = reply.result()
+            {
+                return Message::SnmpTargetsApplied {
+                    origin: marker_origin,
+                    json: String::from_utf8_lossy(&sample.payload().to_bytes()).to_string(),
+                };
+            }
+            Message::CommandFeedback {
+                success: true,
+                message: String::new(),
+            }
+        });
+        current.chain(applied)
+    }
+
+    /// Append the adopted device to the set the sensor reported, and push the
+    /// whole thing (#940).
+    ///
+    /// Two destinations, and the difference is durability:
+    ///
+    /// - **controller alive** → `@rpc/@desired/override/set`. The controller
+    ///   records it in its overrides file and keeps re-publishing it, so it
+    ///   survives the sensor restarting and a second GUI can see it.
+    /// - **controller absent** → `@rpc/snmp/targets/set` on that host. The
+    ///   device is monitored now and gone when that sensor next restarts. The
+    ///   card says so before the button is pressed; the toast says so after.
+    fn push_adopted_target(
+        &self,
+        origin: String,
+        device: &zensight_common::DiscoveredDevice,
+        durable: bool,
+        current: &str,
+    ) -> Task<Message> {
+        let mut set: zensight_common::targets::SnmpTargets = match serde_json::from_str(current) {
+            Ok(s) => s,
+            Err(e) => {
+                return Task::done(Message::CommandFeedback {
+                    success: false,
+                    message: format!(
+                        "That host's target set did not parse ({e}) — not adopting, because \
+                         pushing now would replace a set this build cannot see"
+                    ),
+                });
+            }
+        };
+        let Some(credentials) = device.credentials.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "That proposal has no credential set — the wire carries a NAME into \
+                          the host's own config, and guessing one would poll the device with \
+                          the wrong credential"
+                    .to_string(),
+            });
+        };
+        let name = adopt_name(device);
+        if set.targets.iter().any(|t| t.name == name) {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: format!("{name} is already a monitored target on that host"),
+            });
+        }
+        set.targets.push(zensight_common::targets::SnmpTarget {
+            name: name.clone(),
+            address: device.address.clone(),
+            credentials,
+            profile: device.matched_profiles.first().cloned(),
+            oid_group: None,
+            poll_interval_secs: None,
+        });
+
+        // Refuse locally before publishing. #937's table exists so the GUI can
+        // say no first — the sensor would refuse it too, but on a host nobody
+        // is looking at.
+        if let Err(e) = set.validate() {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: format!("Refusing to adopt: {e}"),
+            });
+        }
+
+        if durable {
+            let doc = match serde_json::to_value(&set) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Task::done(Message::CommandFeedback {
+                        success: false,
+                        message: format!("Failed to encode the target set: {e}"),
+                    });
+                }
+            };
+            let override_doc = zensight_common::desired::DesiredOverride {
+                host: origin.clone(),
+                producer: "snmp".to_string(),
+                topic: "targets".to_string(),
+                doc: Some(doc),
+                // Set by the controller from `?actor=`; sending it would be
+                // theatre.
+                by: None,
+                note: Some(format!("adopted {} from discovery", device.address)),
+                at: 0,
+            };
+            self.call_desired_write(
+                "override/set",
+                override_doc,
+                format!("Adopted {name} — the policy controller will keep it"),
+            )
+            .chain(self.query_snmp_targets_marker(origin))
+        } else {
+            let Some(remote) = Self::remote_origin_of(&origin) else {
+                return Task::done(Message::CommandFeedback {
+                    success: false,
+                    message: format!("{origin} is not a host origin"),
+                });
+            };
+            let key = zensight_common::keyexpr::origin_rpc_key(&remote, "snmp", "targets/set");
+            self.send_command(
+                key,
+                &set,
+                format!("Adopted {name} on that host — not durable, no policy controller"),
+            )
+            .chain(self.query_snmp_targets_marker(origin))
+        }
+    }
+
+    /// Re-read the marker after a write, rather than trusting the local copy —
+    /// the same reason `push_thresholds` re-queries.
+    fn query_snmp_targets_marker(&self, origin: String) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let Some(remote) = Self::remote_origin_of(&origin) else {
+            return Task::none();
+        };
+        let applied_key = zensight_common::keyexpr::origin_state_subtree(
+            &remote,
+            "snmp",
+            &["applied", "targets"],
+        );
+        Task::future(async move {
+            if let Ok(replies) = session
+                .get(&applied_key)
+                .target(zenoh::query::QueryTarget::All)
+                .await
+                && let Ok(reply) = replies.recv_async().await
+                && let Ok(sample) = reply.result()
+            {
+                return Message::SnmpTargetsApplied {
+                    origin,
+                    json: String::from_utf8_lossy(&sample.payload().to_bytes()).to_string(),
+                };
+            }
+            Message::CommandFeedback {
+                success: true,
+                message: String::new(),
+            }
+        })
+    }
+
+    /// Parse an origin chunk into the one-concrete-host type the key builders
+    /// take. `None` for anything that is not a host origin.
+    fn remote_origin_of(origin: &str) -> Option<zenkey::origin::RemoteOrigin> {
+        zenkey::origin::RemoteOrigin::parse(origin).ok()
+    }
+
+    /// Call one gated `@desired` write procedure (#939/#940).
+    ///
+    /// A sibling of [`Self::call_catalog_write`] rather than a generalisation
+    /// of it: the two gate on different liveliness and refuse with different
+    /// sentences, and folding them together would make both explanations
+    /// vaguer than either.
+    fn call_desired_write<T: serde::Serialize>(
+        &self,
+        procedure: &str,
+        body: T,
+        ok_message: String,
+    ) -> Task<Message> {
+        if self.dashboard.desired_alive != Some(true) {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "no policy controller alive — nothing would record this".to_string(),
+            });
+        }
+        let mut key = zensight_common::keyexpr::desired_rpc_key(procedure);
+        key.push_str(&format!("?actor={}", urlencode(&self.operator_name())));
+        self.send_command(key, &body, ok_message)
     }
 
     fn query_thresholds(&self) -> Task<Message> {
@@ -11132,6 +11435,42 @@ fn slugify_rule_name(metric: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+/// The target name an adopted device gets (#940).
+///
+/// A target's name becomes a **key chunk** — its telemetry rides
+/// `telemetry/snmp/<name>/…` and its alerts hash it — so it must pass
+/// `targets::check_names`: `[A-Za-z0-9._-]` only. That rules out the address,
+/// which carries a `:`, and it rules out most `sysName`s verbatim.
+///
+/// Prefer `sys_name`, slugged; fall back to the address, slugged. The SNMP
+/// sensor's own discovery proposal already mints exactly this
+/// (`discovery.rs::identify`, `sys_name` else the address with `:`/`.`
+/// replaced) — the same rule, applied on the side that has to live with it.
+fn adopt_name(device: &zensight_common::DiscoveredDevice) -> String {
+    let raw = device
+        .sys_name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&device.address);
+    let mut out = String::with_capacity(raw.len());
+    let mut last_dash = false;
+    for c in raw.trim().chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            out.push(c);
+            last_dash = c == '-';
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "device".to_string()
+    } else {
+        out
+    }
 }
 
 /// Percent-encode a query-parameter value (#925).

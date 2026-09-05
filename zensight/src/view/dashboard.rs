@@ -186,6 +186,10 @@ pub struct DashboardState {
     pub snmp_discovery: HashMap<String, zensight_common::DiscoveryReport>,
     /// Whether the discovery card shows the expanded proposal list (#579).
     pub snmp_discovery_open: bool,
+    /// The `applied/targets` marker per origin (#936/#940), from the GET an
+    /// adopt issues: which of `file | desired | rpc` is in force on that
+    /// host's SNMP sensor, and the last desired document it refused.
+    pub snmp_targets_applied: HashMap<String, zensight_common::desired::AppliedConfig>,
     /// Whether `@desired/state/alive` is present — the policy controller
     /// (#939). `None` = not yet known, which is **not** permission: an
     /// adoption is durable only if something is there to record it, and the
@@ -214,6 +218,7 @@ impl Default for DashboardState {
             snmp_events: std::collections::VecDeque::new(),
             snmp_discovery: HashMap::new(),
             snmp_discovery_open: false,
+            snmp_targets_applied: HashMap::new(),
             desired_alive: None,
             snmp_event_filter: Default::default(),
         }
@@ -523,6 +528,8 @@ pub fn dashboard_view<'a>(
             event_filter: &state.snmp_event_filter,
             discovery: &state.snmp_discovery,
             discovery_open: state.snmp_discovery_open,
+            desired_alive: state.desired_alive,
+            applied_targets: &state.snmp_targets_applied,
         },
         firing_by_protocol,
     );

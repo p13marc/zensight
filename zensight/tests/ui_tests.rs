@@ -1289,6 +1289,8 @@ fn test_overview_firing_alert_tile() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
         &firing_proto,
     ));
@@ -1312,6 +1314,8 @@ fn test_overview_firing_alert_tile() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
         &none,
     ));
@@ -4689,6 +4693,200 @@ use zensight::entity::EntityStore;
 use zensight_common::{DeviceStatus, HostEntity, MemberClaim};
 
 /// Build a test HostEntity merging the given `(sensor, source)` members.
+/// Adopting a proposal (#940): the sweep proposes, this accepts.
+///
+/// Uses the same fixture shape as the discovery-card test above, whose map is
+/// already keyed by a real-shaped host id — which matters, because the origin
+/// is what says *which* host's sensor the target set is written to.
+mod adopt_discovered {
+    use super::*;
+    use std::collections::HashMap;
+    use zensight::view::overview::snmp::{SnmpOverviewData, snmp_overview};
+
+    fn proposal(
+        address: &str,
+        sys_name: Option<&str>,
+        creds: Option<&str>,
+    ) -> zensight_common::DiscoveredDevice {
+        zensight_common::DiscoveredDevice {
+            address: address.into(),
+            credentials: creds.map(str::to_string),
+            sys_name: sys_name.map(str::to_string),
+            suggested: format!("{{ address: \"{address}\" }}"),
+            ..Default::default()
+        }
+    }
+
+    fn discovery(
+        d: zensight_common::DiscoveredDevice,
+    ) -> HashMap<String, zensight_common::DiscoveryReport> {
+        let mut m = HashMap::new();
+        m.insert(
+            "h-aaaaaaaaaaaa".to_string(),
+            zensight_common::DiscoveryReport {
+                timestamp: 1,
+                scanned: 1,
+                discovered: vec![d],
+            },
+        );
+        m
+    }
+
+    fn view(
+        disc: &HashMap<String, zensight_common::DiscoveryReport>,
+        desired_alive: Option<bool>,
+        applied: &'static HashMap<String, zensight_common::desired::AppliedConfig>,
+    ) -> iced::Element<'static, Message> {
+        // Leak the fixtures: the view borrows them and the simulator outlives
+        // this frame. Fine in a test, and it keeps the call sites readable.
+        let disc: &'static _ = Box::leak(Box::new(disc.clone()));
+        let docs: &'static _ = Box::leak(Box::new(HashMap::new()));
+        let events: &'static _ = Box::leak(Box::new(std::collections::VecDeque::new()));
+        let filter: &'static EventFilterState = Box::leak(Box::default());
+        let devices: &'static _ = Box::leak(Box::new(HashMap::new()));
+        snmp_overview(
+            devices,
+            SnmpOverviewData {
+                interfaces: docs,
+                events,
+                event_filter: filter,
+                discovery: disc,
+                discovery_open: true,
+                desired_alive,
+                applied_targets: applied,
+            },
+        )
+    }
+
+    /// With a controller alive, Adopt submits — and carries the **origin** of
+    /// the sensor that proposed it. Without that the set would be written to
+    /// whichever host answered first.
+    #[test]
+    fn adopt_submits_with_the_proposing_origin() {
+        let disc = discovery(proposal("10.0.0.5:161", Some("edge-sw3"), Some("ro")));
+        let mut ui = simulator(view(&disc, Some(true), no_applied_targets()));
+        ui.click("Adopt").expect("adopt button");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                Message::AdoptDiscovered { origin, durable, .. }
+                    if origin == "h-aaaaaaaaaaaa" && *durable
+            )),
+            "got {msgs:?}"
+        );
+    }
+
+    /// Without one the button still works — the device is monitored now — but
+    /// the card says what it is offering. A control that quietly does the
+    /// weaker thing has misled the operator who pressed it.
+    #[test]
+    fn adopt_without_a_controller_warns_that_it_is_not_durable() {
+        let disc = discovery(proposal("10.0.0.5:161", Some("edge-sw3"), Some("ro")));
+        let mut ui = simulator(view(&disc, Some(false), no_applied_targets()));
+        assert!(
+            ui.find("not durable — no policy controller alive; Adopt writes this host only")
+                .is_ok(),
+            "the weaker offer must be stated before the click"
+        );
+
+        let mut ui = simulator(view(&disc, Some(false), no_applied_targets()));
+        ui.click("Adopt").expect("adopt button");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Message::AdoptDiscovered { durable, .. } if !*durable)),
+            "got {msgs:?}"
+        );
+    }
+
+    /// Unknown is not permission — the same rule the ack gate states by name.
+    #[test]
+    fn an_unknown_controller_state_is_not_durable() {
+        let disc = discovery(proposal("10.0.0.5:161", Some("edge-sw3"), Some("ro")));
+        let mut ui = simulator(view(&disc, None, no_applied_targets()));
+        assert!(
+            ui.find("not durable — no policy controller alive; Adopt writes this host only")
+                .is_ok()
+        );
+    }
+
+    /// A proposal no credential set answered cannot become a target: the wire
+    /// carries a credential NAME and guessing one would poll the device with
+    /// the wrong community — which reads, on every chart, as a device that
+    /// never answered.
+    #[test]
+    fn a_proposal_with_no_credentials_cannot_be_adopted() {
+        let disc = discovery(proposal("10.0.0.9:161", Some("mystery"), None));
+        let mut ui = simulator(view(&disc, Some(true), no_applied_targets()));
+        assert!(
+            ui.find("no credential set answered").is_ok(),
+            "the reason must be on screen"
+        );
+
+        let mut ui = simulator(view(&disc, Some(true), no_applied_targets()));
+        let _ = ui.click("Adopt");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| matches!(m, Message::AdoptDiscovered { .. })),
+            "a disabled Adopt must not submit, got {msgs:?}"
+        );
+    }
+
+    /// The marker says who won last. Without it, an adoption that lost a race
+    /// with `@desired` looks like one that did nothing.
+    #[test]
+    fn the_applied_marker_names_the_writer_in_force() {
+        static APPLIED: std::sync::OnceLock<
+            HashMap<String, zensight_common::desired::AppliedConfig>,
+        > = std::sync::OnceLock::new();
+        let applied = APPLIED.get_or_init(|| {
+            let mut m = HashMap::new();
+            m.insert(
+                "h-aaaaaaaaaaaa".to_string(),
+                zensight_common::desired::AppliedConfig {
+                    topic: "targets".into(),
+                    source: zensight_common::desired::AppliedSource::Desired,
+                    applied_at: 1,
+                    desired_timestamp: None,
+                    effective_json: "{}".into(),
+                    last_rejected: Some(zensight_common::desired::RejectedDesired {
+                        at: 2,
+                        timestamp: None,
+                        error: "unknown credential set \"typo\"".into(),
+                    }),
+                },
+            );
+            m
+        });
+        let disc = discovery(proposal("10.0.0.5:161", Some("edge-sw3"), Some("ro")));
+        let mut ui = simulator(view(&disc, Some(true), applied));
+        assert!(
+            ui.find("h-aaaaaaaaaaaa: targets in force from desired")
+                .is_ok()
+        );
+        let mut ui = simulator(view(&disc, Some(true), applied));
+        assert!(
+            ui.find("  last refused: unknown credential set \"typo\"")
+                .is_ok(),
+            "a refusal the sensor recorded must be visible where the writing happens"
+        );
+    }
+}
+
+/// An empty `applied/targets` map for the overview fixtures — a `&'static`
+/// one, because the field borrows and a `&Default::default()` per call site
+/// would be a temporary dropped while borrowed.
+fn no_applied_targets()
+-> &'static std::collections::HashMap<String, zensight_common::desired::AppliedConfig> {
+    static EMPTY: std::sync::OnceLock<
+        std::collections::HashMap<String, zensight_common::desired::AppliedConfig>,
+    > = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default)
+}
+
 fn test_entity(id: &str, hostname: &str, members: &[(&str, &str)]) -> HostEntity {
     HostEntity {
         entity_id: id.to_string(),
@@ -6873,6 +7071,8 @@ fn test_snmp_overview_rate_based() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
 
@@ -6906,6 +7106,8 @@ fn test_snmp_overview_empty() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     assert!(ui.find("No SNMP devices available").is_ok());
@@ -6965,6 +7167,8 @@ fn test_snmp_overview_trap_feed() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     // The heading gained a collapse marker when it became the filter toggle
@@ -6977,8 +7181,9 @@ fn test_snmp_overview_trap_feed() {
 }
 
 /// Discovery proposals surface on the fleet overview (#579): banner count,
-/// expanded list with identity + profiles, and a copy-snippet button that
-/// emits the snippet.
+/// expanded list with identity + profiles, a copy-snippet button that emits
+/// the snippet, and — since #940 — a per-device Adopt whose availability
+/// follows the proposal, not the card.
 #[test]
 fn test_snmp_overview_discovery_card() {
     use std::collections::HashMap;
@@ -7025,6 +7230,8 @@ fn test_snmp_overview_discovery_card() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     assert!(ui.find("2 unmonitored SNMP devices found ▸").is_ok());
@@ -7039,6 +7246,8 @@ fn test_snmp_overview_discovery_card() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: true,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     assert!(ui.find("192.168.1.50:161").is_ok());
@@ -7047,6 +7256,11 @@ fn test_snmp_overview_discovery_card() {
             .is_ok()
     );
     assert!(ui.find("(no sysName)").is_ok());
+    // A mixed list gates per device (#940): the responder that named a
+    // credential set can be adopted; the one that answered none says why not,
+    // beside it. A single shared verdict would have hidden that.
+    assert!(ui.find("Adopt").is_ok());
+    assert!(ui.find("no credential set answered").is_ok());
     ui.click("Copy snippet").expect("copy button");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(
@@ -7095,6 +7309,8 @@ fn test_snmp_event_feed_filters_and_links() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     assert!(
@@ -7125,6 +7341,8 @@ fn test_snmp_event_feed_filters_and_links() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     assert!(
@@ -7148,6 +7366,8 @@ fn test_snmp_event_feed_filters_and_links() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     assert!(ui.find("No records match the filter").is_ok());
@@ -7167,6 +7387,8 @@ fn test_snmp_event_feed_filters_and_links() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     ui.click("router01").expect("device name links");
@@ -7221,6 +7443,8 @@ fn test_snmp_event_row_links_to_the_alert_it_raised() {
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
         },
     ));
     ui.click("alert →").expect("exact alert link");

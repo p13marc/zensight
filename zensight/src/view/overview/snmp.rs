@@ -181,6 +181,15 @@ pub struct SnmpOverviewData<'a> {
     pub discovery: &'a HashMap<String, zensight_common::DiscoveryReport>,
     /// Whether the discovery card is expanded (#579).
     pub discovery_open: bool,
+    /// Whether the policy controller is alive (#939/#940). `None` = not yet
+    /// known, and **unknown is not permission**: an adoption is durable only
+    /// if something is there to record it, so the card says which kind of
+    /// adopt it is offering rather than promising the stronger one.
+    pub desired_alive: Option<bool>,
+    /// The `applied/targets` marker per origin (#936): which of
+    /// `file | desired | rpc` is in force on that host's SNMP sensor, and the
+    /// last desired document it refused.
+    pub applied_targets: &'a HashMap<String, zensight_common::desired::AppliedConfig>,
 }
 
 /// Render the SNMP network overview.
@@ -194,6 +203,8 @@ pub fn snmp_overview<'a>(
         event_filter,
         discovery,
         discovery_open,
+        desired_alive,
+        applied_targets,
     } = data;
     if devices.is_empty() && interfaces.is_empty() && discovery.is_empty() {
         return empty_state("No SNMP devices available", None);
@@ -232,7 +243,8 @@ pub fn snmp_overview<'a>(
     let trap_feed = render_trap_feed(events, event_filter, devices);
 
     let mut content = column![summary_row].spacing(space::MD).width(Length::Fill);
-    if let Some(card) = render_discovery(discovery, discovery_open) {
+    if let Some(card) = render_discovery(discovery, discovery_open, desired_alive, applied_targets)
+    {
         content = content.push(card);
     }
     content
@@ -250,16 +262,25 @@ pub fn snmp_overview<'a>(
 fn render_discovery<'a>(
     discovery: &'a HashMap<String, zensight_common::DiscoveryReport>,
     open: bool,
+    desired_alive: Option<bool>,
+    applied: &'a HashMap<String, zensight_common::desired::AppliedConfig>,
 ) -> Option<Element<'a, Message>> {
     // Union across publishing sensors, deduped by address (two pollers can
     // sweep overlapping subnets), newest report first so its metadata wins.
-    let mut reports: Vec<_> = discovery.values().collect();
-    reports.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+    //
+    // **Each proposal keeps the origin that made it** (#940). The map is keyed
+    // by the publishing sensor's origin and this used to flatten it away —
+    // which was fine for a clipboard button and is not fine for adopting,
+    // because a target set is written to ONE host's sensor and the origin is
+    // the only thing that says which.
+    let mut reports: Vec<(&str, &zensight_common::DiscoveryReport)> =
+        discovery.iter().map(|(o, r)| (o.as_str(), r)).collect();
+    reports.sort_by_key(|(_, r)| std::cmp::Reverse(r.timestamp));
     let mut seen = std::collections::HashSet::new();
-    let proposals: Vec<&zensight_common::DiscoveredDevice> = reports
+    let proposals: Vec<(&'a str, &'a zensight_common::DiscoveredDevice)> = reports
         .iter()
-        .flat_map(|r| r.discovered.iter())
-        .filter(|d| seen.insert(d.address.as_str()))
+        .flat_map(|(origin, r)| r.discovered.iter().map(move |d| (*origin, d)))
+        .filter(|(_, d)| seen.insert(d.address.as_str()))
         .collect();
     if proposals.is_empty() {
         return None;
@@ -279,9 +300,10 @@ fn render_discovery<'a>(
 
     let mut card = column![toggle].spacing(space::SM);
     if open {
+        let durable = desired_alive.unwrap_or(false);
         let rows: Vec<Element<'a, Message>> = proposals
             .iter()
-            .map(|d| {
+            .map(|(origin, d)| {
                 let identity = d.sys_name.as_deref().unwrap_or("(no sysName)");
                 let profiles = if d.matched_profiles.is_empty() {
                     String::new()
@@ -293,7 +315,8 @@ fn render_discovery<'a>(
                     .as_deref()
                     .map(|c| format!(" [creds: {c}]"))
                     .unwrap_or_default();
-                row![
+
+                let mut r = row![
                     text(d.address.clone()).size(font::CAPTION),
                     text(format!("{identity}{profiles}{creds}"))
                         .size(font::CAPTION)
@@ -301,16 +324,88 @@ fn render_discovery<'a>(
                             color: Some(theme::colors(t).text_muted()),
                         })
                         .width(Length::Fill),
+                ];
+
+                // Adopt (#940). The sweep proposes; this is what accepts.
+                //
+                // A proposal no credential set answered cannot become a
+                // target: `SnmpTarget::credentials` is a NAME into the host's
+                // own config and is required, and inventing `"public"` here
+                // would poll the device with the wrong credential — which
+                // reads, on every chart, as a device that never answered.
+                let mut adopt = iced::widget::button(text("Adopt").size(font::CAPTION))
+                    .style(iced::widget::button::secondary);
+                match d.credentials.as_deref() {
+                    Some(_) => {
+                        adopt = adopt.on_press(Message::AdoptDiscovered {
+                            origin: (*origin).to_string(),
+                            device: Box::new((*d).clone()),
+                            durable,
+                        });
+                    }
+                    None => {
+                        r = r.push(
+                            text("no credential set answered")
+                                .size(font::CAPTION)
+                                .style(|t: &Theme| text::Style {
+                                    color: Some(theme::colors(t).text_dimmed()),
+                                }),
+                        );
+                    }
+                }
+                r = r.push(adopt);
+                r = r.push(
                     iced::widget::button(text("Copy snippet").size(font::CAPTION))
                         .on_press(Message::CopyText(d.suggested.clone()))
                         .style(iced::widget::button::text),
-                ]
-                .spacing(space::SM)
-                .align_y(Alignment::Center)
-                .into()
+                );
+                r.spacing(space::SM).align_y(Alignment::Center).into()
             })
             .collect();
         card = card.push(Column::with_children(rows).spacing(2));
+
+        // What Adopt will actually do, said before it is pressed.
+        //
+        // With no controller the device is still adopted — over
+        // `@rpc/snmp/targets/set`, on that one host — but it is gone the next
+        // time that sensor restarts. Both are useful; only one is durable, and
+        // an operator who is not told which has been misled by a button that
+        // worked.
+        if !durable {
+            card = card.push(
+                text("not durable — no policy controller alive; Adopt writes this host only")
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_dimmed()),
+                    }),
+            );
+        }
+
+        // The marker, verbatim about who won last (#816/#936). Without it an
+        // adoption that lost a race with `@desired` looks like one that did
+        // nothing.
+        let mut origins: Vec<&String> = applied.keys().collect();
+        origins.sort();
+        for origin in origins {
+            let cfg = &applied[origin];
+            let src = format!("{:?}", cfg.source).to_lowercase();
+            card = card.push(
+                text(format!("{origin}: targets in force from {src}"))
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_dimmed()),
+                    }),
+            );
+            if let Some(rejected) = &cfg.last_rejected {
+                card = card.push(
+                    text(format!("  last refused: {}", rejected.error))
+                        .size(font::CAPTION)
+                        .style(|t: &Theme| text::Style {
+                            color: Some(theme::colors(t).text_dimmed()),
+                        }),
+                );
+            }
+        }
     }
     Some(card.into())
 }

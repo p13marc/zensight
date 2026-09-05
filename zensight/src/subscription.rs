@@ -1071,10 +1071,7 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         // unconfigured responders. Shown, never auto-added (#541).
         ZensightState::SnmpDiscovery => {
             decode!(zensight_common::DiscoveryReport, |report| {
-                Message::SnmpDiscoveryReport {
-                    source: origin,
-                    report,
-                }
+                Message::SnmpDiscoveryReport { origin, report }
             })
         }
         ZensightState::Common(CommonState::CatalogEntity { .. }) => {
