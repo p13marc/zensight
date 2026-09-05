@@ -129,10 +129,20 @@ pub async fn browse_mdns(
             continue;
         };
 
-        let Some(addr) = service.addresses.iter().next() else {
+        // `addresses` is a HashSet, so `.iter().next()` is a DIFFERENT address
+        // from round to round on a multi-homed camera. This document is LWW
+        // state published every round: an address that changes for no reason
+        // rewrites it for no reason, which is the churn the compiler and the
+        // historian both go out of their way to avoid. So pick
+        // deterministically — IPv4 first, because an operator's RTSP URL almost
+        // always is, then lowest address.
+        let mut addrs: Vec<std::net::IpAddr> =
+            service.addresses.iter().map(|a| a.to_ip_addr()).collect();
+        addrs.sort_by_key(|a| (a.is_ipv6(), a.to_string()));
+        let Some(addr) = addrs.first() else {
             continue;
         };
-        let address = format!("{}:{}", addr.to_ip_addr(), service.port);
+        let address = format!("{addr}:{}", service.port);
         if configured.contains(&address) {
             continue;
         }
