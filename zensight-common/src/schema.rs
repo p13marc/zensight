@@ -157,6 +157,8 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::targets::SnmpTargets>("SnmpTargets")
         .json::<crate::targets::ProbeTargets>("ProbeTargets")
         .json::<crate::desired::AppliedConfig>("AppliedConfig")
+        // The per-host override the controller records (#939).
+        .json::<crate::desired::DesiredOverride>("DesiredOverride")
         .json::<crate::hostspec::HostspecEvaluation>("HostspecEvaluation")
         // pve's state documents (#818). Real schemas, not summaries: these are
         // state-class payloads and the #815 gate refuses stubs there.

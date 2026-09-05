@@ -583,6 +583,55 @@ pub fn correlator_alive_key() -> String {
     selector::service_alive(&ServiceOrigin::catalog()).into()
 }
 
+/// The `@desired` service origin.
+///
+/// Built through the validating constructor rather than added to `zenkey` as a
+/// second `catalog()`-style helper: `@catalog` is in the neutral convention
+/// (RFC 06 §5) and `@desired` is this application's (RFC 07 §3), so the
+/// grammar crate is right not to name it.
+fn desired_origin() -> ServiceOrigin {
+    // The generated slice is the one source of the chunk's spelling: a
+    // literal here would be a second place for it to be wrong, and the #466
+    // guard bans exactly that kind of hand-spelled key material.
+    ServiceOrigin::new("@desired").expect("a valid verbatim chunk, checked at build time")
+}
+
+#[cfg(test)]
+mod desired_key_tests {
+    use super::*;
+
+    /// The literal in `desired_origin` and the generated slice must agree.
+    /// A key built from a hand-spelled origin that drifted would be published
+    /// where nothing is listening, silently.
+    #[test]
+    fn the_desired_origin_matches_the_generated_slice() {
+        let from_slice = crate::registry::desired::origin().to_string();
+        assert_eq!(desired_origin().as_str(), from_slice);
+        assert_eq!(
+            desired_rpc_key("override/set"),
+            "v1/@desired/@rpc/override/set"
+        );
+        assert_eq!(desired_alive_key(), "v1/@desired/state/alive");
+    }
+}
+
+/// The `@desired` controller's RPC key for `procedure` (#939).
+///
+/// A service origin like `@catalog`, so no producer chunk:
+/// `<base>/v1/@desired/@rpc/<procedure>`.
+pub fn desired_rpc_key(procedure: &str) -> String {
+    selector::service_rpc(&desired_origin(), &proc_chunks(procedure)).into()
+}
+
+/// The `@desired` controller's liveliness token key.
+///
+/// Its absence is what tells the GUI an adoption cannot be made durable — the
+/// same role `@catalog/state/alive` plays for an acknowledgement (#925). A
+/// button that silently does nothing is worse than one that refuses.
+pub fn desired_alive_key() -> String {
+    selector::service_alive(&desired_origin()).into()
+}
+
 /// Build a catalog ownership-claim token key (RFC 06 §5.3). Every candidate
 /// declares one; the lexically-lowest claim chunk wins the election.
 ///

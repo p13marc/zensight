@@ -46,8 +46,10 @@ pub mod compile;
 pub mod config;
 pub mod fleet;
 pub mod merge;
+pub mod overrides;
 pub mod policy;
 pub mod publish;
+pub mod serve;
 
 /// The service origin this daemon writes under (RFC 07 §3).
 pub const ORIGIN: &str = "@desired";

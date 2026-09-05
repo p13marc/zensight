@@ -248,7 +248,12 @@ is opt-in (`collect.timesync`) because reading it shells out.
 
 **The controller is `zensight-desired`** (#938), in this repository: it reads
 one `fleet-policy.json5`, asks `@catalog` what hosts exist, and publishes what
-follows. Exactly one runs per deployment — `@desired` is single-writer, and two
+follows. Since #939 it also serves `@rpc/@desired/override/set` — a per-host
+adoption, gated and audited — plus `introspect` and `describe`, and declares
+`@desired/state/alive` once all three are answering. An adoption is written to
+a **separate** overrides file, never into the policy: that file is commented
+and hand-ordered, its class order is the overlay order, and a machine round
+trip would destroy both. Exactly one runs per deployment — `@desired` is single-writer, and two
 compilers with different policies would overwrite each other every pass. Before
 #938 nothing in-tree published here at all.
 

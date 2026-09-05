@@ -22,7 +22,7 @@
 # file-config baseline).
 
 [registry]
-version = "1.5"
+version = "1.6"
 app = "zensight"
 convention = 1
 
@@ -273,3 +273,44 @@ cardinality = 10000
 ttl_s = 0
 since = "1.3"
 description = "desired threshold rule set for netflow on {host} (#931): rules over the metrics this producer publishes, evaluated on its own publish path"
+
+# ── Procedures (#939) ─────────────────────────────────────────────────────────
+#
+# The first three this slice has had. Until #938 nothing published `@desired`
+# at all, so there was nobody to ask; the controller is that somebody.
+#
+# `override/set` is how a per-host exception gets made durable. The GUI's SNMP
+# discovery has proposed devices since #541 and its adopt path ended in
+# `Message::CopyText` — an operator copying JSON5 into a file on the right
+# host, by hand, which is the workflow this epic exists to delete.
+#
+# It writes an OVERRIDES FILE, never the policy. The policy is hand-written,
+# commented and hand-ordered — its class order IS the overlay order — and a
+# serde round trip would strip every comment and normalise the ordering the
+# first time a GUI button was pressed. A machine may only write a file whose
+# entire content it owns.
+[[procedure]]
+path = "override/set"
+kind = "write"
+fanout = "forbidden"
+request = "DesiredOverride"
+reply = "Ack"
+since = "1.6"
+description = "record a per-host override ({host, producer, topic, doc}) in the controller's overrides file and re-plan; gated by `allow_overrides`. Never edits the hand-written policy — a serde round trip would strip its comments and reorder its classes, and class order is overlay order"
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.6"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.6"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"

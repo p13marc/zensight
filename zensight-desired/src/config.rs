@@ -41,6 +41,25 @@ pub struct ControllerConfig {
     /// sensor would revert to its file baseline at once.
     #[serde(default = "default_delete_grace")]
     pub delete_grace_periods: u32,
+    /// Where `override/set` records what a GUI adopted (#939).
+    ///
+    /// A separate file from the policy, and the separation is the design: the
+    /// policy is hand-written and commented, and a serde round trip would
+    /// strip every comment and normalise the class order — which IS the
+    /// overlay order. A machine may only write a file whose whole content it
+    /// owns.
+    #[serde(default = "default_overrides_path")]
+    pub overrides: String,
+    /// Whether `override/set` is answered or refused.
+    ///
+    /// Off by default. An override changes what a host is told to do on an
+    /// operator's say-so, and is **durable** — it outlives the session that
+    /// made it — so it is the same class of thing as the catalog's
+    /// `link`/`unlink`, and gets the same treatment: still served when off,
+    /// replying `error/gated`, so an operator learns the feature exists and is
+    /// switched off rather than learning nothing from a timeout.
+    #[serde(default)]
+    pub allow_overrides: bool,
     /// Refuse to publish, whatever the policy says. The disarm switch lives
     /// here rather than in the policy for the same reason the sensor's does:
     /// the mechanism that could misbehave must be disarmable from outside
@@ -53,6 +72,8 @@ impl Default for ControllerConfig {
     fn default() -> Self {
         ControllerConfig {
             policy: default_policy_path(),
+            overrides: default_overrides_path(),
+            allow_overrides: false,
             refresh_secs: default_refresh_secs(),
             delete_grace_periods: default_delete_grace(),
             dry_run: false,
@@ -62,6 +83,9 @@ impl Default for ControllerConfig {
 
 fn default_policy_path() -> String {
     "/etc/zensight/fleet-policy.json5".to_string()
+}
+fn default_overrides_path() -> String {
+    "/etc/zensight/fleet-policy.overrides.json5".to_string()
 }
 fn default_refresh_secs() -> u64 {
     300

@@ -409,23 +409,23 @@ mod topic_table_tests {
         let toml = crate::registry::desired::REGISTRY_TOML;
         let table = topics();
 
+        // Parsed, not grepped. The first version read every `path = "` line,
+        // which was fine while this slice had only subjects and broke the
+        // moment #939 gave it procedures — `override/set` is a path too. The
+        // same argument the sensors' write-surface guards make: asking the
+        // slice is immune to the rest of the file.
+        let slice = zenkey::parse_slice(toml).expect("the shipped @desired slice parses");
         let mut declared = Vec::new();
-        for line in toml.lines() {
-            let line = line.trim();
-            let Some(rest) = line.strip_prefix("path = \"") else {
-                continue;
-            };
-            let Some(path) = rest.strip_suffix('"') else {
-                continue;
-            };
+        for subject in &slice.subjects {
             // `{host}/<producer>/<topic>` — the G1 proxy ordering, enforced by
             // zenkey-build's H4 lint, so the shape is guaranteed.
-            let parts: Vec<&str> = path.split('/').collect();
+            let parts: Vec<&str> = subject.path.split('/').collect();
             assert_eq!(
                 parts.len(),
                 3,
-                "unexpected @desired subject shape {path:?} — the table's parser assumes \
-                 {{host}}/<producer>/<topic>"
+                "unexpected @desired subject shape {:?} — the table's parser assumes \
+                 {{host}}/<producer>/<topic>",
+                subject.path
             );
             declared.push((parts[1].to_string(), parts[2].to_string()));
         }
@@ -583,5 +583,160 @@ mod topic_table_tests {
                 never_list_lint(&doc)
             );
         }
+    }
+}
+
+/// One per-host override, as `@rpc/@desired/override/set` carries it (#939).
+///
+/// # Why this is a document and not a patch
+///
+/// The obvious shape is `{ host, producer, topic, patch }` — a fragment merged
+/// into whatever the policy already yields. It is not that, and the reason is
+/// what an operator can *see*.
+///
+/// A patch's effect depends on every class that matched the host, so two
+/// operators reading the same override file cannot tell what a host ends up
+/// with without running the compiler. A whole document can be read. The
+/// controller already has `render <host>` for the merged view, so nothing is
+/// lost by making the stored form the plain one.
+///
+/// It also makes the reverse operation obvious: an override is removed by
+/// deleting its entry, not by working out which patch to send to undo one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DesiredOverride {
+    /// Target host id (`h-<12hex>`), the first subject chunk of the key this
+    /// eventually rides.
+    pub host: String,
+    pub producer: String,
+    pub topic: String,
+    /// The document this host should get for that topic, overlaid last.
+    ///
+    /// `null` **removes** the override rather than storing a null — the same
+    /// rule the policy overlay uses for a field, applied to a whole entry, so
+    /// there is one deletion idiom rather than two.
+    #[serde(default)]
+    pub doc: Option<serde_json::Value>,
+    /// Who asked. Taken from the call's `?actor=`, never from the body — an
+    /// author who reports themselves is an author nobody can be asked about,
+    /// and "who put this here" is the first question of any review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// Free-text reason, for the operator who finds it in six months.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Unix epoch millis it was recorded.
+    #[serde(default)]
+    pub at: i64,
+}
+
+impl DesiredOverride {
+    /// Everything checkable without a fleet.
+    pub fn validate(&self) -> Result<(), String> {
+        if zenkey::origin::HostId::parse(&self.host).is_err() {
+            return Err(format!(
+                "host {:?} is not a host id — an override is keyed by the target host's \
+                 origin (`h-<12hex>`), which is what the desired key's first subject chunk \
+                 has to be (RFC 07 §3 G1)",
+                self.host
+            ));
+        }
+        let Some(spec) = topic(&self.producer, &self.topic) else {
+            return Err(format!(
+                "no @desired topic `{}/{}`. The declared set is in \
+                 `zensight-common/registry/desired.toml`",
+                self.producer, self.topic
+            ));
+        };
+        if let Some(doc) = &self.doc {
+            spec.validate(doc)?;
+        }
+        Ok(())
+    }
+
+    /// The `<producer>/<topic>` key this override is filed under.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.producer, self.topic)
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    fn host() -> String {
+        zenkey::origin::HostId::from_machine_id(
+            "0123456789abcdef0123456789abcdef",
+            crate::PROFILE.salt(),
+        )
+        .as_str()
+        .to_string()
+    }
+
+    #[test]
+    fn an_override_is_validated_like_any_other_document() {
+        let mut o = DesiredOverride {
+            host: host(),
+            producer: "sysinfo".into(),
+            topic: "thresholds".into(),
+            doc: Some(serde_json::json!({ "rules": [] })),
+            by: None,
+            note: None,
+            at: 0,
+        };
+        assert!(o.validate().is_ok());
+
+        o.doc = Some(serde_json::json!({ "rules": "not a list" }));
+        assert!(o.validate().is_err(), "the topic's own type check applies");
+
+        o.doc = Some(serde_json::json!({ "connect": ["tcp/10.0.0.1:7447"] }));
+        let e = o.validate().unwrap_err();
+        assert!(e.contains("never-list"), "and so does the never-list: {e}");
+    }
+
+    /// An entity id is not a host id, and the key's first subject chunk has to
+    /// be the second. Refusing here means the mistake is reported to whoever
+    /// made it rather than becoming a key no sensor reconciles.
+    #[test]
+    fn an_override_for_something_that_is_not_a_host_id_is_refused() {
+        let o = DesiredOverride {
+            host: "h_3fa9c2d41b7e".into(),
+            producer: "sysinfo".into(),
+            topic: "thresholds".into(),
+            doc: None,
+            by: None,
+            note: None,
+            at: 0,
+        };
+        assert!(o.validate().unwrap_err().contains("not a host id"));
+    }
+
+    #[test]
+    fn an_unknown_topic_is_refused_and_says_where_the_list_is() {
+        let o = DesiredOverride {
+            host: host(),
+            producer: "sysinfo".into(),
+            topic: "thresholdz".into(),
+            doc: None,
+            by: None,
+            note: None,
+            at: 0,
+        };
+        assert!(o.validate().unwrap_err().contains("desired.toml"));
+    }
+
+    /// A null doc is a removal, so it must validate — there is nothing to
+    /// type-check, and refusing it would leave no way to undo an override.
+    #[test]
+    fn a_null_doc_is_a_removal_and_validates() {
+        let o = DesiredOverride {
+            host: host(),
+            producer: "sysinfo".into(),
+            topic: "thresholds".into(),
+            doc: None,
+            by: None,
+            note: None,
+            at: 0,
+        };
+        assert!(o.validate().is_ok());
     }
 }
