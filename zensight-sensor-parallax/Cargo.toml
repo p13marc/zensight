@@ -21,11 +21,23 @@ zensight-sensor-core = { path = "../zensight-sensor-core" }
 
 # The video pipeline engine (lib name `parallax`). Default features are empty;
 # we opt into exactly what the sensor needs: openh264 encode/decode (builds the
-# C++ codec from source), V4L2 cameras, RTSP/retina clients, and the pure-Rust
-# JPEG codecs for the preview profile. libcamera is deliberately skipped (heavy
-# system dependency; V4L2 covers webcams).
+# C++ codec from source), V4L2 cameras, RTSP/retina clients, the pure-Rust
+# JPEG codecs for the preview profile, and udev hotplug. libcamera is
+# deliberately skipped (heavy system dependency; V4L2 covers webcams).
+#
+# `hotplug` (#410) is ON, not an opt-in feature, and that is a deliberate
+# departure from how this workspace usually treats a system library. It links
+# libudev, so building this crate now needs `libudev-dev` — but the RUNTIME
+# dependency is already satisfied everywhere it ships: `debian:bookworm-slim`,
+# the base of every component image, carries libudev.so.1, and any host with
+# `/dev/video*` to monitor has udev by definition. Gating it would have meant
+# shipping a default build in which #410's acceptance criterion — plug a camera
+# in and see it, without a restart — is simply false, in exchange for a build
+# dependency the container base already has. Upstream's own CI names `hotplug`
+# in the feature set it expects a sensor to use.
 parallax-pipeline = { workspace = true, features = [
     "h264",
+    "hotplug",
     "v4l2",
     "rtsp",
     "image-jpeg",

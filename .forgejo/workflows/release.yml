@@ -113,7 +113,10 @@ jobs:
       - name: Install build deps + buildah
         run: |
           apt-get update
-          apt-get install -y buildah protobuf-compiler libsystemd-dev libpcap-dev libssl-dev pkg-config jq
+          # libudev-dev: parallax's camera hotplug (#410). Build-time only —
+          # libudev1 is required by libapt-pkg and util-linux, so every Debian
+          # base image including the bookworm-slim runtime already has it.
+          apt-get install -y buildah protobuf-compiler libsystemd-dev libpcap-dev libssl-dev libudev-dev pkg-config jq
       - name: Build release binaries
         run: |
           cd src

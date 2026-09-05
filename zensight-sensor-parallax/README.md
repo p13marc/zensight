@@ -15,7 +15,10 @@ matching listener forces a keyframe the instant a subscriber appears.
   `Vec<StreamDescriptor>` (name, codecs, active flag, **native geometry, and the
   bandwidth tiers the stream offers**, description). Sources: enumerated
   `/dev/video*`, configured RTSP URLs, configured `VideoTestSrc` patterns
-  (demo mirrors the real contract).
+  (demo mirrors the real contract). **Live, not startup-only (#410)**: a udev
+  monitor adds and removes camera entries — with their liveliness tokens, the
+  health device count and the `camera_disappeared` rule — as devices are plugged
+  and pulled, no restart. Needs `libudev-dev` to build; nothing new at runtime.
 - **Demand-driven tiered simulcast (#494)** — a GET on `@rpc/parallax/stream/set`
   carries `Command<StreamControl>` (`open_stream {codec, tier}` /
   `close_stream {codec, tier}` / `request_keyframe {tier}`). The video plane is
@@ -50,9 +53,9 @@ matching listener forces a keyframe the instant a subscriber appears.
   `<stream>/stats/{fps,kbps,drops,rc_drops,viewers,encode_ms}` so existing charts
   light up for free.
 - **Liveliness + health + alerts** — one `state/parallax/device/<stream>/alive`
-  token per catalogue entry; per-stream health tracking; alert rules for
-  disappeared cameras, RTSP connect failures, and encoder overrun on
-  `state/parallax/alert/*`.
+  token per catalogue entry, declared and undeclared as cameras come and go;
+  per-stream health tracking; alert rules for disappeared cameras, RTSP connect
+  failures, and encoder overrun on `state/parallax/alert/*`.
 
 ## Quick start
 

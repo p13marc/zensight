@@ -38,7 +38,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-sensor-bmc/` | out-of-band hardware health (#953): power supplies, fans, thermal sensors and the chassis rollup, over Redfish. The only place a physical fault is visible when the sensors never reach hwmon — which on rack hardware is the normal case. Read-only, **no action surface at all**; every verdict is the BMC's own enum, never a threshold this sensor invented |
 | `zensight-sensor-probe/` | outside-in synthetic checks (#820): HTTP/TLS/DNS/TCP (+opt-in ICMP) against configured targets, plus local certificate expiry — a client only, and every result carries its vantage point |
 | `zensight-sensor-pve/` | Proxmox VE (#818): guests + their `onboot`/NIC-firewall config, storage allocated-vs-capacity, vzdump outcomes and size trend, cluster/HA/replication — read-only, **no action surface at all** |
-| `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline) |
+| `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline). The catalogue is **live** (#410): a udev monitor adds and removes camera entries as devices are plugged and pulled |
 | `zensight-correlator/` | fuses identity evidence → one `HostEntity` per host |
 | `zensight-exporter-{prometheus,otel}/` | forward telemetry/alerts to external systems |
 | `zensight-conformance/` | CI harness (#744): stands a deployment up and runs `zenkey-fleet`'s RFC judges against it. `publish = false`. It links `zenkey-fleet`, as does `zensight` for the fleet view (#745); the invariant is that **no crate a sensor links may** — see `Cargo.toml`'s note on the dependency |
@@ -68,8 +68,11 @@ cargo test -p zensight test_dashboard_empty  # one test
 ```
 
 Sandbox note: `zensight-sensor-gnmi` needs protoc, `zensight-sensor-systemd` needs
-systemd-devel. If a toolbox/container has them, run the full
-workspace there; otherwise `--exclude` those crates and say so.
+systemd-devel, `zensight-sensor-parallax` needs libudev-dev (camera hotplug,
+#410 — build-time only; `libudev1` is required by `libapt-pkg` and `util-linux`,
+so every Debian base image already has the runtime half). If a toolbox/container
+has them, run the full workspace there; otherwise `--exclude` those crates and
+say so.
 
 ## Linting and Formatting
 

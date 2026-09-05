@@ -51,6 +51,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **parallax: the stream catalogue is live — camera hotplug** (#410).
+
+  Plug a USB camera into a running sensor and it is advertised within half a
+  second: a catalogue entry appears, `@rpc/parallax/streams` offers it, its
+  `state/parallax/device/<stream>/alive` token is declared, the health device
+  count moves, and a `camera_disappeared` alert it had raised earlier resolves.
+  Unplug it and each of those reverses.
+
+  **What it replaced could not have done this.** The old watcher re-enumerated
+  all 64 `/dev/video*` nodes every 30 seconds and compared them against a list
+  snapshotted at startup — so a *disappearance* took up to half a minute, and an
+  *appearance* was structurally invisible: a camera plugged in later could never
+  be in a list taken before it existed. The rule it drove is kept; only the
+  polling is gone.
+
+  `parallax-pipeline` 0.9.0 — the version already pinned — has shipped
+  `DeviceMonitor` since 0.5.0, and upstream's own CI names `hotplug` in the
+  feature set it expects a sensor to use. This crate was the outlier.
+
+  The catalogue therefore stops being immutable: entries sit behind an `RwLock`,
+  every accessor clones and drops the guard, and nothing holds it across an
+  await. `SensorRunner` grows `liveliness_shared()` because device tokens are
+  now declared and undeclared *later*, from a spawned task, and a borrow cannot
+  cross a `'static` spawn.
+
+  Three behaviours it absorbs rather than reports as faults, each with a test:
+  a removal event can name a device never advertised (removal cannot be
+  capability-checked, so udev reports every vanished node including a UVC
+  camera's metadata-only one); a hotplugged camera never displaces a configured
+  stream, because `/dev/video*` paths are recycled and silently repointing an
+  operator's stream at hardware they did not configure is the worse failure; and
+  a stream open when its camera is pulled is not force-closed — removing the
+  entry stops anything *new* opening it while the pipeline fails and tears down
+  through the existing path, since `CloseStream` is refcount-based and would
+  decrement a viewer's reference instead.
+
+  **On by default, not a cargo feature**, which is a deliberate departure from
+  how this workspace usually treats a system library. It links `libudev`, so
+  building the crate now needs `libudev-dev` — added to CI, the release job and
+  `docker/Dockerfile.sensor` — but there is no new *runtime* dependency:
+  `libudev1` is required by `libapt-pkg` and `util-linux`, so every Debian base
+  image including the `bookworm-slim` the component images run on already
+  carries it. Gating it would have shipped a default build in which the feature
+  is simply false, to avoid a build dependency the runtime already satisfies.
+
+  It fails soft: no udev, or no permission to read its socket, and the sensor
+  logs why and keeps the catalogue enumeration found — the behaviour every
+  earlier build had. The shipped systemd unit now says why it sets no
+  `RestrictAddressFamilies=`: the monitor is a `NETLINK_KOBJECT_UEVENT` socket,
+  and adding one without `AF_NETLINK` would cost hotplug quietly.
+
 - **`just fleet-sizing` — measure what each sensor actually uses** (#944, epic
   #903), plus `docs/ops/SIZING.md` for the numbers to live in.
 

@@ -20,6 +20,7 @@ pub mod catalog;
 pub mod command;
 pub mod config;
 pub mod egress;
+pub mod hotplug;
 pub mod pipeline;
 pub mod query;
 pub mod reports;

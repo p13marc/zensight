@@ -12,15 +12,12 @@
 //! Every rule resolves automatically on recovery (`reconcile` semantics:
 //! the reporter tombstones alerts whose key is no longer firing).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use zensight_common::Protocol;
 use zensight_common::alert::{Alert, AlertKind, AlertSeverity};
 use zensight_sensor_core::AlertReporter;
-
-use crate::catalog::{Catalog, SourceKind};
 
 /// Per-stream rule bookkeeping over an [`AlertReporter`].
 pub struct ParallaxAlerts {
@@ -207,42 +204,6 @@ impl ParallaxAlerts {
         }
         if let Err(e) = self.reporter.reconcile(rule, &keys).await {
             tracing::warn!(error = %e, rule = %rule, "failed to reconcile alerts");
-        }
-    }
-}
-
-/// Watch the catalogue's V4L2 cameras: re-enumerate every `interval` and
-/// drive the `camera_disappeared` rule. Exits immediately when the catalogue
-/// advertises no local cameras.
-pub async fn watch_cameras(catalog: Arc<Catalog>, alerts: Arc<ParallaxAlerts>, interval: Duration) {
-    let known: Vec<(String, String)> = catalog
-        .entries()
-        .iter()
-        .filter_map(|e| match &e.kind {
-            SourceKind::V4l2 { device } => Some((e.name.clone(), device.clone())),
-            _ => None,
-        })
-        .collect();
-    if known.is_empty() {
-        return;
-    }
-    tracing::info!(cameras = known.len(), "camera-presence watcher running");
-
-    let mut tick = tokio::time::interval(interval);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tick.tick().await;
-        let present: HashSet<String> = match parallax::elements::device::enumerate_video_devices() {
-            Ok(devices) => devices.into_iter().map(|d| d.id).collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "camera re-enumeration failed; skipping tick");
-                continue;
-            }
-        };
-        for (stream, device) in &known {
-            alerts
-                .camera_present(stream, device, present.contains(device))
-                .await;
         }
     }
 }
