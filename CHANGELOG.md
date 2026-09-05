@@ -885,6 +885,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **There is no 1.0 until the software has been battle-tested by the community.**
+  `RELEASING.md` now says so where it already says "the minor is the breaking
+  slot", and the epic that used to be milestoned `1.0` is milestoned
+  **`0.18.0`** (#903).
+
+  The epic's own *Not in this epic* section had contradicted its title from the
+  day it was filed: *"a stranger's fleet actually running it — that is what 1.0
+  means, not a task."* Every criterion previously listed for 1.0 — the feature
+  milestones landed, two consecutive minors with no breaking change, the sizing
+  measured, the demo runnable by a stranger — is something this repository can
+  satisfy on its own, which is exactly why none of them is sufficient. A 1.0 is
+  a promise made to other people.
+
+  Nothing about the release procedure changes: `0.MINOR.PATCH` continues, the
+  minor stays the breaking slot. What changes is that a 1.0 is not schedulable
+  and does not get a milestone. #943 carries the full criteria into
+  `docs/COMPATIBILITY.md` when it is written.
+
 - **`rpc_get` is a client, and it sniffs** (#941). The debug GET example opened
   a **peer** session with gossip off, which knows only the endpoint it dialled
   and does not route a query on past it — so a GET aimed at a sensor one hop
