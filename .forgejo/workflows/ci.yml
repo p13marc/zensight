@@ -81,6 +81,18 @@ jobs:
       # Debug profile: this asserts behaviour, not speed, and a release build of
       # the sensor costs minutes for no extra signal.
       - run: PROFILE=debug scripts/demo-verify.sh
+      # #945: the incident story, which is the one claim ZenSight makes that a
+      # pile of series cannot. It rides in this job rather than a seventh
+      # because it needs the same two things demo-verify does — a debug build
+      # and an isolated port — and a new job would cost a full lane on a
+      # single-runner forge for two processes and a GET.
+      #
+      # It is a SEPARATE script, not a fifth phase of demo-verify, because it
+      # asserts something else: demo-verify asks whether data reaches the
+      # exporters, this asks whether the catalog can attribute a failure. A
+      # phase that shares a fixture with four others also shares their failure
+      # modes, and the point of this one is that it fails alone and legibly.
+      - run: PROFILE=debug scripts/demo-incident-verify.sh
 
   # Nothing in CI had ever asked a running FLEET whether it obeys its own
   # contract.

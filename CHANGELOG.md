@@ -51,6 +51,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`just demo-incident` — a hypervisor dies and the catalog says which alert
+  that explains** (#945, epic #903), with `scripts/demo-incident-verify.sh`
+  asserting it on every PR.
+
+  #945 is the acceptance test of two epics, and both were **invisible**: 0.15.0
+  put the relationship graph on the bus and 0.16.0 put incidents in the catalog,
+  and on a healthy fleet neither shows. The claim ZenSight makes over a pile of
+  series — that a dead hypervisor's guests are filed as *its* symptoms rather
+  than paging independently — had never been demonstrated, and nothing in CI had
+  ever watched it happen.
+
+  The demo publishes two synthetic hosts, `pve01` hosting `vm101`, with a firing
+  alert on the guest. For the first thirty seconds that alert is *unexplained* —
+  which is what Grafana would show forever. Then `pve01`'s liveliness token
+  drops and the catalog re-files the alert as a `symptom_of` `pve01`. Run
+  `just demo-prometheus` beside it and the same series go flat with no
+  relationship at all: **the comparison is the demo**, because a relationship is
+  not a series.
+
+  **Nothing is mocked.** Real `HostEvidence`, `RelationshipEvidence` and `Alert`
+  documents in their shipped shapes, through declared publishers, with real
+  Zenoh liveliness tokens; a real correlator runs the real union-find, resolves
+  the real edge and publishes the real incident. There is no path in the demo
+  that can produce an incident a fleet could not. Two origins are minted with
+  `V1Context::with_origin` — the constructor zenkey documents as being for
+  consumers that mint their identity differently — because a demo needs two
+  hosts and CI has one.
+
+  The verify script asserts four things, and **the fourth is what makes the
+  other three mean anything**: an incident exists for the guest; it names the
+  hypervisor; the cause is not itself filed as a symptom; and *before* the
+  fault, nothing is a symptom of anything. Without that last one a correlator
+  that attributed everything to everything would pass. Verified by mutation:
+  withholding the relationship claim — the edge attribution walks — makes it
+  fail.
+
+  It rides in the existing `demo-smoke` job rather than a seventh, because it
+  needs the same debug build and isolated port and a new job would cost a full
+  lane on a single-runner forge for two processes and a GET. It is a separate
+  *script* from `demo-verify.sh` on purpose: that one asks whether data reaches
+  the exporters, this asks whether the catalog can attribute a failure, and a
+  phase sharing a fixture with four others also shares their failure modes.
+
+
 - **parallax: ONVIF WS-Discovery, written out rather than bought** (#410).
   A second probe under the same `parallax.discovery` block, `ws_discovery`, off
   by default like `mdns`: one SOAP `Probe` for `NetworkVideoTransmitter` to the
