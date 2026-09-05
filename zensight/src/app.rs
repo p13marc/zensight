@@ -2328,6 +2328,9 @@ impl ZenSight {
             Message::CatalogAlive(alive) => {
                 self.alerts.catalog_alive = Some(alive);
             }
+            Message::DesiredAlive(alive) => {
+                self.dashboard.desired_alive = Some(alive);
+            }
             Message::AckReceived(ack) => {
                 self.alerts.ingest_ack(*ack);
             }

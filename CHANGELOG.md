@@ -797,6 +797,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Ack and Silence were disabled on every running deployment** (#1031). #925 built
+  them, #1017 gave them a seed queryable, both exporters mirror them — and the
+  buttons have been greyed out since the day they shipped, with "catalog offline —
+  cannot acknowledge or silence" beside them while the catalog was up and answering.
+
+  `can_write()` reads `catalog_alive`, which is set only by `Message::CatalogAlive`,
+  which is produced only by the `@catalog` arm of `parse_sensor_liveliness`, which is
+  called only from the subscriber declared on `all_liveliness_wildcard()` —
+  `v1/*/state/*/alive`.
+
+  **`*` cannot match a verbatim `@` chunk.** The app declared two liveliness
+  subscribers and both were wildcards, so the sample never arrived, `catalog_alive`
+  stayed `None`, and unknown is (correctly) not permission. `keyexpr.rs` says this
+  outright on the wildcard itself — *"`@catalog`'s own token is **not** in this set
+  and must be asked for by name"* — and `view/explorer/pump.rs` names it for exactly
+  that reason. The main app never did.
+
+  **Why every test stayed green.** The subscription test hands the parser a
+  hand-written `v1/@catalog/state/alive` and asserts it decodes; the UI tests set
+  `catalog_alive` directly and assert the gate. Both are right about what they check.
+  Nothing checked the join between them: *does a selector we declare match the key we
+  expect samples on*. That assertion exists now, in both crates, and both were seen
+  to fail before the fix.
+
+  The fix is one list — `keyexpr::service_alive_keys()` — subscribed by name
+  alongside the two wildcards, and shared with the explorer's monitor so a new
+  service origin cannot be invisible to whichever consumer nobody remembered to
+  update.
+
+  **The controller's token is in it too**, and adding it immediately caught the same
+  bug one step further on: the subscriber would have delivered
+  `@desired/state/alive` to a parser with no arm for it, and the sample would have
+  been thrown away. `Message::DesiredAlive` closes that, and is what #940's Adopt
+  button gates on — an adoption is durable only while something is there to record
+  it.
+
 - **#937's registry conformance test grepped for `path = "`**, which was fine
   while the `@desired` slice had only subjects and broke the moment #939 gave
   it procedures — `override/set` is a path too. It parses the slice now, the

@@ -600,6 +600,34 @@ fn desired_origin() -> ServiceOrigin {
 mod desired_key_tests {
     use super::*;
 
+    /// The assertion whose absence was #1031: a *declared selector* must be
+    /// checked against the key samples actually arrive on, not a parser
+    /// checked against a key handed to it.
+    ///
+    /// If this ever starts passing with `service_alive_keys()` empty, or a
+    /// consumer drops the list and keeps only the wildcard, the service is
+    /// invisible and nothing else says so.
+    #[test]
+    fn the_fleet_wildcard_cannot_cover_a_service_token() {
+        let wildcard = all_liveliness_wildcard();
+        let w: &zenoh::key_expr::keyexpr = wildcard.as_str().try_into().expect("valid keyexpr");
+        let named = service_alive_keys();
+        assert!(
+            !named.is_empty(),
+            "every service token must be named somewhere"
+        );
+        for key in &named {
+            let k: &zenoh::key_expr::keyexpr = key.as_str().try_into().expect("valid keyexpr");
+            assert!(
+                !w.intersects(k),
+                "{wildcard} appears to match {key} — if D4 changed, this list is no \
+                 longer needed; if it did not, something else is wrong"
+            );
+        }
+        assert!(named.contains(&correlator_alive_key()));
+        assert!(named.contains(&desired_alive_key()));
+    }
+
     /// The literal in `desired_origin` and the generated slice must agree.
     /// A key built from a hand-spelled origin that drifted would be published
     /// where nothing is listening, silently.
@@ -613,6 +641,25 @@ mod desired_key_tests {
         );
         assert_eq!(desired_alive_key(), "v1/@desired/state/alive");
     }
+}
+
+/// Every **verbatim service** liveliness token a consumer must ask for by name.
+///
+/// `all_liveliness_wildcard()` is `v1/*/state/*/alive`, and `*` in the origin
+/// position can never match a verbatim `@` chunk (design property D4). So a
+/// consumer that wants to know whether a *service* is up has to name its token
+/// — and one that only declares the wildcard silently never learns.
+///
+/// That is not hypothetical: it is #1031. `@catalog/state/alive` gates the ack
+/// and silence buttons (#925), the GUI declared only the two wildcards, and
+/// the buttons were therefore disabled on every running deployment while the
+/// catalog was up. The parser had a `@catalog` arm and a passing test; the
+/// sample never arrived.
+///
+/// This list exists so the next service origin is added in **one** place
+/// rather than in every consumer that happens to remember.
+pub fn service_alive_keys() -> Vec<String> {
+    vec![correlator_alive_key(), desired_alive_key()]
 }
 
 /// The `@desired` controller's RPC key for `procedure` (#939).
