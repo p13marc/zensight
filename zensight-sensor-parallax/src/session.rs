@@ -1133,7 +1133,7 @@ impl SessionManager {
             // already fired this rule when it arrived as an `Err` string.
             if let Some(alerts) = &self.alerts
                 && matches!(
-                    self.catalog.get(stream).map(|e| &e.kind),
+                    self.catalog.get(stream).map(|e| e.kind),
                     Some(SourceKind::Rtsp { .. })
                 )
             {

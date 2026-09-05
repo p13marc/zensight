@@ -43,6 +43,69 @@ disturb another. The cost (one device open per tier on V4L2) is a
 documented limitation, see below; a shared-capture fanout (#508) is the
 deferred optimisation.
 
+## The catalogue is live (#410)
+
+The catalogue is **seeded** at startup — enumerated V4L2 cameras, configured
+RTSP sources, configured test patterns — and **maintained** thereafter by a udev
+monitor on the `video4linux` subsystem. Plug a USB camera into a running sensor
+and, within the monitor's ≤ 500 ms bound:
+
+- a `SourceKind::V4l2` entry appears in the catalogue, so
+  `@rpc/parallax/streams` advertises it and a viewer can open it;
+- its liveliness token `state/parallax/device/<stream>/alive` is declared, so
+  the GUI's camera card goes live;
+- the health document's device count moves;
+- and if that camera had disappeared earlier, its `camera_disappeared` alert
+  resolves.
+
+Unplug it and each of those reverses.
+
+**What this replaced, and why it was not enough.** The previous watcher
+re-enumerated all 64 `/dev/video*` nodes every 30 seconds and compared them
+against a list captured at startup. It could report a *disappearance* — after up
+to half a minute — and it could never report an *appearance* at all, because a
+camera plugged in later was not in a list taken before it existed. The
+`camera_disappeared` rule is kept; only the polling is gone.
+
+**Three behaviours worth knowing.**
+
+*A removal event can name a device this sensor never advertised.* Removal cannot
+be capability-checked — the device is already gone — so udev reports every
+vanished `/dev/video*` node, including the metadata-only second node a UVC
+camera exposes beside its capture node. This is the ordinary case and is logged
+at `debug`, not `warn`.
+
+*A hotplugged camera never displaces a configured stream.* `/dev/video*` paths
+are recycled by the kernel, and a configured RTSP or test source could be named
+`video0`. If the name a new camera would take is already advertised, the camera
+is not added — silently pointing an operator's stream at hardware they did not
+configure is a worse failure than not advertising a camera.
+
+*A stream that was open when its camera was pulled is not force-closed.*
+Removing the entry stops anything new from opening it — the session actor looks
+the stream up and refuses what it cannot find — while the running pipeline fails
+on its own next read and tears down through the ordinary `EgressEnded` path,
+which already reports why. Forcing it from the watcher would mean sending
+`CloseStream`, and that is refcount-based: it would decrement a viewer's
+reference rather than end the stream.
+
+**When it is unavailable.** `DeviceMonitor::new()` fails without udev, or
+without permission to read its socket. The sensor logs a warning naming the
+reason and carries on with the catalogue enumeration found — the behaviour every
+build had before #410. Hotplug is a *feature of the catalogue*, never a
+precondition for serving it. The shipped systemd unit sets no
+`RestrictAddressFamilies=`, which is what lets the `NETLINK_KOBJECT_UEVENT`
+socket work; adding one without `AF_NETLINK` would silently cost hotplug.
+
+**Build dependency.** This links `libudev` (through `parallax-pipeline`'s
+`hotplug` feature), so building this crate needs `libudev-dev`. There is no new
+*runtime* dependency: `libudev1` is required by `libapt-pkg` and `util-linux`,
+so every Debian base image — including the `bookworm-slim` the component images
+run on — already carries `libudev.so.1`. That is why hotplug is on by default
+rather than behind a cargo feature: gating it would ship a default build in
+which "plug a camera in and see it" is false, in exchange for a build dependency
+the runtime already satisfies.
+
 ## Pipeline shapes per source kind
 
 The video path stamps geometry into the pipeline `Metadata` and inserts a
@@ -573,8 +636,9 @@ reaches health.
 
 Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
 
-- `camera_disappeared` — an advertised V4L2 device vanished from periodic
-  re-enumeration.
+- `camera_disappeared` — an advertised V4L2 device was unplugged. Driven by the
+  udev hotplug watcher since #410, so it fires within the monitor's ≤ 500 ms
+  poll bound rather than at the next 30 s re-enumeration.
 - `rtsp_connect_failed` — the RTSP camera is not delivering: either the initial
   `open_stream` connect failed, or a stream that had opened dropped and the
   source's reconnect ladder ran out. Since #731 the source retries a dropped

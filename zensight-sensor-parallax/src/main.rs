@@ -62,26 +62,25 @@ async fn main() -> Result<()> {
     let parallax_config = runner.config().parallax.clone();
     let session = runner.session().clone();
 
-    // Build the stream catalogue: enumerated V4L2 cameras + configured RTSP +
-    // test-pattern sources.
+    // Seed the stream catalogue: enumerated V4L2 cameras + configured RTSP +
+    // test-pattern sources. Live from here on — the hotplug watcher below adds
+    // and removes camera entries as devices come and go (#410).
     let catalog = Arc::new(Catalog::build(&parallax_config));
     tracing::info!(
         "Parallax sensor running (source: {}, streams: [{}])",
         source,
-        catalog.stream_names().collect::<Vec<_>>().join(", ")
+        catalog.stream_names().join(", ")
     );
 
     // One liveliness token per advertised stream (`state/parallax/device/<stream>/alive`)
     // so the GUI can flip a camera card Offline when the sensor dies.
     if let Some(liveliness) = runner.liveliness() {
         for stream in catalog.stream_names() {
-            if let Err(e) = liveliness.declare_device_alive(stream).await {
+            if let Err(e) = liveliness.declare_device_alive(&stream).await {
                 tracing::warn!(stream = %stream, error = %e, "failed to declare stream liveliness");
             }
         }
-        runner
-            .health()
-            .set_devices_total(catalog.entries().len() as u64);
+        runner.health().set_devices_total(catalog.len() as u64);
     }
 
     // Alert channel: reporter + the late-joiner alert-state seed
@@ -157,18 +156,27 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Camera-presence watcher: re-enumerate V4L2 devices and drive the
-    // camera_disappeared rule. No-op without local cameras.
+    // Camera hotplug (#410): a udev monitor on `video4linux` that adds and
+    // removes catalogue entries, their liveliness tokens and the
+    // `camera_disappeared` rule as devices come and go.
+    //
+    // This replaced a 30 s re-enumeration of all 64 /dev/video* nodes that
+    // compared them against a list captured at startup — which made a
+    // disappearance visible after up to half a minute and an appearance not
+    // visible at all, since a camera plugged in later could never be in a list
+    // taken before it existed.
+    //
+    // It runs even when the catalogue has no cameras yet: "no local cameras"
+    // is precisely the state a hotplug event is about to change, and the old
+    // watcher's early return for it is the bug, not the optimisation.
     {
         let w_catalog = catalog.clone();
         let w_alerts = alerts.clone();
+        let w_liveliness = runner.liveliness_shared();
+        let w_health = runner.health();
         runner.spawn(async move {
-            zensight_sensor_parallax::alerts::watch_cameras(
-                w_catalog,
-                w_alerts,
-                std::time::Duration::from_secs(30),
-            )
-            .await;
+            zensight_sensor_parallax::hotplug::run(w_catalog, w_alerts, w_liveliness, w_health)
+                .await;
         });
     }
 
@@ -222,7 +230,7 @@ async fn main() -> Result<()> {
     // Build status metadata
     let metadata = serde_json::json!({
         "source": source,
-        "streams": catalog.stream_names().collect::<Vec<_>>(),
+        "streams": catalog.stream_names(),
         "preview_fps": parallax_config.preview.fps,
         "tiers": parallax_config.video.tiers.iter().map(|t| &t.spec.name).collect::<Vec<_>>(),
         "default_tier": parallax_config.video.default_tier,

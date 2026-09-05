@@ -86,7 +86,7 @@ pub struct SensorRunner<C: SensorConfig> {
     /// Publisher for telemetry.
     publisher: Publisher,
     /// Liveliness manager for presence detection.
-    liveliness: Option<LivelinessManager>,
+    liveliness: Option<Arc<LivelinessManager>>,
     /// Sensor health tracker, published periodically to the origin-scoped
     /// `state/<producer>/health` so
     /// the frontend's Sensors view / health bar populate. Sensors may update it
@@ -275,7 +275,7 @@ impl<C: SensorConfig> SensorRunner<C> {
     pub async fn with_liveliness(mut self) -> Result<Self> {
         let liveliness =
             LivelinessManager::new(self.session.clone(), self.publisher.v1().clone()).await?;
-        self.liveliness = Some(liveliness);
+        self.liveliness = Some(Arc::new(liveliness));
         Ok(self)
     }
 
@@ -393,7 +393,19 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// Returns `None` before [`Self::run`] unless [`Self::with_liveliness`]
     /// declared it early.
     pub fn liveliness(&self) -> Option<&LivelinessManager> {
-        self.liveliness.as_ref()
+        self.liveliness.as_deref()
+    }
+
+    /// A shared handle to the liveliness manager, for a task that outlives the
+    /// borrow [`liveliness`](Self::liveliness) hands out.
+    ///
+    /// Device tokens were, until #410, all declared in one loop at startup and
+    /// never touched again, so a borrow was enough. Hotplug makes them a thing
+    /// that happens *later*: the parallax sensor declares a token when a camera
+    /// is plugged in and undeclares it when it is pulled, from a task spawned on
+    /// this runner — and a `&` cannot cross a `'static` spawn.
+    pub fn liveliness_shared(&self) -> Option<Arc<LivelinessManager>> {
+        self.liveliness.clone()
     }
 
     /// Spawn a worker task.
@@ -509,7 +521,7 @@ impl<C: SensorConfig> SensorRunner<C> {
         // warning — a broken liveliness path must never stop telemetry.
         if self.liveliness.is_none() {
             match LivelinessManager::new(self.session.clone(), self.publisher.v1().clone()).await {
-                Ok(manager) => self.liveliness = Some(manager),
+                Ok(manager) => self.liveliness = Some(Arc::new(manager)),
                 Err(e) => tracing::warn!(error = %e, "Failed to declare liveliness token"),
             }
         }

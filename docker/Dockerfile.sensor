@@ -14,12 +14,15 @@ ARG SENSOR_PACKAGE
 # Install build dependencies
 # protobuf-compiler: gnmi · libssl-dev: snmp · libsystemd-dev: logs (journald)
 # libpcap-dev: netring (AF_PACKET/pcap capture)
+# libudev-dev: parallax (camera hotplug, #410) — build-time only; the
+#   bookworm-slim runtime below already ships libudev.so.1
 RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     pkg-config \
     libssl-dev \
     libsystemd-dev \
     libpcap-dev \
+    libudev-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

@@ -31,6 +31,12 @@ SupplementaryGroups=video
 # a net tightening, not a loosening. `char-video4linux` covers /dev/video*,
 # /dev/media* and the rest of the subsystem's character devices.
 DeviceAllow=char-video4linux rw
+# Camera hotplug (#410) watches udev over a NETLINK_KOBJECT_UEVENT socket, so
+# this unit deliberately sets no `RestrictAddressFamilies=`: adding one without
+# AF_NETLINK would leave the sensor unable to notice a camera being plugged in.
+# It fails soft either way — the monitor refuses at startup, the sensor logs why
+# and keeps the catalogue enumeration found — which is quiet enough to be worth
+# saying here.
 # V4L2 capture and RTSP are unprivileged, so this sensor needs no capabilities
 # at all — an empty bounding set drops the lot. netring and logs each keep the
 # one they need; parallax keeps none, which is why it scores better than either

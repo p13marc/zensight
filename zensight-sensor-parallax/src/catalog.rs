@@ -1,6 +1,17 @@
 //! The stream catalogue: which video sources this host advertises.
 //!
-//! Built once at startup by merging three source families:
+//! Seeded at startup by merging three source families, and **live thereafter**
+//! (#410): the hotplug watcher adds a `SourceKind::V4l2` entry when a capture
+//! device appears and removes it when the device is pulled, so a USB camera
+//! plugged into a running sensor is advertised without a restart.
+//!
+//! That is why the entries sit behind a lock rather than being handed out as a
+//! `&[CatalogEntry]`: the catalogue is shared by four readers (the `streams`
+//! queryable, the session actor, the health device count and the alerts) and
+//! one writer. Every accessor clones what it returns and drops the guard
+//! immediately — nothing holds it across an await.
+//!
+//! Seeded from:
 //! - enumerated local V4L2 cameras (`enumerate_v4l2: true`),
 //! - configured remote RTSP cameras,
 //! - configured synthetic test-pattern sources (demo mode / CI).
@@ -10,6 +21,7 @@
 //! `<stream>` name is the key chunk under `@media/parallax/`.
 
 use std::collections::HashSet;
+use std::sync::RwLock;
 
 use zensight_common::stream::{StreamDescriptor, TierSpec};
 
@@ -73,9 +85,12 @@ pub struct CatalogEntry {
 }
 
 /// The full, ordered stream catalogue for this host.
-#[derive(Debug, Clone, Default)]
+///
+/// Cheap to read and rarely written: a hotplug event is a human plugging in a
+/// camera, while reads happen per `streams` query and per stream open.
+#[derive(Debug, Default)]
 pub struct Catalog {
-    entries: Vec<CatalogEntry>,
+    entries: RwLock<Vec<CatalogEntry>>,
 }
 
 impl Catalog {
@@ -96,12 +111,7 @@ impl Catalog {
                                 "v4l2 device name collides with an existing stream; skipped");
                             continue;
                         }
-                        let mut description = dev.name.clone();
-                        if let Some(model) = &dev.model
-                            && model != &dev.name
-                        {
-                            description.push_str(&format!(" ({model})"));
-                        }
+                        let description = device_description(&dev.name, &dev.model);
                         // Best-effort native-capability probe: open the device,
                         // read its negotiated geometry, drop it (releasing the
                         // camera). A busy/failing device just advertises no
@@ -142,22 +152,107 @@ impl Catalog {
             entries.push(test_entry(test));
         }
 
-        Self { entries }
+        Self {
+            entries: RwLock::new(entries),
+        }
     }
 
     /// Look one stream up by name.
-    pub fn get(&self, name: &str) -> Option<&CatalogEntry> {
-        self.entries.iter().find(|e| e.name == name)
+    ///
+    /// Returns a clone: the entry may be removed by a hotplug event between
+    /// this call and its use, and a caller holding a reference into the
+    /// catalogue would keep the lock (or, worse, want to) across an await.
+    pub fn get(&self, name: &str) -> Option<CatalogEntry> {
+        self.read().iter().find(|e| e.name == name).cloned()
     }
 
     /// All entries, in catalogue order.
-    pub fn entries(&self) -> &[CatalogEntry] {
-        &self.entries
+    pub fn entries(&self) -> Vec<CatalogEntry> {
+        self.read().clone()
     }
 
     /// The advertised stream names, in catalogue order.
-    pub fn stream_names(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|e| e.name.as_str())
+    pub fn stream_names(&self) -> Vec<String> {
+        self.read().iter().map(|e| e.name.clone()).collect()
+    }
+
+    /// How many streams are advertised.
+    pub fn len(&self) -> usize {
+        self.read().len()
+    }
+
+    /// Whether the catalogue advertises nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.read().is_empty()
+    }
+
+    /// The V4L2 device paths currently advertised, with their stream names.
+    pub fn v4l2_devices(&self) -> Vec<(String, String)> {
+        self.read()
+            .iter()
+            .filter_map(|e| match &e.kind {
+                SourceKind::V4l2 { device } => Some((e.name.clone(), device.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Add a hotplugged V4L2 camera (#410). Returns the stream name when it was
+    /// added, `None` when the catalogue already advertises that device or the
+    /// name it would take.
+    ///
+    /// Both refusals are ordinary, not errors. udev re-announces devices that
+    /// were already present, and a `/dev/video*` path freed by an unplug can be
+    /// handed to a different camera by the kernel — so "already there" and
+    /// "name taken by something else" are both states a running fleet reaches.
+    pub fn add_v4l2(&self, device: &str, description: Option<String>) -> Option<String> {
+        let name = v4l2_stream_name(device);
+        let mut entries = self.write();
+        if entries.iter().any(|e| e.name == name) {
+            return None;
+        }
+        let (width, height, fps) = probe_v4l2(device);
+        entries.push(CatalogEntry {
+            name: name.clone(),
+            kind: SourceKind::V4l2 {
+                device: device.to_string(),
+            },
+            width,
+            height,
+            fps,
+            codecs: vec!["h264".to_string(), "mjpeg".to_string()],
+            description,
+        });
+        Some(name)
+    }
+
+    /// Drop the entry for an unplugged V4L2 device (#410), returning its stream
+    /// name if it was advertised.
+    ///
+    /// `None` is expected and must stay quiet: upstream documents that a
+    /// removal event cannot be capability-checked — the device is already gone
+    /// — so a `Removed` arrives for ids that never produced an `Added`,
+    /// including every metadata-only node a UVC camera exposes beside its
+    /// capture node.
+    pub fn remove_v4l2(&self, device: &str) -> Option<String> {
+        let mut entries = self.write();
+        let idx = entries.iter().position(|e| match &e.kind {
+            SourceKind::V4l2 { device: d } => d == device,
+            _ => false,
+        })?;
+        Some(entries.remove(idx).name)
+    }
+
+    // A poisoned lock means a reader panicked while holding it. The catalogue
+    // is a plain Vec of owned data with no invariant a panic could have half-
+    // applied, so recovering the guard is strictly better than propagating a
+    // panic into every stream open for the life of the process.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<CatalogEntry>> {
+        self.entries.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<CatalogEntry>> {
+        self.entries.write().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Serve-ready descriptors, stamping `active` from the currently open set
@@ -168,7 +263,7 @@ impl Catalog {
         open: &HashSet<String>,
         ladder: &[TierSpec],
     ) -> Vec<StreamDescriptor> {
-        self.entries
+        self.read()
             .iter()
             .map(|e| StreamDescriptor {
                 stream: e.name.clone(),
@@ -254,6 +349,16 @@ fn test_entry(test: &TestSourceConfig) -> CatalogEntry {
     }
 }
 
+/// One human label for a capture device: its name, plus the model when the
+/// model says something the name does not. Shared by startup enumeration and
+/// the hotplug watcher so a camera reads identically whichever found it.
+pub(crate) fn device_description(name: &str, model: &Option<String>) -> String {
+    match model {
+        Some(model) if model != name => format!("{name} ({model})"),
+        _ => name.to_string(),
+    }
+}
+
 /// Derive a stream name from a V4L2 device path: `/dev/video0` → `video0`.
 fn v4l2_stream_name(device_id: &str) -> String {
     device_id
@@ -285,7 +390,7 @@ mod tests {
     #[test]
     fn build_merges_rtsp_and_test_sources() {
         let catalog = Catalog::build(&test_config());
-        let names: Vec<_> = catalog.stream_names().collect();
+        let names = catalog.stream_names();
         assert_eq!(names, vec!["door", "yard", "test0"]);
 
         assert!(matches!(
@@ -344,6 +449,105 @@ mod tests {
         // A 360-high source is offered both tiers (240 fits, high is uncapped).
         let tier_names: Vec<&str> = test0.tiers.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(tier_names, vec!["low", "high"]);
+    }
+
+    // ── hotplug (#410): the catalogue is live ────────────────────────────
+
+    #[test]
+    fn hotplug_adds_and_removes_a_camera() {
+        let catalog = Catalog::build(&test_config());
+        assert_eq!(catalog.stream_names(), vec!["door", "yard", "test0"]);
+
+        let added = catalog.add_v4l2("/dev/video9", Some("USB cam".into()));
+        assert_eq!(added.as_deref(), Some("video9"));
+        assert_eq!(catalog.len(), 4);
+        assert!(matches!(
+            catalog.get("video9").unwrap().kind,
+            SourceKind::V4l2 { ref device } if device == "/dev/video9"
+        ));
+        // The entry a viewer would be offered, not just one the map knows.
+        let descs = catalog.descriptors(&HashSet::new(), &[]);
+        assert!(descs.iter().any(|d| d.stream == "video9"));
+
+        assert_eq!(
+            catalog.remove_v4l2("/dev/video9").as_deref(),
+            Some("video9")
+        );
+        assert_eq!(catalog.stream_names(), vec!["door", "yard", "test0"]);
+        assert!(catalog.get("video9").is_none());
+    }
+
+    #[test]
+    fn a_device_is_only_added_once() {
+        // udev re-announces devices that are already present. The second
+        // announcement must not produce a duplicate stream — which would
+        // publish two liveliness tokens for one camera and double the health
+        // device count.
+        let catalog = Catalog::build(&test_config());
+        assert!(catalog.add_v4l2("/dev/video0", None).is_some());
+        assert!(catalog.add_v4l2("/dev/video0", None).is_none());
+        assert_eq!(catalog.len(), 4);
+    }
+
+    #[test]
+    fn a_hotplugged_name_never_displaces_a_configured_stream() {
+        // /dev/video* paths are recycled by the kernel, and a configured RTSP
+        // or test stream could be called `video0`. Silently replacing it would
+        // point an operator's stream at a camera they did not configure.
+        let catalog = Catalog::build(&test_config());
+        assert!(catalog.add_v4l2("/dev/door", None).is_none());
+        assert!(matches!(
+            catalog.get("door").unwrap().kind,
+            SourceKind::Rtsp { .. }
+        ));
+        assert_eq!(catalog.len(), 3);
+    }
+
+    #[test]
+    fn removing_an_unknown_device_is_a_no_op() {
+        // Upstream: a removal cannot be capability-checked, so udev reports
+        // every vanished /dev/video* node — including the metadata-only second
+        // node a UVC camera exposes, which was never advertised. This is the
+        // ordinary case, not an error, and it must not disturb the catalogue.
+        let catalog = Catalog::build(&test_config());
+        assert!(catalog.remove_v4l2("/dev/video42").is_none());
+        assert_eq!(catalog.stream_names(), vec!["door", "yard", "test0"]);
+    }
+
+    #[test]
+    fn removal_matches_the_device_path_not_the_stream_name() {
+        // The two are related by `v4l2_stream_name` and are NOT the same
+        // string; a lookup by name would silently fail to remove anything, and
+        // an unplugged camera would stay advertised forever.
+        let catalog = Catalog::build(&test_config());
+        catalog.add_v4l2("/dev/video3", None);
+        assert!(catalog.remove_v4l2("video3").is_none());
+        assert_eq!(
+            catalog.remove_v4l2("/dev/video3").as_deref(),
+            Some("video3")
+        );
+    }
+
+    #[test]
+    fn only_v4l2_entries_are_removable_by_device() {
+        // An RTSP entry whose URL happened to equal a device path must not be
+        // removable by a hotplug event: the kinds are what distinguish them.
+        let catalog = Catalog::build(&test_config());
+        assert!(catalog.remove_v4l2("rtsp://cam.local/1").is_none());
+        assert_eq!(catalog.len(), 3);
+    }
+
+    #[test]
+    fn device_description_folds_in_the_model_only_when_it_adds_something() {
+        assert_eq!(device_description("HD Webcam", &None), "HD Webcam");
+        assert_eq!(
+            device_description("HD Webcam", &Some("HD Webcam".into())),
+            "HD Webcam"
+        );
+        assert_eq!(
+            device_description("HD Webcam", &Some("Acme C1".into())),
+            "HD Webcam (Acme C1)"
+        );
     }
 
     #[test]
