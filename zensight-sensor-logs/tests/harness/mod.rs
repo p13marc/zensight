@@ -41,23 +41,75 @@ pub fn isolated_config() -> zenoh::Config {
     config
 }
 
-/// A free localhost TCP port (bind :0, read it, drop). Small TOCTOU window,
-/// fine for CI on localhost.
+/// Ports this process has already handed out, so it never hands out one twice.
+///
+/// The two TLS tests run concurrently in one binary; when they were given the
+/// same port, one rig's listener failed to bind, `start_listeners` only
+/// *logged* it (it spawns each listener and returns `Ok` regardless), and that
+/// rig's client then completed a handshake against the OTHER rig's server —
+/// a different self-signed cert, so `InvalidCertificate(BadSignature)`, in a
+/// crate the offending pull request never touched.
+static HANDED_OUT: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+
+/// A localhost port nothing is listening on, from **below** the ephemeral
+/// range, handed out at most once per process.
+///
+/// The obvious way to get one is to bind `:0`, read the address and drop the
+/// listener. That hands the port straight back to the kernel's ephemeral
+/// allocator and then assumes nothing else takes it — and under a full
+/// `cargo test --workspace`, with many crates' Zenoh peers and listeners
+/// starting at once and every outgoing connection drawing from the same
+/// range, something does. This crate hit it as a TLS handshake failure; the
+/// probe crate hit the same thing as a live "dead" port (#1004), and its
+/// comment is the longer version of this one.
+///
+/// `ip_local_port_range` starts at 32768 on the runner, so a port below it
+/// cannot be handed out by the allocator. Scan rather than assume, and refuse
+/// a port already given to another rig in this process — a window that is
+/// merely *unoccupied* is not enough when the caller has not bound it yet.
+fn free_port(occupied: impl Fn(u16) -> bool) -> u16 {
+    let mut handed = HANDED_OUT.lock().unwrap();
+    let port = (21_000..21_400)
+        .find(|p| !handed.contains(p) && !occupied(*p))
+        .expect("a free loopback port below the ephemeral range (21000-21399 all taken)");
+    handed.push(port);
+    port
+}
+
+/// A free localhost TCP port.
 pub fn free_tcp_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    free_port(|p| std::net::TcpListener::bind(("127.0.0.1", p)).is_err())
 }
 
 /// A free localhost UDP port.
 pub fn free_udp_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    free_port(|p| std::net::UdpSocket::bind(("127.0.0.1", p)).is_err())
+}
+
+/// Block until the configured stream listener accepts a connection.
+///
+/// Only the stream protocols are probed: a UDP or journald listener has
+/// nothing to connect to, and a test that sends to a dead UDP port fails on
+/// its own assertion rather than on a handshake against somebody else's
+/// server.
+async fn wait_until_accepting(listener: &ListenerConfig) {
+    let addr = match listener.protocol {
+        ListenerProtocol::Tcp | ListenerProtocol::Tls => listener.bind.clone(),
+        _ => return,
+    };
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "the rig's {:?} listener never came up on {addr} — start_listeners \
+         spawns and only LOGS a bind failure, so the rig would have run with \
+         nothing listening and the test would have asserted against whatever \
+         else holds that port",
+        listener.protocol
+    );
 }
 
 /// Builder for a `SyslogConfig` with one listener and tuned ingest/multiline.
@@ -144,6 +196,12 @@ impl RigBuilder {
         let (rx, _journald, ingest_stats) = receiver::start_listeners(&cfg)
             .await
             .expect("start listeners");
+        // `start_listeners` SPAWNS each listener and only logs a bind failure —
+        // it returns `Ok` with nothing listening. A rig in that state is worse
+        // than a broken one: `mtls_refuses_client_without_cert` passes against
+        // it, because a connection nobody accepts is also a connection nobody
+        // let through. Wait for the socket and name the failure.
+        wait_until_accepting(&self.listener).await;
 
         let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
         let nanos = std::time::SystemTime::now()
