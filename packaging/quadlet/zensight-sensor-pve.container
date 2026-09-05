@@ -8,6 +8,7 @@
 # other shape: polling the PVE API from a guest or a management host. It needs
 # only network reach to :8006 and a read-only PVEAuditor token — the sensor has
 # no action surface at all.
+# Measure yours with `just fleet-sizing`; see docs/ops/SIZING.md.
 [Unit]
 Description=ZenSight Proxmox VE sensor
 After=network-online.target

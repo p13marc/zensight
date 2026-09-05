@@ -51,6 +51,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`just fleet-sizing` — measure what each sensor actually uses** (#944, epic
+  #903), plus `docs/ops/SIZING.md` for the numbers to live in.
+
+  Eleven quadlet units carry the identical line — *"MemoryMax below is a
+  STARTING POINT (reference-fleet sizing); measure via each sensor's health doc
+  `self_stats`"* — and every sensor has published exactly those numbers since
+  #811: RSS, CPU, the declared budget, per-table occupancy, the shed ladder's
+  step, and the process's own cgroup reading including `memory.max` and
+  `oom_kills`. The reason no measured table ever replaced the starting points
+  was never that the data was missing; it was that reading it meant a document
+  per host, by hand, repeatedly, for as long a window as you wanted. So nobody
+  did, and on 2026-08-17 a VM was OOM-killed under numbers chosen on a laptop.
+
+  `scripts/fleet-sizing.sh` collects; `scripts/fleet-sizing-report.py` renders,
+  as a separate step so a fourteen-day run is re-analysable without being
+  re-run. The report compares observed peak against what the host *actually*
+  allows rather than against what a unit file says, and refuses to guess: a
+  producer with no `self_stats` is **not measured**, never zero; one absent for
+  part of the window is reported with the span it was really seen over; a
+  producer at shed-ladder step ≥1 is called out as unsizable, because its RSS is
+  what the budget forced and not what the workload wanted.
+
+  **It subscribes rather than polls, and finding out why was the interesting
+  part.** The obvious shape — GET `v1/*/state/*/health` on a timer — returns
+  **zero replies against a completely healthy fleet**: health has no
+  late-joiner seed. It does not need one (the runner republishes every five
+  seconds, so a subscriber converges in five), but a poller cannot tell that
+  from a dead bus. Hence the third reader in `zensight-common/examples`:
+  `state_watch`, a client-mode subscriber on any state selector that writes
+  NDJSON with a per-key throttle — `rpc_get` issues one GET and exits, and
+  `v1_probe` is a hub sensors dial into, so neither could answer "what did this
+  key do over the next fortnight".
+
+  Failure modes are separated because their fixes are: **exit 2** could not open
+  a session at all (wrong endpoint), **exit 1** reached the bus and nothing ever
+  published (wrong selector, or a genuinely silent fleet). A zero-length capture
+  is never reported as a fleet that uses no memory.
+
+  `docs/ops/SIZING.md` ships with **every table empty and marked awaiting
+  measurement**, because the only honest source is a real fleet over real time —
+  #944 asks for fourteen days on the six-VM reference fleet, which is elapsed
+  time and not work. What it does carry now: the command, the shipped
+  `MemoryMax` values *with the reasoning each was guessed from*, the events
+  `fs` storage's pruning recipe (Zenoh storages have no TTL, so retention is a
+  disk-space concern), and — the section a future operator needs most — what the
+  2026-08-17 OOM looks like in today's health documents, in the order the
+  signals actually appear: RSS drift, the `sensor-budget` alert at 80%, the shed
+  ladder above step 0, and finally `oom_kills`, which is too late.
+
 - **`docs/COMPATIBILITY.md` — what is stable before 1.0, what may break, and
   what 1.0 would have to mean** (#943, epic #903).
 

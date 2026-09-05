@@ -8,6 +8,7 @@
 # this in more than one place on purpose: on the edge for the outside view, on
 # a guest for the hairpin view — the check that would have caught 2026-08-20 —
 # and it will disagree with itself, usefully.
+# Measure yours with `just fleet-sizing`; see docs/ops/SIZING.md.
 [Unit]
 Description=ZenSight probe sensor
 After=network-online.target

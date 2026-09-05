@@ -1,6 +1,7 @@
 # ZenSight sysinfo sensor — one container, one cgroup, its own budget (#813).
 # MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via
 # the sensor's health doc self_stats and adjust. See README.md beside this.
+# Measure yours with `just fleet-sizing`; see docs/ops/SIZING.md.
 [Unit]
 Description=ZenSight sysinfo sensor
 After=network-online.target
