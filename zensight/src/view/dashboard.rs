@@ -186,6 +186,11 @@ pub struct DashboardState {
     pub snmp_discovery: HashMap<String, zensight_common::DiscoveryReport>,
     /// Whether the discovery card shows the expanded proposal list (#579).
     pub snmp_discovery_open: bool,
+    /// Whether `@desired/state/alive` is present — the policy controller
+    /// (#939). `None` = not yet known, which is **not** permission: an
+    /// adoption is durable only if something is there to record it, and the
+    /// discovery card says so rather than promising (#940).
+    pub desired_alive: Option<bool>,
     /// Filter/search state for the fleet trap/event feed (#578).
     pub snmp_event_filter: crate::view::overview::snmp::EventFilterState,
 }
@@ -209,6 +214,7 @@ impl Default for DashboardState {
             snmp_events: std::collections::VecDeque::new(),
             snmp_discovery: HashMap::new(),
             snmp_discovery_open: false,
+            desired_alive: None,
             snmp_event_filter: Default::default(),
         }
     }

@@ -290,6 +290,44 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
             };
 
+            // Verbatim SERVICE liveliness tokens, asked for BY NAME (#1031).
+            //
+            // The two subscribers around this one are wildcards, and
+            // `v1/*/state/*/alive` can never match `v1/@catalog/state/alive`:
+            // `*` does not match a verbatim `@` chunk (design property D4,
+            // stated on `all_liveliness_wildcard` itself). So for the life of
+            // #925 the ack and silence buttons were disabled on every running
+            // deployment — `catalog_alive` stayed `None`, `can_write()` was
+            // false, and the UI explained it with a sentence saying the
+            // catalog was offline while it was answering.
+            //
+            // One shared channel rather than one select arm per service, so
+            // adding the next service origin is a line in
+            // `service_alive_keys()` and nothing here.
+            let (service_tx, service_liveliness) = flume::unbounded::<zenoh::sample::Sample>();
+            // Held for the stream's life: dropping a subscriber undeclares it.
+            let mut service_subs = Vec::new();
+            for key in zensight_common::keyexpr::service_alive_keys() {
+                let tx = service_tx.clone();
+                match session
+                    .liveliness()
+                    .declare_subscriber(key.as_str())
+                    .history(true)
+                    .callback(move |sample| {
+                        let _ = tx.send(sample);
+                    })
+                    .await
+                {
+                    Ok(sub) => service_subs.push(sub),
+                    Err(e) => tracing::warn!(
+                        error = %e, key = %key,
+                        "Failed to subscribe a service liveliness token — that service's \
+                         presence will read as unknown, and writes gated on it will refuse"
+                    ),
+                }
+            }
+            drop(service_tx);
+
             // Subscribe to device liveliness tokens (same history(true) seed).
             let device_liveliness = match session
                 .liveliness()
@@ -582,6 +620,18 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         }
                     }
 
+                    // Service liveliness (#1031): @catalog and @desired, by name.
+                    result = service_liveliness.recv_async() => {
+                        if let Ok(sample) = result {
+                            let is_alive = sample.kind() == SampleKind::Put;
+                            if let Some(msg) =
+                                parse_sensor_liveliness(sample.key_expr().as_str(), is_alive)
+                            {
+                                yield msg;
+                            }
+                        }
+                    }
+
                     // Device liveliness subscription
                     result = async {
                         match &device_liveliness {
@@ -814,6 +864,18 @@ fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
                 tracing::warn!("catalog went offline — acks and silences cannot be written");
             }
             return Some(Message::CatalogAlive(is_alive));
+        }
+        // The policy controller (#939). Same shape, same reason it has to be
+        // named: an adoption is durable only while this is here (#940).
+        if matches!(&parsed.origin, Origin::Service(svc) if svc.as_str() == "@desired")
+            && parsed.subject == ["alive"]
+        {
+            if is_alive {
+                tracing::info!("policy controller came online");
+            } else {
+                tracing::warn!("policy controller went offline — adoptions cannot be made durable");
+            }
+            return Some(Message::DesiredAlive(is_alive));
         }
         return None;
     };
@@ -1258,6 +1320,58 @@ mod tests {
         // The catalog's *other* service tokens stay ignored: only `alive`
         // means "the catalog can be written to".
         assert!(parse_sensor_liveliness("v1/@catalog/state/claim/abc", true).is_none());
+    }
+
+    /// The assertion whose absence let #1031 ship: the app's **declared**
+    /// liveliness selectors must actually cover the key `CatalogAlive`
+    /// arrives on.
+    ///
+    /// The test above proves the parser handles that key. For the life of
+    /// #925 the key never arrived — the two declared subscribers were both
+    /// `*`-origin wildcards, and `*` cannot match a verbatim `@` chunk (D4) —
+    /// so acknowledging an alert was impossible from the GUI while every
+    /// test stayed green. Parsing a sample nobody delivers is not coverage.
+    #[test]
+    fn the_declared_liveliness_selectors_cover_the_service_tokens() {
+        use zenoh::key_expr::keyexpr;
+
+        // Only `focus` is read; the fleet (unfocused) case is the one that
+        // ships and the one that was broken.
+        let cfg = LinkConfig {
+            zenoh: Default::default(),
+            scope: Vec::new(),
+            profile: LinkProfile::default(),
+            focus: None,
+        };
+        let (sensor, device) = liveliness_exprs(&cfg);
+        let named = zensight_common::keyexpr::service_alive_keys();
+        assert!(!named.is_empty());
+
+        for key in &named {
+            let k: &keyexpr = key.as_str().try_into().expect("valid keyexpr");
+            // Neither wildcard can reach it — that is the whole problem.
+            for wildcard in [&sensor, &device] {
+                let w: &keyexpr = wildcard.as_str().try_into().expect("valid keyexpr");
+                assert!(
+                    !w.intersects(k),
+                    "{wildcard} matches {key}; if D4 changed, the by-name list is dead code"
+                );
+            }
+            // ...so the subscriber loop must ask for it by name, and the
+            // parser must recognise what comes back.
+            assert!(
+                parse_sensor_liveliness(key, true).is_some(),
+                "{key} is declared by name but the parser drops it — the sample \
+                 would arrive and be thrown away"
+            );
+        }
+        assert!(
+            named.iter().any(|k| matches!(
+                parse_sensor_liveliness(k, true),
+                Some(Message::CatalogAlive(true))
+            )),
+            "the catalog token must still be the one that gates ack and silence"
+        );
     }
 
     #[test]

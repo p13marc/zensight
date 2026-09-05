@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use iced::futures::Stream;
 use zenkey_fleet::{Monitor, MonitorSpec, RetentionBudget, WatchId};
-use zensight_common::keyexpr::{all_liveliness_wildcard, correlator_alive_key};
+use zensight_common::keyexpr::{all_liveliness_wildcard, service_alive_keys};
 
 use crate::message::Message;
 
@@ -65,7 +65,13 @@ impl ExplorerCtl {
 fn spec() -> MonitorSpec {
     MonitorSpec {
         selectors: Vec::new(),
-        liveliness: vec![all_liveliness_wildcard(), correlator_alive_key()],
+        // The fleet wildcard plus every verbatim service token by name —
+        // one list, shared with the main app's subscriber since #1031, so a
+        // new service origin is not invisible to whichever of the two nobody
+        // remembered to update.
+        liveliness: std::iter::once(all_liveliness_wildcard())
+            .chain(service_alive_keys())
+            .collect(),
         stats_tick: Duration::from_millis(250),
         capacity: EXPLORER_CAPACITY,
         max_keys: EXPLORER_MAX_KEYS,

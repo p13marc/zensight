@@ -1146,6 +1146,13 @@ pub enum Message {
     /// what disables those buttons — with a reason on them, rather than a
     /// button that quietly does nothing.
     CatalogAlive(bool),
+    /// `@desired/state/alive` appeared or vanished (#939, routed since #1031).
+    ///
+    /// The policy controller is the only writer that makes an adoption
+    /// **durable**, so its absence is what tells the discovery card to warn
+    /// rather than promise (#940). Subscribed by name for the same reason the
+    /// catalog's is: `*` cannot match a verbatim `@` chunk.
+    DesiredAlive(bool),
     /// One `@catalog/state/ack/*` document arrived (#925).
     AckReceived(Box<zensight_common::ack::AlertAck>),
     /// An ack was tombstoned by the catalog.
