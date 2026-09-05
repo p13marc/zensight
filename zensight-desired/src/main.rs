@@ -16,6 +16,22 @@ use zensight_desired::policy::Policy;
 /// answers "no hosts", which is a *report*, not a hang.
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a one-shot command keeps asking `@catalog` before believing an
+/// empty answer (#1045).
+///
+/// `await_peer` proves the session has a link; it does not prove the catalog's
+/// queryable has been declared to it, and declarations propagate after the link
+/// comes up. So a GET issued the instant `connect` returns can reach nobody on
+/// a perfectly healthy bus. This is the window that closes.
+///
+/// It costs nothing on the ordinary path: a settled session answers on the
+/// first attempt and never waits. Only a fleet that genuinely has no hosts pays
+/// the full deadline, and it is about to be told exactly that.
+const FLEET_SETTLE: Duration = Duration::from_secs(10);
+
+/// How often to re-ask inside [`FLEET_SETTLE`].
+const FLEET_POLL: Duration = Duration::from_millis(250);
+
 /// How long [`connect`] waits for the session to have a neighbour before it
 /// asks anything (#1039).
 ///
@@ -119,6 +135,12 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let session = connect(&config).await?;
+            // Deliberately ONE GET, unlike `apply` and `render` (#1045).
+            // `plan`'s contract is "what can you see right now", and callers
+            // loop it precisely to watch a fleet appear — `demo-verify.sh`
+            // phase 4 does exactly that. Making each call wait ten seconds
+            // would turn a cheap repeated probe into a slow one and change what
+            // the command means.
             let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
             report(&policy, &fleet, &overrides, &policy_path);
             let _ = session.close().await;
@@ -126,7 +148,14 @@ async fn main() -> Result<()> {
         }
         Command::Apply => {
             let session = connect(&config).await?;
-            let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
+            // Retried, not asked once (#1045): an empty answer has two causes
+            // and only one of them is stable.
+            let fleet = zensight_desired::fleet::settle(
+                || zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT),
+                FLEET_SETTLE,
+                FLEET_POLL,
+            )
+            .await;
             // An empty fleet is not a no-op, it is an unanswered question
             // (#1039). `fetch` returns `vec![]` both when the catalog says
             // "no hosts" and when nobody answered at all, and this command is
@@ -139,7 +168,10 @@ async fn main() -> Result<()> {
                      nothing would be published.\n\
                      This command cannot tell the two causes apart, so check both: \
                      no correlator is answering on this bus, or one is and it has \
-                     fused no host yet. `plan` shows what it can see."
+                     fused no host yet. `plan` shows what it can see.\n\
+                     (Asked for {}s before concluding — this is not a session \
+                     that had not settled yet.)",
+                    FLEET_SETTLE.as_secs()
                 );
             }
             let compiled = zensight_desired::compile::compile_with(&policy, &fleet, &overrides);
@@ -168,7 +200,15 @@ async fn main() -> Result<()> {
         Command::Run => run(config, policy).await,
         Command::Render { host } => {
             let session = connect(&config).await?;
-            let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
+            // Settled like `apply` (#1045): render answers "what would this
+            // host get", and "nothing, because my session was a second old" is
+            // the wrong answer to it.
+            let fleet = zensight_desired::fleet::settle(
+                || zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT),
+                FLEET_SETTLE,
+                FLEET_POLL,
+            )
+            .await;
             let compiled = zensight_desired::compile::compile_with(&policy, &fleet, &overrides);
             let mut found = false;
             for (h, d) in compiled.docs.iter().map(|((h, _, _), d)| (h, d)) {
@@ -307,6 +347,11 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
 
     loop {
         let compiled = {
+            // The daemon does NOT settle, and does not need to (#1045): it
+            // re-fetches every `refresh_secs`, so a first pass that ran inside
+            // the window is corrected by the next tick — and a key is deleted
+            // only after `delete_grace_periods` consecutive passes without it,
+            // so one empty pass cannot tombstone a fleet's desired state.
             let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
             let ov = overrides.lock().await;
             zensight_desired::compile::compile_with(&policy, &fleet, &ov)
