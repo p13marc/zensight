@@ -190,6 +190,47 @@ pub async fn connect(config: &ZenohConfig) -> Result<Session> {
     Ok(session)
 }
 
+/// Wait until this session actually has a neighbour, up to `timeout` (#1039).
+///
+/// `zenoh::open` returns as soon as the runtime is up. The TCP link to a
+/// `connect` endpoint is established *after* that, so a GET issued straight
+/// away reaches nobody and comes back with **zero replies** — which every
+/// caller in this tree reads as "the answer is empty", not "I asked too early".
+/// That is how `zensight-desired apply` came to compile against a fleet of
+/// zero and report publishing nothing as a successful no-op.
+///
+/// For a **one-shot** command — `apply`, `plan`, a debug GET — this is the
+/// difference between an answer and a lie. For a long-lived process it is only
+/// a head start: the periodic re-read is the correctness path, and a sensor
+/// must be able to start before its hub exists.
+///
+/// So this **never fails**. It returns whether a neighbour appeared, and the
+/// caller decides what that is worth. A `listen`-only rendezvous process has
+/// no neighbour to wait for and will simply use the whole timeout, so do not
+/// call it there.
+pub async fn await_peer(session: &Session, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        // Either kind of neighbour will route a query onward, so either ends
+        // the wait: a peer mesh and a router deployment are both normal here.
+        if session.info().peers_zid().await.next().is_some()
+            || session.info().routers_zid().await.next().is_some()
+        {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                timeout_ms = timeout.as_millis() as u64,
+                "no Zenoh neighbour after waiting — a query issued now will \
+                 come back empty, and an empty answer is indistinguishable \
+                 from an empty fleet"
+            );
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,6 +16,20 @@ use zensight_desired::policy::Policy;
 /// answers "no hosts", which is a *report*, not a hang.
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long [`connect`] waits for the session to have a neighbour before it
+/// asks anything (#1039).
+///
+/// `zenoh::open` returns before the link to a `connect` endpoint is up, so a
+/// GET issued immediately reaches nobody and answers with zero replies —
+/// indistinguishable, to every caller in this crate, from a fleet of zero
+/// hosts. That is exactly how `apply` came to publish nothing and report it as
+/// a successful no-op.
+///
+/// Not fatal on expiry: a controller started before its hub must still come up
+/// and converge on the next refresh. `apply` refuses separately, on the fleet
+/// it actually read.
+const PEER_WAIT: Duration = Duration::from_secs(5);
+
 /// How long to wait for every declared procedure to be serving before saying
 /// `alive`. The same two seconds `SensorRunner` waits.
 const DECLARATION_GRACE: Duration = Duration::from_secs(2);
@@ -113,6 +127,21 @@ async fn main() -> Result<()> {
         Command::Apply => {
             let session = connect(&config).await?;
             let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
+            // An empty fleet is not a no-op, it is an unanswered question
+            // (#1039). `fetch` returns `vec![]` both when the catalog says
+            // "no hosts" and when nobody answered at all, and this command is
+            // run from deploy scripts that read the exit code. Publishing
+            // nothing under exit 0 is the one outcome nobody can act on.
+            if fleet.is_empty() {
+                let _ = session.close().await;
+                anyhow::bail!(
+                    "@catalog reported no hosts, so there is nothing to compile and \
+                     nothing would be published.\n\
+                     This command cannot tell the two causes apart, so check both: \
+                     no correlator is answering on this bus, or one is and it has \
+                     fused no host yet. `plan` shows what it can see."
+                );
+            }
             let compiled = zensight_desired::compile::compile_with(&policy, &fleet, &overrides);
             log_rejections(&compiled);
             if config.desired.dry_run {
@@ -388,11 +417,13 @@ fn log_rejections(c: &zensight_desired::compile::Compiled) {
 }
 
 async fn connect(config: &DesiredDaemonConfig) -> Result<Arc<zenoh::Session>> {
-    Ok(Arc::new(
-        zensight_common::session::connect(&config.zenoh)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to connect to Zenoh: {e}"))?,
-    ))
+    let session = zensight_common::session::connect(&config.zenoh)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to connect to Zenoh: {e}"))?;
+    // Every command goes through here, and every one of them asks the catalog
+    // a question as its first act (#1039).
+    zensight_common::session::await_peer(&session, PEER_WAIT).await;
+    Ok(Arc::new(session))
 }
 
 fn init_tracing(level: &str) {
