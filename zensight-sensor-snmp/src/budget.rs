@@ -156,12 +156,31 @@ mod tests {
         for _ in 0..20 {
             b.charge(1.0).await;
         }
+        let elapsed = start.elapsed();
         assert!(
-            start.elapsed() < Duration::from_millis(50),
-            "the burst is free: {:?}",
-            start.elapsed()
+            elapsed < Duration::from_millis(50),
+            "the burst is free: {elapsed:?}"
         );
-        assert!(b.available().await <= 0.001);
+        // The bucket refills WHILE the loop runs, so "drained" is only true to
+        // within what `elapsed` could have put back — and comparing against
+        // that is the only form of this assertion that is not a bet on the
+        // machine.
+        //
+        // It used to read `available() <= 0.001`. At 20 tokens/s that constant
+        // is 50 MICROSECONDS of wall time for the whole twenty-iteration loop,
+        // and the loop measures ~30 µs on an idle developer box — under 2x
+        // margin, against a shared CI runner. It failed there on 2026-09-05.
+        //
+        // `available()` does not refill (only `charge` does), so the reading is
+        // frozen at the last charge and `elapsed` is measured after it: the
+        // bound below is exact, not generous. A charge that failed to debit
+        // would leave ~20 tokens and still be caught.
+        let refilled = 20.0 * elapsed.as_secs_f64();
+        let available = b.available().await;
+        assert!(
+            available <= refilled + f64::EPSILON,
+            "the twenty charges must all have been debited: {available} tokens left,              and only {refilled} could have refilled in {elapsed:?}"
+        );
     }
 
     /// Past the burst it slows down rather than dropping work: a sensor that

@@ -1024,6 +1024,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **snmp: the budget burst test asserted that the loop ran in under 50
+  microseconds** (#1047). It failed on a pull request that does not touch the
+  crate, and does not reproduce locally — 25 idle runs and 15 under four CPU
+  spinners all passed.
+
+  The bucket refills *while* the loop runs, so with a 20 tokens/s rate and
+  twenty charges the tokens left are `20 x elapsed`. `available() <= 0.001` is
+  therefore the claim "the whole twenty-iteration loop completed within 50 µs" —
+  not what the test is about, and measured at ~30 µs on an idle box: under 2x
+  margin, for twenty async mutex acquisitions, on a shared CI runner.
+
+  It now asserts against the same clock the implementation uses — no more tokens
+  than `20 x elapsed` could have refilled. `available()` does not refill (only
+  `charge` does), so the reading is frozen at the last charge while `elapsed` is
+  measured after it: the bound is exact rather than generous. Removing the debit
+  from `charge` still fails it, and a loop slowed to 4 ms — a hundred times
+  worse than the old constant allowed — still passes.
+
 - **`zensight-desired apply` still raced the catalog: a link is not a route to
   a queryable** (#1045). Caught by `demo-smoke` on a branch that changes no Rust
   the phase executes, and green on master minutes earlier — a timing bug.
