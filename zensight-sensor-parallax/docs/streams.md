@@ -89,6 +89,21 @@ which already reports why. Forcing it from the watcher would mean sending
 `CloseStream`, and that is refcount-based: it would decrement a viewer's
 reference rather than end the stream.
 
+**A camera replugged onto a different node leaves the old alert firing.** The
+kernel hands out `/dev/videoN` on a first-free basis, so unplugging `video0` and
+plugging the same camera back in can produce `video1`. The catalogue is right —
+`video0` really is gone and `video1` really is new — but `camera_disappeared` for
+`video0` stays firing, because nothing resolves it.
+
+This is deliberate, and the alternative was worse. Resolving it would mean
+deciding that the camera on `video1` *is* the one that was on `video0`, and V4L2
+offers no identity to decide that with: `name` and `model` are shared by every
+unit of a model, so two identical cameras swapped between ports would resolve
+each other's alerts. A heuristic that is right most of the time is how an
+alerting path learns to lie. The rule is named `camera_disappeared` and the
+camera at `video0` did disappear; an operator who replugged it can acknowledge
+it, which is what acknowledgement is for.
+
 **When it is unavailable.** `DeviceMonitor::new()` fails without udev, or
 without permission to read its socket. The sensor logs a warning naming the
 reason and carries on with the catalogue enumeration found — the behaviour every

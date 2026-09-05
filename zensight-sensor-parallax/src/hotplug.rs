@@ -111,6 +111,15 @@ pub async fn run(
                         "hotplug: removal of a device this sensor never advertised");
                     continue;
                 };
+                // Fires, and resolves only if THIS device path comes back. A
+                // camera replugged onto a different /dev/videoN leaves it
+                // firing, deliberately: resolving it would mean deciding that
+                // the camera on the new node is the one that left, and V4L2 has
+                // no identity to decide that with — `name` and `model` are
+                // shared by every unit of a model, so two identical cameras
+                // swapped between ports would resolve each other's alerts. A
+                // heuristic that is right most of the time is how an alerting
+                // path learns to lie. See docs/streams.md.
                 alerts.camera_present(&stream, &id, false).await;
                 if let Some(liveliness) = &liveliness {
                     liveliness.undeclare_device(&stream).await;
