@@ -1253,6 +1253,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Expectations pane addresses one host** (#1114, epic #1056). Its
+  three sentinel targets (netlink, systemd, hostspec) read
+  `v1/*/@rpc/<producer>/expectations` — the fleet selector, `QueryTarget::All`
+  — and kept the first reply off the fan-in, so on a fleet of N sentinels the
+  pane rendered whichever host answered first, unlabelled, and the operator's
+  whole-set edit went back to `v1/*/…/expectations/set`: every host running
+  the sentinel. `hostspec/spec`, whose registry description is "what **this
+  host** is being held to", was asked of `*`. The thresholds target had
+  already been built per-origin (#933) with a comment explaining why; the
+  three beside it had not. The pane now has a host picker fed by the sentinel
+  registrations on the bus (chosen automatically when exactly one host runs
+  the sentinel), every read and write is `origin_rpc_key` to that host, and
+  with no host chosen nothing is read or written and the form says so.
+
 - **snmp: the budget burst test asserted that the loop ran in under 50
   microseconds** (#1047). It failed on a pull request that does not touch the
   crate, and does not reproduce locally — 25 idle runs and 15 under four CPU

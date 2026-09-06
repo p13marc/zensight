@@ -2264,6 +2264,9 @@ impl ZenSight {
             Message::SensorInfoReceived(info) => {
                 self.known_sensors
                     .insert(format!("{}@{}", info.name, info.source), info);
+                // A sentinel that just registered belongs in the pane's host
+                // picker (#1114); the choice already made is kept.
+                self.refresh_expectation_hosts();
             }
 
             Message::AlertReceived { origin, alert } => {
@@ -3781,23 +3784,23 @@ impl ZenSight {
 
             Message::OpenExpectations => {
                 self.set_view(CurrentView::Expectations);
+                self.refresh_expectation_hosts();
                 return self.query_expectations();
+            }
+            Message::SetExpectationHost(host) => {
+                self.expectations.host = Some(host);
+                self.expectations.host_explicit = true;
+                self.expectations.status_note = None;
+                return self.refresh_expectations_for_target();
             }
             Message::CloseExpectations => {
                 self.set_view(CurrentView::Dashboard);
             }
             Message::SetExpTarget(target) => {
-                use crate::view::expectations::ExpTarget;
                 self.expectations.target = target;
                 self.expectations.status_note = None;
-                return match target {
-                    ExpTarget::Netlink => self.query_expectations(),
-                    ExpTarget::Systemd => self.query_systemd_expectations(),
-                    ExpTarget::Hostspec => self
-                        .query_hostspec_expectations()
-                        .chain(self.query_hostspec_spec()),
-                    ExpTarget::Thresholds => self.query_thresholds(),
-                };
+                self.refresh_expectation_hosts();
+                return self.refresh_expectations_for_target();
             }
             Message::SetSystemdExpKind(kind) => {
                 self.expectations.systemd_kind = kind;
@@ -3986,7 +3989,14 @@ impl ZenSight {
                         }
                     }
                     let command = self.expectations.hostspec.to_set_json();
-                    let key = zensight_common::fleet_command_key("hostspec", "expectations");
+                    let Some(origin) = self.expectations.host_origin() else {
+                        return self.refuse_no_expectation_host();
+                    };
+                    let key = zensight_common::keyexpr::origin_rpc_key(
+                        &origin,
+                        "hostspec",
+                        "expectations/set",
+                    );
                     return self
                         .send_command(key, &command, "hostspec assertions pushed".to_string())
                         .chain(
@@ -4055,7 +4065,14 @@ impl ZenSight {
                         SystemdExpKind::ForbidFailed => draft.forbid_failed = true,
                     }
                     let command = self.expectations.systemd.to_command_json();
-                    let key = zensight_common::fleet_command_key("systemd", "expectations");
+                    let Some(origin) = self.expectations.host_origin() else {
+                        return self.refuse_no_expectation_host();
+                    };
+                    let key = zensight_common::keyexpr::origin_rpc_key(
+                        &origin,
+                        "systemd",
+                        "expectations/set",
+                    );
                     return self
                         .send_command(key, &command, "systemd expectations pushed".to_string())
                         .chain(self.query_systemd_expectations());
@@ -4113,7 +4130,14 @@ impl ZenSight {
                         })
                     }
                 };
-                let key = zensight_common::fleet_command_key("netlink", "expectations");
+                let Some(origin) = self.expectations.host_origin() else {
+                    return self.refuse_no_expectation_host();
+                };
+                let key = zensight_common::keyexpr::origin_rpc_key(
+                    &origin,
+                    "netlink",
+                    "expectations/set",
+                );
                 return self
                     .send_command(key, &command, "Expectation pushed".to_string())
                     .chain(self.query_expectations());
@@ -4131,7 +4155,14 @@ impl ZenSight {
                 if self.expectations.target == ExpTarget::Hostspec {
                     self.expectations.hostspec.remove_rule(&rule);
                     let command = self.expectations.hostspec.to_set_json();
-                    let key = zensight_common::fleet_command_key("hostspec", "expectations");
+                    let Some(origin) = self.expectations.host_origin() else {
+                        return self.refuse_no_expectation_host();
+                    };
+                    let key = zensight_common::keyexpr::origin_rpc_key(
+                        &origin,
+                        "hostspec",
+                        "expectations/set",
+                    );
                     return self
                         .send_command(key, &command, format!("Removed {rule}"))
                         .chain(
@@ -4142,13 +4173,27 @@ impl ZenSight {
                 if self.expectations.target == ExpTarget::Systemd {
                     self.expectations.systemd.remove_rule(&rule);
                     let command = self.expectations.systemd.to_command_json();
-                    let key = zensight_common::fleet_command_key("systemd", "expectations");
+                    let Some(origin) = self.expectations.host_origin() else {
+                        return self.refuse_no_expectation_host();
+                    };
+                    let key = zensight_common::keyexpr::origin_rpc_key(
+                        &origin,
+                        "systemd",
+                        "expectations/set",
+                    );
                     return self
                         .send_command(key, &command, format!("Removed {rule}"))
                         .chain(self.query_systemd_expectations());
                 }
                 let command = serde_json::json!({ "type": "remove", "rule": rule });
-                let key = zensight_common::fleet_command_key("netlink", "expectations");
+                let Some(origin) = self.expectations.host_origin() else {
+                    return self.refuse_no_expectation_host();
+                };
+                let key = zensight_common::keyexpr::origin_rpc_key(
+                    &origin,
+                    "netlink",
+                    "expectations/set",
+                );
                 return self
                     .send_command(key, &command, format!("Removed {rule}"))
                     .chain(self.query_expectations());
@@ -5284,12 +5329,94 @@ impl ZenSight {
         Some(Task::batch(tasks))
     }
 
+    /// The hosts known to run `producer`, from the sensor registrations on
+    /// the bus (#1114) — labelled by hostname, keyed by origin.
+    pub(crate) fn expectation_hosts(
+        &self,
+        producer: &str,
+    ) -> Vec<crate::view::expectations::ExpHost> {
+        let mut hosts: Vec<crate::view::expectations::ExpHost> = self
+            .known_sensors
+            .values()
+            .filter(|info| info.producer == producer || info.name == producer)
+            .filter_map(|info| {
+                let chunk = info.host_id.clone()?;
+                Some(crate::view::expectations::ExpHost {
+                    label: format!("{} ({chunk})", info.source),
+                    chunk,
+                })
+            })
+            .collect();
+        hosts.sort_by(|a, b| a.label.cmp(&b.label));
+        hosts.dedup_by(|a, b| a.chunk == b.chunk);
+        hosts
+    }
+
+    /// Recompute the pane's host list for its target (#1114). A choice that
+    /// is still valid is kept; a lone host is chosen for the operator; a
+    /// choice that no longer exists is cleared rather than silently pointing
+    /// at a host that is gone.
+    fn refresh_expectation_hosts(&mut self) {
+        use crate::view::expectations::ExpTarget;
+        if self.expectations.target == ExpTarget::Thresholds {
+            return;
+        }
+        let producer = self.expectations.target.to_string();
+        let hosts = self.expectation_hosts(&producer);
+        let still_there = self
+            .expectations
+            .host
+            .as_ref()
+            .is_some_and(|h| hosts.iter().any(|k| k.chunk == h.chunk));
+        if !(self.expectations.host_explicit && still_there) {
+            // Not the operator's choice, or no longer a valid one: a lone
+            // host is chosen for them, anything else is asked.
+            self.expectations.host = match hosts.as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            };
+            self.expectations.host_explicit = false;
+        }
+        self.expectations.hosts = hosts;
+    }
+
+    /// Re-read whatever the pane is looking at.
+    fn refresh_expectations_for_target(&self) -> Task<Message> {
+        use crate::view::expectations::ExpTarget;
+        match self.expectations.target {
+            ExpTarget::Netlink => self.query_expectations(),
+            ExpTarget::Systemd => self.query_systemd_expectations(),
+            ExpTarget::Hostspec => self
+                .query_hostspec_expectations()
+                .chain(self.query_hostspec_spec()),
+            ExpTarget::Thresholds => self.query_thresholds(),
+        }
+    }
+
+    /// The refusal every per-host read and write shares (#1114).
+    fn refuse_no_expectation_host(&self) -> Task<Message> {
+        Task::done(Message::CommandFeedback {
+            success: false,
+            message: "No host chosen — an expectation set belongs to one host's sentinel; \
+                      pick the host in the pane's header"
+                .to_string(),
+        })
+    }
+
     /// Query the netlink sentinel's current expectation set (status queryable).
+    ///
+    /// **Addressed to the chosen host, never the fleet selector** (#1114).
+    /// `v1/*/@rpc/netlink/expectations` reaches every host running the
+    /// sentinel, and the first reply off that fan-in was rendered as if it
+    /// were the only one — then edited and pushed back fleet-wide.
     fn query_expectations(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::fleet_rpc_key("netlink", "expectations");
+        let Some(origin) = self.expectations.host_origin() else {
+            return self.refuse_no_expectation_host();
+        };
+        let key = zensight_common::keyexpr::origin_rpc_key(&origin, "netlink", "expectations");
         Task::future(async move {
             match session
                 .get(&key)
@@ -5824,7 +5951,10 @@ impl ZenSight {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::fleet_rpc_key("systemd", "expectations");
+        let Some(origin) = self.expectations.host_origin() else {
+            return self.refuse_no_expectation_host();
+        };
+        let key = zensight_common::keyexpr::origin_rpc_key(&origin, "systemd", "expectations");
         Task::future(async move {
             match session
                 .get(&key)
@@ -5860,7 +5990,12 @@ impl ZenSight {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::fleet_rpc_key("hostspec", "spec");
+        // Silent, like every other failure of this decoration: the
+        // assertion-set read beside it has already said "pick a host".
+        let Some(origin) = self.expectations.host_origin() else {
+            return Task::none();
+        };
+        let key = zensight_common::keyexpr::origin_rpc_key(&origin, "hostspec", "spec");
         Task::future(async move {
             let body = match session
                 .get(&key)
@@ -5888,7 +6023,10 @@ impl ZenSight {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::fleet_rpc_key("hostspec", "expectations");
+        let Some(origin) = self.expectations.host_origin() else {
+            return self.refuse_no_expectation_host();
+        };
+        let key = zensight_common::keyexpr::origin_rpc_key(&origin, "hostspec", "expectations");
         Task::future(async move {
             match session
                 .get(&key)
@@ -11076,6 +11214,114 @@ mod tier2_app_fold_tests {
 /// An operator's `link` retires an entity id — its doc is *tombstoned*. Anything
 /// still holding that id resolves to nothing unless the alias re-points it. A
 /// merge the product cannot see is not a merge.
+/// The Expectations pane addresses one host (#1114). It used to GET the fleet
+/// selector and keep the first reply, then push the edit back to every host.
+#[cfg(test)]
+mod expectation_host_tests {
+    use super::*;
+    use crate::view::expectations::ExpTarget;
+
+    fn info(name: &str, source: &str, origin: Option<&str>) -> zensight_common::SensorInfo {
+        zensight_common::SensorInfo {
+            name: name.to_string(),
+            version: "0.13.0".to_string(),
+            producer: name.to_string(),
+            source: source.to_string(),
+            host_id: origin.map(str::to_string),
+            boot_id: None,
+            hostname: None,
+            fqdn: None,
+            ips: Vec::new(),
+            macs: Vec::new(),
+            metadata: None,
+            last_updated: 0,
+        }
+    }
+
+    #[test]
+    fn the_host_list_is_the_sentinel_registrations_with_an_origin() {
+        let mut a = ZenSight::boot(true).0;
+        let _ = a.update(Message::SensorInfoReceived(info(
+            "netlink",
+            "edge01",
+            Some("h-aaaaaaaaaaaa"),
+        )));
+        let _ = a.update(Message::SensorInfoReceived(info(
+            "netlink",
+            "edge02",
+            Some("h-bbbbbbbbbbbb"),
+        )));
+        // A registration with no origin cannot be addressed, so it is not a
+        // choice; a different producer is not this sentinel.
+        let _ = a.update(Message::SensorInfoReceived(info("netlink", "legacy", None)));
+        let _ = a.update(Message::SensorInfoReceived(info(
+            "systemd",
+            "edge01",
+            Some("h-aaaaaaaaaaaa"),
+        )));
+        let hosts = a.expectation_hosts("netlink");
+        assert_eq!(
+            hosts.iter().map(|h| h.chunk.as_str()).collect::<Vec<_>>(),
+            ["h-aaaaaaaaaaaa", "h-bbbbbbbbbbbb"]
+        );
+        assert_eq!(hosts[0].label, "edge01 (h-aaaaaaaaaaaa)");
+    }
+
+    #[test]
+    fn two_hosts_means_the_operator_chooses_and_one_host_is_chosen_for_them() {
+        let mut a = ZenSight::boot(true).0;
+        let _ = a.update(Message::SensorInfoReceived(info(
+            "netlink",
+            "edge01",
+            Some("h-aaaaaaaaaaaa"),
+        )));
+        let _ = a.update(Message::SensorInfoReceived(info(
+            "netlink",
+            "edge02",
+            Some("h-bbbbbbbbbbbb"),
+        )));
+        let _ = a.update(Message::SetExpTarget(ExpTarget::Netlink));
+        assert_eq!(a.expectations.hosts.len(), 2);
+        assert!(
+            a.expectations.host.is_none(),
+            "two hosts: nothing is read or written until one is picked"
+        );
+        assert!(a.expectations.host_origin().is_none());
+
+        // The systemd sentinel runs on one host only: chosen automatically.
+        let _ = a.update(Message::SensorInfoReceived(info(
+            "systemd",
+            "edge02",
+            Some("h-bbbbbbbbbbbb"),
+        )));
+        let _ = a.update(Message::SetExpTarget(ExpTarget::Systemd));
+        assert_eq!(
+            a.expectations.host.as_ref().map(|h| h.chunk.as_str()),
+            Some("h-bbbbbbbbbbbb")
+        );
+        assert_eq!(
+            a.expectations
+                .host_origin()
+                .map(|o| {
+                    use zenkey::origin::ConcreteOrigin;
+                    o.chunk().to_string()
+                })
+                .as_deref(),
+            Some("h-bbbbbbbbbbbb"),
+            "the origin every read and write is addressed to"
+        );
+
+        // Back to netlink: the systemd choice does not leak across targets.
+        let _ = a.update(Message::SetExpTarget(ExpTarget::Netlink));
+        assert!(a.expectations.host.is_none());
+        let _ = a.update(Message::SetExpectationHost(a.expectations.hosts[0].clone()));
+        assert_eq!(
+            a.expectations.host.as_ref().map(|h| h.chunk.as_str()),
+            Some("h-aaaaaaaaaaaa")
+        );
+    }
+}
+
 #[cfg(test)]
 mod alias_tests {
     use super::*;

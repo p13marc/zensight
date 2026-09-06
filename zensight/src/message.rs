@@ -208,6 +208,8 @@ pub enum Message {
     CloseExpectations,
     /// Select the sentinel target being authored (netlink vs systemd) (#278).
     SetExpTarget(crate::view::expectations::ExpTarget),
+    /// The operator chose which host's sentinel the pane addresses (#1114).
+    SetExpectationHost(crate::view::expectations::ExpHost),
     /// Set the systemd expectation kind being authored (#278).
     SetSystemdExpKind(crate::view::expectations::SystemdExpKind),
     /// Pick the hostspec assertion kind being authored (#821).
