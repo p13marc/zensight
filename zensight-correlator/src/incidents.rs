@@ -109,10 +109,24 @@ impl AlertStore {
         }
     }
 
-    /// Drop everything older than `ttl_ms`, so a publisher that dies mid-alert
-    /// cannot hold an incident open forever.
-    pub fn sweep(&mut self, now_ms: i64, ttl_ms: i64) {
-        self.map.retain(|_, a| now_ms - a.timestamp < ttl_ms);
+    /// Drop the alerts of a publisher that died mid-alert, so it cannot hold
+    /// an incident open forever — and **only** those (#1101).
+    ///
+    /// `alive(origin)` is the liveliness plane's answer. An alert whose origin
+    /// is alive is kept whatever its age: its publisher will resolve it,
+    /// tombstone it, or keep firing it, and a firing alert's `timestamp` is
+    /// the *transition* instant, which does not move while it fires. The
+    /// first version of this swept on that timestamp alone, so every incident
+    /// lasting longer than `evidence_ttl_secs` (fifteen minutes) was
+    /// tombstoned while its alert was still firing — the Prometheus mirror
+    /// lost `zensight_incident`, the OTel mirror emitted a *false* resolution,
+    /// and the operator's ack was retired as stale. An origin that is dead,
+    /// or was never seen alive (a token that vanished before this catalog
+    /// started, so no liveliness event ever arrives), ages out on `ttl_ms`
+    /// as before.
+    pub fn sweep(&mut self, now_ms: i64, ttl_ms: i64, alive: impl Fn(&str) -> bool) {
+        self.map
+            .retain(|r, a| alive(&r.origin) || now_ms - a.timestamp < ttl_ms);
     }
 
     /// The firing set, in a stable order.
@@ -552,18 +566,23 @@ mod tests {
         assert_eq!(store.len(), 2);
     }
 
-    /// A publisher that dies mid-alert cannot hold an incident open forever.
+    /// A publisher that dies mid-alert cannot hold an incident open forever —
+    /// and a publisher that is alive cannot have its incident swept out from
+    /// under it by the calendar (#1101).
     #[test]
-    fn the_sweep_drops_stale_entries() {
+    fn the_sweep_drops_stale_entries_of_dead_origins_only() {
         let mut store = AlertStore::default();
         store.observe(
             aref("h-aaaaaaaaaaaa", "k1"),
             Some(alert("web01", "x", AlertSeverity::Warning, 1_000)),
         );
-        store.sweep(1_500, 900);
+        let dead = |_: &str| false;
+        store.sweep(1_500, 900, dead);
         assert_eq!(store.len(), 1, "still inside the TTL");
-        store.sweep(2_000, 900);
-        assert!(store.is_empty(), "past it");
+        store.sweep(2_000, 900, |_| true);
+        assert_eq!(store.len(), 1, "past the TTL but the origin is alive: kept");
+        store.sweep(2_000, 900, dead);
+        assert!(store.is_empty(), "past it, and the origin is dead");
     }
 
     // ---- the origin -> entity join --------------------------------------
