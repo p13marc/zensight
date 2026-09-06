@@ -88,6 +88,7 @@ async fn main() -> Result<()> {
                 format,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
             )
+            .with_counters(runner.publisher().counters())
             .with_qos(qos),
         )
     };

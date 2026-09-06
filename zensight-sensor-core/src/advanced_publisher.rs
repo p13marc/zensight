@@ -119,6 +119,12 @@ pub struct AdvancedPublisherRegistry {
     /// installed only on the other one would have missed most of the fleet's
     /// points while looking like it saw them all.
     observer: std::sync::OnceLock<Arc<dyn zensight_common::point_observer::PointObserver>>,
+    /// Publish counters (#1079). Fresh by default; a sensor shares its
+    /// baseline publisher's set through [`Self::with_counters`] so the health
+    /// doc's `published_total` counts this tier too — for netlink, netring,
+    /// snmp and logs this is where the bulk of the telemetry goes, and an
+    /// uncounted bulk path made `published_total` orders of magnitude low.
+    counters: Arc<zensight_common::PublishCounters>,
 }
 
 impl std::fmt::Debug for AdvancedPublisherRegistry {
@@ -147,7 +153,22 @@ impl AdvancedPublisherRegistry {
             qos: QosClass::Telemetry,
             publishers: RwLock::new(HashMap::new()),
             observer: std::sync::OnceLock::new(),
+            counters: Arc::default(),
         }
+    }
+
+    /// Share a publish counter set — normally the baseline
+    /// [`Publisher::counters`](crate::Publisher::counters) of the same sensor,
+    /// so every tier's deliveries land in the one number the health doc
+    /// publishes (#1079).
+    pub fn with_counters(mut self, counters: Arc<zensight_common::PublishCounters>) -> Self {
+        self.counters = counters;
+        self
+    }
+
+    /// This registry's publish counters.
+    pub fn counters(&self) -> Arc<zensight_common::PublishCounters> {
+        self.counters.clone()
     }
 
     /// Override the QoS class for publishers declared by this registry (default
@@ -307,31 +328,43 @@ impl AdvancedPublisherRegistry {
     /// the format's [`Encoding`] (RFC 08 §7: metadata beats sniffing).
     async fn put_raw(&self, key: &str, payload: Vec<u8>) -> Result<()> {
         let encoding = self.format.encoding();
+        let bytes = payload.len();
         {
             let publishers = self.publishers.read().await;
             if let Some(publisher) = publishers.get(key) {
-                return publisher
+                publisher
                     .put(payload)
                     .encoding(encoding)
                     .await
                     .map_err(|e| SensorError::Publish {
                         key: key.to_string(),
                         message: e.to_string(),
-                    });
+                    })?;
+                self.counters.record_publish(bytes);
+                return Ok(());
             }
         }
         self.get_or_create_publisher(key).await?;
         let publishers = self.publishers.read().await;
-        if let Some(publisher) = publishers.get(key) {
-            publisher
-                .put(payload)
-                .encoding(encoding)
-                .await
-                .map_err(|e| SensorError::Publish {
-                    key: key.to_string(),
-                    message: e.to_string(),
-                })?;
-        }
+        // A publisher that was just created and is not in the map is a bug,
+        // not a success: `tombstone` already treats it as one, and a put that
+        // returns `Ok(())` without publishing is the one outcome a caller
+        // cannot detect (#1079).
+        let Some(publisher) = publishers.get(key) else {
+            return Err(SensorError::Publish {
+                key: key.to_string(),
+                message: "publisher missing after creation".to_string(),
+            });
+        };
+        publisher
+            .put(payload)
+            .encoding(encoding)
+            .await
+            .map_err(|e| SensorError::Publish {
+                key: key.to_string(),
+                message: e.to_string(),
+            })?;
+        self.counters.record_publish(bytes);
         Ok(())
     }
 
