@@ -1253,6 +1253,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A coarse bucket's range survives more than one flush** (#1060, epic
+  #1052). `write_batch` replaced the row on disk with the current flush
+  window's bucket. The historian flushes every ten seconds, so an hour bucket
+  was written some 360 times and its `min`/`max` described the hour's final
+  ten seconds — the gauge that touched 400 and settled at 12 read as twelve,
+  flat, which is the exact sentence the v3 schema (#904) was written to make
+  false. Every `downsample` test was a single call and the one `write_batch`
+  test wrote one batch; nothing exercised two flushes into one bucket, which
+  is the steady state. Now the row is merged: the range is the union, `last`
+  is the newer window's. The test that fails without it is
+  `a_second_flush_into_the_same_bucket_keeps_the_range`.
+
 - **snmp: the budget burst test asserted that the loop ran in under 50
   microseconds** (#1047). It failed on a pull request that does not touch the
   crate, and does not reproduce locally — 25 idle runs and 15 under four CPU
