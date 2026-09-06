@@ -1253,6 +1253,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The historian's configured retention is applied, and `max_db_bytes` is a
+  ceiling** (#1063, #1064, epic #1052). `retention.minute_days` and
+  `hour_days` were parsed, cross-validated, printed at startup and put in the
+  stats document — and never passed to `prune`, which took only a clock and
+  used the GUI cache's constants: thirty days of minute buckets and a year of
+  hour buckets ran where two and ninety were configured, and `storage.md`'s
+  "**not** the GUI cache's 365" was false for two releases. `max_db_bytes`
+  was declared, defaulted to 2 GiB, documented as the ceiling on the file,
+  and read by nothing. Together, a 10 000-series fleet at the bench's density
+  would have written some 90 GB on a VM whose quadlet caps it at 320 MB.
+  `prune_with(now, &Retention)` takes the configured windows;
+  `prune_to_ceiling(max_bytes)` takes days off the oldest end across every
+  tier until *live* bytes fit — redb reuses freed pages, so a file at the
+  ceiling stops growing (it does not shrink; compaction needs an exclusive
+  handle and is #911's follow-up). A ceiling that has to prune is a retention
+  that does not fit its disk, so it warns every pass and counts in `stats`
+  (`ceiling_prunes_total`, beside a new `stored_bytes`).
+  `prune_with_honours_the_configured_window` and
+  `the_ceiling_removes_the_oldest_days_first` pin both.
 - **The catalog no longer deletes every incident fifteen minutes after it
   fires** (#1101, epic #1055). `recompute_incidents` swept the firing-alert
   store on `evidence_ttl_secs` against `Alert::timestamp` — the firing
