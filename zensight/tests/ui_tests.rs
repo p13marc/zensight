@@ -2061,15 +2061,28 @@ fn test_alert_filter_pills() {
 /// The expectations authoring view renders and "Add & Push" emits a message.
 #[test]
 fn test_expectations_view() {
-    use zensight::view::expectations::{ExpectationsState, expectations_view, parse_status};
+    use zensight::view::expectations::{
+        ExpHost, ExpectationsState, expectations_view, parse_status,
+    };
 
     let mut state = ExpectationsState::default();
+    // A sentinel form addresses one host (#1114); without one the pane
+    // shows why instead of a form.
+    state.host = Some(ExpHost {
+        chunk: "h-aaaaaaaaaaaa".to_string(),
+        label: "edge01 (h-aaaaaaaaaaaa)".to_string(),
+    });
     state.current = parse_status(
         r#"{"sockets":[{"name":"sshd","listen":22,"severity":"critical"}],"links":[]}"#,
     );
 
     let mut ui = simulator(expectations_view(&state));
     assert!(ui.find("Expectations (netlink sentinel)").is_ok());
+    assert!(
+        ui.find("Applies to this host only (h-aaaaaaaaaaaa).")
+            .is_ok(),
+        "the scope is stated on its own line (#1114)"
+    );
     assert!(ui.find("socket:sshd").is_ok());
     assert!(ui.find("listen :22").is_ok());
 
@@ -4658,10 +4671,14 @@ fn test_systemd_units_table_defaults_to_services() {
 /// renders and "Add & Push" emits AddExpectation.
 #[test]
 fn test_systemd_expectations_authoring() {
-    use zensight::view::expectations::{ExpTarget, ExpectationsState, expectations_view};
+    use zensight::view::expectations::{ExpHost, ExpTarget, ExpectationsState, expectations_view};
 
     let mut state = ExpectationsState::default();
     state.target = ExpTarget::Systemd;
+    state.host = Some(ExpHost {
+        chunk: "h-aaaaaaaaaaaa".to_string(),
+        label: "edge01 (h-aaaaaaaaaaaa)".to_string(),
+    });
     state.new_name = "sshd.service".to_string();
 
     let mut ui = simulator(expectations_view(&state));
@@ -7603,7 +7620,14 @@ mod verdict_ui {
 
 mod hostspec_expectations_ui {
     use super::simulator;
-    use zensight::view::expectations::{ExpTarget, ExpectationsState, expectations_view};
+    use zensight::view::expectations::{ExpHost, ExpTarget, ExpectationsState, expectations_view};
+
+    fn host() -> ExpHost {
+        ExpHost {
+            chunk: "h-aaaaaaaaaaaa".to_string(),
+            label: "edge01 (h-aaaaaaaaaaaa)".to_string(),
+        }
+    }
 
     /// The hostspec authoring form renders for the new target (#821), with
     /// the whole-set caption that tells an operator what a push rewrites.
@@ -7611,9 +7635,28 @@ mod hostspec_expectations_ui {
     fn test_hostspec_form_renders() {
         let mut state = ExpectationsState::default();
         state.target = ExpTarget::Hostspec;
+        state.host = Some(host());
         let mut ui = simulator(expectations_view(&state));
         assert!(ui.find("Declare a host assertion").is_ok());
         assert!(ui.find("Add & Push").is_ok());
+    }
+
+    /// Without a host there is no form (#1114): a form that would read one
+    /// host's set and push it to every host is the bug the picker replaced.
+    #[test]
+    fn no_host_means_no_form() {
+        let mut state = ExpectationsState::default();
+        state.target = ExpTarget::Hostspec;
+        state.hosts = vec![
+            host(),
+            ExpHost {
+                chunk: "h-bbbbbbbbbbbb".to_string(),
+                label: "edge02 (h-bbbbbbbbbbbb)".to_string(),
+            },
+        ];
+        let mut ui = simulator(expectations_view(&state));
+        assert!(ui.find("No host chosen.").is_ok());
+        assert!(ui.find("Add & Push").is_err(), "nothing to push to");
     }
 
     /// Before a reply arrives, an empty list means "not fetched" and must keep
