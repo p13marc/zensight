@@ -1253,6 +1253,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A sensor's health status reads its errors** (#1080, epic #1053). `status`
+  was a pure device census — responding versus failed — and every host sensor
+  (sysinfo, netlink, netring, systemd, logs, hostspec, container, parallax,
+  netflow, gnmi, modbus) has no devices, so it took the census's final `else`
+  and was `Healthy` unconditionally; `errors_last_hour` was published beside
+  it and never consulted. Worse, `publish_error` — the path the logs sensor
+  reports through — did not count as an error, so a sensor publishing a
+  report a second stayed at zero. Now an error not yet followed by a success
+  is `Degraded`, three in a row is `Error`, a success recovers (the rule the
+  census already applied to one device), and the snapshot carries
+  `last_success_unix_ms` and `last_error` — additive optional fields — so a
+  consumer can tell "up" from "collecting". The rolling error counter also
+  rotated outside its lock and stored `now` rather than `last + elapsed`, so
+  "the last hour" drifted long; both fixed. netflow's publish loop records
+  its outcome; the other device-less collectors get theirs with #1082.
+
 - **snmp: the budget burst test asserted that the loop ran in under 50
   microseconds** (#1047). It failed on a pull request that does not touch the
   crate, and does not reproduce locally — 25 idle runs and 15 under four CPU
