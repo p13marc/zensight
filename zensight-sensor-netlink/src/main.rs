@@ -140,9 +140,15 @@ async fn main() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let collector = Collector::new(source.clone(), netlink_config.clone(), session, format)
-        .with_health(runner.health())
-        .with_thresholds(thresholds);
+    let collector = Collector::new(
+        source.clone(),
+        netlink_config.clone(),
+        session,
+        format,
+        runner.publisher().counters(),
+    )
+    .with_health(runner.health())
+    .with_thresholds(thresholds);
     #[cfg(feature = "ebpf")]
     let collector = collector.with_ebpf(ebpf_state.clone());
     // wg-quick peer labels (#268): parse configured wg-quick files once at start.

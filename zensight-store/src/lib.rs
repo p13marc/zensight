@@ -337,6 +337,23 @@ impl Bucket {
     pub fn from_row((last, min, max): (f64, f32, f32)) -> Bucket {
         Bucket { last, min, max }
     }
+
+    /// Fold a later flush window's bucket into this one (#1060).
+    ///
+    /// A coarse bucket is written once per flush, not once per bucket: at a
+    /// ten-second flush an hour bucket is written hundreds of times, and
+    /// before this existed each write *replaced* the row, so `min`/`max`
+    /// described the last ten seconds of the hour — the exact loss the range
+    /// was added to prevent. `last` is the newer window's (flushes are
+    /// time-ordered; a recovered out-of-order sample can only move `last`
+    /// within one window, never across two); the range is the union.
+    pub fn merge(self, newer: Bucket) -> Bucket {
+        Bucket {
+            last: newer.last,
+            min: self.min.min(newer.min),
+            max: self.max.max(newer.max),
+        }
+    }
 }
 
 /// Everything about a metric that its series path does not carry (#904).
@@ -898,7 +915,16 @@ impl PersistentStore {
             }
             let mut table = txn.open_table(SAMPLES_TABLE)?;
             for (metric, tier, bucket_ts, bucket) in &batch.rows {
-                table.insert(pack_key(*metric, *tier, *bucket_ts), bucket.as_row())?;
+                let key = pack_key(*metric, *tier, *bucket_ts);
+                // Merge, never replace: the bucket on disk holds every
+                // earlier flush window of the same bucket (#1060). One
+                // point lookup per row; the samples table is keyed so this
+                // is a single B-tree probe, not a scan.
+                let row = match table.get(key)? {
+                    Some(existing) => Bucket::from_row(existing.value()).merge(*bucket),
+                    None => *bucket,
+                };
+                table.insert(key, row.as_row())?;
                 written += 1;
             }
         }
@@ -2803,6 +2829,47 @@ mod tests {
                 .len(),
             2
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two flushes into ONE coarse bucket keep the bucket's true range
+    /// (#1060). The historian flushes every ten seconds, so an hour bucket is
+    /// written hundreds of times; before the merge each write replaced the row
+    /// with the last flush window's min/max, and a gauge that touched 400 at
+    /// :07 and settled at 12 read as twelve, flat — exactly the case the v3
+    /// schema (#904) was built to keep.
+    #[test]
+    fn a_second_flush_into_the_same_bucket_keeps_the_range() {
+        let path = temp_db_path("merge");
+        let store = PersistentStore::open(&path).expect("open");
+        let m = MetricId(7);
+        // First flush window: the spike.
+        store
+            .write_batch(&FlushBatch {
+                rows: vec![(m, Tier::Hour, 3_600, Bucket::point(400.0))],
+                paths: vec![],
+            })
+            .unwrap();
+        // Second flush window, same hour: the value settled.
+        store
+            .write_batch(&FlushBatch {
+                rows: vec![(m, Tier::Hour, 3_600, Bucket::point(12.0))],
+                paths: vec![],
+            })
+            .unwrap();
+        let got = store
+            .query_buckets(m, Tier::Hour, 3_600_000, 3_600_000)
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].1.last, 12.0,
+            "the closing value is the newer flush's"
+        );
+        assert_eq!(
+            got[0].1.max, 400.0,
+            "the spike from the earlier flush survives"
+        );
+        assert_eq!(got[0].1.min, 12.0);
         let _ = std::fs::remove_file(&path);
     }
 

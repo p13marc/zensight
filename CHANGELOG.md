@@ -1268,6 +1268,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rotated outside its lock and stored `now` rather than `last + elapsed`, so
   "the last hour" drifted long; both fixed. netflow's publish loop records
   its outcome; the other device-less collectors get theirs with #1082.
+- **`published_total` counts what the sensor publishes** (#1078, #1079, epic
+  #1053). Two ways it read zero for a whole process lifetime. Eleven sensors
+  call `SensorRunner::with_format`, which built a *new* `Publisher` — and a
+  new `Publisher` is a new registry with new counters, while the health
+  tracker kept the old ones: `self_stats.published_total` was `Some(0)` on
+  bmc, probe, hostspec, netring, sysinfo, historian, parallax, container,
+  systemd, netlink and pve, a present zero where `data-model.md` promises
+  "absent, never zero". And the advanced tier — the path netlink, netring,
+  snmp and logs use for the bulk of their telemetry — had no counters at
+  all, so even a correctly-wired sensor counted its control plane and not
+  its data. `with_format` now re-formats the publisher it has; the advanced
+  registry carries a counter set and every sensor shares its baseline one
+  into it; both tiers count *after* the put succeeds (the baseline tier
+  counted attempts). A missing advanced publisher is now an error rather
+  than an `Ok(())` that published nothing. `tests/publish_counters.rs` pins
+  both properties; the #944 sizing report reads exactly these fields.
+- **A coarse bucket's range survives more than one flush** (#1060, epic
+  #1052). `write_batch` replaced the row on disk with the current flush
+  window's bucket. The historian flushes every ten seconds, so an hour bucket
+  was written some 360 times and its `min`/`max` described the hour's final
+  ten seconds — the gauge that touched 400 and settled at 12 read as twelve,
+  flat, which is the exact sentence the v3 schema (#904) was written to make
+  false. Every `downsample` test was a single call and the one `write_batch`
+  test wrote one batch; nothing exercised two flushes into one bucket, which
+  is the steady state. Now the row is merged: the range is the union, `last`
+  is the newer window's. The test that fails without it is
+  `a_second_flush_into_the_same_bucket_keeps_the_range`.
 
 - **snmp: the budget burst test asserted that the loop ran in under 50
   microseconds** (#1047). It failed on a pull request that does not touch the

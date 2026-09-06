@@ -183,6 +183,7 @@ impl Collector {
         config: NetlinkConfig,
         session: Arc<zenoh::Session>,
         format: Format,
+        counters: Arc<zensight_common::PublishCounters>,
     ) -> Self {
         let relations =
             zensight_sensor_core::relation::RelationSet::new("netlink", session.clone(), format);
@@ -191,7 +192,8 @@ impl Collector {
             zensight_sensor_core::v1::for_producer("netlink").telemetry_prefix(),
             format,
             AdvancedPublisherConfig::default(),
-        );
+        )
+        .with_counters(counters);
         let collect = CollectHandle::new(config.collect.clone());
         let health = Arc::new(zensight_sensor_core::SensorHealth::new("netlink"));
         let event_state = EventState::new(config.events.ring_capacity);
