@@ -74,6 +74,19 @@ impl Publisher {
         self.format
     }
 
+    /// The same publisher with a different telemetry format.
+    ///
+    /// Keeps the declared-publisher registry — and with it the publish
+    /// counters the health doc reads (#1078). `SensorRunner::with_format`
+    /// used to build a *new* `Publisher`, whose fresh registry had fresh
+    /// counters, while the health tracker kept the old ones: eleven sensors
+    /// reported `published_total: 0` for their whole lifetime, a present
+    /// zero where the data-model doc promises "absent, never zero".
+    pub fn with_format(mut self, format: Format) -> Self {
+        self.format = format;
+        self
+    }
+
     /// Get a reference to the Zenoh session.
     pub fn session(&self) -> &Arc<zenoh::Session> {
         &self.session

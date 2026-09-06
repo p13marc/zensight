@@ -103,6 +103,16 @@ pub struct HealthSnapshot {
     /// sensors — absent always reads as *not measured*, never as zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_stats: Option<SelfStats>,
+    /// When the sensor last did its job successfully (a poll, a batch, a
+    /// device answering), epoch milliseconds (#1080). Absent means the
+    /// sensor has not said — never "never". "The process is up" and "the
+    /// process is collecting" are two facts; `status` was the first one
+    /// dressed as the second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_unix_ms: Option<i64>,
+    /// The most recent error the sensor recorded, if any (#1080).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// A sensor's self-measured resource usage (#811), collected on the health

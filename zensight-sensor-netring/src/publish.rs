@@ -23,6 +23,7 @@ pub async fn run_drains(
     producer: String,
     sensor_id: String,
     format: Format,
+    counters: Arc<zensight_common::PublishCounters>,
     reporter: Arc<AlertReporter>,
     flow_period_secs: u64,
     health: Arc<zensight_sensor_core::SensorHealth>,
@@ -72,7 +73,8 @@ pub async fn run_drains(
         zensight_sensor_core::v1::for_producer(&producer).telemetry_prefix(),
         format,
         AdvancedPublisherConfig::default(),
-    );
+    )
+    .with_counters(counters);
     registry.set_observer(thresholds);
 
     let mut flow_tick = tokio::time::interval(Duration::from_secs(flow_period_secs.max(1)));

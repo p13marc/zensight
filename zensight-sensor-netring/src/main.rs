@@ -753,6 +753,7 @@ async fn main() -> Result<()> {
                 format,
                 AdvancedPublisherConfig::cache_only(1),
             )
+            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::Evidence),
         );
         runner.spawn(zensight_sensor_netring::evidence::run_asset_evidence(
@@ -777,6 +778,7 @@ async fn main() -> Result<()> {
                 format,
                 AdvancedPublisherConfig::cache_only(1),
             )
+            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::Evidence),
         );
         runner.spawn(zensight_sensor_netring::evidence::run_name_evidence(
@@ -817,6 +819,7 @@ async fn main() -> Result<()> {
         producer,
         source,
         format,
+        runner.publisher().counters(),
         reporter,
         flow_period,
         health,

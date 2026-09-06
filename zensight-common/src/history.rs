@@ -324,6 +324,16 @@ pub struct HistorianStats {
     /// ask", which retention makes a moving target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oldest_ts: Option<i64>,
+    /// Live bytes — stored rows plus engine metadata — as opposed to
+    /// `db_bytes`, the file, which only grows (#1064). The ceiling is judged
+    /// against this one. Absent on a memory-only historian.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_bytes: Option<u64>,
+    /// Prune passes in which `max_db_bytes`, not the retention, removed
+    /// history (#1064). Non-zero means the configured retention does not fit
+    /// the disk it was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling_prunes_total: Option<u64>,
 }
 
 #[cfg(test)]

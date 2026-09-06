@@ -1266,6 +1266,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registrations on the bus (chosen automatically when exactly one host runs
   the sentinel), every read and write is `origin_rpc_key` to that host, and
   with no host chosen nothing is read or written and the form says so.
+- **A dead sensor's card flips to Offline** (#1113, epic #1056). The
+  liveliness token names the origin (`h-…`); the health card is keyed by the
+  snapshot's `source`, which is the hostname; `set_sensor_liveliness` compared
+  the two as strings and they were never equal on a real bus. So the card
+  the Sensors view exists to flip stayed green for the life of the process,
+  and the Fleet view — which gates on that card — fed hosts powered off for a
+  week into its rows as "no answer". Two green test suites asserted the two
+  incompatible contracts (one injected a hostname the wire never carries, the
+  other pinned the origin the parser emits) and nothing joined them — the
+  same shape as #1031. The join is now the snapshot's `host_id`, stamped by
+  the runner from the identity the key origin is minted from; the hostname
+  comparison is kept for snapshots without one. The regression test feeds the
+  parser's own output into `update`, and was seen to fail with the join
+  removed.
+- **The historian's configured retention is applied, and `max_db_bytes` is a
+  ceiling** (#1063, #1064, epic #1052). `retention.minute_days` and
+  `hour_days` were parsed, cross-validated, printed at startup and put in the
+  stats document — and never passed to `prune`, which took only a clock and
+  used the GUI cache's constants: thirty days of minute buckets and a year of
+  hour buckets ran where two and ninety were configured, and `storage.md`'s
+  "**not** the GUI cache's 365" was false for two releases. `max_db_bytes`
+  was declared, defaulted to 2 GiB, documented as the ceiling on the file,
+  and read by nothing. Together, a 10 000-series fleet at the bench's density
+  would have written some 90 GB on a VM whose quadlet caps it at 320 MB.
+  `prune_with(now, &Retention)` takes the configured windows;
+  `prune_to_ceiling(max_bytes)` takes days off the oldest end across every
+  tier until *live* bytes fit — redb reuses freed pages, so a file at the
+  ceiling stops growing (it does not shrink; compaction needs an exclusive
+  handle and is #911's follow-up). A ceiling that has to prune is a retention
+  that does not fit its disk, so it warns every pass and counts in `stats`
+  (`ceiling_prunes_total`, beside a new `stored_bytes`).
+  `prune_with_honours_the_configured_window` and
+  `the_ceiling_removes_the_oldest_days_first` pin both.
+- **The catalog no longer deletes every incident fifteen minutes after it
+  fires** (#1101, epic #1055). `recompute_incidents` swept the firing-alert
+  store on `evidence_ttl_secs` against `Alert::timestamp` — the firing
+  *transition*, which does not move while an alert fires — so any incident
+  older than 900 s was tombstoned with its alert still firing: the Prometheus
+  mirror lost `zensight_incident`, the OTel mirror emitted `state="resolved"`
+  for a problem that had not ended, and the operator's ack was retired as
+  stale. The Prometheus exporter's own docs (#758) explain why alerts must not
+  be staleness-swept; the catalog had reintroduced it on the component that
+  publishes the incident. `just demo-incident` lasts thirty seconds, which is
+  why CI never saw it. The sweep now keys on the origin's liveliness: a live
+  origin's alert is kept whatever its age; a dead origin's — or one never
+  seen alive — ages out on the TTL as before.
+  `a_live_origins_alert_outlives_the_evidence_ttl` pins the three cases.
+- **A sensor's health status reads its errors** (#1080, epic #1053). `status`
+  was a pure device census — responding versus failed — and every host sensor
+  (sysinfo, netlink, netring, systemd, logs, hostspec, container, parallax,
+  netflow, gnmi, modbus) has no devices, so it took the census's final `else`
+  and was `Healthy` unconditionally; `errors_last_hour` was published beside
+  it and never consulted. Worse, `publish_error` — the path the logs sensor
+  reports through — did not count as an error, so a sensor publishing a
+  report a second stayed at zero. Now an error not yet followed by a success
+  is `Degraded`, three in a row is `Error`, a success recovers (the rule the
+  census already applied to one device), and the snapshot carries
+  `last_success_unix_ms` and `last_error` — additive optional fields — so a
+  consumer can tell "up" from "collecting". The rolling error counter also
+  rotated outside its lock and stored `now` rather than `last + elapsed`, so
+  "the last hour" drifted long; both fixed. netflow's publish loop records
+  its outcome; the other device-less collectors get theirs with #1082.
+- **`published_total` counts what the sensor publishes** (#1078, #1079, epic
+  #1053). Two ways it read zero for a whole process lifetime. Eleven sensors
+  call `SensorRunner::with_format`, which built a *new* `Publisher` — and a
+  new `Publisher` is a new registry with new counters, while the health
+  tracker kept the old ones: `self_stats.published_total` was `Some(0)` on
+  bmc, probe, hostspec, netring, sysinfo, historian, parallax, container,
+  systemd, netlink and pve, a present zero where `data-model.md` promises
+  "absent, never zero". And the advanced tier — the path netlink, netring,
+  snmp and logs use for the bulk of their telemetry — had no counters at
+  all, so even a correctly-wired sensor counted its control plane and not
+  its data. `with_format` now re-formats the publisher it has; the advanced
+  registry carries a counter set and every sensor shares its baseline one
+  into it; both tiers count *after* the put succeeds (the baseline tier
+  counted attempts). A missing advanced publisher is now an error rather
+  than an `Ok(())` that published nothing. `tests/publish_counters.rs` pins
+  both properties; the #944 sizing report reads exactly these fields.
+- **A coarse bucket's range survives more than one flush** (#1060, epic
+  #1052). `write_batch` replaced the row on disk with the current flush
+  window's bucket. The historian flushes every ten seconds, so an hour bucket
+  was written some 360 times and its `min`/`max` described the hour's final
+  ten seconds — the gauge that touched 400 and settled at 12 read as twelve,
+  flat, which is the exact sentence the v3 schema (#904) was written to make
+  false. Every `downsample` test was a single call and the one `write_batch`
+  test wrote one batch; nothing exercised two flushes into one bucket, which
+  is the steady state. Now the row is merged: the range is the union, `last`
+  is the newer window's. The test that fails without it is
+  `a_second_flush_into_the_same_bucket_keeps_the_range`.
 
 - **snmp: the budget burst test asserted that the loop ran in under 50
   microseconds** (#1047). It failed on a pull request that does not touch the

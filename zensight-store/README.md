@@ -77,8 +77,15 @@ the bucket covered, so a coarse tier can still say a spike happened: an hour
 bucket that reported only its closing value showed a gauge that touched 400 and
 settled at 12 as twelve, flat.
 
+The range is **merged on write**, never replaced (#1060): a coarse bucket is
+written once per flush, not once per bucket — at a ten-second flush an hour
+bucket is written hundreds of times — so `write_batch` folds each flush
+window's min/max into the row already on disk and takes `last` from the
+newer window. Before that, each write replaced the row and an hour's range
+was its final ten seconds.
+
 **The ids and their metadata are persisted.** A `metrics` table maps each
-interned path to `(id, kind, source, metric)`, written in the same transaction
+interned path to `(id, kind, source, metric, unit)`, written in the same transaction
 as the samples that use it, and the interner is rebuilt from it on open — so an
 id means the same path, of the same kind, in every process that opens the file.
 For a long time the ids were not written at all: they were minted in
@@ -91,13 +98,13 @@ them and they cannot be recovered from it. A proxy producer's subject is
 would each have to be recovered by un-slugging a device chunk — a guess, in
 the code that decides which host a chart belongs to.
 
-A `meta` table carries the schema version (`SCHEMA_VERSION`, now **3**). **It
+A `meta` table carries the schema version (`SCHEMA_VERSION`, now **4** — v4 added `unit` to the metrics row). **It
 is read in its own transaction, before any other table is opened**: v3 re-typed
 both `metrics` and `samples`, and opening a re-typed table fails with a redb
 *table type mismatch*, which is not the error the "wrong layout, move it aside"
-path recognises. A v2 file is therefore refused cleanly as
-`StoreOpenError::Schema { found: 2 }` and moved aside
-(`metrics.redb.schema-v2`), the same way a pre-v2 file and an older redb file
+path recognises. An older file is therefore refused cleanly as
+`StoreOpenError::Schema { found: N }` and moved aside
+(`metrics.redb.schema-vN`), the same way a pre-v2 file and an older redb file
 format already were. It is a cache; the history it shadows outlives it.
 
 Without a database (`--demo`, a locked file, a read-only data dir) the store

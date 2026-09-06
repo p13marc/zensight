@@ -290,6 +290,17 @@ the health doc also absorbs the retired `@/status` running flag). Errors feed a
 **rolling one-hour window** of 60 one-minute buckets, so `errors_last_hour` is a
 true sliding count that ages out old failures.
 
+**`status` reads the errors, not only the device census** (#1080). The
+census — devices responding versus failed — is the verdict for a proxy sensor;
+a host sensor with no devices took its final `else` and was `Healthy` with any
+number of errors. Now an error not yet followed by a success is `Degraded`,
+three in a row with no success between is `Error`, and a success recovers —
+the same rule the census applies to one device. `publish_error` counts as an
+error (it did not); a device-less collector calls `record_success()` /
+`record_error()` directly (netflow does; the others are #1082's task
+supervision). The snapshot carries `last_success_unix_ms` and `last_error`, so
+"the process is up" and "the process is collecting" are two facts on the wire.
+
 ### Self-telemetry (#811)
 
 The health tick's snapshot carries `self_stats` — the fields that let the

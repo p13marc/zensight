@@ -266,6 +266,7 @@ async fn main() -> Result<()> {
             Format::Json,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
         )
+        .with_counters(runner.publisher().counters())
         .with_qos(zensight_common::QosClass::HealthLiveness);
         let report_key: String = zensight_sensor_core::v1::for_producer("parallax")
             .const_state_key(&["discovery"])
