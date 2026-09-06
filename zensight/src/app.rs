@@ -8908,9 +8908,21 @@ impl ZenSight {
     /// two line up. Legacy (non-host-scoped) tokens have no source and match
     /// every instance of the protocol — the legacy token shape can't
     /// distinguish hosts anyway.
+    ///
+    /// **The wire carries the origin, not the hostname** (#1113).
+    /// `parse_sensor_liveliness` reads `<source>` out of the key's origin
+    /// chunk (`h-…`), while `sensor_health` is keyed by the snapshot's
+    /// `source`, which every sensor fills from `hostname::get()`. The two
+    /// spellings never met: a dead sensor's card stayed green for as long as
+    /// the GUI ran, and the fleet view fed powered-off hosts into its rows as
+    /// "no answer". The join is the snapshot's `host_id`, which the runner
+    /// stamps from the same identity the key origin is minted from. The
+    /// hostname comparison is kept for snapshots without a `host_id`.
     fn set_sensor_liveliness(&mut self, protocol: &str, source: Option<&str>, alive: bool) {
         for (key, snap) in self.sensor_health.iter_mut() {
-            if !sensor_liveliness_matches(key, protocol, source) {
+            let by_origin =
+                source.is_some() && snap.sensor == protocol && snap.host_id.as_deref() == source;
+            if !by_origin && !sensor_liveliness_matches(key, protocol, source) {
                 continue;
             }
             if alive {
@@ -10666,6 +10678,50 @@ mod sensor_liveliness_tests {
             !alive.iter().any(|(_, producer, _)| producer == "netlink"),
             "a gone-away sensor reported as `silent` would claim it is deployed and \
              not answering — false about a host that is simply gone"
+        );
+    }
+
+    /// The regression test of the kind #1031 asked for: feed the *parser's*
+    /// output into `update`, not a hand-written message. A liveliness token
+    /// names the origin; the health card is keyed by hostname; before #1113
+    /// the two never matched on a real bus and this test could not pass.
+    #[test]
+    fn a_liveliness_token_from_the_wire_flips_the_card_it_belongs_to() {
+        let mut a = app();
+        let mut snap_a = snapshot("netlink", Some("hostA"), HealthStatus::Healthy);
+        snap_a.host_id = Some("h-aaaaaaaaaaaa".into());
+        let mut snap_b = snapshot("netlink", Some("hostB"), HealthStatus::Healthy);
+        snap_b.host_id = Some("h-bbbbbbbbbbbb".into());
+        let _ = a.update(Message::HealthSnapshotReceived(snap_a));
+        let _ = a.update(Message::HealthSnapshotReceived(snap_b));
+
+        let gone = crate::subscription::parse_sensor_liveliness(
+            "v1/h-aaaaaaaaaaaa/state/netlink/alive",
+            false,
+        )
+        .expect("a v1 alive key parses");
+        let _ = a.update(gone);
+        assert_eq!(
+            a.sensor_health["netlink@hostA"].status,
+            HealthStatus::Offline,
+            "the token named hostA's origin"
+        );
+        assert_eq!(
+            a.sensor_health["netlink@hostB"].status,
+            HealthStatus::Healthy,
+            "hostB's token is still there"
+        );
+
+        let back = crate::subscription::parse_sensor_liveliness(
+            "v1/h-aaaaaaaaaaaa/state/netlink/alive",
+            true,
+        )
+        .expect("parses");
+        let _ = a.update(back);
+        assert_eq!(
+            a.sensor_health["netlink@hostA"].status,
+            HealthStatus::Starting,
+            "a returning token lifts Offline"
         );
     }
 
