@@ -31,6 +31,9 @@ pub struct StatsContext {
     pub store: SharedStore,
     pub counters: Arc<IngestCounters>,
     pub last_prune_ms: Arc<AtomicU64>,
+    /// Prune passes in which the ceiling, not the retention, removed history
+    /// (#1064).
+    pub ceiling_prunes: Arc<AtomicU64>,
 }
 
 /// Serve `@rpc/historian/stats`.
@@ -53,7 +56,7 @@ async fn collect(ctx: StatsContext) -> RpcResult {
         (s.persistent(), s.interner().len() as u64)
     };
 
-    let (rows_by_tier, db_bytes, oldest_ts) = match handle {
+    let (rows_by_tier, db_bytes, oldest_ts, stored_bytes) = match handle {
         Some(h) => tokio::task::spawn_blocking(move || {
             let rows = Tier::ALL
                 .iter()
@@ -62,7 +65,12 @@ async fn collect(ctx: StatsContext) -> RpcResult {
                     rows: h.tier_rows(*t).unwrap_or(0),
                 })
                 .collect::<Vec<_>>();
-            (rows, h.db_bytes(), h.oldest_bucket_ms().ok().flatten())
+            (
+                rows,
+                h.db_bytes(),
+                h.oldest_bucket_ms().ok().flatten(),
+                h.stored_bytes().ok(),
+            )
         })
         .await
         .map_err(|e| RpcError::new("error/historian/stats", format!("stats task failed: {e}")))?,
@@ -79,6 +87,7 @@ async fn collect(ctx: StatsContext) -> RpcResult {
                 .collect(),
             0,
             None,
+            None,
         ),
     };
 
@@ -93,6 +102,8 @@ async fn collect(ctx: StatsContext) -> RpcResult {
             ms => Some(ms),
         },
         oldest_ts,
+        stored_bytes,
+        ceiling_prunes_total: Some(ctx.ceiling_prunes.load(Ordering::Relaxed)),
     };
     serde_json::to_vec(&reply)
         .map_err(|e| RpcError::new("error/historian/stats", format!("encode failed: {e}")))

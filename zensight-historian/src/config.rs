@@ -99,6 +99,19 @@ pub struct StoreConfig {
     pub prune_interval_secs: u64,
 }
 
+impl StoreConfig {
+    /// The per-tier windows this configuration means (#1063). The per-second
+    /// tier is not persisted by the historian (#911), so its window is the
+    /// store's own.
+    pub fn retention(&self) -> zensight_store::Retention {
+        zensight_store::Retention {
+            minute_secs: self.retention.minute_days * 86_400,
+            hour_secs: self.retention.hour_days * 86_400,
+            ..zensight_store::Retention::default()
+        }
+    }
+}
+
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {

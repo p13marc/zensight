@@ -441,6 +441,56 @@ impl Tier {
     }
 }
 
+/// How long each tier is kept (#1063).
+///
+/// The store's own constants ([`Tier::retention_secs`]) are the GUI cache's
+/// curve. A service that holds a fleet's history on a 1–2 GB VM configures
+/// its own, and the first historian *parsed* one, validated it, printed it at
+/// startup — and pruned on the constants, because `prune` took only a clock.
+/// Thirty days of minute buckets ran where two were configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    /// Seconds of per-second buckets.
+    pub second_secs: i64,
+    /// Seconds of minute buckets.
+    pub minute_secs: i64,
+    /// Seconds of hour buckets.
+    pub hour_secs: i64,
+}
+
+impl Default for Retention {
+    /// The GUI cache's curve: 2 d / 30 d / 365 d.
+    fn default() -> Self {
+        Self {
+            second_secs: Tier::Second.retention_secs(),
+            minute_secs: Tier::Minute.retention_secs(),
+            hour_secs: Tier::Hour.retention_secs(),
+        }
+    }
+}
+
+impl Retention {
+    /// The window for one tier.
+    pub const fn secs_for(&self, tier: Tier) -> i64 {
+        match tier {
+            Tier::Second => self.second_secs,
+            Tier::Minute => self.minute_secs,
+            Tier::Hour => self.hour_secs,
+        }
+    }
+}
+
+/// What a ceiling pass did (#1064).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CeilingPrune {
+    /// Buckets removed to get under the ceiling.
+    pub removed: usize,
+    /// Days of history taken off the oldest end, across every tier.
+    pub days_removed: u32,
+    /// Live bytes (rows plus redb metadata) after the pass.
+    pub stored_bytes: u64,
+}
+
 /// Project a [`TelemetryValue`] to an `f64` for storage. The single typed place
 /// for this conversion (counters and gauges are numeric; other variants aren't
 /// charted, so they're skipped rather than coerced to a misleading zero).
@@ -1064,18 +1114,29 @@ impl PersistentStore {
     /// wrong basis for the code that stops a file growing without bound: an id
     /// the prune cannot see is an id whose buckets are kept for ever.
     pub fn prune(&self, now_ms: i64) -> Result<usize, redb::Error> {
-        let now_secs = now_ms.div_euclid(1_000);
-        let ids = self.sample_metric_ids()?;
+        self.prune_with(now_ms, &Retention::default())
+    }
 
+    /// [`prune`](Self::prune) with an explicit per-tier window (#1063) —
+    /// the historian's, which is configured, not the cache's constants.
+    pub fn prune_with(&self, now_ms: i64, retention: &Retention) -> Result<usize, redb::Error> {
+        let now_secs = now_ms.div_euclid(1_000);
+        // Strictly older than the cutoff, as it always was: a bucket exactly
+        // at the retention edge is still inside it.
+        self.remove_older_than(|tier| now_secs - retention.secs_for(tier))
+    }
+
+    /// Remove every bucket whose timestamp is strictly below the cutoff
+    /// `cutoff_secs(tier)` returns for its tier. One write transaction.
+    fn remove_older_than(&self, cutoff_secs: impl Fn(Tier) -> i64) -> Result<usize, redb::Error> {
+        let ids = self.sample_metric_ids()?;
         let txn = self.db.begin_write()?;
         let mut removed = 0usize;
         {
             let mut table = txn.open_table(SAMPLES_TABLE)?;
             for id in ids {
                 for tier in Tier::ALL {
-                    // Strictly older than the cutoff, as it always was: a
-                    // bucket exactly at the retention edge is still inside it.
-                    let cutoff = now_secs - tier.retention_secs();
+                    let cutoff = cutoff_secs(tier);
                     if cutoff <= 0 {
                         continue;
                     }
@@ -1090,6 +1151,58 @@ impl PersistentStore {
         }
         txn.commit()?;
         Ok(removed)
+    }
+
+    /// Bytes of live data in the file: stored rows plus redb's own metadata,
+    /// from the engine's accounting rather than the file's length. The file
+    /// (`db_bytes`) only ever grows — freed pages are reused, not returned —
+    /// so this is the number a ceiling has to be judged against.
+    pub fn stored_bytes(&self) -> Result<u64, redb::Error> {
+        let txn = self.db.begin_write()?;
+        let stats = txn.stats()?;
+        let live = stats.stored_bytes() + stats.metadata_bytes();
+        txn.abort()?;
+        Ok(live)
+    }
+
+    /// Hold live data under `max_bytes` by removing history from the oldest
+    /// end, one day at a time, across every tier (#1064).
+    ///
+    /// `max_db_bytes` was declared, defaulted to 2 GiB, documented as "the
+    /// ceiling on the file" and read by nothing; with the retention knob also
+    /// unapplied, a 10 000-series fleet at the bench's density would have
+    /// written some 90 GB on a VM whose quadlet caps it at 320 MB. This bounds
+    /// the *live* bytes: redb reuses the pages a prune frees, so a file at the
+    /// ceiling stops growing. It does not shrink it — that is compaction,
+    /// which needs an exclusive handle and is the prune timer's follow-up.
+    ///
+    /// A pass that removes nothing stops rather than spinning: an empty store
+    /// over the ceiling is metadata, not history, and no day can be taken
+    /// off it.
+    pub fn prune_to_ceiling(&self, max_bytes: u64) -> Result<CeilingPrune, redb::Error> {
+        let mut out = CeilingPrune {
+            stored_bytes: self.stored_bytes()?,
+            ..CeilingPrune::default()
+        };
+        // Bounded: a pass that has to take a year off is a misconfiguration
+        // worth finishing across several timer ticks rather than one.
+        for _ in 0..64 {
+            if out.stored_bytes <= max_bytes {
+                break;
+            }
+            let Some(oldest_ms) = self.oldest_bucket_ms()? else {
+                break;
+            };
+            let cutoff = oldest_ms.div_euclid(1_000) + 86_400;
+            let removed = self.remove_older_than(|_| cutoff)?;
+            if removed == 0 {
+                break;
+            }
+            out.removed += removed;
+            out.days_removed += 1;
+            out.stored_bytes = self.stored_bytes()?;
+        }
+        Ok(out)
     }
 
     // ---- log cold store (#107, C9) ------------------------------------------
@@ -2803,6 +2916,90 @@ mod tests {
                 .len(),
             2
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `prune_with` honours the window it is given (#1063). The historian
+    /// configured two days of minute buckets and got thirty, because `prune`
+    /// took only a clock and the window came from a constant.
+    #[test]
+    fn prune_with_honours_the_configured_window() {
+        let path = temp_db_path("retention");
+        let store = PersistentStore::open(&path).expect("open");
+        let m = MetricId(1);
+        let day = 86_400i64;
+        // Minute buckets 1, 3 and 5 days old.
+        let now_secs = 100 * day;
+        let rows: Vec<FlushRow> = [1, 3, 5]
+            .iter()
+            .map(|d| (m, Tier::Minute, now_secs - d * day, Bucket::point(1.0)))
+            .collect();
+        store
+            .write_batch(&FlushBatch {
+                rows,
+                paths: vec![],
+            })
+            .unwrap();
+        // The cache's constants keep all three (30 days of minute buckets).
+        assert_eq!(store.prune(now_secs * 1_000).unwrap(), 0);
+        assert_eq!(store.tier_rows(Tier::Minute).unwrap(), 3);
+        // A configured two-day window keeps one.
+        let two_days = Retention {
+            minute_secs: 2 * day,
+            ..Retention::default()
+        };
+        assert_eq!(store.prune_with(now_secs * 1_000, &two_days).unwrap(), 2);
+        assert_eq!(store.tier_rows(Tier::Minute).unwrap(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The ceiling takes days off the oldest end until live data fits, and
+    /// takes nothing when it already does (#1064).
+    #[test]
+    fn the_ceiling_removes_the_oldest_days_first() {
+        let path = temp_db_path("ceiling");
+        let store = PersistentStore::open(&path).expect("open");
+        let day = 86_400i64;
+        // 4 series × 6 days of minute buckets, one per minute — enough that
+        // a day is a visible fraction of the file, small enough to stay a
+        // unit test.
+        let mut rows: Vec<FlushRow> = Vec::new();
+        for s in 0..4u32 {
+            for d in 0..6i64 {
+                for minute in 0..(day / 60) {
+                    rows.push((
+                        MetricId(s),
+                        Tier::Minute,
+                        d * day + minute * 60,
+                        Bucket::point(d as f64),
+                    ));
+                }
+            }
+        }
+        store
+            .write_batch(&FlushBatch {
+                rows,
+                paths: vec![],
+            })
+            .unwrap();
+        let before = store.stored_bytes().unwrap();
+        assert!(before > 0);
+
+        // A ceiling above the live size removes nothing.
+        let none = store.prune_to_ceiling(before * 2).unwrap();
+        assert_eq!(none.removed, 0);
+        assert_eq!(none.days_removed, 0);
+
+        // A ceiling at half the live size takes days off the oldest end.
+        let half = store.prune_to_ceiling(before / 2).unwrap();
+        assert!(half.days_removed >= 1, "at least one day removed: {half:?}");
+        assert!(
+            half.stored_bytes <= before / 2,
+            "under the ceiling: {half:?}"
+        );
+        // What is left starts later than what was there.
+        let oldest = store.oldest_bucket_ms().unwrap().unwrap();
+        assert!(oldest >= half.days_removed as i64 * day * 1_000);
         let _ = std::fs::remove_file(&path);
     }
 

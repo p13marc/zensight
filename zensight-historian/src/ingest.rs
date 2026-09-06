@@ -273,7 +273,10 @@ pub async fn flush_once(store: &SharedStore) {
 pub async fn prune_loop(
     store: SharedStore,
     interval: Duration,
+    retention: zensight_store::Retention,
+    max_db_bytes: u64,
     last_prune_ms: Arc<AtomicU64>,
+    ceiling_prunes: Arc<AtomicU64>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -292,9 +295,32 @@ pub async fn prune_loop(
                     s.persistent()
                 }) else { continue };
                 let started = std::time::Instant::now();
+                let ceiling_counter = ceiling_prunes.clone();
                 match tokio::task::spawn_blocking(move || {
                     let now_ms = zensight_common::telemetry::current_timestamp_millis();
-                    let tiers = handle.prune(now_ms)?;
+                    // The CONFIGURED windows (#1063): `prune(now)` is the
+                    // cache's constants, and ran here for two releases.
+                    let tiers = handle.prune_with(now_ms, &retention)?;
+                    // Then the ceiling (#1064). A ceiling doing the pruning is
+                    // a retention that does not fit its disk; say so loudly,
+                    // because the alternative is a full filesystem.
+                    let ceiling = if max_db_bytes > 0 {
+                        let c = handle.prune_to_ceiling(max_db_bytes)?;
+                        if c.removed > 0 {
+                            ceiling_counter.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(
+                                removed = c.removed,
+                                days_removed = c.days_removed,
+                                stored_bytes = c.stored_bytes,
+                                max_db_bytes,
+                                "historian: the ceiling pruned history the retention would have \
+                                 kept — the configured retention does not fit max_db_bytes"
+                            );
+                        }
+                        c.removed
+                    } else {
+                        0
+                    };
                     // The timeline is bounded by row count, not by age: how
                     // far back a reader can scrub is the question it answers,
                     // and a transition does not become less interesting for
@@ -302,7 +328,7 @@ pub async fn prune_loop(
                     let timeline =
                         handle.prune_timeline(zensight_store::TIMELINE_STORE_MAX_ROWS)?;
                     let events = handle.prune_events(zensight_store::EVENT_STORE_MAX_ROWS)?;
-                    Ok::<_, zensight_store::redb::Error>(tiers + timeline + events)
+                    Ok::<_, zensight_store::redb::Error>(tiers + ceiling + timeline + events)
                 })
                 .await
                 {

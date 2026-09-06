@@ -32,7 +32,7 @@ OOM-killed a VM on 2026-08-17; the historian must not be the next one.
 |---|---|
 | Series | ≤ 10 000 |
 | Bytes per minute bucket on disk | ≤ 48 |
-| Database at defaults | ≤ 2 GiB (else `max_db_bytes` prunes early) |
+| Database at defaults | ≤ 2 GiB live (else `max_db_bytes` prunes the oldest days early, warns, and counts it in `stats.ceiling_prunes_total`) |
 | RSS steady, `budget_rss_mb = 256` | ≤ 256 MiB, no ladder step above L1 |
 | Prune wall time | ≤ 2 s |
 | `range` GET p95, 24 h at the minute tier | ≤ 200 ms |
