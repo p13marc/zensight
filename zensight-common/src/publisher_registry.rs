@@ -36,7 +36,10 @@ pub struct PublishCounters {
 }
 
 impl PublishCounters {
-    fn record_publish(&self, bytes: usize) {
+    /// Count one delivered publication. Called by every publish path after
+    /// the put succeeded — the advanced tier included (#1079) — so
+    /// `published_total` is deliveries, not attempts.
+    pub fn record_publish(&self, bytes: usize) {
         use std::sync::atomic::Ordering::Relaxed;
         self.published_total.fetch_add(1, Relaxed);
         self.published_bytes_total.fetch_add(bytes as u64, Relaxed);
@@ -140,13 +143,14 @@ impl PublisherRegistry {
     pub async fn put(&self, key: &str, payload: Vec<u8>, qos: QosClass) -> Result<()> {
         crate::metric_guard::check_telemetry_key(key);
         self.ensure(key, qos).await?;
-        self.counters.record_publish(payload.len());
+        let bytes = payload.len();
         let publishers = self.publishers.read().await;
         publishers
             .get(key)
             .expect("publisher just ensured")
             .put(payload)
             .await?;
+        self.counters.record_publish(bytes);
         Ok(())
     }
 
@@ -163,7 +167,7 @@ impl PublisherRegistry {
     ) -> Result<()> {
         crate::metric_guard::check_telemetry_key(key);
         self.ensure(key, qos).await?;
-        self.counters.record_publish(payload.len());
+        let bytes = payload.len();
         let publishers = self.publishers.read().await;
         publishers
             .get(key)
@@ -171,6 +175,7 @@ impl PublisherRegistry {
             .put(payload)
             .encoding(encoding)
             .await?;
+        self.counters.record_publish(bytes);
         Ok(())
     }
 

@@ -111,6 +111,7 @@ async fn a_started_sensor_reports_link_state_fast() {
         netlink_config(),
         session.clone(),
         zensight_common::Format::Json,
+        std::sync::Arc::new(zensight_common::PublishCounters::default()),
     );
     let started = Instant::now();
     let handle = tokio::spawn(collector.run());
@@ -160,6 +161,7 @@ async fn a_new_interface_is_detected_fast() {
         netlink_config(),
         session.clone(),
         zensight_common::Format::Json,
+        std::sync::Arc::new(zensight_common::PublishCounters::default()),
     );
     let handle = tokio::spawn(collector.run());
 

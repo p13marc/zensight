@@ -2363,6 +2363,8 @@ impl DemoSimulator {
                     host_id: None,
                     source: Some("demo".to_string()),
                     self_stats: None,
+                    last_success_unix_ms: None,
+                    last_error: None,
                 }
             })
             .collect()
