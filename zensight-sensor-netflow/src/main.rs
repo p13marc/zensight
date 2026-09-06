@@ -138,6 +138,7 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     registry.set_observer(thresholds);
 
+    let loop_health = runner.health();
     runner.spawn(async move {
         let mut rollups = rollup::Rollups::default();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(rollup_period.max(1)));
@@ -155,6 +156,7 @@ async fn main() -> Result<()> {
                 }
                 _ = tick.tick(), if publish_stats => {
                     let now = zensight_common::current_timestamp_millis();
+                    let mut failed = false;
                     for point in rollups.points(now) {
                         let key = format!("{key_prefix}/{}", point.metric);
                         if let Err(e) = registry
@@ -167,7 +169,12 @@ async fn main() -> Result<()> {
                             .await
                         {
                             tracing::error!("Failed to publish to {}: {}", key, e);
+                            loop_health.record_error(&format!("publish {key}: {e}"));
+                            failed = true;
                         }
+                    }
+                    if !failed {
+                        loop_health.record_success();
                     }
                 }
                 else => break,

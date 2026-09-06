@@ -347,8 +347,12 @@ impl<C: SensorConfig> SensorRunner<C> {
     }
 
     /// Set a custom serialization format for the publisher.
+    ///
+    /// Re-formats the existing publisher rather than constructing a new one,
+    /// so the health tracker's publish counters keep pointing at the
+    /// registry every put goes through (#1078).
     pub fn with_format(mut self, format: Format) -> Self {
-        self.publisher = Publisher::new(self.session.clone(), self.config.producer(), format);
+        self.publisher = self.publisher.clone().with_format(format);
         self
     }
 
@@ -615,7 +619,8 @@ impl<C: SensorConfig> SensorRunner<C> {
                 Format::Json,
                 crate::advanced_publisher::AdvancedPublisherConfig::cache_only(1),
             )
-            .with_qos(zensight_common::QosClass::Evidence);
+            .with_qos(zensight_common::QosClass::Evidence)
+            .with_counters(self.publisher.counters());
             let name = self.name.clone();
             let version = self.version.clone();
             let producer_name = self.config.producer().to_string();

@@ -142,8 +142,9 @@ High-cardinality detail (offending IP, JA4, expected/actual) belongs in `labels`
 `HealthSnapshot` (the `state/<producer>/health` doc) carries an optional
 `self_stats: SelfStats` — the sensor measuring *itself*: `rss_bytes`,
 `vsz_bytes`, `cpu_percent`, the declared `budget_bytes`, publish counters
-(`published_total`/`published_bytes_total`, sensor-fed `dropped_total`/
-`evicted_total`), per-table occupancy (`tables: Vec<TableStats>` — name,
+(`published_total`/`published_bytes_total` — deliveries, counted after the
+put succeeded, across **both** publish tiers, the baseline registry and the
+advanced one (#1078, #1079); sensor-fed `dropped_total`/`evicted_total`), per-table occupancy (`tables: Vec<TableStats>` — name,
 entries, bytes and capacities where the owner can say), and the sensor's own
 cgroup-v2 memory context (`CgroupSelf`).
 

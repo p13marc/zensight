@@ -41,32 +41,37 @@ impl RollingErrorCounter {
     }
 
     fn increment(&self) {
-        self.rotate_if_needed();
-        let idx = self.current_bucket.load(Ordering::SeqCst);
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        self.rotate_locked(&mut buckets);
+        let idx = self.current_bucket.load(Ordering::SeqCst);
         buckets[idx] += 1;
     }
 
     fn count(&self) -> u64 {
-        self.rotate_if_needed();
-        let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        self.rotate_locked(&mut buckets);
         buckets.iter().sum()
     }
 
-    fn rotate_if_needed(&self) {
+    /// Advance the window to now. Runs under the buckets lock (#1080): the
+    /// rotation used to read `last_rotation`, compute, and only then take
+    /// the lock, so two callers could both rotate and an increment could
+    /// land in a bucket a concurrent rotation had just cleared. And it
+    /// stored `now` rather than `last + elapsed`, so each bucket covered
+    /// 60–119 s and "the last hour" drifted long.
+    fn rotate_locked(&self, buckets: &mut [u64; 60]) {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
         let last = self.last_rotation.load(Ordering::SeqCst);
-        let elapsed_minutes = ((now_secs - last) / 60) as usize;
+        let elapsed_minutes = ((now_secs - last) / 60).max(0) as usize;
 
         if elapsed_minutes == 0 {
             return;
         }
 
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         let current = self.current_bucket.load(Ordering::SeqCst);
 
         // Zero out expired buckets
@@ -77,7 +82,8 @@ impl RollingErrorCounter {
 
         let new_bucket = (current + elapsed_minutes) % 60;
         self.current_bucket.store(new_bucket, Ordering::SeqCst);
-        self.last_rotation.store(now_secs, Ordering::SeqCst);
+        self.last_rotation
+            .store(last + elapsed_minutes as i64 * 60, Ordering::SeqCst);
     }
 }
 
@@ -109,6 +115,16 @@ pub struct SensorHealth {
     metrics_published: AtomicU64,
     /// Errors in the last hour (rolling window with 1-minute buckets).
     errors_last_hour: RollingErrorCounter,
+    /// Epoch ms of the last success (a device answering, a batch landing, a
+    /// poll completing); 0 = never (#1080).
+    last_success_ms: AtomicU64,
+    /// Epoch ms of the last recorded error; 0 = never (#1080).
+    last_error_ms: AtomicU64,
+    /// Errors since the last success (#1080) — the device-less analogue of
+    /// a device's `consecutive_failures`.
+    consecutive_errors: AtomicU64,
+    /// The most recent error message (#1080).
+    last_error: RwLock<Option<String>>,
     /// Last poll duration in milliseconds.
     last_poll_duration_ms: AtomicU64,
     /// Per-device liveness tracking.
@@ -229,6 +245,13 @@ pub struct HealthSnapshot {
     /// measured (a plain [`SensorHealth::snapshot`], or an older sensor).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_stats: Option<zensight_common::SelfStats>,
+    /// When the sensor last did its job successfully, epoch ms (#1080).
+    /// Mirrors `zensight_common::HealthSnapshot::last_success_unix_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_unix_ms: Option<i64>,
+    /// The most recent error the sensor recorded (#1080).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// Device liveness information for serialization.
@@ -297,6 +320,10 @@ impl SensorHealth {
             devices_failed: AtomicU64::new(0),
             metrics_published: AtomicU64::new(0),
             errors_last_hour: RollingErrorCounter::new(),
+            last_success_ms: AtomicU64::new(0),
+            last_error_ms: AtomicU64::new(0),
+            consecutive_errors: AtomicU64::new(0),
+            last_error: RwLock::new(None),
             last_poll_duration_ms: AtomicU64::new(0),
             device_liveness: Arc::new(RwLock::new(HashMap::new())),
             host_id: RwLock::new(None),
@@ -399,6 +426,7 @@ impl SensorHealth {
         // Update counters
         drop(devices);
         self.update_device_counters();
+        self.record_success();
     }
 
     /// Record that a device poll succeeded (async version).
@@ -453,7 +481,7 @@ impl SensorHealth {
         // Update counters
         drop(devices);
         self.update_device_counters();
-        self.errors_last_hour.increment();
+        self.record_error(error);
     }
 
     /// Record that a device poll failed (async version).
@@ -517,6 +545,27 @@ impl SensorHealth {
         self.devices_failed.store(failed, Ordering::SeqCst);
     }
 
+    /// Record that the sensor did its job (#1080): a poll completed, a batch
+    /// landed, a collector tick finished. For a sensor with a device census
+    /// [`record_device_success`](Self::record_device_success) calls this;
+    /// a device-less collector (logs, netflow, gnmi, modbus, hostspec) calls
+    /// it directly, or its `status` can never say anything but `Healthy`.
+    pub fn record_success(&self) {
+        self.last_success_ms.store(now_unix_ms(), Ordering::SeqCst);
+        self.consecutive_errors.store(0, Ordering::SeqCst);
+    }
+
+    /// Record an error that is not tied to a device (#1080). Counts into
+    /// `errors_last_hour`, keeps the message, and — until the next
+    /// [`record_success`](Self::record_success) — degrades `status`, the
+    /// way a device's `consecutive_failures` does for a proxy sensor.
+    pub fn record_error(&self, message: &str) {
+        self.errors_last_hour.increment();
+        self.last_error_ms.store(now_unix_ms(), Ordering::SeqCst);
+        self.consecutive_errors.fetch_add(1, Ordering::SeqCst);
+        *self.last_error.write().unwrap_or_else(|e| e.into_inner()) = Some(message.to_string());
+    }
+
     /// Record that metrics were published.
     pub fn record_metrics_published(&self, count: u64) {
         self.metrics_published.fetch_add(count, Ordering::SeqCst);
@@ -535,7 +584,7 @@ impl SensorHealth {
         let devices_responding = self.devices_responding.load(Ordering::SeqCst);
         let devices_failed = self.devices_failed.load(Ordering::SeqCst);
 
-        let status = if devices_failed == 0 && devices_responding == devices_total {
+        let census = if devices_failed == 0 && devices_responding == devices_total {
             zensight_common::HealthStatus::Healthy
         } else if devices_failed > 0 && devices_responding > 0 {
             zensight_common::HealthStatus::Degraded
@@ -544,6 +593,13 @@ impl SensorHealth {
         } else {
             zensight_common::HealthStatus::Healthy
         };
+        let last_success_ms = self.last_success_ms.load(Ordering::SeqCst);
+        let last_error_ms = self.last_error_ms.load(Ordering::SeqCst);
+        let status = error_status(
+            census,
+            last_error_ms > last_success_ms,
+            self.consecutive_errors.load(Ordering::SeqCst),
+        );
 
         HealthSnapshot {
             sensor: self.sensor_name.clone(),
@@ -561,6 +617,12 @@ impl SensorHealth {
             // ([`snapshot_with_self`]) — the plain snapshot stays cheap for
             // callers that only want the counters.
             self_stats: None,
+            last_success_unix_ms: (last_success_ms > 0).then_some(last_success_ms as i64),
+            last_error: self
+                .last_error
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
     }
 
@@ -669,6 +731,10 @@ impl SensorHealth {
             return Ok(());
         };
 
+        // An error report is an error (#1080): before this, a sensor that
+        // published a report on `state/<producer>/errors` every second still
+        // counted zero in `errors_last_hour` and stayed `Healthy`.
+        self.record_error(&report.message);
         let key = publisher.v1().errors_key();
         publisher
             .publish_json(&key, report, zensight_common::QosClass::HealthLiveness)
@@ -699,6 +765,37 @@ pub fn budget_level(
     } else {
         None
     }
+}
+
+/// The health status the error record implies (#1080), folded over the
+/// device census. The census alone made every device-less sensor `Healthy`
+/// unconditionally — `errors_last_hour` was published beside `status` and
+/// never consulted, so a sensor logging three thousand errors an hour kept a
+/// green card. Same rule the census applies to one device: an error not yet
+/// followed by a success is `Degraded`; three in a row with no success
+/// between is `Error`. A census verdict is only ever upgraded toward worse.
+pub fn error_status(
+    census: zensight_common::HealthStatus,
+    unrecovered: bool,
+    consecutive_errors: u64,
+) -> zensight_common::HealthStatus {
+    use zensight_common::HealthStatus::*;
+    // A census that already says Degraded is one device among several
+    // failing, and three failures of that one device are still one device:
+    // the census's own verdict stands. The escalation is for the sensors
+    // the census cannot see at all.
+    match census {
+        Healthy | Starting if unrecovered && consecutive_errors >= 3 => Error,
+        Healthy | Starting if unrecovered => Degraded,
+        other => other,
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// The health status the shed ladder implies (#812): `Degraded` from step 2
@@ -984,6 +1081,51 @@ mod tests {
             health.snapshot().status,
             zensight_common::HealthStatus::Degraded
         );
+    }
+
+    /// A device-less sensor's status reads its errors (#1080). Before this,
+    /// `devices_total == 0` took the census's final `else` and was `Healthy`
+    /// with any number of errors recorded.
+    #[test]
+    fn a_device_less_sensor_with_unrecovered_errors_is_not_healthy() {
+        use zensight_common::HealthStatus::*;
+        let health = SensorHealth::new("logs");
+        assert_eq!(health.snapshot().status, Healthy, "no errors, no devices");
+        health.record_error("listener bind failed");
+        let snap = health.snapshot();
+        assert_eq!(snap.status, Degraded, "one unrecovered error degrades");
+        assert_eq!(snap.errors_last_hour, 1);
+        assert_eq!(snap.last_error.as_deref(), Some("listener bind failed"));
+        health.record_error("again");
+        health.record_error("and again");
+        assert_eq!(
+            health.snapshot().status,
+            Error,
+            "three in a row is an error"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        health.record_success();
+        let snap = health.snapshot();
+        assert_eq!(snap.status, Healthy, "a success recovers");
+        assert!(snap.last_success_unix_ms.is_some());
+        assert_eq!(
+            snap.errors_last_hour, 3,
+            "the hour window still counts them"
+        );
+    }
+
+    #[test]
+    fn error_status_never_improves_the_census() {
+        use zensight_common::HealthStatus::*;
+        assert_eq!(error_status(Error, false, 0), Error);
+        assert_eq!(error_status(Offline, true, 5), Offline);
+        assert_eq!(error_status(Degraded, true, 1), Degraded);
+        assert_eq!(
+            error_status(Degraded, true, 3),
+            Degraded,
+            "one device failing thrice is still one device"
+        );
+        assert_eq!(error_status(Healthy, false, 0), Healthy);
     }
 
     #[test]
