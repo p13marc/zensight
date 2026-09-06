@@ -62,6 +62,32 @@ impl std::fmt::Display for ExpKind {
 /// tests — and a pick-list entry that carries data means one entry per
 /// (producer, origin) pair, which is a different control from three fixed
 /// targets. The two live beside `target` in [`ExpectationsState`] instead.
+/// A host that runs the target sentinel (#1114): its origin chunk and the
+/// label the picker shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpHost {
+    /// The `h-…` origin chunk, as the health/sensor documents carry it.
+    pub chunk: String,
+    /// `hostname (h-…)` — the hostname is what an operator recognises, the
+    /// chunk is what makes two hosts with one hostname distinguishable.
+    pub label: String,
+}
+
+impl std::fmt::Display for ExpHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+impl ExpectationsState {
+    /// The chosen host as a parsed origin, for `origin_rpc_key`.
+    pub fn host_origin(&self) -> Option<zenkey::RemoteOrigin> {
+        self.host
+            .as_ref()
+            .and_then(|h| zenkey::RemoteOrigin::parse(&h.chunk).ok())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpTarget {
     Netlink,
@@ -620,6 +646,22 @@ pub struct ExpRow {
 pub struct ExpectationsState {
     /// What we're authoring for (#278, #933).
     pub target: ExpTarget,
+    /// The host whose sentinel is being read and written (#1114). An
+    /// expectation set belongs to one host's sentinel — `hostspec/spec` is
+    /// literally "what **this host** is being held to" — and the pane used to
+    /// GET the fleet selector and keep whichever host answered first, then
+    /// push the operator's edit back to `v1/*/…/expectations/set`: every
+    /// host running the sentinel. `None` means nothing is read or written
+    /// until the operator picks one.
+    pub host: Option<ExpHost>,
+    /// Whether `host` was the operator's own choice, as opposed to the lone
+    /// host chosen for them. A lone host that later gains a sibling stops
+    /// being an obvious choice: the pane then asks again, rather than keep
+    /// reading and writing a host nobody picked.
+    pub host_explicit: bool,
+    /// The hosts known to run the target sentinel, from the sensor
+    /// registrations on the bus. A lone entry is chosen automatically.
+    pub hosts: Vec<ExpHost>,
     /// Which producer's threshold rules, when `target == Thresholds` (#933).
     /// Set by `PromoteMetricToAlert` from the metric's own device.
     pub thresholds_producer: String,
@@ -678,6 +720,9 @@ impl Default for ExpectationsState {
     fn default() -> Self {
         Self {
             target: ExpTarget::Netlink,
+            host: None,
+            host_explicit: false,
+            hosts: Vec::new(),
             thresholds_producer: String::new(),
             thresholds_origin: None,
             thresholds: zensight_common::threshold::ThresholdsConfig::default(),
@@ -707,6 +752,9 @@ impl Default for ExpectationsState {
 /// Render the expectations authoring view.
 pub fn expectations_view(state: &ExpectationsState) -> Element<'_, Message> {
     let form: Element<'_, Message> = match state.target {
+        ExpTarget::Netlink | ExpTarget::Systemd | ExpTarget::Hostspec if state.host.is_none() => {
+            render_no_host(state)
+        }
         ExpTarget::Netlink => render_form(state),
         ExpTarget::Systemd => render_systemd_form(state),
         ExpTarget::Hostspec => render_hostspec_form(state),
@@ -745,6 +793,39 @@ fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
     let target = pick_list(ExpTarget::ALL, Some(state.target), Message::SetExpTarget)
         .width(Length::Fixed(120.0));
 
+    // Host selector (#1114): which host's sentinel. Thresholds carry their
+    // own origin (set by the metric that was promoted), so the picker is for
+    // the three sentinels only.
+    let host: Element<'_, Message> = if state.target == ExpTarget::Thresholds {
+        iced::widget::Space::new().width(0).into()
+    } else {
+        pick_list(
+            state.hosts.clone(),
+            state.host.clone(),
+            Message::SetExpectationHost,
+        )
+        .placeholder(if state.hosts.is_empty() {
+            "no host runs this sentinel"
+        } else {
+            "choose a host"
+        })
+        .width(Length::Fixed(260.0))
+        .into()
+    };
+
+    // The scope on its own line, as the thresholds form does: "this host,
+    // not the fleet" is the one fact an operator needs before pressing a
+    // button in this pane (#1114).
+    let scope: Element<'_, Message> = match (&state.host, state.target) {
+        (Some(h), t) if t != ExpTarget::Thresholds => {
+            text(format!("Applies to this host only ({}).", h.chunk))
+                .size(12)
+                .style(dim)
+                .into()
+        }
+        _ => iced::widget::Space::new().width(0).into(),
+    };
+
     row![
         back,
         text(match state.target {
@@ -757,6 +838,8 @@ fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
         })
         .size(22),
         target,
+        host,
+        scope,
         refresh
     ]
     .spacing(15)
@@ -937,6 +1020,34 @@ pub fn threshold_rows(cfg: &zensight_common::threshold::ThresholdsConfig) -> Vec
             }
         })
         .collect()
+}
+
+/// What the pane shows until a host is chosen (#1114). Not an error — the
+/// pane was opened with nothing selected — but not a form either: a form
+/// that would read one host's set and push it to every host is the bug this
+/// replaces.
+fn render_no_host(state: &ExpectationsState) -> Element<'_, Message> {
+    let why = if state.hosts.is_empty() {
+        format!(
+            "No sensor registration on the bus says a {} sentinel is running. Start one, \
+             or wait for its registration to arrive.",
+            state.target
+        )
+    } else {
+        format!(
+            "{} hosts run the {} sentinel. An expectation set belongs to one host — pick \
+             it in the header, and this form reads that host's set and pushes back to \
+             that host only.",
+            state.hosts.len(),
+            state.target
+        )
+    };
+    column![
+        text("No host chosen.").size(14),
+        text(why).size(12).style(dim),
+    ]
+    .spacing(6)
+    .into()
 }
 
 /// The threshold-rule authoring form (#933) — the destination of "promote this

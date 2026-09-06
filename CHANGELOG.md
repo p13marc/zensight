@@ -1253,6 +1253,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Expectations pane addresses one host** (#1114, epic #1056). Its
+  three sentinel targets (netlink, systemd, hostspec) read
+  `v1/*/@rpc/<producer>/expectations` — the fleet selector, `QueryTarget::All`
+  — and kept the first reply off the fan-in, so on a fleet of N sentinels the
+  pane rendered whichever host answered first, unlabelled, and the operator's
+  whole-set edit went back to `v1/*/…/expectations/set`: every host running
+  the sentinel. `hostspec/spec`, whose registry description is "what **this
+  host** is being held to", was asked of `*`. The thresholds target had
+  already been built per-origin (#933) with a comment explaining why; the
+  three beside it had not. The pane now has a host picker fed by the sentinel
+  registrations on the bus (chosen automatically when exactly one host runs
+  the sentinel), every read and write is `origin_rpc_key` to that host, and
+  with no host chosen nothing is read or written and the form says so.
 - **A dead sensor's card flips to Offline** (#1113, epic #1056). The
   liveliness token names the origin (`h-…`); the health card is keyed by the
   snapshot's `source`, which is the hostname; `set_sensor_liveliness` compared

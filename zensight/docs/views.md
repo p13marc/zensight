@@ -203,11 +203,19 @@ drill-downs.
 
 **Expectations** (`view/expectations.rs`) — authors sentinel expectations (over
 sockets/links/routes) and pushes them to the netlink sensor at runtime as an
-`@rpc` write: a GET on the fleet selector
-`zensight/v1/*/@rpc/netlink/expectations/set` (query target `All`); the sensor
+`@rpc` write: a GET on **the chosen host's** procedure
+`zensight/v1/<origin>/@rpc/netlink/expectations/set`; the sensor
 hot-swaps its evaluator and acks in the reply (refusals arrive as `reply_err`
 `{error, message}` payloads). The current config reads back with a GET on
-`…/@rpc/netlink/expectations`. Four targets share the view: **netlink**
+`…/@rpc/netlink/expectations` on the same origin. **The host is chosen in the
+pane's header** (#1114) from the sentinel registrations on the bus, and is
+chosen automatically when exactly one host runs the sentinel; until it is
+chosen nothing is read or written and the form says why. Before #1114 the
+three sentinel targets read the *fleet* selector `v1/*/@rpc/<producer>/…`,
+rendered whichever host answered first as if it were the only one, and pushed
+the operator's edit back to `v1/*/…/expectations/set` — every host running the
+sentinel — which is exactly the failure `hostspec/spec` ("what **this host** is
+being held to") could not survive. Four targets share the view: **netlink**
 (incremental add/remove commands), **systemd** (whole-set `SetExpectations`
 replace, #278), **hostspec** (#821 — whole-set replace of the PLAIN
 `ExpectationsConfig`, no command tag; the sensor validates before applying
@@ -223,9 +231,9 @@ whichever sensor publishes the metric.
 
 Two things distinguish it from the three sentinel targets:
 
-- **It is addressed to one host, never the fleet.** The other three GET
-  `v1/*/@rpc/<producer>/expectations/set`; this one builds a per-origin key
-  from the promoted metric's own device (`origin_rpc_key`). A threshold rule
+- **Its host comes from the metric, not from a picker.** All four targets are
+  addressed to one host with `origin_rpc_key` (since #1114); this one takes
+  the origin from the promoted metric's own device rather than the header. A threshold rule
   belongs to one host's sensor, and fleet-wide authoring is `@desired`'s job —
   done deliberately, not fallen into by clicking "alert" on one number. The
   form states the scope on its own line, naming the host.
