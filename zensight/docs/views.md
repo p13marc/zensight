@@ -751,6 +751,15 @@ sensor's own reported status. The origin chunk in the token distinguishes
 hosts, so N instances of the same protocol never flip together (the catalog's
 own `@catalog/state/alive` service token is recognized and excluded).
 
+The join between a token and a card is the **origin** (#1113): a v1 `alive` key
+names `h-…`, the snapshot's `source` is the hostname, and the card is keyed by
+the hostname — so the token's origin is matched against the snapshot's
+`host_id`, which the runner stamps from the identity the key origin is minted
+from. Before that the two spellings were compared as strings and never equal on
+a real bus, and a dead sensor's card stayed green for as long as the GUI ran.
+The regression test feeds `parse_sensor_liveliness`'s own output into `update`,
+which is the kind of test #1031 asked for and the kind that was missing.
+
 **Settings** (`view/settings.rs`) — Zenoh connection mode (peer/client/router),
 connect/listen endpoints, stale threshold, and theme; persisted to
 `~/.config/zensight/settings.json5`.

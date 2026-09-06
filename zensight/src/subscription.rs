@@ -847,7 +847,7 @@ fn push_sorted(msg: Message, telemetry: &mut Vec<Reading>, others: &mut Vec<Mess
 ///
 /// `alive` is a **liveliness token**, not a data subject — the registry rejects
 /// it as a subject chunk on purpose (RFC 03 §3) — so this stays structural.
-fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
+pub(crate) fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     let parsed = parse_key(key)?;
     // `@catalog/state/alive` is a SERVICE token, not a sensor — but the GUI
     // does care about it since #925: the catalog is the only writer of acks

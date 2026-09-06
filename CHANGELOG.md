@@ -1253,6 +1253,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A dead sensor's card flips to Offline** (#1113, epic #1056). The
+  liveliness token names the origin (`h-…`); the health card is keyed by the
+  snapshot's `source`, which is the hostname; `set_sensor_liveliness` compared
+  the two as strings and they were never equal on a real bus. So the card
+  the Sensors view exists to flip stayed green for the life of the process,
+  and the Fleet view — which gates on that card — fed hosts powered off for a
+  week into its rows as "no answer". Two green test suites asserted the two
+  incompatible contracts (one injected a hostname the wire never carries, the
+  other pinned the origin the parser emits) and nothing joined them — the
+  same shape as #1031. The join is now the snapshot's `host_id`, stamped by
+  the runner from the identity the key origin is minted from; the hostname
+  comparison is kept for snapshots without one. The regression test feeds the
+  parser's own output into `update`, and was seen to fail with the join
+  removed.
 - **The historian's configured retention is applied, and `max_db_bytes` is a
   ceiling** (#1063, #1064, epic #1052). `retention.minute_days` and
   `hour_days` were parsed, cross-validated, printed at startup and put in the
