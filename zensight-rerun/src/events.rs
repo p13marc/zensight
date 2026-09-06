@@ -264,6 +264,8 @@ mod tests {
             host_id: None,
             source: Some("host1".into()),
             self_stats: None,
+            last_success_unix_ms: None,
+            last_error: None,
         }
     }
 

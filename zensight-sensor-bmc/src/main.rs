@@ -105,6 +105,7 @@ async fn main() -> Result<()> {
             format,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
         )
+        .with_counters(runner.publisher().counters())
         .with_qos(zensight_sensor_bmc::poller::STATE_QOS),
     );
     let evidence = bmc.evidence.then(|| {
@@ -115,6 +116,7 @@ async fn main() -> Result<()> {
                 format,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
             )
+            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::Evidence),
         )
     });

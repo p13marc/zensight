@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
 
     let counters = Arc::new(ingest::IngestCounters::default());
     let last_prune_ms = Arc::new(AtomicU64::new(0));
+    let ceiling_prunes = Arc::new(AtomicU64::new(0));
     let shedding = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -154,6 +155,7 @@ async fn main() -> Result<()> {
         store: store.clone(),
         counters: counters.clone(),
         last_prune_ms: last_prune_ms.clone(),
+        ceiling_prunes: ceiling_prunes.clone(),
     };
     query::serve_stats(runner.session().clone(), &ctx, stats_ctx)
         .await
@@ -217,7 +219,10 @@ async fn main() -> Result<()> {
     runner.spawn(ingest::prune_loop(
         store.clone(),
         Duration::from_secs(hc.store.prune_interval_secs),
+        hc.store.retention(),
+        hc.store.max_db_bytes,
         last_prune_ms.clone(),
+        ceiling_prunes.clone(),
         shutdown_rx.clone(),
     ));
 

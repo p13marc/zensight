@@ -216,6 +216,7 @@ async fn main() -> Result<()> {
                 serialization,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
             )
+            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::HealthLiveness),
         )
     });
@@ -230,6 +231,7 @@ async fn main() -> Result<()> {
                 serialization,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
             )
+            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::Evidence),
         )
     });
@@ -515,6 +517,7 @@ async fn main() -> Result<()> {
             serialization,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
         )
+        .with_counters(runner.publisher().counters())
         .with_qos(zensight_common::QosClass::HealthLiveness);
         let report_key: String = zensight_sensor_core::v1::for_producer("snmp")
             .const_state_key(&["discovery"])

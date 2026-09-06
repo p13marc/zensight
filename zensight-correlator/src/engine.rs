@@ -152,6 +152,11 @@ pub struct CorrelatorState {
     silences: std::collections::BTreeMap<String, zensight_common::silence::Silence>,
     /// The published incident set and its change gate.
     incidents: crate::incidents::IncidentState,
+    /// Origins whose liveliness token has been seen and is currently present
+    /// (#1101). The alert sweep keeps a live origin's alerts whatever their
+    /// age; an origin never seen alive ages out as if dead, so an alert left
+    /// behind by a sensor that died before this catalog started still expires.
+    live_origins: std::collections::BTreeSet<String>,
     /// Origins whose liveliness token is currently absent.
     ///
     /// Held as *origins* rather than entities because that is what the token's
@@ -175,6 +180,7 @@ impl CorrelatorState {
             acks: std::collections::BTreeMap::new(),
             silences: std::collections::BTreeMap::new(),
             incidents: crate::incidents::IncidentState::default(),
+            live_origins: std::collections::BTreeSet::new(),
             dead_origins: std::collections::BTreeSet::new(),
         }
     }
@@ -207,7 +213,9 @@ impl CorrelatorState {
             EvidenceMsg::Liveliness { origin, alive } => {
                 if alive {
                     self.dead_origins.remove(&origin);
+                    self.live_origins.insert(origin);
                 } else {
+                    self.live_origins.remove(&origin);
                     self.dead_origins.insert(origin);
                 }
             }
@@ -317,7 +325,11 @@ impl CorrelatorState {
     /// a clock, neither of which belongs in a pure pass.
     pub fn recompute_incidents(&mut self, now_ms: i64) -> Vec<crate::incidents::IncidentOp> {
         let ttl_ms = self.config.evidence_ttl_secs as i64 * 1000;
-        self.alerts.sweep(now_ms, ttl_ms);
+        // Alerts age out by their origin's liveliness, not by their firing
+        // timestamp (#1101): a firing alert's timestamp does not move.
+        let live = &self.live_origins;
+        self.alerts
+            .sweep(now_ms, ttl_ms, |origin| live.contains(origin));
         // A silence past its window stops applying whether or not its
         // tombstone has arrived, so a partitioned catalog cannot keep an
         // expired suppression alive.
@@ -873,6 +885,75 @@ mod tests {
         let ops = s.recompute(1000 + 901_000 + 1);
         assert!(ops.iter().any(|o| matches!(o, EntityOp::Tombstone(_))));
         assert!(s.current_entities().is_empty());
+    }
+
+    /// A firing alert whose origin is alive survives the evidence TTL
+    /// (#1101). Before this, `recompute_incidents` swept the alert store on
+    /// `Alert::timestamp` — the firing *transition*, which never moves — so
+    /// every incident older than fifteen minutes was tombstoned mid-fire.
+    #[test]
+    fn a_live_origins_alert_outlives_the_evidence_ttl() {
+        use zensight_common::alert::{Alert, AlertKind, AlertRef, AlertSeverity};
+        let alert_for = |origin: &str| {
+            let mut a = Alert::new(
+                "host1",
+                zensight_common::Protocol::Sysinfo,
+                AlertKind::Expectation,
+                "disk-full",
+                AlertSeverity::Critical,
+                "/var 97% full",
+            );
+            a.timestamp = 1_000;
+            EvidenceMsg::Alert {
+                r: Box::new(AlertRef {
+                    origin: origin.into(),
+                    producer: "sysinfo".into(),
+                    alert_key: "k".into(),
+                }),
+                alert: Some(Box::new(a)),
+            }
+        };
+        let far_past_ttl = 1_000 + 900_000 * 4; // an hour, four TTLs
+
+        // Alive: kept.
+        let mut s = CorrelatorState::new(cfg()); // ttl 900s
+        s.apply(EvidenceMsg::Liveliness {
+            origin: "h-alive".into(),
+            alive: true,
+        });
+        s.apply(alert_for("h-alive"));
+        let _ = s.recompute_incidents(far_past_ttl);
+        assert_eq!(
+            s.firing_alerts(),
+            1,
+            "a live origin's alert is not swept by age"
+        );
+
+        // Dead: ages out on the TTL, as before.
+        let mut s = CorrelatorState::new(cfg());
+        s.apply(EvidenceMsg::Liveliness {
+            origin: "h-dead".into(),
+            alive: true,
+        });
+        s.apply(alert_for("h-dead"));
+        s.apply(EvidenceMsg::Liveliness {
+            origin: "h-dead".into(),
+            alive: false,
+        });
+        let _ = s.recompute_incidents(far_past_ttl);
+        assert_eq!(s.firing_alerts(), 0, "a dead origin's alert ages out");
+
+        // Never seen alive (died before this catalog started): ages out too.
+        let mut s = CorrelatorState::new(cfg());
+        s.apply(alert_for("h-unknown"));
+        let _ = s.recompute_incidents(2_000);
+        assert_eq!(s.firing_alerts(), 1, "inside the TTL it is still held");
+        let _ = s.recompute_incidents(far_past_ttl);
+        assert_eq!(
+            s.firing_alerts(),
+            0,
+            "an origin never seen alive is treated as dead"
+        );
     }
 
     #[test]
