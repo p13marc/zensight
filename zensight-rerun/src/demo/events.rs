@@ -89,6 +89,8 @@ fn health(status: HealthStatus) -> HealthSnapshot {
         host_id: None,
         source: Some(SOURCE.to_string()),
         self_stats: None,
+        last_success_unix_ms: None,
+        last_error: None,
     }
 }
 

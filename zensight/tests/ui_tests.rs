@@ -2480,6 +2480,8 @@ fn test_sensors_view() {
             host_id: None,
             source: None,
             self_stats: None,
+            last_success_unix_ms: None,
+            last_error: None,
         },
     );
     // ...with a recent error report.
@@ -2566,6 +2568,8 @@ fn test_artifact_holder_pick() {
             host_id: None,
             source: None,
             self_stats: None,
+            last_success_unix_ms: None,
+            last_error: None,
         },
     );
     let kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
@@ -2648,6 +2652,8 @@ fn test_artifact_tree_confirm_card() {
             host_id: None,
             source: None,
             self_stats: None,
+            last_success_unix_ms: None,
+            last_error: None,
         },
     );
 
@@ -2740,6 +2746,8 @@ fn test_sensors_snapshot_dirs() {
             host_id: None,
             source: None,
             self_stats: None,
+            last_success_unix_ms: None,
+            last_error: None,
         },
     );
 

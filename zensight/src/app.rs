@@ -10450,6 +10450,8 @@ mod sensor_liveliness_tests {
             host_id: None,
             source: source.map(str::to_string),
             self_stats: None,
+            last_success_unix_ms: None,
+            last_error: None,
         }
     }
 
