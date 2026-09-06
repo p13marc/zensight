@@ -251,6 +251,16 @@ the same reason: the identity merge is a pure function of host evidence, and an
 alert that could make two machines the same machine would be an identity claim
 wearing a different hat.
 
+**An alert leaves the firing store when its publisher says so, or when its
+publisher is gone** (#1101) — never because it is old. A firing alert's
+`timestamp` is the transition instant and does not move while it fires, so the
+first version, which swept the store on `evidence_ttl_secs` like evidence,
+tombstoned every incident older than fifteen minutes mid-fire: the Prometheus
+mirror lost `zensight_incident`, the OTel mirror emitted a false resolution, and
+the operator's ack was retired. The sweep now keeps any alert whose origin's
+liveliness token is present; an origin that is dead — or was never seen alive,
+so no liveliness event will ever arrive for it — ages out on the TTL as before.
+
 ### Three passes, in order
 
 `recompute` → `recompute_edges` → `recompute_incidents`. Each reads the

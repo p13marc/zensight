@@ -1253,6 +1253,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The catalog no longer deletes every incident fifteen minutes after it
+  fires** (#1101, epic #1055). `recompute_incidents` swept the firing-alert
+  store on `evidence_ttl_secs` against `Alert::timestamp` — the firing
+  *transition*, which does not move while an alert fires — so any incident
+  older than 900 s was tombstoned with its alert still firing: the Prometheus
+  mirror lost `zensight_incident`, the OTel mirror emitted `state="resolved"`
+  for a problem that had not ended, and the operator's ack was retired as
+  stale. The Prometheus exporter's own docs (#758) explain why alerts must not
+  be staleness-swept; the catalog had reintroduced it on the component that
+  publishes the incident. `just demo-incident` lasts thirty seconds, which is
+  why CI never saw it. The sweep now keys on the origin's liveliness: a live
+  origin's alert is kept whatever its age; a dead origin's — or one never
+  seen alive — ages out on the TTL as before.
+  `a_live_origins_alert_outlives_the_evidence_ttl` pins the three cases.
+
 - **snmp: the budget burst test asserted that the loop ran in under 50
   microseconds** (#1047). It failed on a pull request that does not touch the
   crate, and does not reproduce locally — 25 idle runs and 15 under four CPU
