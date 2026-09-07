@@ -44,7 +44,7 @@ jsonschema = { workspace = true, optional = true }
 # a NETLINK_AUDIT socket. `default-features = false` keeps it to the plain
 # `Socket`: no tokio, no mio, no futures. Already in the lock file as a
 # transitive dependency, and MIT — see the feature comment.
-netlink-sys = { version = "0.8", default-features = false, optional = true }
+netlink-sys = { version = "0.9", default-features = false, optional = true }
 
 [features]
 default = []

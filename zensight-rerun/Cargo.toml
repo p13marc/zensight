@@ -56,12 +56,12 @@ clap.workspace = true
 # crate has no reason to pay that toll on a schedule someone else sets. Move it
 # when a concrete need moves it, and update docs/plans/rerun/ when you do.
 # Decline the rerun / re_log_encoding / re_log_types rows on dashboard #615.
-rerun = { version = "=0.36.3", default-features = false, features = ["sdk"] }
+rerun = { version = "=0.37.1", default-features = false, features = ["sdk"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 # e2e decode pass on the produced .rrd (already in the rerun dep tree, so this
 # adds no meaningful build cost; exact-pinned alongside `rerun`).
-re_log_encoding = "=0.36.3"
-re_log_types = "=0.36.3"
+re_log_encoding = "=0.37.1"
+re_log_types = "=0.37.1"
 
