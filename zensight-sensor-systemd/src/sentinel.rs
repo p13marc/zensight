@@ -18,6 +18,7 @@ use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
 use zensight_sensor_core::AlertReporter;
 
 use crate::dbus::{ManagerProxy, TimerProxy, UnitProxy};
+use crate::restart_window::RestartWindow;
 
 pub const SERVICE_ACTIVE_RULE: &str = "expect-service-active";
 pub const TARGET_ACTIVE_RULE: &str = "expect-target-active";
@@ -87,12 +88,6 @@ impl SentinelHandle {
     pub async fn snapshot(&self) -> ExpectationsConfig {
         self.expectations.read().await.clone()
     }
-}
-
-/// Per-unit sliding restart window base.
-struct RestartWindow {
-    start: Instant,
-    base: u32,
 }
 
 /// The sentinel evaluator: reads unit state from D-Bus and reconciles expectation
@@ -374,15 +369,9 @@ impl Evaluator {
         let now = Instant::now();
         let window = Duration::from_secs(window_secs.max(1));
         let mut w = self.restart_windows.lock().expect("restart windows");
-        let e = w.entry(unit.to_string()).or_insert(RestartWindow {
-            start: now,
-            base: restarts,
-        });
-        if now.duration_since(e.start) >= window || restarts < e.base {
-            e.start = now;
-            e.base = restarts;
-        }
-        restarts.saturating_sub(e.base)
+        w.entry(unit.to_string())
+            .or_default()
+            .observe(restarts, now, window)
     }
 
     // ── D-Bus reads (best-effort, uncached: one-shot per sweep, and the eager

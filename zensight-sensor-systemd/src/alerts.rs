@@ -24,6 +24,8 @@
 //! recovery. Set `alerts.unit_failed = false` here to defer to the logs sensor.
 
 use std::collections::HashMap;
+
+use crate::restart_window::RestartWindow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -225,8 +227,20 @@ pub fn evaluate(host: &str, cfg: &AlertsConfig, inputs: &AlertInputs) -> Vec<Rul
                         cfg.restart_storm_window_secs
                     ),
                 )
+                // The count lives in the summary, not a label (#1083). A
+                // label is identity — `alert_key()` hashes every one that is
+                // not host-scoped — and a count that grows every sweep minted
+                // a NEW key every sweep, each with a fresh `first_seen`, each
+                // retired unpublished by the next `reconcile`. With `for` = 15 s
+                // and a 15 s poll the alert could only fire once the count
+                // plateaued for two sweeps: after the storm had stopped. The
+                // timer rule two blocks down was fixed for exactly this and
+                // says so; this one was missed.
                 .with_label("unit", name.clone())
-                .with_label("restarts", n.to_string())
+                // A threshold is configuration, not a measurement: it is stable
+                // across sweeps, so it belongs in the key. Matches
+                // `consecutive-failures` and sysinfo's `fill_rate_rule`.
+                .with_label("threshold", cfg.restart_storm_threshold.to_string())
             })
             .collect();
         out.push(RuleAlerts {
@@ -324,16 +338,13 @@ pub fn evaluate(host: &str, cfg: &AlertsConfig, inputs: &AlertInputs) -> Vec<Rul
     out
 }
 
-/// Per-unit sliding restart window: the base `NRestarts` at the window start.
-struct RestartWindow {
-    start: Instant,
-    base: u32,
-}
-
 /// Compute the restart-storm units from the current `NRestarts` against the
-/// per-unit sliding window (resetting the base when the window elapses or the
-/// counter goes backwards). Pure over the passed-in window map — unit-testable
-/// without a reporter.
+/// per-unit **sliding** window ([`RestartWindow`], #1083). Pure over the passed-in
+/// window map — unit-testable without a reporter.
+///
+/// Units that have left the watchlist are forgotten, as `consecutive_failures`
+/// already did: a glob-driven watchlist otherwise grew this map for the life of
+/// the process.
 fn restart_storm(
     windows: &mut HashMap<String, RestartWindow>,
     units: &[UnitSample],
@@ -344,19 +355,15 @@ fn restart_storm(
     if threshold == 0 {
         return Vec::new();
     }
+    windows.retain(|name, _| units.iter().any(|u| &u.name == name));
     let mut storm = Vec::new();
     for u in units {
-        let w = windows.entry(u.name.clone()).or_insert(RestartWindow {
-            start: now,
-            base: u.n_restarts,
-        });
-        if now.duration_since(w.start) >= window || u.n_restarts < w.base {
-            w.start = now;
-            w.base = u.n_restarts;
-        }
-        let delta = u.n_restarts.saturating_sub(w.base);
-        if delta >= threshold {
-            storm.push((u.name.clone(), delta));
+        let seen = windows
+            .entry(u.name.clone())
+            .or_default()
+            .observe(u.n_restarts, now, window);
+        if seen >= threshold {
+            storm.push((u.name.clone(), seen));
         }
     }
     storm
@@ -742,6 +749,10 @@ mod tests {
         );
     }
 
+    /// The compatibility pin. It passes unchanged under both the old
+    /// **tumbling** window and the sliding one, because all three steps share
+    /// one `t0` and it therefore never advances the clock — which is why
+    /// `a_restart_loop_that_straddles_the_boundary_fires` below exists.
     #[test]
     fn restart_storm_windowing() {
         let mut windows = HashMap::new();
@@ -760,6 +771,135 @@ mod tests {
         // Counter reset (unit reloaded) rebases → no storm.
         u.n_restarts = 1;
         assert!(restart_storm(&mut windows, std::slice::from_ref(&u), t0, 3, window).is_empty());
+    }
+
+    /// #1083, the identity half: the growing count rides the **summary**, and
+    /// the key is stable across sweeps.
+    ///
+    /// `alert_key()` hashes every label that is not host-scoped, so a count
+    /// that grows every sweep minted a new key every sweep, each with a fresh
+    /// `first_seen`, each retired unpublished by the next `reconcile`. With
+    /// `for` = 15 s and a 15 s poll the alert could fire only once the count
+    /// plateaued for two sweeps — i.e. after the loop had ended. The timer rule
+    /// in this same file was fixed for exactly this and says so; the storm rule
+    /// was missed.
+    #[test]
+    fn the_restart_count_rides_the_summary_not_the_key() {
+        let cfg = AlertsConfig::default();
+        let at = |n: u32| {
+            let inputs = AlertInputs {
+                storm_units: vec![("flap.service".to_string(), n)],
+                ..Default::default()
+            };
+            rule(&evaluate("host1", &cfg, &inputs), RESTART_STORM_RULE).alerts[0].clone()
+        };
+        let (three, nine) = (at(3), at(9));
+
+        assert_eq!(
+            three.alert_key(),
+            nine.alert_key(),
+            "the count re-keyed the alert, so it could never survive its own `for:` window"
+        );
+        assert!(!three.labels.contains_key("restarts"), "{:?}", three.labels);
+        assert!(three.summary.contains('3'), "{}", three.summary);
+        assert!(nine.summary.contains('9'), "{}", nine.summary);
+        assert_eq!(
+            three.labels.get("threshold").map(String::as_str),
+            Some(cfg.restart_storm_threshold.to_string()).as_deref(),
+            "a threshold is configuration, so it belongs in the key"
+        );
+    }
+
+    /// #1083, the window half: a loop straddling a window boundary is seen.
+    ///
+    /// Two restarts every 200 s against a 300 s window and a threshold of 3.
+    /// The old `{ start, base }` pair was a *tumbling* window — it rebased at
+    /// t+300, discarding the first pair before the second arrived — so this
+    /// unit never reached the threshold however long it flapped. A restart loop
+    /// is exactly the shape the rule could not see.
+    #[test]
+    fn a_restart_loop_that_straddles_the_boundary_fires() {
+        let mut windows = HashMap::new();
+        let window = Duration::from_secs(300);
+        let t0 = Instant::now();
+        let mut u = sample("flap.service", "active");
+
+        u.n_restarts = 0;
+        assert!(restart_storm(&mut windows, std::slice::from_ref(&u), t0, 3, window).is_empty());
+        u.n_restarts = 2;
+        assert!(
+            restart_storm(
+                &mut windows,
+                std::slice::from_ref(&u),
+                t0 + Duration::from_secs(200),
+                3,
+                window
+            )
+            .is_empty(),
+            "two restarts is below the threshold"
+        );
+        u.n_restarts = 4;
+        assert_eq!(
+            restart_storm(
+                &mut windows,
+                std::slice::from_ref(&u),
+                t0 + Duration::from_secs(400),
+                3,
+                window
+            ),
+            vec![("flap.service".to_string(), 4)],
+            "a tumbling window would have rebased at t+300 and reported 2"
+        );
+    }
+
+    /// A burst ages out of the trailing window rather than at a fixed boundary.
+    #[test]
+    fn a_storm_stops_once_the_restarts_age_out() {
+        let mut windows = HashMap::new();
+        let window = Duration::from_secs(300);
+        let t0 = Instant::now();
+        let mut u = sample("flap.service", "active");
+        u.n_restarts = 0;
+        restart_storm(&mut windows, std::slice::from_ref(&u), t0, 3, window);
+        u.n_restarts = 4;
+        assert!(
+            !restart_storm(
+                &mut windows,
+                std::slice::from_ref(&u),
+                t0 + Duration::from_secs(10),
+                3,
+                window
+            )
+            .is_empty()
+        );
+        assert!(
+            restart_storm(
+                &mut windows,
+                std::slice::from_ref(&u),
+                t0 + Duration::from_secs(400),
+                3,
+                window
+            )
+            .is_empty(),
+            "the burst is older than the window and no longer counts"
+        );
+    }
+
+    /// The window map does not grow for the life of the process when the
+    /// watchlist is glob-driven, as `consecutive_failures` already ensured.
+    #[test]
+    fn restart_storm_forgets_units_that_left_the_watchlist() {
+        let mut windows = HashMap::new();
+        let window = Duration::from_secs(300);
+        let t0 = Instant::now();
+        let gone = sample("gone.service", "active");
+        restart_storm(&mut windows, std::slice::from_ref(&gone), t0, 3, window);
+        assert_eq!(windows.len(), 1);
+
+        let stays = sample("stays.service", "active");
+        restart_storm(&mut windows, std::slice::from_ref(&stays), t0, 3, window);
+        assert_eq!(windows.len(), 1, "the departed unit was not forgotten");
+        assert!(windows.contains_key("stays.service"));
     }
 
     #[test]
