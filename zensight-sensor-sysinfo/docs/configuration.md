@@ -43,7 +43,7 @@ families regardless of the flag.
 | `cpu_times` | true | `/proc/stat` CPU-time breakdown (Linux) |
 | `memory` | true | RAM/swap + composition |
 | `disk` | true | per-mount space |
-| `disk_io` | true | `/proc/diskstats` I/O + util/queue (Linux) |
+| `disk_io` | true | `/proc/diskstats` I/O + util/queue (Linux). Which devices, is `disk_io` below |
 | `network` | true | per-interface counters |
 | `net_dev_extended` | true | extended `/proc/net/dev` counters (Linux) |
 | `system` | true | uptime, load |
@@ -68,14 +68,37 @@ families regardless of the flag.
 | `smart` | **false** | drive SMART health via NVMe admin ioctl + ATA SG_IO (Linux; needs CAP_SYS_ADMIN / CAP_SYS_RAWIO) |
 | `ebpf` | **false** | opt-in eBPF saturation histograms (see below) |
 
-## `sysinfo.network` / `sysinfo.disk` / `sysinfo.sensors` filters
+## `sysinfo.network` / `sysinfo.disk` / `sysinfo.disk_io` / `sysinfo.sensors` filters
 
 `network`: `include` (empty = all), `exclude`, `exclude_loopback` (default
 true), `exclude_virtual` (default false; matches `docker`/`veth`/`br-`/`virbr`/
 `vnet` prefixes).
 
 `disk`: `include` (empty = all), `exclude`, `exclude_pseudo` (default true;
-drops tmpfs/sysfs/proc/cgroup/overlay/squashfs/… filesystems).
+drops tmpfs/sysfs/proc/cgroup/overlay/squashfs/… filesystems). This is *mount
+points* — `disk_io` below is block devices.
+
+`disk_io`: which block devices `collect.disk_io` reports on (#1076) —
+`ignore_prefixes` (default `loop`, `ram`, `fd`, `sr`, `zram`),
+`whole_disks_only` (default true), `include` (empty = all that pass),
+`exclude`.
+
+The defaults are node_exporter's, and they are the **inverse** of what this
+sensor did before #1076. It skipped `loop*`, `ram*` and `dm-*` under a comment
+that claimed to skip partitions — so:
+
+- `sda`, `sda1`, `sda2`, `nvme0n1` and `nvme0n1p1` all published, and a
+  partition's counters are a *subset* of its disk's, so every fleet-level byte
+  sum double-counted;
+- `dm-0` was thrown away — and on any LVM, LUKS or multipath host that is where
+  the volume's I/O actually is. On a stock Debian LVM install there was no
+  `util_percent` or `queue_depth` for the volume the operator names.
+
+`dm-*` is deliberately absent from `ignore_prefixes`. `whole_disks_only` knows
+both partition spellings — `sda1`/`vdb2`/`xvda1`, and `nvme0n1p1`/`mmcblk0p1` —
+and knows that `dm-0`, `md0` and `nvme0n1` end in a digit without being
+partitions. Turn it off to get per-partition rows as well, and expect the
+totals to count each byte twice.
 
 `sensors`: `exclude_chips` (empty = all), the hwmon chips
 `collect.temperatures` and `collect.power`'s fan walk skip. Names are matched

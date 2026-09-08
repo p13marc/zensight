@@ -1443,7 +1443,9 @@ impl SystemCollector {
     async fn collect_disk_io(&mut self, timestamp: i64, interval: f64) -> usize {
         let mut count = 0;
 
-        let disk_io = self.linux_metrics.collect_disk_io(interval);
+        let disk_io = self
+            .linux_metrics
+            .collect_disk_io(interval, &self.config.disk_io);
 
         // Track the busiest device's %util this pass to feed the saturation score
         // (so we don't re-read /proc/diskstats just for the score).

@@ -39,6 +39,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sysinfo`'s disk I/O reports whole disks and the mapper layer** (#1076). The
+  filter skipped `loop*`, `ram*` and `dm-*` under a comment that said "Skip
+  partitions (we want whole disks like sda, nvme0n1)". It did the opposite of
+  both halves: `sda`, `sda1`, `sda2`, `nvme0n1` and `nvme0n1p1` all published —
+  and a partition's counters are a *subset* of its disk's, so every fleet-level
+  byte sum double-counted — while `dm-0`, where every LVM, LUKS and multipath
+  volume's I/O actually appears, was discarded. On a stock Debian LVM install
+  there was no `util_percent` or `queue_depth` for the volume the operator
+  names.
+
+  The rule is node_exporter's now, and it is `sysinfo.disk_io` config rather
+  than a hard-coded prefix list: `ignore_prefixes` (without `dm-`),
+  `whole_disks_only`, `include`, `exclude`. Partition detection knows both
+  spellings — `sda1`/`vdb2`/`xvda1` and `nvme0n1p1`/`mmcblk0p1` — and knows that
+  `dm-0`, `md0` and `nvme0n1` end in a digit without being partitions, which is
+  the trap the naive rule falls into in both directions.
+
+
 - **Every derived rate in `sysinfo` divides by the interval that elapsed**
   (#1069). The poll loop runs `collect_and_publish().await` and *then* sleeps
   `poll_interval_secs`, so the true period is `interval + collection_time` — and
