@@ -104,6 +104,7 @@ async fn collect(ctx: StatsContext) -> RpcResult {
         oldest_ts,
         stored_bytes,
         ceiling_prunes_total: Some(ctx.ceiling_prunes.load(Ordering::Relaxed)),
+        reordered_total: Some(ctx.counters.reordered.load(Ordering::Relaxed)),
     };
     serde_json::to_vec(&reply)
         .map_err(|e| RpcError::new("error/historian/stats", format!("encode failed: {e}")))

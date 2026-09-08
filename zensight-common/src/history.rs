@@ -334,6 +334,12 @@ pub struct HistorianStats {
     /// the disk it was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ceiling_prunes_total: Option<u64>,
+    /// Samples that arrived out of order and were inserted at their place in
+    /// the hot ring (#1062). Expected traffic — the AdvancedSubscriber's
+    /// recovery retransmits — but a large number beside a small `recorded`
+    /// says the link is losing samples, which is not visible anywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reordered_total: Option<u64>,
 }
 
 #[cfg(test)]

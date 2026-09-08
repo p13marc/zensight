@@ -38,7 +38,7 @@ Numeric series flow through three tiers of decreasing resolution:
 
 | Tier | Resolution | Where it lives |
 |------|------------|----------------|
-| **Hot** | per-second | Fixed-size in-memory `RingBuffer` per metric — O(1) append, bounded, read directly by charts. Default capacity `DEFAULT_HOT_CAPACITY = 3_600` (one hour of per-second samples). |
+| **Hot** | per-second | Fixed-size in-memory `RingBuffer` per metric — bounded, held in timestamp order, read directly by charts. Default capacity `DEFAULT_HOT_CAPACITY = 3_600` (one hour of per-second samples). An in-order push is O(1); a late one is inserted at its place from the tail and reported as `Pushed::Reordered`, because the historian's subscriber has recovery on and a ring holding a non-monotonic sequence made `counter_rate` answer `None` (#1062). |
 | **Warm** | per-minute | Periodically downsampled from hot, flushed to the redb `samples` table. |
 | **Cold** | per-hour | Coarsest downsample, also in the `samples` table. |
 
@@ -59,7 +59,7 @@ two hosts with one hostname are two devices).
 Paths are interned to a compact `MetricId(u32)` per the architecture contract,
 so the store is keyed by small integers rather than strings. The redb `samples`
 table maps a packed `(metric_id, tier, bucket_ts)` key (a `u128`) to a
-`Bucket { last: f64, min: f32, max: f32 }`. A `Sample` is a plain
+`Bucket { last: f64, min: f64, max: f64 }`. A `Sample` is a plain
 `{ ts: i64 (ms), value: f64 }` record.
 
 **Values keep their kind.** `SampleValue` is `Counter(u64) | Gauge(f64) |
@@ -76,6 +76,13 @@ last-observation-per-bucket, and `last` is the value. `min`/`max` bound what
 the bucket covered, so a coarse tier can still say a spike happened: an hour
 bucket that reported only its closing value showed a gauge that touched 400 and
 settled at 12 as twelve, flat.
+
+They are **`f64`, and they are bounds** (#1061). They were `f32` — four bytes
+each, on the reasoning that a chart's range is not the value — and written with
+an `as` cast, which rounds to *nearest*. Rounding to nearest does not produce a
+bound: `2^24 + 1` stored as `2^24`, at `rx_bytes` scale an ulp is ~65 KB, and
+since `last` stayed exact a bucket could report a `max` below its own `last`.
+The range API sells `agg=max` on exactly this number.
 
 The range is **merged on write**, never replaced (#1060): a coarse bucket is
 written once per flush, not once per bucket — at a ten-second flush an hour
@@ -98,7 +105,8 @@ them and they cannot be recovered from it. A proxy producer's subject is
 would each have to be recovered by un-slugging a device chunk — a guess, in
 the code that decides which host a chart belongs to.
 
-A `meta` table carries the schema version (`SCHEMA_VERSION`, now **4** — v4 added `unit` to the metrics row). **It
+A `meta` table carries the schema version (`SCHEMA_VERSION`, now **5** — v4
+added `unit` to the metrics row, v5 widened a bucket's `min`/`max` to `f64`). **It
 is read in its own transaction, before any other table is opened**: v3 re-typed
 both `metrics` and `samples`, and opening a re-typed table fails with a redb
 *table type mismatch*, which is not the error the "wrong layout, move it aside"
@@ -106,6 +114,12 @@ path recognises. An older file is therefore refused cleanly as
 `StoreOpenError::Schema { found: N }` and moved aside
 (`metrics.redb.schema-vN`), the same way a pre-v2 file and an older redb file
 format already were. It is a cache; the history it shadows outlives it.
+
+The move-aside is `PersistentStore::open_or_move_aside`, and **both** callers
+go through it. The historian did not: it called `open_with_cache` and treated
+every error as "run memory-only", so a schema bump would have cost it durable
+history on every restart from then on — silently, until somebody deleted the
+file by hand (#1061).
 
 Without a database (`--demo`, a locked file, a read-only data dir) the store
 keeps only the hot rings: nothing is buffered for a flush that cannot happen.
