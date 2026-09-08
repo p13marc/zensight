@@ -39,6 +39,16 @@ pub struct SnmpPoller {
     /// Counter→rate state (#527). Std mutex: locked only for synchronous
     /// bookkeeping, never across an await.
     rate: std::sync::Mutex<RateTracker>,
+    /// ifIndex → link speed in bits/s, from the PREVIOUS cycle's interface
+    /// table (#1074).
+    ///
+    /// The plausibility ceiling that catches a `clear counters` on an errors
+    /// column is physical — a 1 Gb/s link cannot show more errors than the
+    /// ~1.488 M frames/s it can carry — and only the interface table knows the
+    /// speed. It is not known yet while *this* cycle's rates are derived, so
+    /// the previous cycle's is used: a link whose speed changed between two
+    /// polls has bigger problems than one interval's ceiling.
+    speeds: std::sync::Mutex<std::collections::HashMap<String, u64>>,
     /// Threshold alerting (#528), when enabled for this device.
     alerts: Option<tokio::sync::Mutex<crate::alerts::AlertEvaluator>>,
     /// Interface state-doc publishing (#529): the shared advanced-publisher
@@ -128,6 +138,7 @@ impl SnmpPoller {
             walks,
             client: tokio::sync::RwLock::new(None),
             rate: std::sync::Mutex::new(RateTracker::new()),
+            speeds: std::sync::Mutex::new(std::collections::HashMap::new()),
             alerts: None,
             interfaces_doc: None,
             profiles: None,
@@ -419,11 +430,26 @@ impl SnmpPoller {
 
         // Joined interface state doc (#529): refresh whenever the cycle saw
         // interface rows (LWW; a failed cycle keeps the previous doc).
-        if let Some((registry, key)) = &self.interfaces_doc
-            && !table.is_empty()
-        {
+        if !table.is_empty() {
             let doc = table.build(&self.device.name);
-            if let Err(e) = registry.publish_serializable(key, &doc).await {
+            // Remember each interface's speed for NEXT cycle's plausibility
+            // ceiling (#1074). It is not known while this cycle's rates are
+            // derived — the table is only complete now — and a link whose speed
+            // changed between two polls has bigger problems than one interval's
+            // ceiling. Rewritten wholesale, so a removed interface's speed goes
+            // with it.
+            {
+                let mut speeds = self.speeds.lock().unwrap();
+                speeds.clear();
+                for e in &doc.interfaces {
+                    if let Some(bits) = e.speed_bits.filter(|b| *b > 0) {
+                        speeds.insert(e.index.to_string(), bits);
+                    }
+                }
+            }
+            if let Some((registry, key)) = &self.interfaces_doc
+                && let Err(e) = registry.publish_serializable(key, &doc).await
+            {
                 tracing::warn!(device = %self.device.name, error = %e, "interfaces doc publish failed");
             }
         }
@@ -842,26 +868,109 @@ impl SnmpPoller {
         let (counter_value, is_32bit) = counter?;
 
         seen_counters.insert(oid_str.to_string());
-        let rate = self.rate.lock().unwrap().observe(
+        // The physical ceiling this counter can be held to (#1074). Only the
+        // interface table knows the link speed, and only the OID says what the
+        // column counts — 294 967 296 units in a minute is a credible number of
+        // octets and an absurd number of errors, and no rule that knows neither
+        // can tell them apart.
+        let ceiling = self.counter_ceiling(oid_str);
+        let observed = self.rate.lock().unwrap().observe_detailed(
             oid_str,
             counter_value,
             is_32bit,
             std::time::Instant::now(),
+            ceiling,
         );
-        if let Some(rate) = rate {
+        let rate = observed.map(|o| o.rate);
+        if let Some(o) = observed {
+            let rate = o.rate;
             let rate_metric = format!("{metric_name}.rate");
             let unit = rate_unit_for(&metric_name);
-            self.publish_point(
+            // A 32-bit counter on a link fast enough to wrap it more than once
+            // between polls carries a rate that is *plausible and low* (#1074):
+            // modular subtraction is correct across at most one wrap, and
+            // nothing in the arithmetic can tell one from three. `set_rate_pref`
+            // prefers an HC column when the device has one and says nothing when
+            // it does not, so this is the only place that can.
+            let risk = crate::rate::wrap_risk(
+                is_32bit,
+                self.speeds
+                    .lock()
+                    .unwrap()
+                    .get(oid_str.rsplit('.').next().unwrap_or(""))
+                    .copied(),
+                o.dt_secs,
+            );
+            self.publish_rate_point(
                 oid_str,
                 &rate_metric,
-                TelemetryValue::Gauge(rate),
-                Some(unit),
-                None,
+                rate,
+                unit,
                 table_index.as_deref(),
+                risk,
             )
             .await;
         }
         rate
+    }
+
+    /// The physical ceiling a counter's rate can be held to, when this poller
+    /// knows the link's speed from the previous cycle (#1074).
+    ///
+    /// `None` for anything that is not an ifTable column, and for an interface
+    /// whose speed has not been read: an unknown speed supports no bound, and a
+    /// guessed one would refuse legitimate traffic.
+    fn counter_ceiling(&self, oid_str: &str) -> Option<f64> {
+        let index = oid_str.rsplit('.').next()?;
+        let speed = self.speeds.lock().unwrap().get(index).copied()?;
+        // ifTable/ifXTable octet columns count bytes; every other counted
+        // column (packets, errors, discards) is bounded by frames.
+        let octets = [
+            "1.3.6.1.2.1.2.2.1.10.",
+            "1.3.6.1.2.1.2.2.1.16.",
+            "1.3.6.1.2.1.31.1.1.1.6.",
+            "1.3.6.1.2.1.31.1.1.1.10.",
+        ];
+        let frames = [
+            "1.3.6.1.2.1.2.2.1.11.",
+            "1.3.6.1.2.1.2.2.1.13.",
+            "1.3.6.1.2.1.2.2.1.14.",
+            "1.3.6.1.2.1.2.2.1.17.",
+            "1.3.6.1.2.1.2.2.1.19.",
+            "1.3.6.1.2.1.2.2.1.20.",
+            "1.3.6.1.2.1.31.1.1.1.7.",
+            "1.3.6.1.2.1.31.1.1.1.11.",
+        ];
+        if octets.iter().any(|p| oid_str.starts_with(p)) {
+            Some(crate::rate::octet_ceiling(speed))
+        } else if frames.iter().any(|p| oid_str.starts_with(p)) {
+            Some(crate::rate::frame_ceiling(speed))
+        } else {
+            None
+        }
+    }
+
+    /// Publish one derived rate, marking a 32-bit counter whose link can wrap
+    /// it more than once between polls (#1074).
+    async fn publish_rate_point(
+        &self,
+        oid_str: &str,
+        rate_metric: &str,
+        rate: f64,
+        unit: &str,
+        table_index: Option<&str>,
+        wrap_risk: Option<bool>,
+    ) {
+        self.publish_point_labelled(
+            oid_str,
+            rate_metric,
+            TelemetryValue::Gauge(rate),
+            Some(unit),
+            None,
+            table_index,
+            wrap_risk.map(|r| ("wrap_risk", r.to_string())),
+        )
+        .await;
     }
 
     async fn publish_point(
@@ -872,6 +981,31 @@ impl SnmpPoller {
         unit: Option<&str>,
         enum_label: Option<String>,
         table_index: Option<&str>,
+    ) {
+        self.publish_point_labelled(
+            oid_str,
+            metric_name,
+            value,
+            unit,
+            enum_label,
+            table_index,
+            None,
+        )
+        .await
+    }
+
+    /// [`publish_point`](Self::publish_point) with one extra label — the seam
+    /// `wrap_risk` rides on (#1074).
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_point_labelled(
+        &self,
+        oid_str: &str,
+        metric_name: &str,
+        value: TelemetryValue,
+        unit: Option<&str>,
+        enum_label: Option<String>,
+        table_index: Option<&str>,
+        extra: Option<(&str, String)>,
     ) {
         let mut point = TelemetryPoint::new(&self.device.name, Protocol::Snmp, metric_name, value)
             .with_label("oid", oid_str);
@@ -896,6 +1030,9 @@ impl SnmpPoller {
         }
         if let Some(unit) = unit {
             point = point.with_unit(unit);
+        }
+        if let Some((k, v)) = &extra {
+            point = point.with_label(*k, v);
         }
         if let Some(label) = enum_label {
             point = point.with_label("enum", label);
