@@ -339,12 +339,13 @@ const COLLECTOR_INLINE_METRICS: &[&str] = &[
     "sensors/coretemp/core_0/critical",
     "sensors/coretemp/core_0/max",
     "sensors/dell_ddv/cpu_fan/rpm",
-    // process/{rank}/* — the `collect.processes` top-N stream. Absent from
-    // this list until 2026-07-16, which is how it shipped unregistered: the
-    // flag defaults off, so nothing exercised it and only the runtime
-    // metric_guard ever complained (loudly, once the demo turned it on).
-    "process/1/cpu",
-    "process/1/memory",
+    // `process/{rank}/*` is RETIRED (#1070, registry 1.9) and no longer
+    // published. It was here from 2026-07-16, having shipped unregistered
+    // before that: the flag defaults off, so nothing exercised it and only the
+    // runtime metric_guard ever complained. The per-pid detail is
+    // `@rpc/sysinfo/processes`, and the bounded aggregates
+    // `system/processes_{total,zombie}` are still streamed — both are in this
+    // list already.
 ];
 
 #[test]

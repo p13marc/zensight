@@ -28,7 +28,7 @@ and carry the original name back in a label.
 | vmstat (Linux) | `vmstat` | `memory/{oom_kills_total,page_faults_major_total,page_faults_total,paging_in_total,paging_out_total,pgpgin_total,pgpgout_total}` |
 | kernel derivatives (Linux) | `vmstat` | `system/{context_switches_total,forks_total,procs_running,procs_blocked}` |
 | fd / inode ceilings (Linux) | `fd_inode` | `system/file_descriptors_{used,max,used_percent}`, `disk/<mount>/{inodes_total,inodes_used,inodes_free,inode_used_percent}` |
-| processes | `processes` **(default off)** | `system/{processes_total,processes_zombie}`, `process/<rank>/{cpu,memory}` |
+| processes | `processes` **(default off)** | `system/{processes_total,processes_zombie}` — the bounded aggregates only. Per-pid detail is the `@rpc/sysinfo/processes` procedure, never a stream; `process/<rank>/{cpu,memory}` was retired in registry 1.9 (#1070) |
 | temperatures (Linux) | `temperatures` **(default off)** | `sensors/<chip>/<label>/{temp,critical,max}` |
 | tcp states (Linux) | `tcp_states` **(default off)** | `tcp/<state>`, `tcp/total` |
 | cgroup-v2 (Linux) | `cgroups` **(default off)** | `cgroup/cpu/{nr_throttled,throttled_usec}`, `cgroup/memory/{current,max,used_percent,oom_kills_total,oom_total}`, `cgroup/<res>/pressure/<scope>_{avg10,total_us}` |

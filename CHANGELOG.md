@@ -193,6 +193,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — BREAKING
 
+- **`sysinfo`'s `process/{rank}/{cpu,memory}` is retired** (#1070, registry
+  1.9). It was defended in the registry as bounded and stable, and was neither.
+  `process/1/cpu` is whoever is burning the most CPU *this tick*, so the series
+  was a max-envelope over unrelated processes that a chart draws happily and no
+  reader can question. And the Prometheus mapping turns point labels into series
+  labels, so every process that ever entered the top N minted a new
+  `{rank="1",pid="8471",…}` series — an unbounded cardinality leak from the
+  sensor whose job is to notice leaks. `collect.processes` defaulting off limited
+  the blast radius, not the shape.
+
+  Retire-and-sibling needed no sibling: the replacement already existed on both
+  sides. `@rpc/sysinfo/processes` has always served the per-pid detail — richer
+  than this ever was (rss/vsz/threads/io/state/uid) — and the GUI already had a
+  process explorer reading it beside the streamed card, which is now gone.
+  `system/processes_{total,zombie}` still stream. `collect.top_processes` keeps
+  its meaning: it is the reply's default `top` when a caller names none.
+
+
 - **`zensight_container_restart_count` is now
   `zensight_container_restart_count_total`** (#1071). The Prometheus exposition
   appends `_total` to a counter that does not already carry it, so this one

@@ -923,7 +923,22 @@ impl ProcessSelector {
     /// are ignored; bad values fall back to defaults; `top` is clamped to
     /// `1..=MAX_TOP`.
     pub fn parse(params: &str) -> Self {
-        let mut sel = Self::default();
+        Self::parse_with_default_top(params, Self::default().top)
+    }
+
+    /// [`parse`](Self::parse) with the host's own default for a caller that
+    /// named no `top`.
+    ///
+    /// That default is `collect.top_processes`, which is where it went when the
+    /// rank-keyed telemetry stream it used to bound was retired (#1070). The
+    /// operator's "how many processes do I care about" is still a setting; it
+    /// now bounds the on-demand reply instead of a streamed family that could
+    /// not be read.
+    pub fn parse_with_default_top(params: &str, default_top: usize) -> Self {
+        let mut sel = Self {
+            top: default_top.clamp(1, Self::MAX_TOP),
+            ..Self::default()
+        };
         for pair in params.split('&') {
             let Some((k, v)) = pair.split_once('=') else {
                 continue;

@@ -69,10 +69,12 @@ pub fn sysinfo_host_view<'a>(
         content = content.push(card(render_tcp_states_section(state)));
     }
 
-    if has_processes(state) {
-        content = content.push(card(render_processes_section(state)));
-    }
-
+    // The streamed "Top Processes" card is gone with the family behind it
+    // (#1070): `process/{rank}/cpu` was whoever was burning the most CPU *this
+    // tick*, so each row was a max-envelope over unrelated processes, and the
+    // pid/rank labels made an unbounded exporter series leak. The explorer
+    // below asks the same question of the same sensor and gets a real answer.
+    //
     // On-demand process explorer (#47) — the rich `@rpc/sysinfo/processes` table
     // (rss/vsz/threads/io/state/uid), always available for a sysinfo host since
     // it's pulled lazily rather than streamed.
@@ -940,11 +942,6 @@ fn render_tcp_states_section(state: &DeviceDetailState) -> Element<'_, Message> 
     column![title, content].spacing(10).into()
 }
 
-/// Check if process data is available.
-fn has_processes(state: &DeviceDetailState) -> bool {
-    state.metrics.keys().any(|k| k.starts_with("process/"))
-}
-
 /// Whether any metric key starts with `prefix` (#47).
 fn has_prefix(state: &DeviceDetailState, prefix: &str) -> bool {
     state.metrics.keys().any(|k| k.starts_with(prefix))
@@ -1096,57 +1093,6 @@ fn render_system_health_section(state: &DeviceDetailState) -> Element<'_, Messag
     ]
     .spacing(4)
     .into()
-}
-
-/// Render top processes section.
-fn render_processes_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![text("Top Processes").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-    let mut content = Column::new().spacing(5);
-
-    // Header row
-    content = content.push(
-        row![
-            text("Rank").size(10).width(40),
-            text("Name").size(10).width(150),
-            text("CPU %").size(10).width(60),
-            text("Memory").size(10).width(80),
-        ]
-        .spacing(10),
-    );
-
-    // Find processes (process/{rank}/cpu)
-    for rank in 1..=10 {
-        let cpu_key = format!("process/{}/cpu", rank);
-        let mem_key = format!("process/{}/memory", rank);
-
-        if let Some(cpu) = get_metric_value(state, &cpu_key) {
-            let memory = get_metric_value(state, &mem_key).unwrap_or(0.0);
-
-            // Get process name from labels
-            let name = state
-                .metrics
-                .get(&cpu_key)
-                .and_then(|p| p.labels.get("name"))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown");
-
-            let proc_row = row![
-                text(format!("{}", rank)).size(11).width(40),
-                text(name).size(11).width(150),
-                text(format!("{:.1}%", cpu)).size(11).width(60),
-                text(format_bytes(memory)).size(11).width(80),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center);
-
-            content = content.push(proc_row);
-        }
-    }
-
-    column![title, content].spacing(10).into()
 }
 
 /// On-demand process explorer (#47): a sort toggle (CPU / Memory / I/O) that

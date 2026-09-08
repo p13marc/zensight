@@ -80,6 +80,7 @@ pub async fn run(
     producer: String,
     _source: String,
     scrub: ProcessScrubConfig,
+    default_top: usize,
 ) {
     let key = zensight_keyspace_ctx(&producer).const_rpc_key(&["processes"]);
     let queryable = match zensight_common::served::serve_queryable(&session, key.as_keyexpr()).await
@@ -94,7 +95,7 @@ pub async fn run(
 
     let policy = Arc::new(CmdlinePolicy::new(&scrub));
     while let Ok(query) = queryable.recv_async().await {
-        let sel = ProcessSelector::parse(query.parameters().as_str());
+        let sel = ProcessSelector::parse_with_default_top(query.parameters().as_str(), default_top);
         let policy = policy.clone();
         // The per-pid /proc walk is blocking — keep it off the runtime thread.
         let records =

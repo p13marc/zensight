@@ -1293,44 +1293,21 @@ impl SystemCollector {
         .await;
         count += 1;
 
-        let top_n = self.config.collect.top_processes;
-
-        // Get processes sorted by CPU usage
-        let mut processes: Vec<_> = self.system.processes().values().collect();
-        processes.sort_by(|a, b| {
-            b.cpu_usage()
-                .partial_cmp(&a.cpu_usage())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        for (rank, proc) in processes.iter().take(top_n).enumerate() {
-            let mut labels = HashMap::new();
-            labels.insert("pid".to_string(), proc.pid().to_string());
-            labels.insert(
-                "name".to_string(),
-                proc.name().to_string_lossy().to_string(),
-            );
-            labels.insert("rank".to_string(), (rank + 1).to_string());
-
-            self.publish(
-                &format!("process/{}/cpu", rank + 1),
-                TelemetryValue::Gauge(proc.cpu_usage() as f64),
-                timestamp,
-                labels.clone(),
-            )
-            .await;
-            count += 1;
-
-            labels.insert("unit".to_string(), "bytes".to_string());
-            self.publish(
-                &format!("process/{}/memory", rank + 1),
-                TelemetryValue::Gauge(proc.memory() as f64),
-                timestamp,
-                labels,
-            )
-            .await;
-            count += 1;
-        }
+        // The rank-keyed top-N stream — `process/{rank}/{cpu,memory}` with
+        // pid/name/rank as labels — is RETIRED (#1070, registry 1.9).
+        //
+        // It was defended as bounded and stable, and was neither.
+        // `process/1/cpu` is whoever is burning the most CPU *this tick*, so
+        // the series was a max-envelope over unrelated processes that a chart
+        // draws happily. And the Prometheus mapping turns point labels into
+        // series labels, so every process that ever entered the top N minted a
+        // new series — an unbounded cardinality leak from the sensor whose job
+        // is to notice leaks.
+        //
+        // The per-pid detail was always on demand at `@rpc/sysinfo/processes`
+        // (`query.rs`), which is the pattern the framework docs recommend, and
+        // `collect.top_processes` still bounds *that* reply. Nothing had to be
+        // built to replace this; the replacement already existed.
 
         count
     }

@@ -36,3 +36,5 @@ logs	logs/by_unit/{unit}/error_ratio
 logs	logs/by_unit/{unit}/burn_rate
 logs	logs/by_template/{template}/count_total
 logs	logs/by_template/{template}/errors_total
+sysinfo	process/{rank}/cpu
+sysinfo	process/{rank}/memory

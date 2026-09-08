@@ -792,38 +792,10 @@ impl DemoSimulator {
                 timestamp,
             ));
 
-            // Top processes (simulated)
-            let process_names = ["systemd", "postgres", "nginx", "java", "python3"];
-            for (rank, name) in process_names.iter().enumerate() {
-                let proc_cpu = self.rng.random_range(0.5..15.0) / (rank as f64 + 1.0);
-                let proc_mem =
-                    self.rng.random_range(50_000_000u64..500_000_000u64) / (rank as u64 + 1);
-
-                points.push(self.make_point_with_labels(
-                    Protocol::Sysinfo,
-                    server,
-                    &format!("process/{}/cpu", rank + 1),
-                    TelemetryValue::Gauge(proc_cpu),
-                    timestamp,
-                    vec![
-                        ("name".to_string(), name.to_string()),
-                        ("pid".to_string(), (1000 + rank * 100).to_string()),
-                        ("rank".to_string(), (rank + 1).to_string()),
-                    ],
-                ));
-                points.push(self.make_point_with_labels(
-                    Protocol::Sysinfo,
-                    server,
-                    &format!("process/{}/memory", rank + 1),
-                    TelemetryValue::Counter(proc_mem),
-                    timestamp,
-                    vec![
-                        ("name".to_string(), name.to_string()),
-                        ("pid".to_string(), (1000 + rank * 100).to_string()),
-                        ("rank".to_string(), (rank + 1).to_string()),
-                    ],
-                ));
-            }
+            // The simulated top-N process stream is gone with the family
+            // behind it (#1070). The demo publishes what a real sysinfo sensor
+            // publishes, and a rank-keyed process series is no longer that; the
+            // GUI's process card reads `@rpc/sysinfo/processes` instead.
 
             points.extend(self.generate_thermal_power(server, cpu, timestamp));
         }

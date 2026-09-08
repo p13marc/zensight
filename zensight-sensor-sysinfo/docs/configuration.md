@@ -61,7 +61,7 @@ families regardless of the flag.
 | `temperatures` | **false** | hwmon temperatures (Linux) |
 | `tcp_states` | **false** | `/proc/net/tcp` state counts (Linux) |
 | `processes` | **false** | top-N process aggregates (can be heavy) |
-| `top_processes` | `10` | how many top processes to report when `processes` is on |
+| `top_processes` | `10` | rows `@rpc/sysinfo/processes` returns when the caller names no `top`. It used to bound the `process/{rank}/*` stream, which is retired (#1070) |
 | `cgroups` | **false** | cgroup-v2 container-saturation metrics (Linux) |
 | `cgroup_paths` | `[]` | extra cgroup-v2 paths to monitor (with `cgroups`) |
 | `power` | **false** | RAPL/fan/battery/entropy depth (Linux) |
