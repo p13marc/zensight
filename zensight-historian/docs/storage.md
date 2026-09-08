@@ -8,11 +8,11 @@ fleet writes to them, and how that was measured.
 
 | Tier | Resolution | Where | Default retention |
 |---|---|---|---|
-| Hot | per-second | memory, per series | `hot_secs` (600) |
+| Hot | per-second | memory, per series | `hot_secs` (600) — seconds, with an element ceiling of the same number |
 | Warm | per-minute | redb `samples` | `retention.minute_days` (2) |
 | Cold | per-hour | redb `samples` | `retention.hour_days` (90) |
 
-A bucket is `{last, min, max}`: 16 bytes of value plus the packed
+A bucket is `{last, min, max}`: 24 bytes of value plus the packed
 `(metric_id, tier, bucket_ts)` key. `last` is the value and the tier semantics
 are last-observation-per-bucket; the range is what lets a coarse tier say a
 spike happened at all, rather than reporting only where the value landed on the

@@ -12,6 +12,15 @@ use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 use zensight_historian::ingest::{IngestCounters, SharedStore, record_point};
 use zensight_historian::query::range;
 
+/// A trigger no test reaches: `usize::MAX` means the `batch_size` depth is
+/// never met, so an early flush cannot fire (#1066).
+fn no_batch() -> zensight_historian::ingest::BatchTrigger {
+    zensight_historian::ingest::BatchTrigger {
+        size: usize::MAX,
+        notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+    }
+}
+
 fn point(protocol: Protocol, metric: &str, value: TelemetryValue, ts: i64) -> TelemetryPoint {
     TelemetryPoint {
         timestamp: ts,
@@ -61,6 +70,7 @@ async fn range_answers_each_aggregate_over_a_live_session() {
             &store,
             &counters,
             &shed,
+            &no_batch(),
         );
         record_point(
             &format!("v1/{origin}/telemetry/sysinfo/system/load"),
@@ -73,6 +83,7 @@ async fn range_answers_each_aggregate_over_a_live_session() {
             &store,
             &counters,
             &shed,
+            &no_batch(),
         );
     }
 
@@ -157,6 +168,7 @@ async fn pages_reassemble_into_the_unpaged_answer() {
                 &store,
                 &counters,
                 &shed,
+                &no_batch(),
             );
         }
     }
@@ -250,6 +262,7 @@ async fn series_lists_what_is_held() {
         &store,
         &counters,
         &shed,
+        &no_batch(),
     );
     record_point(
         &format!("v1/{origin}/telemetry/sysinfo/system/load"),
@@ -262,6 +275,7 @@ async fn series_lists_what_is_held() {
         &store,
         &counters,
         &shed,
+        &no_batch(),
     );
 
     let ctx = zensight_sensor_core::v1::for_producer("historian");
