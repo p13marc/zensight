@@ -39,6 +39,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The container sensor's cumulative counters are `Counter`, and the registry
+  can now say so** (#1071). `restart_count`, `cpu_usage_usec_total`,
+  `cpu_throttled_usec_total`, `oom_kills_total` and `memory_max_events_total`
+  went out as `TelemetryValue::Gauge`. Both exporters derive the wire type from
+  the variant and nothing else, so `container_…_oom_kills_total` was scraped as
+  `# TYPE … gauge` and exported to OTLP as a Gauge — which no backend can
+  `rate()` or delta-aggregate. Every sibling sensor gets it right explicitly;
+  nothing in the tree could have said so.
+
+  The durable half is upstream and now in the pin: zenkey 0.8.1 carries
+  `kind = "counter" | "gauge" | "text" | "bool"` on `SubjectDecl` (RFC 08 §2
+  v1.32) into the generated `Subject::kind()` and into `registry.lock`'s
+  optional sixth column. `container.toml`'s 21 telemetry subjects declare one,
+  and `registry::kind_matches` — a new shared guard, run from `checked_point` —
+  asserts the variant against it. The remaining ~300 subjects are a mechanical
+  follow-up; a declaration and its publish site must land together, because
+  zenkey-fleet 0.13.0's `kind-mismatch` judge reports an Error per disagreeing
+  key on a live bus and the conformance gate fails on Error.
+
+
 - **`sysinfo`'s disk I/O reports whole disks and the mapper layer** (#1076). The
   filter skipped `loop*`, `ram*` and `dm-*` under a comment that said "Skip
   partitions (we want whole disks like sda, nvme0n1)". It did the opposite of
@@ -170,6 +190,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PR that had touched neither this crate nor any port. Every sibling rig already
   retries (`zensight-correlator/tests/*`) or probes and hands out
   (`zensight-sensor-logs/tests/harness`, #1004); this one did neither.
+
+### Changed — BREAKING
+
+- **`zensight_container_restart_count` is now
+  `zensight_container_restart_count_total`** (#1071). The Prometheus exposition
+  appends `_total` to a counter that does not already carry it, so this one
+  family's exported name moves when its type is corrected. The other four keep
+  their names and change only their `# TYPE` line — from `gauge` to `counter`,
+  which is what makes them usable. A dashboard or recording rule keyed on the
+  old name needs re-pointing; one keyed on the point's `container` label is
+  unaffected.
+
 
 ### Changed
 

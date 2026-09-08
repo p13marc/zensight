@@ -369,8 +369,18 @@ async fn the_container_contract_end_to_end() {
                 .nth(1)
                 .unwrap()
                 .to_string();
-            if let zensight_common::TelemetryValue::Gauge(v) = p.value {
-                seen.insert(subject.clone(), v);
+            // Both numeric variants: the cumulative families are `Counter`
+            // since #1071, and a test that only read gauges would have gone
+            // quietly blind to them rather than failing — which is how they
+            // shipped as gauges in the first place.
+            match p.value {
+                zensight_common::TelemetryValue::Gauge(v) => {
+                    seen.insert(subject.clone(), v);
+                }
+                zensight_common::TelemetryValue::Counter(v) => {
+                    seen.insert(subject.clone(), v as f64);
+                }
+                _ => {}
             }
             points.push((subject, p));
         }
@@ -400,6 +410,34 @@ async fn the_container_contract_end_to_end() {
     assert!(netring_point.labels.contains_key("image"));
     assert_eq!(seen.get("netring/memory_bytes"), Some(&67_000_000.0));
     assert_eq!(seen.get("netring/oom_kills_total"), Some(&1.0));
+    // …and it is a COUNTER (#1071). Both exporters derive the wire type from
+    // this variant and nothing else, so a `Gauge` here is `# TYPE … gauge` in
+    // a scrape — which no backend can `rate()`.
+    for cumulative in [
+        "netring/oom_kills_total",
+        "netring/restart_count",
+        "caddy/cpu_usage_usec_total",
+    ] {
+        let (_, p) = points
+            .iter()
+            .find(|(k, _)| k == cumulative)
+            .unwrap_or_else(|| panic!("{cumulative} is published"));
+        assert!(
+            matches!(p.value, zensight_common::TelemetryValue::Counter(_)),
+            "{cumulative} is cumulative and must be a Counter, got {:?}",
+            p.value
+        );
+    }
+    // A level from the same sensor stays a Gauge, so this asserts that the two
+    // are told apart rather than that everything became a counter.
+    let (_, mem) = points
+        .iter()
+        .find(|(k, _)| k == "netring/memory_bytes")
+        .expect("netring/memory_bytes");
+    assert!(matches!(
+        mem.value,
+        zensight_common::TelemetryValue::Gauge(_)
+    ));
     assert_eq!(seen.get("caddy/healthy"), Some(&1.0));
     assert_eq!(seen.get("containers/total"), Some(&4.0));
     assert_eq!(seen.get("containers/running"), Some(&3.0));

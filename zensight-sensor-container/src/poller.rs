@@ -236,28 +236,48 @@ impl Poller {
             }
 
             let r = &c.resources;
-            let mut points: Vec<(String, f64)> = vec![
+            // The variant is the wire type: both exporters read it and nothing
+            // else (`prometheus/src/mapping.rs::from_value`,
+            // `otel/src/metrics.rs::from_value`). Every one of these used to go
+            // out as `Gauge`, including the five whose names end in `_total`
+            // and whose values only ever climb — so `container_…_oom_kills_total`
+            // was scraped as `# TYPE … gauge` and exported to OTLP as a Gauge,
+            // which no backend can `rate()` or delta-aggregate (#1071).
+            let mut points: Vec<(String, TelemetryValue)> = vec![
+                // A 0/1 step series, and morally `TelemetryValue::Boolean` —
+                // but changing the variant changes the payload, and this issue
+                // is about the five whose TYPE is wrong. Both render as
+                // `# TYPE … gauge` either way; the move is a separate change
+                // with its own wire note.
                 (
                     format!("{slug}/running"),
-                    if c.is_running() { 1.0 } else { 0.0 },
+                    TelemetryValue::Gauge(if c.is_running() { 1.0 } else { 0.0 }),
                 ),
-                (format!("{slug}/restart_count"), c.restart_count as f64),
+                (
+                    format!("{slug}/restart_count"),
+                    TelemetryValue::Counter(c.restart_count),
+                ),
             ];
+            // Cumulative: monotonic within one container's life, reset when the
+            // container is replaced — which is a new cgroup, and which the
+            // origin's `alive` token cycling makes visible on the wire. That is
+            // the RFC 08 §2 definition of `kind = "counter"`.
+            for (suffix, v) in [
+                ("cpu_usage_usec_total", r.cpu_usage_usec),
+                ("cpu_throttled_usec_total", r.cpu_throttled_usec),
+                ("oom_kills_total", r.oom_kills),
+                ("memory_max_events_total", r.memory_max_events),
+            ] {
+                if let Some(v) = v {
+                    points.push((format!("{slug}/{suffix}"), TelemetryValue::Counter(v)));
+                }
+            }
+            // Levels: they may fall, and falling means it fell.
             for (suffix, v) in [
                 ("memory_bytes", r.memory_bytes.map(|v| v as f64)),
                 ("memory_max_bytes", r.memory_max_bytes.map(|v| v as f64)),
                 ("memory_peak_bytes", r.memory_peak_bytes.map(|v| v as f64)),
                 ("memory_ratio", c.memory_ratio()),
-                ("cpu_usage_usec_total", r.cpu_usage_usec.map(|v| v as f64)),
-                (
-                    "cpu_throttled_usec_total",
-                    r.cpu_throttled_usec.map(|v| v as f64),
-                ),
-                ("oom_kills_total", r.oom_kills.map(|v| v as f64)),
-                (
-                    "memory_max_events_total",
-                    r.memory_max_events.map(|v| v as f64),
-                ),
                 ("cpu_pressure_avg10", r.cpu_pressure_avg10),
                 ("memory_pressure_avg10", r.memory_pressure_avg10),
                 ("io_pressure_avg10", r.io_pressure_avg10),
@@ -271,25 +291,29 @@ impl Poller {
                 ),
             ] {
                 if let Some(v) = v {
-                    points.push((format!("{slug}/{suffix}"), v));
+                    points.push((format!("{slug}/{suffix}"), TelemetryValue::Gauge(v)));
                 }
             }
             // Not published when there is no healthcheck or none has ever run:
             // a 0 would say "this service is failing", which is precisely the
             // wrong thing to say about a container whose PROBE is broken.
             match c.health {
-                HealthState::Healthy => points.push((format!("{slug}/healthy"), 1.0)),
-                HealthState::Unhealthy => points.push((format!("{slug}/healthy"), 0.0)),
+                HealthState::Healthy => {
+                    points.push((format!("{slug}/healthy"), TelemetryValue::Gauge(1.0)))
+                }
+                HealthState::Unhealthy => {
+                    points.push((format!("{slug}/healthy"), TelemetryValue::Gauge(0.0)))
+                }
                 _ => {}
             }
             if c.image.upstream_digest.is_some() {
                 points.push((
                     format!("{slug}/image_behind_upstream"),
-                    if c.image.is_behind_upstream() {
+                    TelemetryValue::Gauge(if c.image.is_behind_upstream() {
                         1.0
                     } else {
                         0.0
-                    },
+                    }),
                 ));
             }
 
@@ -299,8 +323,7 @@ impl Poller {
                 // host's cgroup tree; its name is unique per host, not
                 // globally, so filing the series under it made four machines
                 // running `zensight-sensor-logs` collide on one identity.
-                let p = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
-                    .with_labels(labels.clone());
+                let p = checked_point(&self.source, &metric, value).with_labels(labels.clone());
                 if self.publisher.publish(&metric, &p).await.is_ok() {
                     published += 1;
                 }
