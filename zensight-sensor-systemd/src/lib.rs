@@ -19,6 +19,7 @@ pub mod events;
 pub mod journal;
 pub mod map;
 pub mod query;
+pub mod restart_window;
 pub mod sentinel;
 pub(crate) mod telemetry_guard;
 pub mod unit;
