@@ -77,6 +77,73 @@ pub struct GnmiTarget {
     /// gNMI encoding for requests
     #[serde(default)]
     pub encoding: GnmiEncoding,
+
+    /// Path substrings that name a **counter**, in addition to the default
+    /// `/counters/` (#1077).
+    ///
+    /// A gNMI value carries no kind: OpenConfig types `state/counters/in-octets`
+    /// and `cpu/utilization/state/instant` both as `uint64`, and the subscriber
+    /// used to publish *every* `UintVal` as a `Counter`. A backend then applies
+    /// `rate()` to CPU utilisation, and every legitimate decrease looks like a
+    /// reset. Only the path says which is which, and only for the vendor trees
+    /// this list is for — OpenConfig's own convention is covered by the default.
+    #[serde(default)]
+    pub counter_paths: Vec<String>,
+
+    /// Path substrings that name a **gauge**, overriding `counter_paths` and
+    /// the `/counters/` default where a vendor puts a level under one.
+    #[serde(default)]
+    pub gauge_paths: Vec<String>,
+
+    /// How far a device's own timestamp may sit from this host's clock before
+    /// the receive time is used instead, in seconds (#1077). `0` disables the
+    /// clamp and trusts the device unconditionally, which is what every build
+    /// before this one did.
+    ///
+    /// A switch that has not reached NTP after a reload — the common case —
+    /// publishes points months out; a `timestamp: 0`, which the spec defines as
+    /// "unset", published every point at the epoch.
+    #[serde(default = "default_max_clock_skew_secs")]
+    pub max_clock_skew_secs: u64,
+}
+
+/// Five minutes: comfortably past any plausible NTP offset on a device that
+/// *has* synchronised, and far short of the months a device that has not is out
+/// by.
+fn default_max_clock_skew_secs() -> u64 {
+    300
+}
+
+impl GnmiTarget {
+    /// What kind of value a path carries (#1077).
+    ///
+    /// `/counters/` is OpenConfig's own convention — `state/counters/in-octets`
+    /// and friends — and is the only default. Everything else is a **gauge**,
+    /// because that is the answer that costs least when it is wrong: a level
+    /// mistaken for a counter makes `rate()` produce garbage and every decrease
+    /// look like a reset, while a counter mistaken for a level is still exactly
+    /// the number the device sent, just typed as the thing it also is.
+    pub fn kind_for_path(&self, path: &str) -> ValueKind {
+        if self.gauge_paths.iter().any(|p| path.contains(p.as_str())) {
+            return ValueKind::Gauge;
+        }
+        if path.contains("/counters/")
+            || path.starts_with("counters/")
+            || self.counter_paths.iter().any(|p| path.contains(p.as_str()))
+        {
+            return ValueKind::Counter;
+        }
+        ValueKind::Gauge
+    }
+}
+
+/// What a numeric gNMI leaf is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    /// Monotonic until whatever counts it restarts.
+    Counter,
+    /// A level: it may fall, and falling means it fell.
+    Gauge,
 }
 
 /// Authentication credentials

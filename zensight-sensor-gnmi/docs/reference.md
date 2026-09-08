@@ -52,6 +52,31 @@ and `gnmi`.
 | `tls` | object | TLS settings (see below); disabled unless `enabled`. |
 | `encoding` | enum | gNMI wire encoding: `JSON`, `JSON_IETF`, `PROTO`, `ASCII`. |
 | `subscriptions[]` | array | Paths to subscribe to (see below). |
+| `counter_paths[]` | string[] | Path substrings that name a **counter**, in addition to the `/counters/` default (#1077). For vendor trees that put them elsewhere. |
+| `gauge_paths[]` | string[] | Path substrings that name a **gauge**. Wins over `counter_paths` and the default. |
+| `max_clock_skew_secs` | u64 | How far the device's own timestamp may sit from this host's before the receive time is used instead. Default 300; `0` trusts the device unconditionally (#1077). |
+
+#### What a value *is*, and what time it happened
+
+Neither is on the wire, and both used to be guessed wrong.
+
+**Kind.** A gNMI value carries no counter/gauge distinction, and OpenConfig
+types `state/counters/in-octets` and `cpu/utilization/state/instant` both as
+`uint64`. Every `UintVal` was published as a `Counter`, so a backend applied
+`rate()` to CPU utilisation and read every legitimate decrease as a reset. The
+**path** decides now: a `/counters/` segment is a counter, `gauge_paths` and
+`counter_paths` cover vendor trees, and **everything else is a gauge** —
+because that is the answer that costs least when it is wrong. A level mistaken
+for a counter produces garbage; a counter mistaken for a level is still exactly
+the number the device sent.
+
+**Time.** gNMI carries nanoseconds since the epoch from the *device's* clock.
+A `timestamp` of `0` is the spec's "unset" and used to publish the point at
+1970-01-01; a switch that has not reached NTP after a reload — the common case
+— published months out. Both now fall back to the receive time, with the skew
+logged. (The `checked_div(1_000_000).unwrap_or(0)` that looked like it guarded
+the first was dead code: the divisor is a nonzero constant, so `checked_div`
+never returns `None`.)
 
 ### `tls`
 
@@ -75,5 +100,7 @@ and `gnmi`.
 - Enable gNMI/gRPC on the target device (common ports 9339, 6030, 50051) and
   ensure the user has gNMI/telemetry permissions.
 - `skip_verify: true` disables server-certificate validation — development only.
+  **It is currently logged and not honoured** (#1137, epic #1057); so are the
+  unslugged path elements a key is built from. Both are out of scope here.
 - The `artifacts.report.redact_extra` list (see the example config) can add extra
   keys — e.g. `username` — to the debug-bundle redaction set.

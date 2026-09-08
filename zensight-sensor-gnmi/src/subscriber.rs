@@ -278,7 +278,16 @@ impl GnmiSubscriber {
         registry: &zensight_common::PublisherRegistry,
         notification: gnmi::Notification,
     ) -> anyhow::Result<()> {
-        let timestamp = notification.timestamp.checked_div(1_000_000).unwrap_or(0); // Convert nanoseconds to milliseconds
+        // The device's own clock, clamped to this host's (#1077).
+        //
+        // `checked_div(1_000_000).unwrap_or(0)` was dead code twice over: the
+        // divisor is a nonzero constant so `checked_div` never returns `None`,
+        // and the case it looked like it was guarding — `timestamp == 0`, which
+        // the gNMI spec defines as **unset** — fell straight through and
+        // published the point at the epoch. A switch that has not reached NTP
+        // after a reload, which is the common case, published months out.
+        let received_ms = zensight_common::current_timestamp_millis();
+        let timestamp = self.clamp_timestamp(notification.timestamp, received_ms);
         let prefix_path = notification.prefix.as_ref().map(|p| self.path_to_string(p));
 
         for update in notification.update {
@@ -289,7 +298,7 @@ impl GnmiSubscriber {
                     _ => metric_path,
                 };
 
-                let value = self.extract_value(&update);
+                let value = self.extract_value(&update, &full_path);
 
                 let point = TelemetryPoint {
                     timestamp,
@@ -344,9 +353,49 @@ impl GnmiSubscriber {
             .join("/")
     }
 
-    fn extract_value(&self, update: &gnmi::Update) -> TelemetryValue {
+    /// The instant to publish a notification at (#1077).
+    ///
+    /// gNMI carries nanoseconds since the epoch, and the device's clock is not
+    /// this host's. Three cases, and only the first was handled:
+    ///
+    /// - a plausible device clock → use it, so points from one device order
+    ///   among themselves the way the device saw them;
+    /// - `0`, which the spec defines as **unset** → receive time. It used to
+    ///   publish at 1970-01-01, and the `unwrap_or(0)` that looked like it was
+    ///   guarding this was dead code: `checked_div` by a nonzero constant never
+    ///   returns `None`;
+    /// - beyond `max_clock_skew_secs` → receive time, with the skew logged. A
+    ///   switch that has not reached NTP after a reload is the common case, and
+    ///   it publishes months out.
+    fn clamp_timestamp(&self, device_nanos: i64, received_ms: i64) -> i64 {
+        if device_nanos <= 0 {
+            tracing::debug!(
+                target_name = %self.target.name,
+                "gNMI notification carried no timestamp; using receive time"
+            );
+            return received_ms;
+        }
+        let device_ms = device_nanos / 1_000_000;
+        let skew_secs = self.target.max_clock_skew_secs;
+        if skew_secs == 0 {
+            return device_ms; // the clamp is off; trust the device
+        }
+        let limit_ms = (skew_secs as i64).saturating_mul(1_000);
+        if (device_ms - received_ms).abs() > limit_ms {
+            tracing::warn!(
+                target_name = %self.target.name,
+                device_ms, received_ms,
+                skew_secs = (device_ms - received_ms) / 1_000,
+                "gNMI device clock is outside max_clock_skew_secs; publishing at receive time"
+            );
+            return received_ms;
+        }
+        device_ms
+    }
+
+    fn extract_value(&self, update: &gnmi::Update, path: &str) -> TelemetryValue {
         if let Some(val) = &update.val {
-            self.typed_value_to_telemetry(val)
+            self.typed_value_to_telemetry(val, path)
         } else {
             #[allow(deprecated)]
             if let Some(val) = &update.value {
@@ -363,13 +412,22 @@ impl GnmiSubscriber {
     // the field still send them, and a collector that stopped decoding a value
     // a switch emits would be the regression — the arms stay.
     #[allow(deprecated)]
-    fn typed_value_to_telemetry(&self, val: &gnmi::TypedValue) -> TelemetryValue {
+    fn typed_value_to_telemetry(&self, val: &gnmi::TypedValue, path: &str) -> TelemetryValue {
         use gnmi::typed_value::Value;
 
         match &val.value {
             Some(Value::StringVal(s)) => TelemetryValue::Text(s.clone()),
             Some(Value::IntVal(i)) => TelemetryValue::Gauge(*i as f64),
-            Some(Value::UintVal(u)) => TelemetryValue::Counter(*u),
+            // The PATH decides, not the wire type (#1077). OpenConfig uses
+            // `uint64` for `state/counters/in-octets` — a counter — and for
+            // `cpu/utilization/state/instant`, `temperature/instant` and
+            // `memory/state/used` — all levels. Publishing every `UintVal` as a
+            // `Counter` made a backend `rate()` CPU utilisation and read every
+            // legitimate decrease as a reset.
+            Some(Value::UintVal(u)) => match self.target.kind_for_path(path) {
+                crate::config::ValueKind::Counter => TelemetryValue::Counter(*u),
+                crate::config::ValueKind::Gauge => TelemetryValue::Gauge(*u as f64),
+            },
             Some(Value::BoolVal(b)) => TelemetryValue::Boolean(*b),
             Some(Value::BytesVal(b)) => TelemetryValue::Binary(b.clone()),
             Some(Value::FloatVal(f)) => TelemetryValue::Gauge(*f as f64),
@@ -432,6 +490,9 @@ mod tests {
             tls: Default::default(),
             subscriptions: vec![],
             encoding: GnmiEncoding::Json,
+            counter_paths: Vec::new(),
+            gauge_paths: Vec::new(),
+            max_clock_skew_secs: 300,
         };
 
         let subscriber = GnmiSubscriber::new(
@@ -458,6 +519,9 @@ mod tests {
             tls: Default::default(),
             subscriptions: vec![],
             encoding: GnmiEncoding::Json,
+            counter_paths: Vec::new(),
+            gauge_paths: Vec::new(),
+            max_clock_skew_secs: 300,
         };
 
         let subscriber = GnmiSubscriber::new(
@@ -483,6 +547,9 @@ mod tests {
             tls: Default::default(),
             subscriptions: vec![],
             encoding: GnmiEncoding::Json,
+            counter_paths: Vec::new(),
+            gauge_paths: Vec::new(),
+            max_clock_skew_secs: 300,
         };
 
         let subscriber = GnmiSubscriber::new(
@@ -528,6 +595,9 @@ mod tests {
             tls: Default::default(),
             subscriptions: vec![],
             encoding: GnmiEncoding::Json,
+            counter_paths: Vec::new(),
+            gauge_paths: Vec::new(),
+            max_clock_skew_secs: 300,
         };
         GnmiSubscriber::new(
             target,
@@ -567,29 +637,139 @@ mod tests {
         let sub = test_subscriber();
 
         assert_eq!(
-            sub.typed_value_to_telemetry(&typed(Value::StringVal("hi".to_string()))),
+            sub.typed_value_to_telemetry(&typed(Value::StringVal("hi".to_string())), "some/leaf"),
             TelemetryValue::Text("hi".to_string())
         );
         assert_eq!(
-            sub.typed_value_to_telemetry(&typed(Value::IntVal(-5))),
+            sub.typed_value_to_telemetry(&typed(Value::IntVal(-5)), "some/leaf"),
             TelemetryValue::Gauge(-5.0)
         );
+        // A `uint64` under no `/counters/` segment is a LEVEL (#1077). This
+        // assertion used to read `Counter(42)` for every path, which is the bug:
+        // OpenConfig types `cpu/utilization/state/instant` as `uint64` too.
         assert_eq!(
-            sub.typed_value_to_telemetry(&typed(Value::UintVal(42))),
+            sub.typed_value_to_telemetry(&typed(Value::UintVal(42)), "some/leaf"),
+            TelemetryValue::Gauge(42.0)
+        );
+        assert_eq!(
+            sub.typed_value_to_telemetry(
+                &typed(Value::UintVal(42)),
+                "interfaces/interface/state/counters/in-octets"
+            ),
             TelemetryValue::Counter(42)
         );
         assert_eq!(
-            sub.typed_value_to_telemetry(&typed(Value::BoolVal(true))),
+            sub.typed_value_to_telemetry(&typed(Value::BoolVal(true)), "some/leaf"),
             TelemetryValue::Boolean(true)
         );
         assert_eq!(
-            sub.typed_value_to_telemetry(&typed(Value::DoubleVal(1.5))),
+            sub.typed_value_to_telemetry(&typed(Value::DoubleVal(1.5)), "some/leaf"),
             TelemetryValue::Gauge(1.5)
         );
         assert_eq!(
-            sub.typed_value_to_telemetry(&typed(Value::BytesVal(vec![1, 2, 3]))),
+            sub.typed_value_to_telemetry(&typed(Value::BytesVal(vec![1, 2, 3])), "some/leaf"),
             TelemetryValue::Binary(vec![1, 2, 3])
         );
+    }
+
+    /// The path decides whether a `uint64` is a counter (#1077).
+    ///
+    /// OpenConfig uses `uint64` for `state/counters/in-octets` — a counter —
+    /// and for `cpu/utilization/state/instant`, `temperature/instant` and
+    /// `memory/state/used`, all of which are levels. Publishing every `UintVal`
+    /// as a `Counter` makes a backend `rate()` CPU utilisation, and every
+    /// legitimate decrease look like a reset.
+    #[test]
+    fn the_path_decides_whether_a_uint_is_a_counter() {
+        use crate::config::ValueKind;
+        let sub = test_subscriber();
+        for counter in [
+            "interfaces/interface[name=eth0]/state/counters/in-octets",
+            "interfaces/interface/state/counters/out-errors",
+            "counters/in-pkts",
+        ] {
+            assert_eq!(
+                sub.target.kind_for_path(counter),
+                ValueKind::Counter,
+                "{counter}"
+            );
+        }
+        for gauge in [
+            "components/component/cpu/utilization/state/instant",
+            "components/component/state/temperature/instant",
+            "system/memory/state/used",
+            "interfaces/interface/state/mtu",
+        ] {
+            assert_eq!(sub.target.kind_for_path(gauge), ValueKind::Gauge, "{gauge}");
+        }
+    }
+
+    /// A vendor tree that puts counters somewhere else, and one that puts a
+    /// level under `/counters/`, are both config — and the gauge list wins,
+    /// because a level typed as a counter is the failure that matters.
+    #[test]
+    fn the_kind_map_overrides_the_path_convention() {
+        use crate::config::ValueKind;
+        let mut sub = test_subscriber();
+        sub.target.counter_paths = vec!["/stats/total-".into()];
+        sub.target.gauge_paths = vec!["/counters/queue-depth".into()];
+        assert_eq!(
+            sub.target.kind_for_path("vendor/stats/total-drops"),
+            ValueKind::Counter
+        );
+        assert_eq!(
+            sub.target.kind_for_path("qos/state/counters/queue-depth"),
+            ValueKind::Gauge,
+            "the gauge list wins over the /counters/ convention"
+        );
+    }
+
+    /// A device clock is used when it is plausible, and not otherwise (#1077).
+    ///
+    /// `checked_div(1_000_000).unwrap_or(0)` was dead code twice: the divisor
+    /// is a nonzero constant so it never returns `None`, and the case it looked
+    /// like it guarded — `timestamp == 0`, which the spec defines as *unset* —
+    /// fell through and published the point at the epoch. A switch that has not
+    /// reached NTP after a reload published months out.
+    #[test]
+    fn a_device_clock_is_used_only_while_it_is_plausible() {
+        let sub = test_subscriber(); // max_clock_skew_secs: 300
+        let now_ms = 1_757_325_600_000i64;
+        let nanos = |ms: i64| ms * 1_000_000;
+
+        // In step: the device's own clock, so points from one device order the
+        // way the device saw them.
+        assert_eq!(
+            sub.clamp_timestamp(nanos(now_ms - 1_000), now_ms),
+            now_ms - 1_000
+        );
+        // Unset — the case that used to publish at 1970-01-01.
+        assert_eq!(sub.clamp_timestamp(0, now_ms), now_ms);
+        assert_eq!(sub.clamp_timestamp(-1, now_ms), now_ms);
+        // Months out, in either direction: receive time.
+        assert_eq!(
+            sub.clamp_timestamp(nanos(now_ms - 90 * 86_400_000), now_ms),
+            now_ms
+        );
+        assert_eq!(
+            sub.clamp_timestamp(nanos(now_ms + 90 * 86_400_000), now_ms),
+            now_ms
+        );
+        // Just inside the window is still the device's.
+        let inside = now_ms - 299_000;
+        assert_eq!(sub.clamp_timestamp(nanos(inside), now_ms), inside);
+
+        // A zero skew disables the clamp — the pre-#1077 behaviour, kept
+        // reachable for an operator who wants it.
+        let mut trusting = test_subscriber();
+        trusting.target.max_clock_skew_secs = 0;
+        let months_ago = now_ms - 90 * 86_400_000;
+        assert_eq!(
+            trusting.clamp_timestamp(nanos(months_ago), now_ms),
+            months_ago
+        );
+        // …but `unset` is still unset. There is no timestamp to trust.
+        assert_eq!(trusting.clamp_timestamp(0, now_ms), now_ms);
     }
 
     #[test]
@@ -598,7 +778,10 @@ mod tests {
         let sub = test_subscriber();
 
         assert_eq!(
-            sub.typed_value_to_telemetry(&typed(Value::JsonVal(b"{\"a\":1}".to_vec()))),
+            sub.typed_value_to_telemetry(
+                &typed(Value::JsonVal(b"{\"a\":1}".to_vec())),
+                "some/leaf"
+            ),
             TelemetryValue::Text("{\"a\":1}".to_string())
         );
 
@@ -609,7 +792,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            sub.typed_value_to_telemetry(&typed(Value::LeaflistVal(ll))),
+            sub.typed_value_to_telemetry(&typed(Value::LeaflistVal(ll)), "some/leaf"),
             TelemetryValue::Text("[1,\"x\"]".to_string())
         );
     }
@@ -618,7 +801,7 @@ mod tests {
     fn test_typed_value_to_telemetry_none_is_empty_text() {
         let sub = test_subscriber();
         assert_eq!(
-            sub.typed_value_to_telemetry(&gnmi::TypedValue { value: None }),
+            sub.typed_value_to_telemetry(&gnmi::TypedValue { value: None }, "some/leaf"),
             TelemetryValue::Text(String::new())
         );
     }
@@ -653,12 +836,15 @@ mod tests {
             val: Some(typed(Value::UintVal(99))),
             ..Default::default()
         };
-        assert_eq!(sub.extract_value(&update), TelemetryValue::Counter(99));
+        assert_eq!(
+            sub.extract_value(&update, "interfaces/interface/state/counters/in-octets"),
+            TelemetryValue::Counter(99)
+        );
 
         // No value at all -> empty text.
         let empty = gnmi::Update::default();
         assert_eq!(
-            sub.extract_value(&empty),
+            sub.extract_value(&empty, "some/leaf"),
             TelemetryValue::Text(String::new())
         );
     }
