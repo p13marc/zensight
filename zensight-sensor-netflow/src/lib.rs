@@ -22,5 +22,6 @@
 //! ```
 
 pub mod config;
+pub mod fields;
 pub mod receiver;
 pub mod rollup;

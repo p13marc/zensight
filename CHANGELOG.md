@@ -39,6 +39,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **NetFlow v9 and IPFIX byte and packet counters are no longer zero** (#1072).
+  `Rollups::ingest` read `record.fields.get("bytes")`, `get("packets")` and
+  `get("protocol")` — literals minted only by the v5/v7 parsers. v9 and IPFIX
+  minted theirs as `format!("{:?}", field_type).to_lowercase()`, which gives
+  `inbytes`/`inpkts` for v9 and **`iana(octetdeltacount)`** for IPFIX,
+  parentheses and all. So on the only two versions anyone deploys today
+  `{exporter}/bytes_total` and `packets_total` stayed at **0 forever** while
+  `flows_total` counted correctly — which is exactly the shape that makes an
+  exporter look healthy. IPFIX's protocol breakdown was entirely `unknown`.
+
+  `src/fields.rs` resolves the semantics from the **typed enum variants**, not
+  from a `Debug` rendering that is not a stable API: a library rename is now a
+  build failure in one file rather than a silent renaming of every key this
+  sensor publishes. The raw names are still carried on the record, because they
+  are what `@rpc/netflow/flows` serves. The crate had no `tests/` directory and
+  no fixtures — the round-trip test was v5 only, and `rollup.rs`'s tests
+  hand-inserted the literal `"bytes"` key, which is why this was invisible. It
+  now builds real v9 and IPFIX template-then-data packets by hand.
+
+- **A sampled NetFlow exporter's counters are scaled, and say so** (#1075).
+  Nothing read the sampling interval: not the v5 header field, not the v9 or
+  IPFIX options template — `receiver.rs` matched only `…FlowSetBody::Data` and
+  dropped every options body **silently**. A router at `1-out-of-1000` published
+  `bytes_total` at a **thousandth of throughput** as a plain `Counter`, and a
+  consumer rating it was three orders of magnitude low with no way to tell.
+
+  The interval is now learned per exporter from all three declarations and
+  applied at ingest — at ingest, so the counter stays monotonic across a
+  re-configuration that would otherwise look like a reset. `bytes_total` and
+  `packets_total` carry `sampling` and `sampled` labels; `flows_total` does not
+  and is not scaled, because the exporter really did report one flow. An absent
+  label and `sampled=false` are deliberately different claims: "never said" is
+  not "said it is unsampled".
+
+
 - **The container sensor's cumulative counters are `Counter`, and the registry
   can now say so** (#1071). `restart_count`, `cpu_usage_usec_total`,
   `cpu_throttled_usec_total`, `oom_kills_total` and `memory_max_events_total`
