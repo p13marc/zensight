@@ -39,6 +39,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A firing alert's number is corrected on the bus** (#1081).
+  `docs/data-model.md`'s state diagram has always claimed
+  `Firing --> Firing : Put(Firing) (refresh/update)`. It did not happen: only
+  the debounce elapsing or a **severity** change published anything.
+  `sensor-budget` fires at 80 % with "rss 320 MiB at 80 % of 400 MiB budget",
+  RSS climbs to 94 % inside the same band, and the operator's row said 80 %
+  until the severity finally moved.
+
+  `AlertReporter` republishes when the *content* changes — the summary, or a
+  `host.*` label, which are the only fields that can move without minting a
+  different `alert_key` — rate-limited by `with_content_refresh` (30 s by
+  default). Deliberately **not** the `for:` window: that answers "how long
+  before I believe it", this answers "how often may I correct the text", and
+  tying them would leave the summary wrong longest on exactly the alerts that
+  took longest to confirm.
+
+  **`Alert::timestamp` does not move on a refresh.** A new optional
+  `observed_at_ms` carries the fresh reading instead, because three mechanisms
+  read `timestamp` as the transition instant: an acknowledgement applies while
+  `timestamp <= fired_at`, so a moving one would un-acknowledge every acked
+  alert in the fleet every interval; the historian derives a timeline row's uid
+  from it, so a frozen one corrects the row in place rather than appending an
+  "alert fired" event every interval; and the correlator reads it as an
+  incident's start and its TTL clock. An **escalation** still moves it, and
+  still un-acks — that is a real transition.
+
+  Underneath, `ActiveAlert::last` now means *the payload that is on the bus*,
+  assigned only when the reporter publishes. It tracked the freshest
+  observation before, which had two consequences: the late-joiner seed — which
+  stands in for a `latest` storage, and a storage answers with the last value
+  **written** — replied with a document that had never been put, so a page
+  reload showed a different number from the live subscription; and a content
+  change held back by the rate limiter was **lost** rather than deferred,
+  because the next observation compared itself against the change it had
+  already absorbed.
+
+
 - **A cancel that cancelled nothing is no longer journalled as an operator's
   success, and every artifact refusal names the switch** (#1085, #1089). Four
   things the artifact channel said about itself that were not true.

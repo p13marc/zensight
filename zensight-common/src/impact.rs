@@ -318,6 +318,7 @@ mod tests {
     fn alert(severity: AlertSeverity) -> Alert {
         Alert {
             timestamp: 0,
+            observed_at_ms: None,
             source: "s".into(),
             protocol: Protocol::Sysinfo,
             kind: AlertKind::Expectation,

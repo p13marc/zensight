@@ -81,14 +81,42 @@ pub struct Alert {
 - **`AlertState`** — `Firing` (default) or `Resolved`. The lifecycle is a
   `Put(Firing)` to raise/update, a `Put(Resolved)` then a Zenoh `Delete`
   tombstone to clear.
+- **`timestamp` / `observed_at_ms`** — the latest state *transition*, and (only
+  on a content refresh) when the still-firing alert was last re-observed.
+  Absent `observed_at_ms` reads as "not refreshed", never as "not observed";
+  present, it is always `>= timestamp`. See the state diagram below.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Firing : Put(Firing)
-    Firing --> Firing : Put(Firing) (refresh/update)
+    [*] --> Firing : Put(Firing) — raise
+    Firing --> Firing : Put(Firing) — escalate (severity moved)
+    Firing --> Firing : Put(Firing) — refresh (content moved, rate-limited)
     Firing --> Resolved : Put(Resolved)
     Resolved --> [*] : Delete (tombstone)
 ```
+
+**The two self-loops are different events, and the difference is `timestamp`**
+(#1081). Until that issue the diagram claimed the refresh loop and it did not
+happen — only the debounce elapsing or a severity change published anything, so
+`sensor-budget` fired at "rss at 80 %", climbed to 94 % inside the same band,
+and the operator's row stayed at 80 % until the severity finally moved.
+
+- **Escalate** is a state transition: `timestamp` moves. It correctly
+  un-acknowledges the alert (an ack applies while `timestamp <= fired_at`) —
+  a Warning that became Critical should page again.
+- **Refresh** is not: `timestamp` is carried over unchanged and the fresh
+  reading goes in `observed_at_ms`. Three mechanisms depend on that. An ack
+  would otherwise un-apply itself every interval, on every acked alert in the
+  fleet; the historian derives a timeline row's uid from `timestamp`, so a
+  frozen one corrects the existing row instead of appending an "alert fired"
+  event every interval; and the correlator reads it as an incident's start and
+  its TTL clock.
+
+A refresh is rate-limited to `AlertReporter::with_content_refresh`
+(30 s by default), since sensors sweep every 5-60 s and a drifting summary
+would otherwise put one document on the bus per sweep. It is deliberately not
+the `for:` window: that answers "how long before I believe it", this answers
+"how often may I correct the text".
 
 ### alert_key
 
