@@ -50,13 +50,20 @@
         timeout_ms: 2000,
         retries: 3,
 
-        // Inline register definitions
+        // Inline register definitions.
+        //
+        // `count` is VALUES, not registers: an f32 is two registers, so
+        // `count: 1` reads two and `count: 3` reads six and publishes at
+        // address, address+2, address+4. This file used to say `count: 4` for a
+        // single named f32, which read eight registers, decoded four floats and
+        // published all four under one name — keeping the last (#1073). A
+        // `name` with `count > 1` is now refused at startup.
         registers: [
           // Holding registers (read/write, 16-bit)
           {
             type: "holding",
-            address: 0,
-            count: 4,
+            address: 0,             // spans 0-1
+            count: 1,
             name: "temperature",
             data_type: "f32",        // 2 registers = 32-bit float
             scale: 1.0,
@@ -64,8 +71,8 @@
           },
           {
             type: "holding",
-            address: 4,
-            count: 4,
+            address: 2,             // spans 2-3
+            count: 1,
             name: "pressure",
             data_type: "f32",
             scale: 0.01,             // Raw value * 0.01
@@ -106,7 +113,7 @@
           {
             type: "holding",
             address: 0,
-            count: 2,
+            count: 1,
             name: "voltage",
             data_type: "f32",
             unit: "V",
@@ -114,7 +121,7 @@
           {
             type: "holding",
             address: 2,
-            count: 2,
+            count: 1,
             name: "current",
             data_type: "f32",
             unit: "A",
@@ -122,7 +129,7 @@
           {
             type: "holding",
             address: 4,
-            count: 2,
+            count: 1,
             name: "power",
             data_type: "f32",
             unit: "W",
@@ -130,7 +137,7 @@
           {
             type: "holding",
             address: 6,
-            count: 2,
+            count: 1,
             name: "energy",
             data_type: "u32",
             scale: 0.001,            // Wh to kWh
@@ -140,17 +147,18 @@
       },
       digital_io: {
         registers: [
+          // A multi-value block carries no `name` — it would name all eight.
+          // Per-address names come from `register_names` below; an address with
+          // no entry is published under its own number.
           {
             type: "coil",
             address: 0,
             count: 8,
-            name: "outputs",
           },
           {
             type: "discrete",
             address: 0,
             count: 8,
-            name: "inputs",
           },
         ],
       },
@@ -158,10 +166,15 @@
 
     // Optional: Human-readable names for register addresses
     // Format: "register_type:address": "name"
+    // Per-ADDRESS names, for blocks that read more than one value. The address
+    // advances by the value's register width, so consecutive f32 values are two
+    // apart — `holding:100` and `holding:102`, never 100 and 101 (#1073).
     register_names: {
       "holding:100": "motor_speed",
-      "holding:101": "motor_torque",
+      "holding:102": "motor_torque",
       "input:0": "running_status",
+      "coil:0": "pump_enable",
+      "coil:1": "valve_open",
     },
   },
 

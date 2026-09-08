@@ -333,6 +333,18 @@ impl ModbusSensorConfig {
                 )));
             }
 
+            // Every register block this device polls, whether inline or from a
+            // named group.
+            let group = device
+                .register_group
+                .as_ref()
+                .and_then(|g| self.modbus.register_groups.get(g))
+                .map(|g| g.registers.as_slice())
+                .unwrap_or(&[]);
+            for register in device.registers.iter().chain(group) {
+                validate_register(&device.name, register)?;
+            }
+
             // Validate RTU parity
             if let ConnectionConfig::Rtu { parity, .. } = &device.connection {
                 match parity.to_lowercase().as_str() {
@@ -349,6 +361,62 @@ impl ModbusSensorConfig {
 
         Ok(())
     }
+}
+
+/// One register block's own consistency (#1073).
+///
+/// Both rules exist because a config that breaks them publishes plausible wrong
+/// numbers rather than failing:
+///
+/// - A `name` names ONE value. With `count > 1` it was returned for every
+///   decoded value, so `{name: "temperature", count: 10}` published ten sensors
+///   to `…/holding/temperature`, ten times a cycle, and nine were lost —
+///   silently, at whatever cadence the poll ran.
+/// - A block whose span does not fit in `u16` cannot be addressed. The span
+///   used to be an unchecked `count * regs_per_value`, which panicked in debug
+///   and wrapped in release; a wrapped span reads as a short, legal read of the
+///   wrong window.
+fn validate_register(device: &str, register: &RegisterConfig) -> Result<(), ConfigError> {
+    if register.name.is_some() && register.count > 1 {
+        return Err(ConfigError::Validation(format!(
+            "Device '{device}': register at {} has `name` and `count` = {} — a name names one \
+             value, and returning it for all of them publishes {} readings to one key and keeps \
+             the last. Give one entry per register, or drop `name` and use `register_names` \
+             (\"{}:{}\": …), which is keyed by address",
+            register.address,
+            register.count,
+            register.count,
+            register.register_type.as_str(),
+            register.address,
+        )));
+    }
+    if register.count == 0 {
+        return Err(ConfigError::Validation(format!(
+            "Device '{device}': register at {} has `count` = 0 — a block that reads nothing is a \
+             typo, not a configuration",
+            register.address
+        )));
+    }
+    let per_value: u16 = match register.data_type {
+        DataType::U16 | DataType::I16 => 1,
+        _ => 2,
+    };
+    let span = register.count.checked_mul(per_value).ok_or_else(|| {
+        ConfigError::Validation(format!(
+            "Device '{device}': register at {} spans {} × {per_value} registers, which exceeds \
+             the 16-bit address space",
+            register.address, register.count
+        ))
+    })?;
+    // The last register the block touches must still be addressable.
+    span.checked_sub(1)
+        .and_then(|last| register.address.checked_add(last))
+        .ok_or_else(|| ConfigError::Validation(format!(
+            "Device '{device}': register block at {} spanning {span} registers runs past address \
+             65535",
+            register.address
+        )))?;
+    Ok(())
 }
 
 impl zensight_sensor_core::SensorConfig for ModbusSensorConfig {
@@ -487,8 +555,8 @@ mod tests {
                 register_groups: {
                     power_meters: {
                         registers: [
-                            { type: "holding", address: 0, count: 2, name: "voltage", data_type: "f32", unit: "V" },
-                            { type: "holding", address: 2, count: 2, name: "current", data_type: "f32", unit: "A" }
+                            { type: "holding", address: 0, count: 1, name: "voltage", data_type: "f32", unit: "V" },
+                            { type: "holding", address: 2, count: 1, name: "current", data_type: "f32", unit: "A" }
                         ]
                     }
                 }
@@ -502,6 +570,86 @@ mod tests {
         let registers = device.all_registers(&config.modbus.register_groups);
         assert_eq!(registers.len(), 2);
         assert_eq!(registers[0].name.as_deref(), Some("voltage"));
+    }
+
+    /// A `name` names ONE value (#1073). It used to be returned for every
+    /// decoded value in the block, so `{name: "temperature", count: 10}`
+    /// published ten sensors to `…/holding/temperature`, ten times a cycle,
+    /// and nine were lost. `configs/modbus.json5` shipped in exactly that shape.
+    ///
+    /// Refused in a register GROUP as well as inline — the group is where the
+    /// shipped example put it.
+    #[test]
+    fn a_name_with_more_than_one_value_is_refused() {
+        let cfg = |registers: &str| {
+            format!(
+                r#"{{ zenoh: {{ mode: "peer" }}, modbus: {{ devices: [
+                    {{ name: "plc01", connection: {{ type: "tcp", host: "10.0.0.1" }},
+                       registers: [{registers}] }}
+                ] }} }}"#
+            )
+        };
+        let bad: ModbusSensorConfig = json5::from_str(&cfg(
+            r#"{ type: "holding", address: 0, count: 10, name: "temperature", data_type: "u16" }"#,
+        ))
+        .unwrap();
+        let err = bad.validate_config().unwrap_err().to_string();
+        assert!(err.contains("`name` and `count`"), "{err}");
+        assert!(
+            err.contains("register_names"),
+            "the refusal must name the alternative: {err}"
+        );
+
+        // One value with a name is fine, and so is many values without one.
+        for ok in [
+            r#"{ type: "holding", address: 0, count: 1, name: "temperature", data_type: "f32" }"#,
+            r#"{ type: "holding", address: 0, count: 10, data_type: "u16" }"#,
+        ] {
+            let c: ModbusSensorConfig = json5::from_str(&cfg(ok)).unwrap();
+            c.validate_config().expect(ok);
+        }
+
+        // And in a group.
+        let grouped: ModbusSensorConfig = json5::from_str(
+            r#"{ zenoh: { mode: "peer" }, modbus: {
+                devices: [ { name: "plc01", connection: { type: "tcp", host: "10.0.0.1" },
+                             register_group: "g" } ],
+                register_groups: { g: { registers: [
+                    { type: "holding", address: 0, count: 4, name: "v", data_type: "f32" }
+                ] } } } }"#,
+        )
+        .unwrap();
+        assert!(grouped.validate_config().is_err());
+    }
+
+    /// A block whose span does not fit the 16-bit address space is refused
+    /// rather than wrapped. `count * regs_per_value` was an unchecked multiply:
+    /// it panicked in debug and wrapped in release, and a wrapped span reads as
+    /// a short, legal read of the wrong window (#1073).
+    #[test]
+    fn a_block_that_runs_past_the_address_space_is_refused() {
+        let cfg = |address: u16, count: u16| {
+            format!(
+                r#"{{ zenoh: {{ mode: "peer" }}, modbus: {{ devices: [
+                    {{ name: "plc01", connection: {{ type: "tcp", host: "10.0.0.1" }},
+                       registers: [{{ type: "holding", address: {address}, count: {count},
+                                     data_type: "f32" }}] }}
+                ] }} }}"#
+            )
+        };
+        // 40000 f32 values is 80000 registers — the multiply itself overflows.
+        let c: ModbusSensorConfig = json5::from_str(&cfg(0, 40_000)).unwrap();
+        assert!(c.validate_config().is_err());
+        // And a block that fits in a u16 span but runs off the end of the map.
+        let c: ModbusSensorConfig = json5::from_str(&cfg(65_530, 10)).unwrap();
+        assert!(c.validate_config().is_err());
+        // The largest block that does fit is accepted.
+        let c: ModbusSensorConfig = json5::from_str(&cfg(65_534, 1)).unwrap();
+        c.validate_config()
+            .expect("a block ending exactly at 65535");
+        // A count of zero is a typo, not a configuration.
+        let c: ModbusSensorConfig = json5::from_str(&cfg(0, 0)).unwrap();
+        assert!(c.validate_config().is_err());
     }
 
     #[test]
