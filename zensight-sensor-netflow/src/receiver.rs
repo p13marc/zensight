@@ -23,7 +23,10 @@ use tokio::sync::mpsc;
 pub use zensight_common::{NetflowFieldValue as FlowFieldValue, NetflowRecord as FlowRecord};
 
 /// Start all configured listeners and return a channel for receiving flow records.
-pub async fn start_listeners(config: &NetFlowConfig) -> Result<mpsc::Receiver<FlowRecord>> {
+pub async fn start_listeners(
+    config: &NetFlowConfig,
+    sampling: crate::fields::SharedSampling,
+) -> Result<mpsc::Receiver<FlowRecord>> {
     let (tx, rx) = mpsc::channel(10000);
     let exporter_names = Arc::new(config.exporter_names.clone());
 
@@ -31,9 +34,10 @@ pub async fn start_listeners(config: &NetFlowConfig) -> Result<mpsc::Receiver<Fl
         let tx = tx.clone();
         let names = exporter_names.clone();
         let config = listener_config.clone();
+        let sampling = sampling.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = run_listener(&config, tx, names).await {
+            if let Err(e) = run_listener(&config, tx, names, sampling).await {
                 tracing::error!("NetFlow listener error: {}", e);
             }
         });
@@ -47,6 +51,7 @@ async fn run_listener(
     config: &ListenerConfig,
     tx: mpsc::Sender<FlowRecord>,
     exporter_names: Arc<HashMap<String, String>>,
+    sampling: crate::fields::SharedSampling,
 ) -> Result<()> {
     let socket = UdpSocket::bind(&config.bind)
         .await
@@ -93,7 +98,9 @@ async fn run_listener(
                 // socket's own buffer is the backpressure, and a datagram
                 // that does not fit is dropped by the kernel — counted, and
                 // the honest outcome for a receiver that is behind.
-                if let Err(e) = process_packet(data, addr, &tx, &exporter_names, parser).await {
+                if let Err(e) =
+                    process_packet(data, addr, &tx, &exporter_names, parser, &sampling).await
+                {
                     tracing::debug!("Failed to process NetFlow packet from {}: {}", addr, e);
                 }
             }
@@ -132,6 +139,7 @@ async fn process_packet(
     tx: &mpsc::Sender<FlowRecord>,
     exporter_names: &HashMap<String, String>,
     parser: &mut NetflowParser,
+    sampling: &crate::fields::SharedSampling,
 ) -> Result<()> {
     let exporter_ip = addr.ip().to_string();
     let exporter_name = exporter_names
@@ -153,6 +161,14 @@ async fn process_packet(
     for packet in result.packets {
         match packet {
             NetflowPacket::V5(v5) => {
+                // v5 carries the sampling mode and interval in the HEADER's
+                // low 14 bits, one field for the whole datagram (#1075). It was
+                // never read: `process_packet` iterated `flowsets` only.
+                if let Some(n) = sampling_from_v5_header(v5.header.sampling_interval)
+                    && let Ok(mut s) = sampling.lock()
+                {
+                    s.observe(&exporter_name, n);
+                }
                 for flow in &v5.flowsets {
                     let record = parse_v5_flow(&exporter_ip, &exporter_name, flow, timestamp);
                     if tx.send(record).await.is_err() {
@@ -170,31 +186,63 @@ async fn process_packet(
             }
             NetflowPacket::V9(v9) => {
                 for flowset in &v9.flowsets {
-                    if let V9FlowSetBody::Data(data) = &flowset.body {
-                        for flow_record in &data.fields {
-                            let record =
-                                parse_v9_flow(&exporter_ip, &exporter_name, flow_record, timestamp);
-                            if tx.send(record).await.is_err() {
-                                return Ok(());
+                    match &flowset.body {
+                        V9FlowSetBody::Data(data) => {
+                            for flow_record in &data.fields {
+                                let record = parse_v9_flow(
+                                    &exporter_ip,
+                                    &exporter_name,
+                                    flow_record,
+                                    timestamp,
+                                );
+                                if tx.send(record).await.is_err() {
+                                    return Ok(());
+                                }
                             }
                         }
+                        // Options data is where the sampling interval rides
+                        // (#1075). Every non-Data body used to be dropped here
+                        // silently, so a router exporting `1 in 1000` said so
+                        // once per template refresh and was never heard.
+                        V9FlowSetBody::OptionsData(opts) => {
+                            for rec in &opts.fields {
+                                if let Some(n) = sampling_from_v9(&rec.options_fields)
+                                    && let Ok(mut s) = sampling.lock()
+                                {
+                                    s.observe(&exporter_name, n);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
             NetflowPacket::IPFix(ipfix) => {
                 for flowset in &ipfix.flowsets {
-                    if let IpFixFlowSetBody::Data(data) = &flowset.body {
-                        for flow_record in &data.fields {
-                            let record = parse_ipfix_flow(
-                                &exporter_ip,
-                                &exporter_name,
-                                flow_record,
-                                timestamp,
-                            );
-                            if tx.send(record).await.is_err() {
-                                return Ok(());
+                    match &flowset.body {
+                        IpFixFlowSetBody::Data(data) => {
+                            for flow_record in &data.fields {
+                                let record = parse_ipfix_flow(
+                                    &exporter_ip,
+                                    &exporter_name,
+                                    flow_record,
+                                    timestamp,
+                                );
+                                if tx.send(record).await.is_err() {
+                                    return Ok(());
+                                }
                             }
                         }
+                        IpFixFlowSetBody::OptionsData(opts) => {
+                            for rec in &opts.fields {
+                                if let Some(n) = sampling_from_ipfix(rec)
+                                    && let Ok(mut s) = sampling.lock()
+                                {
+                                    s.observe(&exporter_name, n);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -206,6 +254,55 @@ async fn process_packet(
     }
 
     Ok(())
+}
+
+/// The "1 in N" a v5 header declares, or `None` when it declares none.
+fn sampling_from_v5_header(raw: u16) -> Option<u32> {
+    crate::fields::v5_sampling(raw)
+}
+
+/// The "1 in N" a v9 options-data record declares.
+///
+/// Options data is scoped (per system, per interface, …) and the scope is not
+/// read here: an exporter that samples differently per interface is a shape
+/// this sensor's per-exporter rollup cannot express anyway, and taking the
+/// most recent declaration is what pmacct does.
+fn sampling_from_v9(
+    options_fields: &[netflow_parser::variable_versions::v9::V9FieldPair],
+) -> Option<u32> {
+    for (field_type, value) in options_fields {
+        if crate::fields::v9_semantic(field_type) == Some(crate::fields::SAMPLING_INTERVAL)
+            && let Some(n) = field_value_as_u32(value)
+            && n > 1
+        {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// The "1 in N" an IPFIX options-data record declares.
+fn sampling_from_ipfix(
+    record: &[netflow_parser::variable_versions::ipfix::IPFixFieldPair],
+) -> Option<u32> {
+    for (field_type, value) in record {
+        if crate::fields::ipfix_semantic(field_type) == Some(crate::fields::SAMPLING_INTERVAL)
+            && let Some(n) = field_value_as_u32(value)
+            && n > 1
+        {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// A sampling interval is a plain unsigned count in every spelling; anything
+/// else in that field is not one, and is better ignored than coerced.
+fn field_value_as_u32(v: &FieldValue) -> Option<u32> {
+    match parse_field_value(v) {
+        FlowFieldValue::Uint(n) => u32::try_from(n).ok(),
+        _ => None,
+    }
 }
 
 /// Parse a NetFlow v5 flow record.
@@ -386,8 +483,18 @@ fn parse_v9_flow(
     let mut fields = HashMap::new();
 
     for (field_type, field_value) in data {
-        let field_name = format!("{:?}", field_type).to_lowercase();
         let value = parse_field_value(field_value);
+        // The canonical name first, so a later duplicate of the same semantic
+        // (a template carrying both In* and Out*) does not overwrite it with a
+        // second direction — the first is the one the flow is about.
+        if let Some(sem) = crate::fields::v9_semantic(field_type) {
+            fields
+                .entry(sem.to_string())
+                .or_insert_with(|| value.clone());
+        }
+        // …and the raw name, which is what `@rpc/netflow/flows` serves as the
+        // record's own detail.
+        let field_name = format!("{:?}", field_type).to_lowercase();
         fields.insert(field_name, value);
     }
 
@@ -410,8 +517,13 @@ fn parse_ipfix_flow(
     let mut fields = HashMap::new();
 
     for (field_type, field_value) in data {
-        let field_name = format!("{:?}", field_type).to_lowercase();
         let value = parse_field_value(field_value);
+        if let Some(sem) = crate::fields::ipfix_semantic(field_type) {
+            fields
+                .entry(sem.to_string())
+                .or_insert_with(|| value.clone());
+        }
+        let field_name = format!("{:?}", field_type).to_lowercase();
         fields.insert(field_name, value);
     }
 
@@ -601,6 +713,156 @@ mod tests {
             }
         }
         assert!(saw_flow, "parser did not yield a V5 flow record");
+    }
+
+    /// v9 and IPFIX must reach `bytes`, `packets` and `protocol` — the three
+    /// keys the rollup looks up — and before #1072 neither did.
+    ///
+    /// The parsers minted keys as `format!("{:?}", field_type).to_lowercase()`,
+    /// which for v9 gives `inbytes`/`inpkts` and for IPFIX gives
+    /// `iana(octetdeltacount)`, parentheses and all. So on the only two
+    /// versions anyone deploys today `{exporter}/bytes_total` and
+    /// `packets_total` stayed at **zero forever** while `flows_total` counted
+    /// correctly — the shape that makes an exporter look healthy. IPFIX's
+    /// protocol breakdown was entirely `unknown`.
+    ///
+    /// Templates first, then data: v9 and IPFIX are stateful, and the parser
+    /// cannot decode a data record it has no template for. That statefulness is
+    /// why hand-built packets are the only fixture available here — the crate
+    /// ships no pcap corpus.
+    #[test]
+    fn v9_and_ipfix_reach_the_keys_the_rollup_reads() {
+        let uint = |f: &FlowFieldValue| match f {
+            FlowFieldValue::Uint(v) => *v,
+            other => panic!("expected Uint, got {other:?}"),
+        };
+
+        // ── NetFlow v9 ────────────────────────────────────────────────────
+        // Template 256: IN_BYTES(1,4), IN_PKTS(2,4), PROTOCOL(4,1).
+        let mut tpl: Vec<u8> = Vec::new();
+        tpl.extend_from_slice(&9u16.to_be_bytes()); // version
+        tpl.extend_from_slice(&1u16.to_be_bytes()); // count (flowsets)
+        tpl.extend_from_slice(&1000u32.to_be_bytes()); // sys_uptime
+        tpl.extend_from_slice(&1_700_000_000u32.to_be_bytes()); // unix_secs
+        tpl.extend_from_slice(&0u32.to_be_bytes()); // sequence
+        tpl.extend_from_slice(&0u32.to_be_bytes()); // source_id
+        tpl.extend_from_slice(&0u16.to_be_bytes()); // flowset_id 0 = template
+        tpl.extend_from_slice(&(4u16 + 4 + 3 * 4).to_be_bytes()); // length
+        tpl.extend_from_slice(&256u16.to_be_bytes()); // template_id
+        tpl.extend_from_slice(&3u16.to_be_bytes()); // field_count
+        for (id, len) in [(1u16, 4u16), (2, 4), (4, 1)] {
+            tpl.extend_from_slice(&id.to_be_bytes());
+            tpl.extend_from_slice(&len.to_be_bytes());
+        }
+
+        // Data for template 256: 1500 bytes, 10 packets, protocol 6.
+        let mut dat: Vec<u8> = Vec::new();
+        dat.extend_from_slice(&9u16.to_be_bytes());
+        dat.extend_from_slice(&1u16.to_be_bytes());
+        dat.extend_from_slice(&1000u32.to_be_bytes());
+        dat.extend_from_slice(&1_700_000_000u32.to_be_bytes());
+        dat.extend_from_slice(&1u32.to_be_bytes());
+        dat.extend_from_slice(&0u32.to_be_bytes());
+        dat.extend_from_slice(&256u16.to_be_bytes()); // flowset_id = template id
+        dat.extend_from_slice(&(4u16 + 9 + 3).to_be_bytes()); // length (+3 pad)
+        dat.extend_from_slice(&1500u32.to_be_bytes());
+        dat.extend_from_slice(&10u32.to_be_bytes());
+        dat.push(6);
+        dat.extend_from_slice(&[0, 0, 0]); // pad to 4-byte boundary
+
+        let mut parser = NetflowParser::default();
+        let tpl_result = parser.parse_bytes(&tpl);
+        assert!(tpl_result.is_ok(), "v9 template: {:?}", tpl_result.error);
+        let result = parser.parse_bytes(&dat);
+        assert!(result.is_ok(), "v9 data: {:?}", result.error);
+
+        let mut saw = false;
+        for packet in result.packets {
+            if let NetflowPacket::V9(v9) = packet {
+                for flowset in &v9.flowsets {
+                    if let V9FlowSetBody::Data(data) = &flowset.body {
+                        for fr in &data.fields {
+                            let r = parse_v9_flow("1.2.3.4", "edge01", fr, 7);
+                            assert_eq!(r.version, 9);
+                            assert_eq!(uint(&r.fields[crate::fields::BYTES]), 1500);
+                            assert_eq!(uint(&r.fields[crate::fields::PACKETS]), 10);
+                            assert_eq!(uint(&r.fields[crate::fields::PROTOCOL]), 6);
+                            // The raw name survives beside it: it is what
+                            // `@rpc/netflow/flows` serves as the record's detail.
+                            assert!(r.fields.contains_key("inbytes"));
+                            saw = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(saw, "parser yielded no v9 data record");
+
+        // ── IPFIX ─────────────────────────────────────────────────────────
+        // Template 256: octetDeltaCount(1,4), packetDeltaCount(2,4),
+        // protocolIdentifier(4,1).
+        let mut tpl: Vec<u8> = Vec::new();
+        let tpl_set_len = 4u16 + 4 + 3 * 4;
+        tpl.extend_from_slice(&10u16.to_be_bytes()); // version
+        tpl.extend_from_slice(&(16u16 + tpl_set_len).to_be_bytes()); // total length
+        tpl.extend_from_slice(&1_700_000_000u32.to_be_bytes()); // export time
+        tpl.extend_from_slice(&0u32.to_be_bytes()); // sequence
+        tpl.extend_from_slice(&0u32.to_be_bytes()); // domain id
+        tpl.extend_from_slice(&2u16.to_be_bytes()); // set id 2 = template
+        tpl.extend_from_slice(&tpl_set_len.to_be_bytes());
+        tpl.extend_from_slice(&256u16.to_be_bytes());
+        tpl.extend_from_slice(&3u16.to_be_bytes());
+        for (id, len) in [(1u16, 4u16), (2, 4), (4, 1)] {
+            tpl.extend_from_slice(&id.to_be_bytes());
+            tpl.extend_from_slice(&len.to_be_bytes());
+        }
+
+        let mut dat: Vec<u8> = Vec::new();
+        let dat_set_len = 4u16 + 9;
+        dat.extend_from_slice(&10u16.to_be_bytes());
+        dat.extend_from_slice(&(16u16 + dat_set_len).to_be_bytes());
+        dat.extend_from_slice(&1_700_000_000u32.to_be_bytes());
+        dat.extend_from_slice(&1u32.to_be_bytes());
+        dat.extend_from_slice(&0u32.to_be_bytes());
+        dat.extend_from_slice(&256u16.to_be_bytes()); // set id = template id
+        dat.extend_from_slice(&dat_set_len.to_be_bytes());
+        dat.extend_from_slice(&9000u32.to_be_bytes());
+        dat.extend_from_slice(&12u32.to_be_bytes());
+        dat.push(17); // UDP
+
+        let mut parser = NetflowParser::default();
+        let tpl_result = parser.parse_bytes(&tpl);
+        assert!(tpl_result.is_ok(), "ipfix template: {:?}", tpl_result.error);
+        let result = parser.parse_bytes(&dat);
+        assert!(result.is_ok(), "ipfix data: {:?}", result.error);
+
+        let mut saw = false;
+        for packet in result.packets {
+            if let NetflowPacket::IPFix(ipfix) = packet {
+                for flowset in &ipfix.flowsets {
+                    if let IpFixFlowSetBody::Data(data) = &flowset.body {
+                        for fr in &data.fields {
+                            let r = parse_ipfix_flow("1.2.3.4", "edge02", fr, 7);
+                            assert_eq!(r.version, 10);
+                            assert_eq!(uint(&r.fields[crate::fields::BYTES]), 9000);
+                            assert_eq!(uint(&r.fields[crate::fields::PACKETS]), 12);
+                            assert_eq!(uint(&r.fields[crate::fields::PROTOCOL]), 17);
+                            saw = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(saw, "parser yielded no IPFIX data record");
+    }
+
+    /// A v5 header that declares `1 in 1000` is heard, and one that declares no
+    /// mode is not (#1075). The field was never read at all: `process_packet`
+    /// iterated `flowsets` and the header's interval went nowhere.
+    #[test]
+    fn a_v5_header_sampling_declaration_is_read() {
+        assert_eq!(sampling_from_v5_header((1 << 14) | 1000), Some(1000));
+        assert_eq!(sampling_from_v5_header(1000), None);
     }
 
     /// Garbage / truncated input must not panic the parser path.

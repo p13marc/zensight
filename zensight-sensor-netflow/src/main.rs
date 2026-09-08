@@ -8,6 +8,7 @@
 //! read procedure.
 
 mod config;
+mod fields;
 mod receiver;
 mod rollup;
 
@@ -59,7 +60,8 @@ async fn main() -> Result<()> {
     let format = runner.config().serialization;
 
     // Start NetFlow listeners
-    let mut rx = receiver::start_listeners(&netflow_config)
+    let sampling = fields::new_sampling();
+    let mut rx = receiver::start_listeners(&netflow_config, sampling.clone())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start NetFlow listeners: {}", e))?;
 
@@ -149,7 +151,13 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 Some(record) = rx.recv() => {
-                    rollups.ingest(&record);
+                    // The interval the exporter last declared, out of band, in
+                    // an options template or a v5 header (#1075).
+                    let n = sampling
+                        .lock()
+                        .ok()
+                        .and_then(|s| s.interval(&record.exporter_name));
+                    rollups.ingest(&record, n);
                     if publish_flows {
                         rollup::push(&ring, record);
                     }
