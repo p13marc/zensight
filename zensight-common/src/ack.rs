@@ -112,6 +112,26 @@ mod tests {
         assert!(ack(1_000).applies_to(Some(&alert(900))));
     }
 
+    /// **A content refresh does not un-acknowledge** (#1081).
+    ///
+    /// This is the mechanism that decides `timestamp`'s meaning. An ack applies
+    /// while `timestamp <= fired_at`, so if a still-firing alert took a fresh
+    /// timestamp every time its summary was corrected, every acked alert on the
+    /// fleet would un-acknowledge itself every refresh interval, forever. A
+    /// refresh therefore carries the transition timestamp over and puts the new
+    /// reading in `observed_at_ms` — and an escalation, which is a real
+    /// transition, still un-acks, as the test below requires.
+    #[test]
+    fn a_content_refresh_does_not_un_acknowledge() {
+        let mut refreshed = alert(1_000);
+        refreshed.summary = "sshd is not listening (checked again)".into();
+        refreshed.observed_at_ms = Some(9_999);
+        assert!(
+            ack(1_000).applies_to(Some(&refreshed)),
+            "a corrected summary is the same occurrence, not a new one"
+        );
+    }
+
     /// **A re-fire pages again.** This is the difference between an ack and a
     /// silence, and the reason `fired_at` exists at all.
     #[test]

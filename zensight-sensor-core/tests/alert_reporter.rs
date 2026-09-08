@@ -933,3 +933,119 @@ async fn the_default_reporter_still_resolves_immediately() {
         "no window configured means resolve on the first clear sweep"
     );
 }
+
+/// #1081, on the wire: a firing alert whose summary drifts inside one severity
+/// band updates its own document in place, on the same key.
+///
+/// `docs/data-model.md`'s state diagram has always claimed
+/// `Firing --> Firing : Put(Firing) (refresh/update)`. It did not happen: only
+/// the debounce elapsing or a severity change published anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drifting_summary_updates_the_firing_document_in_place() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json)
+        .with_content_refresh(Duration::from_millis(200));
+
+    let source = unique_source();
+    let first = sample_alert(&source);
+    let key = concrete_alert_key(&reporter, &first);
+    let sub = session
+        .declare_subscriber(key.clone())
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    reporter
+        .observe(first.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    let raised = tokio::time::timeout(Duration::from_millis(800), sub.recv_async())
+        .await
+        .expect("no raise")
+        .expect("sample");
+    let raised: Alert = decode_auto(&raised.payload().to_bytes()).expect("decode");
+    assert_eq!(raised.observed_at_ms, None, "a raise is not a refresh");
+
+    // Same severity, different summary, immediately: rate-limited.
+    let mut drifted = sample_alert(&source);
+    drifted.summary = "sshd not listening on :22 (3 checks)".into();
+    assert_eq!(drifted.alert_key(), first.alert_key(), "same alert");
+    reporter
+        .observe(drifted.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(120), sub.recv_async())
+            .await
+            .is_err(),
+        "refreshed inside the interval"
+    );
+
+    // Past the interval, the same drifted reading goes out — deferred, not lost.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    reporter
+        .observe(drifted.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+    let sample = tokio::time::timeout(Duration::from_millis(800), sub.recv_async())
+        .await
+        .expect("the drifted summary was never republished")
+        .expect("sample");
+    let refreshed: Alert = decode_auto(&sample.payload().to_bytes()).expect("decode");
+
+    assert_eq!(refreshed.summary, drifted.summary);
+    assert_eq!(
+        refreshed.timestamp, raised.timestamp,
+        "a refresh must not move the transition clock — an ack applies while \
+         timestamp <= fired_at, so this would un-ack the whole fleet every interval"
+    );
+    assert!(
+        refreshed
+            .observed_at_ms
+            .is_some_and(|o| o >= raised.timestamp),
+        "a refresh carries its own observation clock"
+    );
+    assert_eq!(reporter.active_count(), 1, "still one firing alert");
+}
+
+/// The seed answers with what is on the bus, not with the reporter's freshest
+/// private belief (#1081).
+///
+/// `serve_alerts_query` stands in for a `latest` storage, and a storage replies
+/// with the last value **written**. `ActiveAlert::last` used to track the newest
+/// *observation* instead, so a change held back by the rate limiter made the
+/// seed and the live subscription disagree — which is the divergence a page
+/// reload showed an operator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_seed_serves_exactly_what_is_on_the_bus() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = Arc::new(
+        AlertReporter::new(publisher, Protocol::Netlink, Format::Json)
+            // Long enough that the second observation is certainly held back.
+            .with_content_refresh(Duration::from_secs(300)),
+    );
+
+    let source = unique_source();
+    let first = sample_alert(&source);
+    reporter
+        .observe(first.clone(), Some(Duration::ZERO))
+        .await
+        .expect("observe");
+
+    // A change the rate limiter will hold back.
+    let mut drifted = sample_alert(&source);
+    drifted.summary = "sshd not listening on :22 (17 checks)".into();
+    reporter
+        .observe(drifted, Some(Duration::ZERO))
+        .await
+        .expect("observe");
+
+    let served = reporter.firing_alerts();
+    assert_eq!(served.len(), 1);
+    assert_eq!(
+        served[0].summary, first.summary,
+        "the seed offered a summary that was never put on the bus"
+    );
+}
