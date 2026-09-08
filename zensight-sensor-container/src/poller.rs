@@ -179,7 +179,20 @@ impl Poller {
         self.refresh_upstream(&mut out).await;
         out.sort_by(|a, b| a.name.cmp(&b.name));
         self.health.set_devices_total(out.len() as u64);
-        self.health.record_device_success(&self.source);
+        // Forget containers that are gone (#1088). `device_liveness` had no
+        // eviction, and containers are recreated with new names on every
+        // deploy (see this crate's README) — so the map grew by one entry per
+        // deploy for the life of the process, and `devices_responding`,
+        // recomputed from it, exceeded `devices_total` forever.
+        let names: Vec<String> = out.iter().map(|c| c.name.clone()).collect();
+        let retired = self.health.retain_devices(&names);
+        if retired > 0 {
+            tracing::debug!(retired, "container: forgot containers that no longer exist");
+        }
+        // The runtime socket answering is the *sensor* doing its job, not a
+        // device (#1088): counting it as one made `devices_responding` one
+        // higher than `devices_total` even on a host that never redeploys.
+        self.health.record_success();
         Ok(out)
     }
 

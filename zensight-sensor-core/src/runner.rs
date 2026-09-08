@@ -103,8 +103,14 @@ pub struct SensorRunner<C: SensorConfig> {
     /// [`Self::with_alert_reporter`] — runner-emitted alerts (`sensor-budget`)
     /// then ride the same reporter `serve_alerts_query` seeds from.
     alert_reporter: Option<Arc<crate::alert::AlertReporter>>,
-    /// Spawned tasks.
-    tasks: Vec<JoinHandle<()>>,
+    /// Spawned workers, by abort handle (#1082).
+    ///
+    /// Abort handles rather than `JoinHandle`s because each handle itself is
+    /// moved into a supervisor that awaits it — and shutdown must abort the
+    /// **worker**, not the supervisor watching it.
+    aborts: Vec<tokio::task::AbortHandle>,
+    /// The supervisors watching those workers (#1082), aborted after them.
+    supervisors: Vec<JoinHandle<()>>,
 }
 
 /// The self-report this sensor publishes on `state/<producer>/evidence/self`.
@@ -247,7 +253,8 @@ impl<C: SensorConfig> SensorRunner<C> {
             identity: None,
             governor: Arc::new(crate::governor::MemoryGovernor::default()),
             alert_reporter: None,
-            tasks: Vec::new(),
+            aborts: Vec::new(),
+            supervisors: Vec::new(),
         })
     }
 
@@ -414,29 +421,72 @@ impl<C: SensorConfig> SensorRunner<C> {
 
     /// Spawn a worker task.
     ///
-    /// The task will be tracked and aborted on shutdown.
+    /// The task is tracked, **supervised** (#1082) and aborted on shutdown. It
+    /// takes its name from the call site, so the ~100 existing callers keep
+    /// working and an operator still gets something they can go and look at;
+    /// use [`Self::spawn_named`] to say what the worker *is*.
+    #[track_caller]
     pub fn spawn<F>(&mut self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let handle = tokio::spawn(future);
-        self.tasks.push(handle);
+        let name = std::panic::Location::caller().to_string();
+        self.spawn_named(&name, future);
+    }
+
+    /// Spawn a named worker task, supervised (#1082).
+    ///
+    /// Nothing used to join or poll these handles until shutdown aborted them.
+    /// If a collector panicked — a slice index in a `/proc` parser, a poisoned
+    /// lock — the task died, telemetry stopped, the liveliness token stayed
+    /// declared, and the health task kept publishing
+    /// `{status: "Healthy", devices_responding: 1}` every five seconds.
+    ///
+    /// A second task now awaits the worker's handle and tells health when it
+    /// ends. It is *notice*, not recovery: `F` is not clonable, so the runner
+    /// cannot re-run what it was handed. What it can do is stop saying the
+    /// sensor is fine.
+    pub fn spawn_named<F>(&mut self, name: &str, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        // Shutdown must abort the WORKER, not the supervisor: aborting the
+        // supervisor would leave the worker running, and a cancelled task
+        // cannot run code to abort anything on its way out. So the abort
+        // handle is kept separately, and the supervisor waits on a
+        // `JoinHandle` — which is also what lets it tell a panic
+        // (`is_cancelled() == false`) from shutdown's own `abort()`.
+        self.adopt_named(name, tokio::spawn(future));
+    }
+
+    /// Supervise an already-spawned task (#1082).
+    ///
+    /// The runner's own workers — `introspect`, `describe`, the alert seed, the
+    /// health tick, the identity tick — are handed to it as `JoinHandle`s
+    /// rather than futures, and they need watching for exactly the same reason
+    /// a sensor's collector does. The health tick most of all: it is the task
+    /// whose silence is indistinguishable from a healthy sensor.
+    pub fn adopt_named(&mut self, name: &str, handle: JoinHandle<()>) {
+        self.aborts.push(handle.abort_handle());
+        self.supervisors
+            .push(supervise(self.health.clone(), name, handle));
     }
 
     /// Spawn a worker task that returns a Result.
     ///
-    /// Errors are logged automatically.
+    /// Errors are logged automatically, and the task is supervised like any
+    /// other (#1082).
     pub fn spawn_with_error<F, E>(&mut self, name: String, future: F)
     where
         F: Future<Output = std::result::Result<(), E>> + Send + 'static,
         E: std::fmt::Display + Send + 'static,
     {
-        let handle = tokio::spawn(async move {
+        let label = name.clone();
+        self.spawn_named(&label, async move {
             if let Err(e) = future.await {
                 tracing::error!(worker = %name, error = %e, "Worker failed");
             }
         });
-        self.tasks.push(handle);
     }
 
     /// Run the sensor until a shutdown signal (Ctrl+C / SIGINT or SIGTERM) is received.
@@ -462,7 +512,7 @@ impl<C: SensorConfig> SensorRunner<C> {
             let producer_name = ctx.producer().name().to_string();
             if let Some(toml) = zensight_common::registry::registry_toml(&producer_name) {
                 match crate::rpc::serve_introspect(self.session.clone(), &ctx, toml).await {
-                    Ok(task) => self.tasks.push(task),
+                    Ok(task) => self.adopt_named("introspect", task),
                     Err(e) => tracing::warn!(error = %e, "failed to serve introspect"),
                 }
                 // `describe` rides next to `introspect` (RFC 08 §7): the
@@ -474,7 +524,7 @@ impl<C: SensorConfig> SensorRunner<C> {
                 )
                 .await
                 {
-                    Ok(task) => self.tasks.push(task),
+                    Ok(task) => self.adopt_named("describe", task),
                     Err(e) => tracing::warn!(error = %e, "failed to serve describe"),
                 }
             } else {
@@ -513,8 +563,10 @@ impl<C: SensorConfig> SensorRunner<C> {
             // The late-joiner seed (RFC 05 §4) rides the same registration, so
             // a sensor declares it by handing the runner its reporter rather
             // than by remembering to spawn this itself.
-            self.tasks
-                .push(tokio::spawn(crate::alert::serve_alerts_query(reporter)));
+            self.adopt_named(
+                "alert-seed",
+                tokio::spawn(crate::alert::serve_alerts_query(reporter)),
+            );
         }
 
         // Presence is not optional: declare the sensor-level liveliness token
@@ -604,7 +656,7 @@ impl<C: SensorConfig> SensorRunner<C> {
                     }
                 }
             });
-            self.tasks.push(task);
+            self.adopt_named("health-tick", task);
         }
 
         // Identity envelope (#301): publish the sensor registration + self-report
@@ -700,12 +752,12 @@ impl<C: SensorConfig> SensorRunner<C> {
                     }
                 }
             });
-            self.tasks.push(task);
+            self.adopt_named("identity-tick", task);
         }
 
         tracing::info!(
             sensor = %self.name,
-            tasks = self.tasks.len(),
+            tasks = self.aborts.len(),
             "Sensor running. Press Ctrl+C or send SIGTERM to stop."
         );
 
@@ -717,9 +769,15 @@ impl<C: SensorConfig> SensorRunner<C> {
 
         tracing::info!(sensor = %self.name, "Received shutdown signal");
 
-        // Abort all tasks
-        for task in &self.tasks {
+        // Abort the workers first, then the supervisors watching them (#1082).
+        // In this order every supervisor observes `is_cancelled()` and reports
+        // nothing; the other order would abort the watchers and leave the
+        // workers running through the alert drain below.
+        for task in &self.aborts {
             task.abort();
+        }
+        for sup in &self.supervisors {
+            sup.abort();
         }
 
         // Wait briefly for tasks to clean up
@@ -831,6 +889,42 @@ async fn grade_budget(
     }
 }
 
+/// Watch one worker task and tell `health` if it ends (#1082).
+///
+/// Free rather than a method so the discrimination below can be tested without
+/// a bus, a config or a global tracing init — and that discrimination is the
+/// whole of it:
+///
+/// - `Ok(())` — the worker returned. Every worker in this tree is a loop, so
+///   falling out of one is a finding, not a completion.
+/// - `Err(e)` with `e.is_cancelled()` — **shutdown's own `abort()`**. Not a
+///   death, and not reported as one: otherwise every clean stop would publish
+///   a false finding on its last health tick. This is why the supervisor waits
+///   on a `JoinHandle` rather than wrapping the future — wrapping cannot tell
+///   a cancel from a panic, and a wrapper around a panicking future panics
+///   with it and records nothing at all.
+/// - any other `Err` — the worker panicked.
+pub fn supervise(
+    health: Arc<crate::health::SensorHealth>,
+    name: &str,
+    handle: JoinHandle<()>,
+) -> JoinHandle<()> {
+    let name = name.to_string();
+    tokio::spawn(async move {
+        match handle.await {
+            Ok(()) => {
+                tracing::warn!(worker = %name, "worker task returned");
+                health.record_worker_exit(&name, false);
+            }
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => {
+                tracing::error!(worker = %name, error = %e, "worker task panicked");
+                health.record_worker_exit(&name, true);
+            }
+        }
+    })
+}
+
 /// Wait for an OS shutdown signal: Ctrl+C (SIGINT) or, on Unix, SIGTERM.
 ///
 /// systemd and Docker stop a process with SIGTERM, so handling only Ctrl+C
@@ -919,5 +1013,84 @@ mod tests {
         );
         assert_eq!(ev.vendor, None);
         assert_eq!(ev.platform, None);
+    }
+}
+
+/// Worker supervision (#1082) — the discrimination [`supervise`] exists for.
+#[cfg(test)]
+mod supervision_tests {
+    use super::*;
+
+    fn health() -> Arc<crate::health::SensorHealth> {
+        Arc::new(crate::health::SensorHealth::new("sysinfo"))
+    }
+
+    /// A collector that panics is noticed, named, and stops the sensor saying
+    /// it is Healthy.
+    ///
+    /// Nothing joined or polled these handles before: the task died, telemetry
+    /// stopped, the liveliness token stayed declared, and the health task —
+    /// still alive — kept publishing `Healthy` every five seconds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_worker_stops_the_sensor_saying_it_is_healthy() {
+        let h = health();
+        assert_eq!(
+            h.snapshot().status,
+            zensight_common::HealthStatus::Healthy,
+            "nothing is wrong yet"
+        );
+
+        let worker = tokio::spawn(async { panic!("a slice index in a /proc parser") });
+        supervise(h.clone(), "system-collector", worker)
+            .await
+            .expect("the supervisor itself must not die with its worker");
+
+        let snap = h.snapshot();
+        assert_eq!(snap.dead_workers, vec!["system-collector".to_string()]);
+        assert_ne!(
+            snap.status,
+            zensight_common::HealthStatus::Healthy,
+            "health kept saying Healthy over a dead collector"
+        );
+        assert!(snap.last_error.is_some_and(|e| e.contains("panicked")));
+    }
+
+    /// A worker that simply returns is reported too: every worker in this tree
+    /// is a loop, so falling out of one is a finding.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_worker_that_returns_early_is_reported() {
+        let h = health();
+        supervise(h.clone(), "collector", tokio::spawn(async {}))
+            .await
+            .expect("supervisor");
+        assert_eq!(h.dead_workers(), vec!["collector".to_string()]);
+        assert_ne!(h.snapshot().status, zensight_common::HealthStatus::Healthy);
+    }
+
+    /// **Shutdown is not a death.** Aborting a worker on the way out must not
+    /// be reported as one, or every clean stop would publish a false finding on
+    /// its last health tick.
+    ///
+    /// This is the case that decides the design: a wrapper *around the future*
+    /// cannot tell a cancel from a panic — and, worse, panics along with the
+    /// future it wraps and so records nothing at all. Waiting on the
+    /// `JoinHandle` can read `JoinError::is_cancelled()`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_aborted_worker_is_not_a_dead_worker() {
+        let h = health();
+        let worker = tokio::spawn(std::future::pending::<()>());
+        let abort = worker.abort_handle();
+        let sup = supervise(h.clone(), "long-poll", worker);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        abort.abort();
+        sup.await.expect("supervisor");
+
+        assert!(
+            h.dead_workers().is_empty(),
+            "shutdown's own abort was reported as a death: {:?}",
+            h.dead_workers()
+        );
+        assert_eq!(h.snapshot().status, zensight_common::HealthStatus::Healthy);
     }
 }

@@ -10602,6 +10602,7 @@ mod sensor_liveliness_tests {
             self_stats: None,
             last_success_unix_ms: None,
             last_error: None,
+            dead_workers: Vec::new(),
         }
     }
 

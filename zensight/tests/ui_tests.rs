@@ -2494,6 +2494,7 @@ fn test_sensors_view() {
             source: None,
             self_stats: None,
             last_success_unix_ms: None,
+            dead_workers: Vec::new(),
             last_error: None,
         },
     );
@@ -2582,6 +2583,7 @@ fn test_artifact_holder_pick() {
             source: None,
             self_stats: None,
             last_success_unix_ms: None,
+            dead_workers: Vec::new(),
             last_error: None,
         },
     );
@@ -2666,6 +2668,7 @@ fn test_artifact_tree_confirm_card() {
             source: None,
             self_stats: None,
             last_success_unix_ms: None,
+            dead_workers: Vec::new(),
             last_error: None,
         },
     );
@@ -2760,6 +2763,7 @@ fn test_sensors_snapshot_dirs() {
             source: None,
             self_stats: None,
             last_success_unix_ms: None,
+            dead_workers: Vec::new(),
             last_error: None,
         },
     );

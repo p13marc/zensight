@@ -2336,6 +2336,7 @@ impl DemoSimulator {
                     source: Some("demo".to_string()),
                     self_stats: None,
                     last_success_unix_ms: None,
+                    dead_workers: Vec::new(),
                     last_error: None,
                 }
             })

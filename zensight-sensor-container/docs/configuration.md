@@ -45,6 +45,21 @@ different session cannot read their cgroups at all. The runtime reports the
 path and the sensor follows it; when the files are unreadable every resource
 field is `None` — never zero, which would read as "idle".
 
+### What counts as a device
+
+`devices_total` is the number of containers this sweep found, and
+`devices_responding` counts the same population (#1088). Two things used to
+make them disagree, permanently and in the wrong direction:
+
+- The runtime **socket** was recorded as a device success alongside every
+  container, so `devices_responding` was one higher than `devices_total` even
+  on a host that never redeploys. The socket answering is the *sensor* doing
+  its job, not a device, and it is recorded as such now.
+- `device_liveness` had **no eviction**. Containers are recreated with new names
+  on every deploy, so the map accumulated every name it had ever seen and grew
+  for the life of the process. The poller now retires the names that left the
+  listing.
+
 ### The egress block
 
 ```json5
