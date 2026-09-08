@@ -179,6 +179,51 @@ The artifact channel adds its own procedures (`artifact_request_key`,
 `artifact` / `store` / `tree` delivery prefixes) — see
 [artifacts in the sensor framework](../../zensight-sensor-core/docs/artifacts.md).
 
+### Bounded replies — `Page<T>` (#1157)
+
+A handler that scans is a handler that stops, and every one in the tree used to
+stop silently. `logs/events` truncates a search at `MAX_SEARCH_SCAN` and a
+truncated page is indistinguishable from no matches; `netlink/sockets` and
+`sysinfo/processes` cap and say nothing; the historian's `RangeReply` grew its
+own `truncated` and `next_cursor` and still cannot say what window a tier could
+actually cover.
+
+`page.rs` is the one envelope for all of them — RFC 05 §3.2, ratified upstream
+(zenkey v1.31, shipped 0.8.0) from a row filed *from here*, so the spelling is
+normative rather than a ZenSight habit:
+
+```json
+{ "items": [...], "next_cursor": "<opaque>" | null,
+  "partial": false, "scanned": 4096, "covers_from": "<instant>" | null }
+```
+
+Four rules, each of which has a silent failure behind it:
+
+- **`partial` is the required marker, and it is always on the wire.**
+  `zenkey_fleet::CallAnswer::page_signal()` returns `None` unless the reply is a
+  JSON object with a *boolean* field spelled exactly `partial`. A reply that says
+  `truncated` instead is not read as a bad envelope — it is read as **no
+  envelope**, invisible to `zenctl call` and to every RFC 13 judge.
+- **`next_cursor` is a value, never a position.** The RFC names the reference
+  historian's positional cursor as the defect that motivated the row: sorting
+  keeps the *order* stable, not the *indices*, so a row interned between two
+  pages makes the second repeat one or skip one.
+- **`covers_from` is a string instant.** It is read with `as_str()`; epoch
+  millis is read as absent by exactly the tooling that would catch the bug it
+  reports.
+- **`partial: true` with a null cursor is a contract violation** an observer MAY
+  report (RFC 13 §3) — unless the reply says `covers_from`, because a gap in
+  *time* has no next page and says why instead. `Page::is_contract_violation`
+  computes the same predicate `PageSignal::is_contract_violation` does, so a
+  handler can assert it before a live bus does.
+
+The interop check lives in `zensight-conformance/tests/page_envelope.rs`, not
+beside the type: `zensight-common` is linked by every sensor and so may never
+link `zenkey-fleet` (see that crate's README, "The boundary").
+
+Migration is retire-and-sibling, as ever: a new procedure replying with the
+envelope beside the old one, the old one deprecated.
+
 ## Serialization
 
 `serialization.rs` encodes with either format:
