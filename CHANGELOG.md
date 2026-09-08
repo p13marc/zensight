@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-
 - **`CounterTracker` in `zensight-sensor-core`** (#1152). One rate derivation,
   with the elapsed time it was actually measured over, a reset that costs one
   reading rather than producing a spike, and an optional declared counter width
@@ -39,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   procedure replying with the envelope beside the old one.
 
 ### Fixed
-
 
 - **The audit path can no longer be silenced by its own input** (#1086).
   `docs/audit.md` promised that caller values are capped "so nobody can push the
@@ -482,7 +480,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-
 - **zenkey 0.7 → 0.8.1, zenkey-fleet 0.11.1 → 0.13.0, MSRV 1.97 → 1.98** —
   **breaking on the wire for one family**.
 
@@ -575,7 +572,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-
 - **The GUI's alert rule engine** (#934, epic #901) — **breaking**.
 
   ZenSight had two alerting authorities. One runs in every sensor: it has
@@ -617,7 +613,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for.
 
 ### Added
-
 
 - **`just demo-incident` — a hypervisor dies and the catalog says which alert
   that explains** (#945, epic #903), with `scripts/demo-incident-verify.sh`
@@ -1810,7 +1805,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-
 - **There is no 1.0 until the software has been battle-tested by the community.**
   `RELEASING.md` now says so where it already says "the minor is the breaking
   slot", and the epic that used to be milestoned `1.0` is milestoned
@@ -1841,7 +1835,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guaranteed JSON.
 
 ### Fixed
-
 
 - **The Expectations pane addresses one host** (#1114, epic #1056). Its
   three sentinel targets (netlink, systemd, hostspec) read
@@ -2382,7 +2375,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and has only ever passed `(kind, name)`.
 
 ### Deprecated
-
 
 - **`netlink.expectations.metrics`** (#932) — superseded by `thresholds.rules`
   (#928/#931), which netlink evaluates on its own publish path. The
@@ -3067,7 +3059,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-
 - **CI never type-checked `zensight-sensor-probe --features icmp`.** The
   `features` job exists precisely because a default workspace build does not
   compile feature-gated code, and the icmp check has been behind a feature
@@ -3523,7 +3514,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-
 - **The correlator would have fed relationship claims into the identity
   union-find** (#915). Its host-evidence handler subscribes
   `all_evidence_wildcard()` = `v1/*/state/*/evidence/**` — every evidence
@@ -3722,7 +3712,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-
 - **BREAKING (GUI): the topology graph is read from the catalog, not derived
   in the view** (#919, completing #899). `zensight/src/view/topology/` no
   longer computes structural edges from data it happened to have in memory; it
@@ -3851,7 +3840,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   external, so the bump PR was for a line nothing read.
 
 ### Added
-
 
 - **Docs for the history service** (#913). `docs/ARCHITECTURE.md` gains the
   historian in the system overview and a section on why history became a
@@ -4210,7 +4198,6 @@ is, and what the CI guard checks for:
 
 ### Changed
 
-
 - **The tiered time-series store is a crate** (#904). `zensight::store` was
   2 069 lines inside the Iced binary, opening
   `~/.local/share/zensight/metrics.redb`, readable by nothing but the GUI that
@@ -4272,7 +4259,6 @@ is, and what the CI guard checks for:
   telemetry value comparable against a numeric threshold.
 
 ### Fixed
-
 
 - **`governor_ladder` failed about 1 run in 12 and reddened unrelated PRs** (#968).
   It is in `cargo test --workspace`, so the cost landed on whatever was being
@@ -4773,7 +4759,6 @@ allowlist.
 
 ### Added
 
-
 - **`zensight-sensor-pve` — the hypervisor as a hypervisor** (#818). The
   reference fleet's Proxmox host was watched by three native binaries
   reporting CPU, memory, disks, units and the journal: a complete picture of a
@@ -4995,7 +4980,6 @@ allowlist.
 
 ### Fixed
 
-
 - **hostspec no longer demos as a blank pane** (#867). Nothing was broken —
   the shipped assertion set is empty on purpose, `gen-configs.sh` copied the
   file verbatim, and the sensor said so in its logs — but *an empty pane is
@@ -5083,7 +5067,6 @@ a v1/v2c config without an explicit flag. Read **Changed — BREAKING** first.
   (discovery mode) remain open on #825.
 
 ### Added
-
 
 - **hostspec reconciles `@desired`** (#816, closing PR): the assertion set
   is the fleet's first desired-authorable topic. The sensor wires
@@ -5350,7 +5333,6 @@ a v1/v2c config without an explicit flag. Read **Changed — BREAKING** first.
 
 ### Changed
 
-
 - **Per-sensor is the fleet unit; the bundle is the demo** (#813). The
   all-in-one sensors image gave five sensors one cgroup and one `MemoryMax`:
   on vm-edge, 2026-08-17, netring grew, the kernel picked a victim, and
@@ -5412,7 +5394,6 @@ a v1/v2c config without an explicit flag. Read **Changed — BREAKING** first.
   staleness class that hid the field-new lift for a release.
 
 ### Fixed
-
 
 - **The systemd watchlist cap no longer drops exact-named units** (#865).
   `watch_max` truncated matches in D-Bus `ListUnits` order — an order that
@@ -5924,7 +5905,6 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
   unrepresentable rather than discouraged.
 
 ### Added
-
 
 - **The SNMP event feed persists, filters and cross-links** (#578). Trap records
   land in a new redb `events` table keyed by their ULID — chronologically
@@ -6713,7 +6693,6 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
 
 ### Changed
 
-
 - **`{stream}/stats/drops` is the sink's own counter, not an inference**
   (#692). It is read from `AppSinkHandle::stats().total_dropped`, folded as a
   delta per profile incarnation on the actor's existing 1 Hz tick. The
@@ -7090,7 +7069,6 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
   The correlator image keeps the `--help` check; it has no entrypoint to drive.
 
 ### Fixed
-
 
 - **The catalog announced presence before it could answer** (#782). RFC 04 §5 is
   `alive ⇒ callable`, and the correlator broke it. `guard::acquire` claimed,
@@ -7623,7 +7601,6 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
 
 ### Removed
 
-
 - **`docker/configs/` — three config files that shipped nowhere** (#472). They
   were referenced by no Dockerfile, no compose file and no script: the sensors
   image copies the root `configs/*.json5`, and the per-component images expect a
@@ -7635,7 +7612,6 @@ building from `docker/Dockerfile.exporter` needs a new path (#778).
   carries, was already correct. Both references are corrected here.
 
 ### Decided
-
 
 - **Rerun: an optional debugging backend, and the evaluation is closed** (#430,
   epic #415). `docs/plans/rerun/DECISION.md` is the terminal document of a
@@ -7786,7 +7762,6 @@ packaging is retired in favor of container images and a binary tarball.
 
 ### Added
 
-
 - **Zenoh TLS/mTLS client support**: an optional `zenoh.tls` config block
   (`root_ca_certificate`, `connect_certificate`, `connect_private_key`,
   `enable_mtls` — names mirror Zenoh's `transport/link/tls` keys) on every
@@ -7837,7 +7812,6 @@ packaging is retired in favor of container images and a binary tarball.
   systemd units and example configs, for native installs.
 
 ### Infrastructure
-
 
 - **CI moved to Forgejo Actions** (`.forgejo/workflows/`); the GitHub
   workflows are retired and GitHub is a passive mirror. **deb/rpm packaging
@@ -7966,7 +7940,6 @@ the deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
 
 ### Added
 
-
 - **`zensight-sensor-parallax` — live video onto the media plane** (epics #402 and
   #494). A new sensor built on the `parallax` pipeline engine advertises V4L2
   cameras, RTSP cameras, and synthetic test patterns as a stream catalogue
@@ -8026,7 +7999,6 @@ the deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
 
 ### Fixed
 
-
 - **The router storage configs are verified against a real `zenohd`** (#471). The five
   storages across `configs/router-{blob,evidence,pdns-influxdb}-storage.json5` were
   re-expressed as v1 selectors during the cutover with no test covering them; they now
@@ -8043,7 +8015,6 @@ the deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
   #472 stays open until `scripts/image-verify.sh` runs green.
 
 ### Dependencies
-
 
 - **Bumped `nlink` 0.24 → 0.25** (netlink and netring sensors). 0.25 is largely
   internal correctness fixes; the only breaking surface here is the sockdiag
@@ -8127,7 +8098,6 @@ and frontend together.
 
 ### Changed
 
-
 - **BREAKING — per-line log events moved off the streamed bus (#358).** The logs
   sensor no longer publishes each log line as
   `zensight/logs/<host>/events/<uid>` telemetry; lines land in a bounded
@@ -8146,7 +8116,6 @@ and frontend together.
   sensor (upgrade both together).
 
 ### Added
-
 
 - **Topology view redesigned (epic #395; design report
   `docs/TOPOLOGY-REDESIGN.md`).** The map is now a typed, directed,
@@ -8450,7 +8419,6 @@ and frontend together.
 
 ### Changed
 
-
 - **BREAKING (efficiency, #355): default serialization is now CBOR.**
   `Format::default()` flips JSON → CBOR, so every sensor/exporter/config that
   didn't pin a format now encodes CBOR on the wire (smaller envelopes on a
@@ -8526,7 +8494,6 @@ and frontend together.
 
 ### Fixed
 
-
 - **netring RED latency/duration percentiles used unbounded per-window sample
   buffers (#325).** The DNS query-RTT, HTTP request→response latency and
   flow-duration percentiles each accumulated every sample of the window into a
@@ -8584,7 +8551,6 @@ will see a step:
 
 ### Fixed
 
-
 - **Packaging**: build the legacy sensor Docker images (syslog/sysinfo/snmp).
   `Dockerfile.sensor` gained `libsystemd` (build + runtime) for the logs sensor's
   journald support and `libssl3` at runtime for snmp; the Docker matrices no
@@ -8594,7 +8560,6 @@ will see a step:
 ## [0.6.1] - 2026-06-27
 
 ### Fixed
-
 
 - **Packaging**: restore the RPM and Docker artifacts in the release workflow.
   The Fedora RPM build now installs `protobuf-devel` (the well-known-type
@@ -8656,7 +8621,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 
 #### Frontend
 
-
 - **Redesign**: persistent app shell (left nav rail + top bar), host/
   incident-centric information architecture with facet tabs, a unified
   **Incident** object (grouped alerts + timeline + evidence pivots), and a
@@ -8677,7 +8641,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
   retention/eviction, template-aware log sampling) so history survives restart.
 
 #### Exporters
-
 
 - **Export sensor alerts** to Prometheus (a `<prefix>_alert` gauge, Alertmanager-
   compatible) and OTel (OTLP log records on the `zensight.alerts` scope).
@@ -8702,7 +8665,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 
 ### Changed
 
-
 - **BREAKING**: Renamed the "bridge" crate family to "sensor". `zenoh-bridge-*`
   crates/binaries are now `zensight-sensor-*`; `zensight-bridge-framework` is now
   `zensight-sensor-core`. Framework types renamed (`BridgeRunner`→`SensorRunner`,
@@ -8726,7 +8688,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 
 ### Fixed
 
-
 - **Discovery**: the GUI and sensors form a session via an explicit loopback
   rendezvous instead of relying on multicast (broke under VPN/extra interfaces).
 - Harden the SNMP authPriv path so a malformed v3 config returns an error instead
@@ -8736,7 +8697,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 ## [0.5.0] - 2026-02-21
 
 ### Fixed
-
 
 - **Critical**: Remove unsafe `transmute` in AdvancedPublisher registry, replaced with safe `Arc` cloning
 - **Critical**: Fix TOCTOU race condition in publisher cache with atomic check-and-insert
@@ -8766,7 +8726,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 
 ### Added
 
-
 - **Toast Notifications**: Non-intrusive notification system for user feedback
 - **Loading Indicator**: Visual feedback during Zenoh connection establishment
 - **Stale Metric Indicators**: Visual cue for metrics that haven't updated recently
@@ -8777,7 +8736,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 ## [0.4.0] - 2025-12-29
 
 ### Added
-
 
 - **Device Metrics Table**: Replace metrics list with Iced 0.14 table widget for better data presentation
 - **Page Transition Infrastructure**: Add animated page transitions between views
@@ -8790,7 +8748,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 ## [0.3.0] - 2025-12-29
 
 ### Added
-
 
 - **Prometheus Exporter** (`zensight-exporter-prometheus`): Export ZenSight telemetry to Prometheus
   - HTTP `/metrics` endpoint for Prometheus scraping
@@ -8816,7 +8773,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 ## [0.2.0] - 2025-12-28
 
 ### Added
-
 
 - **Network Topology View**: Interactive force-directed graph visualization
   - Canvas-based rendering with zoom and pan
@@ -8892,7 +8848,6 @@ and `docs/ARCHITECTURE.md` for the authoritative references.
 ## [0.1.0] - 2025-12-15
 
 ### Added
-
 
 - **Core Platform**
   - `zensight`: Iced 0.14 desktop frontend
