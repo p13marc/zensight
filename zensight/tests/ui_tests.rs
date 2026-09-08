@@ -3698,6 +3698,7 @@ fn test_netring_security_tab_and_strip() {
     let mut state = DeviceDetailState::new(device_id);
     state.netring_detail.anomalies = vec![Alert {
         timestamp: 0,
+        observed_at_ms: None,
         source: "wiretap1".into(),
         protocol: Protocol::Netring,
         kind: AlertKind::Anomaly,
