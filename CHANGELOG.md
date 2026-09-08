@@ -39,6 +39,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `for:` an operator set no longer silently disables edge-triggered rules,
+  and a monotonic timer can be overdue** (#1084). Two halves of "the rule that
+  never fires".
+
+  `sysinfo` applied one global `for_secs` to every rule. But `oom` fires on
+  `oom_kill_delta > 0`, which is true for exactly one tick, and `observe` sets
+  `first_seen` on the very call that evaluates `now - first_seen >= dur` — so at
+  any non-zero `for` the test is `0 >= dur`, and the next `reconcile` drops the
+  entry unpublished. An operator who set `for_secs: 60` to stop pressure alerts
+  flapping had **turned OOM alerting off**, with no warning. The SMART
+  `media_errors_delta` and `reallocated_delta` rules are the same shape;
+  `zensight-sensor-container`'s `oom_hold_secs` is a local workaround for the
+  same wall.
+
+  `sensor-core` names the distinction instead of leaving it to each sensor:
+  `Hysteresis::Level(for)` debounces, `Hysteresis::Edge(for)` **holds** — raised
+  on the first observation, held firing that long after the last one. Both
+  halves of the pairing (`for_duration()` for `observe`, `reconcile_opts()` for
+  `reconcile_opts`) come from one value, because the bug was a caller pairing
+  `for` with the wrong half. Nothing new sits underneath: `retire`'s recovery
+  window already *is* hold semantics. sysinfo's `for_secs` defaults to `0`, so a
+  default deployment is byte-identical to before.
+
+  Second, `systemd-timer-overdue` could never fire for a **monotonic** timer.
+  Only `NextElapseUSecRealtime` was bound, which only a calendar timer fills —
+  so every `OnBootSec=` / `OnUnitActiveSec=` timer reported a next elapse of 0
+  and was skipped by both the alert rule and `@rpc/systemd/timers`. Both
+  properties are read now and anchored against `CLOCK_MONOTONIC` (not
+  `CLOCK_BOOTTIME`, which would make every timer on a suspended host look
+  overdue by the length of its last suspend), and the two call sites — which
+  were independent spellings of the same sentence, only one of them with a
+  grace window — share one predicate.
+
+
 - **A firing alert's number is corrected on the bus** (#1081).
   `docs/data-model.md`'s state diagram has always claimed
   `Firing --> Firing : Put(Firing) (refresh/update)`. It did not happen: only

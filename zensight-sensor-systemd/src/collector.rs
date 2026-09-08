@@ -354,12 +354,24 @@ impl SystemdCollector {
                         .build()
                         .await
                 {
-                    let next = timer.next_elapse_usec_realtime().await.unwrap_or(0);
+                    // Both clocks: a calendar timer fills the realtime
+                    // property, a monotonic one (`OnBootSec=`,
+                    // `OnUnitActiveSec=`) fills only the monotonic one and
+                    // reports 0 here. Reading realtime alone skipped every
+                    // monotonic timer silently (#1084).
+                    let rt = timer.next_elapse_usec_realtime().await.unwrap_or(0);
+                    let mono = timer.next_elapse_usec_monotonic().await.unwrap_or(0);
+                    let next = crate::dbus::next_elapse_wall_usec(
+                        rt,
+                        mono,
+                        chrono::Utc::now().timestamp_micros().max(0) as u64,
+                        crate::dbus::monotonic_now_usec(),
+                    );
                     let last = timer.last_trigger_usec().await.unwrap_or(0);
                     points.extend(crate::map::timer_points(&self.source, &u.0, last, next));
                     timers.push(crate::alerts::TimerSample {
                         name: u.0.clone(),
-                        next_elapse_usec_realtime: next,
+                        next_elapse_wall_usec: next,
                     });
                 }
                 // Read socket counters for watched `.socket` units (#279).

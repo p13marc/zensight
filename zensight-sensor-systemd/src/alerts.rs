@@ -116,8 +116,15 @@ fn default_consecutive_failures_threshold() -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerSample {
     pub name: String,
-    /// Wall-clock µs of the next scheduled elapse (0 / `u64::MAX` = none).
-    pub next_elapse_usec_realtime: u64,
+    /// **Wall-clock** µs of the next scheduled elapse (0 = none), already
+    /// resolved from whichever clock systemd populated by
+    /// [`crate::dbus::next_elapse_wall_usec`].
+    ///
+    /// It used to be the raw `NextElapseUSecRealtime`, which only a *calendar*
+    /// timer fills in — so every `OnBootSec=` / `OnUnitActiveSec=` timer
+    /// reported 0 and was skipped, and `systemd-timer-overdue` could not fire
+    /// for one however late it was (#1084).
+    pub next_elapse_wall_usec: u64,
 }
 
 /// Fully-derived inputs for one evaluation tick (storm units pre-computed).
@@ -233,13 +240,15 @@ pub fn evaluate(host: &str, cfg: &AlertsConfig, inputs: &AlertInputs) -> Vec<Rul
         let alerts = inputs
             .timers
             .iter()
+            // One predicate, shared with the `@rpc` timer listing — they were
+            // two independent spellings of the same sentence, and only one of
+            // them had a grace window (#1084).
             .filter(|t| {
-                let n = t.next_elapse_usec_realtime;
-                n > 0 && n != u64::MAX && inputs.now_usec > n.saturating_add(grace_usec)
+                crate::dbus::timer_overdue(t.next_elapse_wall_usec, inputs.now_usec, grace_usec)
             })
             .map(|t| {
                 let overdue_secs =
-                    (inputs.now_usec.saturating_sub(t.next_elapse_usec_realtime)) / 1_000_000;
+                    (inputs.now_usec.saturating_sub(t.next_elapse_wall_usec)) / 1_000_000;
                 alert(
                     host,
                     TIMER_OVERDUE_RULE,
@@ -657,7 +666,7 @@ mod tests {
         let within = AlertInputs {
             timers: vec![TimerSample {
                 name: "a.timer".into(),
-                next_elapse_usec_realtime: now - 30_000_000,
+                next_elapse_wall_usec: now - 30_000_000,
             }],
             now_usec: now,
             ..Default::default()
@@ -671,7 +680,7 @@ mod tests {
         let overdue = AlertInputs {
             timers: vec![TimerSample {
                 name: "a.timer".into(),
-                next_elapse_usec_realtime: now - 120_000_000,
+                next_elapse_wall_usec: now - 120_000_000,
             }],
             now_usec: now,
             ..Default::default()
@@ -686,7 +695,7 @@ mod tests {
         let never = AlertInputs {
             timers: vec![TimerSample {
                 name: "b.timer".into(),
-                next_elapse_usec_realtime: 0,
+                next_elapse_wall_usec: 0,
             }],
             now_usec: now,
             ..Default::default()

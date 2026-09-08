@@ -40,6 +40,19 @@ names (`sshd.service`) stay byte-identical, everything else — uppercase
 
 - **Timers** (#279): watched `.timer` units add `unit/<t>/{last_trigger_usec,
   next_trigger_usec}`.
+
+  `next_trigger_usec` is **wall-clock, from whichever clock systemd
+  populated** (#1084). A calendar timer (`OnCalendar=`) fills
+  `NextElapseUSecRealtime`; a monotonic one (`OnBootSec=`,
+  `OnUnitActiveSec=`) fills only `NextElapseUSecMonotonic` and reports 0 for
+  realtime. Only realtime was bound, so every monotonic timer published a next
+  trigger of 0, was listed as never scheduled by `@rpc/systemd/timers`, and
+  **could not fire `systemd-timer-overdue` however late it was** — check a real
+  one with `systemctl show -p NextElapseUSecMonotonic
+  systemd-tmpfiles-clean.timer`. The monotonic reading is anchored against
+  `CLOCK_MONOTONIC` (not `CLOCK_BOOTTIME`: systemd schedules on the former, and
+  mixing the pair would make every timer on a suspended host look overdue by
+  the length of its last suspend).
 - **Sockets** (#279): watched `.socket` units add `unit/<s>/{n_accepted,
   n_connections,n_refused}`.
 
