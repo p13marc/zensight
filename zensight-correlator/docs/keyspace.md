@@ -28,8 +28,8 @@ delivered to a handler written when the subtree was entirely host identity. `Hos
 carries no `deny_unknown_fields` and requires only `sensor` and `source`, both of which a
 relationship claim has, so it would have decoded cleanly and entered the identity
 union-find with no error and no log line. The dispatch is now an **allow-list of subjects**,
-so the next family added here is inert by default. (Raised on zenkey#416 as a normative line
-worth adding to RFC 06 §4.)
+so the next family added here is inert by default. (Raised as zenkey#416; now normative — RFC 06
+§4 v1.30, shipped in zenkey 0.8, which is also where `common = "evidence_relation"` comes from.)
 
 ## Produces (publications)
 

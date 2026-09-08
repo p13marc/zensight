@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **zenkey 0.7 → 0.8.1, zenkey-fleet 0.11.1 → 0.13.0, MSRV 1.97 → 1.98** —
+  **breaking on the wire for one family**.
+
+  zenkey 0.8.0 was "what the adopters found": five findings, two of them
+  ZenSight's, all one shape — the convention could not *say* something, so no
+  tool could judge it, so this application invented a local rule and the wire
+  drifted. This is the return trip. Nothing here is a new ZenSight feature;
+  it is local rules being deleted in favour of the ratified ones.
+
+  **The slug re-keys, and the family it re-keys is `systemd/unit/*`.** RFC 03
+  §2 v1.31 made the escape injective (zenkey #418: the v1.4 escape produced
+  chunks that were themselves legal values, so `x-foo` and an escaped `foo`
+  could share a key). Values that were already charset-legal are byte-identical
+  — every host origin, every IP slug, every ULID, `sshd.service`,
+  `user_1000.service` — but a value with a foreign byte moves:
+
+  | unit name | 0.7 chunk | 0.8 chunk |
+  |---|---|---|
+  | `sshd.service` | `sshd.service` | `sshd.service` |
+  | `user@1000.service` | `user_x40_1000.service` | `x-user_x401000.service` |
+  | `NetworkManager.service` | `x_x4e_etwork_x4d_anager.service` | `x-_x4eetwork_x4danager.service` |
+
+  Operationally: a `systemd` sensor on 0.13 publishes the new chunk, so an
+  affected unit's history has a break at the upgrade and the old series goes
+  stale rather than continuing. The unit's real name always rode the point's
+  `unit` label and still does, so nothing is *unreadable* — a dashboard keyed
+  on the label is unaffected, one keyed on the chunk needs re-pointing. Units
+  with a plain lower-case name — the common case — do not move at all.
+  `sanitize_outputs_are_pinned` now pins the table, so the next upstream move
+  is a failing test instead of a silent fleet-wide gap (the pin #1153 asks for,
+  taken early because this bump is exactly the event it guards).
+
+- **Five state families stop being ZenSight vocabulary and become framework
+  vocabulary**: `edge/{edge_id}`, `incident/{incident_id}`, `ack/{alert_ref}`,
+  `silence/{id}` and `evidence/relation/{relation_id}`. **No key moves** — RFC
+  06 v1.29/v1.30 ratified the spellings ZenSight already used.
+
+  `zensight-common/src/state.rs` said, in writing, that it refined these
+  app-side "for one reason only: `CommonState` is a closed RFC enum in an
+  external crate, so a new variant costs a zenkey release… If the RFC decides
+  the family is genuinely cross-producer (zenkey#416), this moves; until then
+  the code and the RFC disagree, on purpose and in writing." The RFC decided.
+  So: the nine subject declarations carry a `common` token, the two local
+  `ZensightState` variants are gone, the correlator's relation predicate is one
+  `common_state()` call, and the GUI's edge tombstone is an arm of the
+  framework match rather than a special case ahead of it. The practical gain is
+  that upstream tooling can now see these documents as what they are —
+  `zenctl`, the doctor and `zenwatch` classify them without knowing anything
+  about ZenSight.
+
+- **`.zrec` version 2** (RFC 13 §4.1). `zensight/src/replay.rs` reads the two
+  new row kinds: **preamble** rows (state fetched at trigger time, ahead of the
+  window) are kept in their own field and folded *first* by
+  `Replay::messages`, which is the difference between "this host went unready"
+  and "this host appeared, already unready"; **trigger** records are kept with
+  the row index they were observed at. The checked-in corpus stays version 1
+  and `corpus_headers_parse` now asserts against `ZREC_READS` rather than
+  `ZREC_VERSION` — a capture is a historical fact, and a reader that stopped
+  reading the old dialect is the regression that test should catch.
+  `zensight-conformance --record-zrec` writes version 2 headers with `preamble`
+  and `pre_roll` explicitly absent: it is a live untriggered capture, and a
+  header claiming either would claim coverage the file has not got.
+
+- **`jsonschema` 0.49 → 0.55**, to match zenkey's. The workspace was building
+  two copies and `validate-json` no longer type-checked across the seam.
+
+- **MSRV 1.97 → 1.98** (`rust-toolchain.toml`, `rust-version`, all six CI jobs,
+  both release Dockerfiles, `RELEASING.md`) — zenkey 0.8.1 requires it, and the
+  fleet-uniform toolchain rule (myserver#33) says all `p13marc/*` repos move
+  together.
+
+  **What the upgrade unblocks, none of it done here**: `kind = counter | gauge
+  | text | bool` on a subject and the doctor's `kind-mismatch` check (#1071's
+  durable half, #1151's dependency); the per-producer `[budget]` and
+  `budget-exceeded`, plus `self_stats` in the health document (#1091); the RFC
+  05 §3.2 bounded-reply envelope, whose ratified field set is
+  `{items, next_cursor, partial, scanned, covers_from}` — five fields, not the
+  four #1157 proposed — and `CallAnswer::page_signal()`, which reads it and
+  names "partial with a null cursor" a contract violation (#1157, #1147,
+  #1067); `zenctl storage gen` / `acl gen`, which write the router storage
+  #1102 says nobody ships; and `Chunk::unslug`, the decoder that makes the
+  `sanitize_key` collisions in #1153 fixable rather than merely nameable. Both
+  new doctor checks are inert against ZenSight today — each fires only where a
+  `kind` or a `[budget]` is declared, and none is — so the conformance gate is
+  unchanged and `--list-checks` picks the two up on its own.
+
 ### Removed
 
 - **The GUI's alert rule engine** (#934, epic #901) — **breaking**.

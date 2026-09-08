@@ -83,7 +83,7 @@ members = [
 [workspace.package]
 version = "0.13.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 license = "MIT"
 repository = "https://github.com/p13marc/zensight"
 authors = ["Marc Pardo <p13marc@gmail.com>"]
@@ -189,8 +189,8 @@ zensight-common = { path = "zensight-common" }
 # The keyspace convention crate — external since the zenkey extraction (RFC set
 # + zenctl live there too). crates.io dep (#517); registry TOMLs live in-repo
 # (zensight-common/registry/), compiled at build time by zenkey-build.
-zenkey = "0.7"
-zenkey-build = "0.7"
+zenkey = "0.8"
+zenkey-build = "0.8"
 # The upstream fleet engine: the RFC 05 §2.1 fan-in discipline, bounded and
 # elision-reporting fan-out, declared queriers, registry-slice sets, RFC 13's
 # `Judgement`, and the conformance judges `run_doctor` exposes.
@@ -209,11 +209,11 @@ zenkey-build = "0.7"
 # NOTE the package license is **Apache-2.0**, not the MIT of the zenkey
 # workspace root it lives in. Nothing here is published, so the only
 # obligation is attribution wherever a built binary ships.
-zenkey-fleet = { version = "0.11", default-features = false }
+zenkey-fleet = { version = "0.13", default-features = false }
 schemars = "1"
 # Draft-2020-12 payload conformance, behind zensight-common's `validate-json`
 # feature (#741). `default-features = false` keeps the format/regex extras out.
-jsonschema = { version = "0.49", default-features = false }
+jsonschema = { version = "0.55", default-features = false }
 zensight-sensor-core = { path = "zensight-sensor-core" }
 zensight-store = { path = "zensight-store" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;

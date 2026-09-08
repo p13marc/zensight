@@ -79,10 +79,10 @@ jobs:
   # (amd64 only). Single-job on purpose: artifact passing between jobs is not
   # available on this instance (runner zone cannot reach the public vhost).
   #
-  # Runs inside rust:1.97-bookworm so the binaries link against the SAME glibc
+  # Runs inside rust:1.98-bookworm so the binaries link against the SAME glibc
   # (2.36) as the debian:bookworm-slim runtime base — building on the act
   # ubuntu-24.04 image (glibc 2.39) produces binaries that can fail to load in
-  # the runtime image. This also pins rustc to the cluster-wide 1.97. No node
+  # the runtime image. This also pins rustc to the cluster-wide 1.98. No node
   # inside the container -> no JS actions in this job (manual clone, curl API
   # for the release asset). The apt-installed-buildah variant is an accepted
   # divergence from the fleet template (myserver#33): binaries are built
@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     container:
-      image: rust:1.97-bookworm
+      image: rust:1.98-bookworm
     env:
       REGISTRY: 10.10.0.30:3000
       BUILDAH_ISOLATION: chroot

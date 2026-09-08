@@ -13,7 +13,7 @@ publish = false
 # rerun 0.34.1 requires rust 1.92 (crates.io metadata, 2026-07-11). The MSRV
 # pin used to live here as a deliberate reject-signal tracker for the
 # evaluation (see docs/plans/rerun/01-capabilities.md §1); since myserver#33
-# it is the workspace-inherited rust-version above (1.97), which satisfies it.
+# it is the workspace-inherited rust-version above (1.98), which satisfies it.
 
 [dependencies]
 # Internal crates

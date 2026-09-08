@@ -51,6 +51,7 @@ description = "accumulated IP<->name record; history = storage capture (RFC 06 Â
 
 [[subject]]
 path = "edge/{edge_id}"
+common = "edge"
 class = "state"
 type = "Edge"
 cardinality = 50000
@@ -118,6 +119,7 @@ description = "payload self-description: the SchemaSet JSON for every type this 
 
 [[subject]]
 path = "incident/{incident_id}"
+common = "incident"
 class = "state"
 type = "Incident"
 cardinality = 10000
@@ -127,6 +129,7 @@ description = "firing alerts grouped by ENTITY (#922): inc-<entity_id>, or inc-<
 
 [[subject]]
 path = "ack/{alert_ref}"
+common = "ack"
 class = "state"
 type = "AlertAck"
 cardinality = 10000
@@ -136,6 +139,7 @@ description = "an operator's acknowledgement of one firing alert, keyed <origin>
 
 [[subject]]
 path = "silence/{id}"
+common = "silence"
 class = "state"
 type = "Silence"
 cardinality = 1000

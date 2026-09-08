@@ -2671,6 +2671,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3265,12 +3274,12 @@ checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 
 [[package]]
 name = "fraction"
-version = "0.15.4"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
+checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
 dependencies = [
- "lazy_static",
  "num",
+ "num-bigint",
 ]
 
 [[package]]
@@ -4894,9 +4903,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.49.9"
+version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ec8a241beed129f06114aa68007e905ca350e7baeb6e17a7631bb7978d91b2"
+checksum = "49e89c7d35509ab5248f4160addc47098d0f2b09221851bf6234a948f28a70c4"
 dependencies = [
  "ahash",
  "bytecount",
@@ -4905,7 +4914,6 @@ dependencies = [
  "fancy-regex",
  "fraction",
  "getrandom 0.3.4",
- "idna",
  "itoa",
  "jsonschema-regex",
  "jsonschema-value",
@@ -4923,25 +4931,27 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.49.9"
+version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91994f45017ed5e66aa8e59b8415f4cb033a6380d7200387b7cf117595fbdf85"
+checksum = "a1fb77178bdde7326e2e414526342ad4e26b602ba5372e53440129dc061bc50b"
 dependencies = [
  "regex-syntax",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.49.9"
+version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ec7637f83e510868ae6ed625f7ebfbbde4554ee8ce49854caa5126a8b9b9ecb"
+checksum = "7dadb285b774085f3f3e67cb48ecce59e5d92028f19a01fe014083a4fbaf7fea"
 dependencies = [
  "ahash",
  "bytecount",
  "fraction",
+ "getrandom 0.3.4",
  "num-cmp",
  "num-traits",
  "serde_json",
+ "zmij",
 ]
 
 [[package]]
@@ -5630,7 +5640,7 @@ version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "704b8ac3b57fd40ce21a0acf5491097f406ad37a682ccdc5c14394cf8119a798"
 dependencies = [
- "dirs",
+ "dirs 6.0.0",
  "petgraph",
  "serde",
  "serde_json",
@@ -9190,9 +9200,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.49.9"
+version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6efa2154ea6f5ce0fdecdd2a8d18f2fa1a39a8fbba91564f555a592e4dce8278"
+checksum = "1cc7249156d90d60480d54850c861c37c92f20c6dbb9ae85d98ecca19d81c0b2"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -10286,7 +10296,7 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
- "dirs",
+ "dirs 6.0.0",
 ]
 
 [[package]]
@@ -10405,9 +10415,9 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "sipper"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bccb4192828b3d9a08e0b5a73f17795080dfb278b50190216e3ae2132cf4f95"
+checksum = "ace7bf650ea0110401c6800171a69ea0d8d0bf40253dfc6055245b6cdfbc4201"
 dependencies = [
  "futures",
  "pin-project-lite",
@@ -13873,13 +13883,13 @@ dependencies = [
 
 [[package]]
 name = "zenkey"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1269524118f31366b525b314aed83035ce8a368673876a83005d5e36c2434896"
+checksum = "cce3bb4ed975b937dbc307c32b3d6d9db4a955304087e386906703a1b42531e0"
 dependencies = [
  "base64 0.23.1",
  "ciborium",
- "dirs",
+ "dirs 7.0.0",
  "jsonschema",
  "schemars 1.2.1",
  "serde",
@@ -13894,9 +13904,9 @@ dependencies = [
 
 [[package]]
 name = "zenkey-build"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0978dea5d9da825aa2fb82b4bbfb7f7460a49a76ef68ee575499b72f93563a57"
+checksum = "f50c1c3a064f6bcf1be748e54c8d1e3f57161b572adf416059aea74bce54c96a"
 dependencies = [
  "thiserror 2.0.19",
  "toml 1.1.3+spec-1.1.0",
@@ -13905,9 +13915,9 @@ dependencies = [
 
 [[package]]
 name = "zenkey-fleet"
-version = "0.11.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b9395c7707aeaed43071d8fda5f58b41ad18dbac1f37a74d278e4305ca1db0b"
+checksum = "c3dc3aa0704c83e5685bb1f5fc45474baa357a97b2e6e570f0c578e9a548cd12"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -14472,7 +14482,7 @@ dependencies = [
  "async-stream",
  "chrono",
  "ctor 1.0.13",
- "dirs",
+ "dirs 6.0.0",
  "flume 0.11.1",
  "iced",
  "iced_anim",
@@ -14735,7 +14745,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
- "dirs",
+ "dirs 6.0.0",
  "flume 0.11.1",
  "hostname",
  "if-addrs",
@@ -15144,7 +15154,7 @@ dependencies = [
 name = "zensight-store"
 version = "0.13.0"
 dependencies = [
- "dirs",
+ "dirs 6.0.0",
  "redb",
  "serde",
  "serde_json",

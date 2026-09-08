@@ -214,6 +214,7 @@ description = "the container as the runtime and the kernel jointly know it: imag
 
 [[subject]]
 path = "evidence/relation/{relation_id}"
+common = "evidence_relation"
 class = "state"
 type = "RelationshipEvidence"
 cardinality = 1024

@@ -843,6 +843,7 @@ description = "registration document: identity, version, capabilities (framework
 
 [[subject]]
 path = "evidence/relation/{relation_id}"
+common = "evidence_relation"
 class = "state"
 type = "RelationshipEvidence"
 cardinality = 1024

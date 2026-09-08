@@ -335,12 +335,19 @@ pub fn all_health_wildcard() -> String {
 pub fn all_evidence_wildcard() -> String {
     // v1 (RFC 06 §4): evidence is ordinary per-origin state.
     //
-    // Hand-spelled against **zenkey 0.7**: `selector::common_family` names one
-    // family at a time, and evidence is three of them (`EvidenceSelf`,
-    // `EvidenceDevice`, `EvidenceNames`). This is the union — `evidence/**` —
-    // which no single `CommonFamily` spells, and which a subscriber wants as
-    // ONE subscription rather than three. Its narrower per-family siblings do
-    // come from the generated selector: see [`all_name_evidence_wildcard`].
+    // Hand-spelled against **zenkey 0.8**: `selector::common_family` names one
+    // family at a time, and evidence is now four of them (`EvidenceSelf`,
+    // `EvidenceDevice`, `EvidenceNames`, and `EvidenceRelation` since RFC 06
+    // §4 v1.30). This is the union — `evidence/**` — which no single
+    // `CommonFamily` spells, and which a subscriber wants as ONE subscription
+    // rather than four. Its narrower per-family siblings do come from the
+    // generated selector: see [`all_name_evidence_wildcard`].
+    //
+    // The fourth family is why the correlator's evidence handler dispatches on
+    // an ALLOW-LIST of refined subjects rather than excluding one subtree by
+    // substring: this selector silently widened when the RFC added a family,
+    // and `HostEvidence` would have decoded a relation claim cleanly
+    // (see zensight-correlator/docs/keyspace.md).
     "v1/*/state/*/evidence/**".to_string()
 }
 

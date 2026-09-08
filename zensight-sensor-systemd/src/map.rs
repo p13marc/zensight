@@ -290,13 +290,29 @@ mod tests {
         }
     }
 
+    /// The escaped outputs, pinned. This is the only place in ZenSight that
+    /// slugs an operator-visible name into a key chunk on a live host, so a
+    /// silent upstream change to the escape re-keys a whole fleet's
+    /// `systemd/unit/*` series and nothing else would notice. zenkey 0.8 did
+    /// exactly that (its #418: the v1.4 escape was not injective either way
+    /// round), and this table is what turns the next one into a failing test
+    /// rather than a fleet-wide gap in the history.
     #[test]
-    fn sanitize_is_the_chunk_grammar() {
-        // Already-legal names stay byte-identical.
-        assert_eq!(sanitize_unit("sshd.service"), "sshd.service");
-        // Foreign bytes get the injective escape — `user@1000.service` can
-        // no longer collide with a literal `user_1000.service` (#843).
-        assert_eq!(sanitize_unit("user@1000.service"), "user_x40_1000.service");
+    fn sanitize_outputs_are_pinned() {
+        for (name, chunk) in [
+            // Already-legal names stay byte-identical, on every version.
+            ("sshd.service", "sshd.service"),
+            ("user_1000.service", "user_1000.service"),
+            // Foreign bytes get the injective escape — `x-` reserved on both
+            // sides of the boundary, `_xHH` with no closing underscore
+            // (RFC 03 §2 v1.31).
+            ("user@1000.service", "x-user_x401000.service"),
+            ("NetworkManager.service", "x-_x4eetwork_x4danager.service"),
+        ] {
+            assert_eq!(sanitize_unit(name), chunk, "{name}");
+        }
+        // The property the escape exists for (#843): a name with a foreign
+        // byte can never collide with a literal that spells it out.
         assert_ne!(
             sanitize_unit("user@1000.service"),
             sanitize_unit("user_1000.service")

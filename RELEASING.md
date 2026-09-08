@@ -258,9 +258,9 @@ answers is a leftover.
   `packaging/systemd/` (with `ExecStart=/usr/bin/…` like the others). Nothing
   asserts these stay in lockstep any more (the old `rust.yml` sensor-count guard died with
   the GitHub pipeline) — check by hand.
-- The `images` job runs inside `rust:1.97-bookworm` **on purpose**: the binaries must link
+- The `images` job runs inside `rust:1.98-bookworm` **on purpose**: the binaries must link
   against the same glibc (2.36) as the `debian:bookworm-slim` runtime base. Don't "simplify"
   it back to building on the act ubuntu-24.04 image (glibc 2.39) — that's a load-time
   failure shipped to every host, and the in-image smoke step will catch it.
-- rustc is pinned to **1.97** (root `rust-toolchain.toml`, ci.yml, the images container) in
+- rustc is pinned to **1.98** (root `rust-toolchain.toml`, ci.yml, the images container) in
   lockstep with the whole cluster (see myserver docs) — bump everywhere together.
