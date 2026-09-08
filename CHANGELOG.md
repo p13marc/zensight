@@ -39,6 +39,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Modbus multi-register values are published at the right addresses** (#1073).
+  `poll_once` enumerated *decoded values* and did `register.address +
+  addr_offset`, while a 32-bit type spans **two** registers per value. So
+  `{type: "holding", address: 100, count: 3, data_type: "f32"}` read 100–105,
+  decoded three floats, and published them at 100, 101 and 102 — they are at
+  100, 102 and 104. The `address` label was wrong, and
+  `register_names["holding:102"]` then resolved value #3 to the name of value
+  #2: a pressure reading published under `temperature`.
+
+  `get_register_name` also returned a configured `name` for *every* decoded
+  value, so `{name: "temperature", count: 10}` published ten sensors to
+  `…/holding/temperature`, ten times a cycle, and kept the last. That is refused
+  at startup now, naming the alternative (`register_names`, which is keyed by
+  address). **`configs/modbus.json5` shipped in exactly that shape** — four
+  values under one name, twice — which is the clearest evidence the two
+  meanings of `count` had drifted apart: the file was written believing it
+  counted registers, the code counts values.
+
+  `registers_needed` multiplied `count * regs_per_value` unchecked, panicking in
+  debug and wrapping in release; a wrapped span reads as a short, legal read of
+  the wrong window. A block that does not fit the address space is refused at
+  startup instead.
+
+  `docs/reference.md` listed `bool` and `f64` data types, neither of which
+  exists — coils decode straight to a boolean without consulting `data_type`,
+  and 64-bit values are not implemented — and omitted the three little-endian
+  types that do. Corrected.
+
+
 - **NetFlow v9 and IPFIX byte and packet counters are no longer zero** (#1072).
   `Rollups::ingest` read `record.fields.get("bytes")`, `get("packets")` and
   `get("protocol")` — literals minted only by the v5/v7 parsers. v9 and IPFIX

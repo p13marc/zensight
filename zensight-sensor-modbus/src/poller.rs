@@ -108,11 +108,22 @@ impl ModbusPoller {
         for register in &self.registers {
             match self.read_register(&mut ctx, register).await {
                 Ok(values) => {
-                    for (addr_offset, value) in values.into_iter().enumerate() {
-                        let Some(addr) = register.address.checked_add(addr_offset as u16) else {
+                    // The address advances by REGISTERS, not by decoded values
+                    // (#1073). A 32-bit type spans two registers per value, so
+                    // `{type:"holding", address:100, count:3, data_type:"f32"}`
+                    // reads 100–105 and its three floats live at 100, 102 and
+                    // 104. Stepping by one labelled them 100, 101, 102 — and
+                    // `register_names["holding:102"]` then resolved value #3 to
+                    // the name of value #2, so a pressure reading was published
+                    // under `temperature`.
+                    let stride = Self::registers_per_value(register);
+                    for (value_index, value) in values.into_iter().enumerate() {
+                        let offset = (value_index as u16).checked_mul(stride);
+                        let Some(addr) = offset.and_then(|o| register.address.checked_add(o))
+                        else {
                             warn!(
-                                "Device '{}': register address overflow: {} + {} exceeds u16",
-                                self.device.name, register.address, addr_offset
+                                "Device '{}': register address overflow: {} + {} × {} exceeds u16",
+                                self.device.name, register.address, value_index, stride
                             );
                             break;
                         };
@@ -241,12 +252,27 @@ impl ModbusPoller {
     /// Calculate how many 16-bit registers are needed for the configured data type.
     /// Number of Modbus registers a configured value spans (pure; no `self`).
     fn registers_needed(register: &RegisterConfig) -> u16 {
-        let regs_per_value = match register.data_type {
+        // Saturating, not `*`: an unchecked multiply here panicked in debug and
+        // wrapped in release, and a wrapped span reads as a short, legal read
+        // of the wrong window. Startup validation refuses a block that does not
+        // fit (`validate_config`), so reaching the ceiling here means the
+        // config was built in memory rather than parsed.
+        register
+            .count
+            .saturating_mul(Self::registers_per_value(register))
+    }
+
+    /// How many 16-bit registers one decoded value of this type occupies.
+    ///
+    /// The number the address must advance by between values (#1073), and the
+    /// one `registers_needed` multiplies by `count`. They were the same match
+    /// written twice and only one of them was used for stepping.
+    fn registers_per_value(register: &RegisterConfig) -> u16 {
+        match register.data_type {
             DataType::U16 | DataType::I16 => 1,
             DataType::U32 | DataType::I32 | DataType::F32 => 2,
             DataType::U32Le | DataType::I32Le | DataType::F32Le => 2,
-        };
-        register.count * regs_per_value
+        }
     }
 
     /// Decode raw register values based on data type configuration (pure; no `self`).
@@ -371,7 +397,10 @@ impl ModbusPoller {
 
     /// Get a human-readable name for a register address.
     fn get_register_name(&self, register: &RegisterConfig, address: u16) -> String {
-        // First check if register has a configured name
+        // A configured `name` names ONE value. `validate_config` refuses
+        // `name` with `count > 1`, because returning it for every decoded value
+        // published ten sensors to one key, ten times a cycle, nine of them
+        // lost (#1073).
         if let Some(name) = &register.name {
             return name.clone();
         }
@@ -509,6 +538,48 @@ mod tests {
             gauges(&[0x0001, 0x0000, 0x0002, 0x0000, 0x0003], &r),
             vec![65536.0, 131072.0]
         );
+    }
+
+    /// The address advances by REGISTERS, not by decoded values (#1073).
+    ///
+    /// The issue's acceptance, verbatim: three `f32` at base 100 live at 100,
+    /// 102 and 104. `poll_once` stepped by one, so it labelled them 100, 101,
+    /// 102 — and `register_names["holding:102"]` then resolved value #3 to the
+    /// name of value #2, publishing a pressure reading under `temperature`.
+    #[test]
+    fn a_multi_register_type_steps_the_address_by_its_width() {
+        let addresses = |data_type, count, base: u16| {
+            let r = RegisterConfig {
+                address: base,
+                ..reg(data_type, count, 1.0, 0.0)
+            };
+            let stride = ModbusPoller::registers_per_value(&r);
+            (0..count).map(|i| base + i * stride).collect::<Vec<u16>>()
+        };
+        assert_eq!(addresses(DataType::F32, 3, 100), vec![100, 102, 104]);
+        assert_eq!(addresses(DataType::U32, 3, 100), vec![100, 102, 104]);
+        assert_eq!(addresses(DataType::I32Le, 2, 40), vec![40, 42]);
+        // 16-bit types are unchanged: one register per value.
+        assert_eq!(addresses(DataType::U16, 4, 10), vec![10, 11, 12, 13]);
+        assert_eq!(addresses(DataType::I16, 2, 7), vec![7, 8]);
+    }
+
+    /// The stride and the span are the same fact, and were written as two
+    /// matches with only one of them used for stepping (#1073).
+    #[test]
+    fn the_span_is_the_stride_times_the_count() {
+        for (t, count) in [
+            (DataType::U16, 3u16),
+            (DataType::F32, 3),
+            (DataType::U32Le, 5),
+            (DataType::I16, 1),
+        ] {
+            let r = reg(t, count, 1.0, 0.0);
+            assert_eq!(
+                ModbusPoller::registers_needed(&r),
+                count * ModbusPoller::registers_per_value(&r)
+            );
+        }
     }
 
     #[test]

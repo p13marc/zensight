@@ -71,9 +71,9 @@ and `modbus`.
 |-------|------|-------|
 | `type` | enum | `coil` (FC01), `discrete` (FC02), `holding` (FC03), `input` (FC04). |
 | `address` | u16 | Starting register address. |
-| `count` | u16 | Number of registers to read. |
-| `name` | string? | Metric name used in the key expression. |
-| `data_type` | enum | `bool`/`u16`/`i16`/`u32`/`i32`/`f32`/`f64` (word count must match). |
+| `count` | u16 | Number of **values** to decode, not registers. A block spans `count × registers_per_value`, and a 32-bit type is two registers per value — `{address: 100, count: 3, data_type: "f32"}` reads 100–105 and publishes at 100, 102, 104. |
+| `name` | string? | Metric name in the key. **Refused with `count > 1`** — a name names one value (#1073). For a multi-value block, drop it and use `register_names`, which is keyed by address. |
+| `data_type` | enum | `u16`/`i16`/`u32`/`i32`/`f32` and the little-endian `u32le`/`i32le`/`f32le`. |
 | `scale` | f64 | Multiplier applied to the raw value (default 1.0). |
 | `offset` | f64 | Added after scaling (default 0.0). |
 | `unit` | string? | Engineering unit label (e.g. `°C`, `bar`). |
@@ -84,5 +84,14 @@ and `modbus`.
 - **RTU:** the process needs access to the serial device (`/dev/ttyUSB0`, etc.);
   match `baud_rate`/`parity`/`stop_bits`/`unit_id` to the device or reads fail
   (CRC / illegal-data-address errors).
-- 32/64-bit values span multiple 16-bit registers; ensure `count` matches
-  `data_type` and the device's word/byte ordering.
+- 32-bit values span two 16-bit registers. `count` is values, so the block's
+  span is `count × 2` and consecutive values are **two apart** in the address
+  space — the `address` label, and any `register_names` lookup, follow that
+  stride (#1073).
+- There is no `bool` and no `f64` in `data_type`. Coils and discrete inputs are
+  read by `type` and decode straight to a boolean without consulting
+  `data_type`; 64-bit values are not implemented. Both were listed here for
+  three releases and neither existed.
+- **A `name` with `count > 1` is refused at startup.** It used to be returned
+  for every decoded value in the block, so ten sensors published to one key, ten
+  times a cycle, and nine were lost.
