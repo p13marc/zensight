@@ -80,13 +80,20 @@ impl ArtifactProducer for LogBundleProducer {
             max_lines: self.max_lines,
         }
     }
-    fn accepts(&self, kind: &ArtifactKind) -> Result<(), String> {
+    fn accepts(&self, kind: &ArtifactKind) -> Result<(), zensight_sensor_core::rpc::RpcError> {
+        use zensight_sensor_core::rpc::RpcError;
         match kind {
             ArtifactKind::LogBundle { pattern, .. } => {
-                // Reject a bad regex at request time (clear failure, not mid-produce).
-                LogMatcher::new(pattern.as_deref(), None, None, None, None).map(|_| ())
+                // Reject a bad regex at request time (clear failure, not
+                // mid-produce). A caller's bad regex is a malformed request,
+                // not a switch refusing (#1085).
+                LogMatcher::new(pattern.as_deref(), None, None, None, None)
+                    .map(|_| ())
+                    .map_err(RpcError::invalid_args)
             }
-            _ => Err("logbundle producer given a non-logbundle request".into()),
+            _ => Err(RpcError::invalid_args(
+                "logbundle producer given a non-logbundle request",
+            )),
         }
     }
 

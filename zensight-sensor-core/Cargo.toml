@@ -58,6 +58,10 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
+# `artifact_channel` reads the audit trail back: without the `linux-audit`
+# feature `audit::record` always takes its `tracing` fallback, so capturing the
+# `zensight::audit` target is how a test sees `res=0` (#1085).
+tracing-subscriber.workspace = true
 
 # `governor_ladder` pins the allocator's mmap threshold so its ballast is
 # memory the kernel actually reclaims on free — see the note at the top of
