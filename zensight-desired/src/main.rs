@@ -317,6 +317,7 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
     // The correlator's equivalent is hand-maintained and its own source
     // records that three families were missing from it at some point.
     let missing = zensight_common::served::await_served(
+        "desired",
         &zensight_desired::serve::declared_rpc_keys(),
         DECLARATION_GRACE,
     )

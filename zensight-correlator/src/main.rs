@@ -319,6 +319,12 @@ async fn main() -> anyhow::Result<()> {
     // procedure as unserved while the log says they are ready, then
     // debug-panics. `await_served` takes concrete keys and makes no assumption
     // about how they were spelled.
+    //
+    // It takes the producer name too (#1087): the write-coverage check rides
+    // along here exactly as it does inside `check_registry_coverage` for a
+    // sensor. It did not before, and the check is origin-derived, so the six
+    // write procedures below — more than any sensor has — were the ones nothing
+    // ever checked had gone through the audited seam.
     let callable = [
         entities_query_key(),
         names_query_key(),
@@ -338,7 +344,8 @@ async fn main() -> anyhow::Result<()> {
         catalog_rpc_key("silence"),
         catalog_rpc_key("unsilence"),
     ];
-    let missing = zensight_common::served::await_served(&callable, DECLARATION_GRACE).await;
+    let missing =
+        zensight_common::served::await_served("catalog", &callable, DECLARATION_GRACE).await;
     if !missing.is_empty() {
         // Not fatal: presence with a partial surface is still better than a
         // catalog the fleet cannot see at all, and the conformance judge will

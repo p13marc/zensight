@@ -32,6 +32,17 @@ can pass the third and fail the fifth — that is precisely the state the tree w
 in before #957, with eleven of twelve write surfaces leaving no trail. See
 [`audit.md`](audit.md).
 
+Both the third and the fifth have a **service-origin** spelling as well as a
+sensor one (#1087). `serve_spelling` derives the key from the local host's
+origin, which is right for a sensor and matches nothing at all against
+`v1/@catalog/@rpc/…` — and a check that matches nothing reports nothing, which
+reads like a pass. `await_served(producer, keys, grace)` is the service-origin
+entry point and now runs `check_write_coverage_keys` on the way out.
+
+Every check in the table shares one rule: **a slice it cannot read is UNKNOWN,
+never clean.** A missing or unparsable slice used to make the third and fifth
+return an empty result, so a typo'd producer name silently turned them off.
+
 The two directions are not mirror images and the first does not imply the
 second. A registry may be a strict superset of what the code does and every
 published key still builds — and that superset is exactly what `introspect`

@@ -892,11 +892,17 @@ fn build_assertion(
     kind: AssertionKind,
 ) -> Result<OperatorAssertion, RpcError> {
     if !allowed {
+        // The same switch `write_gate` names, named the same way (#866): this
+        // path is `link`/`unlink`, and it was the one gate in this file that
+        // did not set `refused_by` — so the audit trail recorded the two
+        // procedures that fuse or split hosts as `refused_by=error/gated`,
+        // while `ack`/`silence` beside them named the switch.
         return Err(RpcError::gated(
             "operator assertions are disabled; set `allow_operator_assertions: true` \
              in the correlator config (RFC 06 §5.4 — a link overrides the guard that \
              keeps two machines from fusing into one host)",
-        ));
+        )
+        .with_refused_by("allow_operator_assertions"));
     }
     let old = req
         .param("old")
@@ -1178,6 +1184,23 @@ mod ack_silence_tests {
         assert_eq!(e.error, "error/gated");
         assert_eq!(e.refused_by.as_deref(), Some("allow_operator_assertions"));
         assert!(write_gate(true).is_none());
+    }
+
+    /// `link`/`unlink` are gated by `build_assertion`'s own check rather than
+    /// by `write_gate`, and it was the one gate in this file that did not name
+    /// its switch (#866) — so the two procedures that fuse or split hosts
+    /// audited as `refused_by=error/gated` while `ack`/`silence` beside them
+    /// named `allow_operator_assertions`.
+    #[test]
+    fn a_gated_link_names_the_same_switch_as_ack_and_silence() {
+        let e = build_assertion(&req("old=h-aaaaaaaaaaaa", ""), false, AssertionKind::Link)
+            .expect_err("gated");
+        assert_eq!(e.error, "error/gated");
+        assert_eq!(
+            e.refused_by.as_deref(),
+            write_gate(false).unwrap().refused_by.as_deref(),
+            "the two gates on the same switch must name it identically"
+        );
     }
 
     // ---- ref parsing -----------------------------------------------------
