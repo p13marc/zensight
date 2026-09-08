@@ -30,8 +30,11 @@ pub struct SystemCollector {
     /// cache per key, drop QoS) — never a one-shot `session.put`.
     registry: Arc<zensight_common::PublisherRegistry>,
     format: Format,
-    /// Previous network stats for calculating rates
-    prev_network: HashMap<String, (u64, u64)>,
+    /// Per-interface byte counters and the instants they were read at, for the
+    /// rx/tx rates (#1069). A `CounterTracker` rather than a bare previous-value
+    /// map: the instant has to travel with the sample, or the rate is divided by
+    /// what the scheduler was *asked* for instead of what elapsed.
+    prev_network: zensight_sensor_core::rate::CounterTracker<(String, &'static str)>,
     /// Previous RAPL energy readings (zone -> (energy_uj, max_energy_uj)) for
     /// deriving instantaneous watts across ticks (Linux power depth, §G).
     #[cfg(target_os = "linux")]
@@ -48,7 +51,17 @@ pub struct SystemCollector {
     /// Previous `pswpin` counter, kept to derive the swap-in rate for the
     /// saturation score independently of the alert evaluator's own state.
     #[cfg(target_os = "linux")]
-    prev_pswpin: Option<u64>,
+    prev_pswpin: zensight_sensor_core::rate::CounterTracker<&'static str>,
+    /// When the previous collection pass started.
+    ///
+    /// The loop runs `collect_and_publish().await` and *then* sleeps
+    /// `poll_interval_secs`, so the true period is `interval + collection_time`
+    /// — and every derived rate here used to divide by the nominal one. Under
+    /// load a 5 s tick takes 12 s: `rx_rate` read 2.4× the truth and
+    /// `util_percent` read 240 %, clamped to a flat 100, charting a disk at
+    /// 40 % as saturated (#1069). The error was already *measured*
+    /// (`record_poll_duration`) and published without being used.
+    last_tick: Option<std::time::Instant>,
     /// Cached SMART readings (#823) and when they were last refreshed — the
     /// ioctls run every [`SMART_REFRESH`], not every tick.
     #[cfg(target_os = "linux")]
@@ -79,14 +92,15 @@ impl SystemCollector {
             config,
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,
-            prev_network: HashMap::new(),
+            prev_network: Default::default(),
             #[cfg(target_os = "linux")]
             prev_rapl: HashMap::new(),
             health: Arc::new(zensight_sensor_core::SensorHealth::new("sysinfo")),
             alerts: None,
             last_disk_util_percent: None,
             #[cfg(target_os = "linux")]
-            prev_pswpin: None,
+            prev_pswpin: Default::default(),
+            last_tick: None,
             #[cfg(target_os = "linux")]
             smart_cache: Vec::new(),
             #[cfg(target_os = "linux")]
@@ -265,6 +279,13 @@ impl SystemCollector {
     /// Collect all metrics and publish to Zenoh.
     async fn collect_and_publish(&mut self) {
         let timestamp = chrono::Utc::now().timestamp_millis();
+        // One instant for the whole pass, taken before any collection: every
+        // rate derived below is over the same measured window, and two rates
+        // from one pass that disagreed about when the pass happened would be
+        // worse than one that is merely late (#1069).
+        let now = std::time::Instant::now();
+        let elapsed_secs =
+            measured_interval_secs(self.last_tick, now, self.config.poll_interval_secs);
         let mut count = 0;
 
         if self.config.collect.system {
@@ -300,11 +321,11 @@ impl SystemCollector {
         // Linux-specific: Disk I/O stats
         #[cfg(target_os = "linux")]
         if self.config.collect.disk_io {
-            count += self.collect_disk_io(timestamp).await;
+            count += self.collect_disk_io(timestamp, elapsed_secs).await;
         }
 
         if self.config.collect.network {
-            count += self.collect_network(timestamp).await;
+            count += self.collect_network(timestamp, now).await;
         }
 
         // Linux-specific: Temperature sensors
@@ -342,7 +363,7 @@ impl SystemCollector {
                 count += self.collect_cgroups(timestamp).await;
             }
             if self.config.collect.power {
-                count += self.collect_power(timestamp).await;
+                count += self.collect_power(timestamp, elapsed_secs).await;
             }
             // USE-completeness collectors (#98): network/CPU/memory/disk
             // saturation+error holes. All cheap unprivileged /proc|/sys reads.
@@ -374,9 +395,8 @@ impl SystemCollector {
         // telemetry path above.
         if self.alerts.is_some() {
             let raw = self.gather_alert_inputs();
-            let interval = self.config.poll_interval_secs as f64;
             if let Some(ev) = self.alerts.as_mut() {
-                ev.tick(raw, interval).await;
+                ev.tick(raw, elapsed_secs).await;
             }
         }
 
@@ -384,8 +404,13 @@ impl SystemCollector {
         // dashboard / topology tint / alerting can all key off, blended from the USE
         // saturation signals already collected above. Additive and cheap.
         if self.config.collect.saturation_score {
-            count += self.collect_saturation_score(timestamp).await;
+            count += self.collect_saturation_score(timestamp, now).await;
         }
+
+        // The pass is the unit the next one measures against — set last, so a
+        // panic mid-pass leaves the baseline where it was rather than claiming
+        // a window nothing was collected over.
+        self.last_tick = Some(now);
 
         debug!("Published {} metrics for '{}'", count, self.source);
     }
@@ -509,7 +534,10 @@ impl SystemCollector {
     /// PSI / FD / run-queue / swap-in signals come from cheap Linux `/proc` reads
     /// (left empty elsewhere, where the score degrades gracefully to a low value).
     #[allow(unused_mut)]
-    fn gather_saturation_inputs(&mut self) -> crate::saturation::SaturationInputs {
+    fn gather_saturation_inputs(
+        &mut self,
+        now: std::time::Instant,
+    ) -> crate::saturation::SaturationInputs {
         let mut s = crate::saturation::SaturationInputs {
             disk_util_percent: self.last_disk_util_percent,
             ..Default::default()
@@ -539,16 +567,14 @@ impl SystemCollector {
                 }
             }
             // Swap-in rate (pswpin pages/s) derived against the previous tick.
-            if let Some(vm) = crate::linux::collect_vmstat() {
-                let interval = self.config.poll_interval_secs as f64;
-                if let (Some(prev), Some(cur)) = (self.prev_pswpin, vm.pswpin)
-                    && cur >= prev
-                    && interval > 0.0
-                {
-                    s.swap_in_pages_per_sec = Some((cur - prev) as f64 / interval);
+            if let Some(vm) = crate::linux::collect_vmstat()
+                && let Some(cur) = vm.pswpin
+            {
+                // A miss does not clobber the baseline: the tracker is only fed
+                // when the counter was actually read.
+                if let Some(r) = self.prev_pswpin.observe("pswpin", cur, now) {
+                    s.swap_in_pages_per_sec = Some(r.per_sec);
                 }
-                // Carry the latest counter forward (don't clobber with a miss).
-                self.prev_pswpin = vm.pswpin.or(self.prev_pswpin);
             }
         }
 
@@ -572,8 +598,8 @@ impl SystemCollector {
     /// Compute and publish the derived host saturation score (`0..100`, Gauge) and
     /// coarse health state (`ok`/`warn`/`crit`, Text). Returns the number of points
     /// published (always 2 when enabled).
-    async fn collect_saturation_score(&mut self, timestamp: i64) -> usize {
-        let inputs = self.gather_saturation_inputs();
+    async fn collect_saturation_score(&mut self, timestamp: i64, now: std::time::Instant) -> usize {
+        let inputs = self.gather_saturation_inputs(now);
         let cfg = &self.config.saturation;
         let score = crate::saturation::saturation_score(&inputs, cfg);
         let state = crate::saturation::health_state(score, cfg);
@@ -700,9 +726,7 @@ impl SystemCollector {
     /// Collect thermal/power depth: RAPL watts (rate-derived), fan RPM, battery,
     /// entropy (Linux-specific, §G).
     #[cfg(target_os = "linux")]
-    async fn collect_power(&mut self, timestamp: i64) -> usize {
-        let interval = self.config.poll_interval_secs as f64;
-
+    async fn collect_power(&mut self, timestamp: i64, interval: f64) -> usize {
         // RAPL: derive watts from the energy counter delta vs the prev tick.
         let domains = crate::linux::collect_rapl();
         let mut rapl_watts = Vec::with_capacity(domains.len());
@@ -1122,7 +1146,7 @@ impl SystemCollector {
     }
 
     /// Collect network metrics.
-    async fn collect_network(&mut self, timestamp: i64) -> usize {
+    async fn collect_network(&mut self, timestamp: i64, now: std::time::Instant) -> usize {
         self.networks.refresh(true);
         let mut count = 0;
 
@@ -1199,12 +1223,19 @@ impl SystemCollector {
             .await;
             count += 1;
 
-            // Calculate rates if we have previous data
-            if let Some((prev_rx, prev_tx)) = self.prev_network.get(name) {
-                let interval = self.config.poll_interval_secs as f64;
-                if interval > 0.0 {
-                    let rx_rate = (rx_bytes.saturating_sub(*prev_rx)) as f64 / interval;
-                    let tx_rate = (tx_bytes.saturating_sub(*prev_tx)) as f64 / interval;
+            // Rates against the previous pass, over the interval that actually
+            // elapsed — a counter and the instant it was read at travel
+            // together (#1069).
+            let rx = self
+                .prev_network
+                .observe((name.clone(), "rx"), rx_bytes, now);
+            let tx = self
+                .prev_network
+                .observe((name.clone(), "tx"), tx_bytes, now);
+            if let (Some(rx), Some(tx)) = (rx, tx) {
+                {
+                    let rx_rate = rx.per_sec;
+                    let tx_rate = tx.per_sec;
 
                     labels.insert("unit".to_string(), "bytes/s".to_string());
                     self.publish(
@@ -1226,9 +1257,6 @@ impl SystemCollector {
                     count += 1;
                 }
             }
-
-            // Store current values for next iteration
-            self.prev_network.insert(name.clone(), (rx_bytes, tx_bytes));
         }
 
         count
@@ -1412,9 +1440,8 @@ impl SystemCollector {
 
     /// Collect disk I/O statistics (Linux-specific).
     #[cfg(target_os = "linux")]
-    async fn collect_disk_io(&mut self, timestamp: i64) -> usize {
+    async fn collect_disk_io(&mut self, timestamp: i64, interval: f64) -> usize {
         let mut count = 0;
-        let interval = self.config.poll_interval_secs as f64;
 
         let disk_io = self.linux_metrics.collect_disk_io(interval);
 
@@ -1698,10 +1725,81 @@ pub fn build_key_expr(prefix: &str, _source: &str, metric: &str) -> String {
     format!("{}/{}", prefix, metric)
 }
 
+/// Seconds since the previous collection pass began — the divisor every derived
+/// rate in this sensor must use (#1069).
+///
+/// Falls back to the configured interval when there is nothing to measure: the
+/// first pass, or a clock that did not advance. That costs nothing on the first
+/// pass — every derivation needs a previous counter, and there is none.
+fn measured_interval_secs(
+    last_tick: Option<std::time::Instant>,
+    now: std::time::Instant,
+    nominal_secs: u64,
+) -> f64 {
+    match last_tick {
+        Some(prev) => {
+            let dt = now.duration_since(prev).as_secs_f64();
+            if dt > 0.0 { dt } else { nominal_secs as f64 }
+        }
+        None => nominal_secs as f64,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{DiskConfig, NetworkConfig};
+
+    /// The divisor is what elapsed, not what was asked for (#1069).
+    ///
+    /// The loop runs `collect_and_publish().await` and *then* sleeps
+    /// `poll_interval_secs`, so the true period is `interval + collection_time`.
+    /// Under load a 5 s tick takes 12 s: every rate here divided by 5 and read
+    /// 2.4× the truth, and `util_percent` read 240 % — clamped to a flat 100, so
+    /// a disk at 40 % charted as saturated. The error was already measured by
+    /// `record_poll_duration` and published without being used.
+    #[test]
+    fn the_interval_is_measured_not_assumed() {
+        let t0 = std::time::Instant::now();
+        // The first pass has nothing to measure against and falls back to the
+        // configured interval — which costs nothing, since a rate needs a
+        // previous counter and the first pass has none.
+        assert_eq!(measured_interval_secs(None, t0, 5), 5.0);
+
+        let late = t0 + std::time::Duration::from_secs(12);
+        assert_eq!(
+            measured_interval_secs(Some(t0), late, 5),
+            12.0,
+            "a 5 s tick that took 12 s is a 12 s window, not a 5 s one"
+        );
+
+        // A clock that did not advance falls back rather than dividing by zero.
+        assert_eq!(measured_interval_secs(Some(t0), t0, 5), 5.0);
+    }
+
+    /// The rate itself, through the tracker the collector now keeps — the
+    /// arithmetic #1069 was getting wrong, at the numbers it was getting wrong
+    /// them at.
+    #[test]
+    fn a_late_pass_does_not_inflate_the_rate() {
+        use zensight_sensor_core::rate::CounterTracker;
+        let t0 = std::time::Instant::now();
+        let mut t: CounterTracker<(String, &'static str)> = CounterTracker::new();
+        t.observe(("eth0".into(), "rx"), 0, t0);
+        // 12 MB arrived while a "5 second" pass took 12 seconds.
+        let r = t
+            .observe(
+                ("eth0".into(), "rx"),
+                12_000_000,
+                t0 + std::time::Duration::from_secs(12),
+            )
+            .expect("a rate");
+        assert_eq!(r.per_sec, 1_000_000.0);
+        assert_ne!(
+            r.per_sec, 2_400_000.0,
+            "dividing by the nominal 5 s would have read 2.4x the truth"
+        );
+    }
 
     #[test]
     fn test_build_key_expr() {

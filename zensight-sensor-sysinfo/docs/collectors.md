@@ -7,6 +7,25 @@ data against threshold alert rules. The cross-platform base uses the `sysinfo`
 crate; the deeper saturation/error collectors are Linux-only (`src/linux.rs`)
 and skip gracefully when a `/proc`/`/sys` file is absent.
 
+## Rates are measured, not assumed (#1069)
+
+Every derived rate here — `network/*/rx_rate` and `tx_rate`, `disk/*/read_rate`,
+`write_rate`, `*_iops`, `util_percent`, `queue_depth`, `power/rapl/*/watts`, the
+saturation score's swap-in rate, and the alert evaluator's tick — divides by the
+seconds that **elapsed** between the two collection passes, not by
+`poll_interval_secs`.
+
+The loop runs `collect_and_publish().await` and *then* sleeps the interval, so
+the true period is `interval + collection_time`. Under load a 5 s tick takes
+12 s: rates read 2.4× the truth, and `util_percent` read 240 % — clamped to a
+flat 100, so a disk at 40 % charted as saturated. The sensor was already
+measuring the error and publishing it as `last_poll_duration_ms` without using
+it.
+
+The counter deltas go through `zensight_sensor_core::rate::CounterTracker`, so a
+counter that goes backwards (a reset) costs one reading rather than producing a
+spike.
+
 ## Collectors
 
 ### Utilization (cross-platform, default on)

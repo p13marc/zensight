@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CounterTracker` in `zensight-sensor-core`** (#1152). One rate derivation,
+  with the elapsed time it was actually measured over, a reset that costs one
+  reading rather than producing a spike, and an optional declared counter width
+  so a 32-bit wrap is decoded rather than mistaken for a reset. `netlink`'s
+  per-cookie goodput tracker, `systemd`'s IPAccounting rates and `sysinfo`'s
+  network and swap-in rates now share it; `systemd`'s `counter_bps` is gone.
+
+
 - **`Page<T>` — one envelope for every bounded `@rpc` reply** (#1157). A
   `Vec<LogRecord>` has nowhere to say "there is more", "I stopped early", or
   "this is what the walk cost", and every bounded handler in the tree filled
@@ -30,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   procedure replying with the envelope beside the old one.
 
 ### Fixed
+
+- **Every derived rate in `sysinfo` divides by the interval that elapsed**
+  (#1069). The poll loop runs `collect_and_publish().await` and *then* sleeps
+  `poll_interval_secs`, so the true period is `interval + collection_time` — and
+  all five derivation sites used the nominal one. Under load a 5 s tick takes
+  12 s: `network/*/rx_rate` read **2.4× the truth**, and `disk/*/util_percent`
+  read 240 % and clamped to a flat 100, charting a disk at 40 % as saturated.
+
+  The sensor was already *measuring* the error — `record_poll_duration`, which
+  it publishes as `last_poll_duration_ms` — and spending it on nothing else. It
+  is the divisor now, for the network rates, the RAPL watts, the swap-in rate,
+  the disk I/O rates and the alert evaluator's tick. Nothing about the
+  publication was ever malformed, which is why this needed a review to find.
+
 
 - **`@rpc/historian/range` says what it could cover, and pages by value**
   (#1067, #1068). Two failures the reply had no way to state.
