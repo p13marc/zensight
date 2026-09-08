@@ -65,6 +65,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   precisely the case an ack cannot be attributed in.
 
 
+- **A cancel that cancelled nothing is no longer journalled as an operator's
+  success, and every artifact refusal names the switch** (#1085, #1089). Four
+  things the artifact channel said about itself that were not true.
+
+  `cancel()` returned `()` and fell silently off the end when no id matched, and
+  the caller then answered `executed` unconditionally — so `res=1`, which
+  `docs/audit.md` defines as "asked for, permitted, **and achieved**" and which
+  `ausearch --success` selects on, was written for a cancel of an expired ULID.
+  It returns `bool` now and a miss rides `executed_but`: still executed, because
+  the gate did say yes, but `res=0`.
+
+  `accepts()` returned `Err(String)`, which the channel widened to
+  `error/gated` with no `refused_by`. So the trail said "gated" for a bad regex
+  and named no switch for a real gate — #866's contract met on paper and not on
+  this surface. The producer builds the error now, because only it can tell the
+  two apart: `invalid_args` for a malformed request, `gated` +
+  `with_refused_by("artifacts.snapshot.dirs")` /
+  `("artifacts.capture.on_demand.allow_filter")` for the two switches that
+  actually exist. The busy and cooldown gates name themselves the same way.
+
+  A refusal also **stopped writing to `artifact/status`**. Every refusal path
+  called `set_failed` first, so a request refused as *busy* overwrote the
+  in-flight status of the request it lost to with `Failed { id: <the refused
+  one> }` — the operator watching theirs saw it fail because somebody else asked
+  at the wrong moment. A rejected request is not part of what the channel is
+  doing; the `reply_err` is the whole answer.
+
+  And the `select!` loop (#1089) matched `Ok(query)` on all three recv branches,
+  so a closed session *disabled* them rather than failing — while `ttl_tick`
+  kept the loop alive. `run_inner` never returned, `run`'s "artifact channel
+  exited" never fired, and the process kept an artifact channel that answered
+  nothing, forever.
+
+
 - **gNMI values are typed by their path, and the device's clock is bounded**
   (#1077). Two guesses, both wrong in a way nothing downstream could question.
 

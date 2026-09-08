@@ -45,7 +45,6 @@ A request drives a per-kind state machine, surfaced in the status queryable:
 ```mermaid
 stateDiagram-v2
     [*] --> Generating : request accepted (accepts() ok, busy/cooldown gate passed)
-    [*] --> Failed : accepts() rejects, or busy/cooldown gate blocks
     Generating --> Generating : ProgressUpdate (detail, progress)
     Generating --> Ready : produce() succeeds → finalize (Delivery)
     Generating --> Failed : produce() errors, or cancelled mid-flight
@@ -59,10 +58,34 @@ stateDiagram-v2
   cooldown gate** — so a long capture never blocks a quick debug bundle.
   Production runs off the select loop so status stays responsive; the producer
   streams `ProgressUpdate`s that are republished as `Generating`.
+- **A refusal is not a state (#1085).** A rejected request never enters this
+  machine: the `reply_err` is the whole answer, and `artifact/status` keeps
+  describing what the channel is actually doing. Refusals used to write
+  `Failed { id: <the rejected request> }` over the per-kind status, so a
+  request refused as *busy* overwrote the in-flight status of the very request
+  it lost to — the operator watching theirs saw it fail because somebody else
+  asked at the wrong moment.
+- **Every refusal names the switch that refused it** (#866). `accepts()`
+  returns an `RpcError` the producer built, because only the producer can tell
+  a malformed request (`invalid_args` — a wrong kind, an unparseable filter, a
+  bad regex) from a switch that is off (`gated` carrying
+  `with_refused_by`, e.g. `artifacts.snapshot.dirs` or
+  `artifacts.capture.on_demand.allow_filter`). The busy and cooldown gates name
+  themselves the same way. Before this every refusal was widened to
+  `error/gated` with no switch, so the audit trail sent an operator looking for
+  a config option that had never been involved.
 - On success the produced file/dir is finalized into a `Delivery` and held until
   its TTL; a periodic reaper expires it, and `cancel` aborts an in-flight
   production or frees a `Ready` artifact early. Only one live artifact per kind is
   kept (a new one replaces the prior).
+- **A cancel that cancelled nothing is audited as `res=0`** (#1085). An id that
+  matches no in-flight and no ready artifact — an expired ULID, a typo, a
+  retry after the TTL reaper — is answered through `executed_but`, not
+  `executed`: the gate did permit the call, so it is not a refusal, but
+  [`audit.md`](../../zensight-common/docs/audit.md) defines `res=1` as "asked
+  for, permitted, **and achieved**", and that is what `ausearch --success`
+  selects on. It used to journal every such cancel as a successful operator
+  action.
 - A producer that had to leave something out calls `ctx.note("…")` (#602); the
   channel carries it onto `ArtifactState::Ready { note }` and the GUI shows it
   with the download result. The transfer manifest describes the *bytes* — this
