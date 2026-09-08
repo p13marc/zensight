@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`zensight-desired`'s e2e rig retries its loopback port** (#1170). Its five
+  tests run concurrently in one binary and drew from one `port()` with fixed
+  `+1`/`+2` offsets, then `expect`ed the open — so two draws landing within the
+  offset spread turned into `Address already in use` and a red `test` job on a
+  PR that had touched neither this crate nor any port. Every sibling rig already
+  retries (`zensight-correlator/tests/*`) or probes and hands out
+  (`zensight-sensor-logs/tests/harness`, #1004); this one did neither.
+
 ### Changed
 
 - **zenkey 0.7 → 0.8.1, zenkey-fleet 0.11.1 → 0.13.0, MSRV 1.97 → 1.98** —
