@@ -20,9 +20,33 @@ loads config, builds a `SensorRunner`, spawns protocol workers that publish
    - `.with_artifacts(producers)` — enables the artifact channel
      ([artifacts.md](artifacts.md)).
    - `.with_format(format)` — overrides the telemetry serialization format.
-3. `runner.spawn(future)` / `spawn_with_error(...)` register worker tasks (tracked
-   and aborted on shutdown). `runner.publisher()`, `.health()`, `.session()`,
-   `.identity()` hand workers what they need.
+3. `runner.spawn(future)` / `spawn_named(name, future)` / `spawn_with_error(...)`
+   register worker tasks (tracked, **supervised**, and aborted on shutdown).
+   `runner.publisher()`, `.health()`, `.session()`, `.identity()` hand workers
+   what they need.
+
+   **Every worker is watched** (#1082). A second task awaits each worker's
+   `JoinHandle`; if the worker panics or returns, its name lands in the health
+   doc's `dead_workers` and `status` stops being `Healthy` for the life of the
+   process — including after another collector's next successful poll, which is
+   the case a bare error counter gets wrong. Before this nothing joined or
+   polled those handles until shutdown aborted them, so a collector that
+   panicked left telemetry stopped, the liveliness token declared, and the
+   health task publishing `{status: "Healthy", devices_responding: 1}` every
+   five seconds.
+
+   Three deliberate limits. It is **notice, not recovery**: `spawn` takes a
+   non-clonable `F: Future`, so the runner cannot re-run what it was handed.
+   `alive` **stays declared** — a dead collector is not a dead RPC surface, and
+   retracting the token would tell the fleet the producer is uncallable when it
+   is not. And shutdown's own `abort()` is **not** a death: the supervisor waits
+   on a `JoinHandle` precisely so it can read `JoinError::is_cancelled()` — a
+   wrapper around the future could not tell the two apart, and would panic
+   along with the future it wrapped, recording nothing.
+
+   `spawn` names the worker after its **call site** (`Location::caller()`), so
+   the hundred-odd existing callers keep working and an operator still gets
+   something to go and look at; `spawn_named` says what the worker is.
 4. `run().await` serves the `@rpc/<producer>/introspect` procedure (this build's
    compiled registry slice), declares the liveliness token *after* the RPC
    queryables so "alive ⇒ callable" holds, starts the periodic health task and
@@ -38,7 +62,7 @@ loads config, builds a `SensorRunner`, spawns protocol workers that publish
 stateDiagram-v2
     [*] --> New : SensorRunner::new(name, config)
     New --> Configured : with_liveliness / with_identity / with_artifacts / with_format
-    Configured --> Configured : spawn(future) / spawn_with_error(name, future)
+    Configured --> Configured : spawn(future) / spawn_named(name, future) / spawn_with_error(name, future)
     Configured --> Running : run() / run_with_metadata(meta)
     Running --> Running : serve introspect, declare alive token, health task, identity task
     Running --> ShuttingDown : SIGINT or SIGTERM

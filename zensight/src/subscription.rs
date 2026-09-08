@@ -1519,6 +1519,7 @@ mod tests {
             source: Some("hosta".into()),
             self_stats: None,
             last_success_unix_ms: None,
+            dead_workers: Vec::new(),
             last_error: None,
         };
         let payload = zensight_common::encode(&snapshot, zensight_common::Format::Json).unwrap();

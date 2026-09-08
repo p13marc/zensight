@@ -113,6 +113,16 @@ pub struct HealthSnapshot {
     /// The most recent error the sensor recorded, if any (#1080).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Workers that ended without being asked to (#1082) — a panicked
+    /// collector, an RPC loop that returned. Empty is the normal state, and
+    /// absent (an older sensor) reads as *not reported*, never as "none".
+    ///
+    /// "The process is up" and "the process is collecting" are two facts. This
+    /// is the one that used to have no way of being said: a task could die
+    /// under a declared `alive` token while the health tick kept publishing
+    /// `Healthy` beside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dead_workers: Vec<String>,
 }
 
 /// A sensor's self-measured resource usage (#811), collected on the health

@@ -125,6 +125,12 @@ pub struct SensorHealth {
     consecutive_errors: AtomicU64,
     /// The most recent error message (#1080).
     last_error: RwLock<Option<String>>,
+    /// Workers that exited without being asked to (#1082), newest last.
+    ///
+    /// A spawned task that panics used to be noticed by nobody: nothing joined
+    /// the handle, the liveliness token stayed declared, and the health task —
+    /// still alive — kept publishing `Healthy` over a dead collector.
+    dead_workers: RwLock<Vec<String>>,
     /// Last poll duration in milliseconds.
     last_poll_duration_ms: AtomicU64,
     /// Per-device liveness tracking.
@@ -252,6 +258,16 @@ pub struct HealthSnapshot {
     /// The most recent error the sensor recorded (#1080).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Workers that ended without being asked to (#1082) — a panicked
+    /// collector, an RPC loop that returned. Empty is the normal state, and
+    /// absent (an older sensor) reads as *not reported*, never as "none".
+    ///
+    /// "The process is up" and "the process is collecting" are two facts. This
+    /// is the one that used to have no way of being said: a task could die
+    /// under a declared `alive` token while the health tick kept publishing
+    /// `Healthy` beside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dead_workers: Vec<String>,
 }
 
 /// Device liveness information for serialization.
@@ -324,6 +340,7 @@ impl SensorHealth {
             last_error_ms: AtomicU64::new(0),
             consecutive_errors: AtomicU64::new(0),
             last_error: RwLock::new(None),
+            dead_workers: RwLock::new(Vec::new()),
             last_poll_duration_ms: AtomicU64::new(0),
             device_liveness: Arc::new(RwLock::new(HashMap::new())),
             host_id: RwLock::new(None),
@@ -555,6 +572,40 @@ impl SensorHealth {
         self.consecutive_errors.store(0, Ordering::SeqCst);
     }
 
+    /// Record that a worker task ended when it was not supposed to (#1082).
+    ///
+    /// `SensorRunner::spawn` pushes `JoinHandle`s into a vector that nothing
+    /// joins or polls until shutdown aborts them. If a collector panics — a
+    /// slice index in a `/proc` parser, a poisoned lock — the task dies,
+    /// telemetry stops, the liveliness token stays declared, and the health
+    /// task keeps publishing `{status: "Healthy", devices_responding: 1}` every
+    /// five seconds. The fleet is told something false.
+    ///
+    /// This is *notice*, not recovery: the runner is handed a
+    /// non-clonable future and cannot re-run it. What it can do is stop saying
+    /// the sensor is fine, which is what `status` and `dead_workers` do now.
+    /// A cancelled task — shutdown's own `abort()` — is never recorded here.
+    pub fn record_worker_exit(&self, name: &str, panicked: bool) {
+        {
+            let mut dead = self.dead_workers.write().unwrap_or_else(|e| e.into_inner());
+            if !dead.iter().any(|w| w == name) {
+                dead.push(name.to_string());
+            }
+        }
+        self.record_error(&format!(
+            "worker `{name}` {} while the sensor was running",
+            if panicked { "panicked" } else { "returned" }
+        ));
+    }
+
+    /// The workers that ended without being asked to (#1082).
+    pub fn dead_workers(&self) -> Vec<String> {
+        self.dead_workers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Record an error that is not tied to a device (#1080). Counts into
     /// `errors_last_hour`, keeps the message, and — until the next
     /// [`record_success`](Self::record_success) — degrades `status`, the
@@ -595,10 +646,14 @@ impl SensorHealth {
         };
         let last_success_ms = self.last_success_ms.load(Ordering::SeqCst);
         let last_error_ms = self.last_error_ms.load(Ordering::SeqCst);
-        let status = error_status(
-            census,
-            last_error_ms > last_success_ms,
-            self.consecutive_errors.load(Ordering::SeqCst),
+        let dead_workers = self.dead_workers();
+        let status = worker_status(
+            error_status(
+                census,
+                last_error_ms > last_success_ms,
+                self.consecutive_errors.load(Ordering::SeqCst),
+            ),
+            &dead_workers,
         );
 
         HealthSnapshot {
@@ -618,6 +673,7 @@ impl SensorHealth {
             // callers that only want the counters.
             self_stats: None,
             last_success_unix_ms: (last_success_ms > 0).then_some(last_success_ms as i64),
+            dead_workers,
             last_error: self
                 .last_error
                 .read()
@@ -684,6 +740,51 @@ impl SensorHealth {
             consecutive_failures: state.consecutive_failures,
             last_error: state.last_error.clone(),
         })
+    }
+
+    /// Forget a device this sensor no longer polls (#1088).
+    ///
+    /// `device_liveness` had no eviction at all, and `devices_responding` is
+    /// recomputed from it — so a sensor whose device set *changes* rather than
+    /// merely fails reported more devices responding than it had. The
+    /// container sensor is the clear case: containers are recreated with new
+    /// names on every deploy (its own README says so), so the map grew by one
+    /// entry per deploy for the life of the process and `devices_responding`
+    /// exceeded `devices_total` forever.
+    ///
+    /// Returns whether the device was there to forget.
+    pub fn retire_device(&self, device_id: &str) -> bool {
+        let removed = self
+            .device_liveness
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(device_id)
+            .is_some();
+        if removed {
+            self.update_device_counters();
+        }
+        removed
+    }
+
+    /// Forget every device not in `current` (#1088), and report how many went.
+    ///
+    /// The shape a poller actually wants: it has just enumerated what exists,
+    /// and everything else is gone. Calling [`Self::retire_device`] per
+    /// departure means first working out what departed, which is the bookkeeping
+    /// this exists to avoid.
+    pub fn retain_devices(&self, current: &[String]) -> usize {
+        let mut devices = self
+            .device_liveness
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = devices.len();
+        devices.retain(|id, _| current.iter().any(|c| c == id));
+        let removed = before - devices.len();
+        drop(devices);
+        if removed > 0 {
+            self.update_device_counters();
+        }
+        removed
     }
 
     /// Get liveness info for all devices.
@@ -764,6 +865,27 @@ pub fn budget_level(
         Some(zensight_common::AlertSeverity::Warning)
     } else {
         None
+    }
+}
+
+/// Fold a dead worker into a health verdict (#1082).
+///
+/// A worker that exited without being asked to means the sensor is not doing
+/// part of its job, whatever the device census says — so this can only make a
+/// verdict worse, exactly like [`error_status`]. `Degraded` rather than
+/// `Error`: the process is still answering, its other collectors may still be
+/// working, and `dead_workers` on the wire says precisely which one is not.
+/// `alive` deliberately stays declared — a dead *collector* is not a dead RPC
+/// surface, and retracting the token would tell the fleet the producer is
+/// uncallable when it is not.
+pub fn worker_status(
+    verdict: zensight_common::HealthStatus,
+    dead_workers: &[String],
+) -> zensight_common::HealthStatus {
+    use zensight_common::HealthStatus::*;
+    match verdict {
+        Healthy | Starting if !dead_workers.is_empty() => Degraded,
+        other => other,
     }
 }
 
@@ -1167,5 +1289,136 @@ mod tests {
         let health = SensorHealth::new("sysinfo").with_source("hostA");
         assert_eq!(health.snapshot().source.as_deref(), Some("hostA"));
         assert_eq!(SensorHealth::new("sysinfo").snapshot().source, None);
+    }
+}
+
+/// Device eviction (#1088) and worker supervision (#1082) — the two ways
+/// `SensorHealth` used to describe a sensor that was not doing its job.
+#[cfg(test)]
+mod supervision_tests {
+    use super::*;
+
+    /// #1088: a sensor whose device set *changes* rather than merely fails.
+    ///
+    /// `device_liveness` had no eviction, and `devices_responding` is
+    /// recomputed from it — so on a host that redeploys containers the map grew
+    /// by one entry per deploy and `devices_responding` exceeded
+    /// `devices_total` for the life of the process.
+    #[test]
+    fn a_renamed_device_does_not_inflate_the_responding_count() {
+        let h = SensorHealth::new("container");
+
+        // Sweep one: two containers.
+        h.set_devices_total(2);
+        h.record_device_success("web-abc123");
+        h.record_device_success("db-def456");
+        let first = h.snapshot();
+        assert_eq!(first.devices_responding, 2);
+        assert_eq!(first.devices_responding, first.devices_total);
+
+        // Sweep two, after a deploy: same two services, new container names.
+        h.set_devices_total(2);
+        h.record_device_success("web-zzz999");
+        h.record_device_success("db-yyy888");
+        h.retain_devices(&["web-zzz999".to_string(), "db-yyy888".to_string()]);
+
+        let after = h.snapshot();
+        assert_eq!(
+            after.devices_responding, after.devices_total,
+            "the map kept every name it had ever seen"
+        );
+        assert_eq!(after.devices_responding, 2);
+    }
+
+    /// `retire_device` reports whether there was anything to retire, and the
+    /// counters follow it.
+    #[test]
+    fn retiring_a_device_updates_the_counters() {
+        let h = SensorHealth::new("snmp");
+        h.set_devices_total(1);
+        h.record_device_success("switch01");
+        assert_eq!(h.snapshot().devices_responding, 1);
+
+        assert!(h.retire_device("switch01"));
+        assert_eq!(h.snapshot().devices_responding, 0);
+        assert!(
+            !h.retire_device("switch01"),
+            "retiring twice must not claim it removed something"
+        );
+    }
+
+    /// #1082: a dead worker makes the sensor not-Healthy, and says which one.
+    ///
+    /// Before this, a panicked collector left telemetry stopped, the liveliness
+    /// token declared, and the health task publishing
+    /// `{status: "Healthy", devices_responding: 1}` every five seconds.
+    #[test]
+    fn a_dead_worker_is_not_a_healthy_sensor() {
+        let h = SensorHealth::new("sysinfo");
+        assert_eq!(
+            h.snapshot().status,
+            zensight_common::HealthStatus::Healthy,
+            "a device-less sensor with nothing wrong is Healthy"
+        );
+
+        h.record_worker_exit("system-collector", true);
+        let snap = h.snapshot();
+        assert_ne!(
+            snap.status,
+            zensight_common::HealthStatus::Healthy,
+            "a panicked collector must not read as Healthy"
+        );
+        assert_eq!(snap.dead_workers, vec!["system-collector".to_string()]);
+        assert!(
+            snap.last_error.is_some_and(|e| e.contains("panicked")),
+            "the wire must say what happened, not only that something did"
+        );
+        assert_eq!(snap.errors_last_hour, 1);
+    }
+
+    /// **A later success does not resurrect a dead worker.**
+    ///
+    /// This is the case `worker_status` exists for. `record_worker_exit` also
+    /// records an error, and `error_status` degrades on that — but only while
+    /// `last_error_ms > last_success_ms`. A sensor with two collectors, one
+    /// dead and one still polling happily, would report itself `Healthy` again
+    /// on the next successful poll, with the dead one never coming back.
+    #[test]
+    fn a_later_success_does_not_resurrect_a_dead_worker() {
+        let h = SensorHealth::new("sysinfo");
+        h.record_worker_exit("system-collector", true);
+        assert_ne!(h.snapshot().status, zensight_common::HealthStatus::Healthy);
+
+        // Another collector completes a poll.
+        h.record_success();
+
+        let snap = h.snapshot();
+        assert_ne!(
+            snap.status,
+            zensight_common::HealthStatus::Healthy,
+            "a surviving collector's success made a dead one look alive"
+        );
+        assert_eq!(snap.dead_workers, vec!["system-collector".to_string()]);
+    }
+
+    /// The verdict only ever gets worse: a sensor already reporting an
+    /// unreachable device is not *upgraded* by also losing a worker.
+    #[test]
+    fn a_dead_worker_never_improves_a_worse_verdict() {
+        use zensight_common::HealthStatus::*;
+        assert_eq!(worker_status(Healthy, &[]), Healthy);
+        assert_eq!(worker_status(Healthy, &["w".to_string()]), Degraded);
+        assert_eq!(worker_status(Error, &["w".to_string()]), Error);
+        assert_eq!(worker_status(Unhealthy, &["w".to_string()]), Unhealthy);
+    }
+
+    /// The same worker dying is recorded once, so a supervisor that is somehow
+    /// invoked twice cannot inflate the list.
+    #[test]
+    fn a_worker_is_listed_once() {
+        let h = SensorHealth::new("x");
+        h.record_worker_exit("collector", true);
+        h.record_worker_exit("collector", true);
+        assert_eq!(h.dead_workers().len(), 1);
     }
 }

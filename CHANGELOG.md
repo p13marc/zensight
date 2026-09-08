@@ -39,6 +39,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A worker that dies is noticed, and a sensor stops counting containers it no
+  longer has** (#1082, #1088). Two ways the health document described a sensor
+  that was not doing its job.
+
+  `SensorRunner::spawn` pushed `JoinHandle`s into a vector that nothing joined
+  or polled until shutdown aborted them. If a collector panicked — a slice index
+  in a `/proc` parser, a poisoned lock — the task died, telemetry stopped, the
+  liveliness token stayed **declared**, and the health task, still alive, kept
+  publishing `{status: "Healthy", devices_responding: 1}` every five seconds.
+  Every worker is supervised now: a panic or an early return puts the worker's
+  name in the health doc's new `dead_workers` and keeps `status` off `Healthy`
+  for the life of the process — including after a surviving collector's next
+  successful poll, which is the case a bare error counter gets wrong.
+
+  Three deliberate limits, all named in the docs. It is **notice, not
+  recovery**: `spawn` takes a non-clonable future, so the runner cannot re-run
+  what it was handed. `alive` **stays declared** — a dead collector is not a
+  dead RPC surface. And shutdown's own `abort()` is not reported as a death: the
+  supervisor waits on a `JoinHandle` precisely so it can read
+  `JoinError::is_cancelled()`, which a wrapper around the future could not do —
+  it would panic along with the future it wrapped and record nothing at all.
+  `spawn` names a worker after its call site, so the hundred-odd existing
+  callers keep working and an operator still gets something to look at.
+
+  Second, `SensorHealth`'s device map never evicted, and the container sensor
+  also recorded its runtime **socket** as a device. Containers are recreated
+  with new names on every deploy, so `devices_responding` — recomputed from that
+  map — was containers + 1 + every name ever seen, and exceeded `devices_total`
+  forever. `retire_device` / `retain_devices` evict, the poller retires the
+  names that left the listing, and the socket's liveness is recorded as the
+  sensor's own success rather than as a phantom device.
+
 - **The write-audit coverage check can now see the producer with the most
   writes** (#1087). Two ways for an honesty check to report success without
   having asked anything.
