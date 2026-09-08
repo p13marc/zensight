@@ -34,7 +34,13 @@ async fn main() -> Result<()> {
     let path = resolve_store_path(hc.store.path.as_deref());
     let persistent = match &path {
         Some(p) => {
-            match zensight_store::PersistentStore::open_with_cache(p, hc.store.cache_bytes) {
+            // `open_or_move_aside`, not `open_with_cache`: a schema bump
+            // re-types a table, so a file from an older build is refused —
+            // and a plain open would degrade this historian to memory-only on
+            // every restart from then on, silently, until somebody deleted
+            // the file by hand. The store is a shadow of the live bus; losing
+            // it once at an upgrade beats losing durability forever (#1061).
+            match zensight_store::PersistentStore::open_or_move_aside(p, hc.store.cache_bytes) {
                 Ok(s) => {
                     tracing::info!(path = %p.display(), "historian: opened the history store");
                     Some(s)

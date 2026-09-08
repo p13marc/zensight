@@ -72,10 +72,16 @@ pub const DEFAULT_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// answer "what was it at the end of this minute" and nothing else, so a
 /// query for a day at the hour tier could not say whether a gauge that reads
 /// 12 now had touched 400 in between — the spike was averaged out of
-/// existence by the downsample before any reader could ask. `min`/`max` are
-/// `f32`: they bound a range for a chart, they are not the value, and 4 bytes
-/// each keeps the bucket at 16.
-const SAMPLES_TABLE: TableDefinition<u128, (f64, f32, f32)> = TableDefinition::new("samples");
+/// existence by the downsample before any reader could ask.
+///
+/// v5 (#1061) widened `min`/`max` from `f32` to `f64`. They were narrowed to
+/// save four bytes each on the grounds that they "bound a range for a chart,
+/// they are not the value" — but `as f32` rounds to *nearest*, so they were
+/// not bounds: at `rx_bytes` scale an f32 ulp is ~65 KB, a recorded `max`
+/// could sit below the true max, and because `last` stayed exact a bucket
+/// could report `max < last`. A range that is not a range answers `agg=max`
+/// with a number no reader can check.
+const SAMPLES_TABLE: TableDefinition<u128, (f64, f64, f64)> = TableDefinition::new("samples");
 
 /// redb table: interned metric path -> its [`MetricId`]. The samples table
 /// is keyed by the id, so the id must mean the same path in every process
@@ -128,7 +134,13 @@ const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// declared field that is structurally always absent is a lie in the schema —
 /// a chart opening on a fleet whose sensors are quiet has no live sample to
 /// take the unit from, so the store is where it has to survive.
-pub const SCHEMA_VERSION: u64 = 4;
+///
+/// v5 (#1061): a `samples` bucket's `min`/`max` become `f64`. They were `f32`
+/// and cast with `as`, which rounds to nearest rather than outward, so they
+/// were not bounds — see [`SAMPLES_TABLE`]. Re-typing that table means a v4
+/// file is not readable by this code and is moved aside, as every bump before
+/// it was.
+pub const SCHEMA_VERSION: u64 = 5;
 
 use crate::logs::LOGS_TABLE;
 
@@ -312,10 +324,12 @@ impl SampleValue {
 pub struct Bucket {
     /// The most recent sample's value in this bucket.
     pub last: f64,
-    /// The lowest value seen in this bucket.
-    pub min: f32,
-    /// The highest value seen in this bucket.
-    pub max: f32,
+    /// The lowest value seen in this bucket. A true bound: `min <= last`
+    /// always holds within one bucket (#1061).
+    pub min: f64,
+    /// The highest value seen in this bucket. A true bound: `max >= last`
+    /// always holds within one bucket (#1061).
+    pub max: f64,
 }
 
 impl Bucket {
@@ -323,18 +337,18 @@ impl Bucket {
     pub fn point(value: f64) -> Bucket {
         Bucket {
             last: value,
-            min: value as f32,
-            max: value as f32,
+            min: value,
+            max: value,
         }
     }
 
     /// The on-disk triple.
-    pub fn as_row(self) -> (f64, f32, f32) {
+    pub fn as_row(self) -> (f64, f64, f64) {
         (self.last, self.min, self.max)
     }
 
     /// Read back from the on-disk triple.
-    pub fn from_row((last, min, max): (f64, f32, f32)) -> Bucket {
+    pub fn from_row((last, min, max): (f64, f64, f64)) -> Bucket {
         Bucket { last, min, max }
     }
 
@@ -704,8 +718,30 @@ pub fn device_prefix(producer: &str, origin: &str, source: &str) -> String {
     format!("{producer}/{origin}/{source}")
 }
 
-/// A fixed-capacity ring of samples. Appends are O(1); the oldest sample is
-/// dropped once capacity is reached (drop-oldest, bounded memory).
+/// What a [`RingBuffer::push`] did with the sample.
+///
+/// The ring's readers all promise oldest-first ([`RingBuffer::iter`],
+/// [`RingBuffer::to_vec`], [`MetricStore::hot_samples`]) and
+/// [`crate::rate::counter_rate`] returns `None` on an inverted pair — so a
+/// sample that arrives late is not a curiosity, it is a hole in a chart. The
+/// historian ingests through an AdvancedSubscriber with recovery on, which
+/// means retransmitted samples arrive out of order as a matter of course.
+/// `push` therefore keeps the ring sorted and says what it had to do, so the
+/// caller can count it (#1062).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pushed {
+    /// Newer than everything held — the common path, still O(1).
+    Appended,
+    /// Older than the tail: inserted at its place to keep the ring sorted.
+    Reordered,
+    /// The ring was full and this sample predates its oldest: nowhere to put
+    /// it without evicting something newer, so it is dropped.
+    Dropped,
+}
+
+/// A fixed-capacity ring of samples, held in timestamp order. Appends are
+/// O(1); the oldest sample is dropped once capacity is reached (drop-oldest,
+/// bounded memory).
 #[derive(Debug, Clone)]
 pub struct RingBuffer {
     buf: VecDeque<Sample>,
@@ -722,12 +758,38 @@ impl RingBuffer {
         }
     }
 
-    /// Append a sample, dropping the oldest if at capacity.
-    pub fn push(&mut self, sample: Sample) {
+    /// Insert a sample in timestamp order, dropping the oldest if at
+    /// capacity. Returns what it had to do — see [`Pushed`] (#1062).
+    ///
+    /// The search runs from the tail because that is where a recovered sample
+    /// belongs: an AdvancedSubscriber retransmits a sample seconds late, not
+    /// hours, so the scan is a handful of comparisons and the ordinary
+    /// in-order case is the first one.
+    pub fn push(&mut self, sample: Sample) -> Pushed {
+        let in_order = self.buf.back().is_none_or(|last| last.ts <= sample.ts);
+        if in_order {
+            if self.buf.len() == self.capacity {
+                self.buf.pop_front();
+            }
+            self.buf.push_back(sample);
+            return Pushed::Appended;
+        }
+        // Out of order. If the ring is full and this sample predates the
+        // oldest held, there is no room for it that does not cost a newer
+        // sample — drop it and say so.
+        if self.buf.len() == self.capacity
+            && self.buf.front().is_some_and(|first| sample.ts < first.ts)
+        {
+            return Pushed::Dropped;
+        }
+        let at = self.buf.partition_point(|s| s.ts <= sample.ts);
         if self.buf.len() == self.capacity {
             self.buf.pop_front();
+            self.buf.insert(at - 1, sample);
+        } else {
+            self.buf.insert(at, sample);
         }
-        self.buf.push_back(sample);
+        Pushed::Reordered
     }
 
     /// Shrink to a smaller capacity, dropping the oldest samples that no
@@ -752,6 +814,16 @@ impl RingBuffer {
     /// Whether the ring is empty.
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
+    }
+
+    /// The newest sample held, or `None` when the ring is empty.
+    pub fn newest(&self) -> Option<Sample> {
+        self.buf.back().copied()
+    }
+
+    /// The oldest sample held, or `None` when the ring is empty.
+    pub fn oldest(&self) -> Option<Sample> {
+        self.buf.front().copied()
     }
 
     /// Iterate over samples oldest-first.
@@ -783,8 +855,8 @@ pub fn downsample(samples: &[Sample], tier: Tier) -> Vec<(i64, Bucket)> {
         let bucket = secs.div_euclid(width) * width;
         match buckets.get_mut(&bucket) {
             Some((latest_ts, acc)) => {
-                acc.min = acc.min.min(s.value as f32);
-                acc.max = acc.max.max(s.value as f32);
+                acc.min = acc.min.min(s.value);
+                acc.max = acc.max.max(s.value);
                 if s.ts >= *latest_ts {
                     *latest_ts = s.ts;
                     acc.last = s.value;
@@ -935,6 +1007,45 @@ impl PersistentStore {
     }
 
     /// The default on-disk location: `~/.local/share/zensight/metrics.redb`.
+    /// [`open_with_cache`](Self::open_with_cache), and on a file this build
+    /// cannot read, move it aside and start fresh.
+    ///
+    /// A redb major bump changes the on-disk format and old files cannot be
+    /// auto-upgraded; our own [`SCHEMA_VERSION`] bumps re-type a table and are
+    /// refused for the same reason. The store is a *cache* in both of its
+    /// homes — the GUI shadows the fleet historian, the historian shadows the
+    /// live bus — so losing it beats running memory-only on every launch
+    /// forever, which is what a plain `open` degrades to: silently, and until
+    /// somebody deletes the file by hand (#1061).
+    ///
+    /// The backup name says which layout it was, so an operator can tell a
+    /// redb bump from a schema bump without reading the source.
+    pub fn open_or_move_aside(
+        path: impl AsRef<Path>,
+        cache_bytes: usize,
+    ) -> Result<Self, StoreOpenError> {
+        let path = path.as_ref();
+        let e = match Self::open_with_cache(path, cache_bytes) {
+            Ok(store) => return Ok(store),
+            Err(e @ StoreOpenError::Redb(redb::Error::UpgradeRequired(_)))
+            | Err(e @ StoreOpenError::Schema { .. }) => e,
+            Err(e) => return Err(e),
+        };
+        let backup = match &e {
+            StoreOpenError::Redb(redb::Error::UpgradeRequired(v)) => {
+                path.with_extension(format!("redb.incompatible-v{v}"))
+            }
+            StoreOpenError::Schema { found } => {
+                path.with_extension(format!("redb.schema-v{found}"))
+            }
+            _ => unreachable!("matched above"),
+        };
+        tracing::warn!(path = %path.display(), backup = %backup.display(), error = %e,
+            "metric store file layout is not this build's; moving it aside and starting fresh");
+        std::fs::rename(path, &backup).map_err(|e| StoreOpenError::Redb(redb::Error::from(e)))?;
+        Self::open_with_cache(path, cache_bytes)
+    }
+
     pub fn default_path() -> Option<PathBuf> {
         dirs::data_dir().map(|d| d.join("zensight").join("metrics.redb"))
     }
@@ -1727,46 +1838,10 @@ impl MetricStore {
     /// fatal — a missing/locked DB must not crash the GUI).
     pub fn with_default_persistence() -> Self {
         let persistent = match PersistentStore::default_path() {
-            Some(path) => match PersistentStore::open(&path) {
+            Some(path) => match PersistentStore::open_or_move_aside(&path, DEFAULT_CACHE_BYTES) {
                 Ok(store) => {
                     tracing::info!(path = %path.display(), "Opened metric history store");
                     Some(store)
-                }
-                // A redb major bump changes the on-disk file format and old
-                // files can't be auto-upgraded (observed: v2 file vs v3 code
-                // after the redb 2→4 bump). The store is a local history
-                // cache, so losing it beats silently running memory-only on
-                // every launch: move the old file aside and start fresh.
-                //
-                // The same move-aside covers our own schema (#SCHEMA_VERSION):
-                // a v1 file's sample rows are keyed by ids that were never
-                // written down, so nothing can read them back correctly —
-                // the history it holds was already mislabelled on every
-                // launch, and keeping it would only keep that going.
-                Err(e @ StoreOpenError::Redb(redb::Error::UpgradeRequired(_)))
-                | Err(e @ StoreOpenError::Schema { .. }) => {
-                    let backup = match &e {
-                        StoreOpenError::Redb(redb::Error::UpgradeRequired(v)) => {
-                            path.with_extension(format!("redb.incompatible-v{v}"))
-                        }
-                        StoreOpenError::Schema { found } => {
-                            path.with_extension(format!("redb.schema-v{found}"))
-                        }
-                        StoreOpenError::Redb(_) => unreachable!("matched above"),
-                    };
-                    tracing::warn!(path = %path.display(), backup = %backup.display(), error = %e,
-                        "Metric store file layout is not this build's; moving it aside and starting fresh");
-                    match std::fs::rename(&path, &backup)
-                        .map_err(|e| StoreOpenError::Redb(redb::Error::from(e)))
-                        .and_then(|()| PersistentStore::open(&path))
-                    {
-                        Ok(store) => Some(store),
-                        Err(e) => {
-                            tracing::warn!(error = %e, path = %path.display(),
-                                "Failed to recreate metric store; history will be in-memory only");
-                            None
-                        }
-                    }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, path = %path.display(),
@@ -1806,9 +1881,9 @@ impl MetricStore {
     /// [`TelemetryPoint::metric`] is only the `{metric...}` half, so a store
     /// that reconstructed the path from the payload would be un-slugging a
     /// device chunk and guessing. Both callers already hold the parsed key.
-    pub fn record(&mut self, origin: &str, subject: &str, point: &TelemetryPoint) {
+    pub fn record(&mut self, origin: &str, subject: &str, point: &TelemetryPoint) -> Pushed {
         let Some(value) = SampleValue::from_telemetry(&point.value) else {
-            return;
+            return Pushed::Dropped;
         };
         let key = Self::metric_key(origin, subject, point);
         let before = self.interner.len();
@@ -1828,7 +1903,7 @@ impl MetricStore {
             hot: RingBuffer::new(capacity),
             pending: Vec::new(),
         });
-        series.hot.push(sample);
+        let pushed = series.hot.push(sample);
         // Nothing is buffered for a flush that can never happen: with no
         // redb handle `take_flush_batch` returns early, and `pending` used to
         // grow by one sample per point forever — the demo's, and a degraded
@@ -1839,6 +1914,7 @@ impl MetricStore {
                 self.unsaved_paths.push((key, id.0, meta));
             }
         }
+        pushed
     }
 
     /// Whether there are pending samples awaiting flush.
@@ -2809,6 +2885,132 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A **v4** file must be refused as `Schema { found: 4 }` and then moved
+    /// aside, not left in place (#1061).
+    ///
+    /// v5 re-typed `samples` from `(f64, f32, f32)` to `(f64, f64, f64)`, so
+    /// `open_table` on a v4 file fails the same way a v2 file failed v3 —
+    /// which is why the marker is read in its own transaction first. The
+    /// second half is the half the historian was missing: it called
+    /// `open_with_cache` directly and treated *any* error as "run
+    /// memory-only", so a schema bump cost it durability permanently rather
+    /// than once.
+    #[test]
+    fn a_v4_file_is_refused_by_schema_and_then_moved_aside() {
+        let path = temp_db_path("schema-v4");
+        {
+            // Exactly the v4 layout: `samples` valued by (f64, f32, f32).
+            const V4_SAMPLES: TableDefinition<u128, (f64, f32, f32)> =
+                TableDefinition::new("samples");
+            let db = Database::create(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                txn.open_table(V4_SAMPLES)
+                    .unwrap()
+                    .insert(
+                        pack_key(MetricId(0), Tier::Minute, 60),
+                        (1.0, 1.0f32, 1.0f32),
+                    )
+                    .unwrap();
+                txn.open_table(META_TABLE)
+                    .unwrap()
+                    .insert("schema", 4u64)
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        match PersistentStore::open(&path) {
+            Err(StoreOpenError::Schema { found: 4 }) => {}
+            Err(e) => panic!("a v4 file must be refused as Schema {{ found: 4 }}, got: {e}"),
+            Ok(_) => panic!("a v4 file must not open"),
+        }
+        // And the shared opener both crates now use must start fresh rather
+        // than propagate the refusal.
+        let store = PersistentStore::open_or_move_aside(&path, DEFAULT_CACHE_BYTES)
+            .expect("a v4 file is moved aside and a fresh store opened");
+        drop(store);
+        let backup = path.with_extension("redb.schema-v4");
+        assert!(backup.exists(), "the old file is kept, not deleted");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
+    }
+
+    /// The hot ring holds samples in timestamp order, whatever order they
+    /// arrive in (#1062).
+    ///
+    /// The historian ingests through an AdvancedSubscriber with recovery on,
+    /// so a retransmitted sample lands after samples newer than it. The ring
+    /// appended blindly; `counter_rate` returns `None` on the inverted pair,
+    /// so a chart reading `hot_samples()` went blank exactly when recovery
+    /// had just repaired the gap it was drawing over.
+    #[test]
+    fn the_hot_ring_holds_samples_in_timestamp_order() {
+        let mut ring = RingBuffer::new(8);
+        // Arrival order 1, 3, 2 — the shape recovery produces. Appended
+        // blindly it leaves (t=3, t=2) as the final pair, a backwards clock,
+        // and `counter_rate` answers `None`.
+        assert_eq!(
+            ring.push(Sample {
+                ts: 1_000,
+                value: 10.0
+            }),
+            Pushed::Appended
+        );
+        assert_eq!(
+            ring.push(Sample {
+                ts: 3_000,
+                value: 30.0
+            }),
+            Pushed::Appended
+        );
+        assert_eq!(
+            ring.push(Sample {
+                ts: 2_000,
+                value: 20.0
+            }),
+            Pushed::Reordered
+        );
+        let got: Vec<i64> = ring.to_vec().iter().map(|s| s.ts).collect();
+        assert_eq!(got, vec![1_000, 2_000, 3_000], "the ring is sorted");
+        assert_eq!(
+            crate::rate::counter_rate(&ring.to_vec()),
+            Some(10.0),
+            "a sorted ring carries a rate; an inverted final pair carries None"
+        );
+    }
+
+    /// A sample older than everything a full ring holds is dropped and said
+    /// to be dropped — there is nowhere to put it that does not cost a newer
+    /// sample, and a silent drop is what made this invisible (#1062).
+    #[test]
+    fn a_sample_older_than_a_full_ring_is_dropped_and_says_so() {
+        let mut ring = RingBuffer::new(3);
+        for ts in [10_000, 11_000, 12_000] {
+            assert_eq!(ring.push(Sample { ts, value: 1.0 }), Pushed::Appended);
+        }
+        assert_eq!(
+            ring.push(Sample {
+                ts: 5_000,
+                value: 1.0
+            }),
+            Pushed::Dropped,
+            "older than the oldest held, with the ring full"
+        );
+        let got: Vec<i64> = ring.to_vec().iter().map(|s| s.ts).collect();
+        assert_eq!(got, vec![10_000, 11_000, 12_000], "nothing newer was lost");
+        // But one that lands *inside* the window evicts the oldest, as an
+        // in-order push would, and keeps the ring sorted.
+        assert_eq!(
+            ring.push(Sample {
+                ts: 11_500,
+                value: 1.0
+            }),
+            Pushed::Reordered
+        );
+        let got: Vec<i64> = ring.to_vec().iter().map(|s| s.ts).collect();
+        assert_eq!(got, vec![11_000, 11_500, 12_000]);
+    }
+
     /// The kind and the device survive a reopen, and the device index is
     /// rebuilt from them (#904).
     ///
@@ -2897,7 +3099,7 @@ mod tests {
                     Bucket {
                         last: i as f64,
                         min: 0.0,
-                        max: (i * 2) as f32,
+                        max: (i * 2) as f64,
                     },
                 )
             })
@@ -3067,6 +3269,46 @@ mod tests {
             "the spike from the earlier flush survives"
         );
         assert_eq!(got[0].1.min, 12.0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A bucket's range must actually bound what it covered (#1061).
+    ///
+    /// `min`/`max` were `f32` and cast with `as`, which rounds to *nearest*.
+    /// `2^24 + 1` is the first integer f32 cannot represent, so it stored as
+    /// `2^24` — a `max` below the value it was supposed to bound, and below
+    /// the exact `last` in the same bucket. At `rx_bytes` scale (1e12) the
+    /// same rounding is worth ~65 KB per ulp.
+    #[test]
+    fn a_bucket_bounds_the_value_it_holds() {
+        let v = (1u64 << 24) as f64 + 1.0;
+        let b = Bucket::point(v);
+        assert!(b.max >= v, "max {} must bound {v}", b.max);
+        assert!(b.min <= v, "min {} must bound {v}", b.min);
+        assert!(b.max >= b.last, "max must never read below last");
+        assert!(b.min <= b.last, "min must never read above last");
+    }
+
+    /// The same bound, through the downsample and a round trip on disk — the
+    /// path a `agg=max` range reply actually takes (#1061).
+    #[test]
+    fn a_stored_bucket_bounds_the_value_it_holds() {
+        let v = (1u64 << 24) as f64 + 1.0;
+        let path = temp_db_path("bounds");
+        let store = PersistentStore::open(&path).expect("open");
+        let m = MetricId(11);
+        let buckets = downsample(&[Sample { ts: 0, value: v }], Tier::Hour);
+        assert_eq!(buckets.len(), 1);
+        store
+            .write_batch(&FlushBatch {
+                rows: vec![(m, Tier::Hour, buckets[0].0, buckets[0].1)],
+                paths: vec![],
+            })
+            .unwrap();
+        let got = store.query_buckets(m, Tier::Hour, 0, 3_600_000).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].1.max >= v, "max {} must bound {v}", got[0].1.max);
+        assert!(got[0].1.min <= v, "min {} must bound {v}", got[0].1.min);
         let _ = std::fs::remove_file(&path);
     }
 

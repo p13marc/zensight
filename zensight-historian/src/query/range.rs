@@ -235,8 +235,8 @@ pub fn reduce(points: &[(i64, Bucket)], step_s: i64, agg: Aggregate) -> Vec<(i64
     for (ts, b) in points {
         let step_ts = ts.div_euclid(step_ms) * step_ms;
         let v = match agg {
-            Aggregate::Min => b.min as f64,
-            Aggregate::Max => b.max as f64,
+            Aggregate::Min => b.min,
+            Aggregate::Max => b.max,
             _ => b.last,
         };
         match &mut current {
@@ -432,7 +432,7 @@ mod tests {
         RpcRequest::new(Vec::new(), params)
     }
 
-    fn b(last: f64, min: f32, max: f32) -> Bucket {
+    fn b(last: f64, min: f64, max: f64) -> Bucket {
         Bucket { last, min, max }
     }
 

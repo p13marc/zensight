@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bucket's `min`/`max` are bounds again — `f64`, and the store schema is
+  v5** (#1061). They were `f32`, written with an `as` cast, which rounds to
+  *nearest* rather than outward. So they were not bounds: `2^24 + 1` stored as
+  `2^24`, at `rx_bytes` scale (1e12) an f32 ulp is ~65 KB, and because `last`
+  stayed exact a bucket could report a `max` **below its own `last`** — a
+  well-formed reply a chart draws without complaint, and `agg=max` is what the
+  range API sells on this number.
+
+  The four bytes each were the whole argument for `f32`, and the #911 bench
+  said the per-bucket cost was slack. `SCHEMA_VERSION` goes 4 → 5, which
+  re-types the `samples` table, so an existing file is refused and moved aside
+  — the store is a cache in both of its homes.
+
+  **The half that would have hurt**: only the GUI moved a wrong-schema file
+  aside. The historian called `PersistentStore::open_with_cache` directly and
+  treated *any* error as "run memory-only", so this bump would have cost every
+  historian in a fleet its disk tiers **permanently** — silently, on every
+  restart, until somebody deleted the file by hand. Both callers now go through
+  `PersistentStore::open_or_move_aside`.
+
+- **The hot ring holds samples in timestamp order** (#1062). `RingBuffer::push`
+  was a bare append with no clock compare, while every reader
+  (`hot_samples`, `to_vec`, the sub-minute `range` path) promises oldest-first.
+  The historian ingests through an AdvancedSubscriber with recovery on, so a
+  retransmitted sample arrives *after* samples newer than itself:
+  `zensight_store::rate::counter_rate` then returns `None` on the inverted final
+  pair and a chart went blank exactly when recovery had just repaired the gap it
+  was drawing over.
+
+  `push` now inserts at its place — searching from the tail, because a recovered
+  sample is seconds late, not hours — and returns a `Pushed` saying what it had
+  to do. A sample older than everything a *full* ring holds is dropped, since
+  there is nowhere to put it that does not cost a newer one. The historian
+  counts both: `reordered` (recorded, at its place) and `too_old` (dropped, and
+  in `dropped_total`), the first reaching `@rpc/historian/stats` as
+  `reordered_total`. Neither had a counter anywhere before.
+
 ### Changed
 
 - **zenkey 0.7 → 0.8.1, zenkey-fleet 0.11.1 → 0.13.0, MSRV 1.97 → 1.98** —

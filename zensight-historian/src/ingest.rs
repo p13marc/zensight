@@ -61,6 +61,16 @@ pub struct IngestCounters {
     pub non_numeric: AtomicU64,
     /// Samples shed by the governor while degraded.
     pub shed: AtomicU64,
+    /// Samples that arrived out of order and were inserted at their place in
+    /// the hot ring (#1062). Recovery on the AdvancedSubscriber retransmits,
+    /// so this is expected traffic, not an error — it is counted because a
+    /// ring that silently held a non-monotonic sequence made `counter_rate`
+    /// return `None` and a chart draw backwards.
+    pub reordered: AtomicU64,
+    /// Samples older than everything the hot ring still held, with the ring
+    /// full — there is nowhere to put them that does not cost a newer sample,
+    /// so they are dropped (#1062).
+    pub too_old: AtomicU64,
 }
 
 impl IngestCounters {
@@ -70,6 +80,7 @@ impl IngestCounters {
             + self.undecodable.load(Ordering::Relaxed)
             + self.non_numeric.load(Ordering::Relaxed)
             + self.shed.load(Ordering::Relaxed)
+            + self.too_old.load(Ordering::Relaxed)
     }
 }
 
@@ -176,7 +187,16 @@ pub fn record_point(
     // in-memory structure with no invariant a panic can half-break, so
     // recovering beats losing every subsequent sample.
     let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
-    s.record(&origin, &subject, point);
+    match s.record(&origin, &subject, point) {
+        zensight_store::Pushed::Appended => {}
+        zensight_store::Pushed::Reordered => {
+            counters.reordered.fetch_add(1, Ordering::Relaxed);
+        }
+        zensight_store::Pushed::Dropped => {
+            counters.too_old.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
     counters.recorded.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -561,6 +581,40 @@ mod tests {
         c.undecodable.fetch_add(3, Ordering::Relaxed);
         c.non_numeric.fetch_add(5, Ordering::Relaxed);
         c.shed.fetch_add(7, Ordering::Relaxed);
-        assert_eq!(c.dropped_total(), 17);
+        c.too_old.fetch_add(11, Ordering::Relaxed);
+        assert_eq!(c.dropped_total(), 28);
+        // Reordering is not a drop: the sample was recorded, at its place.
+        c.reordered.fetch_add(13, Ordering::Relaxed);
+        assert_eq!(c.dropped_total(), 28);
+    }
+
+    /// A recovered sample is recorded and counted as reordered, not lost
+    /// (#1062). Before the ring sorted, it was appended after samples newer
+    /// than itself and nothing anywhere said so.
+    #[test]
+    fn a_late_sample_is_recorded_in_order_and_counted() {
+        let st = store();
+        let c = IngestCounters::default();
+        let shedding = AtomicBool::new(false);
+        let key = "v1/h-0123456789ab/telemetry/sysinfo/cpu/usage";
+        for ts in [1_000i64, 3_000, 2_000] {
+            let mut p = point(
+                Protocol::Sysinfo,
+                "cpu/usage",
+                TelemetryValue::Counter(ts as u64),
+            );
+            p.timestamp = ts;
+            record_point(key, &p, &st, &c, &shedding);
+        }
+        assert_eq!(c.recorded.load(Ordering::Relaxed), 3);
+        assert_eq!(c.reordered.load(Ordering::Relaxed), 1);
+        assert_eq!(c.too_old.load(Ordering::Relaxed), 0);
+        let g = st.lock().unwrap();
+        let got: Vec<i64> = g
+            .hot_samples("h-0123456789ab/sysinfo/cpu/usage")
+            .iter()
+            .map(|s| s.ts)
+            .collect();
+        assert_eq!(got, vec![1_000, 2_000, 3_000]);
     }
 }
