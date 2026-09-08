@@ -39,6 +39,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The write-audit coverage check can now see the producer with the most
+  writes** (#1087). Two ways for an honesty check to report success without
+  having asked anything.
+
+  `serve_spelling` derives a procedure's key from `PROFILE.local_origin()`, so
+  `check_write_coverage` is **sensor-shaped**: pointed at the catalog, whose
+  keys are `v1/@catalog/@rpc/…`, it matches nothing, reports nothing, and reads
+  exactly like a clean bill of health. And `await_served` — the origin-agnostic
+  helper the correlator and `zensight-desired` use precisely *because* the
+  sensor-shaped one cannot see them — never called the write check at all. So
+  the catalog's six write procedures (`link`, `unlink`, `ack`, `unack`,
+  `silence`, `unsilence`), more than any sensor has, were the ones nothing
+  verified. They *are* declared through the audited seam; nothing was checking
+  it. `check_write_coverage_keys(producer, keys)` matches on the procedure path
+  instead of the origin, and `await_served` takes the producer name and runs it.
+
+  Second, both `unserved_procedures` and `check_write_coverage` returned an
+  empty result when the registry slice was missing or unparsable — so a typo'd
+  producer name, or a slice this build's `zenkey` cannot parse, turned the check
+  into a silent pass. A slice that cannot be read is **unknown**, never clean,
+  and now says so.
+
+  Also on the #866 contract: `build_assertion`'s inline gate was the one gate in
+  the correlator that did not set `refused_by`, so `link` and `unlink` — the two
+  procedures that fuse or split hosts — audited as `refused_by=error/gated`
+  while `ack`/`silence` beside them named `allow_operator_assertions`.
+
+
 - **gNMI values are typed by their path, and the device's clock is bounded**
   (#1077). Two guesses, both wrong in a way nothing downstream could question.
 

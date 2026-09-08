@@ -291,10 +291,7 @@ impl WriteQuery {
 /// exactly like [`check_registry_coverage`] — which is where this is called
 /// from, so every sensor gets it without a new line.
 pub fn check_write_coverage(producer: &str) {
-    let Some(toml) = crate::registry::registry_toml(producer) else {
-        return;
-    };
-    let Ok(slice) = zenkey::parse_slice(toml) else {
+    let Some(slice) = readable_slice(producer) else {
         return;
     };
     let audited = audited().lock().unwrap_or_else(|e| e.into_inner());
@@ -567,10 +564,7 @@ pub fn is_served(key: &str) -> bool {
 /// Matching is on the **serve-side spelling**: a procedure with a `{var}`
 /// chunk is served as a `*` wildcard, so that is what the served set holds.
 pub fn unserved_procedures(producer: &str) -> Vec<String> {
-    let Some(toml) = crate::registry::registry_toml(producer) else {
-        return Vec::new();
-    };
-    let Ok(slice) = zenkey::parse_slice(toml) else {
+    let Some(slice) = readable_slice(producer) else {
         return Vec::new();
     };
     let served = served().lock().unwrap_or_else(|e| e.into_inner());
@@ -585,21 +579,59 @@ pub fn unserved_procedures(producer: &str) -> Vec<String> {
         .collect()
 }
 
+/// `producer`'s registry slice, or `None` **after saying so** (#1087).
+///
+/// Both honesty checks used to `return` an empty result when the slice was
+/// missing or unparsable, so a typo'd producer name or a slice this build's
+/// `zenkey` cannot parse turned "does what you advertise match what you serve"
+/// into a silent pass. The two checks exist precisely to catch a build that is
+/// wrong about itself; a build that cannot even read its own slice is the case
+/// they should be loudest about.
+///
+/// A caller naming a producer believes it has one, so this is a finding rather
+/// than a shrug. It stays a WARN plus a `debug_assert` — the same weight as the
+/// checks it feeds — because a sensor that cannot read its slice should fail a
+/// test run and still start on a production host.
+fn readable_slice(producer: &str) -> Option<zenkey::slice::RegistrySlice> {
+    let Some(toml) = crate::registry::registry_toml(producer) else {
+        debug_assert!(
+            false,
+            "no registry slice compiled in for `{producer}` — the registry and write-coverage \
+             checks (#484, #957) cannot say anything about a producer they cannot read, and a \
+             silent pass is the one answer that is never true (#1087)"
+        );
+        tracing::warn!(
+            producer = %producer,
+            "no registry slice for this producer — its registry and write-audit coverage are \
+             UNKNOWN, not clean (#1087)"
+        );
+        return None;
+    };
+    match zenkey::parse_slice(toml) {
+        Ok(slice) => Some(slice),
+        Err(e) => {
+            debug_assert!(
+                false,
+                "registry slice for `{producer}` does not parse: {e}. The coverage checks cannot \
+                 say anything about it, and a silent pass is the one answer that is never true \
+                 (#1087)"
+            );
+            tracing::warn!(
+                producer = %producer, error = %e,
+                "registry slice does not parse — this producer's coverage is UNKNOWN, not clean \
+                 (#1087)"
+            );
+            None
+        }
+    }
+}
+
 /// The key a producer serves a procedure on: base-relative, own origin,
 /// `{var}` chunks widened to `*` (the serve-side selector, RFC 05 §2).
 fn serve_spelling(producer: &str, path: &str) -> String {
     use zenkey::ConcreteOrigin;
     let origin = crate::PROFILE.local_origin();
-    let mut key = format!("v1/{}/@rpc/{producer}", origin.chunk());
-    for chunk in path.split('/') {
-        key.push('/');
-        if chunk.starts_with('{') {
-            key.push('*');
-        } else {
-            key.push_str(chunk);
-        }
-    }
-    key
+    format!("v1/{}/@rpc/{producer}{}", origin.chunk(), wildcarded(path))
 }
 
 /// Assert that `producer` serves everything its registry slice advertises
@@ -677,21 +709,96 @@ pub async fn await_registry_coverage(producer: &str, grace: std::time::Duration)
 /// So a caller on a service origin passes the concrete keys it declared. Same
 /// bounded wait, same wakeup discipline, no assumption about how the key was
 /// spelled.
-pub async fn await_served(keys: &[String], grace: std::time::Duration) -> Vec<String> {
+pub async fn await_served(
+    producer: &str,
+    keys: &[String],
+    grace: std::time::Duration,
+) -> Vec<String> {
     let deadline = tokio::time::Instant::now() + grace;
-    loop {
+    let missing = loop {
         // Subscribe to the wakeup BEFORE re-reading the predicate, for the
         // reason `await_registry_coverage` gives: the other order drops a
         // `note_served` landing between the two.
         let changed = served_changed().notified();
         let missing: Vec<String> = keys.iter().filter(|k| !is_served(k)).cloned().collect();
         if missing.is_empty() {
-            return missing;
+            break missing;
         }
         if tokio::time::timeout_at(deadline, changed).await.is_err() {
-            return missing;
+            break missing;
+        }
+    };
+    // The write half rides along, exactly as it does for a sensor inside
+    // `check_registry_coverage` (#1087). It did not before, and
+    // `check_write_coverage` is origin-derived, so the two producers that use
+    // this helper — the catalog and `desired`, both on service origins — were
+    // the only ones whose write procedures nothing ever checked. The catalog
+    // has more write procedures than any sensor.
+    check_write_coverage_keys(producer, keys);
+    missing
+}
+
+/// The origin-agnostic half of [`check_write_coverage`] (#1087): given the
+/// concrete keys a producer declared, assert that every **write** procedure in
+/// its slice went through the audited seam.
+///
+/// [`check_write_coverage`] derives the key from `PROFILE.local_origin()`, so
+/// it is sensor-shaped in exactly the way [`await_served`]'s doc comment
+/// describes — point it at the catalog and it matches nothing, then reports
+/// nothing, which reads identically to a clean bill of health. This matches on
+/// the procedure path instead, which is the part of the key that does not
+/// depend on who is serving it.
+pub fn check_write_coverage_keys(producer: &str, keys: &[String]) {
+    let Some(slice) = readable_slice(producer) else {
+        return;
+    };
+    let audited = audited().lock().unwrap_or_else(|e| e.into_inner());
+    let missing: Vec<String> = slice
+        .procedures
+        .iter()
+        .filter(|p| crate::audit::is_write_procedure(producer, &p.path))
+        .filter_map(|p| {
+            // The caller's own spelling of this procedure, whatever origin it
+            // used. `{var}` chunks are served as `*`, matching `serve_spelling`.
+            let suffix = wildcarded(&p.path);
+            keys.iter()
+                .find(|k| k.ends_with(&suffix))
+                // Only a procedure this build actually declared: an undeclared
+                // one is #484's finding, and reporting it twice buries this one.
+                .filter(|k| !audited.contains(*k))
+                .cloned()
+        })
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let list = missing.join(", ");
+    debug_assert!(
+        false,
+        "{producer} serves write procedures through the unaudited seam: {list}. Both outcomes \
+         of a write MUST reach the host's audit trail (#957) — declare them with \
+         served::serve_write_queryable."
+    );
+    tracing::warn!(
+        producer = %producer,
+        unaudited = %list,
+        "write procedures served without an audit trail (#957)"
+    );
+}
+
+/// A procedure path with `{var}` chunks widened to `*`, the serve-side
+/// spelling shared by [`serve_spelling`] and [`check_write_coverage_keys`].
+fn wildcarded(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 1);
+    for chunk in path.split('/') {
+        out.push('/');
+        if chunk.starts_with('{') {
+            out.push('*');
+        } else {
+            out.push_str(chunk);
         }
     }
+    out
 }
 
 #[cfg(test)]
@@ -703,6 +810,7 @@ mod tests {
     async fn await_served_waits_for_concrete_keys() {
         let key = "v1/@catalog/@rpc/await-served-test".to_string();
         let missing = await_served(
+            "catalog",
             std::slice::from_ref(&key),
             std::time::Duration::from_millis(50),
         )
@@ -711,7 +819,7 @@ mod tests {
 
         note_served(&key);
         assert!(
-            await_served(&[key], std::time::Duration::from_millis(50))
+            await_served("catalog", &[key], std::time::Duration::from_millis(50))
                 .await
                 .is_empty(),
             "served now"
@@ -810,9 +918,6 @@ mod tests {
     /// quiet once the gap is closed.
     #[test]
     fn coverage_reports_only_the_gap() {
-        // An unknown producer has no slice to lie about.
-        assert!(unserved_procedures("not-a-producer").is_empty());
-
         // A real producer with nothing served yet: every declared procedure
         // is missing (this is the state the #453 audit shipped in).
         let missing = unserved_procedures("catalog");
@@ -829,6 +934,61 @@ mod tests {
             after.len() == missing.len() - 1,
             "serving one procedure closes exactly one gap"
         );
+    }
+
+    /// A producer with no slice is a **finding**, not a clean bill of health
+    /// (#1087).
+    ///
+    /// This used to `return Vec::new()`, and the test above used to assert it
+    /// with the words "an unknown producer has no slice to lie about" — which
+    /// is true and beside the point. The two coverage checks exist to catch a
+    /// build that is wrong about itself, and a build that cannot read its own
+    /// slice is the case they should be loudest about; a typo in a producer
+    /// name turned both of them off and reported success.
+    #[test]
+    #[should_panic(expected = "no registry slice compiled in")]
+    fn a_producer_with_no_slice_is_not_a_pass() {
+        let _ = unserved_procedures("not-a-producer");
+    }
+
+    /// The same, for the write half — the one that decides whether an
+    /// operator action reaches the host's audit trail.
+    #[test]
+    #[should_panic(expected = "no registry slice compiled in")]
+    fn a_write_coverage_check_on_no_slice_is_not_a_pass() {
+        check_write_coverage("not-a-producer");
+    }
+
+    /// A **service-origin** producer's write procedures are checked (#1087).
+    ///
+    /// `check_write_coverage` spells the key from `PROFILE.local_origin()`, so
+    /// against the catalog it matches nothing and then reports nothing — which
+    /// reads exactly like a clean bill of health. `await_served` never called
+    /// it at all, so the catalog's six write procedures, more than any sensor
+    /// has, were the ones nothing checked.
+    #[test]
+    #[should_panic(expected = "unaudited seam")]
+    fn a_service_origin_write_served_unaudited_is_reported() {
+        // Declared through the ordinary (unaudited) seam, exactly as the bug
+        // would have it — `note_served` records served without recording
+        // audited, which is what `serve_queryable` does.
+        let key = "v1/@catalog/@rpc/catalog/link".to_string();
+        note_served(&key);
+        check_write_coverage_keys("catalog", &[key]);
+    }
+
+    /// …and it stays quiet when the write went through the audited seam, which
+    /// is what the catalog actually does today. Without this the test above
+    /// would pass against a check that reports everything.
+    #[test]
+    fn a_service_origin_write_served_audited_is_not_reported() {
+        let key = "v1/@catalog/@rpc/catalog/unlink".to_string();
+        note_served(&key);
+        audited()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.clone());
+        check_write_coverage_keys("catalog", &[key]);
     }
 
     /// The wait returns as soon as a late declaration closes the gap, rather

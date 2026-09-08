@@ -44,6 +44,22 @@ Three checks back that up, in decreasing order of strength:
    observable event; nothing can watch a hook fire at runtime, and this page
    does not pretend otherwise.
 
+   "Every producer" is now true (#1087). It has two spellings, because the key
+   a procedure is served on depends on who is serving it:
+   `check_write_coverage(producer)` derives the key from
+   `PROFILE.local_origin()` and is right for a **sensor**;
+   `check_write_coverage_keys(producer, keys)` matches on the procedure path
+   and is right for a **service origin**, where it rides along inside
+   `await_served`. Before that split the sensor-shaped check was the only one:
+   pointed at the catalog it matched nothing, reported nothing, and read
+   exactly like a clean bill of health — so the producer with the most write
+   procedures in the tree was the one nothing checked. (They *were* declared
+   through the audited seam. Nothing was verifying it.)
+
+   And a producer whose slice is **missing or unparsable** is a finding, not a
+   pass. Both checks used to return an empty result in that case, so a typo'd
+   producer name turned the honesty check into a silent success.
+
 A CI grep guard sits beside the four in `.forgejo/workflows/ci.yml`'s `lint`
 job. It is a tripwire for the branch that never runs a sensor's tests, not the
 enforcement.
