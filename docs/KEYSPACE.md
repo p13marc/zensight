@@ -194,20 +194,22 @@ only `evidence/self` and `evidence/device/{device}`, so a family added under
 `evidence/**` is inert to identity by default. Two tests pin it, one of which
 demonstrates that a real relation document does decode as `HostEvidence`.
 
-Neither family carries a `common =` key: `zenkey::CommonState` is a closed RFC
-enum in an external crate, so both refine app-side through
-`zensight_common::state::ZensightState` — the same escape hatch
-`catalog/assertion/{id}` uses.
+Both families carry a `common =` key: `evidence_relation` and `edge`.
 
-> **RFC status.** These two families are **implemented and shipped ahead of the
-> RFC.** The amendment is [zenkey#416](https://github.com/p13marc/zenkey/issues/416),
-> which is open; a comment there records what the implementation turned out to
-> be, the three places it is more specific than the amendment text, and two
-> `edge_id` details worth making normative because both are silent when wrong.
-> Until #416 releases, **the RFC and this code disagree**, deliberately and in
-> writing — the same treatment zenkey#415 got for the historian. When it lands,
-> `CommonState::{EvidenceRelation, CatalogEdge}` replaces the app-side
-> refinement and both families gain a `common =` key; nothing on the wire moves.
+> **RFC status: ratified, and adopted.** These two families were implemented
+> and shipped *ahead* of the RFC, refining app-side through
+> `zensight_common::state::ZensightState` because `zenkey::CommonState` was a
+> closed enum in an external crate — the escape hatch
+> `catalog/assertion/{id}` still uses. The amendment
+> ([zenkey#416](https://github.com/p13marc/zenkey/issues/416)) landed as RFC 06
+> §5.6 / §4 v1.30 and ships in zenkey 0.8, so
+> `CommonState::{EvidenceRelation, CatalogEdge}` now *is* the refinement and
+> the app-side variants are gone. **Nothing on the wire moved** — the ratified
+> spellings are the ones this deployment already published — and the gain is
+> that generic tooling (`zenctl`, the doctor, `zenwatch`) classifies these
+> documents without knowing anything about ZenSight. The same release ratified
+> `incident/{incident_id}`, `ack/{alert_ref}` and `silence/{id}` (RFC 06 §5.5
+> v1.29), which are declared the same way.
 
 `L2Adjacent` is the one kind **no sensor publishes**. The catalog derives it
 from the observed-device identity claims already on the bus — "the sensor on

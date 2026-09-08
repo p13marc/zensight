@@ -934,13 +934,6 @@ pub(crate) fn parse_tombstone(key: &str) -> Option<Message> {
     if !matches!(parsed.class, ClassOrPlane::Class(Class::State)) {
         return None;
     }
-    // `edge/{edge_id}` carries no `common =` key (zenkey#416), so it refines
-    // app-side and never appears in `common_state()`.
-    if let Some(zensight_common::state::ZensightState::CatalogEdge { edge_id }) =
-        zensight_common::state::ZensightState::of(&subject)
-    {
-        return Some(Message::EdgeRemoved(edge_id.to_string()));
-    }
     match subject.common_state()? {
         CommonState::Alert { alert_key } => Some(Message::AlertCleared {
             protocol,
@@ -954,6 +947,10 @@ pub(crate) fn parse_tombstone(key: &str) -> Option<Message> {
         // Dropping it matters as much as adding it — a stale alias would keep
         // re-pointing consumers at an entity that no longer claims them.
         CommonState::CatalogAlias { old_id } => Some(Message::AliasRemoved(old_id.to_string())),
+        // The catalog withdrew a relationship: the last sensor that claimed
+        // it stopped claiming it. Framework vocabulary since RFC 06 v1.30 —
+        // it used to refine app-side, because `CommonState` could not say it.
+        CommonState::CatalogEdge { edge_id } => Some(Message::EdgeRemoved(edge_id.to_string())),
         _ => None,
     }
 }
@@ -1092,18 +1089,28 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
             CommonState::EvidenceSelf
             | CommonState::EvidenceDevice { .. }
             | CommonState::EvidenceNames { .. }
-            | CommonState::CatalogPdns { .. },
+            | CommonState::CatalogPdns { .. }
+            // A relation claim is likewise the catalog's input: the GUI reads
+            // the resolved `edge/{edge_id}` documents, never the raw claims,
+            // for the same reason it reads entities rather than identity
+            // evidence.
+            | CommonState::EvidenceRelation { .. }
+            // Incidents, acks and silences reach the GUI on their own
+            // subscribers with their own decoders (#925) — each reads the id
+            // or the alert ref out of the last key chunk, which is all a
+            // tombstone has. Framework subjects since RFC 06 v1.29, so they
+            // are nameable here now; that does not make them this path's
+            // business, and decoding them twice would double every document.
+            | CommonState::CatalogIncident { .. }
+            | CommonState::CatalogAck { .. }
+            | CommonState::CatalogSilence { .. },
         )
-        // A relation claim is likewise the catalog's input: the GUI reads the
-        // resolved `edge/{edge_id}` documents, never the raw claims, for the
-        // same reason it reads entities rather than identity evidence.
         | ZensightState::Artifact { .. }
-        | ZensightState::CatalogAssertion { .. }
-        | ZensightState::EvidenceRelation { .. } => None,
+        | ZensightState::CatalogAssertion { .. } => None,
         // The catalog's resolved topology graph (#919). Replaces the edge
         // derivation the topology view used to run privately from the netlink
         // neighbour table and the gateway metric.
-        ZensightState::CatalogEdge { .. } => {
+        ZensightState::Common(CommonState::CatalogEdge { .. }) => {
             decode!(zensight_common::relation::Edge, Message::EdgeReceived)
         }
     }

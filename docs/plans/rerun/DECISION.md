@@ -142,7 +142,7 @@ is not, and it is one reason this decision does not go further than it does.
 | Dependency count | **532 distinct crates**, 42 of them `re_*`/`rerun`, including `arrow 58.3` and `tonic 0.14` |
 | Target-dir | **+5 GiB** debug, workspace-wide |
 | Cold build | minutes-scale, dominated by arrow/tonic |
-| MSRV | Rerun demands **1.92** and ratchets fast; `zensight-rerun` carries the workspace's only `rust-version` pin, `1.97` |
+| MSRV | Rerun demands **1.92** and ratchets fast; `zensight-rerun` carries the workspace's only `rust-version` pin, `1.98` |
 | API churn | a migration guide for **every minor**; twelve in ~15 months; **two more since we pinned** (0.35, 0.36) |
 | `.rrd` compatibility | N→N+1 only — not an archival format without re-migration |
 | Transport | unauthenticated, unencrypted, `0.0.0.0` by default |

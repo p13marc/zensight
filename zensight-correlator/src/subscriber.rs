@@ -264,24 +264,24 @@ async fn handle_evidence(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
 
 /// Whether a key is a relationship claim (`evidence/relation/{relation_id}`).
 ///
-/// Refined app-side through `ZensightState`, because the family carries no
-/// `common =` key: `zenkey::CommonState` is a closed RFC enum in an external
-/// crate (zenkey#416).
+/// Framework vocabulary since RFC 06 v1.30, so this is one `common_state()`
+/// call over the refined subject — it used to refine app-side through
+/// `ZensightState`, because `zenkey::CommonState` could not yet say it.
 fn is_relation_subject(key: &str) -> bool {
     let Some((_, _, subject)) = zensight_common::keyexpr::refine_key(key) else {
         return false;
     };
     matches!(
-        zensight_common::state::ZensightState::of(&subject),
-        Some(zensight_common::state::ZensightState::EvidenceRelation { .. })
+        subject.common_state(),
+        Some(zenkey::CommonState::EvidenceRelation { .. })
     )
 }
 
 /// Extract `(origin, sensor, relation_id)` from a relationship-claim key.
 fn parse_relation_key(key: &str) -> Option<(String, String, String)> {
     let (parsed, sensor, subject) = zensight_common::keyexpr::refine_key(key)?;
-    match zensight_common::state::ZensightState::of(&subject)? {
-        zensight_common::state::ZensightState::EvidenceRelation { relation_id } => {
+    match subject.common_state()? {
+        zenkey::CommonState::EvidenceRelation { relation_id } => {
             Some((parsed.origin.to_string(), sensor, relation_id.to_string()))
         }
         _ => None,

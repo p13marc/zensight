@@ -35,9 +35,9 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
       - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           cache-targets: false
@@ -72,9 +72,9 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
       - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           cache-targets: false
@@ -126,9 +126,9 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
       - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: conformance
@@ -169,9 +169,9 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
           components: clippy
       - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
@@ -274,9 +274,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
       # the docker cargo-deny action cannot see deny.toml -> install directly
       - uses: https://github.com/taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
@@ -376,9 +376,9 @@ jobs:
           fetch-depth: 0
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
-      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97 branch head; SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
           components: rustfmt, clippy
       - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:

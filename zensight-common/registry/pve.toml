@@ -308,6 +308,7 @@ description = "quorum, members, HA resources and replication results; quorate is
 
 [[subject]]
 path = "evidence/relation/{relation_id}"
+common = "evidence_relation"
 class = "state"
 type = "RelationshipEvidence"
 cardinality = 1024

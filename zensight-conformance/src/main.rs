@@ -266,6 +266,13 @@ async fn record_capture(args: &Args, path: &std::path::Path) -> Result<()> {
         selectors: args.record_selector.clone(),
         base: args.base.clone(),
         captured_at: zenkey_fleet::rfc3339_now(),
+        // Both absent, and that is the coverage statement, not an omission:
+        // this is a live untriggered capture, so it fetched no state ahead of
+        // the window (`preamble`) and read no retained ring behind it
+        // (`pre_roll`). A header that claimed either would claim coverage the
+        // file does not have.
+        preamble: None,
+        pre_roll: None,
     };
     let out = std::fs::File::create(path)
         .with_context(|| format!("could not create {}", path.display()))?;
@@ -286,7 +293,8 @@ async fn record_capture(args: &Args, path: &std::path::Path) -> Result<()> {
     .await
     .context("the capture itself failed")?;
 
-    let (samples, dropped) = sink.finish().await.context("could not flush the capture")?;
+    let counts = sink.finish().await.context("could not flush the capture")?;
+    let (samples, dropped) = (counts.samples, counts.dropped);
     monitor.shutdown().await.ok();
     let _ = session.close().await;
 

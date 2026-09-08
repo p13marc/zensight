@@ -61,10 +61,22 @@ fn capture(name: &str) -> replay::Replay {
 
 /// Every file parses, states its version, and says what it watched — the
 /// header is the capture's coverage statement (RFC 09 §5.1 O5).
+///
+/// The version is checked against `ZREC_READS`, not `ZREC_VERSION`: the
+/// corpus is deliberately version 1 and stays there. A capture is a
+/// historical fact, so a reader that stopped reading the old dialect is a
+/// regression this corpus should catch — pinning it to whatever the *writer*
+/// currently emits would instead force a regeneration on every dialect bump
+/// and quietly drop the version-1 coverage while doing it.
 #[test]
 fn corpus_headers_parse() {
     for (name, r) in captures() {
-        assert_eq!(r.header.zrec, zenkey_fleet::ZREC_VERSION, "{name}");
+        assert!(
+            zenkey_fleet::ZREC_READS.contains(&r.header.zrec),
+            "{name}: version {} is outside the dialects this reader speaks ({:?})",
+            r.header.zrec,
+            zenkey_fleet::ZREC_READS
+        );
         assert!(!r.header.selectors.is_empty(), "{name}: empty selectors");
         assert!(!r.header.captured_at.is_empty(), "{name}: no capture time");
     }

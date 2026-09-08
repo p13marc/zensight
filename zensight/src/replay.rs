@@ -25,7 +25,7 @@
 use std::io::BufRead;
 use std::time::Instant;
 
-use zenkey_fleet::{IngestRow, ZrecItem, ZrecReader};
+use zenkey_fleet::{IngestRow, Transition, ZrecItem, ZrecReader};
 // Report shapes ride `zenkey_fleet::report::*` — the one sanctioned module
 // path (the crate root carries this one too; the module spelling matches the
 // conformance crate's imports).
@@ -42,9 +42,22 @@ pub struct Replay {
     /// Line 1 of the file: version, selectors (what was watched), the
     /// operator's stated base, and when the capture started.
     pub header: ZrecHeader,
+    /// Preamble rows, in file order — state *fetched* at capture time rather
+    /// than observed on the wire (`.zrec` version 2, RFC 13 §4.1). A
+    /// triggered capture writes these ahead of the first observed row so the
+    /// window is not read against an empty world; they are kept apart from
+    /// [`Replay::rows`] because they are a different fact, and folded first
+    /// by [`Replay::messages`] — the §4.2 *seed the fold* posture a pane
+    /// replay takes, as against the publish posture, which needs
+    /// `ReplaySpec.seed_state` to touch them at all.
+    pub preamble: Vec<IngestRow>,
     /// Sample rows in file order, each with its `t` offset (µs since the
     /// capture epoch, on the observer's arrival clock — the pacing clock).
     pub rows: Vec<(IngestRow, Option<u64>)>,
+    /// The transitions that fired a triggered capture (version 2), each with
+    /// the index into [`Replay::rows`] it was observed at — the position a
+    /// scrubber marks. A time-triggered capture carries none.
+    pub triggers: Vec<(usize, Transition)>,
     /// Samples the *capture* dropped, summed from the interleaved drop
     /// records. A consumer rendering this replay owes the same honesty the
     /// file does: surface it, never fold it away.
@@ -67,17 +80,27 @@ pub fn load(path: impl AsRef<std::path::Path>) -> anyhow::Result<Replay> {
 pub fn read(source: impl BufRead) -> anyhow::Result<Replay> {
     let mut reader = ZrecReader::new(source).map_err(|e| anyhow::anyhow!("{e}"))?;
     let header = reader.header().clone();
+    let mut preamble = Vec::new();
     let mut rows = Vec::new();
+    let mut triggers = Vec::new();
     let mut dropped = 0u64;
     while let Some(item) = reader.next() {
         match item.map_err(|e| anyhow::anyhow!("{e}"))? {
             ZrecItem::Sample { row, t_us, .. } => rows.push((row, t_us)),
             ZrecItem::Dropped(n) => dropped += n,
+            // Fetched, not observed: kept out of `rows` so the pacing clock
+            // and the coverage statement stay about what the wire carried.
+            ZrecItem::Preamble { row, .. } => preamble.push(row),
+            // Recorded at the position it was seen, so a renderer can mark
+            // the row the rule fired on rather than a wall-clock guess.
+            ZrecItem::Trigger(t) => triggers.push((rows.len(), *t)),
         }
     }
     Ok(Replay {
         header,
+        preamble,
         rows,
+        triggers,
         dropped,
     })
 }
@@ -108,10 +131,18 @@ impl Replay {
     /// `App::update` test. Rows the GUI deliberately ignores (unregistered
     /// subjects, evidence, artifacts) yield `None` and are omitted, same as
     /// the live drain loop.
+    ///
+    /// Preamble rows come first, which is what makes a triggered capture
+    /// readable: they are the state as of `t = 0`, so folding them ahead of
+    /// the observed window is the difference between "this host went unready"
+    /// and "this host appeared, already unready". They are seeded, never
+    /// paced — a `.zrec` version 1 capture has none and this is the old
+    /// behaviour exactly.
     pub fn messages(&self) -> Vec<Message> {
-        self.rows
+        self.preamble
             .iter()
-            .filter_map(|(row, _)| decode_row(row, &self.header.base))
+            .chain(self.rows.iter().map(|(row, _)| row))
+            .filter_map(|row| decode_row(row, &self.header.base))
             .collect()
     }
 }
