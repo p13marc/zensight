@@ -61,7 +61,7 @@ pub mod threshold;
 pub mod v1;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
-pub use alert::{AlertReporter, ReconcileOpts, serve_alerts_query};
+pub use alert::{AlertReporter, Hysteresis, ReconcileOpts, serve_alerts_query};
 pub use args::SensorArgs;
 pub use artifact::{
     ArtifactChannel, ArtifactProducer, DeliveryKind, ProduceCtx, Produced, ProgressUpdate,

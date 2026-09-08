@@ -209,8 +209,23 @@ pub trait Timer {
     #[zbus(property, name = "LastTriggerUSec")]
     fn last_trigger_usec(&self) -> zbus::Result<u64>;
     /// Wall-clock µs of the next scheduled elapse (0/`u64::MAX` if none).
+    ///
+    /// **Only calendar timers populate this.** A timer defined with
+    /// `OnBootSec=` / `OnUnitActiveSec=` reports 0 here and schedules on
+    /// `CLOCK_MONOTONIC` instead — see [`Self::next_elapse_usec_monotonic`].
     #[zbus(property, name = "NextElapseUSecRealtime")]
     fn next_elapse_usec_realtime(&self) -> zbus::Result<u64>;
+    /// `CLOCK_MONOTONIC` µs of the next scheduled elapse (0/`u64::MAX` if
+    /// none), for the monotonic timers `OnBootSec=` / `OnUnitActiveSec=`
+    /// define (#1084).
+    ///
+    /// Without this bound, every such timer reported a next elapse of 0 and
+    /// was skipped by both the overdue rule and the `@rpc` timer listing — so
+    /// `systemd-timer-overdue` could never fire for one, however far past its
+    /// schedule it was. Verify against a real unit with
+    /// `systemctl show -p NextElapseUSecMonotonic systemd-tmpfiles-clean.timer`.
+    #[zbus(property, name = "NextElapseUSecMonotonic")]
+    fn next_elapse_usec_monotonic(&self) -> zbus::Result<u64>;
     /// The unit this timer activates (`Unit=`, default `<name>.service`) —
     /// the thing whose *outcome* the `succeeded_within_secs` expectation
     /// judges: a timer can fire on schedule for a week while its service
@@ -232,4 +247,136 @@ pub trait Socket {
     fn n_connections(&self) -> zbus::Result<u32>;
     #[zbus(property, name = "NRefused")]
     fn n_refused(&self) -> zbus::Result<u32>;
+}
+
+/// A next-elapse timestamp systemd did not populate: never scheduled, or
+/// scheduled on the other clock.
+fn unset(usec: u64) -> bool {
+    usec == 0 || usec == u64::MAX
+}
+
+/// `CLOCK_MONOTONIC` now, in µs. `None` if the clock cannot be read.
+///
+/// **`CLOCK_MONOTONIC`, not `CLOCK_BOOTTIME`** — systemd schedules monotonic
+/// timers on the former, which excludes suspended time, and mixing the pair
+/// would make every timer on a laptop look overdue by the length of its last
+/// suspend. `zensight-sensor-netlink`'s eBPF anchor takes the same care for
+/// the same reason.
+pub fn monotonic_now_usec() -> Option<u64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: CLOCK_MONOTONIC with a valid timespec out-pointer.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return None;
+    }
+    Some((ts.tv_sec as u64) * 1_000_000 + (ts.tv_nsec as u64) / 1_000)
+}
+
+/// One timer's next elapse as **wall-clock µs**, from whichever clock systemd
+/// populated (#1084). `0` means "not scheduled", the value both consumers
+/// already treat as absent.
+///
+/// A calendar timer (`OnCalendar=`) fills the realtime property; a monotonic
+/// one (`OnBootSec=`, `OnUnitActiveSec=`) fills only the monotonic property
+/// and reports 0 for realtime. Reading realtime alone — which is what both
+/// call sites did — skipped every monotonic timer silently, so the overdue
+/// rule could not fire for one however late it was.
+///
+/// Pure, so the conversion is testable without a bus or a clock.
+pub fn next_elapse_wall_usec(
+    realtime_usec: u64,
+    monotonic_usec: u64,
+    now_wall_usec: u64,
+    now_monotonic_usec: Option<u64>,
+) -> u64 {
+    if !unset(realtime_usec) {
+        return realtime_usec;
+    }
+    let (Some(now_mono), false) = (now_monotonic_usec, unset(monotonic_usec)) else {
+        return 0;
+    };
+    // The monotonic reading is relative to boot; anchor it to wall time. An
+    // elapse already in the past yields a wall time in the past, which is
+    // exactly what `timer_overdue` needs to see.
+    if monotonic_usec >= now_mono {
+        now_wall_usec.saturating_add(monotonic_usec - now_mono)
+    } else {
+        now_wall_usec.saturating_sub(now_mono - monotonic_usec)
+    }
+}
+
+/// Whether a next-elapse wall timestamp is in the past by more than `grace`.
+///
+/// One predicate for the alert rule and the `@rpc` timer listing, which were
+/// two independent implementations of the same sentence — and only one of them
+/// had a grace window.
+pub fn timer_overdue(next_elapse_wall_usec: u64, now_wall_usec: u64, grace_usec: u64) -> bool {
+    !unset(next_elapse_wall_usec)
+        && now_wall_usec > next_elapse_wall_usec.saturating_add(grace_usec)
+}
+
+#[cfg(test)]
+mod timer_clock_tests {
+    use super::*;
+
+    const NOW_WALL: u64 = 1_700_000_000_000_000;
+    // Five hours of uptime. Deliberately not one hour: `NOW_MONO - 1h` would
+    // be exactly 0, which systemd's own encoding reserves for "unset", so the
+    // fixture would be testing the sentinel rather than the conversion.
+    const NOW_MONO: u64 = 18_000_000_000;
+
+    /// A calendar timer keeps using the realtime property, untouched.
+    #[test]
+    fn a_calendar_timer_uses_the_realtime_clock() {
+        let next = NOW_WALL + 60_000_000;
+        assert_eq!(
+            next_elapse_wall_usec(next, 0, NOW_WALL, Some(NOW_MONO)),
+            next
+        );
+    }
+
+    /// #1084: a monotonic-only timer reports 0 for realtime, and used to be
+    /// skipped entirely. An hour past its elapse, it is overdue.
+    #[test]
+    fn a_monotonic_only_timer_an_hour_late_is_overdue() {
+        // Scheduled for one hour ago, on the monotonic clock.
+        let mono_next = NOW_MONO - 3_600_000_000;
+        let wall = next_elapse_wall_usec(0, mono_next, NOW_WALL, Some(NOW_MONO));
+        assert_eq!(wall, NOW_WALL - 3_600_000_000);
+        assert!(
+            timer_overdue(wall, NOW_WALL, 60_000_000),
+            "a monotonic timer an hour past its elapse must be overdue"
+        );
+        // And the reading it replaced — a bare 0 — never could be.
+        assert!(!timer_overdue(0, NOW_WALL, 60_000_000));
+    }
+
+    /// A monotonic timer scheduled in the future is not overdue.
+    #[test]
+    fn a_monotonic_timer_still_to_come_is_not_overdue() {
+        let wall = next_elapse_wall_usec(0, NOW_MONO + 600_000_000, NOW_WALL, Some(NOW_MONO));
+        assert_eq!(wall, NOW_WALL + 600_000_000);
+        assert!(!timer_overdue(wall, NOW_WALL, 60_000_000));
+    }
+
+    /// Both sentinels mean "not scheduled", on either clock, and a host whose
+    /// monotonic clock cannot be read falls back to "not scheduled" rather
+    /// than to a wrong-but-plausible time.
+    #[test]
+    fn an_unscheduled_timer_stays_unscheduled() {
+        for (rt, mono) in [(0u64, 0u64), (u64::MAX, 0), (0, u64::MAX)] {
+            assert_eq!(next_elapse_wall_usec(rt, mono, NOW_WALL, Some(NOW_MONO)), 0);
+        }
+        assert_eq!(next_elapse_wall_usec(0, NOW_MONO, NOW_WALL, None), 0);
+    }
+
+    /// The grace window is part of the predicate, so both call sites get it.
+    #[test]
+    fn the_grace_window_holds_a_just_late_timer() {
+        let just_late = NOW_WALL - 30_000_000;
+        assert!(!timer_overdue(just_late, NOW_WALL, 60_000_000));
+        assert!(timer_overdue(just_late, NOW_WALL, 10_000_000));
+    }
 }

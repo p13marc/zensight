@@ -176,6 +176,62 @@ impl ReconcileOpts {
     }
 }
 
+/// How a rule's configured `for:` is spent (#1084).
+///
+/// A **level** rule's condition persists for as long as it is true — RSS over
+/// a budget, a unit failed, a filesystem past its watermark — so `for` is a
+/// *debounce*: the condition must be violated continuously for that long
+/// before anything is published.
+///
+/// An **edge** rule's condition is true for exactly one tick, because it is a
+/// counter delta: `oom_kill_delta > 0`, `media_errors_delta > 0`. A debounce it
+/// can never satisfy is a rule that never fires — and that is not a
+/// hypothetical. [`AlertReporter::observe`] sets `first_seen` on the very call
+/// that evaluates `now - first_seen >= dur`, so at `dur > 0` the test is
+/// `0 >= dur`, and the next `reconcile` drops the unpublished entry. An
+/// operator who set `for_secs: 60` to stop pressure alerts flapping had
+/// silently turned OOM alerting off. For those rules `for` is a **hold**: the
+/// alert is raised on the first observation and stays firing for that long
+/// after the last one.
+///
+/// The two halves are returned by one type because they are **one decision**,
+/// and the bug was a caller pairing `for` with the wrong half. Nothing new is
+/// needed underneath: [`AlertReporter::retire`]'s recovery window already
+/// *is* hold semantics — the first clear sweep starts the clock, a re-fire
+/// resets it silently, and the resolve lands once the window elapses.
+///
+/// One rounding to know about: `retire` is sweep-driven and the reporter owns
+/// no timer, so an edge alert resolves at the first reconcile **after** the
+/// hold elapses. The hold is effectively rounded up to a poll interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hysteresis {
+    /// The condition persists while true; `for` debounces it.
+    Level(Duration),
+    /// The condition is true for one tick; `for` holds the alert firing.
+    Edge(Duration),
+}
+
+impl Hysteresis {
+    /// The `for_duration` argument to [`AlertReporter::observe`].
+    pub fn for_duration(self) -> Option<Duration> {
+        match self {
+            Hysteresis::Level(d) => Some(d),
+            // Publish on the first observation: there will not be a second.
+            Hysteresis::Edge(_) => Some(Duration::ZERO),
+        }
+    }
+
+    /// The options for the matching [`AlertReporter::reconcile_opts`].
+    pub fn reconcile_opts(self) -> ReconcileOpts {
+        match self {
+            Hysteresis::Level(_) => ReconcileOpts::default(),
+            Hysteresis::Edge(hold) => ReconcileOpts {
+                recover_after: Some(hold),
+            },
+        }
+    }
+}
+
 impl AlertReporter {
     /// Create a reporter. `publisher`'s v1 context keys the alert state
     /// (`state/<producer>/alert/<key>`); the telemetry prefix is ignored for
@@ -1481,5 +1537,61 @@ mod refresh_tests {
             }
             _ => panic!("expected a resolve"),
         }
+    }
+}
+
+/// [`Hysteresis`] (#1084) — the pairing that used to be made by hand, and made
+/// wrongly.
+#[cfg(test)]
+mod hysteresis_tests {
+    use super::*;
+
+    /// An edge rule spends its `for:` as a **hold**, not a debounce.
+    ///
+    /// This is the whole of #1084: `observe` sets `first_seen` on the call that
+    /// evaluates `now - first_seen >= dur`, so a rule whose condition is true
+    /// for one tick can never satisfy a non-zero debounce, and the next
+    /// `reconcile` drops the unpublished entry. `for_secs: 60` turned OOM
+    /// alerting off with no warning.
+    #[test]
+    fn an_edge_rule_spends_its_for_as_a_hold_not_a_debounce() {
+        let h = Hysteresis::Edge(Duration::from_secs(60));
+        assert_eq!(
+            h.for_duration(),
+            Some(Duration::ZERO),
+            "an edge rule must publish on its only observation"
+        );
+        assert_eq!(
+            h.reconcile_opts().recover_after,
+            Some(Duration::from_secs(60)),
+            "…and stay firing for `for` after it"
+        );
+    }
+
+    /// A level rule is unchanged: `for` is the debounce, and reconcile takes
+    /// the reporter's own default recovery window.
+    #[test]
+    fn a_level_rule_spends_its_for_as_a_debounce() {
+        let h = Hysteresis::Level(Duration::from_secs(60));
+        assert_eq!(h.for_duration(), Some(Duration::from_secs(60)));
+        assert_eq!(
+            h.reconcile_opts().recover_after,
+            None,
+            "a level rule must inherit the reporter's recovery window"
+        );
+    }
+
+    /// `for_secs: 0` — sysinfo's default — is byte-identical either way, so
+    /// the fix bites only for the operators #1084 is about.
+    #[test]
+    fn a_zero_for_is_the_same_decision_either_way() {
+        let edge = Hysteresis::Edge(Duration::ZERO);
+        let level = Hysteresis::Level(Duration::ZERO);
+        assert_eq!(edge.for_duration(), level.for_duration());
+        assert_eq!(
+            edge.reconcile_opts().recover_after,
+            Some(Duration::ZERO),
+            "an explicit immediate resolve, which is what ZERO recovery means"
+        );
     }
 }

@@ -8,6 +8,10 @@ description = "Zenoh sensor for systemd unit/service state and boot performance 
 license = "Apache-2.0"
 
 [dependencies]
+# `clock_gettime(CLOCK_MONOTONIC)` for the timer-elapse anchor (#1084):
+# systemd reports a monotonic-only timer's next elapse on that clock, and it
+# must be converted before it can be compared with wall time.
+libc = "0.2.189"
 zenkey = { workspace = true }
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
