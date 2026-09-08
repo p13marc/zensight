@@ -66,6 +66,24 @@
         // gNMI encoding: JSON, JSON_IETF, PROTO, ASCII
         encoding: "JSON_IETF",
 
+        // What a numeric leaf IS (#1077). gNMI carries no counter/gauge
+        // distinction, and OpenConfig types state/counters/in-octets and
+        // cpu/utilization/state/instant BOTH as uint64 — so the path decides.
+        // A `/counters/` segment is a counter; everything else is a gauge,
+        // because a level mistaken for a counter makes rate() produce garbage
+        // while a counter mistaken for a level is still the number the device
+        // sent. These two lists cover vendor trees that do it differently;
+        // gauge_paths wins.
+        // counter_paths: ["/stats/total-"],
+        // gauge_paths: ["/counters/queue-depth"],
+
+        // How far the DEVICE's clock may sit from this host's before the
+        // receive time is used instead (#1077). A switch that has not reached
+        // NTP after a reload publishes months out, and a `timestamp: 0` — the
+        // spec's "unset" — published every point at 1970-01-01. `0` disables
+        // the clamp and trusts the device unconditionally.
+        max_clock_skew_secs: 300,
+
         // Subscription paths
         subscriptions: [
           {

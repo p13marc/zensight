@@ -39,6 +39,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gNMI values are typed by their path, and the device's clock is bounded**
+  (#1077). Two guesses, both wrong in a way nothing downstream could question.
+
+  `Value::UintVal(u) => TelemetryValue::Counter(*u)` typed **every** unsigned
+  leaf as a counter. In OpenConfig `uint64` is the type of
+  `state/counters/in-octets` — a counter — and of
+  `cpu/utilization/state/instant`, `temperature/instant` and
+  `memory/state/used`, which are levels. A backend applying `rate()` to CPU
+  utilisation produces garbage, and every legitimate decrease looks like a
+  reset. The path decides now: a `/counters/` segment is a counter,
+  `counter_paths`/`gauge_paths` cover vendor trees, and everything else is a
+  **gauge** — the answer that costs least when it is wrong.
+
+  `notification.timestamp.checked_div(1_000_000).unwrap_or(0)` became the point's
+  timestamp with no bound and no fallback. The `unwrap_or(0)` was dead code —
+  `checked_div` by a nonzero constant never returns `None` — and the case it
+  looked like it guarded, `timestamp == 0`, is the gNMI spec's **unset**: it
+  published the point at 1970-01-01. A switch that has not reached NTP after a
+  reload, which is the common case, published months out. Both fall back to the
+  receive time now, with the skew logged, at a configurable
+  `max_clock_skew_secs` (default 300; `0` restores the old unconditional trust).
+
+  Not in scope, and noted in the docs: `skip_verify` is still logged and not
+  honoured, and path elements still reach the key unslugged — both are #1137.
+
+
 - **The SNMP implausible-rate guard can fire for a Counter32, and a multi-wrap
   link is marked** (#1074). Two halves of one problem.
 
