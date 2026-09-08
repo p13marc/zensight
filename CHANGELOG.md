@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`hot_secs` bounds the hot ring in seconds, which is what its name says**
+  (#1065). It was passed to `MetricStore::new` as an element *capacity* and
+  documented as "seconds of per-second samples held in memory, per series. Ten
+  minutes…" — true at 1 Hz and nowhere else. A sysinfo series at a 10 s cadence
+  held six hundred samples: **a hundred minutes, and ten times the memory** the
+  `budget_rss_mb: 256` / `MemoryMax=320M` pair was sized for. The ring is also
+  the first table the governor halves, so the ladder's headroom was mis-sized by
+  the same factor, and the sub-minute `range` path reads this ring — so "how far
+  back can a 10 s step go" was wrong by the interval too.
+
+  The ring is now bounded by **time and by elements, whichever binds first**:
+  the window is what a duration knob promises, the element ceiling (the same
+  number) stops a faster-than-1 Hz series spending the budget the other way.
+  Eviction is measured back from the newest *sample*, not the wall clock, so a
+  series that goes quiet keeps the window it had. `halve_hot_capacity` halves
+  both, or "ten minutes became five" stops being true for the store that is
+  actually bounded in minutes.
+
+- **`batch_size` is a live knob** (#1066). It was documented as "samples
+  buffered before a flush is triggered early", validated `> 0`, and read by
+  nothing: `flush_loop` selected on its interval tick and the shutdown watch,
+  and `MetricStore::record` appended to `pending` with no depth check. Under an
+  ingest burst the buffer grew for the whole `flush_interval_secs` window — the
+  exact pressure the RSS budget exists for, and the one lever documented to
+  relieve it. Ingest now raises a `BatchTrigger` once the depth is reached and
+  the flush loop selects on it alongside the tick.
+
 - **A bucket's `min`/`max` are bounds again — `f64`, and the store schema is
   v5** (#1061). They were `f32`, written with an `as` cast, which rounds to
   *nearest* rather than outward. So they were not bounds: `2^24 + 1` stored as

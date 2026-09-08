@@ -91,6 +91,7 @@ pub async fn run(
     store: SharedStore,
     counters: Arc<IngestCounters>,
     shedding: Arc<std::sync::atomic::AtomicBool>,
+    batch: BatchTrigger,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let subscriber =
@@ -118,7 +119,7 @@ pub async fn run(
                     tracing::warn!("historian: telemetry subscriber closed");
                     return;
                 };
-                record_sample(&sample, &store, &counters, &shedding);
+                record_sample(&sample, &store, &counters, &shedding, &batch);
             }
         }
     }
@@ -130,10 +131,11 @@ pub fn record_sample(
     store: &SharedStore,
     counters: &IngestCounters,
     shedding: &std::sync::atomic::AtomicBool,
+    batch: &BatchTrigger,
 ) {
     let key = sample.key_expr().as_str();
     match decode_telemetry(sample) {
-        Ok(point) => record_point(key, &point, store, counters, shedding),
+        Ok(point) => record_point(key, &point, store, counters, shedding, batch),
         Err(DecodeReject::NotTelemetry) => {
             counters.not_telemetry.fetch_add(1, Ordering::Relaxed);
         }
@@ -157,6 +159,7 @@ pub fn record_point(
     store: &SharedStore,
     counters: &IngestCounters,
     shedding: &std::sync::atomic::AtomicBool,
+    batch: &BatchTrigger,
 ) {
     use zensight_common::TelemetryValue as V;
 
@@ -198,6 +201,28 @@ pub fn record_point(
         }
     }
     counters.recorded.fetch_add(1, Ordering::Relaxed);
+    // Ask for an early flush while the lock is still held: reading the depth
+    // is a walk of the series map, and doing it here costs nothing a second
+    // lock would not cost more.
+    let deep = s.pending_sample_count() >= batch.size;
+    drop(s);
+    if deep {
+        batch.notify.notify_one();
+    }
+}
+
+/// The `batch_size` early-flush trigger (#1066): the configured depth, and the
+/// handle the flush loop waits on.
+///
+/// `notify_one` on a `Notify` the loop is parked in is a store, not a wake-up
+/// storm: a burst raises it many times and the loop flushes once, then finds
+/// the buffer shallow again.
+#[derive(Clone)]
+pub struct BatchTrigger {
+    /// Pending samples, across every series, that trigger a flush.
+    pub size: usize,
+    /// Raised when the depth is reached.
+    pub notify: Arc<tokio::sync::Notify>,
 }
 
 /// `(origin, subject)` for a telemetry key, from the key alone.
@@ -214,10 +239,18 @@ fn series_of(key: &str) -> Option<(String, String)> {
     Some((origin, parsed.subject.join("/")))
 }
 
-/// Flush pending samples to disk on an interval, off the runtime.
+/// Flush pending samples to disk on an interval — or early, when ingest says
+/// the buffer is deep enough (#1066).
+///
+/// `full` is the signal `record_point` raises once `batch_size` samples are
+/// waiting. Before it existed `batch_size` was a documented, validated knob
+/// that nothing read: under an ingest burst the pending buffer grew for the
+/// whole `flush_interval_secs` window — the exact pressure the RSS budget
+/// exists for, and the one lever documented to relieve it.
 pub async fn flush_loop(
     store: SharedStore,
     interval: Duration,
+    full: Arc<tokio::sync::Notify>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -233,6 +266,7 @@ pub async fn flush_loop(
                 }
             }
             _ = ticker.tick() => flush_once(&store).await,
+            _ = full.notified() => flush_once(&store).await,
         }
     }
 }
@@ -371,6 +405,15 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
+    /// A trigger no test reaches: `usize::MAX` means the depth is never met,
+    /// so an early flush cannot fire and the test is measuring what it says.
+    fn no_batch() -> BatchTrigger {
+        BatchTrigger {
+            size: usize::MAX,
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
     fn store() -> SharedStore {
         Arc::new(std::sync::Mutex::new(MetricStore::new(64, None)))
     }
@@ -409,6 +452,7 @@ mod tests {
             &s,
             &c,
             &shed,
+            &no_batch(),
         );
 
         let g = s.lock().unwrap();
@@ -456,6 +500,7 @@ mod tests {
                 &s,
                 &c,
                 &shed,
+                &no_batch(),
             );
             let g = s.lock().unwrap();
             let path = format!("h-0123456789ab/sysinfo/{subject}");
@@ -485,6 +530,7 @@ mod tests {
             &s,
             &c,
             &shed,
+            &no_batch(),
         );
         record_point(
             key,
@@ -492,6 +538,7 @@ mod tests {
             &s,
             &c,
             &shed,
+            &no_batch(),
         );
 
         assert_eq!(c.recorded.load(Ordering::Relaxed), 0);
@@ -523,6 +570,7 @@ mod tests {
             &s,
             &c,
             &shed,
+            &no_batch(),
         );
         record_point(
             &format!("{base}/system/load"),
@@ -530,6 +578,7 @@ mod tests {
             &s,
             &c,
             &shed,
+            &no_batch(),
         );
 
         assert_eq!(c.shed.load(Ordering::Relaxed), 1);
@@ -552,6 +601,7 @@ mod tests {
             &s,
             &c,
             &shed,
+            &no_batch(),
         );
         assert_eq!(c.recorded.load(Ordering::Relaxed), 2);
     }
@@ -588,6 +638,81 @@ mod tests {
         assert_eq!(c.dropped_total(), 28);
     }
 
+    /// `batch_size` triggers a flush before the interval elapses (#1066).
+    ///
+    /// It was documented as "samples buffered before a flush is triggered
+    /// early", validated `> 0`, and read by nothing: `flush_loop` ticked on
+    /// `flush_interval_secs` alone and `pending` grew for the whole window
+    /// under an ingest burst — the exact pressure the RSS budget exists for,
+    /// and the one lever documented to relieve it.
+    ///
+    /// A real redb file, because `pending` is only filled when there is
+    /// somewhere to flush *to*: a memory-only store buffers nothing, and the
+    /// test would pass without the fix.
+    #[tokio::test]
+    async fn a_deep_buffer_flushes_before_the_interval() {
+        let path = std::env::temp_dir().join(format!(
+            "zensight-batch-{}-{:?}.redb",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let ps = zensight_store::PersistentStore::open(&path).expect("open");
+        let st: SharedStore = Arc::new(std::sync::Mutex::new(MetricStore::new(64, Some(ps))));
+        let c = IngestCounters::default();
+        let shedding = AtomicBool::new(false);
+        let batch = BatchTrigger {
+            size: 10,
+            notify: Arc::new(tokio::sync::Notify::new()),
+        };
+        let (_tx, rx) = watch::channel(false);
+        // An hour-long flush interval: nothing but the depth signal can fire
+        // inside this test.
+        let handle = tokio::spawn(flush_loop(
+            st.clone(),
+            Duration::from_secs(3_600),
+            batch.notify.clone(),
+            rx,
+        ));
+        // `tokio::time::interval` completes its first tick immediately, so
+        // let that one drain before anything is buffered — otherwise the test
+        // measures the startup flush rather than the depth trigger.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let key = "v1/h-0123456789ab/telemetry/sysinfo/cpu/usage";
+        for ts in 0..9i64 {
+            let mut p = point(
+                Protocol::Sysinfo,
+                "cpu/usage",
+                TelemetryValue::Gauge(ts as f64),
+            );
+            p.timestamp = ts * 1_000;
+            record_point(key, &p, &st, &c, &shedding, &batch);
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            st.lock().unwrap().has_pending(),
+            "below batch_size nothing should have been flushed early"
+        );
+
+        for ts in 9..11i64 {
+            let mut p = point(
+                Protocol::Sysinfo,
+                "cpu/usage",
+                TelemetryValue::Gauge(ts as f64),
+            );
+            p.timestamp = ts * 1_000;
+            record_point(key, &p, &st, &c, &shedding, &batch);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !st.lock().unwrap().has_pending(),
+            "11 samples past a batch_size of 10 must flush before the interval"
+        );
+        handle.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// A recovered sample is recorded and counted as reordered, not lost
     /// (#1062). Before the ring sorted, it was appended after samples newer
     /// than itself and nothing anywhere said so.
@@ -604,7 +729,7 @@ mod tests {
                 TelemetryValue::Counter(ts as u64),
             );
             p.timestamp = ts;
-            record_point(key, &p, &st, &c, &shedding);
+            record_point(key, &p, &st, &c, &shedding, &no_batch());
         }
         assert_eq!(c.recorded.load(Ordering::Relaxed), 3);
         assert_eq!(c.reordered.load(Ordering::Relaxed), 1);

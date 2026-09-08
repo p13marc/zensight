@@ -68,7 +68,15 @@ async fn main() -> Result<()> {
         // half the rows in the file and most of its bytes to answer a question
         // nothing asks of them (#911). The config and the docs have said this
         // since #906; measuring is what made it true.
+        // `hot_secs` bounds the ring in *seconds*, which is what its name and
+        // its documentation row have always said. It used to be passed
+        // straight in as an element capacity, which is the same thing only at
+        // 1 Hz: a sysinfo series at 10 s held a hundred minutes and ten times
+        // the intended memory (#1065). The capacity ceiling stays at the same
+        // number so a faster-than-1 Hz series cannot spend the budget the
+        // other way.
         zensight_store::MetricStore::new(hc.store.hot_secs, persistent)
+            .with_hot_window(hc.store.hot_secs as u64)
             .persist_tiers(&[zensight_store::Tier::Minute, zensight_store::Tier::Hour]),
     ));
 
@@ -195,12 +203,17 @@ async fn main() -> Result<()> {
     // there is no longer a `serve_unimplemented` list to forget to shrink.
 
     // ── the loops ────────────────────────────────────────────────────────
+    let batch = ingest::BatchTrigger {
+        size: hc.store.batch_size,
+        notify: Arc::new(tokio::sync::Notify::new()),
+    };
     runner.spawn(ingest::run(
         runner.session().clone(),
         hc.key_expr.clone(),
         store.clone(),
         counters.clone(),
         shedding.clone(),
+        batch.clone(),
         shutdown_rx.clone(),
     ));
     let timeline_counters = Arc::new(zensight_historian::timeline::TimelineCounters::default());
@@ -220,6 +233,7 @@ async fn main() -> Result<()> {
     runner.spawn(ingest::flush_loop(
         store.clone(),
         Duration::from_secs(hc.store.flush_interval_secs),
+        batch.notify.clone(),
         shutdown_rx.clone(),
     ));
     runner.spawn(ingest::prune_loop(

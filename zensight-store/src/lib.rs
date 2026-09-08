@@ -739,23 +739,48 @@ pub enum Pushed {
     Dropped,
 }
 
-/// A fixed-capacity ring of samples, held in timestamp order. Appends are
-/// O(1); the oldest sample is dropped once capacity is reached (drop-oldest,
-/// bounded memory).
+/// A ring of samples held in timestamp order, bounded by **capacity and,
+/// optionally, by time** — whichever binds first.
+///
+/// The capacity bound is memory: drop-oldest at a fixed element count. The
+/// time bound is the one a *duration* knob promises. The historian's
+/// `hot_secs` was passed straight in as a capacity and documented as
+/// "seconds of per-second samples", which is true only at 1 Hz: a sysinfo
+/// series at 10 s held a hundred minutes and ten times the intended memory,
+/// against a `budget_rss_mb` sized for ten (#1065). Both bounds are kept
+/// because a *faster*-than-1 Hz series has the mirror-image problem, and the
+/// governor's lever is the element count.
 #[derive(Debug, Clone)]
 pub struct RingBuffer {
     buf: VecDeque<Sample>,
     capacity: usize,
+    /// Retain samples within this many milliseconds of the newest one held.
+    /// `None` leaves the ring bounded by capacity alone.
+    ///
+    /// Measured against the newest *sample*, not the wall clock: a series that
+    /// stops publishing keeps the window it had, and a test does not have to
+    /// own the clock to be deterministic.
+    window_ms: Option<i64>,
 }
 
 impl RingBuffer {
-    /// Create a ring with the given fixed capacity (minimum 1).
+    /// Create a ring with the given fixed capacity (minimum 1), unbounded in
+    /// time.
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
         Self {
             buf: VecDeque::with_capacity(capacity),
             capacity,
+            window_ms: None,
         }
+    }
+
+    /// A ring that also holds at most `window_secs` of history — the shape a
+    /// knob named in seconds actually promises (#1065).
+    pub fn with_window(capacity: usize, window_secs: u64) -> Self {
+        let mut r = Self::new(capacity);
+        r.window_ms = Some((window_secs.max(1) as i64).saturating_mul(1_000));
+        r
     }
 
     /// Insert a sample in timestamp order, dropping the oldest if at
@@ -772,6 +797,7 @@ impl RingBuffer {
                 self.buf.pop_front();
             }
             self.buf.push_back(sample);
+            self.evict_outside_window();
             return Pushed::Appended;
         }
         // Out of order. If the ring is full and this sample predates the
@@ -789,7 +815,37 @@ impl RingBuffer {
         } else {
             self.buf.insert(at, sample);
         }
+        self.evict_outside_window();
         Pushed::Reordered
+    }
+
+    /// Drop everything older than the retention window, measured back from the
+    /// newest sample held. Never empties the ring: the newest sample is always
+    /// within its own window, so at least one survives.
+    fn evict_outside_window(&mut self) {
+        let Some(window) = self.window_ms else { return };
+        let Some(newest) = self.buf.back().map(|s| s.ts) else {
+            return;
+        };
+        let floor = newest.saturating_sub(window);
+        while self.buf.front().is_some_and(|s| s.ts < floor) {
+            self.buf.pop_front();
+        }
+    }
+
+    /// Halve the retention window, if this ring has one. The governor's lever
+    /// is the element count; a ring bounded by time as well needs both moved
+    /// or "ten minutes became five" stops being true (#1065).
+    pub fn halve_window(&mut self) {
+        if let Some(w) = self.window_ms {
+            self.window_ms = Some((w / 2).max(1_000));
+            self.evict_outside_window();
+        }
+    }
+
+    /// The retention window in seconds, when this ring has one.
+    pub fn window_secs(&self) -> Option<u64> {
+        self.window_ms.map(|ms| (ms / 1_000).max(1) as u64)
     }
 
     /// Shrink to a smaller capacity, dropping the oldest samples that no
@@ -1782,6 +1838,10 @@ pub struct MetricStore {
     interner: MetricInterner,
     series: HashMap<MetricId, MetricSeries>,
     hot_capacity: usize,
+    /// Seconds of history each hot ring keeps, when the caller bounded it in
+    /// time as well as in elements (#1065). `None` is capacity-only, which is
+    /// what the GUI wants: its ring is sized in samples for a chart.
+    hot_window_secs: Option<u64>,
     persistent: Option<PersistentStore>,
     /// Which tiers a flush writes to disk. See
     /// [`persist_tiers`](Self::persist_tiers).
@@ -1823,6 +1883,7 @@ impl MetricStore {
             interner,
             series: HashMap::new(),
             hot_capacity: hot_capacity.max(1),
+            hot_window_secs: None,
             persistent,
             persist_tiers: Tier::ALL.to_vec(),
             unsaved_paths: Vec::new(),
@@ -1855,6 +1916,30 @@ impl MetricStore {
             }
         };
         Self::new(DEFAULT_HOT_CAPACITY, persistent)
+    }
+
+    /// Bound every hot ring to `secs` of history as well as to its element
+    /// capacity, whichever binds first (#1065).
+    ///
+    /// The historian's `hot_secs` reached [`RingBuffer::new`] as a raw element
+    /// count and was documented as "seconds of per-second samples" — true at
+    /// 1 Hz and nowhere else. A sysinfo series at a 10 s cadence held a
+    /// hundred minutes of history and ten times the intended memory, against a
+    /// `budget_rss_mb` sized for ten minutes; and because the ring is the
+    /// first table the governor halves, the whole ladder's headroom was
+    /// mis-sized by the same factor. The capacity ceiling stays, so a series
+    /// publishing *faster* than 1 Hz cannot spend the budget the other way.
+    pub fn with_hot_window(mut self, secs: u64) -> Self {
+        self.hot_window_secs = Some(secs.max(1));
+        for series in self.series.values_mut() {
+            series.hot = RingBuffer::with_window(self.hot_capacity, secs.max(1));
+        }
+        self
+    }
+
+    /// The hot ring's retention window in seconds, when it has one.
+    pub fn hot_window_secs(&self) -> Option<u64> {
+        self.hot_window_secs
     }
 
     /// The series path for a point published by `origin` on `subject`:
@@ -1899,8 +1984,12 @@ impl MetricStore {
             value: value.as_f64(),
         };
         let capacity = self.hot_capacity;
+        let window = self.hot_window_secs;
         let series = self.series.entry(id).or_insert_with(|| MetricSeries {
-            hot: RingBuffer::new(capacity),
+            hot: match window {
+                Some(secs) => RingBuffer::with_window(capacity, secs),
+                None => RingBuffer::new(capacity),
+            },
             pending: Vec::new(),
         });
         let pushed = series.hot.push(sample);
@@ -1920,6 +2009,17 @@ impl MetricStore {
     /// Whether there are pending samples awaiting flush.
     pub fn has_pending(&self) -> bool {
         self.series.values().any(|s| !s.pending.is_empty())
+    }
+
+    /// Samples buffered across every series, awaiting the next flush.
+    ///
+    /// The historian's `batch_size` is "samples buffered before a flush is
+    /// triggered early", and for a long time nothing could answer the
+    /// question the knob asks — `pending` is per-series and private, so the
+    /// flush loop had only its own tick to go on and the buffer grew for the
+    /// whole window under an ingest burst (#1066).
+    pub fn pending_sample_count(&self) -> usize {
+        self.series.values().map(|s| s.pending.len()).sum()
     }
 
     /// Drain pending samples and build a persist batch across all tiers,
@@ -2144,8 +2244,13 @@ impl MetricStore {
     /// questions, which is a worse failure than holding one sample.
     pub fn halve_hot_capacity(&mut self) -> usize {
         self.hot_capacity = (self.hot_capacity / 2).max(1);
+        // A ring bounded in time as well needs both halved, or the sentence
+        // the log line prints — "ten minutes became five" — stops being true
+        // for the store that is actually bounded in minutes (#1065).
+        self.hot_window_secs = self.hot_window_secs.map(|s| (s / 2).max(1));
         for series in self.series.values_mut() {
             series.hot.shrink_to(self.hot_capacity);
+            series.hot.halve_window();
         }
         self.hot_capacity
     }
@@ -3310,6 +3415,71 @@ mod tests {
         assert!(got[0].1.max >= v, "max {} must bound {v}", got[0].1.max);
         assert!(got[0].1.min <= v, "min {} must bound {v}", got[0].1.min);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// `hot_secs` bounds the ring in seconds, not in samples (#1065).
+    ///
+    /// It reached `RingBuffer::new` as an element capacity and was documented
+    /// as "seconds of per-second samples, ten minutes" — true at 1 Hz and
+    /// nowhere else. A sysinfo series at a 10 s cadence held six hundred
+    /// samples: a hundred minutes, and ten times the memory the historian's
+    /// `budget_rss_mb` was sized for.
+    #[test]
+    fn a_slow_series_holds_the_seconds_it_was_configured_for() {
+        // hot_secs: 60, a series publishing every 10 s.
+        let mut store = MetricStore::new(60, None).with_hot_window(60);
+        for i in 0..30i64 {
+            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 10_000));
+        }
+        let held = store.hot_samples(&format!("{ORIGIN}/sysinfo/cpu"));
+        assert!(
+            held.len() <= 7,
+            "60 s at a 10 s cadence is at most 7 samples, held {}",
+            held.len()
+        );
+        let span = held.last().unwrap().ts - held.first().unwrap().ts;
+        assert!(
+            span <= 60_000,
+            "the ring spans at most its window, got {span} ms"
+        );
+    }
+
+    /// The element ceiling still binds, so a series publishing *faster* than
+    /// 1 Hz cannot spend the budget in the other direction (#1065).
+    #[test]
+    fn a_fast_series_is_still_bounded_by_the_element_ceiling() {
+        let mut store = MetricStore::new(10, None).with_hot_window(60);
+        for i in 0..100i64 {
+            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 100));
+        }
+        assert_eq!(
+            store.hot_samples(&format!("{ORIGIN}/sysinfo/cpu")).len(),
+            10
+        );
+    }
+
+    /// The governor's lever moves both bounds, or "ten minutes became five"
+    /// stops being true for the store that is actually bounded in minutes
+    /// (#1065).
+    #[test]
+    fn halving_moves_the_window_as_well_as_the_capacity() {
+        let mut store = MetricStore::new(600, None).with_hot_window(600);
+        for i in 0..300i64 {
+            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 1_000));
+        }
+        assert_eq!(store.hot_window_secs(), Some(600));
+        assert_eq!(
+            store.hot_samples(&format!("{ORIGIN}/sysinfo/cpu")).len(),
+            300
+        );
+        store.halve_hot_capacity();
+        assert_eq!(store.hot_window_secs(), Some(300));
+        let held = store.hot_samples(&format!("{ORIGIN}/sysinfo/cpu"));
+        let span = held.last().unwrap().ts - held.first().unwrap().ts;
+        assert!(
+            span <= 300_000,
+            "the halved window is enforced, got {span} ms"
+        );
     }
 
     /// The governor's evict hook (#906): halving the ring must actually drop

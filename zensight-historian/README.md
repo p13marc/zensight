@@ -145,9 +145,12 @@ bundle OOM-killed one on 2026-08-17.
 - `resources.budget_rss_mb` declares the budget. Absent means **undeclared**,
   never "fine": with no budget there is no ladder and no `sensor-budget` alert.
 - The **hot ring** is the evictable table. Under pressure the governor halves
-  its capacity, which is the only thing a per-series ring can actually give back
-  — "ten minutes became five" is a sentence an operator can act on, where
-  "freed 3.7 MiB" is not.
+  it — both its retention window and its element ceiling, which is the only
+  thing a per-series ring can actually give back — so "ten minutes became five"
+  is a sentence an operator can act on, where "freed 3.7 MiB" is not. The
+  window is what makes that sentence true for a series that does not publish at
+  1 Hz; before #1065 `hot_secs` was a sample count, and a 10 s-interval series
+  held a hundred minutes.
 - **Ingest** is the degradable work, and it sheds **booleans first**: a 0/1 step
   series is the cheapest history to lose and the easiest to re-derive, because
   the alert that made it interesting is on the bus anyway.
