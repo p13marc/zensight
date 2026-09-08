@@ -46,13 +46,46 @@ fn isolated() -> zenoh::Config {
     c
 }
 
-fn port() -> u16 {
+/// A port in the ephemeral range, varied per attempt (#1170).
+///
+/// Every draw is a guess: the range is shared with the runner's own outgoing
+/// connections and with every other test binary `cargo test --workspace`
+/// starts at the same moment. Which is why the caller retries — see
+/// [`listening_session`].
+fn candidate_port(attempt: u16) -> u16 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .subsec_nanos() as u16;
-    49152 + ((std::process::id() as u16).wrapping_add(n) % 16000)
+    49152
+        + ((std::process::id() as u16)
+            .wrapping_add(n)
+            .wrapping_add(attempt.wrapping_mul(131)))
+            % 16000
+}
+
+/// A listening peer on a free loopback port, and the port it got (#1170).
+///
+/// The five tests in this file run concurrently in one binary and used to draw
+/// from one `port()` with fixed `+1`/`+2` offsets, then `expect` the open — so
+/// two draws landing within the offset spread turned into
+/// `Address already in use` and a red `test` job on a PR that had touched
+/// neither this crate nor any port. Every sibling rig already retries
+/// (`zensight-correlator/tests/*`) or probes and hands out
+/// (`zensight-sensor-logs/tests/harness`); this one did neither.
+async fn listening_session() -> (Arc<zenoh::Session>, u16) {
+    for attempt in 0..8 {
+        let p = candidate_port(attempt);
+        let mut listen = isolated();
+        listen
+            .insert_json5("listen/endpoints", &format!("[\"tcp/127.0.0.1:{p}\"]"))
+            .unwrap();
+        if let Ok(s) = zenoh::open(listen).await {
+            return (Arc::new(s), p);
+        }
+    }
+    panic!("no free loopback port after 8 attempts");
 }
 
 fn entity(id: &str, host: &str) -> HostEntity {
@@ -95,12 +128,7 @@ fn host_id() -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unchanged_pass_publishes_nothing() {
-    let p = port();
-    let mut listen = isolated();
-    listen
-        .insert_json5("listen/endpoints", &format!("[\"tcp/127.0.0.1:{p}\"]"))
-        .unwrap();
-    let controller = Arc::new(zenoh::open(listen).await.expect("controller session"));
+    let (controller, p) = listening_session().await;
 
     let mut conn = isolated();
     conn.insert_json5("connect/endpoints", &format!("[\"tcp/127.0.0.1:{p}\"]"))
@@ -164,12 +192,7 @@ async fn an_unchanged_pass_publishes_nothing() {
 /// reverts to its file baselines.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_silent_catalog_deletes_nothing_ever() {
-    let p = port().wrapping_add(1);
-    let mut listen = isolated();
-    listen
-        .insert_json5("listen/endpoints", &format!("[\"tcp/127.0.0.1:{p}\"]"))
-        .unwrap();
-    let controller = Arc::new(zenoh::open(listen).await.expect("controller session"));
+    let (controller, _p) = listening_session().await;
 
     let policy: Policy = json5::from_str(POLICY).expect("policy parses");
     let present = compile(&policy, &[entity("web01", &host_id())]);
@@ -204,12 +227,7 @@ async fn a_silent_catalog_deletes_nothing_ever() {
 /// sensor to its file baseline at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_document_is_deleted_only_after_the_grace() {
-    let p = port().wrapping_add(1);
-    let mut listen = isolated();
-    listen
-        .insert_json5("listen/endpoints", &format!("[\"tcp/127.0.0.1:{p}\"]"))
-        .unwrap();
-    let controller = Arc::new(zenoh::open(listen).await.expect("controller session"));
+    let (controller, _p) = listening_session().await;
 
     let policy: Policy = json5::from_str(POLICY).expect("policy parses");
     let fleet = vec![entity("web01", &host_id())];
@@ -262,12 +280,7 @@ async fn a_document_is_deleted_only_after_the_grace() {
 /// quietly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_fleet_is_read_from_the_catalog_seed() {
-    let p = port().wrapping_add(2);
-    let mut listen = isolated();
-    listen
-        .insert_json5("listen/endpoints", &format!("[\"tcp/127.0.0.1:{p}\"]"))
-        .unwrap();
-    let catalog = Arc::new(zenoh::open(listen).await.expect("catalog session"));
+    let (catalog, p) = listening_session().await;
 
     // A stand-in catalog: answers the entity selector storage-shaped.
     let selector = zensight_common::keyexpr::entities_query_key();
