@@ -137,6 +137,34 @@ channel (`<alert_key>` = 16-hex FNV-1a of rule + labels; firing = Put, resolved
   `restart_storm`'s logic where `NRestarts` cannot see: a timer-triggered
   oneshot never restarts, so failed *runs* are counted by `InvocationID`
   changes and judged by `Service.Result`).
+
+  **`systemd-restart-storm` counts over a genuinely sliding window, and its
+  count is in the summary** (#1083). Two bugs, both of which made the rule
+  blind to a restart loop — the one shape it exists to notice.
+
+  The count was a *label*, and labels are alert identity: a count that grows
+  every sweep minted a new key every sweep, each with a fresh `first_seen`,
+  each retired unpublished by the next `reconcile`. With `for` = 15 s and a 15 s
+  poll the alert could only fire once the count **plateaued** for two sweeps —
+  that is, after the loop had stopped. `systemd-timer-overdue` was fixed for
+  exactly this and carries the reasoning; the storm rule was missed. The count
+  now rides the summary; a `threshold` label is added, which is configuration
+  and therefore stable across sweeps.
+
+  And the window was **tumbling**, not sliding: a `{ start, base }` pair
+  rebased wholesale at fixed boundaries, so a unit restarting twice every 200 s
+  against a 300 s window and a threshold of 3 never fired, and a burst
+  straddling a boundary was split and reached the threshold in neither half.
+  [`restart_window::RestartWindow`](../src/restart_window.rs) keeps one bounded
+  entry per poll that saw the counter move and sums what is still inside the
+  window. The sentinel's `expect-restart-rate`, whose own doc comment also
+  claimed "sliding", shares it.
+
+  **Upgrade is self-healing, no manual sweep** (unlike #737). An old document
+  carries `restarts` in its labels, so the new build's `alert_key()` over the
+  old *payload* still equals the key it arrived on: `adopt_persisted` adopts it,
+  the first `reconcile` of the rule does not list that key, and it resolves and
+  tombstones itself — #882's mechanism doing its job.
 - **Sentinel** (#277, `systemd.expectations`): declarative service-health
   expectations, hot-swappable via a GET on `@rpc/systemd/expectations/set`.
   Timer expectations come in two strengths (#824): `within_secs` proves the

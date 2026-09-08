@@ -66,6 +66,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   procedures that fuse or split hosts — audited as `refused_by=error/gated`
   while `ack`/`silence` beside them named `allow_operator_assertions`.
 
+- **`systemd-restart-storm` can fire during a storm** (#1083). Two bugs, and
+  both made the rule blind to a restart loop — the one shape it exists to
+  notice.
+
+  The growing count was in a **label**, and labels are alert identity:
+  `alert_key()` hashes every one that is not host-scoped. Sweep N's delta of 3
+  minted key K₃ with a fresh `first_seen`; sweep N+1's delta of 4 minted a
+  *different* key K₄ with its own clock, and `reconcile` retired the unpublished
+  K₃. With `for` = 15 s and a 15 s poll the alert could fire only once the count
+  **plateaued** for two sweeps — after the loop had ended. `systemd-timer-overdue`
+  in the same file was fixed for exactly this and carries the reasoning in a
+  comment; this rule was missed. The count rides the summary now (where it
+  already was), and a `threshold` label is added — configuration, so stable
+  across sweeps.
+
+  The window was **tumbling**, not the sliding one both its doc comments
+  claimed. A `{ start, base }` pair rebases wholesale at fixed boundaries, so a
+  unit restarting twice every 200 s against a 300 s window and a threshold of 3
+  never fires, and a burst straddling a boundary is split and reaches the
+  threshold in neither half. `restart_window::RestartWindow` keeps one bounded
+  entry per poll that saw the counter move and sums what is still inside the
+  window; the sentinel's `expect-restart-rate`, which had its own copy of the
+  same bug and the same wrong doc comment, shares it. The storm map also
+  forgets units that leave the watchlist, as `consecutive_failures` already did.
+
+  **The re-key is self-healing.** An old document carries `restarts` in its
+  labels, so the new build's `alert_key()` over the old *payload* still equals
+  the key it arrived on: `adopt_persisted` adopts it, the first `reconcile` does
+  not list it, and it resolves and tombstones itself (#882's mechanism). No
+  manual sweep, unlike #737.
+
 
 - **A `for:` an operator set no longer silently disables edge-triggered rules,
   and a monotonic timer can be overdue** (#1084). Two halves of "the rule that
