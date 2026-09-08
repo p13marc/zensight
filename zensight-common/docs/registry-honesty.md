@@ -1,4 +1,4 @@
-# Registry honesty — the five checks, and what none of them checks
+# Registry honesty — the six checks, and what none of them checks
 
 RFC 08 §6.1 is one sentence:
 
@@ -10,11 +10,11 @@ fleet *as truth*, and a generic explorer has nothing else to go on. An entry
 for a surface the code does not serve is not aspirational — it is a lie
 transmitted to every consumer that asks.
 
-Nothing enforces that sentence by itself. Five checks do, between them, and
+Nothing enforces that sentence by itself. Six checks do, between them, and
 they cover different halves in different places. This page says which is which,
 and — more usefully — what is still not covered.
 
-## The five checks
+## The six checks
 
 | Check | Direction | When | Covers |
 |---|---|---|---|
@@ -23,6 +23,7 @@ and — more usefully — what is still not covered.
 | [`served`](../src/served.rs) | registered ⊆ served | run time, before `alive` | **procedures** |
 | [`registry_audit`](../src/registry_audit.rs) | registered ⊆ emittable | CI | **subjects** |
 | [`served::check_write_coverage`](../src/served.rs) | registered **write** ⊆ audited | run time, before `alive` | **procedures** |
+| [`registry::kind_matches`](../src/registry.rs) | published **kind** = declared | run time, every put (debug) | **subjects** |
 
 The fifth is #957's, and it is a different question from the third: the third
 asks whether a declared procedure is *answered at all*, the fifth whether a
@@ -36,6 +37,46 @@ second. A registry may be a strict superset of what the code does and every
 published key still builds — and that superset is exactly what `introspect`
 ships. The #453 audit found seven such surfaces advertised by builds that
 served none of them.
+
+## The sixth check: the value is the kind the registry declares (#1071)
+
+The first five are all about *names*: is this subject registered, is this
+procedure served, is this write audited. None of them could say what a number
+**is**.
+
+That gap had a bill. `zensight-sensor-container` published `restart_count`,
+`cpu_usage_usec_total`, `cpu_throttled_usec_total`, `oom_kills_total` and
+`memory_max_events_total` as `TelemetryValue::Gauge`. Both exporters derive the
+wire type from the variant and nothing else
+(`prometheus/src/mapping.rs::from_value`, `otel/src/metrics.rs::from_value`), so
+`container_…_oom_kills_total` was scraped as `# TYPE … gauge` and exported to
+OTLP as a Gauge — which no backend can `rate()` or delta-aggregate. Every
+sibling sensor happened to get it right. `checked_point` validated
+*registration* and had nothing to check *semantics* against, so nothing in the
+tree could have noticed.
+
+zenkey 0.8.0 closed the upstream half: `kind = "counter" | "gauge" | "text" |
+"bool"` on `SubjectDecl` (RFC 08 §2 v1.32), carried into the generated
+`Subject::kind()` and into `registry.lock` as an optional sixth column. Adding
+a `kind` is **stale** (regenerate the lock); changing or removing one is
+**incompatible** (retire and add a sibling) — so each declaration has to be
+right the first time.
+
+`registry::kind_matches(producer, metric, &value)` is the local half, run from
+each crate's `checked_point`. Two asymmetries are deliberate:
+
+- **An undeclared subject is unjudged, never wrong.** Most subjects carry no
+  `kind` yet; the check returns `Ok(())` for them, which is the same asymmetry
+  zenkey-fleet's `kind-mismatch` doctor check uses on a live bus.
+- **`bool` accepts a `Gauge`.** A 0/1 step series is legitimately published
+  either way today and both render as a gauge; forcing the variant is a
+  separate change with its own wire note.
+
+`container.toml` is the first slice declared. The remaining ~300 subjects are a
+mechanical pass, and one worth doing carefully: the CI conformance job runs
+`sysinfo logs systemd hostspec probe` against a live bus, where zenkey-fleet
+0.13.0's `kind-mismatch` judge reports an Error per disagreeing key — so a
+declaration and its publish site have to land in the same commit.
 
 ## Why the subject half cannot be a runtime check
 
@@ -154,7 +195,7 @@ Also watch for mappers that pick a *name* from an argument: netring's
 `shed_points` chooses `sampled_total` or `new_flows_total` by policy, so one
 call covers one family. Call it once per branch.
 
-## What none of the four checks checks: does the payload conform?
+## What none of the six checks checks: does the payload conform?
 
 Every check above is about *names* — is this subject registered, is this
 procedure served, does this type appear in the type table. None of them looks at

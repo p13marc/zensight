@@ -189,6 +189,79 @@ async fn test_full_flow_counter_metrics() {
     assert!(output.contains("1000000"), "Should contain counter value");
 }
 
+/// The container sensor's cumulative counters are scraped as counters (#1071).
+///
+/// They went out as `TelemetryValue::Gauge` for a release — every one of them,
+/// including the four whose names end in `_total`. This exporter derives the
+/// wire type from the variant and nothing else, so
+/// `container_…_oom_kills_total` was served as `# TYPE … gauge`, which no
+/// backend can `rate()` and no OTLP consumer can delta-aggregate.
+///
+/// The suite could not have caught it: every other test here builds its points
+/// by hand and never touches a sensor's mapper. This one builds them the way
+/// `zensight-sensor-container`'s poller does, so the variant under test is the
+/// one that ships.
+#[tokio::test]
+async fn container_cumulative_counters_are_scraped_as_counters() {
+    let collector = create_collector();
+    let labels: HashMap<String, String> = [("container".to_string(), "caddy".to_string())]
+        .into_iter()
+        .collect();
+
+    for (metric, value) in [
+        ("caddy/oom_kills_total", TelemetryValue::Counter(2)),
+        ("caddy/restart_count", TelemetryValue::Counter(7)),
+        ("caddy/cpu_usage_usec_total", TelemetryValue::Counter(9_000)),
+        (
+            "caddy/cpu_throttled_usec_total",
+            TelemetryValue::Counter(11),
+        ),
+        ("caddy/memory_max_events_total", TelemetryValue::Counter(13)),
+    ] {
+        rec(
+            &collector,
+            make_point("host01", Protocol::Container, metric, value, labels.clone()),
+        );
+    }
+    // A level from the same sensor, so the assertion is that the two are told
+    // apart rather than that everything became a counter.
+    rec(
+        &collector,
+        make_point(
+            "host01",
+            Protocol::Container,
+            "caddy/memory_bytes",
+            TelemetryValue::Gauge(4096.0),
+            labels.clone(),
+        ),
+    );
+
+    let output = collector.render();
+    // `restart_count` is the one whose exported NAME moves: the exposition
+    // rules append `_total` to a counter that does not already end in it, so a
+    // dashboard keyed on `zensight_container_restart_count` needs re-pointing.
+    // The other four already carried the suffix and only their TYPE changes.
+    assert!(
+        output.contains("# TYPE zensight_container_restart_count_total counter"),
+        "restart_count gains the exposition's counter suffix. Output: {output}"
+    );
+    for name in [
+        "zensight_container_oom_kills_total",
+        "zensight_container_cpu_usage_usec_total",
+        "zensight_container_cpu_throttled_usec_total",
+        "zensight_container_memory_max_events_total",
+    ] {
+        assert!(
+            output.contains(&format!("# TYPE {name} counter")),
+            "{name} is cumulative and must be TYPE counter. Output: {output}"
+        );
+    }
+    assert!(
+        output.contains("# TYPE zensight_container_memory_bytes gauge"),
+        "a level stays a gauge. Output: {output}"
+    );
+}
+
 /// A text point is exposed as an info-style **gauge**, under an `_info` family,
 /// with the text in a label named for the subject leaf.
 ///

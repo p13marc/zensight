@@ -2,7 +2,9 @@
 # Regenerate with `zenctl registry lock <dir>` after additive edits;
 # an incompatible edit (changed type/class/kind/shape on an existing
 # path) is refused — retire through [[deprecated]] and add a sibling
-# instead (RFC 08 §3).
+# instead (RFC 08 §3). A subject line's optional sixth column is its
+# declared `kind` (RFC 08 §2, v1.32): adding one is additive,
+# changing or removing one is incompatible.
 procedure	bmc	describe	read	-	SchemaSet
 procedure	bmc	introspect	read	-	RegistrySlice
 procedure	bmc	thresholds	read	-	ThresholdsConfig
@@ -216,33 +218,33 @@ subject	catalog	silence/{id}	state	Silence
 subject	container	alert/{alert_key}	state	Alert
 subject	container	applied/{topic}	state	AppliedConfig
 subject	container	container/{name}	state	ContainerInfo
-subject	container	containers/running	telemetry	TelemetryPoint
-subject	container	containers/total	telemetry	TelemetryPoint
-subject	container	containers/unhealthy	telemetry	TelemetryPoint
+subject	container	containers/running	telemetry	TelemetryPoint	gauge
+subject	container	containers/total	telemetry	TelemetryPoint	gauge
+subject	container	containers/unhealthy	telemetry	TelemetryPoint	gauge
 subject	container	errors	state	ErrorReport
 subject	container	evidence/device/{device}	state	HostEvidence
 subject	container	evidence/relation/{relation_id}	state	RelationshipEvidence
 subject	container	evidence/self	state	HostEvidence
 subject	container	health	state	HealthSnapshot
 subject	container	sensor	state	SensorInfo
-subject	container	{name}/cpu_pressure_avg10	telemetry	TelemetryPoint
-subject	container	{name}/cpu_throttled_usec_total	telemetry	TelemetryPoint
-subject	container	{name}/cpu_usage_usec_total	telemetry	TelemetryPoint
-subject	container	{name}/exit_code	telemetry	TelemetryPoint
-subject	container	{name}/healthy	telemetry	TelemetryPoint
-subject	container	{name}/image_behind_upstream	telemetry	TelemetryPoint
-subject	container	{name}/io_pressure_avg10	telemetry	TelemetryPoint
-subject	container	{name}/memory_bytes	telemetry	TelemetryPoint
-subject	container	{name}/memory_max_bytes	telemetry	TelemetryPoint
-subject	container	{name}/memory_max_events_total	telemetry	TelemetryPoint
-subject	container	{name}/memory_peak_bytes	telemetry	TelemetryPoint
-subject	container	{name}/memory_pressure_avg10	telemetry	TelemetryPoint
-subject	container	{name}/memory_ratio	telemetry	TelemetryPoint
-subject	container	{name}/oom_kills_total	telemetry	TelemetryPoint
-subject	container	{name}/pids	telemetry	TelemetryPoint
-subject	container	{name}/restart_count	telemetry	TelemetryPoint
-subject	container	{name}/running	telemetry	TelemetryPoint
-subject	container	{name}/uptime_secs	telemetry	TelemetryPoint
+subject	container	{name}/cpu_pressure_avg10	telemetry	TelemetryPoint	gauge
+subject	container	{name}/cpu_throttled_usec_total	telemetry	TelemetryPoint	counter
+subject	container	{name}/cpu_usage_usec_total	telemetry	TelemetryPoint	counter
+subject	container	{name}/exit_code	telemetry	TelemetryPoint	gauge
+subject	container	{name}/healthy	telemetry	TelemetryPoint	gauge
+subject	container	{name}/image_behind_upstream	telemetry	TelemetryPoint	gauge
+subject	container	{name}/io_pressure_avg10	telemetry	TelemetryPoint	gauge
+subject	container	{name}/memory_bytes	telemetry	TelemetryPoint	gauge
+subject	container	{name}/memory_max_bytes	telemetry	TelemetryPoint	gauge
+subject	container	{name}/memory_max_events_total	telemetry	TelemetryPoint	counter
+subject	container	{name}/memory_peak_bytes	telemetry	TelemetryPoint	gauge
+subject	container	{name}/memory_pressure_avg10	telemetry	TelemetryPoint	gauge
+subject	container	{name}/memory_ratio	telemetry	TelemetryPoint	gauge
+subject	container	{name}/oom_kills_total	telemetry	TelemetryPoint	counter
+subject	container	{name}/pids	telemetry	TelemetryPoint	gauge
+subject	container	{name}/restart_count	telemetry	TelemetryPoint	counter
+subject	container	{name}/running	telemetry	TelemetryPoint	gauge
+subject	container	{name}/uptime_secs	telemetry	TelemetryPoint	gauge
 subject	desired	{host}/bmc/thresholds	state	ThresholdsConfig
 subject	desired	{host}/container/thresholds	state	ThresholdsConfig
 subject	desired	{host}/gnmi/thresholds	state	ThresholdsConfig
