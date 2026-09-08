@@ -78,9 +78,30 @@ exactly the person who cares which.
 
 Values that are not plain tokens are **hex-encoded**, auditd's own convention
 for untrusted strings: a unit name containing `verdict=executed` must not be
-able to forge a second field. Caller-supplied values are capped at 256 bytes,
-so nobody can push the datagram past the kernel's `MAX_AUDIT_MESSAGE_LENGTH`
-(8970), where it is dropped without a word.
+able to forge a second field.
+
+**The size rule, exactly** (#1086). Every value is capped at **256 bytes** — a
+byte budget, cut on a character boundary, with a `...` marker — and the whole
+line is capped at **8 000 bytes**, under the kernel's
+`MAX_AUDIT_MESSAGE_LENGTH` (8970), where a datagram is dropped without a word.
+Both caps are applied where the line is *rendered*, so no caller can bypass
+them: `target` and `error` are plain public fields that callers assign
+directly, and `artifact/request` takes its `target` verbatim out of caller
+JSON. A line that had to drop a field says `truncated=1`; `res` and `ts` are
+never dropped, because those are what a reader selects on.
+
+The three things that were wrong before, each of which produced the silent
+audit path this module exists to prevent:
+
+- the cap was *checked* in bytes and *applied* in characters, so 256 four-byte
+  characters passed at 1 024 bytes — 2 048 once hex-encoded;
+- `target` and `error` were never capped at all, so a bus caller sending
+  `{"kind": "<20 KB>"}` produced a ~40 KB line;
+- the kernel's ack was read for the **first record only**, so a refusal was
+  never noticed, later acks accumulated unread in the socket buffer, and
+  `emit` reported success for records that were dropped. Every record carries
+  `NLM_F_ACK`, so every one is now read back and **matched by sequence
+  number** — an ack attributed to the wrong record is worse than none.
 
 ## What this does NOT say
 
