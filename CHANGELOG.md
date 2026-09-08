@@ -123,6 +123,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts both: `reordered` (recorded, at its place) and `too_old` (dropped, and
   in `dropped_total`), the first reaching `@rpc/historian/stats` as
   `reordered_total`. Neither had a counter anywhere before.
+- **`zensight-desired`'s e2e rig retries its loopback port** (#1170). Its five
+  tests run concurrently in one binary and drew from one `port()` with fixed
+  `+1`/`+2` offsets, then `expect`ed the open — so two draws landing within the
+  offset spread turned into `Address already in use` and a red `test` job on a
+  PR that had touched neither this crate nor any port. Every sibling rig already
+  retries (`zensight-correlator/tests/*`) or probes and hands out
+  (`zensight-sensor-logs/tests/harness`, #1004); this one did neither.
 
 ### Changed
 
