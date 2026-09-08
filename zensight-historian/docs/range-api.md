@@ -69,20 +69,53 @@ is every coarse query. A counter reset restarts the accumulation from zero
 `raw` is every stored bucket, unreduced — still bounded by `limit`. "Raw" is not
 "unbounded".
 
-### Bounds and paging
+### Bounds, paging and coverage
 
 An unbounded query against a year of history is a denial of service with extra
-steps. `limit` caps the points across all series; `truncated` and `next_cursor`
-say when it bit. **A short page or a null cursor is the end** — the same
-contract `@rpc/logs/events` has.
+steps. `limit` caps the points across all series.
+
+The reply carries the **RFC 05 §3.2 envelope fields** (#1067):
+
+| Field | Says |
+|---|---|
+| `partial` | The answer is less than the question — the `limit` bit, *or* the tier could not cover the window. Always present. |
+| `next_cursor` | Where to resume, or `null` at the end. |
+| `scanned` | Buckets read to build this page, so an expensive empty answer can be told from a cheap one. |
+| `covers_from` | The oldest instant the chosen tier could have answered for, as an **RFC 3339 string** — present only when that is later than `from`. |
+| `truncated` | The `limit` bit. Superseded by `partial`; kept for one release. |
+
+`partial` is the marker, and it is the one that matters:
+`zenkey_fleet::CallAnswer::page_signal()` — what `zenctl call` and the RFC 13
+judges read — keys off a boolean field spelled exactly that and nothing else.
+For as long as `truncated` was the only signal, this reply was not a *bad*
+envelope, it was not seen as one at all.
+
+**Coverage is not truncation.** A sub-minute `step` is served from the hot ring,
+which holds minutes. A caller asking twenty-four hours at `step=10` used to get
+whatever the ring held with `truncated: false` and `next_cursor: null` — and a
+null cursor is the end, as this page says two paragraphs down. The reply echoes
+`from`/`to` unchanged, so a chart drew a 24-hour axis with ten minutes of data
+at the right edge and no gap marker. `covers_from` is that statement, and it is
+a string because the generic reader takes it with `as_str()`: epoch millis is
+read as *absent*, silently, by exactly the tooling that would report the gap.
+
+`partial: true` with `next_cursor: null` is a contract violation an observer MAY
+report — **unless** the reply states `covers_from`. A gap in time has no next
+page; it says why instead.
 
 The cursor is opaque and must not be parsed: pass back exactly what the reply
 gave. A malformed or stale one restarts at the beginning rather than erroring —
-a cursor from a previous build should cost a repeated page, not a failed query.
+a cursor from a previous build should cost a repeated page, not a failed query,
+and that now includes the positional cursors this procedure issued before
+#1068.
 
-Series are ordered by `(origin, producer, subject)` so a cursor means the same
-thing on the next call; an unstable order would make paging silently skip and
-repeat as the fleet interned new series between pages.
+Series are ordered by `(origin, producer, subject)`, and **the cursor is a value
+in that order**, not a position in it (#1068). Sorting keeps the order stable,
+not the indices: a series interned before the cut used to shift everything right
+so page two re-read one, and retention removing one shifted left so page two
+skipped one — neither signalled. Naming the series the page stopped in makes
+both cases correct, and a series that has disappeared between pages resumes at
+the first that sorts after it.
 
 ### Errors
 
@@ -106,7 +139,7 @@ zenctl get -c tcp/127.0.0.1:7447 \
 {
   "historian": "h-0ead7da13eea",
   "from": 1788350000000, "to": 1788350300000, "step_s": 60,
-  "truncated": false, "next_cursor": null,
+  "truncated": false, "partial": false, "next_cursor": null, "scanned": 5,
   "series": [
     { "origin": "h-0ead7da13eea", "producer": "sysinfo",
       "subject": "network/eth0/rx_bytes", "kind": "counter",

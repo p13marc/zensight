@@ -134,6 +134,34 @@ impl<T> Page<T> {
     }
 }
 
+/// Epoch milliseconds as the RFC 3339 instant a [`Page::covers_from`] carries.
+///
+/// The field is read with `as_str()` by every generic consumer, so this is not
+/// a formatting preference: a number there is read as *absent*, silently, by
+/// exactly the tooling that would otherwise report the coverage gap the field
+/// exists to state (#1157).
+///
+/// `None` for a millisecond count no instant corresponds to — which cannot
+/// arise from a clock, only from arithmetic on one, and is better absent than
+/// clamped to some year the caller would then draw an axis to.
+pub fn instant_from_epoch_ms(ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// The inverse of [`instant_from_epoch_ms`], for a consumer that has to place
+/// the coverage boundary on an axis.
+///
+/// `None` for anything that is not an RFC 3339 instant — including the epoch
+/// millis a producer might have sent by mistake, which is the point: a caller
+/// that silently accepted a number would hide the same bug on the read side
+/// that the generic reader hides on the write side.
+pub fn epoch_ms_from_instant(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.timestamp_millis())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +213,32 @@ mod tests {
             !short_window.is_contract_violation(),
             "a gap in time has no next page, and says why instead"
         );
+    }
+
+    /// The instant helper produces what the reader parses, and refuses what
+    /// no clock can produce rather than clamping it (#1157).
+    #[test]
+    fn an_instant_is_rfc_3339_and_an_impossible_one_is_absent() {
+        assert_eq!(
+            instant_from_epoch_ms(0).as_deref(),
+            Some("1970-01-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            instant_from_epoch_ms(1_757_325_600_123).as_deref(),
+            Some("2025-09-08T10:00:00.123Z")
+        );
+        assert_eq!(instant_from_epoch_ms(i64::MAX), None);
+    }
+
+    /// The pair round-trips, and the read side refuses a number for the same
+    /// reason the write side must not send one.
+    #[test]
+    fn an_instant_round_trips_and_a_number_is_refused() {
+        let ms = 1_757_325_600_123i64;
+        let s = instant_from_epoch_ms(ms).unwrap();
+        assert_eq!(epoch_ms_from_instant(&s), Some(ms));
+        assert_eq!(epoch_ms_from_instant("1757325600123"), None);
+        assert_eq!(epoch_ms_from_instant(""), None);
     }
 
     /// A round trip through the envelope keeps every field, and a reply

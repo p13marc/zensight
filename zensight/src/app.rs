@@ -11639,6 +11639,16 @@ async fn fetch_fleet_history(
                              the newest points of the window, not all of it"
                         );
                     }
+                    if let Some(covers) = &r.covers_from {
+                        // A different shortfall, and the one that used to be
+                        // invisible (#1067): the tier reaches back only so far,
+                        // so the left of the axis is not empty, it is unknown.
+                        tracing::warn!(
+                            historian = %r.historian, selector = %selector, covers_from = %covers,
+                            "historian could not cover the window asked for; the chart's \
+                             axis extends further back than any data behind it"
+                        );
+                    }
                     collected.push(r);
                 }
                 Err(e) => tracing::warn!(error = %e, "historian range reply did not decode"),
@@ -11660,9 +11670,12 @@ async fn fetch_fleet_history(
              than falling back — the fleet answered, and what it said was no"
         );
     }
-    // Truncation is the reply's, not a guess: if any historian capped its
-    // answer the window on screen is partial, and the strip says so.
-    let truncated = collected.iter().any(|r| r.truncated);
+    // Partial is the reply's, not a guess: if any historian capped its answer
+    // *or* could not cover the window, what is on screen is less than what was
+    // asked for, and the strip says so. `partial` is the RFC 05 §3.2 marker and
+    // covers both; `truncated` is read too so a historian from before #1067
+    // still raises the strip.
+    let truncated = collected.iter().any(|r| r.partial || r.truncated);
     (
         crate::history::series_for_device(crate::history::merge_replies(collected), source),
         truncated,
