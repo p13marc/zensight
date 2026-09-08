@@ -66,6 +66,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   procedures that fuse or split hosts — audited as `refused_by=error/gated`
   while `ack`/`silence` beside them named `allow_operator_assertions`.
 
+- **The audit path can no longer be silenced by its own input** (#1086).
+  `docs/audit.md` promised that caller values are capped "so nobody can push the
+  datagram past the kernel's `MAX_AUDIT_MESSAGE_LENGTH` (8970), where it is
+  dropped without a word". Three things broke the promise, and each one produced
+  exactly the silent audit path the module exists to prevent.
+
+  The cap was **checked in bytes and applied in characters** — `v.len() <= 256`
+  guarding `v.chars().take(256)` — so 256 four-byte characters satisfied it at
+  1 024 bytes, which the hex encoding doubles to 2 048. And `target` and `error`
+  were never capped at all: both are plain public fields that callers assign
+  directly, and `artifact/request` takes its `target` verbatim out of caller
+  JSON. An anonymous bus caller sending `{"kind": "<20 KB>"}` produced a ~40 KB
+  line that the kernel dropped in silence. Both caps now apply where the line is
+  *rendered*, which is the one place no caller can bypass, and a line that had
+  to drop a field says `truncated=1` — `res` and `ts` never are.
+
+  Third, the kernel's ack was read **for the first record only**. Every record
+  sets `NLM_F_ACK`, so every later ack sat unread in the socket buffer while
+  `emit()` returned `true` on a successful `send_to` alone: a refusal was never
+  noticed, `record()`'s tracing fallback never fired, and the buffer grew for
+  the life of the process. Acks are read for every record now and **matched by
+  sequence number** — the sequence is a counter rather than a nanosecond
+  reading, because two records in one nanosecond bucket shared a `seq`, which is
+  precisely the case an ack cannot be attributed in.
+
 - **`systemd-restart-storm` can fire during a storm** (#1083). Two bugs, and
   both made the rule blind to a restart loop — the one shape it exists to
   notice.

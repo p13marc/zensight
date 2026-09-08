@@ -221,19 +221,34 @@ impl AuditRecord {
     /// fields are omitted. Values that are not plain tokens are hex-encoded,
     /// which is auditd's own convention for untrusted strings — a unit name
     /// with a space in it must not be able to forge a second field.
+    /// Every value is capped, and the whole line is capped, **here** — at the
+    /// one place every field passes through (#1086). Capping in the builders
+    /// alone was not enough: `target` and `error` are plain public fields that
+    /// callers assign directly (`served.rs` does), so they reached the
+    /// datagram at whatever length the caller sent. `artifact/request` takes
+    /// its `target` verbatim out of caller JSON, so "whatever the caller sent"
+    /// was an anonymous bus caller's 20 KB string — which hex-encodes to 40 KB,
+    /// which the kernel drops without a word.
     pub fn message(&self) -> String {
         let mut s = String::with_capacity(160);
+        let mut truncated = false;
+        let t = &mut truncated;
         s.push_str("op=zensight-write");
-        push_field(&mut s, "procedure", Some(&self.procedure));
-        push_field(&mut s, "producer", Some(&self.producer));
-        push_field(&mut s, "origin", Some(&self.origin));
-        push_field(&mut s, "target", self.target.as_deref());
-        push_field(&mut s, "verdict", Some(self.verdict.as_str()));
-        push_field(&mut s, "refused_by", self.refused_by.as_deref());
-        push_field(&mut s, "caller_zid", self.caller_zid.as_deref());
-        push_field(&mut s, "actor", self.actor.as_deref());
-        push_field(&mut s, "request_id", self.request_id.as_deref());
-        push_field(&mut s, "error", self.error.as_deref());
+        push_field(&mut s, "procedure", Some(&self.procedure), t);
+        push_field(&mut s, "producer", Some(&self.producer), t);
+        push_field(&mut s, "origin", Some(&self.origin), t);
+        push_field(&mut s, "target", self.target.as_deref(), t);
+        push_field(&mut s, "verdict", Some(self.verdict.as_str()), t);
+        push_field(&mut s, "refused_by", self.refused_by.as_deref(), t);
+        push_field(&mut s, "caller_zid", self.caller_zid.as_deref(), t);
+        push_field(&mut s, "actor", self.actor.as_deref(), t);
+        push_field(&mut s, "request_id", self.request_id.as_deref(), t);
+        push_field(&mut s, "error", self.error.as_deref(), t);
+        // A dropped field is stated, never silent: a reader must be able to
+        // tell "no error" from "the error did not fit".
+        if truncated {
+            s.push_str(" truncated=1");
+        }
         // `res` is the field `ausearch --success` and every audit report reads.
         // Success means "asked for, permitted, and achieved": a refusal is 0,
         // and so is a permitted action that failed.
@@ -243,36 +258,62 @@ impl AuditRecord {
     }
 }
 
-fn push_field(out: &mut String, key: &str, value: Option<&str>) {
+fn push_field(out: &mut String, key: &str, value: Option<&str>, truncated: &mut bool) {
     // An empty value is an ABSENT value. `?actor=` with nothing after it would
     // otherwise emit `actor=`, which reads as "the caller claimed to be
     // nobody" — a different and wrong statement from "the caller said nothing".
     let Some(value) = value.filter(|v| !v.is_empty()) else {
         return;
     };
+    let encoded = encode(&cap_bytes(value));
+    // `+ 2` for the leading space and the `=`.
+    if out.len() + key.len() + encoded.len() + 2 > MAX_MESSAGE_BYTES - TAIL_RESERVE {
+        *truncated = true;
+        return;
+    }
     out.push(' ');
     out.push_str(key);
     out.push('=');
-    out.push_str(&encode(value));
+    out.push_str(&encoded);
 }
 
-/// The longest a single caller-supplied value may be.
+/// The longest a single caller-supplied value may be, **in bytes**.
 ///
 /// The kernel drops a datagram over `MAX_AUDIT_MESSAGE_LENGTH` (8970) without
 /// telling anyone — the exact failure that looks like a working audit path. A
-/// caller must not be able to reach that by padding `?actor=`.
+/// caller must not be able to reach that by padding a value.
+///
+/// Bytes, not chars (#1086). `chars().take(256)` bounded the *character* count,
+/// so 256 four-byte characters were 1 024 bytes, which [`encode`] hex-doubles
+/// to 2 048 — eight times the intended cap, from a value that satisfied it.
 const MAX_CALLER_VALUE: usize = 256;
 
+/// The longest line we will hand the kernel, well under
+/// `MAX_AUDIT_MESSAGE_LENGTH` (8970) so the header and any future field still
+/// fit. Reaching it means a field was dropped, which the line says.
+const MAX_MESSAGE_BYTES: usize = 8_000;
+
+/// Room kept for the mandatory tail — ` truncated=1 res=N ts=<u64>` — which is
+/// never dropped, because a reader selects on exactly those.
+const TAIL_RESERVE: usize = 48;
+
+/// `value` truncated to [`MAX_CALLER_VALUE`] **bytes**, on a character
+/// boundary, with an elision marker when anything was cut.
+fn cap_bytes(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.len() <= MAX_CALLER_VALUE {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    // Leave room for the marker so the *result* is within the cap.
+    let budget = MAX_CALLER_VALUE - 3;
+    let mut end = budget;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}...", &value[..end]))
+}
+
 fn cap(value: Option<String>) -> Option<String> {
-    value.map(|v| {
-        if v.len() <= MAX_CALLER_VALUE {
-            v
-        } else {
-            let mut t: String = v.chars().take(MAX_CALLER_VALUE).collect();
-            t.push_str("...");
-            t
-        }
-    })
+    value.map(|v| cap_bytes(&v).into_owned())
 }
 
 /// auditd's encoding for a value: a plain token as-is, anything else as
@@ -412,18 +453,23 @@ pub fn record(rec: &AuditRecord) {
         return;
     }
     // The fallback carries the SAME fields, structured, so a log pipeline can
-    // reconstruct the record when the audit socket is not reachable.
+    // reconstruct the record when the audit socket is not reachable — and the
+    // same caps (#1086), or a caller who cannot reach the kernel's 8970 bytes
+    // reaches the log pipeline's line limit instead.
+    let target = rec.target.as_deref().map(cap_bytes);
+    let error = rec.error.as_deref().map(cap_bytes);
     tracing::warn!(
         target: "zensight::audit",
         procedure = %rec.procedure,
         producer = %rec.producer,
         origin = %rec.origin,
-        target = rec.target.as_deref(),
+        target = target.as_deref(),
         verdict = %rec.verdict,
         refused_by = rec.refused_by.as_deref(),
         caller_zid = rec.caller_zid.as_deref(),
         actor = rec.actor.as_deref(),
         request_id = rec.request_id.as_deref(),
+        error = error.as_deref(),
         "{message}"
     );
 }
@@ -559,17 +605,83 @@ mod netlink {
         Some(i32::from_ne_bytes(buf[16..20].try_into().ok()?))
     }
 
+    /// The sequence number an ack is answering (`nlmsghdr.nlmsg_seq`).
+    ///
+    /// Without this an ack was attributed to whichever record happened to be
+    /// in flight when it was read (#1086): a late refusal of record N marked
+    /// record N+1 as refused, and — worse — a refusal that arrived one read too
+    /// late was never seen at all.
+    pub(super) fn ack_seq(buf: &[u8]) -> Option<u32> {
+        if buf.len() < NLMSG_HDR_LEN {
+            return None;
+        }
+        Some(u32::from_ne_bytes(buf[8..12].try_into().ok()?))
+    }
+
+    /// The next sequence number. A counter, not a nanosecond reading: two
+    /// records inside the same nanosecond bucket shared a `seq`, which is
+    /// exactly the case an ack cannot be attributed in. `0` is skipped so a
+    /// zeroed buffer never looks like a valid sequence.
+    fn next_seq() -> u32 {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        if n == 0 { 1 } else { n }
+    }
+
+    /// Read whatever the kernel has queued and decide this record's fate.
+    ///
+    /// Every record sets `NLM_F_ACK`, so the kernel answers every one of them.
+    /// Reading only the first record's ack (which is what this did) left every
+    /// later ack in the socket buffer — so a refusal was never noticed, the
+    /// buffer grew for the life of the process, and `emit` reported success for
+    /// records that were dropped. That is the silent audit path the module
+    /// exists to prevent.
+    fn read_acks(sock: &Socket, seq: u32) -> bool {
+        // Bounded: the loop drains what is queued, it does not wait for more.
+        for _ in 0..16 {
+            let Ok((reply, _)) = sock.recv_from_full() else {
+                // Nothing queued. The send went out and we have no evidence
+                // against it, so this record stands — but nothing is latched
+                // either, and the next record asks again.
+                return true;
+            };
+            let code = ack_code(&reply);
+            let mine = ack_seq(&reply) == Some(seq);
+            match code {
+                // A plain ack, or a reply that is not an NLMSGERR at all.
+                Some(0) | None => {
+                    if mine {
+                        STATE.store(DELIVERING, Ordering::Relaxed);
+                        return true;
+                    }
+                }
+                Some(code) => {
+                    tracing::error!(
+                        target: "zensight::audit",
+                        errno = -code,
+                        seq = ack_seq(&reply),
+                        for_this_record = mine,
+                        "the kernel refused an audit record (CAP_AUDIT_WRITE?) — write-procedure \
+                         outcomes will be LOGGED, not audited, for the life of this process. \
+                         Add AmbientCapabilities=CAP_AUDIT_WRITE to the unit."
+                    );
+                    STATE.store(DEGRADED, Ordering::Relaxed);
+                    // A refusal of an *earlier* record cannot be retracted, but
+                    // it does mean this one is not reaching the kernel either.
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub(super) fn send(message: &str) -> bool {
         if STATE.load(Ordering::Relaxed) == DEGRADED {
             return false;
         }
         let Some(sock) = socket() else { return false };
         let Ok(sock) = sock.lock() else { return false };
-        let seq = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(1)
-            .max(1);
+        let seq = next_seq();
         let buf = frame(message, seq);
         // The kernel is port 0, no multicast group.
         if sock
@@ -580,38 +692,13 @@ mod netlink {
             // in whatever state we were in and let the caller log this one.
             return false;
         }
-        if STATE.load(Ordering::Relaxed) == DELIVERING {
-            return true;
-        }
-        // FIRST record only: read the ack. A netlink permission failure comes
-        // back as an NLMSGERR datagram, NOT as a `sendmsg` error — so without
-        // this, a process with no CAP_AUDIT_WRITE reports every record as
-        // delivered and the trail silently does not exist. The kernel handles
-        // an audit message in the sender's own context, so the reply is already
-        // queued by the time `send_to` returns and one non-blocking read is
-        // enough.
-        match sock.recv_from_full() {
-            Ok((reply, _)) => match ack_code(&reply) {
-                Some(0) | None => {
-                    STATE.store(DELIVERING, Ordering::Relaxed);
-                    true
-                }
-                Some(code) => {
-                    tracing::error!(
-                        target: "zensight::audit",
-                        errno = -code,
-                        "the kernel refused an audit record (CAP_AUDIT_WRITE?) — write-procedure \
-                         outcomes will be LOGGED, not audited, for the life of this process. \
-                         Add AmbientCapabilities=CAP_AUDIT_WRITE to the unit."
-                    );
-                    STATE.store(DEGRADED, Ordering::Relaxed);
-                    false
-                }
-            },
-            // Nothing to read yet: the send went out and we have no evidence
-            // against it. Do not latch either way — the next record asks again.
-            Err(_) => true,
-        }
+        // Read the ack for EVERY record, matched by sequence number (#1086).
+        // A netlink permission failure comes back as an NLMSGERR datagram, NOT
+        // as a `sendmsg` error — so a process with no CAP_AUDIT_WRITE reports
+        // every record as delivered and the trail silently does not exist. This
+        // used to run for the first record only, which left every later ack
+        // unread in the socket buffer.
+        read_acks(&sock, seq)
     }
 }
 
@@ -913,6 +1000,105 @@ mod tests {
         let r = rec().with_actor(Some("a".repeat(10_000)));
         assert!(r.actor.as_ref().unwrap().len() < 300);
         assert!(r.message().len() < 1_000, "{}", r.message().len());
+    }
+
+    /// The cap is a **byte** budget (#1086).
+    ///
+    /// It was written as `v.len() <= 256` (bytes) but applied as
+    /// `chars().take(256)`, so 256 four-byte characters passed the check at
+    /// 1 024 bytes — which `encode` hex-doubles to 2 048. Eight times the cap,
+    /// from a value that satisfied it.
+    #[test]
+    fn the_cap_is_bytes_not_characters() {
+        // 4 bytes each in UTF-8.
+        let wide = "\u{1F600}".repeat(4_000);
+        let r = rec().with_actor(Some(wide));
+        let actor = r.actor.as_ref().unwrap();
+        assert!(
+            actor.len() <= MAX_CALLER_VALUE,
+            "capped to {} bytes, cap is {MAX_CALLER_VALUE}",
+            actor.len()
+        );
+        // And it is still valid UTF-8: the cut lands on a character boundary.
+        assert!(actor.ends_with("..."));
+    }
+
+    /// `target` is taken verbatim out of caller JSON by
+    /// `artifact/request`, and it was never capped at all — neither in a
+    /// builder nor at render (#1086). An anonymous bus caller sending
+    /// `{"kind": "<20 KB>"}` produced a ~40 KB hex-encoded line, which the
+    /// kernel dropped without a word while `emit` reported success.
+    #[test]
+    fn an_adversarial_target_cannot_reach_the_kernels_cap() {
+        let mut r = rec();
+        r.target = Some("k".repeat(20_000));
+        let m = r.message();
+        assert!(
+            m.len() <= MAX_MESSAGE_BYTES,
+            "a 20 KB target produced a {}-byte line",
+            m.len()
+        );
+        // The fields a reader selects on survive regardless.
+        assert!(m.contains(" res="), "{m}");
+        assert!(m.contains("verdict="), "{m}");
+    }
+
+    /// `error` was the other uncapped field, and it is the one a producer
+    /// fills from an upstream error string of unknown length.
+    #[test]
+    fn an_unbounded_error_cannot_reach_the_kernels_cap() {
+        let mut r = rec();
+        r.error = Some("e".repeat(20_000));
+        let m = r.message();
+        assert!(m.len() <= MAX_MESSAGE_BYTES, "{}", m.len());
+        assert!(m.contains(" res=0 "), "an execution that failed: {m}");
+    }
+
+    /// Every field at its worst, at once: the line still fits.
+    ///
+    /// With ten fields capped at 256 bytes each (512 hex-encoded) the total
+    /// guard below cannot be reached *through the fields* — which is the
+    /// point. The guard exists so that stays true when an eleventh field is
+    /// added, and this test is what would notice it stopped being true.
+    #[test]
+    fn every_field_at_its_cap_still_fits_the_datagram() {
+        let long = || Some("\u{1F600}".repeat(5_000));
+        let mut r = rec();
+        r.procedure = "p".repeat(20_000);
+        r.producer = "P".repeat(20_000);
+        r.origin = "o".repeat(20_000);
+        r.target = long();
+        r.refused_by = long();
+        r.error = long();
+        let r = r
+            .with_actor(long())
+            .with_request_id(long())
+            .with_caller_zid(long());
+        let m = r.message();
+        assert!(
+            m.len() <= MAX_MESSAGE_BYTES,
+            "every field at its cap produced a {}-byte line",
+            m.len()
+        );
+        assert!(m.contains(" res="), "the tail is never dropped: {m}");
+    }
+
+    /// A dropped field is stated, not silent: a reader must be able to tell
+    /// "no error" from "the error did not fit". Exercised against
+    /// `push_field` directly, because the field caps make the whole-line guard
+    /// unreachable from a record (see the test above) — and an untested guard
+    /// is one that will not work the day it is needed.
+    #[test]
+    fn a_dropped_field_is_stated_not_silent() {
+        let mut out = "x".repeat(MAX_MESSAGE_BYTES - TAIL_RESERVE - 4);
+        let mut truncated = false;
+        push_field(&mut out, "error", Some("boom"), &mut truncated);
+        assert!(truncated, "the field did not fit and nothing said so");
+        assert!(
+            !out.contains("error="),
+            "it was written anyway: {}",
+            out.len()
+        );
     }
 
     /// Asking whether we are delivering must not be what makes us try.
