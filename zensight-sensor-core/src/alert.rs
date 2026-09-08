@@ -53,21 +53,79 @@ use zensight_common::{Alert, AlertSeverity, AlertState, Format, Protocol, encode
 use crate::error::Result;
 use crate::publisher::Publisher;
 
+/// Default minimum gap between content refreshes of one firing alert (#1081).
+///
+/// Sensors sweep every 5-60 s and the default debounce is `ZERO`, so without a
+/// floor a drifting summary would put one document on the bus per sweep.
+pub const DEFAULT_CONTENT_REFRESH: Duration = Duration::from_secs(30);
+
 /// Internal state for a single tracked alert.
 struct ActiveAlert {
     rule: String,
     severity: AlertSeverity,
     first_seen: Instant,
-    /// The most recent firing payload (republished on resolve as `Resolved`).
+    /// **The payload that is on the bus right now** — the last `Put(Firing)`
+    /// this reporter made for this key. Republished as `Resolved` on retire,
+    /// and served verbatim by the late-joiner seed.
+    ///
+    /// Assigned only when we publish, never on a mere observation (#1081).
+    /// It used to track the freshest *observation* instead, which had two
+    /// consequences: the seed queryable — which stands in for a `latest`
+    /// storage, and a storage answers with the last value **written** —
+    /// answered with a document that had never been put; and a content change
+    /// held back by the refresh interval was *lost* rather than deferred,
+    /// because the next observation compared itself against the change it had
+    /// already absorbed.
     last: Alert,
     /// Whether a `Put(Firing)` has actually been published yet (false while the
     /// `for:` debounce window is still open).
     published: bool,
+    /// When [`Self::last`] went on the bus — the content-refresh rate
+    /// limiter's clock (#1081). Any publish resets it, so an escalation and a
+    /// refresh cannot stack into two puts a moment apart.
+    last_published: Instant,
     /// When the condition was first seen clear, while a recovery window is
     /// open (#929). `None` means "currently violated" — which is also what a
     /// re-fire restores, because an alert that flickers clear and back was
     /// never really clear.
     clear_since: Option<Instant>,
+}
+
+/// Whether two payloads differ in anything a consumer renders — everything
+/// except the two clocks (#1081).
+///
+/// Destructured rather than field-compared on purpose: a new [`Alert`] field
+/// becomes a compile error here, instead of a field that silently never
+/// refreshes.
+///
+/// Note what this *can* differ in. Labels are alert identity — `alert_key()`
+/// hashes every one that is not host-scoped — so a discriminating label cannot
+/// change without minting a different key, and a refresh is therefore usually a
+/// `summary` change. But `host.*` labels are excluded from the derivation, and
+/// `observe` stamps `host.id` from a `SharedIdentity` that can refresh
+/// mid-run: a late-arriving or re-minted host id is a real content change on a
+/// key that stays the same.
+fn content_differs(on_bus: &Alert, observed: &Alert) -> bool {
+    let Alert {
+        timestamp: _,
+        observed_at_ms: _,
+        source,
+        protocol,
+        kind,
+        rule,
+        severity,
+        state,
+        summary,
+        labels,
+    } = on_bus;
+    *source != observed.source
+        || *protocol != observed.protocol
+        || *kind != observed.kind
+        || *rule != observed.rule
+        || *severity != observed.severity
+        || *state != observed.state
+        || *summary != observed.summary
+        || *labels != observed.labels
 }
 
 /// What the synchronous bookkeeping decided we should do on the wire.
@@ -91,6 +149,9 @@ pub struct AlertReporter {
     /// `ZERO` — the default — resolves on the first clear sweep, which is
     /// exactly the behaviour every caller had before this existed.
     recovery: Duration,
+    /// Minimum gap between content refreshes of one firing alert (#1081).
+    /// `ZERO` means no limit — every content change republishes.
+    content_refresh: Duration,
     active: Mutex<HashMap<String, ActiveAlert>>,
 }
 
@@ -128,8 +189,31 @@ impl AlertReporter {
             identity: None,
             known_rules: Vec::new(),
             recovery: Duration::ZERO,
+            content_refresh: DEFAULT_CONTENT_REFRESH,
             active: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Rate-limit content refreshes of a still-firing alert (#1081).
+    ///
+    /// Deliberately **not** the `for:` window. That window answers "how long
+    /// before I believe it"; this one answers "how often may I correct the
+    /// text", and they are unrelated — tying them would give a rule with
+    /// `for: 1h` an hour-long refresh interval, so the summary would stay
+    /// wrong longest on exactly the alerts that took longest to confirm. It is
+    /// also per-*reporter* rather than per-entry, because netlink passes a
+    /// per-expectation `for` and the same entry would otherwise get a
+    /// different interval depending on which call site observed it last.
+    ///
+    /// `ZERO` means no limit, by analogy with [`Self::with_recovery`].
+    ///
+    /// The interval is a floor on incident-document churn too: the correlator
+    /// hashes a representative member's `summary` into its incident content
+    /// hash, so every refresh that changes a summary can move an incident
+    /// document as well.
+    pub fn with_content_refresh(mut self, d: Duration) -> Self {
+        self.content_refresh = d;
+        self
     }
 
     /// Set the default "must be violated continuously for" debounce window.
@@ -227,33 +311,97 @@ impl AlertReporter {
         let action = {
             let mut active = self.active.lock().unwrap();
             let now = Instant::now();
+            let now_ms = zensight_common::current_timestamp_millis();
             let entry = active.entry(key.clone()).or_insert_with(|| ActiveAlert {
                 rule: alert.rule.clone(),
                 severity: alert.severity,
                 first_seen: now,
                 last: alert.clone(),
                 published: false,
+                last_published: now,
                 clear_since: None,
             });
-            let severity_changed = entry.published && entry.severity != alert.severity;
-            entry.severity = alert.severity;
-            entry.last = alert.clone();
-            // A re-fire inside the recovery window resets the clock and emits
-            // NOTHING: the alert never left `Firing`, so there is no
-            // transition to publish. This is the whole anti-flap — a value
-            // oscillating across the threshold produces one document on the
-            // bus, not one per crossing (#929).
-            entry.clear_since = None;
-            if !entry.published && now.duration_since(entry.first_seen) >= dur {
-                entry.published = true;
-                Action::PublishFiring(alert)
-            } else if severity_changed {
-                Action::PublishFiring(alert)
-            } else {
-                Action::None
-            }
+            Self::decide(entry, alert, now, now_ms, dur, self.content_refresh)
         };
         self.apply(&key, action).await
+    }
+
+    /// The synchronous decision for one observation: pure over the entry and
+    /// the injected clock.
+    ///
+    /// Extracted for the reason [`Self::retire`] is — the windows here are
+    /// measured in seconds, and a test that sleeps through one is a test
+    /// nobody runs twice.
+    ///
+    /// The arms are ordered, and the order carries meaning:
+    ///
+    /// 1. **raise** — the debounce has elapsed and nothing is on the bus yet.
+    /// 2. **escalate** — the severity moved. A real transition, so it takes a
+    ///    fresh `timestamp` (which correctly un-acknowledges the alert) and is
+    ///    never rate-limited: a Warning that became Critical should page now.
+    /// 3. **refresh** (#1081) — same severity, different content, and the
+    ///    refresh interval has passed. The alert never left `Firing`, so the
+    ///    transition `timestamp` is **carried over unchanged** and the fresh
+    ///    reading goes in `observed_at_ms`.
+    fn decide(
+        entry: &mut ActiveAlert,
+        alert: Alert,
+        now: Instant,
+        now_ms: i64,
+        dur: Duration,
+        content_refresh: Duration,
+    ) -> Action {
+        entry.severity = alert.severity;
+        // A re-fire inside the recovery window resets the clock and emits
+        // NOTHING by itself: the alert never left `Firing`, so there is no
+        // transition to publish. This is the whole anti-flap — a value
+        // oscillating across the threshold produces one document on the bus,
+        // not one per crossing (#929).
+        entry.clear_since = None;
+
+        // 1. Raise.
+        if !entry.published {
+            if now.duration_since(entry.first_seen) >= dur {
+                return Self::publish(entry, alert, now);
+            }
+            // Still inside the debounce window. Nothing is on the bus, so
+            // `last` must not move — it is what the bus holds, and the bus
+            // holds nothing yet. The *next* raise publishes whatever is
+            // observed then, which is the freshest reading by construction.
+            return Action::None;
+        }
+
+        // 2. Escalate. Compared against what was published, not against a
+        // field assigned one line earlier.
+        if entry.last.severity != alert.severity {
+            return Self::publish(entry, alert, now);
+        }
+
+        // 3. Refresh.
+        if content_differs(&entry.last, &alert)
+            && now.duration_since(entry.last_published) >= content_refresh
+        {
+            let mut refreshed = alert;
+            refreshed.timestamp = entry.last.timestamp;
+            refreshed.observed_at_ms = Some(now_ms);
+            return Self::publish(entry, refreshed, now);
+        }
+
+        Action::None
+    }
+
+    /// Record `out` as the payload now on the bus, and emit it.
+    ///
+    /// Every publishing arm goes through here so [`ActiveAlert::last`] and the
+    /// wire can never drift: the refresh arm publishes a *modified* copy, and
+    /// storing the unmodified observation instead would leave `last.timestamp`
+    /// at build time — so the next refresh would carry the wrong transition
+    /// instant and the seed would serve a document that was never put.
+    fn publish(entry: &mut ActiveAlert, out: Alert, now: Instant) -> Action {
+        entry.published = true;
+        entry.last_published = now;
+        entry.last = out.clone();
+        Action::PublishFiring(out)
     }
 
     /// After evaluating all violations for `rule` this sweep, resolve any
@@ -542,8 +690,17 @@ impl AlertReporter {
                         rule: alert.rule.clone(),
                         severity: alert.severity,
                         first_seen: now,
+                        // Already the on-bus payload — it came off the bus.
+                        // Nothing to reconstruct, which is the second dividend
+                        // of `last` meaning "what was published" (#1081).
                         last: alert,
                         published: true,
+                        // Deliberately `now`, not the inherited timestamp: a
+                        // restart that adopts a large firing set must not
+                        // republish all of it in its first sweep just because
+                        // summaries drifted while it was down. The cost is one
+                        // refresh interval of staleness after a restart.
+                        last_published: now,
                         // Adopted because it is firing NOW, per the seed.
                         clear_since: None,
                     },
@@ -622,8 +779,14 @@ impl AlertReporter {
     ///
     /// Used to answer the `state alert selector` queryable so a late-joining consumer
     /// (a GUI opened *after* an alert fired) can seed its firing set — alerts are
-    /// only published on state change, so without this seed a late joiner would
-    /// never see an already-firing alert.
+    /// published only on a state change or a rate-limited content refresh
+    /// (#1081), so without this seed a late joiner would never see an
+    /// already-firing alert.
+    ///
+    /// It answers with the payloads that are **on the bus**, which is what a
+    /// `latest` storage would do — see [`ActiveAlert::last`]. Serving the
+    /// reporter's freshest private belief instead is how a page reload came to
+    /// show a different number from the live subscription.
     pub fn firing_alerts(&self) -> Vec<Alert> {
         self.active
             .lock()
@@ -759,6 +922,7 @@ mod recovery_tests {
                 first_seen: now,
                 last: a,
                 published: true,
+                last_published: now,
                 clear_since: None,
             },
         )
@@ -921,6 +1085,7 @@ mod recovery_tests {
                         first_seen: t0,
                         last: al.clone(),
                         published: true,
+                        last_published: t0,
                         clear_since: None,
                     },
                 )
@@ -955,5 +1120,366 @@ mod recovery_tests {
             None,
             "the default defers to the reporter"
         );
+    }
+}
+
+/// The content-refresh decision (#1081), tested against `decide` directly with
+/// an injected clock — the same reason `recovery_tests` tests `retire` that way.
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use zensight_common::{AlertKind, AlertSeverity, Protocol};
+
+    const REFRESH: Duration = Duration::from_secs(30);
+
+    fn alert_with(summary: &str, severity: AlertSeverity) -> Alert {
+        Alert::new(
+            "host1",
+            Protocol::Sysinfo,
+            AlertKind::SensorHealth,
+            "sensor-budget",
+            severity,
+            summary.to_string(),
+        )
+    }
+
+    fn alert(summary: &str) -> Alert {
+        alert_with(summary, AlertSeverity::Warning)
+    }
+
+    /// Fire `first` at `t0` and return the entry holding it, as the bus does.
+    fn fired(t0: Instant, first: &Alert) -> ActiveAlert {
+        let mut entry = ActiveAlert {
+            rule: first.rule.clone(),
+            severity: first.severity,
+            first_seen: t0,
+            last: first.clone(),
+            published: false,
+            last_published: t0,
+            clear_since: None,
+        };
+        let action = AlertReporter::decide(
+            &mut entry,
+            first.clone(),
+            t0,
+            1_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+        assert!(matches!(action, Action::PublishFiring(_)), "did not fire");
+        entry
+    }
+
+    fn published(action: &Action) -> Option<&Alert> {
+        match action {
+            Action::PublishFiring(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// #1081: a firing alert whose summary moves inside one severity band is
+    /// republished, once the refresh interval has passed.
+    ///
+    /// `sensor-budget` is the in-tree case: it fires at 80 % with "rss 320 MiB
+    /// at 80 % of 400 MiB budget", RSS climbs to 94 % inside the same band, and
+    /// the operator's row said 80 % until the severity finally changed.
+    #[test]
+    fn a_content_change_republishes_once_the_refresh_window_has_passed() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%");
+        let mut entry = fired(t0, &first);
+
+        // One second later: changed, but rate-limited.
+        let held = AlertReporter::decide(
+            &mut entry,
+            alert("rss at 94%"),
+            t0 + Duration::from_secs(1),
+            2_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+        assert!(published(&held).is_none(), "refreshed inside the interval");
+
+        // Past the interval: it goes out.
+        let out = AlertReporter::decide(
+            &mut entry,
+            alert("rss at 94%"),
+            t0 + Duration::from_secs(31),
+            3_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+        let a = published(&out).expect("a changed summary must republish");
+        assert_eq!(a.summary, "rss at 94%");
+    }
+
+    /// A rate-limited change is **deferred, not lost**.
+    ///
+    /// `entry.last` used to be overwritten on every observation, before any
+    /// decision — so the held-back change became the comparison basis, the next
+    /// observation found nothing different, and the bus kept the *first*
+    /// summary forever. `last` is the payload on the bus now, assigned only
+    /// when we publish.
+    #[test]
+    fn a_rate_limited_content_change_is_deferred_not_lost() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%");
+        let mut entry = fired(t0, &first);
+
+        for (secs, ms) in [(1u64, 2_000i64), (2, 3_000), (3, 4_000)] {
+            let held = AlertReporter::decide(
+                &mut entry,
+                alert("rss at 94%"),
+                t0 + Duration::from_secs(secs),
+                ms,
+                Duration::ZERO,
+                REFRESH,
+            );
+            assert!(published(&held).is_none(), "published inside the interval");
+        }
+
+        // The condition has not changed again — it is still 94 % — and that is
+        // the whole point: the refresh must still happen.
+        let out = AlertReporter::decide(
+            &mut entry,
+            alert("rss at 94%"),
+            t0 + Duration::from_secs(31),
+            5_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+        let a = published(&out).expect("the deferred change was lost");
+        assert_eq!(a.summary, "rss at 94%");
+    }
+
+    /// A refresh is not a transition: `timestamp` is carried over and the
+    /// fresh reading goes in `observed_at_ms`.
+    ///
+    /// An acknowledgement applies while `timestamp <= fired_at`, so a moving
+    /// timestamp would un-acknowledge every acked alert on every refresh.
+    #[test]
+    fn a_refresh_does_not_move_the_transition_timestamp() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%");
+        let fired_ts = first.timestamp;
+        let mut entry = fired(t0, &first);
+
+        // The injected wall clock tracks the real one the alert was built
+        // with, so the >= invariant below is a statement about the code rather
+        // than about the test's fixtures.
+        let refreshed_at = fired_ts + 31_000;
+        let out = AlertReporter::decide(
+            &mut entry,
+            alert("rss at 94%"),
+            t0 + Duration::from_secs(31),
+            refreshed_at,
+            Duration::ZERO,
+            REFRESH,
+        );
+        let a = published(&out).expect("refresh");
+        assert_eq!(
+            a.timestamp, fired_ts,
+            "a refresh moved the transition clock"
+        );
+        assert_eq!(a.observed_at_ms, Some(refreshed_at));
+        assert!(
+            a.observed_at_ms.unwrap() >= a.timestamp,
+            "observed_at_ms must never precede the transition it refreshes"
+        );
+    }
+
+    /// An escalation *is* a transition: fresh timestamp, no `observed_at_ms`,
+    /// and never rate-limited — a Warning that became Critical pages now.
+    #[test]
+    fn an_escalation_is_a_transition_and_is_never_rate_limited() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%");
+        let fired_ts = first.timestamp;
+        let mut entry = fired(t0, &first);
+
+        let out = AlertReporter::decide(
+            &mut entry,
+            alert_with("rss at 96%", AlertSeverity::Critical),
+            t0 + Duration::from_secs(1),
+            2_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+        let a = published(&out).expect("an escalation must publish immediately");
+        assert_eq!(a.severity, AlertSeverity::Critical);
+        assert_eq!(a.observed_at_ms, None, "an escalation is not a refresh");
+        assert!(
+            a.timestamp >= fired_ts,
+            "an escalation takes a fresh transition clock, and so un-acks"
+        );
+    }
+
+    /// An unchanged alert never republishes, however often it is observed.
+    #[test]
+    fn an_unchanged_alert_never_republishes() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%");
+        let mut entry = fired(t0, &first);
+
+        for i in 1..200u64 {
+            let action = AlertReporter::decide(
+                &mut entry,
+                alert("rss at 80%"),
+                t0 + Duration::from_secs(i * 30),
+                1_000 + i as i64,
+                Duration::ZERO,
+                REFRESH,
+            );
+            assert!(published(&action).is_none(), "republished at sweep {i}");
+        }
+    }
+
+    /// Any publish resets the refresh clock, so an escalation and a refresh
+    /// cannot stack into two puts a moment apart.
+    #[test]
+    fn any_publish_resets_the_refresh_clock() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%");
+        let mut entry = fired(t0, &first);
+
+        let escalated = AlertReporter::decide(
+            &mut entry,
+            alert_with("rss at 96%", AlertSeverity::Critical),
+            t0 + Duration::from_secs(20),
+            2_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+        assert!(published(&escalated).is_some());
+
+        // 15 s after the escalation: past 30 s from the *raise*, but not from
+        // the last publish.
+        let held = AlertReporter::decide(
+            &mut entry,
+            alert_with("rss at 97%", AlertSeverity::Critical),
+            t0 + Duration::from_secs(35),
+            3_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+        assert!(
+            published(&held).is_none(),
+            "the refresh clock was not reset by the escalation"
+        );
+    }
+
+    /// A `host.*` label is excluded from `alert_key`, so it can change without
+    /// re-keying — which makes it the one label change that is a *content*
+    /// change rather than a different alert. A late-arriving or re-minted
+    /// `host.id` used to diverge the bus copy silently.
+    #[test]
+    fn a_host_annotation_change_is_a_content_refresh() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%").with_label("host.id", "h-aaaaaaaaaaaa");
+        let restamped = alert("rss at 80%").with_label("host.id", "h-bbbbbbbbbbbb");
+        assert_eq!(
+            first.alert_key(),
+            restamped.alert_key(),
+            "a host.* annotation must not re-key"
+        );
+        let mut entry = fired(t0, &first);
+
+        let out = AlertReporter::decide(
+            &mut entry,
+            restamped,
+            t0 + Duration::from_secs(31),
+            4_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+        let a = published(&out).expect("a re-stamped identity must refresh");
+        assert_eq!(a.labels.get("host.id").unwrap(), "h-bbbbbbbbbbbb");
+    }
+
+    /// Nothing is on the bus during the debounce window, so `last` must not
+    /// move: the raise publishes what is observed at the moment it fires.
+    #[test]
+    fn the_debounce_window_publishes_the_reading_it_fires_on() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%");
+        let mut entry = ActiveAlert {
+            rule: first.rule.clone(),
+            severity: first.severity,
+            first_seen: t0,
+            last: first.clone(),
+            published: false,
+            last_published: t0,
+            clear_since: None,
+        };
+        let held = AlertReporter::decide(
+            &mut entry,
+            first,
+            t0,
+            1_000,
+            Duration::from_secs(60),
+            REFRESH,
+        );
+        assert!(published(&held).is_none(), "fired inside the for: window");
+
+        let out = AlertReporter::decide(
+            &mut entry,
+            alert("rss at 91%"),
+            t0 + Duration::from_secs(61),
+            2_000,
+            Duration::from_secs(60),
+            REFRESH,
+        );
+        let a = published(&out).expect("the debounce elapsed");
+        assert_eq!(
+            a.summary, "rss at 91%",
+            "the raise published a stale reading"
+        );
+        assert_eq!(
+            a.observed_at_ms, None,
+            "a raise is a transition, not a refresh"
+        );
+    }
+
+    /// A resolve carries the payload that was actually published — not a
+    /// summary the bus never saw.
+    #[test]
+    fn a_resolve_carries_the_payload_that_was_published() {
+        let t0 = Instant::now();
+        let first = alert("rss at 80%");
+        let key = first.alert_key();
+        let mut entry = fired(t0, &first);
+
+        // A change held back by the rate limiter.
+        let _ = AlertReporter::decide(
+            &mut entry,
+            alert("rss at 94%"),
+            t0 + Duration::from_secs(1),
+            2_000,
+            Duration::ZERO,
+            REFRESH,
+        );
+
+        let mut active: HashMap<String, ActiveAlert> = HashMap::new();
+        active.insert(key, entry);
+        let action = AlertReporter::retire(
+            &mut active,
+            t0 + Duration::from_secs(2),
+            Duration::ZERO,
+            |_, _| true,
+        );
+        match action {
+            Action::Resolve(alerts) => {
+                assert_eq!(alerts.len(), 1);
+                assert_eq!(
+                    alerts[0].summary, "rss at 80%",
+                    "the resolve retracted content that was never published"
+                );
+                assert_eq!(
+                    alerts[0].observed_at_ms, None,
+                    "a resolve is its own observation"
+                );
+            }
+            _ => panic!("expected a resolve"),
+        }
     }
 }

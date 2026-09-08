@@ -101,8 +101,33 @@ pub enum AlertState {
 /// state on `zensight/v1/<origin>/state/<producer>/alert/<alert_key>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct Alert {
-    /// Unix epoch millis of the latest state transition.
+    /// Unix epoch millis of the latest **state transition** — raised,
+    /// escalated, resolved.
+    ///
+    /// It does **not** move while an alert simply keeps firing, and a content
+    /// refresh (#1081) does not move it either. Three in-tree mechanisms read
+    /// it that way and break if it drifts: an acknowledgement applies while
+    /// `timestamp <= fired_at` ([`crate::ack::AlertAck::applies_to`]), so a
+    /// moving timestamp would un-acknowledge every acked alert on every
+    /// refresh; the historian derives a timeline row's uid from it, so a
+    /// refresh corrects the existing row in place instead of appending an
+    /// "alert fired" event every interval; and the correlator reads it as both
+    /// an incident's start and its TTL clock.
+    ///
+    /// An **escalation** does move it, deliberately — a Warning that became
+    /// Critical is a new transition, and it *should* un-acknowledge.
     pub timestamp: i64,
+    /// When a still-firing alert's content was last re-observed (#1081).
+    ///
+    /// Present **only** on a content refresh: a republication of an alert that
+    /// never left `Firing`, whose summary or host-scoped labels moved. Absent
+    /// on a raise, an escalation and a resolve, where the transition and the
+    /// observation are the same instant — so when it is present it is always
+    /// `>= timestamp`.
+    ///
+    /// Absent reads as "not refreshed", never as "not observed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at_ms: Option<i64>,
     /// Host / sensor identifier (the same value used as `source` in telemetry).
     pub source: String,
     /// Namespace the alert lives under (`netlink` for expectations, `netring`
@@ -133,6 +158,7 @@ impl Alert {
     ) -> Self {
         Self {
             timestamp: current_timestamp_millis(),
+            observed_at_ms: None,
             source: source.into(),
             protocol,
             kind,
@@ -158,6 +184,10 @@ impl Alert {
     pub fn resolved(mut self) -> Self {
         self.state = AlertState::Resolved;
         self.timestamp = current_timestamp_millis();
+        // A resolve IS the observation, so there is no second clock to carry —
+        // and an inherited `observed_at_ms` would be *older* than the timestamp
+        // beside it, breaking the field's one invariant (#1081).
+        self.observed_at_ms = None;
         self
     }
 
