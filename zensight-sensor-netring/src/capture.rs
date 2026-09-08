@@ -29,6 +29,7 @@ use zensight_common::artifact::{ArtifactKind, KindAdvert};
 use zensight_sensor_core::artifact::{
     ArtifactProducer, DeliveryKind, ProduceCtx, Produced, ProgressUpdate,
 };
+use zensight_sensor_core::rpc::RpcError;
 
 use crate::config::CaptureOnDemandConfig;
 
@@ -167,26 +168,33 @@ pub fn clamp(kind: &ArtifactKind, limits: &CaptureOnDemandConfig) -> Clamped {
 /// deferred to [`clamp`] in `produce` — this only rejects the unrecoverable:
 /// wrong kind, zero duration, a filter when filters are disabled, or a filter
 /// that does not parse.
-pub fn validate_capture(kind: &ArtifactKind, allow_filter: bool) -> Result<(), String> {
+pub fn validate_capture(kind: &ArtifactKind, allow_filter: bool) -> Result<(), RpcError> {
     let ArtifactKind::Capture {
         duration_secs,
         filter,
         ..
     } = kind
     else {
-        return Err("capture producer given a non-capture request".into());
+        return Err(RpcError::invalid_args(
+            "capture producer given a non-capture request",
+        ));
     };
     if *duration_secs == 0 {
-        return Err("capture duration must be > 0".into());
+        return Err(RpcError::invalid_args("capture duration must be > 0"));
     }
     if let Some(expr) = filter {
+        // The one real *switch* on this surface, so it is the one refusal that
+        // names itself (#866/#1085). Everything else here is a malformed
+        // request, and calling that "gated" told an operator to go looking for
+        // a config option that was never involved.
         if !allow_filter {
-            return Err("capture filters are disabled by config".into());
+            return Err(RpcError::gated("capture filters are disabled by config")
+                .with_refused_by("artifacts.capture.on_demand.allow_filter"));
         }
         // Validate now so a bad expression fails fast (produce re-validates
         // before swapping the live filter).
         netring::monitor::subscription::parse_expr(expr)
-            .map_err(|e| format!("invalid capture filter: {e}"))?;
+            .map_err(|e| RpcError::invalid_args(format!("invalid capture filter: {e}")))?;
     }
     Ok(())
 }
@@ -390,7 +398,7 @@ impl ArtifactProducer for CaptureProducer {
         }
     }
 
-    fn accepts(&self, kind: &ArtifactKind) -> Result<(), String> {
+    fn accepts(&self, kind: &ArtifactKind) -> Result<(), RpcError> {
         validate_capture(kind, self.limits.allow_filter)
     }
 
@@ -611,12 +619,22 @@ mod tests {
             true,
         )
         .unwrap_err();
-        assert!(err.contains("invalid capture filter"), "got: {err}");
-        // filter when disallowed
         assert!(
-            validate_capture(&capture_kind(30, None, Some("udp"), None, false), false)
-                .unwrap_err()
-                .contains("disabled")
+            err.message.contains("invalid capture filter"),
+            "got: {err:?}"
+        );
+        assert_eq!(
+            err.refused_by, None,
+            "a bad filter expression is a malformed request, not a switch"
+        );
+        // filter when disallowed — the one gate, and it names itself (#1085)
+        let gated =
+            validate_capture(&capture_kind(30, None, Some("udp"), None, false), false).unwrap_err();
+        assert!(gated.message.contains("disabled"));
+        assert_eq!(
+            gated.refused_by.as_deref(),
+            Some("artifacts.capture.on_demand.allow_filter"),
+            "a gated capture refusal must name the switch that refused it (#866)"
         );
     }
 

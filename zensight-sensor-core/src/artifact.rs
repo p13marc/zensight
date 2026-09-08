@@ -154,9 +154,18 @@ pub trait ArtifactProducer: Send + Sync + 'static {
     fn advert(&self) -> KindAdvert;
 
     /// Validate + authorize a request's parameters against this producer's policy
-    /// (e.g. snapshot allowlist resolution, capture filter/duration clamps). An
-    /// `Err(reason)` is published as `Failed`.
-    fn accepts(&self, kind: &ArtifactKind) -> Result<(), String>;
+    /// (e.g. snapshot allowlist resolution, capture filter/duration clamps).
+    ///
+    /// The producer returns the refusal it means, because only it can tell the
+    /// two apart (#1085): a malformed request is
+    /// [`RpcError::invalid_args`](crate::rpc::RpcError::invalid_args), while a
+    /// switch that is off is
+    /// [`RpcError::gated`](crate::rpc::RpcError::gated) **carrying
+    /// `with_refused_by(<switch>)`** — #866's contract, and what the audit
+    /// trail's `refused_by` column is read for. Every refusal used to be
+    /// `Err(String)` widened to `gated`, so the trail said `error/gated` for a
+    /// bad regex and named no switch for a real gate.
+    fn accepts(&self, kind: &ArtifactKind) -> Result<(), crate::rpc::RpcError>;
 
     /// For a `Tree` producer, an optional cap on the file count (enforced by the
     /// channel after the walk, since it depends on the walk result). Ignored for
@@ -483,7 +492,15 @@ impl ArtifactChannel {
 
         loop {
             tokio::select! {
-                Ok(query) = req_q.recv_async() => {
+                // Every recv branch binds the `Result`, never `Ok(..)` (#1089).
+                // A pattern that only matches `Ok` *disables* its branch when
+                // the session closes, and `ttl_tick` then keeps this loop alive
+                // forever over three dead queryables: `run_inner` never
+                // returns, so `run`'s "artifact channel exited" never fires and
+                // the process keeps an artifact channel that answers nothing.
+                result = req_q.recv_async() => {
+                    let query = result
+                        .map_err(|e| anyhow::anyhow!("artifact request channel closed: {e}"))?;
                     // Write procedure (RFC 05 §3): value reply = accepted
                     // ({ id }); failures ride reply_err with a namespaced name.
                     let payload = query.request().payload;
@@ -510,7 +527,9 @@ impl ArtifactChannel {
                         }
                     }
                 }
-                Ok(query) = status_q.recv_async() => {
+                result = status_q.recv_async() => {
+                    let query = result
+                        .map_err(|e| anyhow::anyhow!("artifact status channel closed: {e}"))?;
                     let status = self.status().await;
                     let payload = serde_json::to_vec(&status).unwrap_or_default();
                     // Concrete reply key (RFC 05 §2.1).
@@ -518,7 +537,9 @@ impl ArtifactChannel {
                         tracing::warn!(error = %e, "artifact status reply failed");
                     }
                 }
-                Ok(query) = cancel_q.recv_async() => {
+                result = cancel_q.recv_async() => {
+                    let query = result
+                        .map_err(|e| anyhow::anyhow!("artifact cancel channel closed: {e}"))?;
                     // `?id=<ulid>` selector param, with the legacy body form
                     // as fallback.
                     let req = query.request();
@@ -527,10 +548,23 @@ impl ArtifactChannel {
                         .then(|| String::from_utf8_lossy(&req.payload).trim().to_string());
                     match param_id.or(body_id).and_then(|s| s.parse::<Ulid>().ok()) {
                         Some(id) => {
-                            self.cancel(id).await;
+                            // `res=1` is "asked for, permitted, AND achieved"
+                            // (docs/audit.md) and is what `ausearch --success`
+                            // reads. A cancel for an expired or unknown ULID
+                            // achieved nothing, so it rides `executed_but` and
+                            // lands as `res=0` (#1085) — the gate did say yes,
+                            // which is why it is not a refusal.
+                            let cancelled = self.cancel(id).await;
                             let target = id.to_string();
+                            let outcome =
+                                (!cancelled).then(|| "no such artifact".to_string());
                             if let Err(e) = query
-                                .executed(cancel_key.as_str(), Vec::new(), Some(&target))
+                                .executed_but(
+                                    cancel_key.as_str(),
+                                    Vec::new(),
+                                    Some(&target),
+                                    outcome,
+                                )
                                 .await
                             {
                                 tracing::warn!(error = %e, "artifact cancel reply failed");
@@ -589,20 +623,24 @@ impl ArtifactChannel {
             )));
         }
 
+        // A refusal never mutates per-kind state (#1085). `set_failed` used to
+        // run on all four paths below, so a refused request B overwrote request
+        // A's in-flight or ready `artifact/status` with `Failed { id: B }` —
+        // the operator watching A saw it fail because somebody else asked.
+        // The refusal *is* the answer; `artifact/status` describes what this
+        // channel is doing, which a rejected request never became part of.
         let slug = req.kind.slug();
         let Some(producer) = self.producers.get(slug).cloned() else {
-            self.set_failed(slug, req.id, &format!("unsupported artifact kind: {slug}"))
-                .await;
             return Err(RpcError::unsupported(format!(
                 "unsupported artifact kind: {slug}"
             )));
         };
 
-        // Producer-specific validation / authorization.
-        if let Err(reason) = producer.accepts(&req.kind) {
-            self.set_failed(slug, req.id, &reason).await;
-            return Err(RpcError::gated(reason));
-        }
+        // Producer-specific validation / authorization. The producer builds the
+        // error itself (#1085): only it knows whether "no" means a malformed
+        // request or a switch that is off, and — for the switch — which switch
+        // (#866, the contract `WriteQuery::refused` reads out of `refused_by`).
+        producer.accepts(&req.kind)?;
 
         // Per-kind busy + cooldown gate.
         let cancel = CancelToken::new();
@@ -611,23 +649,21 @@ impl ArtifactChannel {
             let kr = rt.entry(slug).or_default();
             if kr.busy {
                 drop(rt);
-                self.set_failed(slug, req.id, "already producing this artifact kind")
-                    .await;
                 return Err(crate::rpc::RpcError::new(
                     crate::rpc::ERR_BUSY,
                     "already producing this artifact kind",
-                ));
+                )
+                .with_refused_by("busy"));
             }
             if let Some(last) = kr.last_gen
                 && last.elapsed() < Duration::from_secs(producer.common().cooldown_secs)
             {
                 drop(rt);
-                self.set_failed(slug, req.id, "cooling down; try again shortly")
-                    .await;
                 return Err(crate::rpc::RpcError::new(
                     crate::rpc::ERR_BUSY,
                     "cooling down; try again shortly",
-                ));
+                )
+                .with_refused_by("cooldown_secs"));
             }
             kr.busy = true;
             kr.in_flight = Some((req.id, cancel.clone()));
@@ -1029,18 +1065,12 @@ impl ArtifactChannel {
         }
     }
 
-    async fn set_failed(&self, slug: &'static str, id: Ulid, reason: &str) {
-        let mut rt = self.state.lock().await;
-        let kr = rt.entry(slug).or_default();
-        kr.current = Some(ArtifactState::Failed {
-            id,
-            kind: slug.to_string(),
-            reason: reason.to_string(),
-        });
-    }
-
     /// Cancel by id: abort an in-flight production, or expire a ready artifact.
-    async fn cancel(&self, id: Ulid) {
+    ///
+    /// Returns whether `id` matched anything. It used to return `()` and fall
+    /// silently off the end, so a cancel for an expired ULID was journalled as
+    /// a successful operator action (#1085).
+    async fn cancel(&self, id: Ulid) -> bool {
         let mut rt = self.state.lock().await;
         for (slug, kr) in rt.iter_mut() {
             // In-flight: signal the producer to stop; `drive` records Failed.
@@ -1048,7 +1078,7 @@ impl ArtifactChannel {
                 && *in_id == id
             {
                 token.cancel();
-                return;
+                return true;
             }
             // Ready: expire the delivered artifact now.
             if let Some(active) = &kr.active
@@ -1063,9 +1093,10 @@ impl ArtifactChannel {
                     drop(rt);
                     self.release(cleanup).await;
                 }
-                return;
+                return true;
             }
         }
+        false
     }
 
     /// Reap any artifact past its TTL.
