@@ -204,14 +204,47 @@ image actually uses is `configs/snmp.json5`, which was already correct.)
   unit `By/s`, all other counters `1/s`. The raw lifetime counter keeps
   publishing unchanged (history, exporters).
 - **Wrap handling**: deltas use modular arithmetic in the counter's width, so
-  a single Counter32 wrap (~5.7 min at a saturated 100 Mb/s link) still
-  yields a correct continuous rate.
+  **one** Counter32 wrap (~5.7 min at a saturated 100 Mb/s link) still yields a
+  correct continuous rate. More than one is not decodable — see *wrap risk*.
 - **Reset handling**: the poller reads sysUpTime.0 every cycle; if it goes
   backwards, the device rebooted — all rate baselines drop and one interval
-  publishes no rates (never negative/garbage spikes). An implausibly large
-  single-counter delta (> 1e10/s) re-baselines just that counter. Rate
-  eligibility comes from the wire tag, backed by the MIB table's SYNTAX for
-  agents that mis-tag counters.
+  publishes no rates (never negative/garbage spikes). Rate eligibility comes
+  from the wire tag, backed by the MIB table's SYNTAX for agents that mis-tag
+  counters.
+
+  A single counter's delta is held to the **smallest of three ceilings**
+  (#1074), and it re-baselines rather than publishing above it:
+
+  | Ceiling | Value | Catches |
+  |---|---|---|
+  | width | one full wrap per measured interval — 2³²/dt, ~71.6 M/s at a 60 s poll | a Counter32 reset producing a near-modulus delta |
+  | absolute | 1e10/s, an 80 Gb/s link in octets with headroom | a Counter64 reset |
+  | physical | the link's own limit: `speed/8` octets/s, or `speed/(84×8)` frames/s for packet, error and discard columns | a `clear counters` on an errors column |
+
+  The width ceiling is the one that was missing. `MAX_PLAUSIBLE_RATE = 1e10`
+  was the only guard, and 1e10 is **above** the largest 32-bit modular delta
+  there is (2³² ≈ 4.29e9) — so it could never fire for any Counter32, which is
+  exactly the population that needs it. A `clear counters` on `ifInErrors`
+  (4e9 → 0) published ≈ 4.9 M errors/s over a 60 s poll, and fired
+  `interface_errors`.
+
+  The physical ceiling applies to a **backwards** step only. A backwards step is
+  genuinely ambiguous — wrap or reset — and a physical bound is the right
+  tie-breaker. A *forward* delta is what the device reported, and `ifSpeed` is
+  wrong all the time (aggregate members, mis-declared virtual interfaces, a
+  stale re-negotiated link); suppressing real traffic would be a worse failure
+  than the one this guards against.
+- **Wrap risk** (#1074): a `.rate` derived from a 32-bit counter carries a
+  `wrap_risk` label when the interface's speed makes **more than one** wrap
+  possible between polls. Modular subtraction is correct across at most one, and
+  nothing in the arithmetic can tell one from three — the residue is published
+  as a plausible, *lower* number, so a utilisation alert never fires on a pinned
+  link. At 1 Gb/s `ifInOctets` wraps every ~34 s and the default poll is 60.
+  RFC 2233 §3.1.6 requires the 64-bit `ifXTable` columns above 20 Mbit/s, and
+  snmp_exporter and LibreNMS both force them; this sensor prefers HC columns
+  when the device has them (`set_rate_pref`) and, when it does not, says so
+  instead of saying nothing. The label is absent when the speed is unknown: that
+  supports no claim either way.
 - **Units**: `TelemetryPoint` carries an optional UCUM-style `unit` field
   (serde-default, absent when unknown). The OTel exporter forwards it as the
   instrument unit; the Prometheus exporter exports rates as gauges named

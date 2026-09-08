@@ -39,6 +39,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The SNMP implausible-rate guard can fire for a Counter32, and a multi-wrap
+  link is marked** (#1074). Two halves of one problem.
+
+  `MAX_PLAUSIBLE_RATE = 1e10` was the only ceiling, and **1e10 is above the
+  largest 32-bit modular delta there is** (2³² ≈ 4.29e9) — so the guard could
+  never fire for any Counter32, which is exactly the population that needs it.
+  Only 64-bit counters were protected, and `implausible_delta_rebaselines` tests
+  only those. A `clear counters` on `ifInErrors` (4e9 → 0) published ≈ 4.9 M
+  errors/s over a 60 s poll and fired `interface_errors` — and those columns
+  (`ifIn/OutErrors`, `ifIn/OutDiscards`) have no HC sibling to prefer instead.
+
+  A delta is now held to the smallest of three ceilings: the **width** (one full
+  wrap per measured interval — the missing one), the **absolute** 1e10 (kept,
+  because 2⁶⁴/dt would have made the 64-bit guard weaker than the constant), and
+  a **physical** bound from the link's own speed, which is the only thing that
+  can tell 294 967 296 credible *octets* from 294 967 296 absurd *errors*. The
+  physical one applies to a **backwards** step only: that step is genuinely
+  ambiguous, while a forward delta is what the device reported and `ifSpeed` is
+  wrong all the time.
+
+  Second half: modular subtraction is correct across at most **one** wrap, and
+  nothing in the arithmetic can tell one from three. At 1 Gb/s `ifInOctets`
+  wraps every ~34 s against a 60 s default poll, so two wraps land in one
+  interval and the residue is published as a plausible, *lower* number — a
+  utilisation alert that never fires on a pinned link. A `.rate` from a 32-bit
+  counter now carries `wrap_risk` when the interface's speed makes that
+  possible, per RFC 2233 §3.1.6's 20 Mbit/s threshold. Absent when the speed is
+  unknown: that supports no claim either way.
+
+
 - **Modbus multi-register values are published at the right addresses** (#1073).
   `poll_once` enumerated *decoded values* and did `register.address +
   addr_offset`, while a 32-bit type spans **two** registers per value. So
