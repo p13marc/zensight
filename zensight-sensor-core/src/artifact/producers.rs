@@ -46,10 +46,13 @@ impl ArtifactProducer for ReportProducer {
     fn advert(&self) -> KindAdvert {
         KindAdvert::Report {}
     }
-    fn accepts(&self, kind: &ArtifactKind) -> Result<(), String> {
+    fn accepts(&self, kind: &ArtifactKind) -> Result<(), crate::rpc::RpcError> {
         match kind {
             ArtifactKind::Report {} => Ok(()),
-            _ => Err("report producer given a non-report request".into()),
+            // A wrong kind is a malformed request, not a switch saying no.
+            _ => Err(crate::rpc::RpcError::invalid_args(
+                "report producer given a non-report request",
+            )),
         }
     }
     async fn produce(&self, _kind: ArtifactKind, _ctx: ProduceCtx) -> anyhow::Result<Produced> {
@@ -104,14 +107,19 @@ impl ArtifactProducer for SnapshotProducer {
             dirs: self.limits.dir_names(),
         }
     }
-    fn accepts(&self, kind: &ArtifactKind) -> Result<(), String> {
+    fn accepts(&self, kind: &ArtifactKind) -> Result<(), crate::rpc::RpcError> {
         match kind {
-            ArtifactKind::Snapshot { dir } => self
-                .limits
-                .resolve(dir)
-                .map(|_| ())
-                .ok_or_else(|| format!("unknown directory: {dir}")),
-            _ => Err("snapshot producer given a non-snapshot request".into()),
+            // A directory outside the allowlist is a gate, and the allowlist
+            // is the switch that refused it (#866).
+            ArtifactKind::Snapshot { dir } => {
+                self.limits.resolve(dir).map(|_| ()).ok_or_else(|| {
+                    crate::rpc::RpcError::gated(format!("unknown directory: {dir}"))
+                        .with_refused_by("artifacts.snapshot.dirs")
+                })
+            }
+            _ => Err(crate::rpc::RpcError::invalid_args(
+                "snapshot producer given a non-snapshot request",
+            )),
         }
     }
     fn tree_max_files(&self) -> Option<u64> {

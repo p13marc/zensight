@@ -332,7 +332,7 @@ impl ArtifactProducer for SlowProducer {
     fn advert(&self) -> KindAdvert {
         KindAdvert::Report {}
     }
-    fn accepts(&self, _kind: &ArtifactKind) -> Result<(), String> {
+    fn accepts(&self, _kind: &ArtifactKind) -> Result<(), zensight_sensor_core::rpc::RpcError> {
         Ok(())
     }
     async fn produce(&self, _kind: ArtifactKind, ctx: ProduceCtx) -> anyhow::Result<Produced> {
@@ -834,4 +834,333 @@ async fn replicate_publishes_snapshot_chunks_and_index() {
         "the index is published under its content root (RFC 07 §2.3): {}",
         index_put.key_expr()
     );
+}
+
+// ===========================================================================
+// #1085 / #1089 — the artifact channel's honesty about what it did
+// ===========================================================================
+
+/// The audit trail, as this process would write it.
+///
+/// Without the `linux-audit` feature `audit::emit` always fails, so
+/// `audit::record` always takes its `tracing` fallback — and the fallback's
+/// message *is* the auditd line, `res=` included. Capturing the
+/// `zensight::audit` target is therefore the only way a test can read back what
+/// `ausearch --success` would.
+///
+/// The buffer is global (a `tracing` subscriber is per-process) and shared by
+/// every test in this binary, so each assertion filters for its **own** ULID,
+/// which appears in the record's `target=` field.
+mod audit_trail {
+    use std::io;
+    use std::sync::{Mutex, OnceLock};
+
+    fn buffer() -> &'static Mutex<Vec<u8>> {
+        static BUF: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+        BUF.get_or_init(Default::default)
+    }
+
+    struct Sink;
+
+    impl io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            buffer()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Sink;
+        fn make_writer(&'a self) -> Self::Writer {
+            Sink
+        }
+    }
+
+    /// Install the capture once. Safe to call from every test.
+    pub fn capture() {
+        static ONCE: OnceLock<()> = OnceLock::new();
+        ONCE.get_or_init(|| {
+            use tracing_subscriber::layer::SubscriberExt;
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(Sink)
+                .with_ansi(false)
+                .with_target(true);
+            let subscriber = tracing_subscriber::registry().with(layer);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
+    /// Every captured audit line mentioning `needle`.
+    pub fn lines_mentioning(needle: &str) -> Vec<String> {
+        let buf = buffer().lock().unwrap_or_else(|e| e.into_inner());
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .filter(|l| l.contains("zensight::audit") && l.contains(needle))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// `res=1` is "asked for, permitted, **and achieved**" (`docs/audit.md`), and
+/// it is what `ausearch --success` reads. `cancel()` used to return `()` and
+/// fall silently off the end when no id matched, after which the caller
+/// unconditionally answered `executed` — so a cancel for an expired or
+/// invented ULID was journalled as a successful operator action (#1085).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_that_cancelled_nothing_is_not_recorded_as_achieved() {
+    audit_trail::capture();
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "artcancelmiss";
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let producer = Arc::new(SlowProducer {
+        common: zensight_common::CommonArtifactLimits {
+            enabled: true,
+            max_bytes: 1 << 20,
+            cooldown_secs: 0,
+            ttl_secs: 600,
+            chunk_size: 256 * 1024,
+        },
+        started: started.clone(),
+    });
+    let channel = ArtifactChannel::new(session.clone(), prefix, "host1", vec![producer]).unwrap();
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // Nothing has ever been requested, so this id matches nothing.
+    let missing = Ulid::from_parts(7, 424_242);
+    let replies = session
+        .get(format!("{}?id={}", artifact_cancel_key(prefix), missing))
+        .await
+        .unwrap();
+    let reply = replies.recv_async().await.expect("cancel reply");
+    assert!(
+        reply.result().is_ok(),
+        "a cancel for an unknown id is not a refusal — the gate did say yes: {reply:?}"
+    );
+
+    // Now cancel something that really is in flight, for the contrast.
+    let live = Ulid::from_parts(7, 424_243);
+    let _ = session
+        .get(artifact_request_key(prefix))
+        .payload(
+            serde_json::to_vec(&ArtifactRequest {
+                id: live,
+                kind: ArtifactKind::Report {},
+                opts: Default::default(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .recv_async()
+        .await
+        .expect("request reply");
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("producer never started");
+    let _ = session
+        .get(format!("{}?id={}", artifact_cancel_key(prefix), live))
+        .await
+        .unwrap()
+        .recv_async()
+        .await
+        .expect("cancel reply");
+
+    // Give the fallback writer a moment to flush both records.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let miss = audit_trail::lines_mentioning(&missing.to_string());
+    assert!(!miss.is_empty(), "no audit record for the missed cancel");
+    assert!(
+        miss.iter().all(|l| l.contains("res=0")),
+        "a cancel that cancelled nothing must not be `res=1`: {miss:?}"
+    );
+    assert!(
+        miss.iter().all(|l| l.contains("verdict=executed")),
+        "it is still an executed action — the gate permitted it: {miss:?}"
+    );
+
+    let hit = audit_trail::lines_mentioning(&live.to_string());
+    assert!(!hit.is_empty(), "no audit record for the real cancel");
+    assert!(
+        hit.iter().any(|l| l.contains("res=1")),
+        "a cancel that really cancelled must stay `res=1`: {hit:?}"
+    );
+}
+
+/// A refusal must not mutate per-kind state (#1085).
+///
+/// The busy and cooldown gates used to call `set_failed` before returning their
+/// refusal, so a *rejected* request B overwrote the in-flight or ready status of
+/// request A with `Failed { id: B }` — the operator watching A saw it fail
+/// because somebody else asked at the wrong moment. The refusal is the answer;
+/// `artifact/status` describes what this channel is doing, which a rejected
+/// request never became part of.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_refusal_leaves_the_in_flight_request_in_status() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "artbusy";
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let producer = Arc::new(SlowProducer {
+        common: zensight_common::CommonArtifactLimits {
+            enabled: true,
+            max_bytes: 1 << 20,
+            cooldown_secs: 0,
+            ttl_secs: 600,
+            chunk_size: 256 * 1024,
+        },
+        started: started.clone(),
+    });
+    let channel = ArtifactChannel::new(session.clone(), prefix, "host1", vec![producer]).unwrap();
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let first = Ulid::from_parts(9, 1);
+    let request = |id: Ulid| {
+        let session = session.clone();
+        async move {
+            session
+                .get(artifact_request_key(prefix))
+                .payload(
+                    serde_json::to_vec(&ArtifactRequest {
+                        id,
+                        kind: ArtifactKind::Report {},
+                        opts: Default::default(),
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+                .recv_async()
+                .await
+                .expect("request reply")
+        }
+    };
+
+    assert!(
+        request(first).await.result().is_ok(),
+        "first request refused"
+    );
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("producer never started");
+
+    // Second request while the first is still producing: refused as busy.
+    let second = Ulid::from_parts(9, 2);
+    let reply = request(second).await;
+    let err = reply.result().expect_err("a busy channel must refuse");
+    let refusal: zensight_sensor_core::rpc::RpcError =
+        serde_json::from_slice(&err.payload().to_bytes()).expect("decode refusal");
+    assert_eq!(
+        refusal.refused_by.as_deref(),
+        Some("busy"),
+        "a refusal must name the switch that refused it (#866): {refusal:?}"
+    );
+
+    // The status still describes the request that is actually running.
+    let status = poll_status(&session, &artifact_status_key(prefix))
+        .await
+        .expect("status");
+    match kind_current(&status, "report") {
+        Some(ArtifactState::Generating { id, .. }) => assert_eq!(
+            id, first,
+            "the refused request replaced the in-flight one in `artifact/status`"
+        ),
+        other => panic!("expected the first request still generating, got {other:?}"),
+    }
+}
+
+/// A gated refusal names the switch that refused it (#866, #1085).
+///
+/// `accepts` returned `Err(String)`, which the channel widened to
+/// `error/gated` with no `refused_by` — so the trail said `error/gated` for a
+/// malformed request and named no switch for a real gate. The producer builds
+/// the error now, because only it knows which of the two it meant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gated_snapshot_refusal_names_the_allowlist() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "artgated";
+    let dir = tempfile::tempdir().unwrap();
+
+    let limits = ArtifactSnapshotLimits {
+        enabled: true,
+        cooldown_secs: 0,
+        dirs: vec![SnapshotDir {
+            name: "allowed".into(),
+            path: dir.path().to_string_lossy().to_string(),
+            incremental: false,
+        }],
+        ..Default::default()
+    };
+    let producer = Arc::new(SnapshotProducer::new(&limits));
+    let channel = ArtifactChannel::new(session.clone(), prefix, "host1", vec![producer]).unwrap();
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let reply = session
+        .get(artifact_request_key(prefix))
+        .payload(
+            serde_json::to_vec(&ArtifactRequest {
+                id: Ulid::from_parts(11, 1),
+                kind: ArtifactKind::Snapshot {
+                    dir: "not-on-the-list".to_string(),
+                },
+                opts: Default::default(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .recv_async()
+        .await
+        .expect("request reply");
+    let err = reply
+        .result()
+        .expect_err("an unlisted directory is refused");
+    let refusal: zensight_sensor_core::rpc::RpcError =
+        serde_json::from_slice(&err.payload().to_bytes()).expect("decode refusal");
+    assert_eq!(
+        refusal.refused_by.as_deref(),
+        Some("artifacts.snapshot.dirs"),
+        "a gated refusal must name the switch, not the error class: {refusal:?}"
+    );
+}
+
+/// The loop must not outlive its own queryables (#1089).
+///
+/// Every recv branch matched `Ok(query)`, so when the session closed the three
+/// branches were *disabled* rather than failing — and `ttl_tick` kept the loop
+/// alive forever. `run_inner` never returned, so `run`'s "artifact channel
+/// exited" never fired and the process kept an artifact channel that answered
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_session_ends_the_artifact_loop() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let prefix = "artexit";
+    let channel = ArtifactChannel::new(
+        session.clone(),
+        prefix,
+        "host1",
+        vec![report_producer(prefix)],
+    )
+    .unwrap();
+    let running = tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // Close the bus under the running channel.
+    session.close().await.expect("close");
+
+    // One ttl tick is 5s; the loop must notice well inside two.
+    tokio::time::timeout(Duration::from_secs(12), running)
+        .await
+        .expect("the artifact loop outlived its own queryables (#1089)")
+        .expect("the artifact task panicked");
 }
