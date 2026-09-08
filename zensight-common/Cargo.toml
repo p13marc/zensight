@@ -7,6 +7,12 @@ license.workspace = true
 description = "Common types and utilities for ZenSight observability sensors"
 
 [dependencies]
+# Formatting only, for the RFC 3339 instant a `Page`'s `covers_from` must
+# carry (#1157/#1067): the generic reader takes that field with `as_str()`, so
+# an epoch-millis number is read as *absent*. `clock` is off — nothing here
+# asks the OS what time it is, and every sensor already pulls chrono through
+# `zensight-sensor-core`, so this adds nothing to a producer's tree.
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
 # `decode` is on unconditionally, and costs nothing: it pulls only `ciborium`,
 # which this crate already depends on directly. It is what makes
 # `zenkey::schema::validate::{Verdict, NotValidated}` exist in *every* build —

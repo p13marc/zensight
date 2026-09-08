@@ -29,6 +29,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`@rpc/historian/range` says what it could cover, and pages by value**
+  (#1067, #1068). Two failures the reply had no way to state.
+
+  A sub-minute `step` is served from the hot ring, which holds minutes. A caller
+  asking twenty-four hours at `step=10` got whatever the ring held, in a reply
+  with `truncated: false` and `next_cursor: null` — and `docs/range-api.md` is
+  explicit that a null cursor is the end. `from`/`to` are echoed unchanged, so a
+  chart drew a 24-hour axis with ten minutes of data at the right edge and no
+  gap marker. The reply now carries the RFC 05 §3.2 envelope fields — `partial`,
+  `scanned`, `covers_from` — additively, beside `truncated`, which is kept for
+  one release and superseded. `covers_from` is an **RFC 3339 string**: the
+  generic reader takes it with `as_str()`, so epoch millis would be read as
+  absent by exactly the tooling meant to catch this.
+
+  `partial` is not a rename of `truncated`, it is the marker: `page_signal()`
+  keys off a boolean field spelled exactly that, so until now this procedure was
+  not a *bad* RFC 05 §3.2 envelope — it was not seen as one at all, by `zenctl
+  call` or by any RFC 13 judge. The GUI's existing partial-window strip now
+  rises for a coverage gap as well as for a `limit`.
+
+  The cursor was `"<series index>:<points consumed>"`, an index into the freshly
+  sorted selection. Sorting keeps the *order* stable, not the *indices*: a
+  series interned before the cut shifted everything right and page two re-read
+  one; retention removing one shifted left and page two skipped one; neither was
+  signalled. It is now the series name plus points consumed, and a series that
+  disappeared between pages resumes at the first that sorts after it. A
+  positional cursor from an older build restarts the walk rather than resuming
+  at a series named `120`.
+
 - **`hot_secs` bounds the hot ring in seconds, which is what its name says**
   (#1065). It was passed to `MetricStore::new` as an element *capacity* and
   documented as "seconds of per-second samples held in memory, per series. Ten

@@ -197,10 +197,48 @@ pub struct RangeReply {
     pub step_s: i64,
     /// True when the reply was cut short by `limit` rather than by the window.
     /// A chart that renders a truncated window without saying so is lying.
+    ///
+    /// **Superseded by `partial`, and kept for one release** (#1067). It says
+    /// less — a window the chosen tier could not cover is also a short answer,
+    /// and this field could not say so — and it is spelled wrong for the
+    /// generic reader: `zenkey_fleet::CallAnswer::page_signal()` looks for a
+    /// boolean `partial` and nothing else, so for as long as this was the only
+    /// marker, `@rpc/historian/range` was not merely a *bad* RFC 05 §3.2
+    /// envelope, it was not seen as one at all.
     pub truncated: bool,
+    /// The producer stopped before completing the walk — the `limit` was
+    /// spent, or the tier could not cover the window asked for (#1067). The
+    /// RFC 05 §3.2 marker, and the only field the generic reader keys off.
+    #[serde(default)]
+    pub partial: bool,
     /// Opaque cursor for the next page, or absent at the end.
+    ///
+    /// A **value** cursor since #1068: the last emitted series name and the
+    /// points consumed within it. It was a positional index into a freshly
+    /// sorted list, which keeps the *order* stable but not the *indices* — a
+    /// series interned before the cut made page two repeat one, retention
+    /// removing one made it skip one, and neither was signalled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// Buckets read to build this page, so an expensive empty answer can be
+    /// told from a cheap one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<u64>,
+    /// The oldest instant the chosen tier could have answered for, as an RFC
+    /// 3339 string — present only when that is **later** than `from`, i.e.
+    /// when the answer is narrower than the question (#1067).
+    ///
+    /// A sub-minute `step` is served from the hot ring, which holds minutes;
+    /// a caller asking twenty-four hours at `step=10` used to get whatever the
+    /// ring held with `truncated: false` and a null cursor — and the reply
+    /// echoes `from`/`to` unchanged, so a chart drew a 24-hour axis with ten
+    /// minutes of data at the right edge and no gap marker.
+    ///
+    /// A string, not epoch millis: the generic reader takes it with `as_str()`
+    /// and a number is read as absent — see
+    /// [`crate::page::instant_from_epoch_ms`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covers_from: Option<String>,
     /// One entry per series, in a stable order so a cursor means the same
     /// thing on the next call.
     pub series: Vec<RangeSeries>,
@@ -406,9 +444,9 @@ mod tests {
         }
     }
 
-    /// `truncated` and `next_cursor` are the only signals a caller has that a
-    /// window is partial, so they must survive the round trip even when the
-    /// reply is otherwise empty.
+    /// The completeness signals are the only ones a caller has that a window is
+    /// partial, so they must survive the round trip even when the reply is
+    /// otherwise empty.
     #[test]
     fn an_empty_reply_still_states_its_window_and_completeness() {
         let reply = RangeReply {
@@ -417,7 +455,10 @@ mod tests {
             to: 2_000,
             step_s: 60,
             truncated: false,
+            partial: false,
             next_cursor: None,
+            scanned: None,
+            covers_from: None,
             series: vec![],
         };
         let json = serde_json::to_string(&reply).unwrap();
@@ -427,5 +468,29 @@ mod tests {
             json.contains("\"truncated\":false"),
             "completeness is never elided: a reader must not have to guess it"
         );
+        assert!(
+            json.contains("\"partial\":false"),
+            "the RFC 05 §3.2 marker is never elided either — a reply without a \
+             boolean `partial` is not read as a bad envelope, it is not read as \
+             an envelope at all (#1067)"
+        );
+    }
+
+    /// A reply written by a historian from before #1067 still parses: the four
+    /// new fields all default. The reverse — an old *reader* against a new
+    /// reply — is the additive case serde already handles.
+    #[test]
+    fn a_reply_from_before_the_envelope_still_parses() {
+        let old = r#"{"historian":"h-0123456789ab","from":1000,"to":2000,
+                      "step_s":60,"truncated":true,"next_cursor":"3:0","series":[]}"#;
+        let back: RangeReply = serde_json::from_str(old).unwrap();
+        assert!(back.truncated);
+        assert!(
+            !back.partial,
+            "absent defaults to false, never to `truncated`"
+        );
+        assert_eq!(back.next_cursor.as_deref(), Some("3:0"));
+        assert!(back.scanned.is_none());
+        assert!(back.covers_from.is_none());
     }
 }

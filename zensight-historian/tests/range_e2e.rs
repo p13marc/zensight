@@ -209,6 +209,10 @@ async fn pages_reassemble_into_the_unpaged_answer() {
                     page.truncated,
                     "a page with a cursor is truncated by definition"
                 );
+                assert!(
+                    page.partial,
+                    "and partial, which is the marker the RFC reads"
+                );
                 cursor = Some(c);
             }
             None => break,
@@ -228,6 +232,194 @@ async fn pages_reassemble_into_the_unpaged_answer() {
         seen, expected,
         "every point appears exactly once across the pages — no gap, no repeat"
     );
+
+    session.close().await.unwrap();
+}
+
+/// A series interned **between** two pages must not make the second repeat one
+/// or skip one (#1068).
+///
+/// The cursor was `"<series index>:<points consumed>"`, an index into the
+/// freshly sorted `select()` output. Sorting keeps the *order* stable, not the
+/// *indices*: a series interned before the cut shifted everything right and
+/// page two re-read one. Nothing signalled it, at either end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_series_interned_between_pages_is_neither_repeated_nor_skipped() {
+    let session = session().await;
+    let store: SharedStore = Arc::new(std::sync::Mutex::new(zensight_store::MetricStore::new(
+        4_096, None,
+    )));
+    let counters = IngestCounters::default();
+    let shed = AtomicBool::new(false);
+    let origin = "h-0123456789ab";
+
+    let write = |name: &str| {
+        let name = name.to_string();
+        let store = store.clone();
+        move |counters: &IngestCounters, shed: &AtomicBool| {
+            for i in 0..10i64 {
+                record_point(
+                    &format!("v1/{origin}/telemetry/sysinfo/{name}"),
+                    &point(
+                        Protocol::Sysinfo,
+                        &name,
+                        TelemetryValue::Gauge(i as f64),
+                        i * 1_000,
+                    ),
+                    &store,
+                    counters,
+                    shed,
+                    &no_batch(),
+                );
+            }
+        }
+    };
+    // Sorted by subject: "b" and "d". "c" arrives between the two pages.
+    write("b")(&counters, &shed);
+    write("d")(&counters, &shed);
+
+    let ctx = zensight_sensor_core::v1::for_producer("historian");
+    let key = ctx.rpc_key(&["range"]).unwrap().to_string();
+    let _h = range::serve_range(session.clone(), ctx, store.clone(), origin.to_string())
+        .await
+        .expect("range serves");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // A limit that lands the cut inside "b".
+    let base = format!("{key}?from=0;to=100000;step=1;agg=last;limit=6");
+    let page1: RangeReply = get_one(&session, &base).await;
+    let cursor = page1
+        .next_cursor
+        .clone()
+        .expect("the first page is short of the whole answer");
+    assert!(page1.partial);
+
+    // A new series sorting BEFORE the cursor's series is interned. Under a
+    // positional cursor every index past it shifts, and page two re-reads.
+    write("a")(&counters, &shed);
+
+    let mut seen: Vec<(String, i64)> = page1
+        .series
+        .iter()
+        .flat_map(|s| s.points.iter().map(|(ts, _)| (s.subject.clone(), *ts)))
+        .collect();
+    let mut cursor = Some(cursor);
+    let mut pages = 1;
+    while let Some(c) = cursor.take() {
+        let page: RangeReply = get_one(&session, &format!("{base};cursor={c}")).await;
+        for s in &page.series {
+            seen.extend(s.points.iter().map(|(ts, _)| (s.subject.clone(), *ts)));
+        }
+        pages += 1;
+        assert!(pages < 20, "pagination did not terminate");
+        cursor = page.next_cursor.clone();
+    }
+
+    let mut sorted = seen.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        seen.len(),
+        "no point is returned twice across the pages"
+    );
+    // "b" and "d" were complete before paging began, so every one of their
+    // points must appear exactly once. ("a" arrived mid-walk and sorts before
+    // the cursor, so the walk is under no obligation to it — but it must not
+    // have cost anything either.)
+    for name in ["b", "d"] {
+        let got = seen.iter().filter(|(s, _)| s == name).count();
+        assert_eq!(
+            got, 10,
+            "every point of {name} appears exactly once, got {got}"
+        );
+    }
+
+    session.close().await.unwrap();
+}
+
+/// A window the hot ring cannot cover is answered as one that could be, unless
+/// the reply says otherwise (#1067).
+///
+/// A sub-minute `step` is served from the ring, which holds minutes. Asking for
+/// a day at `step=10` used to return whatever the ring held with
+/// `truncated: false` and `next_cursor: null` — and `docs/range-api.md` is
+/// explicit that a null cursor is the end. The reply echoes `from`/`to`
+/// unchanged, so a chart drew a 24-hour axis with ten minutes of data at the
+/// right edge and no gap marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_window_wider_than_the_ring_says_what_it_could_cover() {
+    let session = session().await;
+    let store: SharedStore = Arc::new(std::sync::Mutex::new(zensight_store::MetricStore::new(
+        4_096, None,
+    )));
+    let counters = IngestCounters::default();
+    let shed = AtomicBool::new(false);
+    let origin = "h-0123456789ab";
+
+    // Sixty seconds of samples, ending "now".
+    let now = zensight_common::telemetry::current_timestamp_millis();
+    let ring_start = now - 60_000;
+    for i in 0..61i64 {
+        record_point(
+            &format!("v1/{origin}/telemetry/sysinfo/cpu/usage"),
+            &point(
+                Protocol::Sysinfo,
+                "cpu/usage",
+                TelemetryValue::Gauge(i as f64),
+                ring_start + i * 1_000,
+            ),
+            &store,
+            &counters,
+            &shed,
+            &no_batch(),
+        );
+    }
+
+    let ctx = zensight_sensor_core::v1::for_producer("historian");
+    let key = ctx.rpc_key(&["range"]).unwrap().to_string();
+    let _h = range::serve_range(session.clone(), ctx, store, origin.to_string())
+        .await
+        .expect("range serves");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Twenty-four hours, at a step only the ring can answer.
+    let day_ago = now - 24 * 3_600_000;
+    let sel = format!("{key}?from={day_ago};to={now};step=10;agg=last");
+    let reply: RangeReply = get_one(&session, &sel).await;
+
+    assert!(!reply.series.is_empty(), "the ring did answer something");
+    assert!(
+        reply.partial,
+        "an answer narrower than the question is partial, whatever it managed \
+         to return"
+    );
+    let covers = reply
+        .covers_from
+        .as_deref()
+        .expect("a coverage statement, as an RFC 3339 string");
+    let covers_ms = zensight_common::page::epoch_ms_from_instant(covers)
+        .expect("an instant the generic reader can parse");
+    assert!(
+        covers_ms >= day_ago + 23 * 3_600_000,
+        "coverage must name the ring's start ({covers}), not the window asked for"
+    );
+    // The window is echoed unchanged — which is exactly why the coverage
+    // statement has to exist.
+    assert_eq!(reply.from, day_ago);
+    assert_eq!(reply.to, now);
+    // `partial` with a null cursor is the RFC's contract violation *unless* the
+    // reply says why, which a coverage gap does: there is no next page in time.
+    assert!(reply.next_cursor.is_none());
+
+    // And a window the ring covers has nothing to confess.
+    let sel = format!(
+        "{key}?from={};to={now};step=10;agg=last",
+        ring_start + 10_000
+    );
+    let covered: RangeReply = get_one(&session, &sel).await;
+    assert!(!covered.partial);
+    assert!(covered.covers_from.is_none());
 
     session.close().await.unwrap();
 }

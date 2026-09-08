@@ -200,7 +200,10 @@ mod tests {
             to: 1_000,
             step_s: 60,
             truncated: false,
+            partial: false,
             next_cursor: None,
+            scanned: None,
+            covers_from: None,
             series,
         }
     }

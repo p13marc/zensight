@@ -55,7 +55,7 @@ pub struct RangeQuery {
     pub agg: Option<Aggregate>,
     pub limit: usize,
     /// `(series index, points already returned in it)`.
-    pub cursor: (usize, usize),
+    pub cursor: Cursor,
 }
 
 /// The tier that can answer a `step`-second resolution.
@@ -127,11 +127,9 @@ pub fn parse(req: &RpcRequest, now_ms: i64) -> Result<RangeQuery, RpcError> {
     // restarts at the beginning rather than erroring — a stale cursor from a
     // previous build should cost a repeated page, not a failed query.
     let cursor = p("cursor")
-        .and_then(|c| {
-            let (a, b) = c.split_once(':')?;
-            Some((a.parse().ok()?, b.parse().ok()?))
-        })
-        .unwrap_or((0, 0));
+        .as_deref()
+        .and_then(Cursor::parse)
+        .unwrap_or_default();
 
     Ok(RangeQuery {
         pattern,
@@ -143,6 +141,70 @@ pub fn parse(req: &RpcRequest, now_ms: i64) -> Result<RangeQuery, RpcError> {
         limit,
         cursor,
     })
+}
+
+/// Where a paged walk resumes (#1068).
+///
+/// **A value, never a position.** The cursor used to be
+/// `"<series index>:<points consumed>"` — an index into the freshly sorted
+/// `select()` output. Sorting keeps the *order* stable, not the *indices*: a
+/// series interned before the cut shifts everything right and page two
+/// re-reads one, retention or a restart shrinking the set shifts left and page
+/// two skips one, and neither is signalled. RFC 05 §3.2 names exactly this as
+/// the defect that motivated the envelope's value-cursor rule.
+///
+/// The wire form is `"<points>:<origin>/<producer>/<subject>"`. The count goes
+/// first so the split is unambiguous: a subject may contain `:` or `/`, a
+/// decimal count may not.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Cursor {
+    /// The series the previous page stopped in, `(origin, producer, subject)`.
+    /// `None` starts at the beginning.
+    pub after: Option<(String, String, String)>,
+    /// Points of that series already returned.
+    pub consumed: usize,
+}
+
+impl Cursor {
+    /// Parse the wire form. `None` for anything else — a stale cursor from a
+    /// previous build costs a repeated page, not a failed query.
+    fn parse(s: &str) -> Option<Cursor> {
+        let (count, path) = s.split_once(':')?;
+        let consumed = count.parse().ok()?;
+        let mut chunks = path.splitn(3, '/');
+        let (origin, producer, subject) = (chunks.next()?, chunks.next()?, chunks.next()?);
+        if subject.is_empty() {
+            return None;
+        }
+        Some(Cursor {
+            after: Some((origin.into(), producer.into(), subject.into())),
+            consumed,
+        })
+    }
+
+    /// The wire form for "resume in this series, past this many points".
+    fn wire(sel: &Selected, consumed: usize) -> String {
+        format!("{consumed}:{}/{}/{}", sel.origin, sel.producer, sel.subject)
+    }
+
+    /// Index into a freshly sorted selection to resume at, and how many points
+    /// of that series to skip.
+    ///
+    /// The named series may be **gone** — retired, pruned, or never held by
+    /// this historian. Then the walk resumes at the first series that sorts
+    /// after it, with nothing skipped: no duplicate, and no gap.
+    fn resume_at(&self, selected: &[Selected]) -> (usize, usize) {
+        let Some((o, p, s)) = &self.after else {
+            return (0, 0);
+        };
+        let key = (o.as_str(), p.as_str(), s.as_str());
+        match selected.binary_search_by(|c| {
+            (c.origin.as_str(), c.producer.as_str(), c.subject.as_str()).cmp(&key)
+        }) {
+            Ok(i) => (i, self.consumed),
+            Err(i) => (i, 0),
+        }
+    }
 }
 
 /// One series selected for a query.
@@ -315,11 +377,17 @@ async fn answer_range(req: &RpcRequest, store: &SharedStore, historian: String) 
     let mut budget = q.limit;
     let mut truncated = false;
     let mut next_cursor = None;
+    let mut scanned: u64 = 0;
+    // The oldest instant any answered series could be answered for. The most
+    // restrictive wins: a caller told the window is covered from an instant one
+    // series cannot reach would draw a line through a gap (#1067).
+    let mut covers_from_ms: Option<i64> = None;
 
-    for (idx, sel) in selected.iter().enumerate().skip(q.cursor.0) {
+    let (resume_idx, resume_skip) = q.cursor.resume_at(&selected);
+    for (idx, sel) in selected.iter().enumerate().skip(resume_idx) {
         if budget == 0 {
             truncated = true;
-            next_cursor = Some(format!("{idx}:0"));
+            next_cursor = Some(Cursor::wire(sel, 0));
             break;
         }
         let agg = q.agg.unwrap_or_else(|| Aggregate::default_for(sel.kind));
@@ -327,10 +395,17 @@ async fn answer_range(req: &RpcRequest, store: &SharedStore, historian: String) 
         let raw: Vec<(i64, Bucket)> = if q.tier == Tier::Second {
             // The per-second resolution lives only in the ring: it is never
             // flushed as its own tier, so a sub-minute step is answered from
-            // memory or not at all.
+            // memory or not at all. Which is the whole of #1067: the ring holds
+            // minutes, the caller may have asked for a day, and the reply used
+            // to echo `from` unchanged with `truncated: false` and a null
+            // cursor — and `range-api.md` is explicit that a null cursor is the
+            // end.
             let g = store.lock().unwrap_or_else(|e| e.into_inner());
-            g.hot_samples_by_id(sel.id)
-                .into_iter()
+            let held = g.hot_samples_by_id(sel.id);
+            if let Some(oldest) = held.first().map(|s| s.ts) {
+                covers_from_ms = Some(covers_from_ms.map_or(oldest, |c| c.max(oldest)));
+            }
+            held.into_iter()
                 .filter(|s| s.ts >= q.from_ms && s.ts <= q.to_ms)
                 .map(|s| (s.ts, Bucket::point(s.value)))
                 .collect()
@@ -349,9 +424,10 @@ async fn answer_range(req: &RpcRequest, store: &SharedStore, historian: String) 
                 })?
         };
 
+        scanned += raw.len() as u64;
         let mut points = reduce(&raw, q.step_s, agg);
         // Resume inside a series the previous page cut in half.
-        let skip = if idx == q.cursor.0 { q.cursor.1 } else { 0 };
+        let skip = if idx == resume_idx { resume_skip } else { 0 };
         if skip >= points.len() {
             continue;
         }
@@ -359,7 +435,7 @@ async fn answer_range(req: &RpcRequest, store: &SharedStore, historian: String) 
         if points.len() > budget {
             points.truncate(budget);
             truncated = true;
-            next_cursor = Some(format!("{idx}:{}", skip + budget));
+            next_cursor = Some(Cursor::wire(sel, skip + budget));
         }
         budget -= points.len();
         if points.is_empty() {
@@ -381,13 +457,34 @@ async fn answer_range(req: &RpcRequest, store: &SharedStore, historian: String) 
         }
     }
 
+    // The disk tiers know their own oldest row; the ring's was collected above.
+    if q.tier != Tier::Second
+        && let Some(h) = handle.clone()
+        && let Ok(Some(oldest)) = tokio::task::spawn_blocking(move || h.oldest_bucket_ms())
+            .await
+            .unwrap_or(Ok(None))
+    {
+        covers_from_ms = Some(covers_from_ms.map_or(oldest, |c| c.max(oldest)));
+    }
+    // Stated only when the answer is narrower than the question. A tier that
+    // reaches further back than `from` has nothing to confess.
+    let covers_from = covers_from_ms
+        .filter(|c| *c > q.from_ms)
+        .and_then(zensight_common::page::instant_from_epoch_ms);
+
     let reply = RangeReply {
         historian,
         from: q.from_ms,
         to: q.to_ms,
         step_s: q.step_s,
         truncated,
+        // The RFC 05 §3.2 marker: cut short by the limit, or by a tier that
+        // could not cover the window. `truncated` could only ever say the
+        // first, and is spelled wrong for the generic reader besides.
+        partial: truncated || covers_from.is_some(),
         next_cursor,
+        scanned: Some(scanned),
+        covers_from,
         series: series_out,
     };
     serde_json::to_vec(&reply)
@@ -459,7 +556,7 @@ mod tests {
         assert_eq!(q.tier, Tier::Minute);
         assert_eq!(q.agg, None, "unset means by-kind, resolved per series");
         assert_eq!(q.limit, DEFAULT_LIMIT);
-        assert_eq!(q.cursor, (0, 0));
+        assert_eq!(q.cursor, Cursor::default());
     }
 
     /// A page cap, not a stream. `limit` above the ceiling is clamped rather
@@ -490,12 +587,83 @@ mod tests {
     }
 
     /// A stale cursor from a previous build costs a repeated page, not a
-    /// failed query.
+    /// failed query — including a **positional** one from before #1068, which
+    /// every deployed caller mid-upgrade is still holding.
     #[test]
     fn a_malformed_cursor_restarts_rather_than_failing() {
-        assert_eq!(parse(&req("cursor=3:120"), 0).unwrap().cursor, (3, 120));
-        assert_eq!(parse(&req("cursor=nonsense"), 0).unwrap().cursor, (0, 0));
-        assert_eq!(parse(&req("cursor="), 0).unwrap().cursor, (0, 0));
+        assert_eq!(
+            parse(&req("cursor=120:h-0123456789ab/sysinfo/cpu/usage"), 0)
+                .unwrap()
+                .cursor,
+            Cursor {
+                after: Some((
+                    "h-0123456789ab".into(),
+                    "sysinfo".into(),
+                    "cpu/usage".into()
+                )),
+                consumed: 120,
+            }
+        );
+        // The old positional form: `3:120` has no `/`, so it names no series
+        // and restarts rather than resuming at a series called "120".
+        assert_eq!(
+            parse(&req("cursor=3:120"), 0).unwrap().cursor,
+            Cursor::default()
+        );
+        assert_eq!(
+            parse(&req("cursor=nonsense"), 0).unwrap().cursor,
+            Cursor::default()
+        );
+        assert_eq!(parse(&req("cursor="), 0).unwrap().cursor, Cursor::default());
+    }
+
+    /// The property a positional cursor cannot have (#1068): a series interned
+    /// between two pages must not make the second repeat one or skip one.
+    #[test]
+    fn a_value_cursor_survives_the_set_changing_under_it() {
+        let sel = |o: &str, p: &str, s: &str| Selected {
+            id: zensight_store::MetricId(0),
+            origin: o.into(),
+            producer: p.into(),
+            subject: s.into(),
+            kind: SeriesKind::Gauge,
+            source: None,
+            metric: None,
+            unit: None,
+        };
+        // Page one stopped 40 points into `h-a/sysinfo/cpu`.
+        let c = Cursor {
+            after: Some(("h-a".into(), "sysinfo".into(), "cpu".into())),
+            consumed: 40,
+        };
+
+        let unchanged = vec![
+            sel("h-a", "sysinfo", "boot"),
+            sel("h-a", "sysinfo", "cpu"),
+            sel("h-a", "sysinfo", "mem"),
+        ];
+        assert_eq!(c.resume_at(&unchanged), (1, 40));
+
+        // A series interned *before* the cut shifts every index right. A
+        // positional cursor would re-read `cpu` from the start; the value one
+        // still lands on `cpu`, 40 points in.
+        let grown = vec![
+            sel("h-a", "sysinfo", "boot"),
+            sel("h-a", "sysinfo", "cache"),
+            sel("h-a", "sysinfo", "cpu"),
+            sel("h-a", "sysinfo", "mem"),
+        ];
+        assert_eq!(c.resume_at(&grown), (2, 40));
+
+        // Retention removed one before the cut: a positional cursor would skip
+        // `mem` entirely.
+        let shrunk = vec![sel("h-a", "sysinfo", "cpu"), sel("h-a", "sysinfo", "mem")];
+        assert_eq!(c.resume_at(&shrunk), (0, 40));
+
+        // The series itself is gone: resume at the first that sorts after it,
+        // from the start of it. No duplicate, no gap.
+        let without = vec![sel("h-a", "sysinfo", "boot"), sel("h-a", "sysinfo", "mem")];
+        assert_eq!(c.resume_at(&without), (1, 0));
     }
 
     /// `subject` is a key expression, so `*` and `**` mean what they mean
