@@ -23,12 +23,29 @@ use zensight_common::query_detail::SocketRecord;
 
 /// Per-cookie TCP goodput rate tracker. Fed cheap sockdiag byte samples on a
 /// fixed cadence (no `/proc` scan); the query handler reads the latest rates.
+///
+/// The delta arithmetic is `zensight_sensor_core::rate::CounterTracker` since
+/// #1152 — this file was the copy that already got it right (the instant
+/// travels with the sample, a backwards step re-baselines rather than
+/// producing a negative rate), and the shared type keeps exactly those
+/// properties. What stays local is the part that is actually about sockets:
+/// cookies are reused, so a cookie absent from a sample is *pruned* rather
+/// than carried, and the two counters share one key space.
 #[derive(Default)]
 pub struct BandwidthTracker {
-    /// cookie → (bytes_acked, bytes_received, sampled-at) of the last sample.
-    prev: HashMap<u64, (u64, u64, Instant)>,
+    /// `(cookie, direction)` → last value and the instant it was read at.
+    prev: zensight_sensor_core::rate::CounterTracker<(u64, Direction)>,
     /// cookie → (tx_bps, rx_bps) latest computed rate.
     rates: HashMap<u64, (f64, f64)>,
+}
+
+/// Which of a socket's two byte counters a tracked key names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Direction {
+    /// `bytes_acked`.
+    Tx,
+    /// `bytes_received`.
+    Rx,
 }
 
 impl BandwidthTracker {
@@ -40,21 +57,20 @@ impl BandwidthTracker {
         let mut seen: HashSet<u64> = HashSet::new();
         for (cookie, acked, received) in sample {
             seen.insert(cookie);
-            if let Some(&(pa, pr, at)) = self.prev.get(&cookie) {
-                let dt = now.duration_since(at).as_secs_f64();
-                if dt > 0.0 {
-                    let tx = acked.checked_sub(pa).map(|d| d as f64 / dt).unwrap_or(0.0);
-                    let rx = received
-                        .checked_sub(pr)
-                        .map(|d| d as f64 / dt)
-                        .unwrap_or(0.0);
-                    self.rates.insert(cookie, (tx, rx));
-                }
+            let tx = self.prev.observe((cookie, Direction::Tx), acked, now);
+            let rx = self.prev.observe((cookie, Direction::Rx), received, now);
+            // A cookie reused between samples looks like a counter that fell.
+            // Both directions must have a rate before either is published, or
+            // one half of a reused socket's traffic would be attributed to the
+            // process that had the cookie before it.
+            if let (Some(tx), Some(rx)) = (tx, rx) {
+                self.rates.insert(cookie, (tx.per_sec, rx.per_sec));
+            } else {
+                self.rates.remove(&cookie);
             }
-            self.prev.insert(cookie, (acked, received, now));
         }
         // Drop sockets that vanished this sample (closed) so the maps stay bounded.
-        self.prev.retain(|c, _| seen.contains(c));
+        self.prev.retain(|(c, _)| seen.contains(c));
         self.rates.retain(|c, _| seen.contains(c));
     }
 

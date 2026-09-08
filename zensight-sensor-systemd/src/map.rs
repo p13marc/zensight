@@ -103,17 +103,6 @@ pub fn unit_points(source: &str, s: &UnitSample) -> Vec<TelemetryPoint> {
     pts
 }
 
-/// Bytes-per-second between two cumulative counter reads (#315). Returns `None`
-/// when the interval is non-positive or the counter went **backwards** — a unit
-/// restart resets its IPAccounting counters, so a backwards step is a re-baseline,
-/// not a negative rate. Callers skip that tick and re-seed the baseline.
-pub fn counter_bps(cur: u64, prev: u64, elapsed_secs: f64) -> Option<f64> {
-    if elapsed_secs <= 0.0 || cur < prev {
-        return None;
-    }
-    Some((cur - prev) as f64 / elapsed_secs)
-}
-
 /// Per-unit IP bandwidth-rate points (#315): `unit/<name>/{ip_ingress_bps,
 /// ip_egress_bps}` as **wire-L3** gauges (cgroup_skb: L3+ bytes incl. retransmits,
 /// no L2 framing), labelled `bw.source=systemd`/`bw.semantics=wire-l3` so the GUI
@@ -455,14 +444,34 @@ mod tests {
         assert_eq!(one[0].metric, "journal/disk_usage_bytes");
     }
 
+    /// The rate derivation this module used to own moved to
+    /// `zensight_sensor_core::rate::CounterTracker` (#1152). The properties it
+    /// guarded are the same, and are asserted here against the shared type so
+    /// this crate notices if they ever stop holding.
     #[test]
-    fn counter_bps_computes_and_guards_reset() {
+    fn counter_rates_still_guard_a_unit_restart() {
+        use std::time::{Duration, Instant};
+        use zensight_sensor_core::rate::CounterTracker;
+        let t0 = Instant::now();
+        let mut t: CounterTracker<&str> = CounterTracker::new();
+        t.observe("u", 10_000, t0);
         // 10_000 bytes over 2 s = 5000 B/s.
-        assert_eq!(counter_bps(20_000, 10_000, 2.0), Some(5000.0));
-        // Counter went backwards (unit restart) → no rate, re-baseline.
-        assert_eq!(counter_bps(500, 10_000, 2.0), None);
-        // Non-positive interval → no rate.
-        assert_eq!(counter_bps(20_000, 10_000, 0.0), None);
+        assert_eq!(
+            t.observe("u", 20_000, t0 + Duration::from_secs(2))
+                .map(|r| r.per_sec),
+            Some(5000.0)
+        );
+        // A unit restart resets its IPAccounting counters: a backwards step is
+        // a re-baseline, not a negative rate.
+        assert!(
+            t.observe("u", 500, t0 + Duration::from_secs(4)).is_none(),
+            "a backwards step carries no rate"
+        );
+        // Non-advancing clock → no rate.
+        assert!(
+            t.observe("u", 900, t0 + Duration::from_secs(4)).is_none(),
+            "and neither does a clock that did not move"
+        );
     }
 
     #[test]

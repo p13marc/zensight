@@ -451,6 +451,42 @@ ever reach them: a `Resolved` document whose `Delete` was lost, and a document
 whose key does not match the `alert_key` its own payload derives — the #737
 re-key stranding, which a producer can now clear for itself.
 
+## Rates from counters — `CounterTracker` (#1152)
+
+`rate.rs` — `CounterTracker<K>::observe(key, value, Instant) -> Option<Rate>`.
+One derivation, for every sensor that turns a cumulative counter into a rate.
+
+It exists because five crates kept their own previous-value map and their own
+delta arithmetic, and no copy had both halves:
+
+| Copy | Measured elapsed | Reset | Wrap |
+|---|---|---|---|
+| `netlink/bandwidth.rs` | yes | yes | n/a |
+| `systemd` IPAccounting | yes | yes | n/a |
+| `snmp/rate.rs` | yes | re-baseline | yes |
+| `sysinfo/collector.rs` (×4) | **no** | **no** | n/a |
+
+The sysinfo row is the bug (#1069): the poll loop runs
+`collect_and_publish().await` and *then* sleeps the configured interval, so the
+true period is `interval + collection_time` — and every rate divided by the
+nominal one. Under load a 5 s tick takes 12 s and `rx_rate` reads 2.4× the
+truth. The sensor already *measured* the error (`record_poll_duration`) and
+published it without using it.
+
+Three rules, each with a failure behind it:
+
+- **The instant travels with the sample.** A rate divided by what the scheduler
+  was *asked* for is not wrong by a little under load; it is wrong by exactly
+  the amount that makes the load interesting.
+- **A backwards step yields no rate, and re-baselines.** The sample is stored
+  either way, so the *next* observation has a baseline — a reset that silently
+  kept the old one publishes one enormous rate and then looks correct forever,
+  which is the failure hardest to notice.
+- **A wrap is only decodable if the width is declared.** `CounterWidth::Bits32`
+  decodes a backwards step as one modular wrap; nothing in the arithmetic can
+  tell one wrap from three, so `max_plausible_rate(elapsed)` gives the caller
+  the ceiling and leaves the judgement to whoever knows the link speed.
+
 ## Liveness
 
 `liveliness.rs` — `LivelinessManager` declares Zenoh liveliness tokens for
