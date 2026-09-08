@@ -43,6 +43,7 @@ pub mod media;
 pub mod metric_guard;
 pub mod netlink;
 pub mod outlet;
+pub mod page;
 pub mod pipeline_health;
 // The seam every telemetry point passes on its way to the bus (#930).
 pub mod point_observer;

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Page<T>` — one envelope for every bounded `@rpc` reply** (#1157). A
+  `Vec<LogRecord>` has nowhere to say "there is more", "I stopped early", or
+  "this is what the walk cost", and every bounded handler in the tree filled
+  that gap differently or not at all.
+
+  The shape is RFC 05 §3.2, ratified upstream (zenkey v1.31, shipped 0.8.0) from
+  a row filed *from this application* — so `items` / `next_cursor` / `partial` /
+  `scanned` / `covers_from` are normative spellings, not ZenSight habits, and
+  `zenkey_fleet::CallAnswer::page_signal()` already reads them. Three of the
+  rules are silent failures if you get them wrong, and are pinned by tests in
+  `zensight-conformance/tests/page_envelope.rs`: a reply that says `truncated`
+  rather than `partial` is read as **no envelope at all** rather than a bad one;
+  `covers_from` as epoch millis is read as absent, because the reader takes it
+  with `as_str()`; and `partial: true` with a null cursor is a contract violation
+  an observer MAY report, unless the reply states `covers_from` — a gap in time
+  has no next page and says why instead.
+
+  Nothing is migrated onto it yet. Migration is retire-and-sibling: a new
+  procedure replying with the envelope beside the old one.
+
 ### Fixed
 
 - **`hot_secs` bounds the hot ring in seconds, which is what its name says**

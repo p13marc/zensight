@@ -28,3 +28,11 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# The `Page<T>` interop test (#1157) only: it asserts that this application's
+# envelope is what `zenkey_fleet::CallAnswer::page_signal()` reads. The check
+# has to live here because `zensight-common` is linked by every sensor and so
+# may never link `zenkey-fleet` — see the note above. A dev-dependency runs the
+# arrow the other way and links nothing into any sensor.
+zensight-common = { workspace = true }
