@@ -209,6 +209,7 @@ impl LinuxMetrics {
     pub fn collect_disk_io(
         &mut self,
         interval_secs: f64,
+        cfg: &crate::config::DiskIoConfig,
     ) -> HashMap<String, (DiskIoStats, Option<DiskIoStats>, Option<DiskSaturation>)> {
         let mut result = HashMap::new();
 
@@ -218,12 +219,14 @@ impl LinuxMetrics {
         };
 
         for disk in diskstats {
-            // Skip partitions (we want whole disks like sda, nvme0n1)
-            // Partitions have numbers at the end like sda1, sda2
+            // Which devices are reported is `collect.disk_io` config, not a
+            // hard-coded prefix list (#1076). The list here used to skip
+            // `loop*`, `ram*` and `dm-*` under a comment claiming to skip
+            // partitions: so `sda` and `sda1` both published and double-counted,
+            // while `dm-0` — the LVM/LUKS/multipath volume the operator names —
+            // was thrown away.
             let name = &disk.name;
-
-            // Skip loop devices, ram disks, and device mapper
-            if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("dm-") {
+            if !cfg.should_include(name) {
                 continue;
             }
 
@@ -1291,7 +1294,7 @@ mod tests {
     #[test]
     fn test_collect_disk_io() {
         let mut metrics = LinuxMetrics::new();
-        let disk_io = metrics.collect_disk_io(1.0);
+        let disk_io = metrics.collect_disk_io(1.0, &crate::config::DiskIoConfig::default());
         // Should have some disks (unless running in unusual environment)
         // Just verify it doesn't panic
         for (name, (stats, _rates, _sat)) in disk_io {

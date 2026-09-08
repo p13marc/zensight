@@ -41,7 +41,9 @@ spike.
 
 - **cpu_times** — `/proc/stat` breakdown (user/nice/system/idle/iowait/irq/
   softirq/steal).
-- **disk_io** — `/proc/diskstats` read/write bytes, ops, IOPS, plus the
+- **disk_io** — whole block devices from `/proc/diskstats` (partitions dropped,
+  `dm-*` kept — see `sysinfo.disk_io` in
+  [configuration](configuration.md)): read/write bytes, ops, IOPS, plus the
   saturation-flavored `util_percent` and `queue_depth`.
 - **net_dev_extended** — richer `/proc/net/dev` counters (drops, fifo, frame,
   collisions, carrier) that the base `sysinfo` counters omit.

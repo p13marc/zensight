@@ -73,6 +73,10 @@ pub struct SysinfoConfig {
     #[serde(default)]
     pub disk: DiskConfig,
 
+    /// Which block devices `disk_io` reports on (#1076).
+    #[serde(default)]
+    pub disk_io: DiskIoConfig,
+
     /// hwmon chip filters for the temperature + fan collectors.
     #[serde(default)]
     pub sensors: SensorsConfig,
@@ -385,6 +389,120 @@ pub struct NetworkConfig {
     pub exclude_virtual: bool,
 }
 
+/// Which block devices `/proc/diskstats` telemetry covers (#1076).
+///
+/// The default is node_exporter's, and it is the **inverse** of what this
+/// sensor used to do. It skipped `loop*`, `ram*` and `dm-*` while a comment
+/// above it claimed to skip partitions — so `sda`, `sda1`, `sda2`, `nvme0n1`
+/// and `nvme0n1p1` all published and their bytes double-counted the whole disk,
+/// while `dm-0` — where every LVM, LUKS or multipath volume's I/O actually
+/// appears — was thrown away. On a stock Debian LVM install there was no
+/// `util_percent` or `queue_depth` for the volume the operator names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskIoConfig {
+    /// Device-name prefixes never reported on: virtual block layers with no
+    /// hardware behind them.
+    #[serde(default = "default_disk_io_ignore")]
+    pub ignore_prefixes: Vec<String>,
+
+    /// Drop partitions and report only whole disks (default: true) —
+    /// `sda1` and `nvme0n1p1` go, `sda` and `nvme0n1` stay.
+    ///
+    /// A partition's counters are a *subset* of its disk's, so publishing both
+    /// double-counts every byte in any fleet-level sum. An operator who wants
+    /// per-partition I/O turns this off and gets both, and can tell them apart
+    /// by name.
+    #[serde(default = "default_true")]
+    pub whole_disks_only: bool,
+
+    /// Only these devices (empty = every device that survives the rules above).
+    #[serde(default)]
+    pub include: Vec<String>,
+
+    /// Never these devices, by exact name.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// `loop*` and `ram*` have no hardware behind them; `fd*` is a floppy.
+/// **`dm-*` is deliberately absent** — that is the mapper layer, and on any
+/// LVM, LUKS or multipath host it is where the volume the operator cares about
+/// actually does its I/O.
+fn default_disk_io_ignore() -> Vec<String> {
+    ["loop", "ram", "fd", "sr", "zram"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+impl Default for DiskIoConfig {
+    fn default() -> Self {
+        DiskIoConfig {
+            ignore_prefixes: default_disk_io_ignore(),
+            whole_disks_only: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+        }
+    }
+}
+
+impl DiskIoConfig {
+    /// Whether `/proc/diskstats` telemetry should be published for `device`.
+    pub fn should_include(&self, device: &str) -> bool {
+        if !self.include.is_empty() && !self.include.iter().any(|i| i == device) {
+            return false;
+        }
+        if self.exclude.iter().any(|e| e == device) {
+            return false;
+        }
+        if self
+            .ignore_prefixes
+            .iter()
+            .any(|p| !p.is_empty() && device.starts_with(p.as_str()))
+        {
+            return false;
+        }
+        if self.whole_disks_only && is_partition(device) {
+            return false;
+        }
+        true
+    }
+}
+
+/// Whether a `/proc/diskstats` device name is a partition of another device.
+///
+/// This is node_exporter's rule, spelled out rather than as a regex, because
+/// the naive version — "ends in a digit" — is wrong in both directions and both
+/// wrongs are load-bearing here:
+///
+/// - `nvme0n1`, `mmcblk0`, `md0` and `dm-0` all end in a digit and are **whole
+///   devices**. Dropping `dm-0` is the bug this whole change exists to fix.
+/// - `nvme0n1p1` is a partition, and a rule that only knew `sda1`'s shape (a
+///   letter run then digits) would keep every NVMe partition — which on a
+///   modern fleet is most of them.
+///
+/// So: a `p<digits>` suffix preceded by a digit (`nvme0n1p1`, `mmcblk0p1`), or
+/// one of the four classic disk prefixes followed by a letter run and digits
+/// (`sda1`, `vdb2`, `hdc3`, `xvda1`). Nothing else.
+fn is_partition(device: &str) -> bool {
+    /// `(h|s|v|xv)d` — the prefixes whose devices are `<prefix><letters><n>`.
+    const CLASSIC: [&str; 4] = ["xvd", "hd", "sd", "vd"];
+
+    let stem = device.trim_end_matches(|c: char| c.is_ascii_digit());
+    if stem.len() == device.len() {
+        return false; // no trailing partition number at all
+    }
+    if let Some(rest) = stem.strip_suffix('p')
+        && rest.chars().last().is_some_and(|c| c.is_ascii_digit())
+    {
+        return true; // nvme0n1p1, mmcblk0p1
+    }
+    CLASSIC.iter().any(|p| {
+        stem.strip_prefix(p)
+            .is_some_and(|tail| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_lowercase()))
+    })
+}
+
 /// Disk mount filtering configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiskConfig {
@@ -627,6 +745,95 @@ impl DiskConfig {
 
 #[cfg(test)]
 mod tests {
+
+    /// The disk-I/O filter keeps whole disks and the mapper layer, and drops
+    /// partitions and the virtual block devices (#1076).
+    ///
+    /// The old rule was the inverse of its own comment: it skipped `loop`,
+    /// `ram` and `dm-` while claiming to skip partitions. So `sda` and `sda1`
+    /// both published — and a partition's counters are a subset of its disk's,
+    /// so every fleet-level byte sum was double-counted — while `dm-0`, where
+    /// every LVM/LUKS/multipath volume's I/O actually appears, was thrown away.
+    /// On a stock Debian LVM install there was no `util_percent` for the volume
+    /// the operator names.
+    #[test]
+    fn disk_io_keeps_whole_disks_and_the_mapper_layer() {
+        let cfg = DiskIoConfig::default();
+        for keep in [
+            "sda", "sdb", "vda", "hda", "nvme0n1", "nvme1n2", "mmcblk0", "dm-0", "dm-17", "md0",
+        ] {
+            assert!(cfg.should_include(keep), "{keep} must be reported on");
+        }
+        for drop in [
+            "sda1",
+            "sda15",
+            "vdb2",
+            "hdc3",
+            "nvme0n1p1",
+            "nvme0n1p12",
+            "mmcblk0p1",
+            "loop0",
+            "ram3",
+            "fd0",
+            "sr0",
+            "zram0",
+        ] {
+            assert!(!cfg.should_include(drop), "{drop} must not be reported on");
+        }
+    }
+
+    /// The operator can have the partitions back, and can name devices
+    /// explicitly either way.
+    #[test]
+    fn disk_io_filtering_is_configurable() {
+        let with_parts = DiskIoConfig {
+            whole_disks_only: false,
+            ..Default::default()
+        };
+        assert!(with_parts.should_include("sda1"));
+        assert!(with_parts.should_include("nvme0n1p1"));
+        // …but a `loop` is still a loop.
+        assert!(!with_parts.should_include("loop0"));
+
+        let only_one = DiskIoConfig {
+            include: vec!["dm-0".into()],
+            ..Default::default()
+        };
+        assert!(only_one.should_include("dm-0"));
+        assert!(!only_one.should_include("sda"));
+
+        let not_that_one = DiskIoConfig {
+            exclude: vec!["sdb".into()],
+            ..Default::default()
+        };
+        assert!(not_that_one.should_include("sda"));
+        assert!(!not_that_one.should_include("sdb"));
+
+        // An operator who wants the mapper layer gone can say so — the point is
+        // that it is a decision, not a hard-coded prefix.
+        let no_mapper = DiskIoConfig {
+            ignore_prefixes: vec!["loop".into(), "dm-".into()],
+            ..Default::default()
+        };
+        assert!(!no_mapper.should_include("dm-0"));
+        assert!(no_mapper.should_include("sda"));
+    }
+
+    /// `dm-0` ends in a digit and is not a partition; `md0` is a RAID array,
+    /// not a partition of `md`. Both were the trap in the naive rule.
+    #[test]
+    fn a_trailing_digit_is_not_by_itself_a_partition() {
+        assert!(!is_partition("dm-0"));
+        assert!(!is_partition("md0"));
+        assert!(!is_partition("nvme0n1"));
+        assert!(!is_partition("mmcblk0"));
+        assert!(is_partition("sda1"));
+        assert!(is_partition("nvme0n1p1"));
+        assert!(is_partition("mmcblk0p2"));
+        assert!(!is_partition("sda"));
+        assert!(!is_partition(""));
+    }
+
     use super::*;
 
     #[test]

@@ -219,6 +219,32 @@
       exclude_virtual: false,
     },
 
+    // Which BLOCK DEVICES collect.disk_io reports on (#1076).
+    //
+    // The defaults are node_exporter's, and they are the inverse of what this
+    // sensor used to do: it dropped `dm-*` — where every LVM, LUKS and
+    // multipath volume's I/O actually appears — and kept partitions, whose
+    // counters are a subset of their disk's, so every fleet-level byte sum
+    // double-counted. On a stock Debian LVM install there was no util_percent
+    // for the volume the operator names.
+    disk_io: {
+      // Never report on devices whose name starts with one of these. `dm-` is
+      // deliberately NOT here: that is the mapper layer, and it is the answer
+      // on any LVM/LUKS/multipath host.
+      ignore_prefixes: ["loop", "ram", "fd", "sr", "zram"],
+
+      // Whole disks only: sda, nvme0n1, dm-0, md0 — not sda1 or nvme0n1p1.
+      // Turn this off to get per-partition I/O as well, and expect the totals
+      // to count each byte twice.
+      whole_disks_only: true,
+
+      // Only these devices (empty = everything the rules above allow)
+      include: [],
+
+      // Never these devices, by exact name
+      exclude: [],
+    },
+
     // Disk mount point filtering
     disk: {
       // Only include these mount points (empty = include all)
