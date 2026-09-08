@@ -356,11 +356,6 @@ fn build_cgroup_tree(
     )
 }
 
-/// Whether a next-elapse timestamp is in the past (a run is overdue).
-fn timer_overdue(next_elapse_usec: u64, now_usec: u64) -> bool {
-    next_elapse_usec != 0 && next_elapse_usec != u64::MAX && next_elapse_usec < now_usec
-}
-
 /// Enumerate `.timer` units and read their schedule into [`TimerRecord`]s (#279).
 async fn list_timers(
     conn: &zbus::Connection,
@@ -381,14 +376,24 @@ async fn list_timers(
             && let Ok(timer) = builder.build().await
         {
             last = timer.last_trigger_usec().await.unwrap_or(0);
-            next = timer.next_elapse_usec_realtime().await.unwrap_or(0);
+            // Both clocks (#1084): a monotonic timer reports 0 for realtime,
+            // so this listing used to report every `OnBootSec=` timer as
+            // never scheduled and never overdue.
+            next = crate::dbus::next_elapse_wall_usec(
+                timer.next_elapse_usec_realtime().await.unwrap_or(0),
+                timer.next_elapse_usec_monotonic().await.unwrap_or(0),
+                now_usec,
+                crate::dbus::monotonic_now_usec(),
+            );
         }
         out.push(TimerRecord {
             name: u.0.clone(),
             active_state: u.3.clone(),
             last_trigger_usec: last,
             next_elapse_usec: next,
-            overdue: timer_overdue(next, now_usec),
+            // The shared predicate. This listing had no grace window while the
+            // alert rule did, so the two disagreed about the same timer.
+            overdue: crate::dbus::timer_overdue(next, now_usec, 0),
         });
     }
     out
@@ -988,12 +993,16 @@ mod tests {
         assert_eq!(accounting(42), Some(42));
     }
 
+    /// The listing's overdue verdict, now the same predicate the alert rule
+    /// uses (#1084) — with no grace, which is this surface's contract: it
+    /// reports the schedule, the rule decides when late is worth an alert.
     #[test]
     fn timer_overdue_only_for_past_scheduled_elapse() {
+        use crate::dbus::timer_overdue;
         let now = 1_000_000u64;
-        assert!(timer_overdue(999_999, now)); // next in the past
-        assert!(!timer_overdue(1_000_001, now)); // next in the future
-        assert!(!timer_overdue(0, now)); // no next elapse
-        assert!(!timer_overdue(u64::MAX, now)); // no next elapse
+        assert!(timer_overdue(999_999, now, 0)); // next in the past
+        assert!(!timer_overdue(1_000_001, now, 0)); // next in the future
+        assert!(!timer_overdue(0, now, 0)); // no next elapse
+        assert!(!timer_overdue(u64::MAX, now, 0)); // no next elapse
     }
 }
