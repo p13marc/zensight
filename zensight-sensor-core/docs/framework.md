@@ -435,6 +435,30 @@ raise/update, then `Put(Resolved)` + a `Delete` tombstone to clear).
   published.
 - `reconcile(rule, &still_firing_keys)` — after evaluating a rule, resolves any
   alert of that rule no longer in the firing set.
+- `Hysteresis::{Level, Edge}` — **how a rule spends its `for:`** (#1084), and
+  the two halves of that decision (`for_duration()` for `observe`,
+  `reconcile_opts()` for `reconcile_opts`) come from one value so they cannot
+  be paired wrongly.
+
+  A **level** rule's condition persists while it is true — RSS over a budget, a
+  unit failed — so `for` debounces it. An **edge** rule's condition is a
+  per-tick counter delta (`oom_kill_delta > 0`, `media_errors_delta > 0`) and is
+  true for exactly one tick; `observe` sets `first_seen` on the very call that
+  evaluates `now - first_seen >= dur`, so at any non-zero `for` the test is
+  `0 >= dur` and the next `reconcile` drops the entry unpublished. An operator
+  who set `for_secs: 60` to stop pressure alerts flapping had silently turned
+  OOM alerting off. For an edge rule `for` is a **hold** instead: raised on the
+  first observation, held firing that long after the last one.
+
+  Nothing new sits underneath it — `retire`'s recovery window already *is* hold
+  semantics. One rounding to know: `retire` is sweep-driven and the reporter
+  owns no timer, so an edge alert resolves at the first reconcile **after** the
+  hold elapses.
+- **A firing alert's content is refreshed** (#1081), rate-limited by
+  `with_content_refresh` (30 s default). A summary that drifts inside one
+  severity band is republished on the same key, with `timestamp` — the
+  *transition* clock an ack and the historian's timeline uid both read —
+  carried over unchanged and the fresh reading in `observed_at_ms`.
 - `with_identity(shared)` — stamps `host.id` as an annotation label on every
   alert. Annotation labels are excluded from `alert_key()`, so stamping never
   changes alert identity (firing/resolve stay matched across identity refreshes).

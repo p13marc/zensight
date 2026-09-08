@@ -26,7 +26,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
-use zensight_sensor_core::AlertReporter;
+use zensight_sensor_core::{AlertReporter, Hysteresis};
 
 // Stable rule slugs (one logical rule per slug; reconcile clears recovered keys).
 const OOM_RULE: &str = "oom_kills";
@@ -43,6 +43,33 @@ const SMART_SPARE_RULE: &str = "smart_spare";
 const SMART_CRITICAL_WARNING_RULE: &str = "smart_critical_warning";
 const SMART_MEDIA_ERRORS_RULE: &str = "smart_media_errors";
 const SMART_SATA_ATTRS_RULE: &str = "smart_sata_attrs";
+
+/// The rules whose condition is a **per-tick delta** (#1084).
+///
+/// Each is true for exactly one tick, so a `for_secs` debounce it can never
+/// satisfy is a rule that never fires — `for_secs: 60`, set to stop pressure
+/// alerts flapping, silently turned OOM alerting off. For these the configured
+/// `for` is spent as a hold instead; see [`Hysteresis`].
+///
+/// [`SMART_SATA_ATTRS_RULE`] is here even though it is not *purely* edge: its
+/// predicate is `reallocated_delta > 0 || pending_sectors > 0`, and pending
+/// sectors persist across polls. Classifying it edge makes it fire immediately
+/// (rather than never, which is today's behaviour under any non-zero
+/// `for_secs`) and, when only the level half is true, adds one hold's delay to
+/// its resolve — a delay that is harmless for a disk attribute that is not
+/// going to improve. Splitting it into two rules would be cleaner and would
+/// re-key, stranding a document per drive at upgrade.
+const EDGE_RULES: &[&str] = &[OOM_RULE, SMART_MEDIA_ERRORS_RULE, SMART_SATA_ATTRS_RULE];
+
+/// How `rule` spends the configured `for_secs` (#1084).
+fn hysteresis_for(rule: &str, for_secs: u64) -> Hysteresis {
+    let d = Duration::from_secs(for_secs);
+    if EDGE_RULES.contains(&rule) {
+        Hysteresis::Edge(d)
+    } else {
+        Hysteresis::Level(d)
+    }
+}
 
 // ===========================================================================
 // Configuration
@@ -1265,20 +1292,24 @@ impl AlertEvaluator {
         };
         let mut inputs = derive_inputs(&mut self.prev, raw, interval_secs);
         inputs.disk_fill = disk_fill;
-        let for_duration = if self.cfg.for_secs > 0 {
-            Some(Duration::from_secs(self.cfg.for_secs))
-        } else {
-            None
-        };
         for ra in evaluate(&self.host, &self.cfg, &inputs) {
+            // One `for_secs`, two ways to spend it (#1084). A level rule
+            // debounces on it; an edge rule — whose condition is a delta, true
+            // for exactly one tick — is held firing for it instead, because a
+            // debounce it can never satisfy is a rule that never fires.
+            let hys = hysteresis_for(&ra.rule, self.cfg.for_secs);
             let mut firing_keys = Vec::with_capacity(ra.alerts.len());
             for alert in ra.alerts {
                 firing_keys.push(alert.alert_key());
-                if let Err(e) = self.reporter.observe(alert, for_duration).await {
+                if let Err(e) = self.reporter.observe(alert, hys.for_duration()).await {
                     warn!(error = %e, rule = %ra.rule, "sysinfo: failed to publish alert");
                 }
             }
-            if let Err(e) = self.reporter.reconcile(&ra.rule, &firing_keys).await {
+            if let Err(e) = self
+                .reporter
+                .reconcile_opts(&ra.rule, &firing_keys, hys.reconcile_opts())
+                .await
+            {
                 warn!(error = %e, rule = %ra.rule, "sysinfo: failed to reconcile alerts");
             }
         }
@@ -1898,5 +1929,82 @@ mod tests {
             5.0,
         );
         assert_eq!(d.smart[0].media_errors_delta, None);
+    }
+}
+
+/// The edge/level classification (#1084).
+#[cfg(test)]
+mod edge_rule_tests {
+    use super::*;
+
+    /// `for_secs: 60`, set to stop pressure alerts flapping, used to turn OOM
+    /// alerting off with no warning: `oom_kill_delta > 0` is true for exactly
+    /// one tick, `observe` sets `first_seen` on the very call that evaluates
+    /// `now - first_seen >= dur`, so the test was `0 >= 60` and the next
+    /// `reconcile` dropped the unpublished entry.
+    #[test]
+    fn an_oom_delta_survives_a_for_secs_an_operator_set() {
+        let h = hysteresis_for(OOM_RULE, 60);
+        assert_eq!(
+            h.for_duration(),
+            Some(Duration::ZERO),
+            "the OOM rule must publish on its only observation"
+        );
+        assert_eq!(
+            h.reconcile_opts().recover_after,
+            Some(Duration::from_secs(60)),
+            "…and be held firing for the window the operator configured"
+        );
+    }
+
+    /// The SMART delta rules are the same shape, and a level rule beside them
+    /// is untouched.
+    #[test]
+    fn the_delta_rules_are_edge_and_the_others_are_not() {
+        for rule in [SMART_MEDIA_ERRORS_RULE, SMART_SATA_ATTRS_RULE] {
+            assert_eq!(
+                hysteresis_for(rule, 60).for_duration(),
+                Some(Duration::ZERO),
+                "{rule} is a per-tick delta"
+            );
+        }
+        for rule in [PRESSURE_CPU_RULE, DISK_USAGE_RULE, THERMAL_RULE, SWAP_RULE] {
+            assert_eq!(
+                hysteresis_for(rule, 60).for_duration(),
+                Some(Duration::from_secs(60)),
+                "{rule} is a level: `for` is its debounce"
+            );
+        }
+    }
+
+    /// Every slug in `EDGE_RULES` is one `evaluate` can actually emit.
+    ///
+    /// A typo would silently revert the fix — the rule would be classified
+    /// level again, and nothing would say so.
+    #[test]
+    fn every_edge_rule_is_a_rule_evaluate_can_emit() {
+        let cfg = AlertsConfig::default();
+        let inputs = AlertInputs::default();
+        let emitted: Vec<String> = evaluate("host1", &cfg, &inputs)
+            .into_iter()
+            .map(|ra| ra.rule)
+            .collect();
+        for rule in EDGE_RULES {
+            assert!(
+                emitted.iter().any(|r| r == rule),
+                "EDGE_RULES names `{rule}`, which evaluate never emits: {emitted:?}"
+            );
+        }
+    }
+
+    /// sysinfo's `for_secs` defaults to 0, so the default deployment behaves
+    /// exactly as before — the fix bites only for the operators #1084 is about.
+    #[test]
+    fn the_default_configuration_is_unchanged() {
+        assert_eq!(AlertsConfig::default().for_secs, 0);
+        assert_eq!(
+            hysteresis_for(OOM_RULE, 0).for_duration(),
+            hysteresis_for(PRESSURE_CPU_RULE, 0).for_duration()
+        );
     }
 }
