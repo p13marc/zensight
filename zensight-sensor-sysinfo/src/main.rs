@@ -70,8 +70,14 @@ async fn main() -> Result<()> {
         let q_producer = "sysinfo".to_string();
         let q_source = source.clone();
         let q_scrub = sysinfo_config.processes.clone();
+        // `collect.top_processes` bounds this reply when the caller names no
+        // `top`. It used to bound the rank-keyed telemetry stream, which is
+        // retired (#1070) — the operator's setting keeps its meaning against
+        // the surface that replaced it.
+        let q_top = sysinfo_config.collect.top_processes;
         runner.spawn(async move {
-            zensight_sensor_sysinfo::query::run(q_session, q_producer, q_source, q_scrub).await;
+            zensight_sensor_sysinfo::query::run(q_session, q_producer, q_source, q_scrub, q_top)
+                .await;
         });
     }
 

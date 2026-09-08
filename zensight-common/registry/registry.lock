@@ -868,8 +868,6 @@ subject	sysinfo	network/{iface}/tx_packets	telemetry	TelemetryPoint
 subject	sysinfo	network/{iface}/tx_rate	telemetry	TelemetryPoint
 subject	sysinfo	power/rapl/{zone}/watts	telemetry	TelemetryPoint
 subject	sysinfo	pressure/{resource}/{stat}	telemetry	TelemetryPoint
-subject	sysinfo	process/{rank}/cpu	telemetry	TelemetryPoint
-subject	sysinfo	process/{rank}/memory	telemetry	TelemetryPoint
 subject	sysinfo	sensor	state	SensorInfo
 subject	sysinfo	sensors/{chip}/{label}/critical	telemetry	TelemetryPoint
 subject	sysinfo	sensors/{chip}/{label}/max	telemetry	TelemetryPoint

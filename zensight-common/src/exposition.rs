@@ -595,7 +595,10 @@ pub const KIND_OVERRIDE: &[(&str, &str, MetricKind)] = &[
     ("sysinfo", "disk/{mount}/total", MetricKind::Gauge),
     ("sysinfo", "disk/{mount}/used", MetricKind::Gauge),
     ("sysinfo", "disk/{mount}/available", MetricKind::Gauge),
-    ("sysinfo", "process/{rank}/memory", MetricKind::Gauge),
+    // `process/{rank}/memory` was here until #1070 retired the family. The
+    // correction had nothing left to correct, and `kind_overrides_name_real_patterns`
+    // is the test that says so — an override for a subject that no longer
+    // exists is a rule nobody can find their way back from.
 ];
 
 fn kind_override(producer: &str, pattern: &str) -> Option<MetricKind> {

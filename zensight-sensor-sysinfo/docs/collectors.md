@@ -77,8 +77,18 @@ spike.
 
 ### Opt-in (default off)
 
-- **processes** — top-N by CPU/memory aggregates streamed; the per-pid firehose
-  is served on demand (see [telemetry.md](telemetry.md)).
+- **processes** — `system/processes_total` and `processes_zombie`, the two
+  bounded aggregates. The per-pid detail is served on demand at
+  `@rpc/sysinfo/processes` and is never streamed (see
+  [telemetry.md](telemetry.md)).
+
+  The rank-keyed `process/{rank}/{cpu,memory}` stream was **retired** in
+  registry 1.9 (#1070). It was defended as bounded and stable and was neither:
+  `process/1/cpu` is whoever is burning the most CPU *this tick*, so the series
+  was a max-envelope over unrelated processes; and the Prometheus mapping turns
+  point labels into series labels, so every process that ever entered the top N
+  minted a new `{rank=…,pid=…}` series — an unbounded cardinality leak from the
+  sensor whose job is to notice leaks.
 - **temperatures** — hwmon sensor readings (also provides the critical trip
   points the thermal alert needs).
 - **tcp_states** — `/proc/net/tcp` connection-state counts.
