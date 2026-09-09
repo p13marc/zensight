@@ -112,11 +112,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install build deps + buildah
         run: |
-          apt-get update
-          # libudev-dev: parallax's camera hotplug (#410). Build-time only —
-          # libudev1 is required by libapt-pkg and util-linux, so every Debian
-          # base image including the bookworm-slim runtime already has it.
-          apt-get install -y buildah protobuf-compiler libsystemd-dev libpcap-dev libssl-dev libudev-dev pkg-config jq
+          # The build's system packages come from the SAME list every CI job
+          # uses (#1099). This job's own list had drifted from all five of
+          # them: it carried libssl-dev and libpcap-dev, neither of which
+          # anything in Cargo.lock binds, and it was MISSING libclang-dev,
+          # which parallax genuinely needs (v4l2-sys-mit runs bindgen
+          # unconditionally) and which these builds have been getting only
+          # because rust:1.98-bookworm happens to carry libclang.
+          cd src && scripts/ci-build-deps.sh
+          # buildah and jq are this job's tooling, not build dependencies.
+          apt-get install -y buildah jq
       - name: Build release binaries
         run: |
           cd src

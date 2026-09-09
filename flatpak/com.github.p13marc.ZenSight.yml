@@ -32,8 +32,27 @@ modules:
       build-args:
         - --share=network
     build-commands:
-      - cargo fetch --manifest-path Cargo.toml
-      - cargo build --release -p zensight
+      # The SDK extension gives whatever "stable" this runtime-version ships,
+      # and it has no rustup, so the repo's rust-toolchain.toml (1.98) does not
+      # reach it — this is the one build in the tree whose compiler cannot be
+      # pinned. So assert it instead: a runtime bump that moves rustc backwards
+      # past the workspace's rust-version must fail here, loudly, rather than
+      # in a user's install (#1099).
+      - |
+        set -eu
+        have=$(rustc --version | cut -d' ' -f2)
+        want=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+        echo "flatpak SDK rustc $have; workspace rust-version $want"
+        lowest=$(printf '%s\n%s\n' "$have" "$want" | sort -V | head -1)
+        if [ "$lowest" != "$want" ] && [ "$have" != "$want" ]; then
+          echo "ERROR: the SDK's rustc $have is older than the workspace's rust-version $want" >&2
+          exit 1
+        fi
+      # --locked on BOTH (#1099): this is the artifact end users install, and
+      # it was the only build in the tree not built from Cargo.lock — free to
+      # resolve dependency versions no CI job ever verified.
+      - cargo fetch --locked --manifest-path Cargo.toml
+      - cargo build --release --locked -p zensight
       - install -Dm755 target/release/zensight ${FLATPAK_DEST}/bin/zensight
       - install -Dm644 flatpak/com.github.p13marc.ZenSight.desktop ${FLATPAK_DEST}/share/applications/com.github.p13marc.ZenSight.desktop
       - install -Dm644 flatpak/com.github.p13marc.ZenSight.metainfo.xml ${FLATPAK_DEST}/share/metainfo/com.github.p13marc.ZenSight.metainfo.xml
