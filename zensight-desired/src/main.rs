@@ -50,6 +50,10 @@ const PEER_WAIT: Duration = Duration::from_secs(5);
 /// `alive`. The same two seconds `SensorRunner` waits.
 const DECLARATION_GRACE: Duration = Duration::from_secs(2);
 
+/// Bounds the ownership election's claim-set and incumbent queries (#1104), so
+/// a bus with no other instance does not stall startup for zenoh's default.
+const GUARD_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[derive(Parser, Debug)]
 #[command(name = "zensight-desired")]
 #[command(about = "Compile a fleet policy into the per-host @desired documents")]
@@ -148,6 +152,23 @@ async fn main() -> Result<()> {
         }
         Command::Apply => {
             let session = connect(&config).await?;
+            // One writer per origin, and `apply` is a writer (#1104). A
+            // one-shot `apply` beside a live `run` is the same two-writer
+            // failure as two daemons: each seeds its `published` diff map from
+            // the storage, reads the other's write as a change, and rewrites
+            // it — so every sensor flaps between two configurations, silently.
+            // Refusing by name is the whole difference between that and an
+            // operator who knows what happened.
+            let guard = zensight_common::service_guard::ServiceGuard::desired(session.clone());
+            if let Some(owner) = guard.incumbent(GUARD_TIMEOUT).await {
+                let _ = session.close().await;
+                anyhow::bail!(
+                    "a `zensight-desired run` instance already owns @desired ({owner}).\n\
+                     Two writers on one service origin make every sensor flap between two \
+                     configurations, with nothing on the bus to say so.\n\
+                     Stop the daemon, or let it apply this policy itself."
+                );
+            }
             // Retried, not asked once (#1045): an empty answer has two causes
             // and only one of them is stable.
             let fleet = zensight_desired::fleet::settle(
@@ -267,6 +288,41 @@ async fn main() -> Result<()> {
 async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
     let session = connect(&config).await?;
 
+    // `@desired` is a single-writer service origin (#1104). It used to declare
+    // `alive` unconditionally, with no claim key, no election and no standby —
+    // the README's whole mitigation was the sentence "run exactly one per
+    // deployment". A failover that started before the old instance died, or an
+    // operator running `apply` beside a live `run`, then had both publishing to
+    // `v1/@desired/state/<host>/…`; each seeds its `published` diff map from
+    // the storage, so each reads the other's write as a change and rewrites it.
+    // Every sensor flaps between two configurations and nothing says so.
+    //
+    // The catalog has had the RFC 06 §5.3 protocol for exactly this reason, and
+    // `Cargo.toml`'s member comment already called this daemon "the
+    // correlator's shape". Now it is the correlator's code.
+    let guard = zensight_common::service_guard::ServiceGuard::desired(session.clone());
+    let _claim = loop {
+        match guard.campaign(GUARD_TIMEOUT).await? {
+            zensight_common::service_guard::Standing::Owner(claim) => break claim,
+            zensight_common::service_guard::Standing::StandBy { owner } => {
+                tracing::info!(
+                    owner = owner.as_deref().unwrap_or("unknown"),
+                    "another @desired instance owns this origin — standing by"
+                );
+                tokio::select! {
+                    _ = guard.wait_for_vacancy(
+                        GUARD_TIMEOUT,
+                        zensight_common::service_guard::STANDBY_POLL,
+                    ) => {}
+                    _ = wait_for_shutdown() => {
+                        tracing::info!("shutting down while standing by");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    };
+
     // Declared BEFORE the first pass, so a change arriving during it is not
     // lost between the GET and the subscription.
     let entity_sub = session
@@ -329,11 +385,7 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
              silence from those, which `alive ⇒ callable` forbids"
         );
     }
-    let _alive = match session
-        .liveliness()
-        .declare_token(zensight_common::keyexpr::desired_alive_key())
-        .await
-    {
+    let _alive = match guard.declare_alive().await {
         Ok(token) => Some(token),
         Err(e) => {
             tracing::error!(error = %e, "failed to declare the @desired alive token");

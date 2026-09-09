@@ -35,12 +35,22 @@ alert on the guest, and then the hypervisor's liveliness token dropping, so the
 catalog re-files that alert as its `symptom_of`. `just demo-incident-verify`
 is the same fault with an exit code, and it runs in CI.
 
-Catalog ownership is an explicit claim protocol (`guard.rs`): every candidate
-declares a liveliness claim at `zensight/v1/@catalog/state/claim/<zid>`, the
-lexically-lowest claim wins the election, and losers exit rather than
-double-write. Only the elected owner declares `…/@catalog/state/alive` and the
-catalog publishers/queryables (deterministic merge means a partition-split pair
-would emit identical docs, so this is a safety net, not a lock).
+Catalog ownership is an explicit claim protocol
+(`zensight_common::service_guard`, shared with `@desired` since #1104): every
+candidate declares a liveliness claim at
+`zensight/v1/@catalog/state/claim/<zid>`, **defers to any live incumbent**, and
+otherwise wins on the lexically-lowest claim. A loser **stands by** — waiting
+for the owner's `alive` token to drop and campaigning again — rather than
+exiting. Only the elected owner declares `…/@catalog/state/alive` and the
+catalog publishers/queryables.
+
+Incumbent-first matters because the election used to run once, at startup
+(#1105): an instance started later with a lower zid elected *itself* and
+published beside the incumbent, so every seed GET returned two replies. Lowest
+zid is a tie-break for simultaneous starts, not a standing entitlement to
+displace a running owner — an incumbent never steps down for a lower claim,
+because there is nothing better about the session whose id sorts first and the
+churn would have no upper bound.
 
 ## The topology graph (#899)
 
