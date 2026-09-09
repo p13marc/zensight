@@ -231,13 +231,7 @@ impl Publisher {
     pub async fn raw_media_publisher(&self, key: impl Into<String>) -> Result<RawMediaPublisher> {
         let key = key.into();
         let qos = QosClass::LiveVideo;
-        let inner = self
-            .session
-            .declare_publisher(key.clone())
-            .congestion_control(qos.congestion_control())
-            .priority(qos.priority())
-            .express(qos.express())
-            .reliability(qos.reliability())
+        let inner = zensight_common::qos::declare_publisher(&self.session, key.clone(), qos)
             .await
             .map_err(|e| SensorError::Publish {
                 key: key.clone(),
