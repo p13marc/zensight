@@ -9,9 +9,9 @@ use tracing::{error, info};
 use zensight_common::config::LoggingConfig;
 use zensight_common::{catalog_rpc_key, entities_query_key, names_query_key};
 
+use zensight_common::service_guard::{self, ServiceGuard, Standing};
 use zensight_correlator::config::CorrelatorConfig;
 use zensight_correlator::engine::{CorrelatorState, Engine};
-use zensight_correlator::guard::{self, GuardOutcome};
 use zensight_correlator::{pdns, publisher, query, subscriber};
 
 /// Cross-sensor identity correlation service for ZenSight.
@@ -64,13 +64,31 @@ async fn main() -> anyhow::Result<()> {
 
     // Single-writer guard. This wins the election and takes the claim token;
     // it deliberately does NOT declare `alive` — that happens below, once the
-    // queryables are serving. See guard.rs, "Election and presence are two
-    // steps, on purpose".
-    let _claim = match guard::acquire(&session, GUARD_TIMEOUT).await? {
-        GuardOutcome::Acquired(claim) => claim,
-        GuardOutcome::AlreadyRunning => {
-            error!("another correlator instance is already running; exiting");
-            std::process::exit(1);
+    // queryables are serving. See `zensight_common::service_guard`, "Election
+    // and presence are two steps, on purpose".
+    //
+    // A loser STANDS BY rather than exiting (#1105). Exiting meant that killing
+    // the owner left no catalog at all until a supervisor happened to restart a
+    // loser whose zid sorted right; waiting here makes takeover cost one poll
+    // interval. The loop also re-campaigns after an unreadable claim set, which
+    // is the answer that used to be misread as sole candidacy.
+    let guard = ServiceGuard::catalog(session.clone());
+    let _claim = loop {
+        match guard.campaign(GUARD_TIMEOUT).await? {
+            Standing::Owner(claim) => break claim,
+            Standing::StandBy { owner } => {
+                info!(
+                    owner = owner.as_deref().unwrap_or("unknown"),
+                    "another catalog owns @catalog — standing by for it to go away"
+                );
+                tokio::select! {
+                    _ = guard.wait_for_vacancy(GUARD_TIMEOUT, service_guard::STANDBY_POLL) => {}
+                    _ = wait_for_shutdown() => {
+                        info!("shutting down while standing by");
+                        return Ok(());
+                    }
+                }
+            }
         }
     };
 
@@ -393,7 +411,7 @@ async fn main() -> anyhow::Result<()> {
             "declaring `alive` with queryables still undeclared after {DECLARATION_GRACE:?} —              RFC 04 §5 says alive means callable, so this window is a promise this              process cannot yet keep"
         );
     }
-    let _alive = match guard::declare_alive(&session).await {
+    let _alive = match guard.declare_alive().await {
         Ok(token) => Some(token),
         // A broken liveliness path must not stop the catalog, exactly as it
         // must not stop a sensor's telemetry.

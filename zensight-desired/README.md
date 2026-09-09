@@ -99,9 +99,19 @@ its own override.
 | Release | in the tarball and as `zensight-desired:<tag>` |
 | CI | `cargo test --workspace` covers the compiler, the merge rules and the two bus properties |
 
-**Run exactly one per deployment.** `@desired` is a single-writer service
-origin; two compilers with different policies would overwrite each other's
-documents on every pass and every sensor would flap between them.
+**One per deployment, and the bus enforces it** (#1104). `@desired` is a
+single-writer service origin: two compilers overwrite each other's documents on
+every pass — each seeds its `published` diff map from the storage, so each reads
+the other's write as a change and rewrites it — and every sensor flaps between
+them with nothing on the bus to say so.
+
+That used to be a sentence in this README and nothing else. `run` now takes the
+same RFC 06 §5.3 claim protocol the catalog uses
+(`zensight_common::service_guard`): it claims `@desired/state/claim/<zid>`,
+defers to any live incumbent, and if it loses **stands by** — waiting for the
+owner to go away and taking over within a poll interval, rather than exiting and
+leaving the fleet with no compiler. `apply`, which is also a writer, refuses
+outright while a `run` instance is alive and names it.
 
 ## Related
 

@@ -3,7 +3,7 @@
 //!
 //! # What went wrong, and how it was caught
 //!
-//! `guard::acquire` used to do three things at once: claim, elect, and declare
+//! The election used to do three things at once: claim, elect, and declare
 //! the owner `alive` token. `main` then spawned every queryable *after* it. So
 //! between winning the election and declaring `entities`/`names`/`introspect`/
 //! `describe`, the correlator was on the roster and answered nothing.
@@ -22,7 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zensight_correlator::guard::{self, GuardOutcome};
+use zensight_common::service_guard::{ServiceGuard, Standing};
 
 fn isolated_config() -> zenoh::Config {
     let mut config = zenoh::Config::default();
@@ -59,12 +59,16 @@ async fn alive_is_declared(session: &zenoh::Session) -> bool {
 async fn the_election_does_not_announce_presence() {
     let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
 
-    let claim = match guard::acquire(&session, Duration::from_secs(2))
+    let guard = ServiceGuard::catalog(session.clone());
+    let claim = match guard
+        .campaign(Duration::from_secs(2))
         .await
-        .expect("acquire")
+        .expect("campaign")
     {
-        GuardOutcome::Acquired(claim) => claim,
-        GuardOutcome::AlreadyRunning => panic!("nothing else is running in an isolated session"),
+        Standing::Owner(claim) => claim,
+        Standing::StandBy { owner } => {
+            panic!("nothing else is running in an isolated session (saw {owner:?})")
+        }
     };
 
     assert!(
@@ -74,7 +78,8 @@ async fn the_election_does_not_announce_presence() {
          zensight-conformance fail"
     );
 
-    let alive = guard::declare_alive(&session)
+    let alive = guard
+        .declare_alive()
         .await
         .expect("declare alive after the queryables are up");
     assert!(
@@ -90,10 +95,14 @@ async fn the_election_does_not_announce_presence() {
 /// undone by a second declaration creeping back into the election.
 #[test]
 fn only_declare_alive_mints_the_alive_token() {
+    // The guard moved to `zensight-common` when `@desired` needed the same
+    // protocol (#1104), and this check moved with it — a rule enforced by
+    // reading one file only holds while it reads the right file.
     let guard_src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/guard.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zensight-common/src/service_guard.rs"),
     )
-    .expect("src/guard.rs");
+    .expect("zensight-common/src/service_guard.rs");
 
     let code: Vec<&str> = guard_src
         .lines()
@@ -112,7 +121,7 @@ fn only_declare_alive_mints_the_alive_token() {
         mints.len(),
         1,
         "correlator_alive_key() must be reached from exactly one place \
-         (guard::declare_alive), so presence cannot drift back into the \
+         (ServiceGuard::declare_alive), so presence cannot drift back into the \
          election — found: {mints:?}"
     );
 }

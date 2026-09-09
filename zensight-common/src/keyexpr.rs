@@ -708,6 +708,21 @@ pub fn catalog_claims_wildcard() -> String {
     "v1/@catalog/state/claim/*".to_string()
 }
 
+/// `@desired`'s claim key, the mirror of [`catalog_claim_key`] (#1104).
+///
+/// `zensight-desired` is a single-writer service origin exactly as the catalog
+/// is — two instances make every sensor flap between two configurations — and
+/// it had no claim protocol at all: it declared `alive` unconditionally and the
+/// README's mitigation was one sentence, "run exactly one per deployment".
+pub fn desired_claim_key(zid: &str) -> String {
+    format!("v1/@desired/state/claim/{}", zid.to_ascii_lowercase())
+}
+
+/// The `@desired` claim-set selector. See [`catalog_claims_wildcard`].
+pub fn desired_claims_wildcard() -> String {
+    "v1/@desired/state/claim/*".to_string()
+}
+
 /// Build a wildcard key expression for all sensor-emitted alerts.
 ///
 /// Matches: `<base>/v1/<origin>/state/<producer>/alert/<alert_key>`
