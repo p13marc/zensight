@@ -113,7 +113,23 @@ pub(crate) fn hash_machine_id(raw: &str) -> Option<String> {
     )
 }
 
-/// Non-loopback interface MACs from a `/sys/class/net`-shaped directory.
+/// **Stable** interface MACs from a `/sys/class/net`-shaped directory.
+///
+/// Only `lo` was excluded before (#1110), so every veth and bridge counted —
+/// and a veth's address is *random per container start*. On a container host
+/// `HostEvidence.macs` therefore churned completely every five minutes, and MAC
+/// is the catalog's strongest merge key after `host_id`: a claim that changes
+/// under you is worse than one you never made.
+///
+/// "Stable" is read from the kernel rather than guessed from a name: an
+/// interface qualifies if `addr_assign_type` is `0` (`NET_ADDR_PERM` — the
+/// address the hardware came with) or, where that file cannot be read, if the
+/// interface has a `device` symlink, which only real hardware does. Name
+/// prefixes (`veth`, `br-`, `docker`) were deliberately not used: they are
+/// convention, renameable, and every runtime spells them differently.
+///
+/// Bonds and VLANs are excluded by that rule and lose nothing — they carry
+/// their underlying NIC's address, which is already in the set.
 fn detect_macs(sys_class_net: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(sys_class_net) else {
         return Vec::new();
@@ -121,6 +137,7 @@ fn detect_macs(sys_class_net: &Path) -> Vec<String> {
     let mut macs: Vec<String> = entries
         .flatten()
         .filter(|e| e.file_name() != "lo")
+        .filter(|e| has_stable_address(&e.path()))
         .filter_map(|e| std::fs::read_to_string(e.path().join("address")).ok())
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|mac| !mac.is_empty() && mac != "00:00:00:00:00:00")
@@ -128,6 +145,21 @@ fn detect_macs(sys_class_net: &Path) -> Vec<String> {
     macs.sort();
     macs.dedup();
     macs
+}
+
+/// Whether this interface's MAC is the one its hardware came with (#1110).
+///
+/// `NET_ADDR_PERM` is `0` in `linux/netdevice.h`; a veth reports `1`
+/// (`NET_ADDR_RANDOM`), which is exactly the churn this excludes.
+fn has_stable_address(iface: &Path) -> bool {
+    match std::fs::read_to_string(iface.join("addr_assign_type")) {
+        Ok(t) => t.trim() == "0",
+        // Older or unusual kernels may not expose it. A `device` symlink is
+        // the fallback question — only a real device has one — and answering
+        // "no" on both is the safe direction: a missing claim, not a churning
+        // one.
+        Err(_) => iface.join("device").exists(),
+    }
 }
 
 /// Non-loopback, non-link-local local IPs via getifaddrs.
@@ -229,6 +261,8 @@ mod tests {
         let boot_id = dir.path().join("boot_id");
         std::fs::write(&boot_id, "aaaabbbb-cccc-dddd-eeee-ffff00001111\n").unwrap();
         let net = dir.path().join("net");
+        // `addr_assign_type` is what a real `/sys/class/net` always carries;
+        // `0` is NET_ADDR_PERM (#1110).
         for (iface, addr) in [
             ("lo", "00:00:00:00:00:00"),
             ("eth0", "AA:BB:CC:DD:EE:01"),
@@ -238,6 +272,7 @@ mod tests {
             let d = net.join(iface);
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("address"), format!("{addr}\n")).unwrap();
+            std::fs::write(d.join("addr_assign_type"), "0\n").unwrap();
         }
 
         // Containerized fixture: a docker-scope cgroup path yields container_id.
@@ -256,11 +291,63 @@ mod tests {
             Some("aaaabbbb-cccc-dddd-eeee-ffff00001111")
         );
         // lo skipped by name; all-zero MACs skipped by value; lowercased + sorted.
+        // (All four are NET_ADDR_PERM here — the churn filter has its own test.)
         assert_eq!(id.macs, vec!["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]);
         assert!(!id.hostname.is_empty());
         assert_eq!(id.container_id.as_deref(), Some(container_id_hex.as_str()));
         // Cloud facts are never file-detected — the async probe sets them.
         assert_eq!(id.cloud, None);
+    }
+
+    /// #1110: a veth's MAC is random per container start, and only `lo` was
+    /// excluded — so `HostEvidence.macs` churned completely every five minutes
+    /// on every container host, on the catalog's strongest merge key after
+    /// `host_id`.
+    #[test]
+    fn a_veths_random_address_is_not_this_hosts_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let net = dir.path().join("net");
+        // (interface, address, addr_assign_type)
+        for (iface, addr, kind) in [
+            ("lo", "00:00:00:00:00:00", "0"),
+            ("eth0", "aa:bb:cc:dd:ee:01", "0"), // NET_ADDR_PERM — real NIC
+            ("veth9f2c1a", "3e:11:22:33:44:55", "1"), // NET_ADDR_RANDOM
+            ("br-abcdef", "02:42:aa:bb:cc:dd", "3"), // NET_ADDR_SET — a bridge
+            ("docker0", "02:42:11:22:33:44", "3"),
+        ] {
+            let d = net.join(iface);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("address"), format!("{addr}\n")).unwrap();
+            std::fs::write(d.join("addr_assign_type"), format!("{kind}\n")).unwrap();
+        }
+
+        assert_eq!(
+            detect_macs(&net),
+            vec!["aa:bb:cc:dd:ee:01"],
+            "only the permanently-assigned address is this host's identity"
+        );
+    }
+
+    /// A kernel that does not expose `addr_assign_type` falls back to the
+    /// `device` symlink — only real hardware has one — and answering "no" to
+    /// both is the safe direction: a missing claim, never a churning one.
+    #[test]
+    fn without_addr_assign_type_a_device_link_decides() {
+        let dir = tempfile::tempdir().unwrap();
+        let net = dir.path().join("net");
+        for iface in ["eth0", "veth1"] {
+            let d = net.join(iface);
+            std::fs::create_dir_all(&d).unwrap();
+        }
+        std::fs::write(net.join("eth0").join("address"), "aa:bb:cc:dd:ee:01\n").unwrap();
+        std::fs::write(net.join("veth1").join("address"), "3e:11:22:33:44:55\n").unwrap();
+        // Only eth0 is backed by a device.
+        let target = dir.path().join("pci0000:00");
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, net.join("eth0").join("device")).unwrap();
+
+        assert_eq!(detect_macs(&net), vec!["aa:bb:cc:dd:ee:01"]);
     }
 
     #[test]
