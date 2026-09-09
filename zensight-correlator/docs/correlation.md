@@ -108,7 +108,11 @@ There is no second code path through the merge, and no guard bypass to get wrong
 
 `unlink` is the veto: these are **not** the same machine. It retires a `link` (and
 tombstones its document, so a correlator restarting from a storage does not
-re-seed a revoked one). A veto also wins over any link chain that would route
+re-seed a revoked one — a tombstone that rides the **same** QoS class as the
+document it retracts, which until #1103 it did not: the put was reliable and
+blocking, the delete took Zenoh's `Drop` + best-effort default, and a lost one
+left the revoked assertion live for every subscriber while this process had
+already forgotten it). A veto also wins over any link chain that would route
 around it — `link a→c` plus `link b→c` would otherwise merge a vetoed pair
 transitively, so `Assertions::new` breaks the chain rather than let that happen.
 

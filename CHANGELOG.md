@@ -52,6 +52,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A `recompute_max_wait_ms` (default 2 s) now caps how long a burst may hold the
   pass back: whichever of the two elapses first. `0` restores the pure debounce.
 
+- **A tombstone rides the same QoS class as the document it retracts** (#1103).
+  The correlator published an ack, a silence or an operator assertion at
+  `QosClass::Entity` — reliable + block — and deleted it through a bare
+  `session.declare_publisher(key).delete()`, whose Zenoh default is `Drop` +
+  best-effort. So the write that *created* a suppression was guaranteed to
+  arrive and the write that removed it was not: a dropped `unsilence`, `unack`
+  or `unlink` leaves the document live for every subscriber — and on disk where
+  a storage exists — while the correlator's own memory has already forgotten it,
+  and a restart re-seeds the revoked document. `EntityPublisher::tombstone` and
+  `EdgePublisher::tombstone` did it correctly; only the operator-write family
+  was wrong, which is the family an operator can least afford to be wrong.
+
+  The four-call builder chain that carries the class was written out by hand at
+  seven call sites, so it fixes as one: `zensight_common::qos::declare_publisher`
+  is now the only way to declare one, every site routes through it, and a **new
+  CI guard** refuses a bare `.declare_publisher(` outside it. The existing R5
+  guard could not have caught this — it bans `session.put`/`session.delete`, and
+  this was a declared publisher, merely an unconfigured one.
+
 
 - **A worker that dies is noticed, and a sensor stops counting containers it no
   longer has** (#1082, #1088). Two ways the health document described a sensor
