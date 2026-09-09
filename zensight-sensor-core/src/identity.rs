@@ -3,7 +3,7 @@
 //!
 //! Read once at startup (plus a slow refresh for DHCP address churn) via
 //! [`SharedIdentity`]. The machine-id is **confidential** per the systemd docs
-//! and never leaves the host raw: `host_id` is `sha256(machine_id || salt)` with
+//! and never leaves the host raw: `host_id` is 48 bits of `sha256(machine_id || salt)` with
 //! a fixed app-scoped salt, so every ZenSight sensor on the same machine derives
 //! the same stable, non-reversible identifier.
 
@@ -22,8 +22,24 @@ fn host_id_salt() -> zenkey::OriginSalt {
 /// The identity envelope for the local host.
 #[derive(Debug, Clone, Default)]
 pub struct HostIdentity {
-    /// `hex(sha256(machine_id + salt))` — stable across boots, never the raw id.
-    /// `None` if `/etc/machine-id` is unreadable.
+    /// The RFC 06 §1 origin: `h-` + the **first 48 bits** of
+    /// `sha256(machine_id + salt)`, as 12 lowercase hex. Stable across boots,
+    /// never the raw id.
+    ///
+    /// **48 bits, not 256** (#1111). The width is `zenkey`'s grammar decision
+    /// (`h-<12hex>`, RFC 03) and raising it is a change to make there, not
+    /// here — but it is worth being honest about what it buys: the salt is a
+    /// compile-time constant, so anyone who can choose a container's
+    /// `/etc/machine-id` can grind a 48-bit collision and publish under another
+    /// host's origin, overwriting its LWW alert state. The keyspace is not an
+    /// authorization boundary and never claimed to be — RBAC is out of scope by
+    /// #903 — but "48 bits behind a public salt" is the accurate description,
+    /// and the docs used to say `sha256` full stop.
+    ///
+    /// Always `Some` on a running sensor: when `/etc/machine-id` is unreadable
+    /// this carries the same persisted-random origin the producer's *keys* do,
+    /// because the payload disagreeing with the key is the one thing RFC 06 §1
+    /// forbids.
     pub host_id: Option<String>,
     /// Kernel boot id (`/proc/sys/kernel/random/boot_id`) — changes every boot.
     pub boot_id: Option<String>,
@@ -48,11 +64,19 @@ pub struct HostIdentity {
 impl HostIdentity {
     /// Detect the local host's identity from the live system.
     pub fn detect() -> Self {
+        // The origin the KEYS use, minted once per process by the profile
+        // (`/etc/machine-id` + salt, with a persisted-random fallback). Passed
+        // in so the payload can never disagree with it (#1111).
+        let key_origin = {
+            use zenkey::ConcreteOrigin;
+            zensight_common::PROFILE.local_origin().chunk().to_string()
+        };
         let mut identity = Self::detect_from(
             Path::new("/etc/machine-id"),
             Path::new("/proc/sys/kernel/random/boot_id"),
             Path::new("/sys/class/net"),
             Path::new("/proc/self/cgroup"),
+            &key_origin,
         );
         identity.ips = detect_ips();
         identity
@@ -66,10 +90,24 @@ impl HostIdentity {
         boot_id: &Path,
         sys_class_net: &Path,
         self_cgroup: &Path,
+        key_origin: &str,
     ) -> Self {
+        // The payload `host_id` MUST equal the origin chunk in this producer's
+        // keys (#1111) — that equality is the whole of RFC 06 §1 and what lets
+        // a consumer group without a correlation join.
+        //
+        // Reading `/etc/machine-id` here reproduces exactly what `HostId::mint`
+        // does, so whenever the file is readable the two agree by construction.
+        // When it is *not*, they used to diverge silently: `mint` fell back to
+        // a persisted random id — a perfectly valid `h-…` that went into every
+        // key — while this returned `None`, so the payload said "I do not know
+        // who I am" on a host whose keys were confidently claiming an identity.
+        // A machine-id-less host is not exotic: a stripped container image, a
+        // read-only rootfs, an image built before `systemd-machine-id-setup`.
         let host_id = std::fs::read_to_string(machine_id)
             .ok()
-            .and_then(|raw| hash_machine_id(&raw));
+            .and_then(|raw| hash_machine_id(&raw))
+            .or_else(|| Some(key_origin.to_string()));
         let boot_id = std::fs::read_to_string(boot_id)
             .ok()
             .map(|s| s.trim().to_string())
@@ -284,7 +322,7 @@ mod tests {
         )
         .unwrap();
 
-        let id = HostIdentity::detect_from(&machine_id, &boot_id, &net, &cgroup);
+        let id = HostIdentity::detect_from(&machine_id, &boot_id, &net, &cgroup, "h-ffffffffffff");
         assert_eq!(id.host_id.as_deref(), Some(FIXTURE_HOST_ID));
         assert_eq!(
             id.boot_id.as_deref(),
@@ -350,19 +388,55 @@ mod tests {
         assert_eq!(detect_macs(&net), vec!["aa:bb:cc:dd:ee:01"]);
     }
 
+    /// #1111: a host with no `/etc/machine-id` still publishes the id its own
+    /// keys carry.
+    ///
+    /// This test used to assert `host_id == None`, which is what the bug looked
+    /// like from inside: `HostId::mint` fell back to a persisted random id — a
+    /// perfectly valid `h-…` that went into every key — while the payload said
+    /// "I do not know who I am". RFC 06 §1's whole point is that the two are the
+    /// same string, so a consumer can group without a correlation join; a
+    /// stripped container image or a read-only rootfs broke it silently.
+    ///
+    /// Everything else still degrades to `None`, which is right: those are
+    /// facts about the host, and absent means *not observed*.
     #[test]
-    fn detect_from_missing_files_degrades_to_none() {
+    fn a_host_with_no_machine_id_still_claims_its_key_origin() {
         let dir = tempfile::tempdir().unwrap();
+        let key_origin = "h-0123456789ab";
         let id = HostIdentity::detect_from(
             &dir.path().join("nope"),
             &dir.path().join("nope2"),
             &dir.path().join("nonet"),
             &dir.path().join("nocgroup"),
+            key_origin,
         );
-        assert_eq!(id.host_id, None);
+        assert_eq!(
+            id.host_id.as_deref(),
+            Some(key_origin),
+            "the payload must never disagree with the origin in this producer's keys"
+        );
         assert_eq!(id.boot_id, None);
         assert!(id.macs.is_empty());
         assert_eq!(id.container_id, None);
+    }
+
+    /// …and when the machine-id IS readable, the payload is the hash of it —
+    /// which is byte-identical to what `HostId::mint` computes for the keys, so
+    /// the fallback above is the only path where the two could ever differ.
+    #[test]
+    fn a_readable_machine_id_outranks_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine_id = dir.path().join("machine-id");
+        std::fs::write(&machine_id, format!("{FIXTURE_MACHINE_ID}\n")).unwrap();
+        let id = HostIdentity::detect_from(
+            &machine_id,
+            &dir.path().join("nope2"),
+            &dir.path().join("nonet"),
+            &dir.path().join("nocgroup"),
+            "h-ffffffffffff",
+        );
+        assert_eq!(id.host_id.as_deref(), Some(FIXTURE_HOST_ID));
     }
 
     #[test]
