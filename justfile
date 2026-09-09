@@ -88,15 +88,25 @@ actions := "0"
 #   just ebpf=1 run   /   just ebpf=0 run
 ebpf := "auto"
 
-# aya-build shells out to `rustup run nightly cargo build -Z build-std=core`, so
-# it needs the *plain* `nightly` channel — a pinned nightly-YYYY-MM-DD does not
-# satisfy it, hence anchoring on the host triple rather than a bare `grep
-# nightly` — plus rust-src for build-std, plus bpf-linker for the link step.
+# aya-build shells out to `rustup run <toolchain> cargo build -Z
+# build-std=core`. That toolchain is the DATED nightly the program crates pin
+# (#1094) — `build.rs` reads it out of their `rust-toolchain.toml`, so there is
+# one pin and `rustup run` honours it. It used to be the literal string
+# `nightly`, which meant the object was built by whatever nightly the machine
+# happened to have; on a box whose plain `nightly` predates the workspace's
+# `rust-version` that fails with a message about the *ebpf* crates rather than
+# about the toolchain, which is a confusing way to learn you need `rustup
+# update`.
+#
+# So detection asks for the pinned one by name, plus rust-src for build-std,
+# plus bpf-linker for the link step.
+_ebpf_toolchain := `grep -oP '^channel = "\K[^"]+' zensight-sensor-sysinfo-ebpf/rust-toolchain.toml 2>/dev/null || echo nightly`
 _ebpf_detected := ```
+    tc=$(grep -oP '^channel = "\K[^"]+' zensight-sensor-sysinfo-ebpf/rust-toolchain.toml 2>/dev/null || echo nightly)
     if command -v bpf-linker >/dev/null 2>&1 \
        && rustup toolchain list 2>/dev/null \
-            | grep -q "^nightly-$(rustc -vV | awk '/^host:/{print $2}')" \
-       && rustup component list --toolchain nightly 2>/dev/null \
+            | grep -q "^${tc}-$(rustc -vV | awk '/^host:/{print $2}')" \
+       && rustup component list --toolchain "$tc" 2>/dev/null \
             | grep -q '^rust-src.*(installed)'
     then echo 1; else echo 0; fi
 ```
@@ -159,7 +169,7 @@ _default:
 # build with no output whatsoever. (This comment lives out here rather than in the
 # recipe body because just echoes recipe lines, comments included.)
 build:
-    @echo '{{ if ebpf_on == "1" { "eBPF: ON (sysinfo runqlat/biolatency) — grant the caps with: just caps" } else { "eBPF: off — needs bpf-linker + nightly + rust-src; force with: just ebpf=1 build" } }}'
+    @echo '{{ if ebpf_on == "1" { "eBPF: ON (sysinfo runqlat/biolatency) — grant the caps with: just caps" } else { "eBPF: off — needs bpf-linker, plus the nightly pinned in zensight-sensor-sysinfo-ebpf/rust-toolchain.toml with rust-src. See: just ebpf-setup" } }}'
     cargo build {{relflag}} \
         -p zensight --features zensight/h264 \
         -p zensight-sensor-netring \
@@ -177,6 +187,20 @@ build:
         -p zensight-historian \
         -p zensight-desired \
         {{ebpf_features}}
+
+# Install exactly what an eBPF build needs: the DATED nightly the program crates
+# pin (#1094) plus rust-src, and bpf-linker.
+#
+# The pin is read from the crate rather than written here, so this recipe cannot
+# drift from what `build.rs` actually asks `rustup run` for.
+ebpf-setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tc=$(grep -oP '^channel = "\K[^"]+' zensight-sensor-sysinfo-ebpf/rust-toolchain.toml)
+    echo "pinned eBPF toolchain: $tc"
+    rustup toolchain install "$tc" --component rust-src
+    command -v bpf-linker >/dev/null 2>&1 || cargo install bpf-linker
+    echo "ready — build with: just ebpf=1 build"
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
 
