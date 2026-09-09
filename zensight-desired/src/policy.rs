@@ -317,6 +317,15 @@ impl Policy {
             .as_deref()
             .and_then(|h| self.hosts.get(h))
             .or_else(|| self.hosts.get(&entity.entity_id))
+            // …and through the ids this entity has superseded (#1107). A
+            // `hosts:` key is written by a human against the id they could see
+            // at the time; when the catalog upgrades an entity's id — a
+            // fallback id becoming a real `host_id` after the machine's own
+            // sensor reports in — a policy keyed on the old one silently stops
+            // applying. Nothing errors, the host just stops receiving its
+            // configuration, which `docs/policy.md` names as the worst failure
+            // this compiler has.
+            .or_else(|| entity.aliases.iter().find_map(|a| self.hosts.get(a)))
     }
 
     fn push_with_extends<'a>(
@@ -519,5 +528,77 @@ mod glob_tests {
         assert!(glob("a*c", "axbxc"));
         assert!(glob("*b*", "abc"));
         assert!(!glob("a*d", "axbxc"));
+    }
+}
+
+/// Entity id lineage in the policy layer (#1107).
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    fn entity(id: &str, aliases: &[&str]) -> zensight_common::HostEntity {
+        zensight_common::HostEntity {
+            entity_id: id.into(),
+            aliases: aliases.iter().map(|a| (*a).into()).collect(),
+            host_id: Some(id.into()),
+            boot_id: None,
+            ips: Vec::new(),
+            macs: Vec::new(),
+            container_ids: Vec::new(),
+            origins: Vec::new(),
+            hostname: None,
+            fqdn: None,
+            names: Vec::new(),
+            vendor: None,
+            platform: None,
+            members: Vec::new(),
+            status: None,
+            last_updated: 0,
+        }
+    }
+
+    /// A `hosts:` key keeps applying after the catalog upgrades the entity's id.
+    ///
+    /// A human writes the key against the id they can see. When the machine's
+    /// own sensor reports in, a fallback id becomes a real `host_id` and the
+    /// entity id changes — and a policy keyed on the old one silently stopped
+    /// applying. Nothing errors; the host just stops receiving its
+    /// configuration, which `docs/policy.md` names as the worst failure this
+    /// compiler has.
+    #[test]
+    fn an_override_follows_a_superseded_entity_id() {
+        let p: Policy = json5::from_str(
+            r#"{ classes: [], hosts: { "h-old0000000a":
+                 { docs: { "sysinfo/thresholds": { rules: [] } } } } }"#,
+        )
+        .unwrap();
+
+        assert!(
+            p.override_for(&entity("h-new0000000b", &[])).is_none(),
+            "nothing names the current id — which is exactly the situation"
+        );
+        assert!(
+            p.override_for(&entity("h-new0000000b", &["h-old0000000a"]))
+                .is_some(),
+            "the override must follow the id the catalog superseded"
+        );
+    }
+
+    /// The current id still wins: an alias is a fallback, not an override of
+    /// the override.
+    #[test]
+    fn the_current_id_outranks_an_alias() {
+        let p: Policy = json5::from_str(
+            r#"{ classes: [], hosts: {
+                 "h-current0001": { docs: { "sysinfo/thresholds": { rules: [ { name: "now" } ] } } },
+                 "h-old00000001": { docs: { "sysinfo/thresholds": { rules: [ { name: "then" } ] } } },
+               } }"#,
+        )
+        .unwrap();
+        let o = p
+            .override_for(&entity("h-current0001", &["h-old00000001"]))
+            .expect("an override applies");
+        let doc = &o.docs["sysinfo/thresholds"];
+        assert_eq!(doc["rules"][0]["name"], "now");
     }
 }

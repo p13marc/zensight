@@ -208,6 +208,66 @@ pub async fn serve_incidents(
 /// So the catalog answers for its own acks, exactly as it does for assertions
 /// ([`serve_assertions`]) and incidents ([`serve_incidents`]) — storage-shaped,
 /// one reply per document on its concrete key.
+/// Serve the **alias** seed (#1107) — `@catalog/state/alias/*`.
+///
+/// `alias_key()` and `all_alias_wildcard()` existed, `EntityPublisher::upsert`
+/// published an `AliasRecord` once and cached "already published", and nothing
+/// served a queryable on the selector. `README.md` tells consumers to "follow
+/// `@catalog/state/alias/*` so a merged entity still resolves" — and in the
+/// shipped storage-less deployment that GET returned zero replies, which is
+/// exactly the failure #925 fixed for acks.
+///
+/// The records come from the persisted lineage rather than from `self.last`,
+/// because an id upgrade is a **transition**: it is visible for one recompute,
+/// and `self.last` has moved on by the next one.
+pub async fn serve_alias_seed(
+    session: Arc<Session>,
+    state: SharedState,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::all_alias_wildcard();
+    let queryable = zensight_common::served::serve_state_queryable(&session, &key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare alias seed queryable: {e}"))?;
+    info!(key = %key, "alias seed queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                let (pairs, stamp) = {
+                    let guard = state.lock().unwrap();
+                    (
+                        guard.alias_records(),
+                        zensight_common::served::seed_stamp(&session),
+                    )
+                };
+                let now = zensight_common::current_timestamp_millis();
+                for (old_id, entity_id) in pairs {
+                    let key = zensight_common::keyexpr::alias_key(&old_id);
+                    let rec = zensight_common::entity::AliasRecord {
+                        old_id,
+                        entity_id,
+                        last_updated: now,
+                    };
+                    match serde_json::to_vec(&rec) {
+                        Ok(payload) => {
+                            if let Err(e) = query.reply_state(&key, payload, stamp).await {
+                                warn!(error = %e, "alias seed reply failed");
+                            }
+                        }
+                        Err(e) => warn!(error = %e, "serialize alias failed"),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Serve the **assertion** seed (#1102) — `@catalog/state/assertion/*`.
 ///
 /// This family had no seed at all. `docs/correlation.md` says a restarted

@@ -38,6 +38,14 @@ so the next family added here is inert by default. (Raised as zenkey#416; now no
 | `zensight/v1/@catalog/state/entity/<entity_id>` | `HostEntity` | The merged entity view; `<entity_id>` is `h-<12hex>` (the origin id when a member has a `host_id`). The catalog is the **single writer**. A `PUT` upserts (cached plain publisher per id, reliable + block); a `DELETE` tombstones a retired entity. Re-emitted every `reemit_secs`. |
 | `zensight/v1/@catalog/state/edge/<edge_id>` | `Edge` | The resolved relationship graph (#917). Same lifecycle as `entity/`: cached plain publisher per id, reliable + block, `DELETE` as tombstone, re-emitted every `reemit_secs`. `<edge_id>` is `e-<16hex>` = `fnv1a_64(kind ‖ from ‖ to)` computed **after** resolution, so a refresh is an idempotent overwrite and two sensors seeing one relationship land on one key. |
 | `zensight/v1/@catalog/state/pdns/<ip-slug>` | `PdnsRecord` | Historical passive-DNS: an IP's full accumulated name set, published on every name-store update for that IP. Plain `session.put` (the IP set is unbounded), reliable + block. Meant to be captured by a storage backend, not consumed live — see [`storage.md`](storage.md). |
+| `zensight/v1/@catalog/state/alias/<old_id>` | `AliasRecord` | The id an entity superseded → the id it is known by now. Published once per upgrade; **served from persisted lineage** since #1107, because an id upgrade is a transition visible for one recompute and `merge` returns `aliases` empty on every pass after it. |
+| `zensight/v1/@catalog/state/incident/<incident_id>` | `Incident` | Firing alerts grouped by entity and attributed over the relationship graph (#900/#923). Same cached-publisher lifecycle as `entity/`. |
+| `zensight/v1/@catalog/state/assertion/<id>` | `OperatorAssertion` | An operator's `link`/`unlink` — state that is not evidence, so nothing can re-derive it. Also written to the `operator_decisions` file (#1102). |
+| `zensight/v1/@catalog/state/ack/<alert_ref>` | `AlertAck` | An acknowledgement. As above: persisted, because the bus does not hold it on a storage-less deployment. |
+| `zensight/v1/@catalog/state/silence/<id>` | `Silence` | A suppression, with the same lifecycle as `ack/`. |
+
+The last four were missing from this table, which is part of how the seeds for
+three of them came to be missing too (#1102, #1107).
 
 ## Queryables (late-joiner seed / on-demand)
 
@@ -45,6 +53,8 @@ so the next family added here is inert by default. (Raised as zenkey#416; now no
 |-----|----------|-------|
 | `zensight/v1/@catalog/state/entity/*` | — | The entity seed IS the state selector: a late-joining frontend plain-GETs it on connect and the catalog answers **storage-shaped** — one JSON `HostEntity` reply per entity, each on its concrete state key. |
 | `zensight/v1/@catalog/state/edge/*` | — | The edge seed, storage-shaped like the entity seed: one `Edge` reply per edge on its concrete key. Without it a late-joining consumer sees a blank graph until something in the fleet's topology *changes* — which, with the change gate doing its job, may be a long time and is supposed to be. |
+| `zensight/v1/@catalog/state/alias/*` | — | The alias seed (#1107). `README.md` tells consumers to follow this family "so a merged entity still resolves", and on the shipped storage-less deployment the GET returned **zero replies** — the same failure #925 fixed for acks. |
+| `zensight/v1/@catalog/state/assertion/*` | — | The assertion seed (#1102). This family had no seed at all, so a restarted correlator lost every `link` an operator had made. |
 | `zensight/v1/@catalog/@rpc/names` | `?ip=<addr>` | JSON `Vec<NameVal>` — up to 32 accumulated names for that IP. An `@rpc` procedure: resolves arbitrary/external IPs on demand instead of flooding the bus; a missing/blank `ip` replies with an empty set. |
 
 ## Liveliness (catalog ownership)

@@ -64,6 +64,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is already in the set.
 
 
+- **A merged entity's alias survives the pass that created it, and is
+  servable** (#1107). Three failures around one fact the catalog could not keep.
+
+  `apply_upgrades` computed the superseded ids from the entries leaving
+  `self.last`, and then `self.last` was replaced — so on the **very next**
+  recompute `merge` returned the entity with `aliases` empty. The entity
+  republished without its alias, which also registers as a content change, so
+  every id upgrade emitted a spurious `Upsert` about half a second later. The
+  lineage is kept across passes now, and persisted with the operator decisions,
+  because an id upgrade is a *transition*: nothing on the bus after that pass
+  implies it, so a restart could not rebuild it either.
+
+  `alias_key()` and `all_alias_wildcard()` existed, `EntityPublisher::upsert`
+  published an `AliasRecord` once and cached "already published", and **nothing
+  served a queryable on the selector** — while `README.md` tells consumers to
+  follow `@catalog/state/alias/*` "so a merged entity still resolves". On the
+  shipped storage-less deployment that GET returned zero replies, which is the
+  failure #925 fixed for acks. The seed exists now.
+
+  And `Policy::override_for` never consulted `aliases`, so a
+  `fleet-policy.json5` `hosts:` key written against the id a human could see
+  silently stopped applying the moment the catalog upgraded it — the host just
+  stopped receiving its configuration. It resolves through the lineage now, with
+  the current id still winning.
+
+  `docs/keyspace.md`'s Produces table was also missing `alias`, `incident`,
+  `assertion`, `ack` and `silence` — part of how three of those seeds came to be
+  missing in the first place.
+
+
 - **Operator decisions survive a restart** (#1102). `docs/correlation.md` stated
   it as a design property — *"a restarted correlator, a replica, or a
   storage-backed router re-seeds the operator's decisions through the same path

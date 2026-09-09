@@ -150,6 +150,19 @@ pub struct CorrelatorState {
     >,
     /// Live suppression windows.
     silences: std::collections::BTreeMap<String, zensight_common::silence::Silence>,
+    /// Entity id lineage: current id → every id it has superseded (#1107).
+    ///
+    /// Kept across passes, and persisted with the operator decisions, because
+    /// it is derived from a **transition** rather than from state: an id
+    /// upgrade is visible for exactly the one recompute in which the old id
+    /// leaves `self.last`. `apply_upgrades` computed it from that difference
+    /// and then replaced `self.last`, so on the very next pass `merge` returned
+    /// entities with `aliases` empty — the entity republished without its
+    /// alias (which also registers as a content change, so every id upgrade
+    /// emitted a spurious `Upsert` about half a second later), and a Grafana
+    /// link, a runbook or a `fleet-policy.json5` `hosts:` key holding the
+    /// superseded id dangled.
+    lineage: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Where operator decisions are kept across restarts (#1102). `None`
     /// disables persistence, which is what every unit test wants and what a
     /// deployment that has configured no path gets.
@@ -183,6 +196,7 @@ impl CorrelatorState {
             alerts: crate::incidents::AlertStore::default(),
             acks: std::collections::BTreeMap::new(),
             silences: std::collections::BTreeMap::new(),
+            lineage: std::collections::BTreeMap::new(),
             journal: None,
             incidents: crate::incidents::IncidentState::default(),
             live_origins: std::collections::BTreeSet::new(),
@@ -201,17 +215,20 @@ impl CorrelatorState {
         match journal.load() {
             Ok(d) => {
                 let (a, k, si) = (d.assertions.len(), d.acks.len(), d.silences.len());
+                let lin = d.lineage.len();
+                self.lineage.extend(d.lineage);
                 self.assertions
                     .extend(d.assertions.into_iter().map(|v| (v.id.clone(), v)));
                 self.acks
                     .extend(d.acks.into_iter().map(|v| (v.alert_ref.clone(), v)));
                 self.silences
                     .extend(d.silences.into_iter().map(|v| (v.id.clone(), v)));
-                if a + k + si > 0 {
+                if a + k + si + lin > 0 {
                     tracing::info!(
                         assertions = a,
                         acks = k,
                         silences = si,
+                        lineage = lin,
                         path = %journal.path().display(),
                         "restored operator decisions the bus cannot re-derive"
                     );
@@ -245,6 +262,7 @@ impl CorrelatorState {
             assertions: self.assertions.values().cloned().collect(),
             acks: self.acks.values().cloned().collect(),
             silences: self.silences.values().cloned().collect(),
+            lineage: self.lineage.clone(),
         };
         if let Err(e) = journal.save(&d) {
             tracing::error!(
@@ -583,7 +601,7 @@ impl CorrelatorState {
     /// entity but is not itself a current id was upgraded/merged into that new
     /// entity — put the old id in the new entity's `aliases` (it is tombstoned
     /// by the diff since it is no longer a current id).
-    fn apply_upgrades(&self, entities: &mut [HostEntity]) {
+    fn apply_upgrades(&mut self, entities: &mut [HostEntity]) {
         let new_ids: std::collections::HashSet<&str> =
             entities.iter().map(|e| e.entity_id.as_str()).collect();
         // Snapshot old (id -> member set) that are no longer current ids.
@@ -594,16 +612,55 @@ impl CorrelatorState {
             .map(|(id, rec)| (id.clone(), member_set(&rec.entity)))
             .collect();
 
-        for e in entities.iter_mut() {
+        // Record this pass's transitions into the lineage, which outlives it
+        // (#1107). The transition is visible for exactly one recompute; the
+        // *fact* it establishes is permanent.
+        let mut learned = false;
+        for e in entities.iter() {
             let members = member_set(e);
             for (old_id, old_members) in &superseded {
                 if old_id != &e.entity_id && !members.is_disjoint(old_members) {
-                    e.aliases.push(old_id.clone());
+                    // An id that was itself an alias carries its own history
+                    // forward, so a twice-renamed host still resolves from its
+                    // original id.
+                    let inherited = self.lineage.remove(old_id).unwrap_or_default();
+                    let slot = self.lineage.entry(e.entity_id.clone()).or_default();
+                    learned |= slot.insert(old_id.clone());
+                    for older in inherited {
+                        learned |= slot.insert(older);
+                    }
                 }
+            }
+        }
+
+        for e in entities.iter_mut() {
+            if let Some(olds) = self.lineage.get(&e.entity_id) {
+                e.aliases.extend(olds.iter().cloned());
             }
             e.aliases.sort();
             e.aliases.dedup();
         }
+
+        if learned {
+            self.persist_decisions();
+        }
+    }
+
+    /// Every id this entity has superseded (#1107) — the alias seed's source.
+    pub fn aliases_of(&self, entity_id: &str) -> Vec<String> {
+        self.lineage
+            .get(entity_id)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The whole lineage, as `(old id, current id)` pairs — what the alias seed
+    /// serves and what a consumer holding a stale id needs.
+    pub fn alias_records(&self) -> Vec<(String, String)> {
+        self.lineage
+            .iter()
+            .flat_map(|(new, olds)| olds.iter().map(move |old| (old.clone(), new.clone())))
+            .collect()
     }
 }
 
@@ -1110,6 +1167,111 @@ mod tests {
         let _ = sh_tx.send(true);
         drop(tx);
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    /// #1107: the alias survives the pass that created it.
+    ///
+    /// `apply_upgrades` computed `superseded` from the ids leaving `self.last`,
+    /// then `self.last` was replaced — so on the very next recompute `merge`
+    /// returned the entity with `aliases` empty. The entity republished without
+    /// its alias (which is also a content change, so every id upgrade emitted a
+    /// spurious `Upsert` about half a second later), and any consumer holding
+    /// the superseded id dangled.
+    #[test]
+    fn an_alias_outlives_the_pass_that_created_it() {
+        let mut s = CorrelatorState::new(cfg());
+        let mut asset = HostEvidence {
+            sensor: "netring".into(),
+            source: "aa-bb".into(),
+            observer: Some("netring".into()),
+            host_id: None,
+            boot_id: None,
+            hostname: None,
+            fqdn: Some("host9.example.com".into()),
+            ips: vec!["10.0.0.9".into()],
+            macs: vec!["aa:bb:cc:dd:ee:99".into()],
+            vendor: None,
+            platform: None,
+            container_id: None,
+            cloud: None,
+            last_updated: 1000,
+        };
+        s.apply(EvidenceMsg::Host {
+            origin: "h-demo".into(),
+            ev: Box::new(asset.clone()),
+        });
+        let old_id = s
+            .recompute(2000)
+            .iter()
+            .find_map(|o| match o {
+                EntityOp::Upsert(e) => Some(e.entity_id.clone()),
+                _ => None,
+            })
+            .expect("first pass publishes an entity");
+
+        // The machine's own sensor reports in, upgrading the id.
+        asset.last_updated = 2500;
+        s.apply(EvidenceMsg::Host {
+            origin: "h-demo".into(),
+            ev: Box::new(asset.clone()),
+        });
+        s.apply(EvidenceMsg::Host {
+            origin: "h-demo".into(),
+            ev: Box::new(HostEvidence {
+                sensor: "sysinfo".into(),
+                source: "host9".into(),
+                observer: None,
+                host_id: Some(hid(9)),
+                hostname: Some("host9".into()),
+                last_updated: 2500,
+                ..asset.clone()
+            }),
+        });
+        let upgraded = s.recompute(3000);
+        let new_id = format!("h-{}", &hid(9)[..12]);
+        let e = upgraded
+            .iter()
+            .find_map(|o| match o {
+                EntityOp::Upsert(e) if e.entity_id == new_id => Some(e),
+                _ => None,
+            })
+            .expect("the upgraded entity");
+        assert!(e.aliases.contains(&old_id), "the upgrade pass records it");
+
+        // The next pass, with nothing new: the alias must still be there.
+        asset.last_updated = 3500;
+        s.apply(EvidenceMsg::Host {
+            origin: "h-demo".into(),
+            ev: Box::new(asset),
+        });
+        s.recompute(4000);
+
+        // What a consumer actually sees: the document this catalog now holds
+        // and re-emits. That is the assertion that matters — `self.last` is
+        // what the entity seed serves and what the 60 s re-emit publishes.
+        let published = s
+            .reemit(4500)
+            .into_iter()
+            .find_map(|o| match o {
+                EntityOp::Upsert(e) if e.entity_id == new_id => Some(*e),
+                _ => None,
+            })
+            .expect("the entity is still published");
+        assert!(
+            published.aliases.contains(&old_id),
+            "the alias was lost on the pass after the upgrade, so a consumer \
+             holding {old_id} dangles: {:?}",
+            published.aliases
+        );
+        assert!(
+            s.aliases_of(&new_id).contains(&old_id),
+            "and the lineage the alias seed reads must hold it too"
+        );
+        assert_eq!(
+            s.alias_records(),
+            vec![(old_id, new_id)],
+            "…so the alias seed has something to serve"
+        );
     }
 
     #[test]
