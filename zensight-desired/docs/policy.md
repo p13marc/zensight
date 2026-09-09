@@ -104,7 +104,25 @@ is where the mistake is least visible.
 order, so two classes with one name have no defined precedence); an `extends`
 naming an unknown class; an `extends` cycle, reported by naming the loop; a
 document key that is not `<producer>/<topic>`; a topic the registry does not
-declare; a never-list key in any fragment.
+declare; a never-list key in any fragment; and — since #1109 — **a selector that
+can never match**.
+
+That last one had been claimed rather than implemented: `ip_in_cidr`'s own doc
+comment said "a malformed CIDR is caught by `validate` as a problem, so this
+returning `false` is the second line rather than the only one", and `validate`
+never looked at a selector, so `false` *was* the only line. `ip_cidr:
+"10.0.0.0"` (no prefix), `"10.0.0.0/33"` (impossible for v4) and
+`"10.0.0.0/24 "` (a trailing space, and every match here is exact) all parsed,
+validated, planned, passed CI and matched zero hosts. The validator reads a CIDR
+exactly as `ip_in_cidr` does, so what it accepts is precisely what can match —
+a more lenient validator would put the silence back somewhere new.
+
+**Warned by `plan`, not refused:** a class whose selector is well-formed and
+simply *wrong* — `platform: "debian"` where the field is `debian-13`, a CIDR for
+a subnet that has been renumbered. Nothing about it is malformed, so `validate`
+cannot see it; but against a **non-empty** catalog, a class that selects nobody
+is worth a line. (Against an empty catalog every class selects nobody and the
+observation means nothing, so it is not made.)
 
 **Refused per document, pass continues:** a merged document that does not
 deserialize into its registered type. One host's bad override must not stop the
