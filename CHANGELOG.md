@@ -69,6 +69,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently. Both services now share `zensight_common::service_guard`, and
   `apply` refuses while a `run` instance is alive, naming it.
 
+- **A busy bus no longer stops the catalog recomputing** (#1106). Every inbound
+  message set `deadline = now + recompute_debounce_ms`, and the debounce is an
+  **idle** gap — one a fleet's inbound stream may never offer. Evidence
+  refreshes, a passive-DNS observation per resolved IP from netring, every alert
+  transition, every ack and silence, every liveliness flap: keep the aggregate
+  inter-arrival gap under 500 ms and `recompute` never ran at all. New hosts
+  never appeared and retired ones never tombstoned, while the 60 s `reemit`
+  republished the frozen set with a fresh `last_updated` — so the catalog
+  reported that it had just recomputed.
+
+  A `recompute_max_wait_ms` (default 2 s) now caps how long a burst may hold the
+  pass back: whichever of the two elapses first. `0` restores the pure debounce.
+
 - **An identity claim describes one machine, and its MACs are the ones the
   hardware came with** (#1110). Two claims the catalog would have merged on.
 

@@ -584,6 +584,9 @@ pub struct Engine {
     /// what every entity-only test uses.
     incident_out: Option<mpsc::Sender<crate::incidents::IncidentOp>>,
     debounce: Duration,
+    /// The longest a recompute may be deferred, however busy the bus (#1106).
+    /// `ZERO` restores the pure debounce.
+    max_wait: Duration,
     reemit: Duration,
 }
 
@@ -595,10 +598,11 @@ impl Engine {
         rx: mpsc::Receiver<EvidenceMsg>,
         out: mpsc::Sender<EntityOp>,
     ) -> Self {
-        let (debounce, reemit) = {
+        let (debounce, max_wait, reemit) = {
             let s = state.lock().unwrap();
             (
                 Duration::from_millis(s.config.recompute_debounce_ms),
+                Duration::from_millis(s.config.recompute_max_wait_ms),
                 Duration::from_secs(s.config.reemit_secs),
             )
         };
@@ -610,6 +614,7 @@ impl Engine {
             edge_out: None,
             incident_out: None,
             debounce,
+            max_wait,
             reemit,
         }
     }
@@ -647,6 +652,7 @@ impl Engine {
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
         info!(
             debounce_ms = self.debounce.as_millis(),
+            max_wait_ms = self.max_wait.as_millis(),
             reemit_secs = self.reemit.as_secs(),
             "correlation engine started"
         );
@@ -654,8 +660,13 @@ impl Engine {
         reemit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         reemit.tick().await; // consume the immediate first tick
 
-        // `None` = idle (no pending recompute); `Some(deadline)` = debounce armed.
+        // `None` = idle (no pending recompute); `Some(deadline)` = armed.
         let mut deadline: Option<Instant> = None;
+        // When the currently-pending burst started (#1106). The debounce is an
+        // IDLE gap, and a fleet's inbound stream has no idle gap to find, so
+        // the deadline slid forward on every message and `recompute` never ran.
+        // This is what the `max_wait` cap is measured from.
+        let mut pending_since: Option<Instant> = None;
 
         loop {
             tokio::select! {
@@ -692,13 +703,23 @@ impl Engine {
                                     }
                                 }
                             }
-                            deadline = Some(Instant::now() + self.debounce);
+                            let now = Instant::now();
+                            let since = *pending_since.get_or_insert(now);
+                            let idle = now + self.debounce;
+                            // Whichever comes first: the burst going quiet, or
+                            // the cap on how long it may hold the catalog back.
+                            deadline = Some(if self.max_wait.is_zero() {
+                                idle
+                            } else {
+                                idle.min(since + self.max_wait)
+                            });
                         }
                         None => break, // subscribers gone
                     }
                 }
                 _ = async { sleep_until(deadline.unwrap()).await }, if deadline.is_some() => {
                     deadline = None;
+                    pending_since = None;
                     let now = current_timestamp_millis();
                     let (ops, edge_ops, incident_ops) = {
                         let mut st = self.state.lock().unwrap();
@@ -990,6 +1011,80 @@ mod tests {
             e.names[0].name, "new.example.com",
             "ranked most-recent first"
         );
+    }
+
+    /// #1106: a busy bus must not hold the catalog back forever.
+    ///
+    /// The debounce is an **idle** gap, and a fleet's inbound stream — evidence
+    /// refreshes, a passive-DNS observation per resolved IP, every alert
+    /// transition, every ack and silence, every liveliness flap — has no idle
+    /// gap to find. Every message pushed the deadline forward, so `recompute`
+    /// never ran; meanwhile the 60 s `reemit` republished the frozen set with a
+    /// fresh `last_updated`, so the catalog claimed to have just recomputed.
+    /// New hosts never appeared and retired ones never tombstoned.
+    ///
+    /// Compressed clocks (100 ms debounce / 200 ms cap, a message every 40 ms)
+    /// so the test runs in under a second while keeping the shape: the gap
+    /// between messages is always under the debounce, so only the cap can fire.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_busy_bus_still_recomputes() {
+        let mut c = cfg();
+        c.recompute_debounce_ms = 100;
+        c.recompute_max_wait_ms = 200;
+        let state = std::sync::Arc::new(std::sync::Mutex::new(CorrelatorState::new(c)));
+        let (tx, rx) = mpsc::channel(64);
+        let (op_tx, mut op_rx) = mpsc::channel(64);
+        let engine = Engine::new(state, rx, op_tx);
+        let (sh_tx, sh_rx) = watch::channel(false);
+        let handle = tokio::spawn(engine.run(sh_rx));
+
+        // A steady stream for ~1 s, never idle for as long as the debounce.
+        let started = tokio::time::Instant::now();
+        let feeder = tokio::spawn(async move {
+            for i in 0..25u32 {
+                let _ = tx
+                    .send(EvidenceMsg::Host {
+                        origin: format!("h-{i:012x}"),
+                        ev: {
+                            let mut ev =
+                                self_report("sysinfo", &format!("host{i}"), &format!("h-{i:012x}"));
+                            // The engine recomputes against the wall clock, and
+                            // the shared fixture's `last_updated: 1000` is
+                            // decades outside `evidence_ttl_secs`.
+                            ev.last_updated = current_timestamp_millis();
+                            Box::new(ev)
+                        },
+                    })
+                    .await;
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            tx
+        });
+
+        // The question is not "does it ever recompute" — it does, once the
+        // burst finally stops — but "does it recompute WHILE the bus is busy".
+        // So: how long until the first entity op, measured against a stream
+        // that keeps arriving for a full second.
+        let first = tokio::time::timeout(Duration::from_millis(900), op_rx.recv())
+            .await
+            .expect("no recompute at all inside 900 ms of steady traffic")
+            .expect("engine channel closed");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(first, EntityOp::Upsert(_)),
+            "expected an entity upsert, got {first:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "the first recompute took {elapsed:?} — it waited for the stream to \
+             go quiet, which on a real fleet it never does; the max_wait cap \
+             should have fired at ~200 ms"
+        );
+
+        let tx = feeder.await.unwrap();
+        let _ = sh_tx.send(true);
+        drop(tx);
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
     #[tokio::test]
