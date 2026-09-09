@@ -287,7 +287,12 @@ impl Poller {
             observer: Some("bmc".to_string()),
             host_id: None,
             boot_id: None,
-            hostname: sweep.chassis.name.clone(),
+            // The machine's OWN `ComputerSystem.HostName`, or nothing (#1110).
+            // This used to be `Chassis.Name` — a schema *description*, which
+            // Dell, HPE and Supermicro all ship as the literal "Computer System
+            // Chassis". Every such machine on the fleet then claimed the same
+            // hostname, and hostname is a merge rule.
+            hostname: sweep.hostname.clone(),
             fqdn: None,
             ips: Vec::new(),
             macs: sweep.macs.clone(),
