@@ -186,7 +186,20 @@ current id is recorded in the new entity's `aliases` and its old id is tombstone
 
 The async engine (`engine.rs`) coalesces bursts: an incoming claim arms a
 debounce timer (`recompute_debounce_ms`, default 500 ms); recompute runs once the
-bus goes idle for that gap. Each recompute:
+bus goes idle for that gap — **or once `recompute_max_wait_ms` (default 2 s) has
+elapsed since the burst began, whichever comes first.**
+
+That cap is not a refinement, it is the thing that makes the debounce safe
+(#1106). The debounce measures an *idle* gap, and a fleet's inbound stream —
+evidence refreshes, a passive-DNS observation per resolved IP from netring,
+every alert transition, every ack and silence, every liveliness flap — may
+simply never be idle for 500 ms. Below that threshold the deadline slid forward
+on every message and recompute never ran at all: new hosts never appeared,
+retired ones never tombstoned, and the 60 s re-emit below kept republishing the
+frozen set with a fresh `last_updated`, so the catalog reported that it had just
+recomputed. Setting the cap to `0` restores the pure debounce.
+
+Each recompute:
 
 1. sweeps evidence + name stores past their TTL (`evidence_ttl_secs`, default
    900 s),

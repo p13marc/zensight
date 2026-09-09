@@ -44,6 +44,20 @@ pub struct CorrelatorConfig {
     #[serde(default = "default_recompute_debounce_ms")]
     pub recompute_debounce_ms: u64,
 
+    /// The longest a recompute may be deferred, however busy the bus
+    /// (milliseconds). `0` disables the cap and restores the pure debounce.
+    ///
+    /// The debounce alone is an **idle** gap, and a fleet's inbound stream —
+    /// evidence refreshes, a passive-DNS observation per resolved IP from
+    /// netring, every alert transition, every ack and silence, every liveliness
+    /// flap — has no idle gap to find (#1106). Below the debounce the deadline
+    /// slid forward on every message and `recompute` never ran, while the 60 s
+    /// `reemit` republished the frozen set with a fresh `last_updated`: new
+    /// hosts never appeared, retired ones never tombstoned, and the catalog
+    /// said it had just recomputed.
+    #[serde(default = "default_recompute_max_wait_ms")]
+    pub recompute_max_wait_ms: u64,
+
     /// Re-publish every current entity on this cadence (seconds) — doubles as
     /// correlator liveness and seeds a late-restarted bus.
     #[serde(default = "default_reemit_secs")]
@@ -119,6 +133,10 @@ fn default_decisions_path() -> String {
     "/var/lib/zensight-correlator/operator-decisions.json5".to_string()
 }
 
+fn default_recompute_max_wait_ms() -> u64 {
+    2_000
+}
+
 fn default_reemit_secs() -> u64 {
     60
 }
@@ -130,6 +148,7 @@ impl Default for CorrelatorConfig {
             serialization: Format::default(),
             evidence_ttl_secs: default_evidence_ttl(),
             recompute_debounce_ms: default_recompute_debounce_ms(),
+            recompute_max_wait_ms: default_recompute_max_wait_ms(),
             reemit_secs: default_reemit_secs(),
             rules: RulesConfig::default(),
             logging: LoggingConfig::default(),
@@ -221,6 +240,7 @@ mod tests {
         assert_eq!(config.zenoh.mode, "peer");
         assert_eq!(config.evidence_ttl_secs, 900);
         assert_eq!(config.recompute_debounce_ms, 500);
+        assert_eq!(config.recompute_max_wait_ms, 2_000);
         assert_eq!(config.reemit_secs, 60);
         assert!(config.rules.host_id);
         assert!(config.rules.cloud_instance);
@@ -262,6 +282,7 @@ mod tests {
         let d = CorrelatorConfig::default();
         assert_eq!(d.evidence_ttl_secs, 900);
         assert_eq!(d.recompute_debounce_ms, 500);
+        assert_eq!(d.recompute_max_wait_ms, 2_000);
         assert_eq!(d.reemit_secs, 60);
         assert!(d.rules.hostname_enabled);
     }
