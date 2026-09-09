@@ -290,13 +290,36 @@ Discipline (each of these is load-bearing):
 
 `identity.rs` — `HostIdentity::detect()` reads the local system:
 
-- `host_id` = `hex(sha256(machine_id + "zensight-host-id-v1"))`. The salt is
-  fixed (not configurable) so every ZenSight sensor on a host derives the same
-  id; the raw machine-id (confidential per systemd) never leaves the host. `None`
-  if `/etc/machine-id` is unreadable.
+- `host_id` = `h-` + the first **48 bits** of
+  `sha256(machine_id + "zensight-host-id-v1")`, as 12 hex — the RFC 03 origin
+  chunk. The salt is fixed (not configurable) so every ZenSight sensor on a host
+  derives the same id; the raw machine-id (confidential per systemd) never
+  leaves the host.
+
+  48 bits behind a public salt is not a security boundary and does not claim to
+  be (#1111): someone who can choose a container's `/etc/machine-id` can grind a
+  collision and publish under another host's origin. The width is a `zenkey`
+  grammar decision; what changed here is that the docs say so.
+
+  It is **never `None` on a running sensor**. When `/etc/machine-id` is
+  unreadable the profile's `HostId::mint` falls back to a persisted random id,
+  which goes into every key — so the payload carries that same value rather than
+  `None`, because a payload disagreeing with its own keys is the one thing
+  RFC 06 §1 forbids.
+
+  > **Operational note for a machine-id-less host.** That fallback is persisted
+  > at `zenkey`'s `dirs::state_dir()`, which is **per-user**
+  > (`$XDG_STATE_HOME`, else `~/.local/state`) — so the same host running a
+  > sensor as root and another as a service mints *two* origins and appears
+  > twice in the catalog. Give such a host a stable
+  > `/etc/machine-id`, or point every unit at one system path
+  > (`StateDirectory=` plus `Environment=XDG_STATE_HOME=…`). Making that the
+  > packaging default is #1092/#1093's territory, not this crate's: the path is
+  > chosen inside `zenkey`, and ZenSight can only influence it through the
+  > environment.
 - `boot_id` from `/proc/sys/kernel/random/boot_id`, `hostname` (+ a dot-heuristic
   `fqdn`), non-loopback/non-link-local `ips` (getifaddrs) and `macs`
-  (`/sys/class/net`, `lo` and all-zero skipped), and `container_id` from
+  (`/sys/class/net`, stable addresses only — see #1110), and `container_id` from
   `/proc/self/cgroup`.
 
 `SharedIdentity` is a cheap-to-clone `Arc<RwLock<HostIdentity>>`: `get()` snapshots,

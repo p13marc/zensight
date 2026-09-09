@@ -39,6 +39,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A host with no `/etc/machine-id` no longer disagrees with its own keys, and
+  the docs say 48 bits** (#1111).
+
+  `HostIdentity::detect_from` derived the payload `host_id` from
+  `/etc/machine-id` alone and returned `None` when it could not be read — while
+  the *key* origin comes from `HostId::mint`, which falls back to a persisted
+  random id that is a perfectly valid `h-…` and goes into every key. So a
+  stripped container image or a read-only rootfs published keys confidently
+  claiming an identity beside a document saying "I do not know who I am",
+  breaking the payload-equals-key-origin equality that is the whole of RFC 06 §1
+  and the reason a consumer can group without a correlation join. The payload
+  now carries the same minted origin the keys do.
+
+  And the width is stated honestly. `identity.rs`, `docs/identity-evidence.md`,
+  `framework.md` and both READMEs said `sha256(machine_id + salt)`, which reads
+  as 256 bits of separation; it is `h-` + the **first 48 bits** of that hash, and
+  the salt is a compile-time constant — so someone who can choose a container's
+  `/etc/machine-id` can grind a collision and publish under another host's
+  origin. The keyspace is not an authorization boundary and has never claimed to
+  be (#903 puts RBAC out of scope); raising the width is a `zenkey` grammar
+  change. What changed here is that the documents say what the code does.
+
 - **A single-writer service origin defends itself, and `@desired` has one at
   all** (#1104, #1105). The catalog's election ran **once**, at startup, and
   compared session ids. Three failures followed.

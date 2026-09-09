@@ -47,7 +47,10 @@ pub struct HostEvidence {
     /// observed device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observer: Option<String>,
-    /// Hashed machine-id (`sha256(machine_id + salt)` hex) — never the raw id.
+    /// The RFC 06 §1 origin: `h-` + the first **48 bits** of
+    /// `sha256(machine_id + salt)`, hex — never the raw id. See
+    /// `docs/identity-evidence.md` for what 48 bits does and does not buy
+    /// (#1111).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
     /// Kernel boot id.

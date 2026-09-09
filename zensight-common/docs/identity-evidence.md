@@ -51,7 +51,7 @@ pub struct HostEvidence {
     pub sensor: String,               // publishing sensor, e.g. "sysinfo"
     pub source: String,               // the source this claim is about
     pub observer: Option<String>,     // None = self-report; Some = third-party
-    pub host_id: Option<String>,      // hashed machine-id (never raw), sha256(machine_id+salt)
+    pub host_id: Option<String>,      // hashed machine-id (never raw); see the width note
     pub boot_id: Option<String>,
     pub hostname: Option<String>,
     pub fqdn: Option<String>,
@@ -65,6 +65,24 @@ pub struct HostEvidence {
     pub last_updated: i64,
 }
 ```
+
+**`host_id` is 48 bits, not 256** (#1111). It is `h-` + the first 12 hex
+characters of `sha256(machine_id + salt)` — the RFC 03 `h-<12hex>` origin chunk
+— and the salt is a compile-time constant. So anyone able to choose a
+container's `/etc/machine-id` can grind a collision and publish under another
+host's origin, overwriting its LWW alert state. The keyspace is not an
+authorization boundary and has never claimed to be (RBAC is out of scope per
+#903); the point is that the docs used to say `sha256(machine_id + salt)` full
+stop, which reads as 256 bits of separation. Raising the width is a `zenkey`
+grammar change, not a ZenSight one.
+
+**And it always equals the origin in that producer's keys.** When
+`/etc/machine-id` is unreadable — a stripped container image, a read-only
+rootfs, an image built before `systemd-machine-id-setup` — `HostId::mint` falls
+back to a persisted random id, which is a perfectly valid `h-…` and goes into
+every key. The payload used to report `None` in that case: keys confidently
+claiming an identity beside a document saying "I do not know who I am", which
+breaks the one equality this whole page is about.
 
 **A MAC in this document is one the hardware came with** (#1110). Only `lo` was
 excluded before, so every veth and bridge counted — and a veth's address is
@@ -86,7 +104,7 @@ fuse the enclosure into one host.
 Merge strength of the identifying fields (strongest first): `host_id` >
 `(cloud.provider, cloud.instance_id)` > `mac + ip` > `fqdn` > `hostname`. Notes:
 
-- **`host_id`** is `sha256(machine_id + salt)` — the raw machine-id (confidential
+- **`host_id`** is the first 48 bits of `sha256(machine_id + salt)` — the raw machine-id (confidential
   per the systemd docs) never leaves the host.
 - **`container_id`** is host-scoped (only unique per host runtime), so it is a
   qualifier ("this sensor's view is from inside container X"), *never* a
