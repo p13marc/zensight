@@ -102,16 +102,13 @@ impl Publisher0 {
         if !self.publishers.contains_key(key) {
             // Desired state is operator policy: it must arrive, so reliable +
             // block, the same class the catalog uses for entities.
-            let q = zensight_common::QosClass::Entity;
-            let p = self
-                .session
-                .declare_publisher(key.to_string())
-                .congestion_control(q.congestion_control())
-                .priority(q.priority())
-                .express(q.express())
-                .reliability(q.reliability())
-                .await
-                .map_err(|e| anyhow::anyhow!("declare publisher {key}: {e}"))?;
+            let p = zensight_common::qos::declare_publisher(
+                &self.session,
+                key.to_string(),
+                zensight_common::QosClass::Entity,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("declare publisher {key}: {e}"))?;
             self.publishers.insert(key.to_string(), p);
         }
         Ok(self.publishers.get(key).expect("just inserted"))

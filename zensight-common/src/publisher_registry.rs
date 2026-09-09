@@ -127,14 +127,7 @@ impl PublisherRegistry {
             return Ok(());
         }
         // Owned String → `KeyExpr<'static>` so the cached publisher is `'static`.
-        let publisher = self
-            .session
-            .declare_publisher(key.to_string())
-            .congestion_control(qos.congestion_control())
-            .priority(qos.priority())
-            .express(qos.express())
-            .reliability(qos.reliability())
-            .await?;
+        let publisher = crate::qos::declare_publisher(&self.session, key.to_string(), qos).await?;
         publishers.insert(key.to_string(), publisher);
         Ok(())
     }

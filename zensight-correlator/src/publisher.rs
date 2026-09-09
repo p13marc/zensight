@@ -9,6 +9,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Every catalog document — entity, edge, incident, alias, assertion, ack,
+/// silence — is materialized fleet state and must arrive: reliable + block.
+///
+/// One constant rather than a `let q = …` per function, because the value that
+/// was easy to forget was forgotten (#1103): the puts carried it and the
+/// tombstones did not.
+const QOS: zensight_common::QosClass = zensight_common::QosClass::Entity;
+
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 use zenoh::Session;
@@ -45,14 +53,7 @@ impl EntityPublisher {
         if !self.publishers.contains_key(entity_id) {
             let key = entity_key(entity_id);
             // Entities are materialized fleet state — must arrive (reliable+block).
-            let q = zensight_common::QosClass::Entity;
-            let pubr = self
-                .session
-                .declare_publisher(key.clone())
-                .congestion_control(q.congestion_control())
-                .priority(q.priority())
-                .express(q.express())
-                .reliability(q.reliability())
+            let pubr = zensight_common::qos::declare_publisher(&self.session, key.clone(), QOS)
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to declare entity publisher {key}: {e}"))?;
             self.publishers.insert(entity_id.to_string(), pubr);
@@ -87,16 +88,10 @@ impl EntityPublisher {
             // entity-publisher machinery is overkill; reuse a plain declared
             // publisher keyed like the entities.
             let key = alias_key(old_id);
-            let q = zensight_common::QosClass::Entity;
-            let alias_pub = self
-                .session
-                .declare_publisher(key.clone())
-                .congestion_control(q.congestion_control())
-                .priority(q.priority())
-                .express(q.express())
-                .reliability(q.reliability())
-                .await
-                .map_err(|e| anyhow::anyhow!("declare alias publisher {key}: {e}"))?;
+            let alias_pub =
+                zensight_common::qos::declare_publisher(&self.session, key.clone(), QOS)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("declare alias publisher {key}: {e}"))?;
             alias_pub
                 .put(payload)
                 .encoding(self.format.encoding())
@@ -143,14 +138,7 @@ impl EdgePublisher {
     async fn publisher_for(&mut self, edge_id: &str) -> anyhow::Result<&Publisher<'static>> {
         if !self.publishers.contains_key(edge_id) {
             let key = zensight_common::keyexpr::edge_key(edge_id);
-            let q = zensight_common::QosClass::Entity;
-            let pubr = self
-                .session
-                .declare_publisher(key.clone())
-                .congestion_control(q.congestion_control())
-                .priority(q.priority())
-                .express(q.express())
-                .reliability(q.reliability())
+            let pubr = zensight_common::qos::declare_publisher(&self.session, key.clone(), QOS)
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to declare edge publisher {key}: {e}"))?;
             self.publishers.insert(edge_id.to_string(), pubr);
@@ -203,14 +191,7 @@ impl IncidentPublisher {
     async fn publisher_for(&mut self, incident_id: &str) -> anyhow::Result<&Publisher<'static>> {
         if !self.publishers.contains_key(incident_id) {
             let key = zensight_common::keyexpr::incident_key(incident_id);
-            let q = zensight_common::QosClass::Entity;
-            let pubr = self
-                .session
-                .declare_publisher(key.clone())
-                .congestion_control(q.congestion_control())
-                .priority(q.priority())
-                .express(q.express())
-                .reliability(q.reliability())
+            let pubr = zensight_common::qos::declare_publisher(&self.session, key.clone(), QOS)
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to declare incident publisher {key}: {e}"))?;
             self.publishers.insert(incident_id.to_string(), pubr);
@@ -411,13 +392,7 @@ async fn put_catalog_doc<T: serde::Serialize>(
     doc: &T,
 ) -> anyhow::Result<()> {
     let payload = encode(doc, format).map_err(|e| anyhow::anyhow!("encode {key}: {e}"))?;
-    let q = zensight_common::QosClass::Entity;
-    let pubr = session
-        .declare_publisher(key.to_string())
-        .congestion_control(q.congestion_control())
-        .priority(q.priority())
-        .express(q.express())
-        .reliability(q.reliability())
+    let pubr = zensight_common::qos::declare_publisher(session, key.to_string(), QOS)
         .await
         .map_err(|e| anyhow::anyhow!("declare publisher {key}: {e}"))?;
     pubr.put(payload)
@@ -428,8 +403,11 @@ async fn put_catalog_doc<T: serde::Serialize>(
 }
 
 async fn delete_catalog_doc(session: &Session, key: &str) -> anyhow::Result<()> {
-    let pubr = session
-        .declare_publisher(key.to_string())
+    // The SAME class as the matching put (#1103). A tombstone that rides
+    // best-effort while the document that created it was reliable is the one
+    // asymmetry an operator can never see: the `unsilence` is lost, the
+    // silence stays live for every subscriber, and a restart re-seeds it.
+    let pubr = zensight_common::qos::declare_publisher(session, key.to_string(), QOS)
         .await
         .map_err(|e| anyhow::anyhow!("declare publisher {key}: {e}"))?;
     pubr.delete()
@@ -446,13 +424,7 @@ pub async fn publish_assertion(
     let key = assertion_key(&assertion.id);
     let payload =
         encode(assertion, format).map_err(|e| anyhow::anyhow!("encode assertion: {e}"))?;
-    let q = zensight_common::QosClass::Entity;
-    let pubr = session
-        .declare_publisher(key.clone())
-        .congestion_control(q.congestion_control())
-        .priority(q.priority())
-        .express(q.express())
-        .reliability(q.reliability())
+    let pubr = zensight_common::qos::declare_publisher(session, key.clone(), QOS)
         .await
         .map_err(|e| anyhow::anyhow!("declare assertion publisher {key}: {e}"))?;
     pubr.put(payload)
@@ -466,8 +438,7 @@ pub async fn publish_assertion(
 /// Tombstone an assertion key — how an `unlink` retires the `link` it replaces.
 pub async fn retire_assertion(session: &Session, id: &str) -> anyhow::Result<()> {
     let key = assertion_key(id);
-    let pubr = session
-        .declare_publisher(key.clone())
+    let pubr = zensight_common::qos::declare_publisher(session, key.clone(), QOS)
         .await
         .map_err(|e| anyhow::anyhow!("declare assertion publisher {key}: {e}"))?;
     pubr.delete()
