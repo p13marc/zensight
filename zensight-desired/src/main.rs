@@ -498,6 +498,19 @@ fn report(
             compiled.unmatched.join(", ")
         );
     }
+    // The mirror image, and the one `validate` cannot see (#1109): a class
+    // whose selector is well-formed and simply wrong — `platform: "debian"`
+    // where the field is `debian-13`, a CIDR for a renumbered subnet. Nothing
+    // errors; those hosts just never receive the documents someone wrote for
+    // them.
+    let idle = policy.classes_matching_nothing(fleet);
+    if !idle.is_empty() {
+        println!(
+            "  WARNING: {} class(es) selected no host of this fleet: {}",
+            idle.len(),
+            idle.join(", ")
+        );
+    }
     for r in &compiled.rejected {
         println!("  REFUSED {r}");
     }
