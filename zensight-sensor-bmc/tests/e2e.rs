@@ -38,6 +38,9 @@ async fn chassis_collection() -> Json<Value> {
 async fn chassis_one() -> Json<Value> {
     Json(json!({
         "Id": "1",
+        // The literal string Dell, HPE and Supermicro all ship. It is a schema
+        // DESCRIPTION, not a name — the sensor must not claim it as a hostname
+        // (#1110), or every such machine on the fleet claims the same one.
         "Name": "Computer System Chassis",
         "Manufacturer": "ACME",
         "Model": "R740",
@@ -46,7 +49,67 @@ async fn chassis_one() -> Json<Value> {
         "PowerState": "On",
         "PhysicalSecurity": {"IntrusionSensor": "Normal"},
         "Status": {"Health": "OK", "State": "Enabled"},
+        // The chassis's own statement of which machine is in it. Scoping the
+        // identity claim through this is the whole of #1110.
+        "Links": {"ComputerSystems": [{"@odata.id": "/redfish/v1/Systems/1"}]},
     }))
+}
+
+/// The second bay of the same enclosure — a different machine, behind the same
+/// Redfish service.
+async fn chassis_two() -> Json<Value> {
+    Json(json!({
+        "Id": "2",
+        "Name": "Computer System Chassis",
+        "Manufacturer": "ACME",
+        "Model": "R740",
+        "Status": {"Health": "OK", "State": "Enabled"},
+        "Links": {"ComputerSystems": [{"@odata.id": "/redfish/v1/Systems/2"}]},
+    }))
+}
+
+/// A bay linking a system this account cannot read — the "unreadable resource
+/// is data, not a failure" case.
+async fn chassis_three() -> Json<Value> {
+    Json(json!({
+        "Id": "3",
+        "Name": "Computer System Chassis",
+        "Status": {"Health": "OK", "State": "Enabled"},
+        "Links": {"ComputerSystems": [{"@odata.id": "/redfish/v1/Systems/forbidden"}]},
+    }))
+}
+
+async fn system_two() -> Json<Value> {
+    Json(json!({
+        "Id": "2",
+        "HostName": "node-b",
+        "EthernetInterfaces": {"@odata.id": "/redfish/v1/Systems/2/EthernetInterfaces"},
+    }))
+}
+
+async fn system_two_nics() -> Json<Value> {
+    Json(json!({"Members": [{"@odata.id": "/redfish/v1/Systems/2/EthernetInterfaces/nic1"}]}))
+}
+
+async fn system_two_nic1() -> Json<Value> {
+    Json(json!({"Id": "nic1", "MACAddress": "AA:BB:CC:00:00:02"}))
+}
+
+async fn system_one() -> Json<Value> {
+    Json(json!({
+        "Id": "1",
+        // What the machine calls ITSELF — the honest hostname claim.
+        "HostName": "node-a",
+        "EthernetInterfaces": {"@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces"},
+    }))
+}
+
+async fn system_one_nics() -> Json<Value> {
+    Json(json!({"Members": [{"@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/nic1"}]}))
+}
+
+async fn system_one_nic1() -> Json<Value> {
+    Json(json!({"Id": "nic1", "MACAddress": "AA:BB:CC:00:00:01"}))
 }
 
 fn supplies(repaired: bool) -> Value {
@@ -190,14 +253,21 @@ async fn thermal_member(axum::extract::Path(i): axum::extract::Path<usize>) -> J
     Json(temperatures().as_array().unwrap()[i].clone())
 }
 
-async fn not_found() -> axum::http::StatusCode {
-    axum::http::StatusCode::NOT_FOUND
-}
-
 async fn spawn(fixture: Fixture) -> SocketAddr {
     let app = Router::new()
         .route("/redfish/v1/Chassis", get(chassis_collection))
         .route("/redfish/v1/Chassis/1", get(chassis_one))
+        .route("/redfish/v1/Chassis/2", get(chassis_two))
+        .route("/redfish/v1/Chassis/3", get(chassis_three))
+        .route("/redfish/v1/Systems/1", get(system_one))
+        .route(
+            "/redfish/v1/Systems/1/EthernetInterfaces",
+            get(system_one_nics),
+        )
+        .route(
+            "/redfish/v1/Systems/1/EthernetInterfaces/nic1",
+            get(system_one_nic1),
+        )
         .route("/redfish/v1/Chassis/1/Power", get(legacy_power))
         .route("/redfish/v1/Chassis/1/Thermal", get(legacy_thermal))
         .route("/redfish/v1/Chassis/1/PowerSubsystem", get(power_subsystem))
@@ -231,7 +301,27 @@ async fn spawn(fixture: Fixture) -> SocketAddr {
         )
         // A read-only account legitimately cannot see Systems on some
         // firmware. It comes back as no MACs, not as a failed sweep.
-        .route("/redfish/v1/Systems", get(not_found))
+        // A Twin/blade service fronts SEVERAL machines. Walking this
+        // collection wholesale is exactly what #1110 was: every node's MACs
+        // landed on every chassis's evidence.
+        .route(
+            "/redfish/v1/Systems",
+            get(|| async {
+                Json(json!({"Members": [
+                    {"@odata.id": "/redfish/v1/Systems/1"},
+                    {"@odata.id": "/redfish/v1/Systems/2"},
+                ]}))
+            }),
+        )
+        .route("/redfish/v1/Systems/2", get(system_two))
+        .route(
+            "/redfish/v1/Systems/2/EthernetInterfaces",
+            get(system_two_nics),
+        )
+        .route(
+            "/redfish/v1/Systems/2/EthernetInterfaces/nic1",
+            get(system_two_nic1),
+        )
         .with_state(fixture);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -440,10 +530,55 @@ async fn the_documented_faults_each_assert_once_and_then_resolve() {
 
 /// A Redfish resource this account may not read is a fact about the deployment
 /// and not a failed poll: the sweep succeeds with no MACs rather than erroring.
+///
+/// Chassis 2 links a system the fixture does not serve, which is what a 403 on
+/// `ComputerSystems` looks like from here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreadable_resource_is_data_not_a_failure() {
     let addr = spawn(fixture(true)).await;
-    let sweep = client(addr).sweep("1").await.expect("sweep");
+    let sweep = client(addr).sweep("3").await.expect("sweep");
     assert!(sweep.macs.is_empty());
+    assert_eq!(sweep.hostname, None, "a missing claim, not a wrong one");
     assert_eq!(sweep.chassis.health, Health::OK);
+}
+
+/// #1110: the identity claim describes the machine in **this** chassis.
+///
+/// `macs()` ignored its chassis argument and walked `/redfish/v1/Systems`
+/// wholesale, so on a Twin or a blade enclosure every node's MACs landed on
+/// every chassis's evidence — and MAC is the catalog's strongest merge key
+/// after `host_id`. The hostname came from `Chassis.Name`, which is a schema
+/// description that ships as the literal "Computer System Chassis": every such
+/// machine on the fleet claimed the same hostname, and hostname is a merge
+/// rule too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_identity_claim_is_scoped_to_this_chassis() {
+    let addr = spawn(fixture(true)).await;
+    let sweep = client(addr).sweep("1").await.expect("sweep");
+    assert_eq!(
+        sweep.macs,
+        vec!["aa:bb:cc:00:00:01"],
+        "only the system this chassis links"
+    );
+    assert_eq!(
+        sweep.hostname.as_deref(),
+        Some("node-a"),
+        "the machine's own HostName, not the chassis's schema description"
+    );
+    assert_eq!(
+        sweep.chassis.name.as_deref(),
+        Some("Computer System Chassis"),
+        "the chassis name is still read — it is simply not an identity claim"
+    );
+
+    // The other bay of the same enclosure, behind the same Redfish service:
+    // a DISJOINT claim, which is the whole acceptance criterion.
+    let other = client(addr).sweep("2").await.expect("sweep");
+    assert_eq!(other.macs, vec!["aa:bb:cc:00:00:02"]);
+    assert_eq!(other.hostname.as_deref(), Some("node-b"));
+    assert!(
+        other.macs.iter().all(|m| !sweep.macs.contains(m)),
+        "two bays of one enclosure claimed each other's MACs — the catalog's \
+         strongest merge key after host_id"
+    );
 }
