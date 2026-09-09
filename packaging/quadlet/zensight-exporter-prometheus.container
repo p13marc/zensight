@@ -1,0 +1,34 @@
+# ZenSight prometheus exporter — one container, one cgroup, its own budget (#813/#1093).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via the
+# health doc's self_stats and adjust. See README.md beside this, and
+# `packaging/README.md` for the units × capabilities × MemoryMax × budget table
+# `scripts/packaging-check.sh` keeps true.
+#
+# `Network=host` so the /metrics endpoint its config binds is reachable at the
+# host address Prometheus is configured to scrape. A bridged network needs an
+# explicit PublishPort matching that config, in two places instead of one.
+#
+# No health document yet — see #1202.
+[Unit]
+Description=ZenSight prometheus exporter
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-exporter-prometheus:latest
+ContainerName=zensight-exporter-prometheus
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+DropCapability=ALL
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/prometheus-exporter.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

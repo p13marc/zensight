@@ -60,24 +60,44 @@ window it was measured over.*
 
 ### What is shipped today, and where it came from
 
-These are the values in `packaging/quadlet/*.container`. Every one of them was
-chosen by reasoning about what a sensor does, not by watching one do it — which
-is exactly why each unit file carries the line *"MemoryMax below is a STARTING
-POINT (reference-fleet sizing); measure yours"*.
+These are the values in `packaging/quadlet/*.container` **and**
+`packaging/systemd/*.service` — since #1092 the two forms carry the same number
+and `scripts/packaging-check.sh` fails the build if they diverge. Every one of
+them was chosen by reasoning about what a producer does, not by watching one do
+it, which is exactly why each unit file carries the line *"MemoryMax below is a
+STARTING POINT (reference-fleet sizing); measure yours"*.
 
-| Unit | Shipped `MemoryMax` | Why that number was guessed |
-|---|---:|---|
-| `zensight-sensor-netring` | 512M | the only sensor with unbounded-in-principle state: flow ring, TLS/asset tables, detector state |
-| `zensight-historian` | 320M | holds a database; its own budget default is 256 MiB and this leaves the process room around it |
-| `zensight-sensor-logs` | 256M | a durable store plus ingest buffers |
-| `zensight-sensor-sysinfo` | 256M | generous for what it does; it is the sensor most likely to be the only one on a host |
-| `zensight-sensor-netlink` | 128M | socket and neighbour tables scale with the host's connection count |
-| `zensight-sensor-systemd` | 128M | one D-Bus connection and a unit watchlist |
-| `zensight-sensor-bmc` | 96M | one HTTP client against one BMC |
-| `zensight-sensor-pve` | 96M | one HTTP client against one API |
-| `zensight-sensor-container` | 64M | a socket client with two GETs and cgroupfs reads |
-| `zensight-sensor-hostspec` | 64M | a closed vocabulary of assertions; executes nothing |
-| `zensight-sensor-probe` | 64M | a check client with a timeout |
+| Unit | Shipped `MemoryMax` | `budget_rss_mb` | Why that number was guessed |
+|---|---:|---:|---|
+| `zensight-sensor-netring` | 512M | 448 | the only sensor with unbounded-in-principle state: flow ring, TLS/asset tables, detector state. **Measured** |
+| `zensight-sensor-parallax` | 512M | 384 | encoder state and frame buffers, not a poll cycle |
+| `zensight-historian` | 320M | 256 | holds a database; the budget leaves the process room around it. **Measured** |
+| `zensight-sensor-logs` | 256M | 192 | a durable store plus ingest buffers |
+| `zensight-sensor-sysinfo` | 256M | 192 | generous for what it does; it is the sensor most likely to be the only one on a host |
+| `zensight-sensor-netlink` | 128M | 96 | socket and neighbour tables scale with the host's connection count |
+| `zensight-sensor-systemd` | 128M | 96 | one D-Bus connection and a unit watchlist |
+| `zensight-sensor-netflow` | 128M | 96 | a rollup map keyed by flow, plus the parser's LRU |
+| `zensight-sensor-snmp` | 128M | 96 | interface tables across every polled agent |
+| `zensight-correlator` | 128M | — | the fleet's entity set, and the union-find over it |
+| `zensight-exporter-prometheus` | 128M | — | one gauge family per series it forwards |
+| `zensight-exporter-otel` | 128M | — | a provider stack per origin |
+| `zensight-sensor-bmc` | 96M | 72 | one HTTP client against one BMC |
+| `zensight-sensor-pve` | 96M | 72 | one HTTP client against one API |
+| `zensight-sensor-gnmi` | 96M | 72 | one streaming subscription per target |
+| `zensight-desired` | 96M | — | one policy file in, one document per host out |
+| `zensight-sensor-container` | 64M | 48 | a socket client with two GETs and cgroupfs reads |
+| `zensight-sensor-hostspec` | 64M | 48 | a closed vocabulary of assertions; executes nothing |
+| `zensight-sensor-probe` | 64M | 48 | a check client with a timeout |
+| `zensight-sensor-modbus` | 64M | 48 | a register poller with a fixed map |
+
+Nine of these units had no `MemoryMax` in either form before #1092/#1093, and
+every budget but netring's and the historian's is new in #1091 — set at three
+quarters of the backstop, deliberately the same fraction the runner derives
+from a cgroup when nothing is declared.
+
+The four service-tier rows have **no budget because they have no health
+document to carry one** (#1202), so `just fleet-sizing` has no row for them and
+their `MemoryMax` is the only thing holding them.
 
 **Replace a row only from a measured window**, and keep the shipped column beside
 your own — the delta is the interesting part, and it is what a future default

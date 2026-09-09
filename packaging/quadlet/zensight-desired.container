@@ -1,0 +1,37 @@
+# ZenSight desired — the fleet policy compiler — one container, one cgroup, its own budget (#813/#1093).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via the
+# health doc's self_stats and adjust. See README.md beside this, and
+# `packaging/README.md` for the units × capabilities × MemoryMax × budget table
+# `scripts/packaging-check.sh` keeps true.
+#
+# ONE PER DEPLOYMENT (#938): the single writer of every host's `@desired`
+# document. It runs no command and reaches no host.
+#
+# THE POLICY FILE IS THE INPUT AND IT LIVES IN /etc/zensight, which is mounted
+# read-only above — which is what you want: this container compiles the policy,
+# it does not author it.
+#
+# No health document yet — see #1202.
+[Unit]
+Description=ZenSight desired — the fleet policy compiler
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-desired:latest
+ContainerName=zensight-desired
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+DropCapability=ALL
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/desired.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

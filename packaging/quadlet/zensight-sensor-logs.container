@@ -16,6 +16,8 @@ Volume=/etc/machine-id:/etc/machine-id:ro
 Volume=/etc/zensight:/etc/zensight:ro
 Volume=/var/log/journal:/var/log/journal:ro
 Volume=/run/log/journal:/run/log/journal:ro
+DropCapability=ALL
+AddCapability=NET_BIND_SERVICE
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Exec=--config /etc/zensight/logs.json5
 

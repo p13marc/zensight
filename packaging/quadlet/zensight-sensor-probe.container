@@ -24,6 +24,7 @@ Volume=/etc/zensight:/etc/zensight:ro
 # Certificate files to watch (kind: "certfile"), read-only.
 # Volume=/etc/zensight/tls:/etc/zensight/tls:ro
 
+DropCapability=ALL
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Exec=--config /etc/zensight/probe.json5
 

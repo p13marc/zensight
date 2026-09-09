@@ -428,6 +428,29 @@ jobs:
           strip /tmp/guard-src-all      > /tmp/guard-stripped-all
           strip /tmp/guard-src-sessions > /tmp/guard-stripped-sessions
 
+      # #1092: the native unit and the quadlet say the same thing about
+      # capabilities and MemoryMax, or this fails. The two forms had drifted
+      # three separate ways at once and nothing in CI read packaging/ at all.
+      # Files only — no podman, no systemd, no network.
+      - name: the two packaging forms agree (#1092 guard)
+        run: scripts/packaging-check.sh
+
+      # #1092: and the generated table in packaging/README.md still matches
+      # what the units say. A table a human maintains is a table that drifts,
+      # which is what this whole check exists to stop.
+      - name: packaging/README.md's table is current (#1092 guard)
+        run: |
+          scripts/packaging-check.sh --table > /tmp/packaging-table-fresh.md
+          # The committed table is the block between the "do not hand-edit"
+          # line and the paragraph after it.
+          awk '/^\| Unit \| Capabilities/,/^$/' packaging/README.md \
+            | grep -v '^$' > /tmp/packaging-table-committed.md
+          grep -v '^$' /tmp/packaging-table-fresh.md > /tmp/packaging-table-fresh-trimmed.md
+          if ! diff -u /tmp/packaging-table-committed.md /tmp/packaging-table-fresh-trimmed.md; then
+            echo "::error::packaging/README.md's table is stale — regenerate with scripts/packaging-check.sh --table"
+            exit 1
+          fi
+
       # D2 (#28): all colors must come from the design-system modules. Widened
       # in #845: the old pattern matched only `Color::from_rgb*`, so the
       # associated constants (`Color::BLACK` — one was live in chart.rs), the

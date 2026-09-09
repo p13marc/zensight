@@ -6,7 +6,13 @@ pool that the greediest sensor spends for everyone — and on 2026-08-17 that
 meant the OOM victim's exit took down the four sensors that would have
 explained the incident.
 
-One `.container` file per sensor, each with:
+**One `.container` file per unit — all twenty of them since #1093**: fifteen
+sensors, the historian, the correlator, `zensight-desired` and both exporters.
+Until then there were eleven, and the five proxy sensors most likely to run as
+containers on one box (gnmi, modbus, netflow, snmp) plus parallax and the whole
+service tier had none, while this sentence already claimed otherwise.
+`scripts/packaging-check.sh` — run by `ci.yml`'s `lint` job — fails if a
+`.service` ever loses its twin again. Each unit has:
 
 - **its own `MemoryMax`**, sized to that sensor (the placeholders below are
   the reference fleet's starting points — measure yours with
@@ -21,9 +27,27 @@ Install: copy the `.container` files you want into
 A host that needs only the basics runs sysinfo + systemd + logs under a cap
 sized for those three; netring runs only where it earns its keep.
 
-The per-sensor images are built and pushed by every release
-(`zensight-sensor-<name>:<tag>`); mounts/capabilities per sensor are the
-same as the bundle's rows in `docs/DEPLOYMENT.md`.
+- **`DropCapability=ALL`**, and then exactly the capabilities its `.service`
+  twin grants — nothing more.
+
+The per-unit images are built and pushed by every release
+(`zensight-sensor-<name>:<tag>`, plus `zensight-correlator`,
+`zensight-historian`, `zensight-desired` and both exporters).
+
+**Do not read capabilities off the bundle's rows in `docs/DEPLOYMENT.md`** —
+that is how netring's quadlet acquired a `NET_ADMIN` its unit deliberately
+withholds. The bundle's `--cap-add` list is the union across six sensors; a
+per-sensor unit needs its own row. The authority is
+[`../README.md`](../README.md)'s table, which `scripts/packaging-check.sh`
+generates from the units themselves.
+
+**`DropCapability=ALL` is load-bearing and was missing from all eleven units
+until #1092.** A quadlet that declares no capability is *not* the equivalent of
+its twin's `CapabilityBoundingSet=`: it gets podman's eleven-capability default
+(`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `NET_BIND_SERVICE`,
+`SETFCAP`, `SETGID`, `SETPCAP`, `SETUID`, `SYS_CHROOT`). Every unit here was
+therefore more privileged than its native form — and the logs quadlet appeared
+to work only because `NET_BIND_SERVICE` happened to be in that default.
 
 ## Configuring them: one policy, not one file per host
 

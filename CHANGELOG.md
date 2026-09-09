@@ -39,6 +39,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A quadlet for all twenty units, and a guard that stops the two forms
+  drifting again** (#1092, #1093). ZenSight ships every producer twice — a
+  native `.service` and a Quadlet `.container` — and nothing had ever compared
+  them. They had drifted four separate ways at once:
+
+  - **`DropCapability=ALL` was missing from all eleven quadlets.** A
+    `.container` that declares no capability is not the equivalent of its
+    twin's `CapabilityBoundingSet=`; it is podman's eleven-capability default.
+    Every quadlet was therefore more privileged than its native form, including
+    the ones whose twin holds nothing at all — and the logs quadlet only
+    *appeared* to work because `NET_BIND_SERVICE` happens to be in that
+    default.
+  - **netring's quadlet granted `NET_ADMIN` its unit deliberately withholds**,
+    copied from the all-in-one bundle's row, which is the union across six
+    sensors.
+  - **netlink's quadlet omitted `BPF`/`PERFMON`**, so eBPF was silently
+    unavailable in the container form only.
+  - **Sixteen of twenty `.service` files had no `MemoryMax` at all** — including
+    both units that declare a memory budget, so `docs/ops/SIZING.md`'s rule
+    "set the budget below `MemoryMax` so the ladder gets to act first" was
+    satisfied by **zero** shipped units: the only four `.service` files with a
+    backstop were exactly the four sensors that could not declare a budget.
+
+  All twenty units now carry a `MemoryMax`, identical in both forms and above
+  that unit's budget. The **nine missing quadlets** are written — gnmi, modbus,
+  netflow, snmp and parallax, plus the whole service tier (correlator,
+  `zensight-desired`, both exporters) — each with its `.service` twin's exact
+  capability set, so `packaging/quadlet/README.md`'s "one `.container` file per
+  sensor" and `docs/DEPLOYMENT.md`'s equivalent claim are true for the first
+  time. parallax gets a real unit with `AddDevice=` rather than the stated
+  excuse the issue would have accepted. All twenty were validated through
+  podman's own quadlet generator, not just parsed.
+
+  `scripts/packaging-check.sh` — new, run by `ci.yml`'s `lint` job, files only —
+  fails on any of the five: capabilities that disagree, a missing
+  `DropCapability=ALL`, a missing or mismatched `MemoryMax`, a budget at or
+  above its backstop, or a unit present in one form and not the other. It also
+  generates the units × capabilities × `MemoryMax` × budget table in the new
+  `packaging/README.md`, and a second lint step fails if the committed table
+  has gone stale.
+
+  **`packaging/systemd/README.md`'s security scores were re-measured, and were
+  wrong in both directions.** It listed bmc/probe/pve at 5.6 and excused the
+  container sensor as "around 8"; they are 1.7, 1.7, 1.7 and 2.2. It omitted
+  the historian and bmc entirely and put hostspec at 5.6 rather than 5.7. The
+  cause is structural — those four are the only units carrying the full
+  `Protect*`/`Restrict*`/`SystemCallFilter` sandbox block, worth about four
+  points, and the other sixteen carry an older thinner template for no reason
+  but writing order. Filed as #1204; it needs a per-unit argument for each
+  directive, not a sed.
+
+  Also corrected: `docs/DEPLOYMENT.md` counted "five host sensors" beside a
+  parenthesis naming six, "the other four keep publishing" of six, and "five
+  new cards"; `release.yml`'s smoke echo said "five sensors alive" for the same
+  six.
+
 - **`resources.budget_rss_mb` on every producer** (#1091). `docs/ops/SIZING.md`
   told every operator to set a memory budget; two of sixteen sensors had a field
   to set it in. On the other fourteen the key parsed clean and was discarded —

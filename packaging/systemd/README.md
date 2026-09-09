@@ -50,6 +50,14 @@ extra capabilities, granted as *ambient* caps (still no root):
 | `zensight-sensor-logs` | `CAP_NET_BIND_SERVICE` | bind the privileged syslog port 514 |
 | `zensight-sensor-netlink` | `CAP_NET_ADMIN` (+`CAP_BPF CAP_PERFMON`) | *optional* collectors only — nftables/conntrack + the XFRM monitor (`CAP_NET_ADMIN`) and the eBPF module (`CAP_BPF`/`CAP_PERFMON`, also needs a `--features ebpf` build) |
 
+**Every unit now carries a `MemoryMax`** (#1092). Sixteen of the twenty had
+none — including the two that declare a memory budget, so `docs/ops/SIZING.md`'s
+rule *"set the budget below `MemoryMax` so the ladder gets to act first"* was
+satisfied by **zero** shipped units. The value matches the quadlet twin's
+exactly, and `scripts/packaging-check.sh` (run by `ci.yml`'s `lint` job) fails
+if the two disagree or if a budget climbs above its backstop. The table is in
+[`../README.md`](../README.md).
+
 **Every other unit holds none, and now says so.** Until #670 they simply left
 `CapabilityBoundingSet` unset, which is not "none" — it is the kernel default,
 the *full* set. Nothing could use those capabilities (`DynamicUser` with no
@@ -63,16 +71,38 @@ $ for f in packaging/systemd/*.service; do
     systemd-analyze security --offline=true "$f" | tail -1
   done | sort -k1
 
-5.6   correlator, desired, both exporters, gnmi, modbus, netflow, snmp,
-      sysinfo, systemd, hostspec (ProtectHome=read-only — an operator may
-      assert on /home paths; everything hostspec reads, it reads read-only,
-      and it executes nothing)
-5.6   probe, pve      (empty set; both are clients — nothing on the host to reach)
-5.7   parallax        (empty set, plus DeviceAllow — see below)
-5.8   logs            CAP_NET_BIND_SERVICE
-5.8   netring         CAP_NET_RAW + CAP_IPC_LOCK
-5.9   netlink         CAP_NET_ADMIN (+ CAP_BPF CAP_PERFMON)
+1.7 OK       bmc, probe, pve
+2.2 OK       container       (runs as root on purpose — see the end of this file)
+5.6 MEDIUM   correlator, desired, both exporters, historian, gnmi, modbus,
+             netflow, snmp, sysinfo, systemd
+5.7 MEDIUM   hostspec        (ProtectHome=read-only — an operator may assert on
+                              /home paths; everything hostspec reads, it reads
+                              read-only, and it executes nothing)
+5.7 MEDIUM   parallax        (empty set, plus DeviceAllow — see below)
+5.8 MEDIUM   logs            CAP_NET_BIND_SERVICE
+5.8 MEDIUM   netring         CAP_NET_RAW + CAP_IPC_LOCK
+5.9 MEDIUM   netlink         CAP_NET_ADMIN (+ CAP_BPF CAP_PERFMON)
 ```
+
+**Re-measured 2026-09-09 (#1092), and the old table was wrong in both
+directions.** It listed `bmc`, `probe` and `pve` at 5.6 and excused `container`
+as *"around 8"*; they are **1.7**, **1.7**, **1.7** and **2.2**. It omitted
+`historian` and `bmc` entirely, and put `hostspec` at 5.6 rather than 5.7.
+
+The four-versus-sixteen split is not about capabilities at all — every unit
+here holds an empty or minimal set. It is that **bmc, container, probe and pve
+are the only units carrying the full sandbox block**: `PrivateTmp`,
+`PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`,
+`ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `ProtectProc`,
+`RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`,
+`LockPersonality`, `MemoryDenyWriteExecute`, `SystemCallFilter`,
+`SystemCallArchitectures` and `RestrictAddressFamilies`. The other sixteen
+carry the older, thinner template — `DynamicUser`, `NoNewPrivileges`,
+`ProtectSystem=strict`, `ProtectHome`, `CapabilityBoundingSet=` — and that
+difference is worth about **four points** of exposure. Closing it is
+[#1204](https://git.marcpardo.eu/marcpardo/zensight/issues/1204): a real
+security change, per unit, that deserves its own measurements rather than a
+ride on a consistency PR.
 
 Two of them carry a caveat in the unit rather than just a reason:
 
@@ -118,8 +148,13 @@ netring   5.8 MEDIUM      # CAP_NET_RAW + CAP_IPC_LOCK
 logs      5.8 MEDIUM      # CAP_NET_BIND_SERVICE
 ```
 
+(Re-measured 2026-09-09; these three are unchanged.)
+
 Device access costs nothing in that score; an unrestricted capability bounding
-set costs 2.3. Eight of the other units still leave theirs unrestricted.
+set costs 2.3 — which is why every unit here carries an explicit
+`CapabilityBoundingSet=` line, as the section above says. (This paragraph used
+to end *"Eight of the other units still leave theirs unrestricted"*, which #670
+had already made false sixty-nine lines earlier in this same file.)
 
 **Screen capture is not supported by this unit, and cannot be.** A screen source
 would go through the XDG desktop portal, which needs an interactive session
@@ -140,6 +175,8 @@ unit's `ExecStart` names `/usr/bin` — the three 0.13.0 sensors said
 `/usr/local/bin` for one release, which was exactly the "unit that fails at exec"
 the note at the top of this file is about.
 
-`zensight-sensor-container` runs as root (see *Privileges*) and does not score in
-the band above; `systemd-analyze security` puts it around 8, which is the honest
-number for a process that reads a root-owned socket.
+`zensight-sensor-container` runs as root (see *Privileges*). It is in the table
+above at **2.2 OK** — better than sixteen of the twenty, because it carries the
+full sandbox block; running as uid 0 costs it only what `DynamicUser` would
+have saved, which is the honest number for a process that has to read a
+root-owned socket.

@@ -25,6 +25,7 @@ Volume=/etc/zensight:/etc/zensight:ro
 # config as `file:/run/secrets/pve.token`.
 Volume=/etc/zensight/pve.token:/run/secrets/pve.token:ro
 
+DropCapability=ALL
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Exec=--config /etc/zensight/pve.json5
 

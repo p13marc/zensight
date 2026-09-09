@@ -250,7 +250,7 @@ jobs:
               grep -n "does not serve" /tmp/smoke.log
               exit 1
             fi
-            echo "sensors image: five sensors alive after 25s, no panics, registry honest"
+            echo "sensors image: six sensors alive after 25s, no panics, registry honest"
           '
           buildah --storage-driver vfs rm "$ctr"
           # The exporter images were built and PUSHED without ever being
