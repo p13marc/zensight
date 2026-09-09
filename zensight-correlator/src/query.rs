@@ -208,6 +208,62 @@ pub async fn serve_incidents(
 /// So the catalog answers for its own acks, exactly as it does for assertions
 /// ([`serve_assertions`]) and incidents ([`serve_incidents`]) — storage-shaped,
 /// one reply per document on its concrete key.
+/// Serve the **assertion** seed (#1102) — `@catalog/state/assertion/*`.
+///
+/// This family had no seed at all. `docs/correlation.md` says a restarted
+/// correlator "re-seeds the operator's decisions through the same path as every
+/// other document", and for `link`/`unlink` there was no such path: the publish
+/// used a one-shot publisher with no cache behind it, no storage is shipped,
+/// and `main`'s `callable` list — the very list that asserts what this producer
+/// can answer — did not name the family. So a `link` an operator made to repair
+/// a reinstall vanished on the next restart, and the host silently split back
+/// into two entities.
+///
+/// The same shape as [`serve_acks`], including the stamp-inside-the-lock rule:
+/// an assertion retired mid-loop would otherwise have its live tombstone
+/// stamped earlier than this loop's stale copy, and LWW would resurrect it.
+pub async fn serve_assertion_seed(
+    session: Arc<Session>,
+    state: SharedState,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = zensight_common::keyexpr::all_assertion_wildcard();
+    let queryable = zensight_common::served::serve_state_queryable(&session, &key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare assertion seed queryable: {e}"))?;
+    info!(key = %key, "assertion seed queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                let (assertions, stamp) = {
+                    let guard = state.lock().unwrap();
+                    (
+                        guard.current_assertions(),
+                        zensight_common::served::seed_stamp(&session),
+                    )
+                };
+                for a in assertions {
+                    let key = zensight_common::keyexpr::assertion_key(&a.id);
+                    match serde_json::to_vec(&a) {
+                        Ok(payload) => {
+                            if let Err(e) = query.reply_state(&key, payload, stamp).await {
+                                warn!(error = %e, "assertion seed reply failed");
+                            }
+                        }
+                        Err(e) => warn!(error = %e, "serialize assertion failed"),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn serve_acks(
     session: Arc<Session>,
     state: SharedState,
