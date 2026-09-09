@@ -37,6 +37,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nothing is migrated onto it yet. Migration is retire-and-sibling: a new
   procedure replying with the envelope beside the old one.
 
+### Added
+
+- **`resources.budget_rss_mb` on every producer** (#1091). `docs/ops/SIZING.md`
+  told every operator to set a memory budget; two of sixteen sensors had a field
+  to set it in. On the other fourteen the key parsed clean and was discarded —
+  nothing in this tree sets `deny_unknown_fields` — so nine of eleven quadlets
+  instructed an operator to configure something their sensor could not accept,
+  and `self_stats.budget_bytes` read null for them in the GUI, in
+  `fleet-sizing-report.py`, and in every health document.
+
+  The block is now part of the framework: one `ResourcesConfig` in
+  `zensight-sensor-core`, returned from a new `SensorConfig::resources()`, with
+  `budget_bytes()` derived from it. It replaces two structs that differed in
+  name (`ResourcesConfig` vs `ResourceConfig`) and in nesting depth, and it
+  duplicates the MiB→bytes conversion nowhere. No runtime wiring changed —
+  `SensorRunner` has always carried `budget_bytes()` into the health document
+  and constructed a governor for every producer; what was missing was a way to
+  say the number.
+
+  Every shipped `configs/*.json5` now declares a budget at **three quarters of
+  its unit's `MemoryMax`** — the same fraction the runner derives from a cgroup
+  when nothing is declared, so the shed ladder gets to act before the kernel
+  does. They are starting points and say so; the two that came from a
+  measurement, netring (448) and the historian (256), are unchanged. A new
+  coverage test reads the files as a raw tree, because a typed parse would
+  deserialise a config that had *lost* the key straight back into `None`.
+
+  The runner now names the budget at startup, and warns when there is none —
+  before this, whether a sensor had one was first visible in a health document
+  five seconds later, and "no budget" is the state that ends in an OOM kill.
+
+  The historian's key **moved** from `historian.resources.budget_rss_mb` to the
+  top-level spelling every other producer uses. The old path is still read, so
+  an existing deployment keeps its budget rather than silently losing it; the
+  two set to different numbers is a startup error.
+
+  Out of scope, and named rather than faked: the correlator, `zensight-desired`,
+  both exporters and `zensight-rerun` run no `SensorRunner` and have no health
+  document, `self_stats` or governor at all, so a `resources` block there would
+  be read by nothing. Giving them a budget means giving them the health plane
+  first.
+
 ### Changed
 
 - **Dependency bumps, hand-rolled** (#1098). netring `0.29` → **`0.30`** and

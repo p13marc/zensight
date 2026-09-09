@@ -33,6 +33,14 @@ pub struct ParallaxSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
+    /// Declared resource envelope (#811/#1091). `resources.budget_rss_mb` is
+    /// carried into the health doc's `self_stats.budget_bytes` and graded by
+    /// the runner's `sensor-budget` rule at 80 % — declared, not enforced
+    /// (#812 is the shed ladder). Absent reads as *undeclared*, never as
+    /// unlimited-and-fine.
+    #[serde(default)]
+    pub resources: zensight_sensor_core::ResourcesConfig,
+
     /// On-demand artifact channel (`@rpc/parallax/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
@@ -608,6 +616,10 @@ impl SensorConfig for ParallaxSensorConfig {
 
     fn producer(&self) -> &str {
         "parallax"
+    }
+
+    fn resources(&self) -> &zensight_sensor_core::ResourcesConfig {
+        &self.resources
     }
 
     fn desired(&self) -> zensight_common::desired::DesiredConfig {

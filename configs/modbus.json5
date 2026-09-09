@@ -14,6 +14,21 @@
     serialization: "cbor",           // "json" or "cbor"
   },
 
+  // Declared resource envelope (#811/#1091). `budget_rss_mb` arms two things
+  // that do not exist without it: the `sensor-budget` alert at 80 % of this
+  // number, and the shed ladder that tries to stay under it. A sensor with no
+  // budget grows silently until the cgroup kills it — the 2026-08-17 sequence
+  // `docs/ops/SIZING.md` is written about.
+  //
+  // A STARTING POINT, NOT A MEASUREMENT. 48 MiB is three quarters of this
+  // unit's `MemoryMax=64M` — the same fraction the runner derives from a
+  // cgroup when no budget is declared — so the ladder gets to shed before the
+  // kernel gets to kill. Measure yours with `just fleet-sizing` and set it
+  // from what you see; keep it BELOW `MemoryMax`.
+  resources: {
+    budget_rss_mb: 48,
+  },
+
   // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
   // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle (and, for

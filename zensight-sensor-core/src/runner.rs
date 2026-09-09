@@ -239,6 +239,20 @@ impl<C: SensorConfig> SensorRunner<C> {
                 // tier's publish counters and any declared budget.
                 .with_publish_counters(publisher.counters()),
         );
+        // Say the budget out loud at startup (#1091). Before this, whether a
+        // sensor had one was only visible in the health doc five seconds
+        // later — and "no budget" is the state that ends in an OOM kill, so
+        // it is the one worth naming on the way up.
+        match config.budget_bytes() {
+            Some(bytes) => tracing::info!(
+                budget_rss_mb = bytes / (1024 * 1024),
+                "declared memory budget: the sensor-budget alert arms at 80% and the shed ladder at 75%"
+            ),
+            None => tracing::warn!(
+                "no memory budget declared (resources.budget_rss_mb): no sensor-budget alert and no shed ladder — \
+                 set it below the unit's MemoryMax, see docs/ops/SIZING.md"
+            ),
+        }
         health.set_budget_bytes(config.budget_bytes().unwrap_or(0));
 
         Ok(Self {

@@ -127,15 +127,6 @@ impl Default for StoreConfig {
     }
 }
 
-/// The governor's budget (#811/#812).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResourceConfig {
-    /// RSS the governor holds this process to, in MiB. Absent means no budget
-    /// and no ladder — which reads as *undeclared*, never as fine.
-    #[serde(default)]
-    pub budget_rss_mb: Option<u64>,
-}
-
 /// The historian's own settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistorianConfig {
@@ -149,7 +140,7 @@ pub struct HistorianConfig {
     #[serde(default)]
     pub store: StoreConfig,
     #[serde(default)]
-    pub resources: ResourceConfig,
+    pub resources: zensight_sensor_core::ResourcesConfig,
 }
 
 impl Default for HistorianConfig {
@@ -157,7 +148,7 @@ impl Default for HistorianConfig {
         Self {
             key_expr: default_key_expr(),
             store: StoreConfig::default(),
-            resources: ResourceConfig::default(),
+            resources: zensight_sensor_core::ResourcesConfig::default(),
         }
     }
 }
@@ -173,6 +164,17 @@ pub struct HistorianSensorConfig {
     pub historian: HistorianConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Declared resource envelope (#811/#1091). The historian is the one
+    /// producer that shipped this block **nested**, as
+    /// `historian.resources.budget_rss_mb`, before #1091 gave every producer
+    /// the top-level spelling. Both are read; the nested one is deprecated
+    /// but still authoritative when it is the only one set, because nothing
+    /// in this tree sets `deny_unknown_fields` — moving the key outright
+    /// would have discarded a real operator's budget in silence, which is the
+    /// 2026-08-17 sequence `docs/ops/SIZING.md` is written about.
+    #[serde(default)]
+    pub resources: zensight_sensor_core::ResourcesConfig,
 }
 
 impl HistorianSensorConfig {
@@ -226,16 +228,32 @@ impl SensorConfig for HistorianSensorConfig {
         crate::PRODUCER
     }
 
-    fn budget_bytes(&self) -> Option<u64> {
-        self.historian
-            .resources
-            .budget_rss_mb
-            .map(|mb| mb.saturating_mul(1024 * 1024))
+    /// Top level wins; the deprecated `historian.resources` is read when it is
+    /// the only one set. `validate` refuses the case where both are set and
+    /// disagree, so "wins" is never a silent choice between two real numbers.
+    fn resources(&self) -> &zensight_sensor_core::ResourcesConfig {
+        if self.resources.budget_rss_mb.is_some() {
+            &self.resources
+        } else {
+            &self.historian.resources
+        }
     }
 
     fn validate(&self) -> zensight_sensor_core::Result<()> {
         let h = &self.historian;
         let mut problems = Vec::new();
+
+        // Two spellings of one budget. Reading one and ignoring the other is
+        // how a sensor ends up held to a number nobody chose.
+        if let (Some(top), Some(nested)) = (self.resources.budget_rss_mb, h.resources.budget_rss_mb)
+            && top != nested
+        {
+            problems.push(format!(
+                "resources.budget_rss_mb ({top}) and the deprecated \
+                 historian.resources.budget_rss_mb ({nested}) disagree — \
+                 keep one, and prefer the top-level spelling"
+            ));
+        }
 
         // A selector that spells the deployment base matches nothing, and the
         // symptom is a healthy session with an empty database — the one
@@ -334,8 +352,57 @@ mod tests {
     fn the_budget_is_reported_in_bytes() {
         let mut c = HistorianSensorConfig::default();
         assert_eq!(c.budget_bytes(), None, "absent means undeclared, not fine");
+        c.resources.budget_rss_mb = Some(256);
+        assert_eq!(c.budget_bytes(), Some(256 * 1024 * 1024));
+    }
+
+    /// #1091 moved this key to the top level. A deployment that still carries
+    /// the old nested spelling must keep its budget: nothing here sets
+    /// `deny_unknown_fields`, so a config whose only budget sat under
+    /// `historian.` would otherwise parse clean and run with none.
+    #[test]
+    fn the_deprecated_nested_spelling_still_declares_a_budget() {
+        let mut c = HistorianSensorConfig::default();
         c.historian.resources.budget_rss_mb = Some(256);
         assert_eq!(c.budget_bytes(), Some(256 * 1024 * 1024));
+        assert!(c.validate().is_ok());
+    }
+
+    /// …and two spellings that disagree are refused, rather than one of them
+    /// quietly winning.
+    #[test]
+    fn two_budget_spellings_that_disagree_are_a_startup_error() {
+        let mut c = HistorianSensorConfig::default();
+        c.resources.budget_rss_mb = Some(256);
+        c.historian.resources.budget_rss_mb = Some(256);
+        assert!(c.validate().is_ok(), "agreeing is not a conflict");
+
+        c.historian.resources.budget_rss_mb = Some(512);
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("disagree"), "{err}");
+        assert!(err.contains("256") && err.contains("512"), "{err}");
+    }
+
+    /// The shipped config carries the budget at the TOP level now. A raw-tree
+    /// assertion, because with `deny_unknown_fields` off a typed one would
+    /// pass on a file that had lost the key entirely.
+    #[test]
+    fn shipped_config_spells_out_the_budget_at_the_top_level() {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("configs")
+                .join("historian.json5"),
+        )
+        .expect("configs/historian.json5");
+        let v: serde_json::Value = json5::from_str(&raw).expect("parses");
+        assert_eq!(
+            v.get("resources")
+                .and_then(|r| r.get("budget_rss_mb"))
+                .and_then(|b| b.as_u64()),
+            Some(256),
+            "the shipped historian config must declare its budget at the top level"
+        );
     }
 
     #[test]

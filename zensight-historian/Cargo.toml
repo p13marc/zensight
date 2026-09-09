@@ -33,6 +33,9 @@ tracing.workspace = true
 tempfile.workspace = true
 # The live round trips decode replies straight off the wire.
 serde.workspace = true
+# The shipped-config assertion reads configs/historian.json5 as a raw tree —
+# a typed parse would pass on a file that had lost the key (#1091).
+json5.workspace = true
 
 # A one-shot @rpc client, so scripts/demo-verify.sh can ASK the historian
 # rather than only start it (#912). Not a binary: it is a test fixture with a

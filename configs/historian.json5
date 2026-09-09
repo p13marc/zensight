@@ -66,16 +66,23 @@
       // only finds the buckets that aged out since the last one.
       prune_interval_secs: 300,
     },
+  },
 
-    resources: {
-      // RSS the governor holds this process to (#811/#812). Absent means no
-      // budget and no ladder — which reads as *undeclared*, never as fine.
-      //
-      // A history service is the component that most needs this: it is the one
-      // that holds a database, and the reference fleet is where the sensor
-      // bundle OOM-killed a VM on 2026-08-17.
-      budget_rss_mb: 256,
-    },
+  // Declared resource envelope (#811/#1091). RSS the governor holds this
+  // process to. Absent means no budget and no ladder — which reads as
+  // *undeclared*, never as fine.
+  //
+  // A history service is the component that most needs this: it is the one
+  // that holds a database, and the reference fleet is where the sensor bundle
+  // OOM-killed a VM on 2026-08-17. 256 MiB sits under the quadlet's
+  // `MemoryMax=320M`, so the ladder gets to shed before the kernel kills.
+  //
+  // MOVED IN #1091, from `historian.resources` to here — the spelling every
+  // other producer now uses. The nested path is still read for deployments
+  // that carry it, and the two disagreeing is a startup error rather than a
+  // silent choice between two real numbers.
+  resources: {
+    budget_rss_mb: 256,
   },
 
   // Logging configuration
