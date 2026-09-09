@@ -39,6 +39,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The weekly supply-chain report can now find what it exists to find**
+  (#1097). `deny-fresh.yml` was 36 lines with none of the apparatus
+  `ci.yml`'s deny job needed: no `rust-cache`, no `~/.cargo/advisory-dbs` cache
+  directory, no `GIT_TERMINAL_PROMPT=0`, no separation of a refused advisory-db
+  fetch from a real finding, no build-parallelism cap and no concurrency group.
+  That made it the run *most* likely to go red for a reason unrelated to the
+  tree — and, being "a REPORT, not a gate", the one least likely to be
+  investigated. The triage is now `scripts/cargo-deny-checked.sh`, which both
+  workflows call. (A local composite action, which the issue suggested, is not
+  available on this Forgejo: every `uses:` in `.forgejo/workflows/` is an
+  absolute URL and there is no `.forgejo/actions/`. A shared script is the
+  repo's existing shape for this.)
+
+  **And the report could not detect the staleness it was written for.**
+  `deny.toml`'s own comment says the weekly run is what "surfaces a stale entry
+  so it cannot rot silently"; stripping `ignore = []` — the only thing that
+  workflow did — *removes* the `advisory-not-detected` warnings that name one.
+  New `scripts/deny-stale-entries.sh` runs with the file **intact** and fails
+  on any `*-not-detected` / `*-not-encountered` / `unmatched-*` warning, which
+  also covers the two `licenses.exceptions` and any future `[bans]` skip.
+  Verified by planting a stale ignore and watching it exit 1 naming the line.
+  This is the check that would have caught the quick-xml pair removed in #1098
+  automatically, instead of by someone reading warnings.
+
+  The ignore-stripping rewrite is also **verified to have matched**: it was a
+  regex substitution with no check, so a reformatted `ignore = [` would have
+  silently re-applied the full list while still reporting green.
+
 - **The three build configurations CI never type-checked** (#1099).
 
   **`zensight-store` with `blob` off** — the configuration the historian and
