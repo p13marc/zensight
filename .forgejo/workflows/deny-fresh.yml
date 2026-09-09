@@ -1,20 +1,45 @@
-# Weekly advisory freshness (#845): `cargo deny check` gates PRs with the
-# ignore list in deny.toml applied — which means a stale ignore (its upstream
-# fix shipped, its rationale expired) is invisible forever. This run strips
-# the ignore list and checks advisories bare. It is a REPORT, not a gate: a
-# red run here means "read deny.toml's ignores against this output and prune",
-# not "the tree is broken". The same staleness class bit the conformance
-# gate's field-new exclusion for a full release (#845 finding 1).
+# Weekly supply-chain freshness (#845, #1097).
+#
+# `cargo deny check` gates PRs with deny.toml's ignore list APPLIED, which
+# means an entry whose reason has expired is invisible: cargo-deny reports it
+# as a *warning* and the gate goes green. This workflow is where those entries
+# are made to fail.
+#
+# It is a REPORT, not a gate: red here means "prune deny.toml", never "the tree
+# is broken". The same staleness class bit the conformance gate's field-new
+# exclusion for a full release (#845 finding 1).
+#
+# #1097 gave it the apparatus ci.yml's deny job had and this one did not — no
+# cache, no advisory-db cache directory, no GIT_TERMINAL_PROMPT, no
+# fetch-failure triage, no build-parallelism cap and no concurrency group. That
+# made the weekly report the run MOST likely to go red for a reason unrelated
+# to the tree, and, being a report nobody gates on, the one least likely to be
+# investigated. Both jobs now call the same `scripts/cargo-deny-checked.sh`.
 name: deny-fresh
 on:
   schedule:
     - cron: '17 5 * * 1'   # Mondays 05:17 UTC
   workflow_dispatch:
 
+concurrency:
+  # A dispatch on top of the Monday cron must queue, not double-run.
+  group: deny-fresh-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Cap build parallelism against the runner's lane capacity, as ci.yml does.
+  CARGO_BUILD_JOBS: "2"
+
 jobs:
-  advisories-bare:
+  # THE ENTRIES THAT NO LONGER MATCH ANYTHING. This is the check the file's own
+  # comment in deny.toml promises and the previous version of this workflow
+  # could not perform: stripping the ignore list removes the very warnings that
+  # name a stale entry.
+  stale-entries:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845)
@@ -23,14 +48,59 @@ jobs:
       - uses: https://github.com/taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-deny
-      - name: advisories with the ignore list stripped
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          cache-targets: false
+          cache-on-failure: true
+          cache-directories: |
+            ~/.cargo/advisory-dbs
+            ~/.cargo/advisory-db
+      - name: deny.toml carries no entry that matches nothing
+        run: scripts/deny-stale-entries.sh
+
+  # THE IGNORED ADVISORIES, SHOWN. Strips the ignore list so every advisory the
+  # gate is currently suppressing appears in one place, for a human to read
+  # each rationale against.
+  advisories-bare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845)
+        with:
+          toolchain: "1.98"
+      - uses: https://github.com/taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        with:
+          tool: cargo-deny
+      - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          cache-targets: false
+          cache-on-failure: true
+          cache-directories: |
+            ~/.cargo/advisory-dbs
+            ~/.cargo/advisory-db
+      - name: strip the ignore list
         run: |
+          set -euo pipefail
           # Empty the [advisories] ignore array in place; everything else in
           # deny.toml (severity threshold, yanked handling) stays in force.
+          #
+          # THE SUBSTITUTION IS VERIFIED (#1097). The previous version rewrote
+          # the file with a regex and never checked that it matched: reformat
+          # `ignore = [` even slightly and the sed silently no-ops, the "bare"
+          # run quietly re-applies the FULL ignore list, and it still reports
+          # green — a report structurally incapable of finding what it exists
+          # to find.
           python3 - <<'PY'
-          import re
+          import re, sys
           s = open('deny.toml').read()
-          s = re.sub(r'(?ms)^ignore = \[.*?^\]', 'ignore = []', s)
-          open('deny.toml', 'w').write(s)
+          out, n = re.subn(r'(?ms)^ignore = \[.*?^\]', 'ignore = []', s)
+          if n != 1:
+              sys.exit(f"deny.toml: expected exactly one `ignore = [...]` block, matched {n} — "
+                       "the ignore list was NOT stripped, so this run would silently re-apply it")
+          open('deny.toml', 'w').write(out)
           PY
-          cargo deny check advisories
+          grep -q '^ignore = \[\]$' deny.toml \
+            || { echo "deny.toml still has a populated ignore list after the rewrite" >&2; exit 1; }
+      - name: advisories with the ignore list stripped
+        run: scripts/cargo-deny-checked.sh advisories

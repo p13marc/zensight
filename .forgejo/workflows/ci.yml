@@ -334,40 +334,14 @@ jobs:
       # The cached database is at most as old as the cache entry, and the
       # weekly `deny-fresh` run checks a fresh one with the ignore list
       # stripped — so staleness has its own gate and does not need this one.
+      # The three-way triage (fetch refused / wedged clone / real finding) is
+      # in `scripts/cargo-deny-checked.sh`, so `deny-fresh.yml` gets the same
+      # apparatus rather than a 36-line version with none of it (#1097). This
+      # Forgejo has no local composite actions — every `uses:` in this
+      # directory is an absolute URL — so a shared script is the shape, as it
+      # is for demo-verify.sh and conformance-verify.sh.
       - name: cargo deny (cached advisory database, fetch failure isolated)
-        env:
-          # A credential challenge must fail immediately and say so, not block
-          # on a terminal that is not there.
-          GIT_TERMINAL_PROMPT: "0"
-        run: |
-          set -uo pipefail
-          cargo deny --version
-          log=$(mktemp)
-          if cargo deny check 2>&1 | tee "$log"; then exit 0; fi
-
-          if grep -q "failed to fetch advisory database" "$log"; then
-            echo "::warning::advisory-db fetch refused by github.com (#950); re-checking against the cached database"
-            if cargo deny --offline check; then
-              echo "::warning::advisories checked against the CACHED database, not a freshly fetched one — the weekly deny-fresh run checks a fresh one"
-              exit 0
-            fi
-            echo "::error::advisory database is neither fetchable nor cached; nothing was checked"
-            exit 1
-          fi
-
-          if grep -qE "expected flush after ref listing|failed to get 'FETCH_HEAD'|failed to open advisory database" "$log"; then
-            echo "::warning::the lane's advisory-db clone is wedged; resetting it and retrying once"
-            rm -rf ~/.cargo/advisory-db ~/.cargo/advisory-dbs "${CARGO_HOME:-$HOME/.cargo}/advisory-db" "${CARGO_HOME:-$HOME/.cargo}/advisory-dbs"
-            cargo deny check
-            exit $?
-          fi
-
-          # A finding. Fail WITHOUT touching the cache: `cache-on-failure` saves
-          # after this step, so deleting the database here would hand the next
-          # run an empty cache and put it straight back into the clone that
-          # started all this.
-          echo "::error::cargo deny reported a finding; see the output above"
-          exit 1
+        run: scripts/cargo-deny-checked.sh
 
   lint:
     runs-on: ubuntu-24.04

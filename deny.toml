@@ -81,10 +81,16 @@ allow = ["LGPL-2.1-or-later WITH GCC-exception-2.0"]
 # duplicated crate (102 today, mostly the iced and zenoh trees) that rots on
 # every dependency bump — a gate made of stale skips protects less than a
 # warning someone reads. The audit's real finding was that NOTHING could
-# surface a stale entry anywhere in this file; that is now the scheduled
-# deny-fresh workflow's job (.forgejo/workflows/deny-fresh.yml), which runs
-# the advisory check with the ignore list stripped and goes red when an
-# ignore has gone stale or a new advisory lands.
+# surface a stale entry anywhere in this file; that is the scheduled
+# deny-fresh workflow's job (.forgejo/workflows/deny-fresh.yml).
+#
+# It could not actually do it until #1097. Stripping the ignore list — the only
+# thing that workflow did — REMOVES the `advisory-not-detected` warnings that
+# name a stale entry, so the check that was supposed to find them could not.
+# `scripts/deny-stale-entries.sh` now runs with this file intact and fails on
+# any `*-not-detected` / `*-not-encountered` / `unmatched-*` warning, which
+# covers the licenses.exceptions below and any future [bans] skip as well as
+# the ignores above.
 multiple-versions = "warn"
 # The fleet skeleton says "deny", but this workspace wires its 25 members
 # together with version-less path dependencies, and `allow-wildcard-paths`
