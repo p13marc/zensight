@@ -73,12 +73,25 @@ pub struct Decisions {
     /// Suppressions.
     #[serde(default)]
     pub silences: Vec<Silence>,
+    /// Entity id lineage: current id → the ids it has superseded (#1107).
+    ///
+    /// Not an operator *decision*, but it belongs in the same file for the same
+    /// reason: it is derived from a **transition**, and a transition is visible
+    /// for exactly one recompute. Nothing on the bus after that pass implies it,
+    /// so a restart cannot rebuild it — and a consumer holding a superseded id
+    /// (a Grafana link, a runbook, a `fleet-policy.json5` `hosts:` key) then
+    /// dangles.
+    #[serde(default)]
+    pub lineage: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl Decisions {
     /// Whether there is nothing worth writing.
     pub fn is_empty(&self) -> bool {
-        self.assertions.is_empty() && self.acks.is_empty() && self.silences.is_empty()
+        self.assertions.is_empty()
+            && self.acks.is_empty()
+            && self.silences.is_empty()
+            && self.lineage.is_empty()
     }
 }
 

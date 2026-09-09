@@ -213,6 +213,18 @@ async fn main() -> anyhow::Result<()> {
             }
         })
     };
+    // The alias seed (#1107) — the family README.md tells consumers to follow
+    // and which answered nothing.
+    let alias_seed_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_alias_seed(s, st, sh).await {
+                error!(error = %e, "alias seed queryable error");
+            }
+        })
+    };
     // The assertion seed (#1102) — the family a restart had no way to recover.
     let assertion_seed_task = {
         let s = session.clone();
@@ -376,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
         // both the bug and how it stayed invisible — the list exists to assert
         // what this producer can answer.
         zensight_common::keyexpr::all_assertion_wildcard(),
+        zensight_common::keyexpr::all_alias_wildcard(),
         zensight_common::keyexpr::all_acks_wildcard(),
         zensight_common::keyexpr::all_silences_wildcard(),
         catalog_rpc_key("introspect"),
@@ -432,6 +445,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = describe_task.await;
         let _ = assertion_task.await;
         let _ = assertion_seed_task.await;
+        let _ = alias_seed_task.await;
     })
     .await;
 
