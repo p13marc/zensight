@@ -39,6 +39,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A malformed policy selector is refused instead of silently selecting
+  nobody** (#1109). `ip_in_cidr`'s doc comment claimed the check already
+  existed — *"a malformed CIDR is caught by `validate` as a problem, so this
+  returning `false` is the second line rather than the only one"* — and
+  `Policy::validate` never looked at a `Selector`, so `false` **was** the only
+  line. `ip_cidr: "10.0.0.0"` (no prefix), `"10.0.0.0/33"` (impossible for v4)
+  and `"10.0.0.0/24 "` (a trailing space, and every match here is exact) all
+  parsed, validated, planned, passed CI, and matched zero hosts.
+  `docs/policy.md` calls this the worst failure a policy compiler has: nothing
+  is broken, no error is raised, the hosts simply stop receiving configuration.
+
+  Every selector is checked at load now, and the CIDR reading is *the same one*
+  `ip_in_cidr` performs — a validator that parsed more leniently than the
+  matcher would put the silence back somewhere new, and a test pins the two
+  together. Empty and whitespace-padded selectors go with it, since every match
+  is byte-exact or glob-exact.
+
+  `plan` additionally **warns** on a class whose selector is well-formed and
+  simply wrong (`platform: "debian"` where the field is `debian-13`), which
+  `validate` cannot see — but only against a non-empty catalog, because against
+  an empty one every class selects nobody and the observation says nothing.
+
 - **`--for 0 --strict-window` no longer passes green having observed nothing**
   (#1112). `--for 0` skips the listen phase and produces **no** observation
   section, deliberately — "not asked" is not "nothing found". But the gate read
