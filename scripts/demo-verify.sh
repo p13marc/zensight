@@ -81,8 +81,8 @@ die() {
 
 echo "==> building"
 cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-exporter-otel \
-    -p zensight-sensor-sysinfo -p zensight-historian -p zensight-desired \
-    -p zensight-correlator >/dev/null
+    -p zensight-sensor-sysinfo -p zensight-sensor-netlink -p zensight-historian \
+    -p zensight-desired -p zensight-correlator >/dev/null
 # The one-shot @rpc client the historian phase queries with (#912). An
 # example, not a binary: it is a test fixture with a `main`, and shipping it
 # in the release tarball would suggest otherwise.
@@ -93,8 +93,9 @@ cargo build $relflag --locked -p zensight-common --example rpc_get >/dev/null
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
 require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" \
-    "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-historian" "$BIN/zensight-desired" \
-    "$BIN/zensight-correlator" "$BIN/examples/historian-query" "$BIN/examples/rpc_get"
+    "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-sensor-netlink" "$BIN/zensight-historian" \
+    "$BIN/zensight-desired" "$BIN/zensight-correlator" "$BIN/examples/historian-query" \
+    "$BIN/examples/rpc_get"
 
 tmp="$(mktemp -d)"
 echo "==> generating configs into $tmp"
@@ -141,6 +142,24 @@ echo "==> starting sysinfo sensor"
 ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
     "$BIN/zensight-sensor-sysinfo" --config "$tmp/sysinfo.json5" \
     >"$tmp/sysinfo.log" 2>&1 &
+pids+=($!)
+
+# The netlink sensor, so the network dashboard is actually covered (#1096).
+# Every one of the 18 metric names in demo/prometheus/dashboards/zensight-network.json
+# starts with `zensight_netlink_`, and that prefix was deferred by the guard
+# below — so the dashboard the guard exists for was 0% checked, and its
+# generated config was already being written here and then never used.
+#
+# UNPRIVILEGED. `zensight-sensor-netlink/src/lib.rs:8` says so and the unit
+# repeats it: interfaces, routes, neighbours, addresses, sockets, ethtool, tc
+# and the RTNETLINK event stream need no capability. The two collectors that
+# do — nftables and conntrack — open lazily and log one warn line each without
+# CAP_NET_ADMIN, which is what this job has. ci.yml's demo-smoke runs on a bare
+# ubuntu-24.04 with no container and no privileges, and that is unchanged.
+echo "==> starting netlink sensor"
+ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
+    "$BIN/zensight-sensor-netlink" --config "$tmp/netlink.json5" \
+    >"$tmp/netlink.log" 2>&1 &
 pids+=($!)
 
 echo "==> waiting for telemetry to reach the exporter"
@@ -221,9 +240,15 @@ naming regressed, and per-entity subjects are back in metric names"
 # silently — a panel with no data reads as "the exporter is broken". This is the
 # check that keeps demo/ honest.
 #
-# This harness runs sysinfo only and fires no alerts, so families from other
-# sensors are deferred rather than asserted. Everything a provisioned dashboard
-# names that sysinfo CAN produce must exist.
+# This harness runs sysinfo AND netlink (#1096) and fires no alerts. What is
+# still deferred is named below with the reason; everything else a provisioned
+# dashboard names must exist.
+#
+# `zensight_netlink_` was deferred until #1096, which meant all 18 names in
+# zensight-network.json — the whole dashboard, all nine panels — were
+# unchecked, and across the three dashboards 21 of 33 names were. The dashboard
+# `dashboards-blocked/README.md` describes as "checked against a real netlink
+# scrape" was the one with zero coverage.
 stale=$(python3 - "$metrics" <<'PY'
 import glob, re, sys
 
@@ -233,9 +258,19 @@ used = set()
 for f in glob.glob("demo/prometheus/dashboards/*.json"):
     used |= set(re.findall(r'zensight_[a-z_0-9]+', open(f).read()))
 
-OTHER_SENSORS = ("zensight_netlink_", "zensight_systemd_", "zensight_netring_")
+# `zensight_systemd_`: the systemd sensor is not run here — it needs a session
+# bus this job has not got. `zensight_netring_` is NOT in this list any more:
+# it matched nothing in any dashboard, so it deferred nothing and only made the
+# list look more complete than it was.
+OTHER_SENSORS = ("zensight_systemd_",)
 deferred = {m for m in used if m.startswith(OTHER_SENSORS)}
+# The harness fires no alerts, so the alert family has nothing to be.
 deferred.add("zensight_alert")
+
+# Say what is being taken on trust, every run. A deferral nobody sees is how
+# `zensight_netlink_` sat in this list long enough to cover a whole dashboard.
+if deferred:
+    print("DEFERRED:" + ",".join(sorted(deferred)), file=sys.stderr)
 
 print("\n".join(sorted(used - live - deferred)))
 PY

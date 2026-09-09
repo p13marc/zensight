@@ -82,12 +82,24 @@ logs_note() {
 # and cannot find each other. It is the wrong one when a process is already
 # gone — which is the case the preflight above cannot catch, because a binary
 # can exist and still exit on a bad config, a busy port or a missing capability.
+# TRUE ONLY IF EVERY pid IS ALIVE (#1096).
+#
+# This was an `any`: it returned 0 while ONE process out of six was still up.
+# Every caller uses it as "nothing has died yet", so a dead child did not break
+# the wait loop — the loop burned its whole 40/45/60s timeout and only then
+# called `dead_children` to say what had happened. Worse, demo-verify.sh uses
+# it as a hard assertion (`still_running … || die "a process exited"`), which
+# under the old semantics could fire only once EVERY process was gone.
+#
+# `dead_children` below is the one that answers "which ones", and it is
+# unchanged.
 still_running() {
     local pid
     for pid in "$@"; do
-        [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && return 0
+        [[ -n "$pid" ]] || continue
+        kill -0 "$pid" 2>/dev/null || return 1
     done
-    return 1
+    return 0
 }
 
 # Which of the pids we started are gone. Prints nothing when all are alive.
