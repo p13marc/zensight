@@ -70,6 +70,22 @@ pub struct CorrelatorConfig {
     #[serde(default)]
     pub allow_operator_assertions: bool,
 
+    /// Where operator decisions are kept across restarts (#1102).
+    ///
+    /// `link`/`unlink`, `ack` and `silence` are the catalog's **only**
+    /// non-derivable state: nothing on the bus implies them and no amount of
+    /// recomputation produces one. They are published as ordinary catalog
+    /// state so a restart can re-seed them — but the publish had no cache
+    /// behind it, the ack and silence seeds are served by *this* process (so a
+    /// restart asks itself and is answered from its own empty store), and the
+    /// shipped `configs/` run no router storage. An operator's `link` did not
+    /// survive a restart.
+    ///
+    /// Empty disables persistence, which is the pre-#1102 behaviour and what
+    /// every test wants.
+    #[serde(default = "default_decisions_path")]
+    pub operator_decisions: String,
+
     /// Incident evaluation (#900): group firing alerts by entity, attribute
     /// them over the relationship graph, and publish
     /// `@catalog/state/incident/*`.
@@ -97,6 +113,12 @@ fn default_recompute_debounce_ms() -> u64 {
     500
 }
 
+fn default_decisions_path() -> String {
+    // Beside the daemon's other state; the systemd unit's `StateDirectory=`
+    // puts this under /var/lib/zensight-correlator.
+    "/var/lib/zensight-correlator/operator-decisions.json5".to_string()
+}
+
 fn default_reemit_secs() -> u64 {
     60
 }
@@ -112,6 +134,7 @@ impl Default for CorrelatorConfig {
             rules: RulesConfig::default(),
             logging: LoggingConfig::default(),
             allow_operator_assertions: false,
+            operator_decisions: default_decisions_path(),
             incidents_enabled: true,
         }
     }

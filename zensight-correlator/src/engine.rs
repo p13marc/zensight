@@ -150,6 +150,10 @@ pub struct CorrelatorState {
     >,
     /// Live suppression windows.
     silences: std::collections::BTreeMap<String, zensight_common::silence::Silence>,
+    /// Where operator decisions are kept across restarts (#1102). `None`
+    /// disables persistence, which is what every unit test wants and what a
+    /// deployment that has configured no path gets.
+    journal: Option<crate::journal::Journal>,
     /// The published incident set and its change gate.
     incidents: crate::incidents::IncidentState,
     /// Origins whose liveliness token has been seen and is currently present
@@ -179,9 +183,74 @@ impl CorrelatorState {
             alerts: crate::incidents::AlertStore::default(),
             acks: std::collections::BTreeMap::new(),
             silences: std::collections::BTreeMap::new(),
+            journal: None,
             incidents: crate::incidents::IncidentState::default(),
             live_origins: std::collections::BTreeSet::new(),
             dead_origins: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Load operator decisions from `journal` and keep writing them there
+    /// (#1102).
+    ///
+    /// Called **before** the bus seed, so a live document still wins: the
+    /// catalog stays a function of the bus wherever the bus has an answer, and
+    /// the file only supplies what the bus has forgotten — which, on the
+    /// deployment this project actually ships, is all of it.
+    pub fn with_journal(mut self, journal: crate::journal::Journal) -> Self {
+        match journal.load() {
+            Ok(d) => {
+                let (a, k, si) = (d.assertions.len(), d.acks.len(), d.silences.len());
+                self.assertions
+                    .extend(d.assertions.into_iter().map(|v| (v.id.clone(), v)));
+                self.acks
+                    .extend(d.acks.into_iter().map(|v| (v.alert_ref.clone(), v)));
+                self.silences
+                    .extend(d.silences.into_iter().map(|v| (v.id.clone(), v)));
+                if a + k + si > 0 {
+                    tracing::info!(
+                        assertions = a,
+                        acks = k,
+                        silences = si,
+                        path = %journal.path().display(),
+                        "restored operator decisions the bus cannot re-derive"
+                    );
+                }
+            }
+            // A file we cannot read must not stop the catalog: that would trade
+            // "some operator decisions are missing" for "the fleet has no
+            // catalog", which is strictly worse. Loudly, though — this is the
+            // one state nothing else can rebuild.
+            Err(e) => tracing::error!(
+                error = %e, path = %journal.path().display(),
+                "could not read the operator-decision journal; continuing WITHOUT the \
+                 links, acks and silences it holds"
+            ),
+        }
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Write the operator decisions out, if a journal is configured.
+    ///
+    /// Called from [`Self::apply`] on every arm that changes one, so a new
+    /// write path cannot be added that forgets to persist. Synchronous on
+    /// purpose: these are human actions, a few per week, and a queued write is
+    /// a write a crash can lose — which is the bug this exists to fix.
+    fn persist_decisions(&self) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let d = crate::journal::Decisions {
+            assertions: self.assertions.values().cloned().collect(),
+            acks: self.acks.values().cloned().collect(),
+            silences: self.silences.values().cloned().collect(),
+        };
+        if let Err(e) = journal.save(&d) {
+            tracing::error!(
+                error = %e, path = %journal.path().display(),
+                "could not persist an operator decision — it will be lost on restart"
+            );
         }
     }
 
@@ -195,20 +264,25 @@ impl CorrelatorState {
             }
             EvidenceMsg::Assert(a) => {
                 self.assertions.insert(a.id.clone(), a);
+                self.persist_decisions();
             }
             EvidenceMsg::Relation { origin, ev } => self.relations.upsert(origin, *ev),
             EvidenceMsg::Alert { r, alert } => self.alerts.observe(*r, alert.map(|a| *a)),
             EvidenceMsg::Ack(ack) => {
                 self.acks.insert(ack.alert_ref.clone(), *ack);
+                self.persist_decisions();
             }
             EvidenceMsg::RemoveAck(r) => {
                 self.acks.remove(&r);
+                self.persist_decisions();
             }
             EvidenceMsg::Silence(s) => {
                 self.silences.insert(s.id.clone(), *s);
+                self.persist_decisions();
             }
             EvidenceMsg::RemoveSilence { id } => {
                 self.silences.remove(&id);
+                self.persist_decisions();
             }
             EvidenceMsg::Liveliness { origin, alive } => {
                 if alive {

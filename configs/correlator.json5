@@ -71,6 +71,24 @@
   // feature exists and is disabled.
   allow_operator_assertions: false,
 
+  // Where operator decisions are kept across restarts (#1102).
+  //
+  // `link`/`unlink`, `ack` and `silence` are the catalog's ONLY non-derivable
+  // state: nothing on the bus implies them, and no amount of recomputation
+  // produces one. They are published as ordinary catalog state so a restart can
+  // re-seed them — but the ack and silence seeds are served by this very
+  // process (so a restart asks itself, and is answered from its own empty
+  // store) and no router storage is shipped. Without this file, an operator's
+  // `link` did not survive a restart: the host silently split back into two
+  // entities, with no error and no log line.
+  //
+  // The file is a floor, not a source of truth — it is read BEFORE the bus
+  // seed, so a live document still wins. Set it to "" to disable persistence,
+  // which is right for a deployment that has deployed a router storage (see
+  // `zenctl storage gen`) and wants the catalog to be purely a function of the
+  // bus.
+  operator_decisions: "/var/lib/zensight-correlator/operator-decisions.json5",
+
   // Incidents (#900): group the fleet's firing alerts by ENTITY, attribute
   // each group to a root cause over the relationship graph, and publish
   // @catalog/state/incident/*. One incident per machine, whether its own
