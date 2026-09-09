@@ -122,6 +122,40 @@ impl QosClass {
     }
 }
 
+/// Declare a publisher already carrying `class`'s QoS profile.
+///
+/// **The one way to declare a publisher** (#1103). The four-call builder chain
+/// — `congestion_control` / `priority` / `express` / `reliability` — was
+/// written out by hand at seven call sites, and the two that mattered most
+/// omitted it: the correlator tombstoned an `unack`, `unsilence` or `unlink`
+/// through a bare `session.declare_publisher(key).delete()`, whose Zenoh
+/// default is `Drop` + best-effort. So the write that *created* a suppression
+/// was reliable and blocking, and the write that removed it was neither: a
+/// dropped tombstone leaves the document live for every subscriber — and on
+/// disk, where a storage exists — while the correlator's own memory has
+/// forgotten it. A restart then re-seeds the revoked document.
+///
+/// A QoS profile that has to be spelled out is a QoS profile that will be
+/// forgotten. Spelling it out is now impossible: the CI guard refuses a bare
+/// `.declare_publisher(` outside this function.
+pub async fn declare_publisher<K>(
+    session: &zenoh::Session,
+    key: K,
+    class: QosClass,
+) -> zenoh::Result<zenoh::pubsub::Publisher<'static>>
+where
+    K: TryInto<zenoh::key_expr::KeyExpr<'static>>,
+    <K as TryInto<zenoh::key_expr::KeyExpr<'static>>>::Error: Into<zenoh::Error>,
+{
+    session
+        .declare_publisher(key)
+        .congestion_control(class.congestion_control())
+        .priority(class.priority())
+        .express(class.express())
+        .reliability(class.reliability())
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +236,33 @@ mod tests {
                 "{q:?} moved on the express axis; see docs/qos-express.md before changing this"
             );
         }
+    }
+
+    /// A tombstone must ride the same class as the document it retracts
+    /// (#1103).
+    ///
+    /// The correlator published an ack, a silence or an assertion at
+    /// `Entity` — reliable + block — and deleted it through a bare
+    /// `declare_publisher(key).delete()`, whose Zenoh default is `Drop` +
+    /// best-effort. The asymmetry is invisible from the operator's side: the
+    /// suppression they created arrives, the one they removed may not, and the
+    /// document stays live for every subscriber while the correlator's own
+    /// memory has forgotten it.
+    ///
+    /// This asserts the property that made the bug possible — that the two
+    /// defaults genuinely differ — so the guard has something to be about.
+    #[test]
+    fn zenohs_publisher_default_is_not_the_entity_profile() {
+        let entity = QosClass::Entity;
+        assert_eq!(entity.congestion_control(), CongestionControl::Block);
+        assert_eq!(entity.reliability(), Reliability::Reliable);
+        // What a publisher declared without the four calls would have been.
+        assert_ne!(
+            entity.congestion_control(),
+            CongestionControl::Drop,
+            "if these ever coincide, the delete/put asymmetry stops being observable \
+             and this test stops protecting anything"
+        );
     }
 
     #[test]

@@ -456,6 +456,31 @@ jobs:
             exit 1
           fi
 
+      # #1103: a publisher's QoS profile must not be spellable by hand.
+      - name: every publisher carries a QoS class (#1103 guard)
+        run: |
+          # The four-call builder chain (congestion_control / priority /
+          # express / reliability) was written out at seven call sites, and the
+          # two that mattered most omitted it: the correlator tombstoned an
+          # `unack`, `unsilence` or `unlink` through a bare
+          # `declare_publisher(key).delete()`, whose Zenoh default is Drop +
+          # best-effort. The write that CREATED a suppression was reliable and
+          # blocking; the one that removed it was neither.
+          #
+          # The R5 guard above could not see it — that bans `session.put/delete`,
+          # and this was a declared publisher, just an unconfigured one.
+          #
+          # `advanced_publisher.rs` is exempt: its builder continues into
+          # `.cache()` / `.sample_miss_detection()`, so it cannot return through
+          # the helper — and it does set the four itself.
+          hits=$(grep -nE '\.declare_publisher\(' /tmp/guard-stripped-all \
+            | grep -vE 'qos\.rs|advanced_publisher\.rs' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Bare declare_publisher — declare through zensight_common::qos::declare_publisher so the QoS class cannot be forgotten (#1103):"
+            echo "$hits"
+            exit 1
+          fi
+
       # #484: every queryable goes through zensight_common::served, so the
       # registry-vs-served check knows what this build actually serves.
       - name: The exporters must not hand-roll a plain telemetry subscriber
