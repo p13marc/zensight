@@ -103,7 +103,7 @@ See [`packaging/quadlet/README.md`](../../packaging/quadlet/README.md).
 | Bytes per minute bucket, as written | | ≤ 48 |
 | Bytes per minute bucket, after `compact()` | | ≤ 48 |
 | Database size at defaults | | ≤ 2 GiB |
-| Steady RSS at `budget_bytes = 256 MiB` | | ≤ 256 MiB |
+| Steady RSS at `resources.budget_rss_mb: 256` | | ≤ 256 MiB |
 | Worst-case prune | | ≤ 2 s |
 | Range GET p95 (24 h, minute tier) | | ≤ 200 ms |
 
@@ -194,6 +194,22 @@ silently until the cgroup kills it, which is precisely the 2026-08-17 sequence.
 The budget is declared, the ladder enforces, and `MemoryMax` is the backstop —
 set all three, and set the budget *below* `MemoryMax` so the ladder gets to act
 first.
+
+The key is **`resources.budget_rss_mb`**, in MiB, at the top level of the
+config — `budget_bytes` is the internal spelling (the trait accessor and the
+`self_stats` field) and is not settable. Since #1091 **every** producer config
+accepts it and every shipped `configs/*.json5` declares one, at three quarters
+of its unit's `MemoryMax` — the same fraction the runner derives from a cgroup
+when nothing is declared. Those are starting points, not measurements: the two
+that came from a measurement are netring (448) and the historian (256), and
+they say so in their own files. Until #1091 only those two had a field to set
+it in and the other fourteen accepted the key and discarded it, because nothing
+in this tree sets `deny_unknown_fields`.
+
+The historian is the one producer with a second, **deprecated** spelling:
+`historian.resources.budget_rss_mb`, which is still read for deployments that
+carry it. Setting both to different numbers is a startup error rather than a
+silent choice between them.
 
 ---
 

@@ -369,9 +369,19 @@ was OOM-killed, and reported `Healthy` throughout:
   not call back into `SensorHealth`**. This is the field that turns "the
   sensor is big" into "the flow table is 280 MB of it". netring is the
   wired exemplar (flow ring, TLS inventory, asset inventory).
-- **budget** — `SensorConfig::budget_bytes()` (e.g. netring's
-  `resources.budget_rss_mb`) is carried into `self_stats.budget_bytes`.
+- **budget** — `SensorConfig::resources()` returns the shared
+  [`ResourcesConfig`], whose `budget_rss_mb` (MiB) becomes
+  `budget_bytes()` and is carried into `self_stats.budget_bytes`.
   **Declared, not enforced** — the shed ladder is #812.
+
+  Since #1091 the block is part of the framework rather than a per-sensor
+  invention: a config type adds `#[serde(default)] pub resources:
+  ResourcesConfig` beside `zenoh` and `logging`, and returns it from
+  `resources()`. Nothing else is needed — `SensorRunner::new` already wires
+  the result into the health document, and logs the budget (or its absence)
+  at startup. Before #1091 the struct existed twice, under two names and at
+  two nesting depths, and fourteen of sixteen producers had no field at all
+  while `docs/ops/SIZING.md` told every operator to set the key.
 - **cgroup context** — `memory.{current,max,high}` + OOM counters from the
   sensor's own cgroup-v2, when it runs in one (`max` = unlimited = absent).
 

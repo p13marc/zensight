@@ -3,10 +3,49 @@
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SensorError};
 use crate::{LoggingConfig, ZenohConfig};
 use zensight_common::ArtifactLimits;
+
+/// The declared resource envelope (#811/#1091).
+///
+/// One shape for every producer. Before #1091 this struct existed twice — as
+/// `ResourcesConfig` in the netring sensor and `ResourceConfig` (singular) in
+/// the historian, at two different nesting depths — and the other fourteen
+/// sensors had no field at all, so `docs/ops/SIZING.md`'s instruction to "set
+/// all three" named a key that nine of eleven shipped units could not accept.
+///
+/// Nothing here sets `deny_unknown_fields`, which is why the omission was
+/// silent: a `resources` block in a config the binary did not know about
+/// parsed clean and was discarded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourcesConfig {
+    /// Declared RSS budget, in **MiB**. Absent means *undeclared* — no
+    /// `sensor-budget` alert and no shed ladder — never "unlimited and fine".
+    ///
+    /// The key is `budget_rss_mb`. `budget_bytes` is the internal spelling
+    /// (this module's accessor and the health doc's `self_stats` field) and is
+    /// not settable; the two were confused in the docs until #1091.
+    #[serde(default)]
+    pub budget_rss_mb: Option<u64>,
+}
+
+impl ResourcesConfig {
+    /// The budget in bytes, or `None` when undeclared. The MiB -> bytes
+    /// conversion for the whole tree lives here; it was duplicated in two
+    /// crates before #1091.
+    pub fn budget_bytes(&self) -> Option<u64> {
+        self.budget_rss_mb.map(|mb| mb.saturating_mul(1024 * 1024))
+    }
+}
+
+/// The undeclared envelope, so `SensorConfig::resources` can hand out a
+/// reference without every implementor owning a field.
+const NO_RESOURCES: &ResourcesConfig = &ResourcesConfig {
+    budget_rss_mb: None,
+};
 
 /// Trait for sensor configuration types.
 ///
@@ -75,15 +114,23 @@ pub trait SensorConfig: Sized + DeserializeOwned {
         zensight_common::IdentityConfig::default()
     }
 
+    /// The declared resource envelope (`resources.*`, #811/#1091). Every
+    /// producer carries one; the default is the undeclared envelope, for a
+    /// config type that predates the block.
+    fn resources(&self) -> &ResourcesConfig {
+        NO_RESOURCES
+    }
+
     /// Declared memory budget in bytes (#811) — carried into the health
     /// doc's `self_stats.budget_bytes` and graded by the runner's
     /// `sensor-budget` rule at 80 %. **Declared, not enforced** (#812 is the
-    /// enforcement ladder). Default: no budget — absent reads as
-    /// *undeclared*, never as unlimited-and-fine. A sensor opts in by
-    /// carrying e.g. `resources.budget_bytes` in its config and overriding
-    /// this.
+    /// enforcement ladder). Absent reads as *undeclared*, never as
+    /// unlimited-and-fine.
+    ///
+    /// Derived from [`resources`](Self::resources); a sensor declares the
+    /// budget by carrying the block, not by overriding this.
     fn budget_bytes(&self) -> Option<u64> {
-        None
+        self.resources().budget_bytes()
     }
 
     /// `@desired` reconcile settings (#816/#849) — the kill switch and the

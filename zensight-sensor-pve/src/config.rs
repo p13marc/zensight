@@ -59,6 +59,14 @@ pub struct PveSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
+    /// Declared resource envelope (#811/#1091). `resources.budget_rss_mb` is
+    /// carried into the health doc's `self_stats.budget_bytes` and graded by
+    /// the runner's `sensor-budget` rule at 80 % — declared, not enforced
+    /// (#812 is the shed ladder). Absent reads as *undeclared*, never as
+    /// unlimited-and-fine.
+    #[serde(default)]
+    pub resources: zensight_sensor_core::ResourcesConfig,
+
     /// `@desired` reconcile settings (#931): the kill switch and refresh
     /// cadence. File config on purpose — the mechanism that could misbehave
     /// must be disarmable from outside itself.
@@ -263,6 +271,10 @@ impl SensorConfig for PveSensorConfig {
 
     fn producer(&self) -> &'static str {
         "pve"
+    }
+
+    fn resources(&self) -> &zensight_sensor_core::ResourcesConfig {
+        &self.resources
     }
 
     fn desired(&self) -> zensight_common::desired::DesiredConfig {

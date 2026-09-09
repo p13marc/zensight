@@ -68,7 +68,7 @@ pub use artifact::{
     ReportProducer, SnapshotProducer,
 };
 pub use cloud::detect_cloud;
-pub use config::SensorConfig;
+pub use config::{ResourcesConfig, SensorConfig};
 pub use container::{container_id_from_cgroup, container_id_from_path, detect_self_container_id};
 pub use error::{Result, SensorError};
 pub use event::EventPublisher;
