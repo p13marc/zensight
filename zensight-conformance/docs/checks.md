@@ -15,6 +15,12 @@ the `--allow` / `--deny` tokens below are safe to write into a script.
 skips phase 4 (and the report then carries **no** observation section at all,
 rather than an empty one — "not asked" is not "nothing found", RFC 09 §5.1 O4).
 
+`--for 0 --strict-window` is therefore a **contradiction, and is reported as
+one** (#1112): the gate answers `Unobservable` (exit 2) rather than a clean
+pass. It used to read the absent section as "zero samples dropped" and exit 0 —
+a caller asking for completeness to be a hard claim, and being told it held
+having observed nothing.
+
 ### 1. Served vs. declared (always)
 
 | check | severity | what it means here |
@@ -65,7 +71,7 @@ prints the window, the scopes, and every bound it hit.
 | `cardinality-over-declared` | warning / **info** | a family expanded past its declared `cardinality`. Fires at **info**, with an explicit "exempt: rest-variable" note, for `{var...}` families (`snmp/{device}/{metric...}` and friends) — unbounded by construction, so the declared number is not a bound this check can pass or fail. |
 | `field-vanished` | warning | a dotted path present early in the window stopped appearing. |
 | `field-stuck` | warning | a numeric path never changed across the window. |
-| `field-new` | warning | a path appears in samples that the served schema never declared. **Excluded by default — upstream zenkey#384.** See the README. |
+| `field-new` | warning | a path appears in samples that the served schema never declared. **Gates**, since zenkey#384 landed — `DEFAULT_EXCLUDED` is empty. `--allow field-new` remains the per-run override. |
 
 ## What a clean run looks like
 
@@ -85,14 +91,13 @@ listen window: 12.0s, 618 sample(s) over 307 key(s); scopes: v1/*/telemetry/**, 
   [info] storage-coverage · fleet: 69 state famil(y|ies) have no storage coverage …
   [info] cardinality-over-declared · snmp/{device}/{metric...}: exempt: rest-variable …
 
--- EXCLUDED FROM THE GATE (21) — field-new --
-   field-new: 21 finding(s) suppressed
-
-PASS — no gated findings. 1 producer(s) judged, 28 finding(s) reported, none of them gated
+PASS — no gated findings. 1 producer(s) judged, 7 finding(s) reported, none of them gated
 ```
 
-Twenty-eight findings and a pass is not a contradiction: twenty-one are the
-upstream `oneOf` blind spot, seven are `info`. The two numbers that matter are
+Seven findings and a pass is not a contradiction: all seven are `info`, below
+the severity floor. Nothing is excluded by default — `DEFAULT_EXCLUDED` is
+empty, and an `EXCLUDED FROM THE GATE` block appears only when a run passes
+`--allow`. The two numbers that matter are
 `slices in sync: 1` (the diff *ran*, and agreed) and `dropped: 0`.
 
 ## When a check fires
