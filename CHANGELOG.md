@@ -39,6 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Link-layer adjacency actually reaches the wire** (#1108). `l2_claims()`
+  derives `l2_adjacent` edges from the observer identity claims already in the
+  evidence store — and was referenced only by its own tests. `README.md`
+  ("derived here from the observed-device identity claims"),
+  `docs/correlation.md` ("pushed through the same resolver as every real
+  claim"), `README.md`'s advice to filter `l2_adjacent` out of the containment
+  set, and the 0.15.0 CHANGELOG entry "link-layer adjacency is derived in the
+  catalog, not the GUI" all described a kind that never appeared — while the
+  GUI carried an `EdgeKind::L2Adjacent` arm and a whole L2 lens waiting for it.
+  `recompute_edges` feeds the claims through the same `resolve` as every real
+  relation now, which is what the docs already said it did.
+
 - **A malformed policy selector is refused instead of silently selecting
   nobody** (#1109). `ip_in_cidr`'s doc comment claimed the check already
   existed — *"a malformed CIDR is caught by `validate` as a problem, so this
