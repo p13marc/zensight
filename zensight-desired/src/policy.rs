@@ -183,6 +183,21 @@ impl Policy {
                     c.name
                 ));
             }
+            // Every selector is checked here (#1109). `ip_in_cidr`'s own doc
+            // comment claimed this already happened — "a malformed CIDR is
+            // caught by `validate` as a problem, so this returning `false` is
+            // the second line rather than the only one" — and it did not, so
+            // `false` WAS the only line. `10.0.0.0`, `10.0.0.0/33` and
+            // `"10.0.0.0/24 "` all parsed, validated, planned and matched
+            // exactly zero hosts. `docs/policy.md` names silently matching
+            // nothing as the worst failure a policy compiler has.
+            if let Some(Match::All(v) | Match::Any(v)) = &c.matches {
+                for sel in v {
+                    if let Err(e) = check_selector(sel) {
+                        p.push(format!("class {:?}: {e}", c.name));
+                    }
+                }
+            }
         }
 
         for c in &self.classes {
@@ -249,6 +264,34 @@ impl Policy {
         }
 
         p
+    }
+
+    /// Classes whose own matcher selected **no** host of `fleet` (#1109).
+    ///
+    /// A well-formed selector that is simply wrong — `platform: "debian"`
+    /// where the field is `debian-13`, a CIDR for a subnet that was
+    /// renumbered — is the failure `validate` cannot see and the one
+    /// `docs/policy.md` calls the worst a policy compiler has: nothing errors,
+    /// the hosts just stop receiving configuration.
+    ///
+    /// Only reportable against a **non-empty** catalog: with no fleet, every
+    /// class matches nothing and the answer means nothing. Classes reached
+    /// only through `extends` are excluded — a mixin with no matcher of its own
+    /// is doing exactly what it was written to do.
+    pub fn classes_matching_nothing(&self, fleet: &[zensight_common::HostEntity]) -> Vec<&str> {
+        if fleet.is_empty() {
+            return Vec::new();
+        }
+        self.classes
+            .iter()
+            .filter(|c| c.matches.is_some())
+            .filter(|c| {
+                !fleet
+                    .iter()
+                    .any(|e| c.matches.as_ref().is_some_and(|m| m.matches(e)))
+            })
+            .map(|c| c.name.as_str())
+            .collect()
     }
 
     /// The `extends` chain from `name` back to itself, if there is one.
@@ -432,11 +475,77 @@ fn glob(pat: &str, s: &str) -> bool {
     pi == p.len()
 }
 
+/// Whether one selector can ever match anything (#1109).
+///
+/// A selector that cannot is not a policy that is merely strict — it is a
+/// policy that is broken and silent, which `docs/policy.md` calls the worst
+/// failure a policy compiler has: nothing errors, hosts simply stop receiving
+/// configuration.
+fn check_selector(sel: &Selector) -> Result<(), String> {
+    let empty = |what: &str, v: &str| {
+        if v.trim().is_empty() {
+            Err(format!("{what} selector is empty, so it matches nothing"))
+        } else if v != v.trim() {
+            // Every match below is byte-exact or glob-exact, so surrounding
+            // whitespace is silently fatal rather than forgiving.
+            Err(format!(
+                "{what} selector {v:?} has leading or trailing whitespace — the match is \
+                 exact, so it matches nothing"
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    match sel {
+        Selector::HostId(v) => empty("host_id", v),
+        Selector::HostnameGlob(v) => empty("hostname", v),
+        Selector::Sensor(v) => empty("sensor", v),
+        Selector::Vendor(v) => empty("vendor", v),
+        Selector::Platform(v) => empty("platform", v),
+        Selector::IpCidr(v) => {
+            empty("ip_cidr", v)?;
+            check_cidr(v)
+        }
+    }
+}
+
+/// The CIDR half, split out because it is the one with real arithmetic.
+///
+/// Deliberately the *same* reading `ip_in_cidr` performs, so a CIDR this
+/// accepts is exactly a CIDR that can match — a validator that parsed more
+/// leniently than the matcher would restore the bug in a new place.
+fn check_cidr(cidr: &str) -> Result<(), String> {
+    use std::net::IpAddr;
+    let Some((base, bits)) = cidr.split_once('/') else {
+        return Err(format!(
+            "ip_cidr {cidr:?} has no prefix length — write {cidr}/32 for a single host"
+        ));
+    };
+    let Ok(base_ip) = base.parse::<IpAddr>() else {
+        return Err(format!("ip_cidr {cidr:?}: {base:?} is not an IP address"));
+    };
+    let Ok(bits) = bits.parse::<u32>() else {
+        return Err(format!(
+            "ip_cidr {cidr:?}: prefix length {bits:?} is not a number"
+        ));
+    };
+    let max = if base_ip.is_ipv4() { 32 } else { 128 };
+    if bits > max {
+        return Err(format!(
+            "ip_cidr {cidr:?}: prefix length {bits} exceeds {max} for an \
+             IPv{} address, so it matches nothing",
+            if base_ip.is_ipv4() { 4 } else { 6 }
+        ));
+    }
+    Ok(())
+}
+
 /// Whether `ip` is inside `cidr`. v4 and v6; a malformed CIDR matches nothing.
 ///
-/// A malformed CIDR is caught by `validate` as a problem, so this returning
+/// A malformed CIDR is caught by [`check_selector`] at load, so this returning
 /// `false` is the second line rather than the only one — but it must be
 /// `false` and not a panic, because the policy is a file a human wrote.
+/// (Until #1109 that first line did not exist and this *was* the only one.)
 fn ip_in_cidr(ip: &str, cidr: &str) -> bool {
     use std::net::IpAddr;
     let Some((base, bits)) = cidr.split_once('/') else {
@@ -600,5 +709,169 @@ mod alias_tests {
             .expect("an override applies");
         let doc = &o.docs["sysinfo/thresholds"];
         assert_eq!(doc["rules"][0]["name"], "now");
+    }
+}
+
+/// Selector validation (#1109) — the check `ip_in_cidr`'s doc comment claimed
+/// already existed.
+#[cfg(test)]
+mod selector_validation_tests {
+    use super::*;
+
+    fn policy_with(selector: &str) -> Policy {
+        let src = format!(
+            r#"{{ classes: [ {{ name: "c", matches: {{ any: [ {selector} ] }},
+                 docs: {{ "sysinfo/thresholds": {{ rules: [] }} }} }} ] }}"#
+        );
+        json5::from_str(&src).expect("fixture parses")
+    }
+
+    fn problems(selector: &str) -> String {
+        policy_with(selector).validate().to_string()
+    }
+
+    /// The three shapes from the issue: all parse, all validate, all match
+    /// exactly zero hosts.
+    #[test]
+    fn a_malformed_cidr_is_a_validation_problem() {
+        for bad in [
+            r#"{ ip_cidr: "10.0.0.0" }"#,
+            r#"{ ip_cidr: "10.0.0.0/33" }"#,
+            r#"{ ip_cidr: "10.0.0.0/24 " }"#,
+            r#"{ ip_cidr: "10.0.0.0/x" }"#,
+            r#"{ ip_cidr: "not-an-ip/24" }"#,
+        ] {
+            let p = problems(bad);
+            assert!(!p.is_empty(), "{bad} validated clean");
+            assert!(
+                p.contains("ip_cidr"),
+                "the problem must name the selector: {p}"
+            );
+        }
+    }
+
+    /// A `/128` on v6 is legal and a `/33` on v4 is not — the bound is the
+    /// address family's, which is what `ip_in_cidr` itself reads.
+    #[test]
+    fn a_well_formed_cidr_validates_on_both_families() {
+        for good in [
+            r#"{ ip_cidr: "10.0.0.0/24" }"#,
+            r#"{ ip_cidr: "10.0.0.1/32" }"#,
+            r#"{ ip_cidr: "0.0.0.0/0" }"#,
+            r#"{ ip_cidr: "2001:db8::/32" }"#,
+            r#"{ ip_cidr: "2001:db8::1/128" }"#,
+        ] {
+            assert!(problems(good).is_empty(), "{good} was refused");
+        }
+    }
+
+    /// The validator must accept exactly what the matcher accepts. A validator
+    /// that parsed more leniently would put the silence back somewhere new.
+    #[test]
+    fn the_validator_agrees_with_the_matcher() {
+        for cidr in [
+            "10.0.0.0/24",
+            "10.0.0.0",
+            "10.0.0.0/33",
+            "2001:db8::/129",
+            "2001:db8::/64",
+        ] {
+            let validates = check_cidr(cidr).is_ok();
+            // A CIDR the matcher can never satisfy, for an address inside it.
+            let matches_anything = ip_in_cidr("10.0.0.5", cidr) || ip_in_cidr("2001:db8::5", cidr);
+            assert!(
+                validates || !matches_anything,
+                "{cidr} was refused by validate but the matcher accepts it"
+            );
+        }
+    }
+
+    /// A class whose selector is well-formed and simply *wrong* (#1109): the
+    /// failure `validate` cannot see, because nothing about it is malformed.
+    #[test]
+    fn plan_notices_a_class_that_selects_nobody() {
+        use zensight_common::HostEntity;
+        let fleet = vec![HostEntity {
+            entity_id: "h_1".into(),
+            aliases: Vec::new(),
+            host_id: Some("h-1".into()),
+            boot_id: None,
+            ips: vec!["10.0.0.7".into()],
+            macs: Vec::new(),
+            container_ids: Vec::new(),
+            origins: vec!["h-1".into()],
+            hostname: Some("web-01".into()),
+            fqdn: None,
+            names: Vec::new(),
+            vendor: Some("Dell Inc.".into()),
+            // #935: the field is `<ID>-<VERSION_ID>`, never a bare family.
+            platform: Some("debian-13".into()),
+            members: Vec::new(),
+            status: None,
+            last_updated: 0,
+        }];
+
+        // `debian-*` is what #935's `<ID>-<VERSION_ID>` needs; `debian` is the
+        // exact-match mistake the Platform doc comment warns about.
+        let right: Policy = json5::from_str(
+            r#"{ classes: [ { name: "d", matches: { any: [ { platform: "debian-*" } ] },
+                docs: { "sysinfo/thresholds": { rules: [] } } } ] }"#,
+        )
+        .unwrap();
+        assert!(right.classes_matching_nothing(&fleet).is_empty());
+
+        let wrong: Policy = json5::from_str(
+            r#"{ classes: [ { name: "d", matches: { any: [ { platform: "debian" } ] },
+                docs: { "sysinfo/thresholds": { rules: [] } } } ] }"#,
+        )
+        .unwrap();
+        assert!(
+            wrong.validate().is_empty(),
+            "nothing about it is malformed — that is why plan has to say it"
+        );
+        assert_eq!(wrong.classes_matching_nothing(&fleet), vec!["d"]);
+    }
+
+    /// With no fleet, every class matches nothing and the answer means
+    /// nothing — so it is not reported.
+    #[test]
+    fn an_empty_fleet_reports_no_idle_classes() {
+        let p: Policy = json5::from_str(
+            r#"{ classes: [ { name: "d", matches: { any: [ { platform: "debian" } ] },
+                docs: { "sysinfo/thresholds": { rules: [] } } } ] }"#,
+        )
+        .unwrap();
+        assert!(p.classes_matching_nothing(&[]).is_empty());
+    }
+
+    /// Whitespace and emptiness are silently fatal for every selector, because
+    /// every match is byte-exact or glob-exact.
+    #[test]
+    fn an_empty_or_padded_selector_is_a_problem() {
+        for bad in [
+            r#"{ hostname_glob: "" }"#,
+            r#"{ hostname_glob: " web-* " }"#,
+            r#"{ platform: "" }"#,
+            r#"{ vendor: " Dell*" }"#,
+            r#"{ sensor: "sysinfo " }"#,
+            r#"{ host_id: "" }"#,
+        ] {
+            assert!(!problems(bad).is_empty(), "{bad} validated clean");
+        }
+    }
+
+    /// …and an ordinary selector still validates, so the check above is not
+    /// simply refusing everything.
+    #[test]
+    fn ordinary_selectors_still_validate() {
+        for good in [
+            r#"{ hostname_glob: "web-*" }"#,
+            r#"{ platform: "debian-*" }"#,
+            r#"{ vendor: "Dell*" }"#,
+            r#"{ sensor: "sysinfo" }"#,
+            r#"{ host_id: "h-3fa9c2d41b7e" }"#,
+        ] {
+            assert!(problems(good).is_empty(), "{good} was refused");
+        }
     }
 }
