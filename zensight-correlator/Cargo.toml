@@ -55,6 +55,11 @@ clap.workspace = true
 # =============================================================================
 # Package metadata for cargo-deb
 # =============================================================================
+
+[dev-dependencies]
+# The operator-decision journal writes a real file (#1102).
+tempfile = "3"
+
 [package.metadata.deb]
 maintainer = "Marc Pardo <p13marc@gmail.com>"
 copyright = "2024, Marc Pardo"

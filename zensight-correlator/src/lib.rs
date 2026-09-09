@@ -21,6 +21,7 @@ pub mod demo;
 pub mod edges;
 pub mod engine;
 pub mod incidents;
+pub mod journal;
 pub mod merge;
 pub mod pdns;
 pub mod publisher;

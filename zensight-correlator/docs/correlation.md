@@ -125,6 +125,24 @@ re-seeds the operator's decisions through the same path as every other document.
 The correlator therefore subscribes to what it publishes — which looks circular
 and is exactly the point.
 
+**And it is backed by a file, because on the deployment we ship the bus does not
+hold it** (#1102). That paragraph was a design intent the mechanism did not
+deliver: the publish used a one-shot publisher with no cache behind it; the ack
+and silence seeds are served by *this* process, so a restart asks itself and is
+answered from its own empty store; `assertion/*` had no seed queryable at all;
+and `configs/` runs no router storage. An operator ran `link old→new` to repair
+a reinstall, somebody restarted the correlator, and the host silently split back
+into two entities — no error, no log line.
+
+The three surfaces are fixed together: the assertion seed exists now, the
+`callable` list names it, and `operator_decisions` points at a small JSON5 file
+the correlator owns (`journal.rs`, the shape `zensight-desired`'s `overrides.rs`
+uses, written atomically). The file is a **floor, not a source of truth** — it
+is read *before* the bus seed, so a live document still wins and the catalog
+stays a function of the bus wherever the bus has an answer. Set the path to `""`
+on a deployment that has a router storage (`zenctl storage gen`) and wants
+exactly the original property.
+
 Assertions name **origin ids** (`h-<12hex>`), never the weaker evidence-derived
 entity ids: an id computed from a hostname or a MAC changes shape when the set it
 names changes, so an assertion keyed on one would dangle the moment it took
