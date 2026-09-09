@@ -2,5 +2,9 @@
 # bpfel-unknown-none target) and require `rust-src`. Pinned per-crate so the rest
 # of the workspace stays on stable.
 [toolchain]
-channel = "nightly"
+# DATED, not floating (#1094). This repo SHA-pins every action and `--locked`s
+# every build; a bare `nightly` was the one input that changed under it
+# silently, so an eBPF build could break on a compiler nobody chose. Bump it
+# deliberately — a nightly that is a few weeks old is the point.
+channel = "nightly-2026-08-18"
 components = ["rust-src"]

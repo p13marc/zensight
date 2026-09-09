@@ -253,7 +253,10 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
     // and is indistinguishable from an idle host.
     let offset_bytes = offsets_to_bytes(&offsets);
     let mut bpf = loader
-        .set_global("TCP_SOCK_OFFSETS", &offset_bytes[..], true)
+        // `override_global`, not the deprecated `set_global` (#1094). The
+        // eBPF leg was checked with `cargo check`, which exits 0 on warnings,
+        // so a deprecation could sit here indefinitely.
+        .override_global("TCP_SOCK_OFFSETS", &offset_bytes[..], true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             // The bin-target name of the kernel crate (differs from its package
@@ -367,7 +370,7 @@ fn resolve_tcp_sock_offsets() -> TcpSockOffsets {
 #[cfg(feature = "ebpf")]
 fn offsets_to_bytes(o: &TcpSockOffsets) -> [u8; core::mem::size_of::<TcpSockOffsets>()] {
     let mut out = [0u8; core::mem::size_of::<TcpSockOffsets>()];
-    for (chunk, value) in out.chunks_exact_mut(4).zip([
+    for (chunk, value) in out.as_chunks_mut::<4>().0.iter_mut().zip([
         o.valid,
         o.bytes_acked,
         o.bytes_received,
@@ -399,7 +402,7 @@ fn monotonic_anchor_ms() -> i64 {
     if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
         return 0;
     }
-    let mono_ms = (ts.tv_sec as i64) * 1_000 + (ts.tv_nsec as i64) / 1_000_000;
+    let mono_ms = ts.tv_sec * 1_000 + ts.tv_nsec / 1_000_000;
     zensight_common::telemetry::current_timestamp_millis().saturating_sub(mono_ms)
 }
 

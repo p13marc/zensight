@@ -26,6 +26,13 @@ on:
   pull_request:
     paths:
       - '.forgejo/workflows/features-ebpf.yml'
+  # …and on a tag (#1094). Without this a release could ship an `ebpf` feature
+  # whose last compile was up to 24 h and any number of merges ago: the daily
+  # schedule is a *staleness* signal, not a release gate, and `release.yml`
+  # never waited for it. A tag is the one moment the answer has to be current.
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 env:
   CARGO_TERM_COLOR: always
@@ -60,7 +67,13 @@ jobs:
       # `rustup run nightly`, so it must be installed, not merely selected.
       - uses: https://github.com/dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly branch head; SHA-pinned (#845)
         with:
-          toolchain: nightly
+          # The DATED nightly the two `-ebpf` crates pin (#1094). It was a bare
+          # `nightly` in a repo that SHA-pins every action and `--locked`s every
+          # build — the one input that could change under CI without anyone
+          # choosing it. Keep this in step with
+          # `zensight-sensor-{netlink,sysinfo}-ebpf/rust-toolchain.toml`; the
+          # step below fails the job if they drift.
+          toolchain: nightly-2026-08-18
           components: rust-src
       - uses: https://github.com/Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
@@ -126,7 +139,34 @@ jobs:
           # on this image — which is the half that can fail.
           echo "bpf-linker ${BPF_LINKER_VERSION} installed: $(bpf-linker --version)"
 
+      # `clippy --all-targets -- -D warnings`, not `cargo check` (#1094).
+      # ci.yml's `features` job says why, and #845 made the change there —
+      # in one file and not this one: "check exits 0 on warnings while every
+      # other job denies them, so feature-gated code was the one place a
+      # warning could land silently". It had. Switching this job found a
+      # deprecated `aya::EbpfLoader::set_global` and three clippy lints that
+      # `check` had been passing over, one of them in the tests `--all-targets`
+      # adds.
+      # The workflow's pin and the crates' pins are two places one fact is
+      # written, and a `rust-toolchain.toml` silently wins over the installed
+      # toolchain — so a drift would not fail, it would quietly build with
+      # something else. Cheapest possible check, right before the builds.
+      - name: the pinned nightly matches the crates
+        run: |
+          want='nightly-2026-08-18'
+          fail=0
+          for f in zensight-sensor-netlink-ebpf/rust-toolchain.toml \
+                   zensight-sensor-sysinfo-ebpf/rust-toolchain.toml; do
+            got=$(grep -oP '^channel = "\K[^"]+' "$f")
+            if [ "$got" != "$want" ]; then
+              echo "::error::$f pins $got, this workflow installs $want"
+              fail=1
+            fi
+          done
+          [ "$fail" = 0 ] || exit 1
+          echo "both -ebpf crates pin $want"
+
       - name: netlink --features ebpf
-        run: cargo check -p zensight-sensor-netlink --features ebpf --locked
+        run: cargo clippy -p zensight-sensor-netlink --features ebpf --all-targets --locked -- -D warnings
       - name: sysinfo --features ebpf
-        run: cargo check -p zensight-sensor-sysinfo --features ebpf --locked
+        run: cargo clippy -p zensight-sensor-sysinfo --features ebpf --all-targets --locked -- -D warnings

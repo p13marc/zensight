@@ -39,6 +39,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The eBPF workflow denies warnings, pins its compiler, and runs on a tag**
+  (#1094). Three ways the one job that guards an opt-in feature was weaker than
+  the tree around it.
+
+  It ran `cargo check`, which `ci.yml`'s own comment explains is wrong — *"check
+  exits 0 on warnings while every other job denies them, so feature-gated code
+  was the one place a warning could land silently"*. #845 made that change in
+  `ci.yml` and not here. Switching this job to
+  `clippy --all-targets -- -D warnings` immediately found four real lints it had
+  been passing over, including a deprecated `aya::EbpfLoader::set_global` and
+  one only `--all-targets` reaches.
+
+  The two `-ebpf` crates pinned a **floating** `nightly` in a repo that SHA-pins
+  every action and `--locked`s every build — the one input that could change
+  under CI without anyone choosing it. Both now pin a dated nightly, the
+  workflow installs the same one, and a new step fails the job if the two drift
+  (a `rust-toolchain.toml` silently wins over the installed toolchain, so a
+  drift would not fail — it would quietly build with something else).
+
+  And the workflow ran on schedule, dispatch and its own path only: **never on a
+  tag**, so a release could ship an `ebpf` feature whose last compile was up to
+  24 h and any number of merges ago. The daily run is a staleness signal, not a
+  release gate.
+
 - **A host with no `/etc/machine-id` no longer disagrees with its own keys, and
   the docs say 48 bits** (#1111).
 
