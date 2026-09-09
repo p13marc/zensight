@@ -307,7 +307,19 @@ impl CorrelatorState {
     pub fn recompute_edges(&mut self, now_ms: i64) -> Vec<crate::edges::EdgeOp> {
         let ttl_ms = self.config.evidence_ttl_secs as i64 * 1000;
         self.relations.sweep(now_ms, ttl_ms);
-        let live = self.relations.live(now_ms, ttl_ms);
+        let mut live = self.relations.live(now_ms, ttl_ms);
+        // Link-layer adjacency is *derived* from the observer claims already in
+        // the evidence store, not published as a relation by any sensor —
+        // `l2_claims` synthesises it so it flows through the same `resolve` as
+        // every real claim (#1108). It was written, documented in three places
+        // and never called: `README.md`, `docs/correlation.md` and the 0.15.0
+        // CHANGELOG all described a kind that never reached the wire, while the
+        // GUI's topology view carried an `EdgeKind::L2Adjacent` arm waiting for
+        // it.
+        live.extend(crate::edges::l2_claims(
+            &self.evidence.live_with_origin(now_ms, ttl_ms),
+            now_ms,
+        ));
         let entities: Vec<HostEntity> = self.last.values().map(|r| r.entity.clone()).collect();
         self.edges
             .diff(crate::edges::resolve(&live, &entities, now_ms))
@@ -1036,6 +1048,82 @@ mod tests {
         let _ = sh_tx.send(true);
         drop(tx);
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    /// #1108: link-layer adjacency reaches the wire.
+    ///
+    /// `l2_claims` was written, tested, and referenced only by its own tests.
+    /// `README.md:52`, `docs/correlation.md:315` and the 0.15.0 CHANGELOG all
+    /// describe the kind ("derived here from the observed-device identity
+    /// claims", "pushed through the same resolver as every real claim",
+    /// "derived in the catalog, not the GUI") — and the GUI's topology view
+    /// carries an `EdgeKind::L2Adjacent` arm and an L2 lens for it. Nothing
+    /// ever published one.
+    #[test]
+    fn an_observer_claim_yields_an_l2_adjacent_edge() {
+        use zensight_common::relation::RelationKind;
+
+        let mut s = CorrelatorState::new(cfg());
+        let now = current_timestamp_millis();
+
+        // The observing host, self-reporting: this is who "from" resolves to.
+        let mut me = self_report("netlink", "probe01", &hid(1));
+        me.last_updated = now;
+        s.apply(EvidenceMsg::Host {
+            origin: "h-probe".into(),
+            ev: Box::new(me),
+        });
+
+        // …and what it saw on its segment. `observer: Some(..)` is what makes
+        // this adjacency rather than identity.
+        let mut seen = self_report("netlink", "neighbour-a", &hid(2));
+        seen.observer = Some("netlink".into());
+        seen.macs = vec!["aa:bb:cc:dd:ee:02".into()];
+        seen.ips = vec!["10.0.0.42".into()];
+        seen.last_updated = now;
+        s.apply(EvidenceMsg::Host {
+            origin: "h-probe".into(),
+            ev: Box::new(seen),
+        });
+
+        s.recompute(now);
+        let ops = s.recompute_edges(now);
+        let kinds: Vec<RelationKind> = ops
+            .iter()
+            .filter_map(|o| match o {
+                crate::edges::EdgeOp::Upsert(e) => Some(e.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            kinds.contains(&RelationKind::L2Adjacent),
+            "no l2_adjacent edge reached the wire: {kinds:?}"
+        );
+    }
+
+    /// A **self**-report is identity, not adjacency — otherwise every host is
+    /// adjacent to itself and the L2 lens is a list of self-loops.
+    #[test]
+    fn a_self_report_yields_no_l2_edge() {
+        use zensight_common::relation::RelationKind;
+
+        let mut s = CorrelatorState::new(cfg());
+        let now = current_timestamp_millis();
+        let mut me = self_report("sysinfo", "host1", &hid(1));
+        me.last_updated = now;
+        s.apply(EvidenceMsg::Host {
+            origin: "h-solo".into(),
+            ev: Box::new(me),
+        });
+        s.recompute(now);
+        let ops = s.recompute_edges(now);
+        assert!(
+            !ops.iter().any(|o| matches!(
+                o,
+                crate::edges::EdgeOp::Upsert(e) if e.kind == RelationKind::L2Adjacent
+            )),
+            "a host claimed adjacency to itself"
+        );
     }
 
     #[test]
