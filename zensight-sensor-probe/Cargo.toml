@@ -40,13 +40,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2"
 webpki-roots = "1"
-x509-parser = "0.17"
+x509-parser = "0.18"
 
 # DNS, with the resolver named — the whole point of the check.
 hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
 
 # ICMP, feature-gated.
-surge-ping = { version = "0.8", optional = true }
+surge-ping = { version = "0.9", optional = true }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }

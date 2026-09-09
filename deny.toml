@@ -7,7 +7,8 @@ all-features = true
 [advisories]
 version = 2
 # Transitive and unactionable here — dated, with the pin that traps each one.
-# Re-check on every zenoh / iced / netring bump (2026-08-29).
+# Re-check on every zenoh / iced / netring bump (last: 2026-09-09, #1098 —
+# netring 0.29 -> 0.30, zenoh 1.10.0 -> 1.10.1, rerun 0.36 -> 0.37).
 ignore = [
     "RUSTSEC-2023-0071", # rsa: Marvin timing sidechannel — no fixed release exists (zenoh tree)
     "RUSTSEC-2023-0089", # atomic-polyfill unmaintained (via heapless, zenoh tree)
@@ -16,20 +17,24 @@ ignore = [
     "RUSTSEC-2025-0134", # rustls-pemfile unmaintained (zenoh tree)
     "RUSTSEC-2025-0141", # bincode 1.x unmaintained (zenoh tree)
     "RUSTSEC-2026-0041", # lz4_flex decompress leak — zenoh pins 0.10, fix is in a later minor
-    # quick-xml < 0.41 DoS pair: locked to 0.39 by wayland-scanner (a
-    # proc-macro parsing the wayland protocol XML at build time, via
-    # iced/winit) — build-time only, input is not attacker-controlled.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
+    # RUSTSEC-2026-0194/0195 (the quick-xml < 0.41 DoS pair) were dropped here
+    # on 2026-09-09: wayland-scanner has moved off 0.39, the tree now carries
+    # only 0.41/0.42, and cargo-deny reported both entries as
+    # `advisory-not-detected`. An ignore that matches nothing is the stale
+    # entry deny-fresh exists to find.
     "RUSTSEC-2026-0192", # ttf-parser unmaintained (via resvg/usvg, iced tree)
     "RUSTSEC-2026-0206", # rustybuzz unmaintained (via resvg/usvg, iced tree)
-    # wasmtime 43.x, via yara-x behind the opt-in netring/yara feature; no
-    # fixed release on the 43 line, and no chain fix exists yet (netring
-    # 0.29 pins yara-x ^1.19 -> wasmtime ^43; yara-x 1.20 wants ^45, also
-    # unfixed). wasmtime here runs yara-x's own compiled rules — operator-
-    # authored, no untrusted wasm, no WASI preopens — so both advisories'
-    # exposure is nil in this use. Re-check on the next netring/yara-x bump;
-    # the weekly deny-fresh run resurfaces these so they cannot rot silently.
+    # wasmtime, via yara-x behind the opt-in netring/yara feature. RE-CHECKED
+    # 2026-09-09 on the netring 0.30 bump, which is the event the previous note
+    # named: netring 0.30 -> yara-x 1.20 -> wasmtime **45.0.3**, so the chain
+    # moved off the 43 line as predicted — and the 45 line is unfixed too.
+    # Neither advisory has a 45.x patched range (0222: >=24.0.12, >=36.0.13,
+    # >=46.0.2, >=47.0.3; 0269: >=24.0.13, >=36.0.14, >=46.0.3, >=47.0.4), so
+    # there is still no version of this chain that resolves them.
+    # wasmtime here runs yara-x's own compiled rules — operator-authored, no
+    # untrusted wasm, no WASI preopens — so both advisories' exposure is nil in
+    # this use. Re-check when yara-x moves to a wasmtime 46/47; the weekly
+    # deny-fresh run resurfaces these so they cannot rot silently.
     "RUSTSEC-2026-0222", # type-index mixup
     "RUSTSEC-2026-0269", # fs sandbox escape on trailing-slash paths (2026-08-31)
 ]

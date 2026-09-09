@@ -46,7 +46,6 @@ zstd = { workspace = true }
 async-trait = { workspace = true }
 
 # Host identity envelope (#301)
-sha2 = { workspace = true }
 hostname = { workspace = true }
 if-addrs = { workspace = true }
 

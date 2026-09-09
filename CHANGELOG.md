@@ -37,6 +37,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nothing is migrated onto it yet. Migration is retire-and-sibling: a new
   procedure replying with the envelope beside the old one.
 
+### Changed
+
+- **Dependency bumps, hand-rolled** (#1098). netring `0.29` → **`0.30`** and
+  flowscope `0.22` → **`0.24`** (they move together), zenoh `1.10.0` → `1.10.1`,
+  rerun/`re_log_*` `=0.36.3` → **`=0.37.1`**, dirs `6` → **`7`**, zstd `0.13` →
+  **`0.14`**, sha2 `0.10` → **`0.11`**, x509-parser `0.17` → **`0.18`** in the
+  probe sensor (which unifies it with the logs sensor's `0.18` — the tree
+  carried two), surge-ping `0.8` → **`0.9`**, plus the compatible patch/minor
+  set (clap, uuid, redb, rustls, hyper, jsonschema, zbus, toml, schemars,
+  rcgen, prometheus-client, hickory-resolver, http-body-util, tokio-rustls,
+  tower-http, async-trait, futures, mdns-sd, thiserror).
+
+  Two ports were needed. sha2 0.11 dropped the `LowerHex` impl on a digest, so
+  the correlator's two `format!("{:x}", …)` sites spell the hex out — the output
+  is byte-identical, which matters because one of them is half of an entity id.
+  And `zensight-sensor-core` declared `sha2` without using it; the dependency is
+  gone.
+
+  Three bumps were **dropped on purpose**, each because it is blocked rather
+  than merely large. `reqwest` stops at `0.13.1`: 0.13.4 removed the
+  `webpki-roots` feature five crates here ask for, so moving needs the
+  root-store re-plumbing that #1136 is about. `flume` stops at `0.11`: zenoh
+  1.10 implements `IntoHandler` for flume 0.11's `Sender`, so a 0.12 in our
+  manifests is a *different crate* to the one zenoh will accept. `netlink-sys`
+  stops at `0.8`: it was chosen for the audit writer precisely because it was
+  already in the tree via `nlink`, and 0.9 would put a second copy there.
+
+  `parallax-pipeline` keeps its exact `0.9.0` and now carries the dated
+  rationale the pin was missing: 0.10.1 is tagged upstream but **never published
+  to crates.io**, so this is not a hold that can be relaxed from here.
+
+  `deny.toml` re-examined against the new tree. The quick-xml pair
+  (RUSTSEC-2026-0194/0195) is **removed** — wayland-scanner has moved off 0.39
+  and cargo-deny reported both as `advisory-not-detected`, which is exactly the
+  stale entry the weekly `deny-fresh` run exists to surface. The two wasmtime
+  ignores stay, re-dated: netring 0.30 → yara-x 1.20 → wasmtime **45.0.3**, the
+  move the old note predicted, and the 45 line has no patched release for either
+  advisory.
+
+
 ### Removed
 
 - **Two orphans** (#1100). `zensight-key-semantic/` held two pre-zenkey RFC

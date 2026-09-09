@@ -20,8 +20,15 @@ pub const DEMO_BASE_TS: i64 = 1_700_000_000_000;
 
 fn host_id(tag: &str) -> String {
     // A sha256-shaped 64-hex host_id, deterministic from a short tag.
+    // Hex is spelled out because sha2 0.11 dropped `LowerHex` on the output.
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(tag.as_bytes()))
+    use std::fmt::Write as _;
+    Sha256::digest(tag.as_bytes())
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
 }
 
 /// The synthetic evidence + name set. Exercises: a two-sensor self-report merge

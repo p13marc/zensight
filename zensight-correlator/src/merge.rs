@@ -270,9 +270,17 @@ fn is_zero_mac(mac: &str) -> bool {
 
 /// The 12-hex-char entity-id suffix from a sha256 of `input`.
 fn sha256_12(input: &str) -> String {
-    let digest = Sha256::digest(input.as_bytes());
-    let hex = format!("{:x}", digest);
-    hex[..12].to_string()
+    // sha2 0.11 dropped the `LowerHex` impl on the digest output, so the hex is
+    // spelled out here. Byte-for-byte the same string as `{:x}` produced — this
+    // suffix is half of an entity id and must not move.
+    Sha256::digest(input.as_bytes())
+        .iter()
+        .take(6)
+        .fold(String::with_capacity(12), |mut acc, b| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
 }
 
 /// Stable, input-order-independent key for a node: its `(sensor, source)` — the
