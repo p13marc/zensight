@@ -84,6 +84,14 @@ serves only the old pair. The client tries the new one, falls back, and
 **records which answered** in the chassis document — because a reading absent
 on one is a different fact from the same reading absent on the other.
 
+The two generations are not the same shape, and the difference is not uniform.
+`PowerSupplies` and `Fans` are collections on both — a `Members` array of
+links. **`ThermalMetrics` is a singleton**: no `Members`, the readings sit on
+the body as `TemperatureReadingsCelsius`, an array of reduced sensor excerpts.
+Reading it as a collection (#1131) returned nothing on every BMC serving the
+modern surface, so this sensor published no temperature at all there while the
+legacy path worked — an inversion where newer firmware reported *less*.
+
 ## Running it
 
 ```bash

@@ -234,6 +234,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advisory.
 
 
+### Fixed
+
+- **bmc: no thermal telemetry at all on the modern Redfish surface** (#1131).
+  `ThermalMetrics` is a **singleton** — no `Members`, the readings on the body
+  as `TemperatureReadingsCelsius` — and the client read it as a collection. It
+  found nothing, every time, so a sensor whose whole purpose is "a physical
+  fault the host cannot see" published no temperature on any BMC serving
+  `ThermalSubsystem`. The legacy `Chassis/{id}/Thermal` path was correct, so
+  **newer firmware reported less than older firmware** — the inversion that
+  kept it hidden.
+
+  It survived a passing test suite because `tests/e2e.rs`'s fixture served
+  `ThermalMetrics` as a collection, with per-index member routes: a shape
+  Redfish does not have. The fixture had been written to match the client
+  rather than the protocol, so the assertion passed against a fiction. The
+  fixture now serves the real singleton, and with it the old client yields 0
+  readings where 2 are expected — the fix is load-bearing, verified by
+  reverting it.
+
 ### Removed
 
 - **Two orphans** (#1100). `zensight-key-semantic/` held two pre-zenkey RFC
