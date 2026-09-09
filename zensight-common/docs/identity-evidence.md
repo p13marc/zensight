@@ -56,7 +56,8 @@ pub struct HostEvidence {
     pub hostname: Option<String>,
     pub fqdn: Option<String>,
     pub ips: Vec<String>,             // identifying
-    pub macs: Vec<String>,            // merge evidence, not identity (VMs clone MACs)
+    pub macs: Vec<String>,            // merge evidence, not identity (VMs clone MACs);
+                                      //   STABLE addresses only — see below
     pub vendor: Option<String>,       // descriptive / display-only
     pub platform: Option<String>,     // descriptive / display-only
     pub container_id: Option<String>, // #311 — host-scoped qualifier, never a merge key
@@ -64,6 +65,23 @@ pub struct HostEvidence {
     pub last_updated: i64,
 }
 ```
+
+**A MAC in this document is one the hardware came with** (#1110). Only `lo` was
+excluded before, so every veth and bridge counted — and a veth's address is
+*random per container start*. On a container host the whole set churned every
+five minutes, on what is the catalog's strongest merge key after `host_id`: a
+claim that changes under you is worse than one you never made. The filter reads
+the kernel rather than guessing from a name (`veth`, `br-`, `docker` are
+convention, renameable, and spelled differently by every runtime): an interface
+qualifies when `addr_assign_type` is `0` — `NET_ADDR_PERM` — or, where that file
+cannot be read, when it has a `device` symlink. Bonds and VLANs drop out and
+lose nothing: they carry their underlying NIC's address, which is already in the
+set.
+
+An **observer** claiming MACs for another machine has the same obligation, and
+the BMC sensor is the case that shows why: one Redfish service fronts every
+blade in an enclosure, so a claim built from all of them asks the catalog to
+fuse the enclosure into one host.
 
 Merge strength of the identifying fields (strongest first): `host_id` >
 `(cloud.provider, cloud.instance_id)` > `mac + ip` > `fqdn` > `hostname`. Notes:

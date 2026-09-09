@@ -56,6 +56,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   false: `CheckId::parse` returns `Option` and `main.rs` puts it through
   `with_context`, so an unknown id is a startup error.
 
+- **An identity claim describes one machine, and its MACs are the ones the
+  hardware came with** (#1110). Two claims the catalog would have merged on.
+
+  The BMC sensor's `macs()` **ignored its chassis argument** and walked every
+  member of `/redfish/v1/Systems`, so the union landed on *each* chassis's
+  evidence. On a 4-node Twin or a blade enclosure — one Redfish service in front
+  of several machines — every node claimed every node's MACs, which is the
+  catalog's strongest merge key after `host_id`: the claim asks it to fuse the
+  whole enclosure into one host. It is scoped through
+  `Chassis/{id}/Links/ComputerSystems` now. The hostname came from
+  `Chassis.Name`, a schema *description* that Dell, HPE and Supermicro all ship
+  as the literal "Computer System Chassis" — so every such machine on the fleet
+  claimed the same hostname, and hostname is a merge rule too. It comes from the
+  machine's own `ComputerSystem.HostName`, or is omitted.
+
+  The sibling in `sensor-core`: `detect_macs` filtered only `lo`, so every veth
+  and bridge counted — and a veth's address is **random per container start**.
+  `HostEvidence.macs` therefore churned completely every five minutes on every
+  container host. The filter reads the kernel rather than guessing from a name:
+  an interface qualifies when `addr_assign_type` is `0` (`NET_ADDR_PERM`) or,
+  where that file cannot be read, when it has a `device` symlink. Bonds and
+  VLANs drop out and lose nothing — they carry their underlying NIC's address,
+  which is already in the set.
+
+
 - **A tombstone rides the same QoS class as the document it retracts** (#1103).
   The correlator published an ack, a silence or an operator assertion at
   `QosClass::Entity` — reliable + block — and deleted it through a bare

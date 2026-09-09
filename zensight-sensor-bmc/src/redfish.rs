@@ -61,7 +61,15 @@ pub struct ChassisSweep {
     pub fans: Vec<Fan>,
     pub thermal: Vec<ThermalSensor>,
     /// MACs the BMC knows about this machine, for the identity claim.
+    /// Scoped to the systems **this chassis links** (#1110).
     pub macs: Vec<String>,
+    /// The managed machine's own `ComputerSystem.HostName`, when it reports
+    /// one (#1110). Deliberately **not** `Chassis.Name`, which is a schema
+    /// description that ships as the literal "Computer System Chassis" on Dell,
+    /// HPE and Supermicro — claiming it as a hostname asserts that every such
+    /// machine is the same host. `None` means the BMC did not say, which is a
+    /// missing claim rather than a wrong one.
+    pub hostname: Option<String>,
 }
 
 pub struct RedfishClient {
@@ -233,13 +241,14 @@ impl RedfishClient {
         fill_ids(&mut thermal, |t| &mut t.id);
 
         let chassis = parse_chassis(id, &root, surface);
-        let macs = self.macs(id).await.unwrap_or_default();
+        let (macs, hostname) = self.identity(&root).await.unwrap_or_default();
         Ok(ChassisSweep {
             chassis,
             supplies,
             fans,
             thermal,
             macs,
+            hostname,
         })
     }
 
@@ -259,14 +268,40 @@ impl RedfishClient {
         Ok(out)
     }
 
-    /// MACs the BMC reports for the managed machine, for the identity claim.
-    /// Best-effort: absent on plenty of firmware, and absent is fine.
-    async fn macs(&self, _chassis: &str) -> Result<Vec<String>> {
-        let Some(systems) = self.get("/redfish/v1/Systems").await? else {
-            return Ok(Vec::new());
-        };
+    /// What the BMC knows about the machine (or machines) in **this** chassis,
+    /// for the identity claim.
+    ///
+    /// Scoped through `Chassis/{id}/Links/ComputerSystems` (#1110). It used to
+    /// ignore its chassis argument entirely and walk every member of
+    /// `/redfish/v1/Systems`, so on a 4-node Twin or a blade enclosure — one
+    /// Redfish service in front of several machines — the union of all nodes'
+    /// MACs landed on *each* chassis's evidence. MAC is the catalog's strongest
+    /// merge key after `host_id`, so that claim asks it to fuse every node in
+    /// the enclosure into one host.
+    ///
+    /// A chassis that links no system yields nothing, which is correct: this
+    /// is a claim about a machine, and a chassis with no machine in it has none
+    /// to make.
+    ///
+    /// Best-effort throughout: absent on plenty of firmware, and absent is
+    /// fine — it is a *missing* claim, not a wrong one.
+    async fn identity(&self, chassis_root: &Value) -> Result<(Vec<String>, Option<String>)> {
         let mut macs = Vec::new();
-        for system in members(&systems) {
+        let mut hostname = None;
+        for system in linked_systems(chassis_root) {
+            let Ok(Some(sys)) = self.get(&system).await else {
+                continue;
+            };
+            // The machine's OWN name, as it knows it. Not `Chassis.Name`,
+            // which is a schema description — Dell, HPE and Supermicro all
+            // ship the literal "Computer System Chassis", so claiming it as a
+            // hostname asserts that every such machine is the same host.
+            if hostname.is_none()
+                && let Some(h) = sys.get("HostName").and_then(Value::as_str)
+                && !h.trim().is_empty()
+            {
+                hostname = Some(h.to_string());
+            }
             let Ok(Some(body)) = self.get(&format!("{system}/EthernetInterfaces")).await else {
                 continue;
             };
@@ -281,7 +316,7 @@ impl RedfishClient {
         }
         macs.sort();
         macs.dedup();
-        Ok(macs)
+        Ok((macs, hostname))
     }
 }
 
@@ -289,6 +324,25 @@ impl RedfishClient {
 //
 // Free functions over `Value`, so every shape below is testable against a
 // fixture without a socket — which is most of what there is to get wrong.
+
+/// The `ComputerSystem` links a chassis declares (#1110).
+///
+/// `Chassis/{id}/Links/ComputerSystems` is Redfish's own statement of which
+/// machines are in this enclosure, and it is the difference between one
+/// blade's identity claim and the whole chassis's.
+pub fn linked_systems(chassis: &Value) -> Vec<String> {
+    chassis
+        .get("Links")
+        .and_then(|l| l.get("ComputerSystems"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("@odata.id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// `@odata.id` links out of a Redfish collection.
 pub fn members(body: &Value) -> Vec<String> {
@@ -474,6 +528,60 @@ fn fill_ids<T>(items: &mut [T], id: impl Fn(&mut T) -> &mut String) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #1110: a chassis claims the systems **it links**, not every system the
+    /// Redfish service knows.
+    ///
+    /// On a 4-node Twin or a blade enclosure one service fronts several
+    /// machines, and `macs()` ignored its chassis argument and walked
+    /// `/redfish/v1/Systems` wholesale — so the union of every node's MACs
+    /// landed on *each* chassis's evidence. MAC is the catalog's strongest
+    /// merge key after `host_id`, so that claim asks it to fuse the whole
+    /// enclosure into one host.
+    #[test]
+    fn a_chassis_links_its_own_systems_only() {
+        let blade_a = json!({
+            "Id": "1",
+            "Links": { "ComputerSystems": [{"@odata.id": "/redfish/v1/Systems/1"}] },
+        });
+        let blade_b = json!({
+            "Id": "2",
+            "Links": { "ComputerSystems": [{"@odata.id": "/redfish/v1/Systems/2"}] },
+        });
+        assert_eq!(linked_systems(&blade_a), vec!["/redfish/v1/Systems/1"]);
+        assert_eq!(linked_systems(&blade_b), vec!["/redfish/v1/Systems/2"]);
+        assert!(
+            linked_systems(&blade_a)
+                .iter()
+                .all(|s| !linked_systems(&blade_b).contains(s)),
+            "two blades must not claim each other's systems"
+        );
+    }
+
+    /// A chassis that links no system makes no identity claim, which is
+    /// correct: a chassis with no machine in it has no machine to describe.
+    /// Firmware that omits `Links` entirely lands here too — a *missing* claim
+    /// rather than a wrong one.
+    #[test]
+    fn a_chassis_with_no_linked_system_claims_nothing() {
+        assert!(linked_systems(&json!({"Id": "1"})).is_empty());
+        assert!(linked_systems(&json!({"Id": "1", "Links": {}})).is_empty());
+        assert!(linked_systems(&json!({"Id": "1", "Links": {"ComputerSystems": []}})).is_empty());
+    }
+
+    /// An enclosure that fronts several machines links them all, and then the
+    /// union is correct rather than a merge hazard.
+    #[test]
+    fn a_multi_system_chassis_links_all_of_them() {
+        let enclosure = json!({
+            "Id": "encl",
+            "Links": { "ComputerSystems": [
+                {"@odata.id": "/redfish/v1/Systems/1"},
+                {"@odata.id": "/redfish/v1/Systems/2"},
+            ]},
+        });
+        assert_eq!(linked_systems(&enclosure).len(), 2);
+    }
 
     /// A healthy modern supply.
     #[test]

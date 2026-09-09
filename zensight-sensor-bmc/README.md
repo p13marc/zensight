@@ -47,6 +47,16 @@ point that polls it, not a machine that publishes for itself.
 
 ## Three rules the whole crate is arranged around
 
+- **An identity claim describes one machine.** The evidence document is scoped
+  to the systems *this chassis links* (`Chassis/{id}/Links/ComputerSystems`),
+  and its hostname is the machine's own `ComputerSystem.HostName` — never
+  `Chassis.Name`, which is a schema *description* that Dell, HPE and
+  Supermicro all ship as the literal string "Computer System Chassis" (#1110).
+  Both matter because both are merge keys: on a 4-node Twin or a blade
+  enclosure, one Redfish service fronts several machines, and a claim built
+  from every system it knows asks the catalog to fuse the whole enclosure into
+  one host. A chassis that links no readable system claims nothing, which is a
+  *missing* claim rather than a wrong one.
 - **"Not measured" is never a zero.** A bay the BMC reports `Absent`
   publishes `present: false` and **no watts** — even when the firmware leaves
   a stale `0.0` in the document, which some does. A `0 W` reads as a supply
