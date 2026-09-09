@@ -163,7 +163,6 @@ pub fn judge(report: &DoctorReport, gate: &Gate) -> Verdict {
         }
     }
 
-    let dropped = report.observation.as_ref().map_or(0, |o| o.dropped);
     let judgement = if report.live_producers == 0 {
         Judgement::Unobservable {
             reason: "the liveliness roster was empty — no producer was judged, so a \
@@ -172,7 +171,20 @@ pub fn judge(report: &DoctorReport, gate: &Gate) -> Verdict {
         }
     } else if !gated.is_empty() {
         Judgement::Established
-    } else if gate.strict_window && dropped > 0 {
+    } else if gate.strict_window && report.observation.is_none() {
+        // A window that never happened is not a clean window (#1112). The
+        // dropped count used to come from `map_or(0, …)`, so an ABSENT
+        // observation section — which `--for 0` produces by design — read as
+        // "zero samples dropped" and the run passed green. `--for 0
+        // --strict-window` is a caller asking for completeness to be a hard
+        // claim and being told it holds, having observed nothing at all.
+        Judgement::Unobservable {
+            reason: "--strict-window was asked for but no listen window ran (--for 0), \
+                     so there is no window to call clean (RFC 09 §5.1 O6)"
+                .into(),
+        }
+    } else if gate.strict_window && report.observation.as_ref().is_some_and(|o| o.dropped > 0) {
+        let dropped = report.observation.as_ref().map_or(0, |o| o.dropped);
         Judgement::Unobservable {
             reason: format!(
                 "the listen window dropped {dropped} sample(s); under --strict-window \
@@ -368,6 +380,62 @@ mod tests {
             ..Gate::default()
         };
         assert_eq!(judgement_exit_code(&judge(&lossy, &strict).judgement), 2);
+    }
+
+    /// #1112: `--for 0 --strict-window` is a caller asking for completeness to
+    /// be a hard claim, and being told it holds having observed nothing.
+    ///
+    /// `--for 0` produces no observation section by design (`docs/checks.md`),
+    /// and `dropped` came from `observation.map_or(0, …)` — so an *absent*
+    /// window read as "zero samples dropped", the strict arm never fired, and
+    /// the run exited 0. A window that never happened is not a clean window.
+    #[test]
+    fn strict_window_without_a_window_is_unobservable() {
+        let no_window = DoctorReport {
+            observation: None,
+            ..report(vec![])
+        };
+        // Without --strict-window, a run that did not listen is still a normal
+        // clean run: the caller did not ask for the window.
+        assert_eq!(
+            judgement_exit_code(&judge(&no_window, &Gate::default()).judgement),
+            0
+        );
+        let strict = Gate {
+            strict_window: true,
+            ..Gate::default()
+        };
+        let v = judge(&no_window, &strict);
+        assert!(
+            v.judgement.is_unobservable(),
+            "a strict run that never listened must not read as clean: {:?}",
+            v.judgement
+        );
+        assert_eq!(judgement_exit_code(&v.judgement), 2);
+    }
+
+    /// The contrast that keeps the arm honest: a window that *did* run and
+    /// dropped nothing is clean under `--strict-window`, as it always was.
+    #[test]
+    fn strict_window_over_a_complete_window_is_clean() {
+        let complete = DoctorReport {
+            observation: Some(ObservationSummary {
+                window_s: 10.0,
+                scopes: vec!["v1/*/telemetry/**".into()],
+                samples: 100,
+                keys_seen: 7,
+                dropped: 0,
+                synthetic_marked: 0,
+                field_paths_dropped: 0,
+                facts_evicted: 0,
+            }),
+            ..report(vec![])
+        };
+        let strict = Gate {
+            strict_window: true,
+            ..Gate::default()
+        };
+        assert_eq!(judgement_exit_code(&judge(&complete, &strict).judgement), 0);
     }
 
     /// `field_paths_dropped` is the #223 per-path table hitting its own bound

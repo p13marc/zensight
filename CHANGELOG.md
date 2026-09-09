@@ -39,6 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--for 0 --strict-window` no longer passes green having observed nothing**
+  (#1112). `--for 0` skips the listen phase and produces **no** observation
+  section, deliberately — "not asked" is not "nothing found". But the gate read
+  the dropped count as `observation.map_or(0, …)`, so an absent section became
+  "zero samples dropped", the strict arm never fired, and the run exited 0. A
+  caller asking for completeness to be a hard claim was told it held over a
+  window that never ran. `strict_window` with no observation is `Unobservable`
+  (exit 2) now, and a window that *did* run and dropped nothing is still clean.
+
+  Two claims in `docs/checks.md` were also stale and are corrected: `field-new`
+  is **not** excluded by default (`DEFAULT_EXCLUDED` is empty since zenkey#384
+  landed, which the crate's own test asserts), so the sample clean run no longer
+  shows an `EXCLUDED FROM THE GATE (21)` block it cannot produce. The issue's
+  third claim — that unknown `--allow` ids are accepted silently — was already
+  false: `CheckId::parse` returns `Option` and `main.rs` puts it through
+  `with_context`, so an unknown id is a startup error.
+
 - **A busy bus no longer stops the catalog recomputing** (#1106). Every inbound
   message set `deadline = now + recompute_debounce_ms`, and the debounce is an
   **idle** gap — one a fleet's inbound stream may never offer. Evidence
