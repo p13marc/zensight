@@ -39,6 +39,16 @@
   // arriving evidence collapses into one merge pass.
   recompute_debounce_ms: 500,
 
+  // The longest (ms) a recompute may be deferred, however busy the bus. The
+  // debounce above is an IDLE gap, and a fleet's inbound stream — evidence
+  // refreshes, a passive-DNS observation per resolved IP, every alert
+  // transition, ack, silence and liveliness flap — may never go idle for
+  // 500 ms. Without this cap the deadline slid forward on every message and
+  // the catalog simply stopped recomputing, while the `reemit_secs` pass below
+  // kept republishing the frozen set with a fresh `last_updated` (#1106).
+  // 0 disables the cap and restores the pure debounce.
+  recompute_max_wait_ms: 2000,
+
   // How often (seconds) to re-emit every current entity. Doubles as correlator
   // liveness and lets a restarting frontend reseed from the AdvancedPublisher
   // cache. The frontend marks an entity stale after ~3x this period.
