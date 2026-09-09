@@ -53,10 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The two `-ebpf` crates pinned a **floating** `nightly` in a repo that SHA-pins
   every action and `--locked`s every build — the one input that could change
-  under CI without anyone choosing it. Both now pin a dated nightly, the
-  workflow installs the same one, and a new step fails the job if the two drift
-  (a `rust-toolchain.toml` silently wins over the installed toolchain, so a
-  drift would not fail — it would quietly build with something else).
+  under CI without anyone choosing it. And pinning `rust-toolchain.toml` alone
+  would not have fixed it: `aya-build` shells out to `rustup run <toolchain>`,
+  which **bypasses that file entirely**, and `Toolchain::default()` is the
+  literal string `"nightly"`. So the eBPF object was built by whatever nightly
+  the machine happened to have — on a developer box, often one predating the
+  workspace's own `rust-version`, which fails with a message about the *ebpf
+  crates* rather than about the toolchain.
+
+  `build.rs` now reads the channel out of the program crate's
+  `rust-toolchain.toml` and passes it to `aya-build`, so there is one pin and
+  `rustup run` honours it. The workflow installs the same toolchain and a new
+  step fails the job if the two drift; `just ebpf-setup` installs exactly what a
+  developer needs, reading the pin from the same file rather than repeating it.
 
   And the workflow ran on schedule, dispatch and its own path only: **never on a
   tag**, so a release could ship an `ebpf` feature whose last compile was up to

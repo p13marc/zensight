@@ -147,10 +147,11 @@ jobs:
       # deprecated `aya::EbpfLoader::set_global` and three clippy lints that
       # `check` had been passing over, one of them in the tests `--all-targets`
       # adds.
-      # The workflow's pin and the crates' pins are two places one fact is
-      # written, and a `rust-toolchain.toml` silently wins over the installed
-      # toolchain — so a drift would not fail, it would quietly build with
-      # something else. Cheapest possible check, right before the builds.
+      # The workflow installs a toolchain; `build.rs` asks `rustup run` for
+      # whatever the program crates' `rust-toolchain.toml` names. Those are two
+      # places one fact is written, and a mismatch does not fail — rustup would
+      # simply download the other one, so the job would silently test a
+      # compiler nobody chose. Cheapest possible check, right before the builds.
       - name: the pinned nightly matches the crates
         run: |
           want='nightly-2026-08-18'
