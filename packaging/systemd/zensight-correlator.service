@@ -19,6 +19,13 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
+# The operator-decision journal (#1102): link/unlink, ack and silence are the
+# catalog's only non-derivable state, so they are written here to survive a
+# restart. Under DynamicUser this resolves to
+# /var/lib/private/zensight-correlator with a symlink at
+# /var/lib/zensight-correlator, which is the path the shipped config names.
+StateDirectory=zensight-correlator
+StateDirectoryMode=0700
 # Needs no capabilities: a pure bus client — it subscribes to evidence and
 # publishes entities, binds nothing, and makes no privileged syscall.
 CapabilityBoundingSet=

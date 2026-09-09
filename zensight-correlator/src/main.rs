@@ -81,7 +81,17 @@ async fn main() -> anyhow::Result<()> {
     let (pdns_tx, pdns_rx) = mpsc::channel::<zensight_common::PdnsRecord>(ENGINE_CHANNEL_CAP);
 
     // Shared correlation state (engine mutates; queryables read).
-    let state = Arc::new(Mutex::new(CorrelatorState::new(config.clone())));
+    // The operator decisions the bus cannot re-derive, loaded BEFORE the bus
+    // seed so a live document still wins (#1102).
+    let state = {
+        let mut st = CorrelatorState::new(config.clone());
+        if !config.operator_decisions.trim().is_empty() {
+            st = st.with_journal(zensight_correlator::journal::Journal::new(
+                &config.operator_decisions,
+            ));
+        }
+        Arc::new(Mutex::new(st))
+    };
 
     // Engine.
     let (edge_tx, edge_rx) =
@@ -182,6 +192,17 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             if let Err(e) = query::serve_incidents(s, st, sh).await {
                 error!(error = %e, "incidents queryable error");
+            }
+        })
+    };
+    // The assertion seed (#1102) — the family a restart had no way to recover.
+    let assertion_seed_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_assertion_seed(s, st, sh).await {
+                error!(error = %e, "assertion seed queryable error");
             }
         })
     };
@@ -333,6 +354,10 @@ async fn main() -> anyhow::Result<()> {
         // not exist until #925, which is exactly how a GUI came to issue three
         // seed GETs of which two were answered by nothing at all.
         zensight_common::keyexpr::all_incidents_wildcard(),
+        // #1102: the assertion family was missing from this list, which is
+        // both the bug and how it stayed invisible — the list exists to assert
+        // what this producer can answer.
+        zensight_common::keyexpr::all_assertion_wildcard(),
         zensight_common::keyexpr::all_acks_wildcard(),
         zensight_common::keyexpr::all_silences_wildcard(),
         catalog_rpc_key("introspect"),
@@ -388,6 +413,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = introspect_task.await;
         let _ = describe_task.await;
         let _ = assertion_task.await;
+        let _ = assertion_seed_task.await;
     })
     .await;
 

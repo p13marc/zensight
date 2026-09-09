@@ -94,6 +94,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is already in the set.
 
 
+- **Operator decisions survive a restart** (#1102). `docs/correlation.md` stated
+  it as a design property — *"a restarted correlator, a replica, or a
+  storage-backed router re-seeds the operator's decisions through the same path
+  as every other document"* — and it held only for the third of those three.
+
+  `publish_assertion`, `publish_ack` and `publish_silence` used a one-shot
+  `declare_publisher` dropped at the end of the call, so nothing held the
+  document for a late GET. The ack and silence seeds are served by **this**
+  process, so a restart asks itself and is answered from its own empty store.
+  `assertion/*` had no seed queryable at all — and was missing from `main`'s
+  `callable` list, which is the very list that asserts what this producer can
+  answer. And the shipped `configs/` run no router storage. So an operator ran
+  `link old→new` to repair a reinstall, somebody restarted the correlator, and
+  the host silently split back into two entities: no error, no log line.
+
+  All three are fixed. The assertion seed exists and is declared; and
+  `operator_decisions` (new, defaulting to the unit's `StateDirectory`) points
+  at a small JSON5 file the correlator owns — `journal.rs`, on the shape
+  `zensight-desired`'s `overrides.rs` already uses, written atomically so an
+  interrupted write cannot leave a half-file that reads as *no decisions at
+  all*. A file rather than redb because this is a handful of human decisions,
+  not a time series, and being able to read, diff and delete it by hand is
+  worth most at exactly the moment it matters.
+
+  The file is a **floor, not a source of truth**: it is loaded *before* the bus
+  seed, so a live document still wins and the catalog stays a function of the
+  bus wherever the bus has an answer. Set the path to `""` for the original
+  behaviour on a deployment that ships a router storage.
+
+
 - **A tombstone rides the same QoS class as the document it retracts** (#1103).
   The correlator published an ack, a silence or an operator assertion at
   `QosClass::Entity` — reliable + block — and deleted it through a bare
