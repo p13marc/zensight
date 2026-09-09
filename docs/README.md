@@ -30,12 +30,12 @@ reference pages are under `<crate>/docs/`.
 
 | Crate | Docs |
 |-------|------|
-| [zensight](../zensight/) (frontend) | views · testing · design-system · local-store |
+| [zensight](../zensight/) (frontend) | views · testing · design-system · local-store · media-receiver |
 | [zensight-common](../zensight-common/) | data-model · identity-evidence · keyspace-helpers · registry-honesty · audit |
 | [zensight-store](../zensight-store/) | the tiered store shared by the GUI and the historian |
 | [zensight-sensor-core](../zensight-sensor-core/) | framework · artifacts |
 | [zensight-sensor-snmp](../zensight-sensor-snmp/) | reference |
-| [zensight-sensor-logs](../zensight-sensor-logs/) | telemetry · filtering · configuration |
+| [zensight-sensor-logs](../zensight-sensor-logs/) | telemetry · filtering · configuration · alerting · reliable-delivery · testing |
 | [zensight-sensor-netflow](../zensight-sensor-netflow/) | reference |
 | [zensight-sensor-modbus](../zensight-sensor-modbus/) | reference |
 | [zensight-sensor-sysinfo](../zensight-sensor-sysinfo/) | telemetry · collectors · configuration |
@@ -54,14 +54,18 @@ reference pages are under `<crate>/docs/`.
 | [zensight-desired](../zensight-desired/) | policy |
 | [zensight-exporter-prometheus](../zensight-exporter-prometheus/) | reference |
 | [zensight-exporter-otel](../zensight-exporter-otel/) | reference |
-| [zensight-conformance](../zensight-conformance/) | the live RFC-judge harness |
+| [zensight-conformance](../zensight-conformance/) | the live RFC-judge harness (`publish = false`) |
+| [zensight-btf](../zensight-btf/) | BTF/CO-RE struct offsets for the eBPF collectors |
+| [zensight-rerun](../zensight-rerun/) | rerun evaluation harness (`publish = false`, off by default — see [plans/rerun/DECISION.md](plans/rerun/DECISION.md)) |
+| [packaging](../packaging/) | the two unit forms, and the table `scripts/packaging-check.sh` keeps true |
 | [zblob](https://github.com/p13marc/zblob) | graduated external repo (was in-tree `zenoh-blob/`) |
 
 ## Quick start
 
 ```bash
 cargo build --release --workspace
-just run          # GUI + local sensors (netring, netlink, sysinfo, logs/journald)
+just run          # GUI + local sensors (sysinfo, netlink, netring, logs/journald,
+                  # systemd, hostspec) — nine processes including the router and correlator
 just netring      # one sensor: netring | netlink | sysinfo | logs
 
 just demo-prometheus   # sensors + exporter + Prometheus + Grafana  (demo/README.md)

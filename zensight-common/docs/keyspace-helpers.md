@@ -5,7 +5,7 @@ A quick index of the key-expression builders in `keyexpr.rs` (and the `@rpc` /
 (or `zensight_keyspace::V1Context` on the producer side) rather than ad-hoc
 `format!()`. This page is only an index — [`../docs/KEYSPACE.md`](../../docs/KEYSPACE.md)
 summarizes the deployed profile and the RFC set in
-[`../docs/rfcs/keyspace-v2/`](../../docs/rfcs/keyspace-v2/00-index.md) is the
+[`../docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md) is the
 **normative** contract.
 
 The single root is `KEY_PREFIX` = `zensight`, and everything rides the v1 grammar
@@ -217,5 +217,5 @@ profile, which is what this table used to call it.
 ## See also
 
 - [`../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) — deployed profile;
-  [`../docs/rfcs/keyspace-v2/`](../../docs/rfcs/keyspace-v2/00-index.md) — normative spec.
+  [`../docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md) — normative spec.
 - [Data model](data-model.md) and [Identity, evidence & entities](identity-evidence.md).

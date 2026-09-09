@@ -13,7 +13,7 @@ per-detector); high-cardinality detail (individual flows, talkers, assets,
 per-process bandwidth) is **served on demand** from the `@rpc/netring/*` read
 procedures in [§ On-demand detail](#on-demand-detail--rpcnetringtopic), never
 streamed. Sources: this crate's `src/map.rs`, `../../docs/KEYSPACE.md`, and
-[`zensight-keyspace/registry/netring.toml`](../../zensight-keyspace/registry/netring.toml).
+[`zensight-keyspace/registry/netring.toml`](../../zensight-common/registry/netring.toml).
 
 Collector gating is noted per family — a family is only published when its
 `collect.*` (or feature/config) switch is on. Defaults are in

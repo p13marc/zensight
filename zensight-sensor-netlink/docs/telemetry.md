@@ -11,7 +11,7 @@ streamed** — it is served on request from the `@rpc/netlink/<topic>` procedure
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative
 key-expression contract and
-[`zensight-keyspace/registry/netlink.toml`](../../zensight-keyspace/registry/netlink.toml)
+[`zensight-keyspace/registry/netlink.toml`](../../zensight-common/registry/netlink.toml)
 for the machine-readable subject/procedure registry this page summarizes.
 
 ## Streamed telemetry

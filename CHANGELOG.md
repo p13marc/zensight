@@ -39,6 +39,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The repo-level docs rows of the 2026-09-06 review, and a guard for the
+  largest class** (#1158). Every one of these is a sentence a reader would act
+  on and be wrong.
+
+  **19 broken relative links**, and they had one shape between them: something
+  moved and the links did not. Eight pointed into `docs/rfcs/keyspace-v2/` and
+  `rfcs/keyspace-v2/`, which left for the zenkey repo with the RFC extraction;
+  two at `zensight-keyspace/registry/`, which is now
+  `zensight-common/registry/`; one at a file that moved into `docs/design/` and
+  was lowercased on the way. New `scripts/check-doc-links.sh`, in `ci.yml`'s
+  `lint` job, resolves all 471 relative links with no network — an
+  external-URL checker is a gate that fails when someone else's site is down.
+
+  **`RELEASING.md`'s counts were all wrong**: 25 crates / 27 manifests / 18
+  binaries / 19 images, against 31 / 31 / 20 / 21. bmc and `zensight-desired`
+  were missing from both artifact lists. The file now says how to re-derive
+  them, because they are countable and this is the second time they have
+  rotted.
+
+  **`docs/ARCHITECTURE.md` never mentioned bmc, pve, container or probe** —
+  both mermaid rosters stopped at parallax, and the source-tree block omitted
+  store, historian, desired, conformance, btf and rerun. **`docs/README.md`**'s
+  per-crate index omitted `zensight/docs/media-receiver.md`, three of the logs
+  sensor's six pages, and btf and rerun entirely; its `just run` line named
+  four sensors for six.
+
 - **The release pipeline can no longer roll the fleet back, and waits for CI**
   (#1095).
 
@@ -8454,7 +8480,7 @@ shim, and a 0.7.0 deployment will not interoperate with a 0.8.0 one.**
 Upgrading from 0.7.0? Read the migration table in
 [`docs/plans/keyspace-v2/RETROSPECTIVE.md`](docs/plans/keyspace-v2/RETROSPECTIVE.md)
 (§2, "The keys themselves" / "What was *deleted*") — it maps every old key to its
-v1 form. The normative spec is [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md);
+v1 form. The normative spec is [`docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md);
 the deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
 
 ### Changed — BREAKING

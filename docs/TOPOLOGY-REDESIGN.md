@@ -1,6 +1,6 @@
 # Topology View Redesign
 
-*2026-07-07 — design report. Companion audits: [`ZENOH-EFFICIENCY.md`](ZENOH-EFFICIENCY.md),
+*2026-07-07 — design report. Companion audits: [`design/zenoh-efficiency.md`](design/zenoh-efficiency.md),
 [`design/correlation.md`](design/correlation.md).*
 
 ## Executive summary

@@ -409,6 +409,19 @@ jobs:
           strip /tmp/guard-src-all      > /tmp/guard-stripped-all
           strip /tmp/guard-src-sessions > /tmp/guard-stripped-sessions
 
+      # #1158: every relative link in a Markdown file resolves. Nineteen did
+      # not, all of them the same shape — something moved (the RFCs to the
+      # zenkey repo, the registry TOMLs to zensight-common/) and its links did
+      # not. No network: an external-URL checker is a gate that fails when
+      # someone else's site is down.
+      #
+      # Like the CHANGELOG guards at the end of this job, this cannot fire on a
+      # PR that touches ONLY prose — `paths-ignore` skips the whole workflow —
+      # so what slips through is a docs-only PR that breaks a link, caught by
+      # the next code PR one merge late. Do not read it as total.
+      - name: every relative doc link resolves (#1158 guard)
+        run: scripts/check-doc-links.sh
+
       # #1092: the native unit and the quadlet say the same thing about
       # capabilities and MemoryMax, or this fails. The two forms had drifted
       # three separate ways at once and nothing in CI read packaging/ at all.

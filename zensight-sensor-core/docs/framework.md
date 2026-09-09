@@ -602,4 +602,4 @@ dead sensor would keep its last reported health forever.
 - [`zensight-common` data model](../../zensight-common/docs/data-model.md) — the
   wire types published here (`TelemetryPoint`, `Alert`, `QosClass`).
 - [`../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) — the deployed key contract
-  (normative spec: [`../docs/rfcs/keyspace-v2/`](../../docs/rfcs/keyspace-v2/00-index.md)).
+  (normative spec: [`../docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md)).
