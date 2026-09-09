@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
+        run: scripts/ci-build-deps.sh
       # The workspace toolchain builds the userspace half...
       - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845)
         with:

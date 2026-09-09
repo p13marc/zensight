@@ -39,6 +39,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The three build configurations CI never type-checked** (#1099).
+
+  **`zensight-store` with `blob` off** — the configuration the historian and
+  the logs sensor actually link, and the one `release.yml` builds — was
+  compiled by nothing. `zensight/Cargo.toml` takes the store with
+  `features = ["blob"]`, and a workspace build unifies features, so
+  `cargo test --workspace` only ever saw the feature-on build. It now has its
+  own leg, exactly like the `zensight-common`-alone build #845 added for the
+  same mechanism. (It passes today; the leg is what stops it not passing
+  tomorrow.)
+
+  **The flatpak built without `--locked`** — the one artifact end users
+  install was the only build in the tree free to resolve dependency versions
+  no CI job had verified. Both its `cargo fetch` and its `cargo build` are
+  locked now. Its compiler *cannot* be pinned — the SDK extension ships
+  whatever "stable" the runtime version carries and has no rustup, so the
+  repo's `rust-toolchain.toml` never reaches it — so the manifest asserts
+  instead: a runtime bump that moves rustc back past the workspace's
+  `rust-version` fails the build, loudly, rather than a user's install.
+
+  **Six copies of one `apt-get install` line, and a seventh that disagreed
+  with all of them.** They are now `scripts/ci-build-deps.sh`, one list with a
+  reason per package. Settling the disagreement rather than copying it:
+  `release.yml` installed `libssl-dev` and `libpcap-dev`, and **neither is
+  used** — `Cargo.lock` has no `openssl-sys` and no libpcap binding of any
+  kind, netring's `pcap` feature being `pcap-file`, which is pure Rust. It also
+  **omitted `libclang-dev`**, which parallax genuinely needs: `v4l2-sys-mit`'s
+  build script runs bindgen unconditionally. Those release builds have been
+  working because `rust:1.98-bookworm` happens to carry libclang; that is now
+  declared instead of assumed.
+
 - **A quadlet for all twenty units, and a guard that stops the two forms
   drifting again** (#1092, #1093). ZenSight ships every producer twice — a
   native `.service` and a Quadlet `.container` — and nothing had ever compared

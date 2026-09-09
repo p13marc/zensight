@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
+        run: scripts/ci-build-deps.sh
       - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
           toolchain: "1.98"
@@ -48,6 +48,13 @@ jobs:
       # checked, never as a pass" contract — never compile above. Built alone,
       # the crate gets its real default feature set (empty) and they run.
       - run: cargo test -p zensight-common --locked
+      # zensight-store ALONE (#1099): the same mechanism, one crate over.
+      # `zensight/Cargo.toml` takes the store with `features = ["blob"]`, and a
+      # workspace build unifies features — so the store's DEFAULT-features
+      # build, which is what the historian and the logs sensor actually link
+      # and what `release.yml` builds (no `-p zensight` in its list), is
+      # compiled by nothing above.
+      - run: cargo test -p zensight-store --locked
 
   # Nothing in CI had ever EXECUTED an exporter.
   #
@@ -71,7 +78,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
+        run: scripts/ci-build-deps.sh
       - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
           toolchain: "1.98"
@@ -125,7 +132,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
+        run: scripts/ci-build-deps.sh
       - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
           toolchain: "1.98"
@@ -168,7 +175,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
+        run: scripts/ci-build-deps.sh
       - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
           toolchain: "1.98"
@@ -375,7 +382,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libsystemd-dev libclang-dev libudev-dev
+        run: scripts/ci-build-deps.sh
       - uses: https://github.com/dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # SHA-pinned (#845) — with a SHA the toolchain must be named explicitly
         with:
           toolchain: "1.98"
