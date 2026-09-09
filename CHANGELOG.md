@@ -37,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nothing is migrated onto it yet. Migration is retire-and-sibling: a new
   procedure replying with the envelope beside the old one.
 
+### Removed
+
+- **Two orphans** (#1100). `zensight-key-semantic/` held two pre-zenkey RFC
+  drafts — not a workspace member, referenced by nothing, last touched by the
+  v1-grammar commits that predate the zenkey extraction; the ratified RFCs live
+  in the [zenkey repo](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md).
+  `example.yml` at the repo root was a tracked GitHub-Actions "Release Packages"
+  workflow for the retired deb/rpm pipeline, referenced by nothing and sitting
+  where it read as project config — beside a repo whose CI is Forgejo and which
+  has no `.github/` at all. Git keeps both.
+
 ### Fixed
 
 - **A host with no `/etc/machine-id` no longer disagrees with its own keys, and
