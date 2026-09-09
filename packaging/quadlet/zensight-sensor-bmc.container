@@ -33,6 +33,7 @@ Volume=/etc/zensight/bmc.password:/run/secrets/bmc.password:ro
 # in `ca_file`. The right answer: verification stays ON.
 # Volume=/etc/ssl/bmc-ca.pem:/run/secrets/bmc-ca.pem:ro
 
+DropCapability=ALL
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Exec=--config /etc/zensight/bmc.json5
 

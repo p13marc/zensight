@@ -1,0 +1,33 @@
+# ZenSight netflow sensor — one container, one cgroup, its own budget (#813/#1093).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via the
+# health doc's self_stats and adjust. See README.md beside this, and
+# `packaging/README.md` for the units × capabilities × MemoryMax × budget table
+# `scripts/packaging-check.sh` keeps true.
+#
+# A LISTENER, on the UNPRIVILEGED port its config names (2055 by default), so
+# it needs no CAP_NET_BIND_SERVICE. `Network=host` is what puts it on the
+# collector address exporters are configured to send to; a bridged network
+# would need an explicit PublishPort and would break source-address attribution.
+[Unit]
+Description=ZenSight netflow sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-netflow:latest
+ContainerName=zensight-sensor-netflow
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+DropCapability=ALL
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Exec=--config /etc/zensight/netflow.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

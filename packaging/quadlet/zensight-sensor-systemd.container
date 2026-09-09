@@ -15,6 +15,7 @@ HostName=%H
 Volume=/etc/machine-id:/etc/machine-id:ro
 Volume=/etc/zensight:/etc/zensight:ro
 Volume=/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+DropCapability=ALL
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Exec=--config /etc/zensight/systemd.json5
 

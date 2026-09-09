@@ -31,6 +31,7 @@ Volume=/etc/zensight:/etc/zensight:ro
 # writable layer and every image pull is a fleet amnesia.
 Volume=zensight-historian-state:/var/lib/zensight-historian:Z
 
+DropCapability=ALL
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Environment=STATE_DIRECTORY=/var/lib/zensight-historian
 Exec=--config /etc/zensight/historian.json5

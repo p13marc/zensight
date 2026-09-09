@@ -14,7 +14,8 @@ Network=host
 HostName=%H
 Volume=/etc/machine-id:/etc/machine-id:ro
 Volume=/etc/zensight:/etc/zensight:ro
-AddCapability=NET_RAW NET_ADMIN IPC_LOCK
+DropCapability=ALL
+AddCapability=NET_RAW IPC_LOCK
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Exec=--config /etc/zensight/netring.json5
 

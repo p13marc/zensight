@@ -1,0 +1,47 @@
+# ZenSight parallax sensor — one container, one cgroup, its own budget (#813/#1093).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via the
+# health doc's self_stats and adjust. See README.md beside this, and
+# `packaging/README.md` for the units × capabilities × MemoryMax × budget table
+# `scripts/packaging-check.sh` keeps true.
+#
+# THE ONE UNIT HERE THAT TOUCHES HARDWARE. Its `.service` twin grants no
+# capability either — a V4L2 camera is a device-node permission question, not a
+# capability one — so the two forms agree on `DropCapability=ALL` and differ
+# only in how the device is reached: `DeviceAllow=char-video4linux rw` plus
+# `SupplementaryGroups=video` there, `AddDevice=` here.
+#
+# ADD ONE `AddDevice=` LINE PER CAMERA. There is no glob: the commented line
+# below is the usual first one, and `Network=host` is what lets an RTSP source
+# and the @media plane share the host's addresses. A build without a camera
+# (the `test` source kind) needs neither.
+#
+# LARGER THAN ANY OTHER SENSOR ON PURPOSE: it holds encoder state and frame
+# buffers, not a poll cycle.
+[Unit]
+Description=ZenSight parallax sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-parallax:latest
+ContainerName=zensight-sensor-parallax
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+# Recording/snapshot state.
+Volume=zensight-parallax-state:/var/lib/zensight-parallax:Z
+DropCapability=ALL
+# One line per camera; there is no glob. `/dev/video0` is the usual first one.
+# AddDevice=/dev/video0
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Environment=STATE_DIRECTORY=/var/lib/zensight-parallax
+Exec=--config /etc/zensight/parallax.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

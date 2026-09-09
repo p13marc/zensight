@@ -1,0 +1,40 @@
+# ZenSight snmp sensor — one container, one cgroup, its own budget (#813/#1093).
+# MemoryMax below is a STARTING POINT (reference-fleet sizing); measure via the
+# health doc's self_stats and adjust. See README.md beside this, and
+# `packaging/README.md` for the units × capabilities × MemoryMax × budget table
+# `scripts/packaging-check.sh` keeps true.
+#
+# A POLLER, and the proxy sensor most likely to run as a container on one box.
+#
+# THE TRAP LISTENER IS THE ONE THING THIS FORM CANNOT DO UNCHANGED. The shipped
+# config binds traps to 0.0.0.0:162, a privileged port, and it is
+# `enabled: false`. Turning it on here needs `AddCapability=NET_BIND_SERVICE`
+# AND the same capability on the `.service` twin — `scripts/packaging-check.sh`
+# fails if you add it to only one of them, which is the point.
+[Unit]
+Description=ZenSight snmp sensor
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=git.marcpardo.eu/marcpardo/zensight-sensor-snmp:latest
+ContainerName=zensight-sensor-snmp
+Network=host
+HostName=%H
+Volume=/etc/machine-id:/etc/machine-id:ro
+Volume=/etc/zensight:/etc/zensight:ro
+# ifIndex/discovery state. Without this every image pull re-discovers the
+# fleet's agents from scratch.
+Volume=zensight-snmp-state:/var/lib/zensight-snmp:Z
+DropCapability=ALL
+Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
+Environment=STATE_DIRECTORY=/var/lib/zensight-snmp
+Exec=--config /etc/zensight/snmp.json5
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

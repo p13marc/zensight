@@ -1,9 +1,9 @@
 # Deploying ZenSight on multiple machines
 
 One machine runs the **GUI** (and the identity **correlator**); every machine
-you want to monitor runs one **sensors container** — the five host sensors
-`just run` spawns locally (sysinfo, netlink, netring, logs, systemd, hostspec) with the
-same demo-max defaults, bundled into a single image. The only thing you
+you want to monitor runs one **sensors container** — the **six** host sensors
+`just run` spawns locally (sysinfo, netlink, netring, logs, systemd, hostspec)
+with the same demo-max defaults, bundled into a single image. The only thing you
 configure is the Zenoh endpoint the sensors connect to.
 
 Once it runs, [**§6**](#6-day-two-one-policy-file-instead-of-eighteen) is the
@@ -151,7 +151,7 @@ equivalent `zenoh.tls` block — see `configs/sysinfo.json5`).
 | `--restart=on-failure` | belt-and-braces for the whole container; since #813 the entrypoint supervises each sensor individually (restart with backoff), so one sensor's crash no longer takes the set down. |
 
 Missing mounts are **warnings, not failures** — the affected sensor idles and
-the other four keep publishing. `podman logs zensight-sensors` shows the
+the other five keep publishing. `podman logs zensight-sensors` shows the
 preflight warnings and each sensor's output with a `[name]` prefix.
 
 ### Known limitations
@@ -173,10 +173,15 @@ host-observing agents (same as node-exporter-style deployments).
 
 ## 3. Start on boot (quadlet)
 
-> **The bundle is the demo (#813).** A fleet runs ONE CONTAINER PER SENSOR —
-> `packaging/quadlet/` ships a `.container` unit per sensor, each with its
-> own `MemoryMax` and restart policy, against the per-sensor images every
-> release already builds. The all-in-one unit below remains the one-command
+> **The bundle is the demo (#813).** A fleet runs ONE CONTAINER PER PRODUCER —
+> `packaging/quadlet/` ships a `.container` unit for all twenty (fifteen
+> sensors, the historian, the correlator, `zensight-desired` and both
+> exporters), each with its own `MemoryMax`, its own `DropCapability=ALL` plus
+> exactly the capabilities its `.service` twin grants, and its own restart
+> policy, against the images every release already builds. The nine that were
+> missing landed in #1093; `scripts/packaging-check.sh` fails the build if one
+> goes missing again, or if the two forms disagree
+> ([`packaging/README.md`](../packaging/README.md) has the table). The all-in-one unit below remains the one-command
 > demo path; its entrypoint now supervises each sensor with restart-and-
 > backoff (one crash never blanks the rest) and honours
 > `ZENSIGHT_SENSORS=sysinfo,systemd,logs` for subsetting.
@@ -391,7 +396,7 @@ The file format, the overlay rules and the reasoning behind each are in
 
 On the GUI machine, after starting a container on another host you should see:
 
-- **Sensors** view: five new cards labelled `<sensor> @ <that-hostname>`.
+- **Sensors** view: six new cards labelled `<sensor> @ <that-hostname>`.
 - **Inventory / Topology**: one new host entity/node (needs the correlator).
 - `podman logs zensight-sensors` on the monitored machine: the detected
   capture interface, no preflight WARNs (if all mounts were given), and

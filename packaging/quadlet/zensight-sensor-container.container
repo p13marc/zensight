@@ -27,6 +27,7 @@ Volume=/sys/fs/cgroup:/sys/fs/cgroup:ro
 # every cycle. Grant nothing else — no CAP_SYS_ADMIN, no privileged flag.
 User=0:0
 
+DropCapability=ALL
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Exec=--config /etc/zensight/container.json5
 

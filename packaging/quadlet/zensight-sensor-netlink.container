@@ -14,7 +14,8 @@ Network=host
 HostName=%H
 Volume=/etc/machine-id:/etc/machine-id:ro
 Volume=/etc/zensight:/etc/zensight:ro
-AddCapability=NET_ADMIN
+DropCapability=ALL
+AddCapability=NET_ADMIN BPF PERFMON
 Environment=ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:7447
 Exec=--config /etc/zensight/netlink.json5
 
