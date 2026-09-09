@@ -49,12 +49,30 @@ so the next family added here is inert by default. (Raised as zenkey#416; now no
 
 ## Liveliness (catalog ownership)
 
-Ownership is an explicit claim protocol (`guard.rs`, RFC 06 §5.3): every
-candidate declares a liveliness claim token at
-`zensight/v1/@catalog/state/claim/<zid>`, queries the claim set
-(`…/state/claim/*`), and the lexically-lowest claim chunk wins the election —
-deterministic and coordinator-free. Losers exit; only the elected owner declares
-`zensight/v1/@catalog/state/alive` and the catalog publishers/queryables.
+Ownership is an explicit claim protocol
+(`zensight_common::service_guard`, RFC 06 §5.3): every candidate declares a
+liveliness claim token at `zensight/v1/@catalog/state/claim/<zid>`, then asks
+two questions in order.
+
+1. **Is there a live incumbent?** — i.e. does anyone hold
+   `zensight/v1/@catalog/state/alive`. If so, stand by, whatever the zids say.
+2. **Otherwise, who sorts first?** — query the claim set (`…/state/claim/*`);
+   the lexically-lowest chunk wins. Deterministic and coordinator-free, so
+   simultaneous starts converge without messages.
+
+A loser **stands by**, polling until the owner's presence is gone, and then
+campaigns again — it does not exit, which used to mean that killing the owner
+left no catalog until a supervisor restarted a loser whose zid sorted right.
+
+An **unreadable claim set is not sole candidacy** (#1105). A query that times
+out used to log "assuming sole candidate" and make the caller a winner, so a
+slow bus elected everybody; a campaign now retries, treats an answer that does
+not contain its own claim as no answer, and stands by rather than guessing —
+which is self-healing, because the standby loop campaigns again.
+
+Only the elected owner declares `zensight/v1/@catalog/state/alive` and the
+catalog publishers/queryables. `@desired` runs the identical protocol on its own
+claim space (`zensight/v1/@desired/state/claim/*`).
 
 ## Why the pdns tier is off the firehose
 

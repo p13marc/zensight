@@ -60,6 +60,7 @@ pub mod schema;
 pub mod semconv;
 pub mod serialization;
 pub mod served;
+pub mod service_guard;
 pub mod session;
 pub mod silence;
 pub mod state;

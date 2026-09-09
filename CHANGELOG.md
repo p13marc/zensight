@@ -39,6 +39,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A single-writer service origin defends itself, and `@desired` has one at
+  all** (#1104, #1105). The catalog's election ran **once**, at startup, and
+  compared session ids. Three failures followed.
+
+  An instance started later with a lexically **lower** zid computed itself the
+  winner, declared `alive` and published — while the incumbent kept publishing
+  too, so every seed GET returned two replies. A live incumbent now outranks any
+  zid, and never steps down for a lower claim: lowest-zid is a tie-break for
+  *simultaneous starts*, not a standing entitlement, and letting a lower id
+  displace a running owner would be a churn source with no upper bound.
+
+  Losers **exited**, so killing the owner left no catalog until a supervisor
+  happened to restart one whose zid sorted right. A loser stands by now — it
+  waits for the owner's `alive` token to drop and campaigns again, so takeover
+  costs one poll interval.
+
+  And a claim-set query that timed out logged "assuming sole candidate" and made
+  the caller a winner, so a **slow bus elected everybody**. A campaign retries,
+  treats an answer that does not contain its own claim as no answer, and stands
+  by rather than guessing — self-healing, because the standby loop asks again.
+
+  `zensight-desired` had **no claim protocol at all**: it declared `alive`
+  unconditionally, and the README's whole mitigation was the sentence "run
+  exactly one per deployment". Two instances — a failover that started before
+  the old one died, an operator running `apply` beside a live `run` — each seed
+  their `published` diff map from the storage, so each reads the other's write as
+  a change and rewrites it: every sensor flaps between two configurations,
+  silently. Both services now share `zensight_common::service_guard`, and
+  `apply` refuses while a `run` instance is alive, naming it.
+
 - **Link-layer adjacency actually reaches the wire** (#1108). `l2_claims()`
   derives `l2_adjacent` edges from the observer identity claims already in the
   evidence store — and was referenced only by its own tests. `README.md`
