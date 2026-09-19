@@ -96,6 +96,9 @@ pub struct ExporterStats {
     pub alerts_exported: u64,
     pub spans_exported: u64,
     pub export_errors: u64,
+    /// New series refused by the cardinality budget, by producer (#1145) —
+    /// the attribution the single `warn!` never carried.
+    pub series_refused_by_producer: HashMap<String, u64>,
 }
 
 /// Build a collision-resistant gauge key from metric name and attributes.
@@ -221,6 +224,8 @@ enum ObsKind {
 struct Observation {
     value: f64,
     attrs: Vec<opentelemetry::KeyValue>,
+    /// Which producer published it — the cardinality-quota dimension (#1145).
+    producer: &'static str,
     last_updated: Instant,
 }
 
@@ -316,6 +321,19 @@ pub struct OtelExporter {
 }
 
 impl OtelExporter {
+    /// The most series one producer may hold, given who else is here (#1145).
+    ///
+    /// `max - max / n`, so one share is kept out of any single producer's
+    /// reach and a **single producer keeps the whole cap** — a fixed share
+    /// would silently halve a deployment that runs one sensor. The same rule
+    /// the Prometheus exporter applies, because it is the same budget.
+    fn producer_quota(max: usize, producers_present: usize) -> usize {
+        if producers_present <= 1 {
+            return max;
+        }
+        (max - max / producers_present).max(1)
+    }
+
     /// Build an exporter around an already-constructed meter provider.
     ///
     /// Test-only seam. It exists so the metrics path can be asserted **on the
@@ -819,13 +837,48 @@ impl OtelExporter {
             let mut store = self.observations.write();
             let series = store.entry(store_key.clone()).or_default();
             if !series.contains_key(&series_key) {
-                let total: usize = store.values().map(HashMap::len).sum();
-                if total >= self.max_gauge_series {
+                // A new series has to fit twice: under the global cap, and
+                // under this producer's own share of it (#1145). The global
+                // cap alone does not bound WHO fills it — one producer
+                // leaking a per-request label reached it by itself, and from
+                // then on every new series was refused, so a host joining the
+                // fleet afterwards exported nothing at all until the
+                // staleness sweep happened to free a slot.
+                let producer = point.protocol.as_str();
+                let mut total = 0usize;
+                let mut held = 0usize;
+                let mut producers: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for series in store.values() {
+                    total += series.len();
+                    for obs in series.values() {
+                        producers.insert(obs.producer);
+                        if obs.producer == producer {
+                            held += 1;
+                        }
+                    }
+                }
+                producers.insert(producer);
+                let quota = Self::producer_quota(self.max_gauge_series, producers.len());
+                if total >= self.max_gauge_series || held >= quota {
                     warn!(
+                        producer,
+                        held,
+                        quota,
                         max = self.max_gauge_series,
-                        "Max series limit reached, dropping new series"
+                        reason = if held >= quota {
+                            "producer quota"
+                        } else {
+                            "global cap"
+                        },
+                        "Refusing a new series"
                     );
-                    self.stats.write().metrics_failed += 1;
+                    let mut stats = self.stats.write();
+                    stats.metrics_failed += 1;
+                    *stats
+                        .series_refused_by_producer
+                        .entry(producer.to_string())
+                        .or_insert(0) += 1;
                     return;
                 }
                 let series = store.entry(store_key.clone()).or_default();
@@ -834,6 +887,7 @@ impl OtelExporter {
                     Observation {
                         value,
                         attrs: attributes,
+                        producer,
                         last_updated: Instant::now(),
                     },
                 );

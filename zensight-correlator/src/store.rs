@@ -18,6 +18,22 @@ pub struct EvidenceStore {
     map: HashMap<StoreKey, (String, HostEvidence)>,
 }
 
+/// The most identity claims held at once (#1145).
+///
+/// This was the one per-key store in this crate with **no cap**, beside
+/// [`MAX_IPS`], `RelationStore::MAX_RELATIONS` and `AlertStore::MAX_FIRING`,
+/// each of which says why it has one.
+///
+/// netring publishes one `evidence/device/<mac>` per observed L2 asset, so a
+/// flat segment is thousands of claims — every one of them re-merged on each
+/// debounce, with the `mac_ip` rule quadratic inside a MAC bucket. A segment
+/// that grows, or a sender that mints addresses, grew this without limit.
+///
+/// Generous next to a real fleet and far below where the merge stops being
+/// affordable. Past it the claim whose `last_updated` is oldest is evicted:
+/// a stale claim is the one the TTL sweep would have taken anyway.
+pub const MAX_EVIDENCE: usize = 50_000;
+
 impl EvidenceStore {
     /// Insert or replace the claim for its `(sensor, source)` key, recording
     /// the **origin the claim was published from**.
@@ -28,9 +44,31 @@ impl EvidenceStore {
     /// claim's content — but the topology graph does: "netlink on host A sees
     /// device D" is a statement about A's link-layer segment, and without A
     /// the observation is unattributable (#917).
+    /// Bounded by [`MAX_EVIDENCE`] (#1145): past it the claim with the oldest
+    /// `last_updated` is evicted, which is the one the TTL sweep would have
+    /// taken next anyway.
     pub fn upsert(&mut self, origin: String, ev: HostEvidence) {
-        self.map
-            .insert((ev.sensor.clone(), ev.source.clone()), (origin, ev));
+        let key = (ev.sensor.clone(), ev.source.clone());
+        if !self.map.contains_key(&key) && self.map.len() >= MAX_EVIDENCE {
+            self.evict_stalest();
+        }
+        self.map.insert(key, (origin, ev));
+    }
+
+    /// Drop the claim whose `last_updated` is oldest.
+    fn evict_stalest(&mut self) {
+        if let Some(victim) = self
+            .map
+            .iter()
+            .min_by_key(|(_, (_, ev))| ev.last_updated)
+            .map(|(k, _)| k.clone())
+        {
+            tracing::warn!(
+                sensor = %victim.0, source = %victim.1, cap = MAX_EVIDENCE,
+                "evidence store full; evicting the stalest claim"
+            );
+            self.map.remove(&victim);
+        }
     }
 
     /// Drop the claim for `(sensor, source)` (evidence tombstone). Returns
@@ -267,5 +305,57 @@ mod tests {
         assert_eq!(live[0].source, "a");
         s.sweep(1500, 600);
         assert_eq!(s.len(), 1);
+    }
+
+    /// **#1145.** The evidence store is bounded, and evicts the stalest claim.
+    ///
+    /// It was the one per-key store in this crate with no cap, beside
+    /// `MAX_IPS`, `MAX_RELATIONS` and `MAX_FIRING` — each of which says why it
+    /// has one. netring publishes one `evidence/device/<mac>` per observed L2
+    /// asset, so a flat segment is thousands of claims, every one re-merged on
+    /// each debounce with the `mac_ip` rule quadratic inside a MAC bucket.
+    #[test]
+    fn the_evidence_store_is_bounded_and_evicts_the_stalest() {
+        let mut s = EvidenceStore::default();
+        let claim = |source: &str, ts: i64| HostEvidence {
+            sensor: "netring".into(),
+            source: source.into(),
+            observer: Some("netring".into()),
+            host_id: None,
+            boot_id: None,
+            hostname: None,
+            fqdn: None,
+            ips: vec![],
+            macs: vec![source.to_string()],
+            vendor: None,
+            platform: None,
+            container_id: None,
+            cloud: None,
+            last_updated: ts,
+        };
+
+        // The one we care about keeping: seen most recently.
+        s.upsert("h-test".into(), claim("live", i64::MAX));
+        // A flat segment's worth, oldest first, well past the cap.
+        for i in 0..(MAX_EVIDENCE + 100) {
+            s.upsert("h-test".into(), claim(&format!("mac{i}"), i as i64));
+        }
+
+        assert!(
+            s.map.len() <= MAX_EVIDENCE,
+            "{} claims held, cap is {MAX_EVIDENCE}",
+            s.map.len()
+        );
+        assert!(
+            s.map
+                .contains_key(&("netring".to_string(), "live".to_string())),
+            "the most recently seen claim must survive the flood"
+        );
+        // And the very oldest are the ones that went.
+        assert!(
+            !s.map
+                .contains_key(&("netring".to_string(), "mac0".to_string())),
+            "the stalest claim is the one evicted"
+        );
     }
 }
