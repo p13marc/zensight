@@ -43,6 +43,20 @@ flowchart LR
     Map --> Tr["traces (opt-in) — firing → resolved pair = one span"]
 ```
 
+### The telemetry subscriber is on a ring (#1211)
+
+`declare_telemetry_subscriber` hands zenoh a `RingChannel` of
+`TELEMETRY_CHANNEL_CAPACITY` (8 192) rather than its default `FifoChannel`, so
+an exporter that falls behind drops the oldest samples instead of **blocking
+the zenoh thread that feeds it**. That thread is the session's, so the
+alternative is not a lagging exporter but a silent one — `@rpc` and the
+shutdown path included — while publishers fail to push to it. Diagnosed on the
+historian; both exporters take the same helper and had the same exposure.
+
+A dropped sample is restated on the sensor's next interval, and an OTLP metric
+export is a periodic snapshot, so the cost is at most one interval's freshness
+for that series.
+
 ## Incidents (#926)
 
 The catalog groups firing alerts **by entity** and publishes the result

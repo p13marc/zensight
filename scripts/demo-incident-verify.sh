@@ -59,8 +59,7 @@ tmp=""
 pids=()
 cleanup() {
     local rc=$?
-    for pid in "${pids[@]:-}"; do [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true; done
-    for pid in "${pids[@]:-}"; do [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true; done
+    stop_children "${pids[@]:-}"   # bounded; see scripts/lib/verify.sh (#1211)
     if [[ -n "$tmp" ]]; then
         if [[ "$KEEP_TMP" == 1 ]]; then
             printf '\n(logs kept: %s)\n' "$tmp" >&2
