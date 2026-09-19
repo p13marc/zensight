@@ -33,6 +33,44 @@ Three details that decide whether these are useful or noise:
 - **`guest-not-running` requires `onboot=1`.** A guest deliberately left off is
   not a fault, and `onboot` is the only machine-readable statement of intent
   Proxmox has. Without that gate, the rule would fire on every parked VM.
+- **Nothing is graded for a guest this sweep cannot see** (#1132). See below —
+  it is the fourth detail and it was missing.
+
+### The sweep has to be entitled to its opinion
+
+`/cluster/resources` on a node that has lost quorum **still answers**. It
+reports the guests on the far side of the partition as `status: "unknown"`, and
+`is_running()` is `status == "running"` — so a ninety-second corosync blip
+fired a **critical** `guest-not-running` for every VM in the cluster, alongside
+`cluster-not-quorate`, and none of them had stopped.
+
+Two states hold every guest rule rather than grading on what the API happened
+to say:
+
+| State | What is held |
+|---|---|
+| `quorate == Some(false)` | **every** guest — a node without quorum is not entitled to an opinion about anything but itself, and Proxmox's own tooling refuses to act in that state |
+| a node listed with `online == false` | that node's guests only; guests on nodes that answered are graded as usual in the same sweep |
+
+A standalone node (`quorate: None`) is always observable: there is no quorum to
+have or lose. But a `/cluster/status` read that **failed** is graded as
+non-quorate and not as standalone — folding the two together would turn the
+guard off exactly when the cluster API is the thing that is unwell.
+
+**Holding is two halves, and the second is the one that is easy to miss.**
+`grade` not emitting an alert is not enough: the poller reconciles every rule
+every sweep, and a fleet-wide reconcile reads "did not fire" as "recovered".
+So the three guest rules reconcile **per node**
+(`reconcile_labeled(rule, "node", …)`), over the nodes this sweep could speak
+for. A node that did not answer is skipped, and its guests keep their alerts.
+
+The same reasoning applies to telemetry: `guest/{vmid}/running` is not
+published at all for a held guest. A `0` there is this sensor turning "we
+cannot see it" into "it stopped", which is the one claim the rest of that block
+refuses to make.
+
+This is SNMP's `device_answered` and BMC's `chassis.is_none()` guard, one API
+over — the lesson both of those already paid for.
 
 `alerts.exempt_vmids` excludes a guest from all three — the VM that is *meant*
 to be off, or the one on a bridge with no firewall at all.
@@ -66,12 +104,22 @@ sensor collapsed pools on the name alone: a three-node cluster kept one
 false `pool-overcommitted` on a pool that was half empty.
 
 Now the derived total for a non-shared pool counts only the guests on that
-pool's node, and a non-shared pool whose name is not unique across the
-cluster carries the node in its key chunk (`storage/<node>-<name>`), so two
-pools do not take turns overwriting one document. A name that *is* unique —
-every pool on a single node — keeps the bare chunk it has always had, so
-nothing moves on a standalone deployment. vzdump tasks are asked of every
-node, not only the nodes the (deduplicated) pool list happened to keep.
+pool's node, and **every** non-shared pool carries the node in its key chunk
+(`storage/<node>-<name>`), so two pools do not take turns overwriting one
+document. vzdump tasks are asked of every node, not only the nodes the
+(deduplicated) pool list happened to keep.
+
+**The disambiguator is `shared`, a property of the pool — not "did this sweep
+see the name twice"** (#1132). It was the latter for a release, which made the
+KEY depend on which nodes answered: when node B dropped out of the cluster,
+node A's `local-lvm` moved from `storage/pve1-local-lvm` to
+`storage/local-lvm`, its series restarted under a new name, and the old state
+document became an LWW ghost that nothing would ever overwrite again. A key
+that changes shape with the weather is not a key.
+
+The cost is that a single-node deployment's pools are `storage/pve-local`
+rather than `storage/local`. That is the right trade: a name is either
+disambiguated or it is not, and "not yet" is how the ghost got made.
 
 ### Reported vs derived (#881)
 
@@ -169,6 +217,17 @@ counted as a failure.
 the rule cannot fire there. Reporting "not quorate" for a single node would be
 a permanent false positive on most of the installed base; there is no quorum to
 lose.
+
+When it **does** fire it is the only rule that fires: every guest rule is held
+for the duration (#1132, see [Guests](#guests) above). That is the point of the
+pairing — `cluster-not-quorate` is the fact, and a page of `guest-not-running`
+criticals for VMs that never stopped is the noise it used to arrive with.
+
+The HA resources in the cluster document are the rows
+`/cluster/ha/status/current` marks `type: "service"`. That endpoint is a
+**status feed**, not a resource list: its other rows are `quorum`, `lrm` and
+`master`, and taking them wholesale (#1132) put three or four phantom services
+per node in the document, none of which `ha-manager` would ever name.
 
 ## What is deliberately not asserted
 

@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
+use crate::fields::MAX_EXPORTERS;
 use crate::receiver::{FlowFieldValue, FlowRecord, protocol_number_to_name};
 
 /// Default reply cap when no `?max=` selector is supplied.
@@ -57,12 +58,26 @@ struct ExporterAgg {
     /// `None` means it never declared one — which is a different fact from
     /// declaring 1, and is labelled differently.
     sampling: Option<u32>,
+    /// When this exporter was last heard, as a monotonic sequence rather than
+    /// a clock — the eviction order only needs to be an order, and a counter
+    /// makes it testable without sleeping (#1139).
+    last_seen: u64,
 }
 
 /// Rollup accumulator for all exporters seen by this receiver.
+///
+/// **Bounded** (#1139). NetFlow is UDP with no handshake and the exporter name
+/// defaults to the source address of the datagram, so this map grew by one
+/// permanent aggregate per address ever seen: a /16 sweep was 65 000 entries,
+/// a spoofing sender was unbounded — and every entry was re-published, at
+/// three or more keys apiece, every rollup period **forever**. The parser map
+/// next door had been capped with an LRU and a comment explaining exactly this
+/// since it was written; evicting a parser did not evict its aggregate.
 #[derive(Debug, Default)]
 pub struct Rollups {
     per_exporter: HashMap<String, ExporterAgg>,
+    /// Ticks once per ingest, so "least recently seen" is a total order.
+    seq: u64,
 }
 
 /// One key chunk from an exporter name (names may be raw IPs when the
@@ -74,11 +89,34 @@ pub fn exporter_slug(name: &str) -> String {
 
 impl Rollups {
     /// Fold one flow record into its exporter's counters.
+    ///
+    /// Past [`MAX_EXPORTERS`] the exporter seen least recently is evicted, as
+    /// the parser map does (#1139). An evicted exporter's counters restart
+    /// from zero if it comes back, which a TSDB reads as a counter reset —
+    /// the correct and recoverable answer, and a smaller lie than publishing
+    /// an aggregate for an address that sent one spoofed datagram in March.
     pub fn ingest(&mut self, record: &FlowRecord, sampling: Option<u32>) {
+        self.seq += 1;
+        if !self.per_exporter.contains_key(&record.exporter_name)
+            && self.per_exporter.len() >= MAX_EXPORTERS
+            && let Some(stale) = self
+                .per_exporter
+                .iter()
+                .min_by_key(|(_, a)| a.last_seen)
+                .map(|(k, _)| k.clone())
+        {
+            tracing::warn!(
+                evicted = %stale, arriving = %record.exporter_name, cap = MAX_EXPORTERS,
+                "NetFlow: rollup exporter cap reached; evicting the least recently seen"
+            );
+            self.per_exporter.remove(&stale);
+        }
+        let seq = self.seq;
         let agg = self
             .per_exporter
             .entry(record.exporter_name.clone())
             .or_default();
+        agg.last_seen = seq;
         agg.sampling = sampling;
         // Every version's fields reach these three names now (#1072). They used
         // to be v5/v7 spellings only: v9 minted `inbytes`/`inpkts` and IPFIX
@@ -380,5 +418,71 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert!(out.iter().all(|f| f.exporter_name == "a"));
         assert_eq!(out[0].timestamp, 8, "newest matching first");
+    }
+
+    /// **#1139, the acceptance.** The rollup map is bounded, and evicts the
+    /// exporter seen least recently.
+    ///
+    /// NetFlow is UDP with no handshake and the exporter name defaults to the
+    /// datagram's source address, so this map grew by one permanent aggregate
+    /// per address ever seen — a /16 sweep was 65 000 entries, a spoofing
+    /// sender was unbounded — and every one of them was re-published at three
+    /// or more keys apiece, every rollup period, forever. The parser map next
+    /// door had been capped with an LRU and a comment explaining exactly this
+    /// since it was written; evicting a parser did not evict its aggregate.
+    #[test]
+    fn a_spoofing_sender_cannot_grow_the_rollup_map_without_bound() {
+        let mut r = Rollups::default();
+        // One real exporter, kept fresh throughout.
+        r.ingest(&rec("10.0.0.1", 6, 100), None);
+
+        for i in 0..(MAX_EXPORTERS * 3) {
+            r.ingest(&rec(&format!("198.51.100.{i}"), 6, 1), None);
+            // The real one keeps sending, so it is never the least recent.
+            r.ingest(&rec("10.0.0.1", 6, 100), None);
+        }
+
+        assert!(
+            r.per_exporter.len() <= MAX_EXPORTERS,
+            "{} exporters held, cap is {MAX_EXPORTERS}",
+            r.per_exporter.len()
+        );
+        assert!(
+            r.per_exporter.contains_key("10.0.0.1"),
+            "the exporter that kept sending must survive the flood"
+        );
+        // And the published series are bounded with it — this is the cost the
+        // issue is about: three keys per entry, every period.
+        assert!(r.points(0).len() <= MAX_EXPORTERS * 8);
+    }
+
+    /// Eviction is least-recently-seen, not arbitrary: an exporter that is
+    /// still sending outlives one that stopped.
+    #[test]
+    fn the_least_recently_seen_exporter_is_the_one_evicted() {
+        let mut r = Rollups::default();
+        r.ingest(&rec("quiet", 6, 1), None);
+        for i in 0..(MAX_EXPORTERS - 1) {
+            r.ingest(&rec(&format!("busy-{i}"), 6, 1), None);
+        }
+        assert_eq!(r.per_exporter.len(), MAX_EXPORTERS);
+        assert!(r.per_exporter.contains_key("quiet"));
+
+        // One more arrival: `quiet` has been silent longest.
+        r.ingest(&rec("newcomer", 6, 1), None);
+        assert_eq!(r.per_exporter.len(), MAX_EXPORTERS);
+        assert!(!r.per_exporter.contains_key("quiet"), "the silent one goes");
+        assert!(r.per_exporter.contains_key("newcomer"));
+    }
+
+    /// The three per-exporter maps in this crate share ONE cap (#1139). They
+    /// were 256, 512 and unbounded, while the sampling registry's own comment
+    /// claimed it matched "the parser map's own cap".
+    #[test]
+    fn every_per_exporter_map_shares_one_cap() {
+        assert_eq!(
+            crate::fields::SamplingRegistry::MAX_EXPORTERS,
+            MAX_EXPORTERS
+        );
     }
 }

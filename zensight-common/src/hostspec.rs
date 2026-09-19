@@ -83,12 +83,34 @@ pub struct FileExpectation {
 pub struct ListeningExpectation {
     pub name: String,
     pub port: u16,
+    /// Which transport's listeners this is about (#1138).
+    ///
+    /// **`tcp` by default**, which is what every existing expectation meant
+    /// and got. Before this field there was no choice: `listening` read
+    /// `/proc/net/tcp{,6}` only, so `{port: 53}` for a resolver or
+    /// `{port: 514}` for a syslog receiver was a permanent false "nothing is
+    /// listening" — and `forbid: true` on a UDP port, which is how an
+    /// operator writes *"this host must not expose an open resolver"*, was a
+    /// false all-clear from the sensor whose whole purpose is machine-checked
+    /// assertions.
+    #[serde(default)]
+    pub proto: ListenProto,
     /// Exact bound address to require (or forbid). `None` = any listener on
     /// the port. `0.0.0.0` and `::` are DISTINCT wildcards — forbid both if
     /// you mean "not world-reachable" on a dual-stack host (the shipped
-    /// example shows the pair).
+    /// example shows the pair), or set `dual_stack` and let one expectation
+    /// mean both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addr: Option<String>,
+    /// Treat `0.0.0.0` and `::` as the same wildcard (#1138).
+    ///
+    /// The exact comparison above is deliberate and stays the default — it is
+    /// what lets an operator forbid each family separately. But *"not
+    /// world-reachable"* is the commoner intent by far, and writing it needed
+    /// two expectations that had to be kept in step. With this set,
+    /// `addr: "0.0.0.0"` also matches a `::` listener and the reverse.
+    #[serde(default)]
+    pub dual_stack: bool,
     /// `true`: fire when a matching listener EXISTS (the bound-to-0.0.0.0
     /// case); `false`: fire when none does.
     #[serde(default)]
@@ -101,6 +123,34 @@ pub struct ListeningExpectation {
     /// [`ExpectationsConfig::default_recover_after_secs`] (#932).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recover_after_secs: Option<u64>,
+}
+
+/// Which transport a [`ListeningExpectation`] is about (#1138).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ListenProto {
+    /// The default, and what every expectation written before #1138 meant.
+    #[default]
+    Tcp,
+    Udp,
+    /// Either — for a service that answers on both, which is what a resolver
+    /// and a syslog receiver do.
+    Both,
+}
+
+impl ListenProto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+            Self::Both => "both",
+        }
+    }
+
+    /// Whether a listener of `proto` satisfies this expectation.
+    pub fn accepts(self, proto: Self) -> bool {
+        matches!(self, Self::Both) || self == proto
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

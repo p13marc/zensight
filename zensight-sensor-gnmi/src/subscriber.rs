@@ -169,10 +169,10 @@ impl GnmiSubscriber {
         if self.target.tls.enabled {
             let mut tls_config = ClientTlsConfig::new();
 
-            if self.target.tls.skip_verify {
-                // Note: In production, this should use rustls with proper cert handling
-                warn!("TLS verification disabled - not recommended for production");
-            }
+            // `skip_verify` is refused at startup (#1137) — see
+            // `config::validate`. It cannot be reached here, and the warning
+            // that used to stand in for it is gone: a log line saying
+            // verification is off, while it is on, is worse than silence.
 
             if let Some(ref ca_cert_path) = self.target.tls.ca_cert {
                 let ca_cert = tokio::fs::read(ca_cert_path).await?;
@@ -288,7 +288,40 @@ impl GnmiSubscriber {
         // after a reload, which is the common case, published months out.
         let received_ms = zensight_common::current_timestamp_millis();
         let timestamp = self.clamp_timestamp(notification.timestamp, received_ms);
+        let prefix_elems: Vec<String> = notification
+            .prefix
+            .as_ref()
+            .map(Self::path_elements)
+            .unwrap_or_default();
         let prefix_path = notification.prefix.as_ref().map(|p| self.path_to_string(p));
+
+        // A LEAF THAT WENT AWAY IS DELETED, NOT FROZEN (#1137).
+        //
+        // `notification.delete` is how gNMI says a path no longer exists — an
+        // interface removed from the config, a transceiver pulled, a neighbour
+        // that went down. It was ignored entirely, so the last value that leaf
+        // ever had stayed on the bus forever: a chart shows the optical power
+        // of a transceiver that is in someone's pocket.
+        //
+        // Deleted first, so a notification that carries both a delete and an
+        // update for the same path leaves the update standing.
+        for path in &notification.delete {
+            let mut elems = prefix_elems.clone();
+            elems.extend(Self::path_elements(path));
+            let key = self.point_key(&elems);
+            if let Err(e) = registry
+                .delete(&key, zensight_common::QosClass::Telemetry)
+                .await
+            {
+                warn!(
+                    target_name = %self.target.name,
+                    key = %key,
+                    "gnmi: could not tombstone a deleted leaf: {e}"
+                );
+                continue;
+            }
+            debug!("Tombstoned {key}");
+        }
 
         for update in notification.update {
             if let Some(path) = &update.path {
@@ -297,6 +330,9 @@ impl GnmiSubscriber {
                     Some(prefix) if !prefix.is_empty() => format!("{}/{}", prefix, metric_path),
                     _ => metric_path,
                 };
+
+                let mut elems = prefix_elems.clone();
+                elems.extend(Self::path_elements(path));
 
                 let value = self.extract_value(&update, &full_path);
 
@@ -310,15 +346,19 @@ impl GnmiSubscriber {
                     unit: None,
                 };
 
-                let key = format!(
-                    "{}/{}/{}",
-                    self.telemetry_prefix, self.target.name, full_path
-                );
+                let key = self.point_key(&elems);
 
                 // `put_point`, not a hand-rolled encode: the last place this
                 // is a `TelemetryPoint` rather than bytes, and where the
                 // operator's threshold rules see it (#931).
-                registry
+                //
+                // A FAILED PUBLISH DROPS THE POINT, NOT THE CONNECTION
+                // (#1137). This used to be `?`, and `?` here propagates out of
+                // `process_notification`, out of `subscribe_loop`, into
+                // `run`'s `Err` arm — so a working subscription was torn down
+                // and reconnected with backoff because one leaf had an awkward
+                // name. The stream is the expensive thing; one point is not.
+                if let Err(e) = registry
                     .put_point(
                         &key,
                         &point,
@@ -326,7 +366,14 @@ impl GnmiSubscriber {
                         self.serialization.into(),
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("Zenoh put failed: {}", e))?;
+                {
+                    warn!(
+                        target_name = %self.target.name,
+                        key = %key,
+                        "gnmi: dropping one point, keeping the subscription: {e}"
+                    );
+                    continue;
+                }
                 debug!("Published telemetry to {}", key);
             }
         }
@@ -335,6 +382,15 @@ impl GnmiSubscriber {
     }
 
     fn path_to_string(&self, path: &Path) -> String {
+        Self::path_elements(path).join("/")
+    }
+
+    /// One string per gNMI path element, **before** they are joined.
+    ///
+    /// The join is where the element boundary is lost, and the boundary is
+    /// exactly what a key needs: `Ethernet1/1/1` is ONE element whose name
+    /// happens to contain slashes (#1137).
+    fn path_elements(path: &Path) -> Vec<String> {
         path.elem
             .iter()
             .map(|elem| {
@@ -349,8 +405,39 @@ impl GnmiSubscriber {
                     format!("{}[{}]", elem.name, keys.join(","))
                 }
             })
+            .collect()
+    }
+
+    /// The key one gNMI path publishes under — **slugged element by element**
+    /// (#1137).
+    ///
+    /// Every element of a device-supplied path is a foreign value, and every
+    /// other remote sensor slugs at this boundary. Without it:
+    ///
+    /// - `Ethernet1/1/1`, an ordinary Arista interface name, split the key
+    ///   into extra chunks and published the same leaf under a different
+    ///   subject depth from every other interface;
+    /// - a `*`, `?` or `#` in a description leaf made the key **illegal**, so
+    ///   `put_point` returned `Err` — and that error used to tear down the
+    ///   whole subscription (see `process_notification`).
+    ///
+    /// The path separator is kept: a gNMI path is a tree and the key should
+    /// be one too. It is the *elements* that are slugged — which is why this
+    /// takes them, and not the joined string a `split('/')` could only guess
+    /// the boundaries of.
+    fn point_key(&self, elements: &[String]) -> String {
+        let subject = elements
+            .iter()
+            .filter(|e| !e.is_empty())
+            .map(|e| zenkey::Chunk::slug(e).as_str().to_string())
             .collect::<Vec<_>>()
-            .join("/")
+            .join("/");
+        format!(
+            "{}/{}/{}",
+            self.telemetry_prefix,
+            zenkey::Chunk::slug(&self.target.name).as_str(),
+            subject
+        )
     }
 
     /// The instant to publish a notification at (#1077).
@@ -610,6 +697,75 @@ mod tests {
 
     fn typed(value: gnmi::typed_value::Value) -> gnmi::TypedValue {
         gnmi::TypedValue { value: Some(value) }
+    }
+
+    /// **#1137, the acceptance.** An interface named `Ethernet1/1/1` — an
+    /// ordinary Arista name — publishes under ONE chunk.
+    ///
+    /// Every element of a device-supplied path is a foreign value, and this
+    /// was the one remote sensor that did not slug at the boundary. Unslugged,
+    /// `Ethernet1/1/1` split the key into extra chunks and published that leaf
+    /// at a different subject depth from every other interface's.
+    #[test]
+    fn a_path_element_with_a_slash_stays_one_chunk() {
+        let sub = test_subscriber();
+        let key = sub.point_key(&[
+            "interfaces".into(),
+            "interface[name=Ethernet1/1/1]".into(),
+            "state".into(),
+            "counters".into(),
+            "in-octets".into(),
+        ]);
+        let subject = key
+            .split("/telemetry/gnmi/")
+            .nth(1)
+            .expect("a telemetry key");
+        // target / interfaces / interface[...] / state / counters / in-octets
+        assert_eq!(
+            subject.split('/').count(),
+            6,
+            "the element's own slashes must not become key separators: {key}"
+        );
+        assert!(
+            !subject.contains("Ethernet1/1/1"),
+            "the raw name survived into the key: {key}"
+        );
+    }
+
+    /// **#1137.** A wildcard in a leaf name made the key ILLEGAL, `put_point`
+    /// returned `Err`, and that error tore the whole subscription down. The
+    /// key has to be mintable whatever the device called the leaf.
+    #[test]
+    fn key_expression_metacharacters_cannot_reach_the_key() {
+        let sub = test_subscriber();
+        for awkward in [
+            vec!["interfaces", "interface[name=et*]", "description"],
+            vec!["interfaces", "interface[name=et?]", "description"],
+            vec!["components", "component[name=a#b]", "state"],
+            vec!["a", "b", "c d", "e"],
+        ] {
+            let elems: Vec<String> = awkward.iter().map(|s| s.to_string()).collect();
+            let key = sub.point_key(&elems);
+            let subject = key.split("/telemetry/gnmi/").nth(1).unwrap();
+            assert!(
+                !subject.contains(['*', '?', '#', '$']),
+                "a key expression metacharacter reached the key: {key}"
+            );
+            assert!(
+                zensight_common::keyexpr::parse_key(&key).is_some(),
+                "the key must be a legal v1 key: {key}"
+            );
+        }
+    }
+
+    /// The target's own name is a foreign value too — an operator types it.
+    #[test]
+    fn the_target_name_is_slugged_as_well() {
+        let mut sub = test_subscriber();
+        sub.target.name = "core sw/1".to_string();
+        let key = sub.point_key(&["state".into(), "up".into()]);
+        assert!(zensight_common::keyexpr::parse_key(&key).is_some(), "{key}");
+        assert!(!key.contains("core sw"), "{key}");
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 use zensight_common::config::ZenohConfig;
+use zensight_common::serialization::Format;
 
 // Re-export LoggingConfig from the framework for compatibility
 pub use zensight_sensor_core::LoggingConfig;
@@ -25,6 +26,13 @@ pub enum ConfigError {
 pub struct ModbusSensorConfig {
     /// Zenoh connection settings
     pub zenoh: ZenohConfig,
+
+    /// Serialization format for telemetry. Shared vocabulary, CBOR by default
+    /// (#1133) — this sensor hard-coded JSON in `main.rs` and offered no knob
+    /// at all, so a deployment that set `serialization` got JSON from this one
+    /// producer with nothing to say so.
+    #[serde(default)]
+    pub serialization: Format,
 
     /// Modbus-specific settings
     pub modbus: ModbusConfig,
@@ -424,8 +432,38 @@ fn validate_register(device: &str, register: &RegisterConfig) -> Result<(), Conf
              65535",
             register.address
         )))?;
+    // THE PROTOCOL'S OWN CEILING (#1133). Modbus caps one read at 125 holding
+    // or input registers (2 000 for coils and discrete inputs): the response
+    // PDU has a single byte for its length. A block above it is not a slow
+    // read, it is an illegal one — the slave answers with an exception, or
+    // worse, a permissive stack truncates and this sensor publishes a short
+    // window under the configured names. Refused at startup, where a config
+    // error belongs, rather than once a cycle in a `warn!` nobody reads.
+    let ceiling = match register.register_type {
+        RegisterType::Coil | RegisterType::Discrete => MAX_BITS_PER_READ,
+        RegisterType::Input | RegisterType::Holding => MAX_REGISTERS_PER_READ,
+    };
+    if span > ceiling {
+        return Err(ConfigError::Validation(format!(
+            "Device '{device}': register block at {} spans {span} {}, over the Modbus maximum of \
+             {ceiling} for one {} read. Split it into several blocks",
+            register.address,
+            match register.register_type {
+                RegisterType::Coil | RegisterType::Discrete => "bits",
+                _ => "registers",
+            },
+            register.register_type.as_str(),
+        )));
+    }
     Ok(())
 }
+
+/// Modbus's own limit on one holding/input read: the response PDU carries a
+/// single byte of length, so 125 × 2 bytes is the most that fits.
+pub const MAX_REGISTERS_PER_READ: u16 = 125;
+
+/// The same limit for coils and discrete inputs, which pack eight to a byte.
+pub const MAX_BITS_PER_READ: u16 = 2_000;
 
 impl zensight_sensor_core::SensorConfig for ModbusSensorConfig {
     fn zenoh(&self) -> &ZenohConfig {
