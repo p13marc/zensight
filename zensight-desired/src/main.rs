@@ -70,8 +70,15 @@ struct Args {
     /// Override the policy path from the config.
     #[arg(long, global = true)]
     policy: Option<String>,
+    /// Optional **only** so `--check-config` can stand alone; every other
+    /// invocation needs one, and `None` without the flag is a usage error.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    /// Parse and validate the config, the policy and the overrides, print the
+    /// verdict, and exit — open no session, publish nothing (#1150). A deploy
+    /// script gates on the exit status.
+    #[arg(long)]
+    check_config: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -128,7 +135,26 @@ async fn main() -> Result<()> {
     ))
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    match args.command {
+    // `--check-config` stops here, before any subcommand and before the
+    // session (#1150). It is placed *after* the policy and the overrides load
+    // and the policy validates, because for this daemon those are the config
+    // — a daemon config that parses while the policy it compiles does not is
+    // not a deployable host.
+    if args.check_config {
+        println!(
+            "config ok: {} (policy {policy_path}: {} classes, {} adopted host(s))",
+            args.config,
+            policy.classes.len(),
+            overrides.hosts.len()
+        );
+        return Ok(());
+    }
+
+    let Some(command) = args.command else {
+        anyhow::bail!("a subcommand is required (plan, apply, run, render) — see --help");
+    };
+
+    match command {
         Command::Plan { offline } => {
             if offline {
                 println!(

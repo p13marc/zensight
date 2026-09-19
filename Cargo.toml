@@ -139,6 +139,7 @@ mdns-sd = "0.21"
 
 # Configuration
 json5 = "1.0"
+serde_ignored = "0.1.14"
 # TOML, for the two places that read a registry file as data rather than
 # through zenkey-build's generated surface: the SNMP MIB loader, and the
 # parallax test that pins the declared rate ceiling against the interval the

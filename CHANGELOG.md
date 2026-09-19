@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A misspelled config key is a startup refusal, and `--check-config` tells
+  you before the deploy** (#1150). No producer's config checked for keys it did
+  not declare, so `poll_interval_sec` for `poll_interval_secs` parsed clean and
+  took the Rust default on a production host — indistinguishable, from the
+  operator's side, from the interval they thought they had set.
+  `zensight-sensor-sysinfo`'s own config records the cost: `temperatures` and
+  `power` "stayed dark for so long" for exactly this reason.
+
+  `SensorConfig::parse_strict` collects **every** undeclared key by full dotted
+  path in one pass and refuses the load naming all of them:
+
+  ```
+  unknown config key(s): probe.poll_interval_sec, snmp.devices.0.comunity.
+  Fix the typo, or set allow_unknown_fields: true to ignore (mixed-version fleets).
+  ```
+
+  **The issue asked for `serde(deny_unknown_fields)` on every block; this is
+  `serde_ignored` instead, and the tree already knew why.** #547 built this
+  mechanism in `zensight-sensor-logs` — the only strict loader in the workspace,
+  which the issue did not see — and it is the better of the two:
+  `deny_unknown_fields` errors at the first struct to meet a stray key, so the
+  message names the field but not where it sits, and it aborts *before* a
+  collector could run, which rules out both the list above and the escape hatch
+  below. The two cannot be combined. So logs' loader moved into
+  `zensight-sensor-core` and every producer, exporter and service now shares it;
+  logs' own `parse_strict` is the thin call that remains.
+
+  Two exemptions, both deliberate. The **`zenoh` block is not checked**: it is
+  the one block a newer participant must be able to hand to an older one
+  mid-rollout, and refusing an unknown transport knob would turn a staged
+  upgrade into an outage. And **`allow_unknown_fields: true`** downgrades the
+  refusal to one `warn!` naming the keys, for a mixed-version fleet sharing one
+  file — read off the raw tree, so a config struct does not have to declare it
+  to honour it.
+
+  It refuses what is *extra*, not what is *missing*: a key that was never in the
+  shipped config still takes the Rust default silently, which is the other half
+  of how `temperatures` stayed dark. The per-crate "the shipped config
+  physically contains this key" tests walk the raw tree for that half and stay.
+
+  Beside it, **`--check-config` on every binary that parses one** — fifteen
+  sensors, both exporters, the correlator, the historian and `zensight-desired`.
+  It parses, validates, prints `config ok: <path>` and exits, opening no session
+  and joining no fleet, so a deploy script gates on the exit status. For
+  `zensight-desired` it also loads and validates the policy and the overrides,
+  because for that daemon those *are* the config. Before this the only way to
+  find out was to start the thing on the host and read the logs, by which time
+  it had already joined the bus.
+
+  `scripts/demo-verify.sh` gains **phase 3b**, which runs `--check-config` over
+  every config the script builds a binary for, through that binary, and then
+  checks that a `poll_interval_sec` typo is refused. The per-crate tests already
+  parsed those files into the crate's own type; nothing had ever run the binary
+  over one, and a flag CI never executes is a flag that stops working quietly.
+  The pairs are **named**, not globbed: this is a seven-binary debug run, not a
+  workspace build, and a loop that skips an absent binary reports success just
+  as loudly as one that checked it.
+
+  **It found one immediately.** `gen-configs.sh` writes the systemd sensor's
+  config from scratch and put `report: {…}` at the **top level**, where
+  `SystemdSensorConfig` declares it under `artifacts:`. So the demo and the
+  conformance rig have been asking for on-demand report downloads and silently
+  getting none, for as long as that block has existed. That is precisely the
+  failure this issue is about, caught by the check this issue adds.
+
+  One thing this exposed: `SensorConfig::validate` flattened `zensight-sensor-logs`'
+  anyhow context with `{e}`, so a bad IANA zone reported `listener 0 timezone`
+  and never named the zone. It formats with `{e:#}` now.
+
 - **`CounterTracker` in `zensight-sensor-core`** (#1152). One rate derivation,
   with the elapsed time it was actually measured over, a reset that costs one
   reading rather than producing a spike, and an optional declared counter width

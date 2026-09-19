@@ -44,6 +44,12 @@ struct Args {
     /// Isolated Zenoh session: scouting off, explicit endpoints only.
     #[arg(long)]
     isolate: bool,
+
+    /// Parse and validate the config, print the verdict, and exit — open no
+    /// session, record nothing (#1150). A deploy script gates on the exit
+    /// status.
+    #[arg(long)]
+    check_config: bool,
 }
 
 #[tokio::main]
@@ -72,6 +78,17 @@ async fn main() -> anyhow::Result<()> {
         config.isolate = true;
     }
     config.validate()?;
+
+    // `--check-config` stops here, after the CLI overrides are folded in and
+    // validated — a config that is only valid without the flags you pass is
+    // not a config that deploys (#1150).
+    if args.check_config {
+        match &args.config {
+            Some(path) => println!("config ok: {path}"),
+            None => println!("config ok: built-in defaults (no --config given)"),
+        }
+        return Ok(());
+    }
 
     // Honor ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN} explicitly (the launcher's
     // rendezvous pins). The isolated session path reads no env itself (so

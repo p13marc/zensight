@@ -31,6 +31,11 @@ struct Args {
     /// it was dead config (#757). Absent here means "use the file".
     #[arg(long)]
     log_level: Option<String>,
+    /// Parse and validate the config, print the verdict, and exit — open no
+    /// session, publish nothing (#1150). A deploy script gates on the exit
+    /// status.
+    #[arg(long)]
+    check_config: bool,
 }
 
 #[tokio::main]
@@ -43,6 +48,16 @@ async fn main() -> anyhow::Result<()> {
     } else {
         ExporterConfig::default()
     };
+
+    // `--check-config` stops here, before the Zenoh session and the OTLP
+    // exporter exist (#1150). A deploy script gates on the exit status.
+    if args.check_config {
+        match &args.config {
+            Some(path) => println!("config ok: {path}"),
+            None => println!("config ok: built-in defaults (no --config given)"),
+        }
+        return Ok(());
+    }
 
     // Override endpoint from CLI
     if let Some(endpoint) = args.endpoint {

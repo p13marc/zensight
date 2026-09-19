@@ -500,6 +500,66 @@ fi
 echo "OK — demo/fleet-policy.json5 validates, and a never-list violation is refused."
 
 # ---------------------------------------------------------------------------
+# Phase 3b (#1150): every shipped config survives its own binary's
+# `--check-config`, and a typo in one does not.
+#
+# The per-crate tests parse `configs/*.json5` into the crate's own type, which
+# proves the file matches the struct — but nothing ran the BINARY over it, and
+# `--check-config` is the verb a deploy script gates on. A flag that is never
+# executed is a flag that stops working quietly, which is the lesson the two
+# exporter phases above are written about.
+#
+# It opens no session and costs milliseconds per binary.
+echo
+echo "==> phase 3b: --check-config over every shipped config"
+#
+# The pairs this script BUILDS, named explicitly rather than discovered by
+# globbing `configs/` and skipping what is missing. This is a debug-profile
+# run of seven binaries, not a workspace build — and a loop that skips an
+# absent binary reports success just as loudly as one that checked it (the
+# `head`/SIGPIPE lesson, one shape over). Naming them means an added binary
+# has to be added here too, which is the point.
+check_pairs=(
+    "zensight-sensor-sysinfo:sysinfo"
+    "zensight-sensor-netlink:netlink"
+    "zensight-exporter-prometheus:prometheus-exporter"
+    "zensight-exporter-otel:otel-exporter"
+    "zensight-historian:historian"
+    "zensight-correlator:correlator"
+    "zensight-desired:desired"
+)
+checked=0
+for pair in "${check_pairs[@]}"; do
+    bin="$BIN/${pair%%:*}"
+    cfg="$ROOT/configs/${pair##*:}.json5"
+    [ -x "$bin" ] || die "phase 3b: $bin was not built — the build step above \
+and this list have drifted apart"
+    [ -f "$cfg" ] || die "phase 3b: $cfg does not exist"
+    # `desired` compiles a policy, so point it at the one this repo ships
+    # rather than at /etc.
+    extra=()
+    [ "${pair##*:}" = "desired" ] && extra=(--policy "$ROOT/demo/fleet-policy.json5")
+    if ! out=$("$bin" --config "$cfg" "${extra[@]}" --check-config 2>&1); then
+        die "configs/${pair##*:}.json5 does not pass its own --check-config:
+$out"
+    fi
+    checked=$((checked + 1))
+done
+[ "$checked" -eq "${#check_pairs[@]}" ] \
+    || die "--check-config ran over $checked of ${#check_pairs[@]} config(s)"
+
+# And the check must REFUSE a bad one, or the phase above is theatre.
+sed 's/poll_interval_secs/poll_interval_sec/' "$ROOT/configs/sysinfo.json5" \
+    > "$tmp/typo-sysinfo.json5"
+if "$BIN/zensight-sensor-sysinfo" --config "$tmp/typo-sysinfo.json5" \
+        --check-config >/dev/null 2>&1; then
+    die "a misspelled config key passed --check-config — the strict loader is \
+not running (#1150)"
+fi
+
+echo "OK — $checked shipped config(s) pass --check-config, and a typo is refused."
+
+# ---------------------------------------------------------------------------
 # Phase 4 (#941): the policy loop, END TO END.
 #
 # Phase 3 proves the compiler parses. It publishes nothing, and *nothing

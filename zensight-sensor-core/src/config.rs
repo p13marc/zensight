@@ -17,9 +17,11 @@ use zensight_common::ArtifactLimits;
 /// sensors had no field at all, so `docs/ops/SIZING.md`'s instruction to "set
 /// all three" named a key that nine of eleven shipped units could not accept.
 ///
-/// Nothing here sets `deny_unknown_fields`, which is why the omission was
-/// silent: a `resources` block in a config the binary did not know about
-/// parsed clean and was discarded.
+/// The omission this block closes was silent because nothing checked for
+/// unknown keys: a `resources` block in a config the binary did not know about
+/// parsed clean and was discarded. Every config loads through
+/// [`SensorConfig::parse_strict`] now (#1150), so the same mistake is a startup
+/// refusal naming the key.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourcesConfig {
     /// Declared RSS budget, in **MiB**. Absent means *undeclared* — no
@@ -163,7 +165,9 @@ pub trait SensorConfig: Sized + DeserializeOwned {
 
     /// Load configuration from a file path.
     ///
-    /// Supports JSON5 format. Calls [`validate`](Self::validate) after loading.
+    /// Supports JSON5 format. Rejects unknown keys through
+    /// [`parse_strict`](Self::parse_strict), then calls
+    /// [`validate`](Self::validate).
     fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
 
@@ -174,10 +178,68 @@ pub trait SensorConfig: Sized + DeserializeOwned {
         }
 
         let content = std::fs::read_to_string(path)?;
-        let config: Self = json5::from_str(&content)?;
+        Self::parse_strict(&content)
+    }
+
+    /// Parse a JSON5 config, **refusing a key no struct declares** (#1150),
+    /// then validate it.
+    ///
+    /// A misspelled key used to parse clean and take the Rust default on a
+    /// production host. `zensight-sensor-sysinfo`'s config records what that
+    /// costs: `temperatures` and `power` stayed dark for months because a key
+    /// in the wrong block is indistinguishable from a key nobody wrote.
+    ///
+    /// **This is `serde_ignored`, not `serde(deny_unknown_fields)`**, and the
+    /// difference is the point. `deny_unknown_fields` errors at the first
+    /// struct that sees a stray key, so the message names the field but not
+    /// where it sits; `serde_ignored` collects every unknown key by its **full
+    /// dotted path** in one pass, so `snmp.devices.0.comunity` reads as itself.
+    /// The two cannot be combined — `deny_unknown_fields` aborts before the
+    /// collector runs. This mechanism is `zensight-sensor-logs`' (#547), lifted
+    /// here so every producer gets it rather than one.
+    ///
+    /// Two exemptions, both deliberate:
+    ///
+    /// - **the `zenoh` block**, which stays forward-compatible: it is the one
+    ///   block a newer participant must be able to hand to an older one during
+    ///   a rollout;
+    /// - **`allow_unknown_fields: true`**, the escape hatch for a mixed-version
+    ///   fleet sharing one file. It downgrades the refusal to one `warn!`
+    ///   naming the keys. Read off the raw tree, so it needs no field on any
+    ///   config struct.
+    fn parse_strict(content: &str) -> Result<Self> {
+        let value: serde_json::Value = json5::from_str(content)?;
+        let allow = value
+            .get("allow_unknown_fields")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let mut unknown: Vec<String> = Vec::new();
+        let config: Self = serde_ignored::deserialize(value, |path| {
+            let path = path.to_string();
+            if path == "allow_unknown_fields" || path == "zenoh" || path.starts_with("zenoh.") {
+                return;
+            }
+            unknown.push(path);
+        })
+        .map_err(|e| SensorError::config(e.to_string()))?;
+
+        if !unknown.is_empty() {
+            let list = unknown.join(", ");
+            if allow {
+                tracing::warn!(
+                    unknown_keys = %list,
+                    "config has unknown keys (allow_unknown_fields is set — ignoring)"
+                );
+            } else {
+                return Err(SensorError::config(format!(
+                    "unknown config key(s): {list}. Fix the typo, or set \
+                     allow_unknown_fields: true to ignore (mixed-version fleets)."
+                )));
+            }
+        }
 
         config.validate()?;
-
         Ok(config)
     }
 }

@@ -53,6 +53,15 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = SyslogSensorConfig::load_from_file(&args.config)?;
+
+    // `--check-config` stops here, before the runner, the session and any
+    // publisher exists (#1150). A config check that joins the fleet is not a
+    // check — it is a deployment.
+    if args.check_config {
+        zensight_sensor_core::report_config_ok(&args.config);
+        return Ok(());
+    }
+
     let source = config.syslog.resolved_source();
     tracing::info!(summary = %config.startup_summary(), "syslog sensor configuration");
 
