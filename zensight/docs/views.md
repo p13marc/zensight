@@ -485,6 +485,15 @@ O6: asked-and-could-not-tell is neither fine nor fire), and both sort **between*
 the findings and the clean rows: not verdicts, so they must not outrank one; not
 passing checks, so they must not sink below one either.
 
+That paragraph was true of the intent and false of the code until #1120:
+`Skew` — asked, answered, and the registry version disagrees — sorted *below*
+both poles. A mid-rollout fleet is exactly when `Skew` is the thing to look at
+and also when unreachable hosts are common, so the rows an operator needed were
+pushed off the first screen by rows with no content. The order is
+`Drift, Skew, Unreadable, NoAnswer, NotAsked, InSync`, and
+`a_finding_outranks_a_row_that_said_nothing` pins the whole table rather than
+one pair.
+
 Which pole an absent-but-alive producer gets depends on whether the sweep was
 whole. Past the reply bound, replies are drained but not kept, so a missing
 producer may have answered and had its answer discarded, or may never have been

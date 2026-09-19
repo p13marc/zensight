@@ -166,11 +166,23 @@ pub fn series_for_device(series: Vec<RangeSeries>, source: &str) -> Vec<(String,
 ///
 /// Sorted newest-first because that is how the markers read against a scrubbed
 /// chart: the thing that just happened is the thing being investigated.
+///
+/// **The de-duplication runs on uid order, not on timestamp order** (#1120).
+/// `dedup_by` only collapses *adjacent* equal elements, and the display sort
+/// is by `ts` — so two historians reporting the same transition with
+/// timestamps 1 ms apart put the two copies in different places and left a
+/// doubled marker on the chart. Which is exactly the case this function
+/// exists for: two historians agree on the uid by construction and may
+/// disagree on the millisecond they recorded it.
 pub fn dedup_markers(
     mut markers: Vec<zensight_common::history::TimelineEntry>,
 ) -> Vec<zensight_common::history::TimelineEntry> {
-    markers.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.uid.cmp(&b.uid)));
+    // Collapse first, on the key that identifies a transition.
+    markers.sort_by(|a, b| a.uid.cmp(&b.uid).then_with(|| b.ts.cmp(&a.ts)));
     markers.dedup_by(|a, b| a.uid == b.uid);
+    // Then present newest-first, with a stable tiebreak so two markers at the
+    // same instant do not swap between renders.
+    markers.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.uid.cmp(&b.uid)));
     markers
 }
 
@@ -474,6 +486,55 @@ mod marker_tests {
     fn distinct_transitions_at_one_instant_both_survive() {
         let out = dedup_markers(vec![entry("a", 1_000), entry("b", 1_000)]);
         assert_eq!(out.len(), 2, "same instant, different transitions");
+    }
+
+    /// **Two historians disagreeing by one millisecond still collapse**
+    /// (#1120).
+    ///
+    /// This is the case the function exists for, and the case it got wrong.
+    /// `dedup_by` collapses only *adjacent* equal elements, and the sort was by
+    /// `ts` — so two reports of one transition, timestamped a millisecond
+    /// apart, landed either side of a third marker and left a doubled one on
+    /// the chart.
+    ///
+    /// The two historians agree on the uid by construction (#908); the
+    /// millisecond is whenever each of them happened to record it.
+    #[test]
+    fn two_historians_one_millisecond_apart_still_collapse() {
+        let out = dedup_markers(vec![
+            entry("shared", 1_000),
+            // A third marker between them in ts order, which is what makes the
+            // two copies non-adjacent.
+            entry("other", 1_000),
+            entry("shared", 1_001),
+        ]);
+        assert_eq!(
+            out.len(),
+            2,
+            "one transition seen twice is one marker, whichever millisecond \
+             each historian wrote down: {:?}",
+            out.iter().map(|e| (&e.uid, e.ts)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            out.iter().filter(|e| e.uid == "shared").count(),
+            1,
+            "exactly one copy survives"
+        );
+        // The survivor is the newer report, and the list is still newest-first.
+        assert_eq!(out[0].uid, "shared");
+        assert_eq!(out[0].ts, 1_001);
+    }
+
+    /// Ties are broken, so a marker does not move between renders (#1120).
+    #[test]
+    fn markers_at_one_instant_have_a_stable_order() {
+        let a = dedup_markers(vec![entry("b", 1_000), entry("a", 1_000)]);
+        let b = dedup_markers(vec![entry("a", 1_000), entry("b", 1_000)]);
+        assert_eq!(
+            a.iter().map(|e| e.uid.clone()).collect::<Vec<_>>(),
+            b.iter().map(|e| e.uid.clone()).collect::<Vec<_>>(),
+            "the input order must not decide the output order"
+        );
     }
 
     #[test]

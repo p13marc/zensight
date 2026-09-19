@@ -231,6 +231,27 @@ impl AlertsState {
         format!("{}/{}", alert.source, alert.alert_key())
     }
 
+    /// Worst-first order for the external alert feed, and a **total** one
+    /// (#1120).
+    ///
+    /// Severity, then recency, then the key. The third term is not decoration:
+    /// these alerts come out of a `HashMap`, whose iteration order is not the
+    /// insertion order and is not stable across processes, so without it two
+    /// alerts agreeing on severity *and* timestamp swapped places between
+    /// renders — and an operator's click landed on the row that had just
+    /// moved. `catalog_incidents` has tiebroken on `id` since it was written;
+    /// these three sorts had three copies of a two-term key and none of them
+    /// did.
+    ///
+    /// Named rather than repeated, because three copies of a sort key is how
+    /// they came to disagree in the first place.
+    pub fn external_order(a: &SensorAlert, b: &SensorAlert) -> std::cmp::Ordering {
+        b.severity
+            .cmp(&a.severity)
+            .then(b.timestamp.cmp(&a.timestamp))
+            .then_with(|| Self::external_key(a).cmp(&Self::external_key(b)))
+    }
+
     pub fn ingest_external(&mut self, alert: SensorAlert) -> ExternalAlertOutcome {
         self.ingest_external_from(None, alert)
     }
@@ -576,11 +597,7 @@ impl AlertsState {
 
     pub fn active_external(&self) -> Vec<&SensorAlert> {
         let mut v: Vec<&SensorAlert> = self.external.values().collect();
-        v.sort_by(|a, b| {
-            b.severity
-                .cmp(&a.severity)
-                .then(b.timestamp.cmp(&a.timestamp))
-        });
+        v.sort_by(|a, b| Self::external_order(a, b));
         v
     }
 
@@ -650,11 +667,7 @@ impl AlertsState {
             .map(|(_, a)| a)
             .collect();
         let mut firing = firing;
-        firing.sort_by(|a, b| {
-            b.severity
-                .cmp(&a.severity)
-                .then(b.timestamp.cmp(&a.timestamp))
-        });
+        firing.sort_by(|a, b| Self::external_order(a, b));
         crate::view::incident::group_incidents(
             &firing,
             |k| self.is_external_acked(k),
@@ -691,11 +704,7 @@ impl AlertsState {
         let mut groups: Vec<ExternalIncident<'_>> = by_source
             .into_iter()
             .map(|(source, mut alerts)| {
-                alerts.sort_by(|a, b| {
-                    b.severity
-                        .cmp(&a.severity)
-                        .then(b.timestamp.cmp(&a.timestamp))
-                });
+                alerts.sort_by(|a, b| Self::external_order(a, b));
                 let unacked = alerts
                     .iter()
                     .filter(|a| !self.is_external_acked(&Self::external_key(a)))
@@ -1507,6 +1516,81 @@ const MAX_ALERT_MESSAGE_LEN: usize = 60;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The external order is total** (#1120).
+    ///
+    /// Severity and timestamp alone are not: two alerts can agree on both, and
+    /// these come out of a `HashMap` whose iteration order is not the
+    /// insertion order and differs between processes. So the pair swapped
+    /// places between renders and an operator's click landed on the row that
+    /// had just moved.
+    ///
+    /// Totality is the property under test rather than a rendered order,
+    /// because a rendered order *cannot* catch this within one process: a
+    /// `HashMap`'s layout is decided by its contents and its seed, so two maps
+    /// with the same contents iterate the same way and a stable-sort over them
+    /// agrees whether or not the comparator is total. It is exactly across
+    /// runs — different seed, different order, same contents — that the bug
+    /// shows, and a total comparator is what makes that impossible by
+    /// construction.
+    #[test]
+    fn the_external_order_is_total() {
+        let alert = |source: &str, rule: &str| {
+            let mut a = zensight_common::Alert::new(
+                source,
+                Protocol::Sysinfo,
+                zensight_common::AlertKind::Expectation,
+                rule,
+                zensight_common::AlertSeverity::Critical,
+                format!("{rule} on {source}"),
+            );
+            // The same instant and the same severity, deliberately: anything
+            // else would let an earlier term decide and hide the tiebreak.
+            a.timestamp = 1_700_000_000_000;
+            a
+        };
+        let set = [
+            alert("web01", "disk"),
+            alert("web02", "disk"),
+            alert("web01", "cpu"),
+        ];
+
+        for (i, a) in set.iter().enumerate() {
+            for (j, b) in set.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert_ne!(
+                    AlertsState::external_order(a, b),
+                    std::cmp::Ordering::Equal,
+                    "{}/{} and {}/{} compare Equal — their order is then \
+                     whatever the HashMap happened to iterate, and it changes \
+                     between renders",
+                    a.source,
+                    a.rule,
+                    b.source,
+                    b.rule,
+                );
+                // Antisymmetric, or "worst first" is not an order at all.
+                assert_eq!(
+                    AlertsState::external_order(a, b).reverse(),
+                    AlertsState::external_order(b, a),
+                );
+            }
+        }
+
+        // And severity still decides first — the tiebreak must not have
+        // become the sort.
+        let mut worse = alert("zzz", "zzz");
+        worse.severity = zensight_common::AlertSeverity::Critical;
+        let mut better = alert("aaa", "aaa");
+        better.severity = zensight_common::AlertSeverity::Warning;
+        assert_eq!(
+            AlertsState::external_order(&worse, &better),
+            std::cmp::Ordering::Less,
+            "critical sorts above warning, whatever the keys say"
+        );
+    }
 
     /// #558: the alert context block surfaces known label groups in a stable
     /// order and is empty for an alert with no known labels.
