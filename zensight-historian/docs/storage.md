@@ -21,6 +21,55 @@ hour.
 Retention runs every `prune_interval_secs`, walking `(metric, tier)` by
 `(metric, tier)` and extracting each one's aged range — not scanning the file.
 
+## Falling behind must not take the session down with it (#1211)
+
+**The ingest subscriber is on a ring, not on zenoh's default FIFO.** That is
+the single most important line in `ingest.rs`, and it is in
+`zensight-common/src/subscribe.rs`. Zenoh's own documentation explains why:
+pushing to a full `FifoChannel` *blocks the zenoh thread doing the pushing*,
+and that thread is the session's, not this consumer's.
+
+So a historian that falls behind does not merely lag. It stops its own session
+answering anything. Observed, with two producers on the bus and a contended
+box:
+
+- `range`, `series`, `stats`, **`introspect` and `describe`** all answering
+  `Timeout` — including the two that read no state at all;
+- a sibling sensor's `@rpc` answering instantly through the same hub, so it was
+  this session and not the routing;
+- the process at **0.2% CPU** with every thread parked, `app-0` idle in
+  `epoll_wait` and the `rx-*` threads on a futex — a blocked channel push, not
+  a busy process;
+- publishers logging `Unable to push non droppable network message` at it, so
+  a wedged consumer back-pressures the producers too;
+- and SIGTERM ignored, because the watcher that turns the signal into a
+  shutdown is another task on the stalled session.
+
+A ring drops the oldest sample when it is full. For telemetry that is the right
+degradation: a sample is restated on the next interval, and this crate has a
+whole shedding ladder for exactly this pressure. **Losing the oldest sample of
+a burst is a smaller failure than losing the bus.** The events and
+alert-transition subscribers keep the FIFO — an event is a rare, deliberate
+statement that nothing restates, and its volume cannot fill a channel the way
+telemetry can.
+
+The burst that matters is the first one: `detect_late_publishers` asks every
+producer for its whole history at once, which is exactly when someone is
+watching the process start.
+
+### Two things on the same path, fixed with it
+
+The three subscriber loops now **yield** after each sample. Zenoh's channel
+handlers are flume channels, outside tokio's cooperative budget, and
+`tokio::select!` adds no yield of its own — it returns the moment a branch is
+ready. Without it, a task with a backlog owns its worker until the backlog is
+gone, which is the reason a backlog drains as slowly as it possibly can.
+
+And `MetricStore::pending_sample_count()` is a maintained counter rather than a
+walk of the series map. `record_point` asks it on every ingested point,
+**inside** the store mutex that every query handler also takes, so an
+O(series) answer put a per-point cost on the path already under pressure.
+
 ## Acceptance numbers (#911)
 
 These are the numbers the reference fleet — a Proxmox host and six 1–2 GB VMs —

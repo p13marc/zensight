@@ -102,12 +102,7 @@ tmp=""
 pids=()
 cleanup() {
     local rc=$?
-    for pid in "${pids[@]:-}"; do
-        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
-    done
-    for pid in "${pids[@]:-}"; do
-        [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
-    done
+    stop_children "${pids[@]:-}"   # bounded; see scripts/lib/verify.sh (#1211)
     # Keep the evidence when a failure pointed at it (#790): every failure
     # message ends with "logs: $tmp/…", and deleting the directory on the way
     # out made that line a lie.

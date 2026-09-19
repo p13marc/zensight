@@ -1857,6 +1857,9 @@ pub struct MetricStore {
     /// Event records buffered for the next flush to the cold store (#578).
     event_pending: Vec<zensight_common::EventRecord>,
     timeline_pending: Vec<crate::timeline::TimelineRow>,
+    /// Samples buffered across every series, maintained rather than counted
+    /// (#1211). See [`pending_sample_count`](Self::pending_sample_count).
+    pending_samples: usize,
 }
 
 impl MetricStore {
@@ -1891,6 +1894,7 @@ impl MetricStore {
             log_retention: LogRetention::new(LOG_SAMPLE_EVERY),
             event_pending: Vec::new(),
             timeline_pending: Vec::new(),
+            pending_samples: 0,
         }
     }
 
@@ -1999,6 +2003,7 @@ impl MetricStore {
         // launch's, slow leak.
         if self.persistent.is_some() {
             series.pending.push(sample);
+            self.pending_samples += 1;
             if self.interner.len() > before {
                 self.unsaved_paths.push((key, id.0, meta));
             }
@@ -2008,7 +2013,7 @@ impl MetricStore {
 
     /// Whether there are pending samples awaiting flush.
     pub fn has_pending(&self) -> bool {
-        self.series.values().any(|s| !s.pending.is_empty())
+        self.pending_samples > 0
     }
 
     /// Samples buffered across every series, awaiting the next flush.
@@ -2018,8 +2023,20 @@ impl MetricStore {
     /// question the knob asks — `pending` is per-series and private, so the
     /// flush loop had only its own tick to go on and the buffer grew for the
     /// whole window under an ingest burst (#1066).
+    ///
+    /// **A counter, not a walk** (#1211). The historian asks this question on
+    /// EVERY ingested point, while holding the store's mutex — the same mutex
+    /// every `@rpc` handler takes to answer a query. Summing `pending.len()`
+    /// over the series map made `record`, whose own contract one screen up is
+    /// "O(1), safe to call inline on the UI thread", O(series) at the caller
+    /// that matters most, and put that cost inside the lock.
+    ///
+    /// The counter is maintained in exactly two places — the push in `record`
+    /// and the drain in [`take_flush_batch`](Self::take_flush_batch) — which
+    /// are also the only two places `series.pending` is touched.
+    /// `pending_count_agrees_with_a_full_walk` holds them to it.
     pub fn pending_sample_count(&self) -> usize {
-        self.series.values().map(|s| s.pending.len()).sum()
+        self.pending_samples
     }
 
     /// Drain pending samples and build a persist batch across all tiers,
@@ -2040,6 +2057,11 @@ impl MetricStore {
                 }
             }
         }
+        // Every series' pending buffer was drained above, whatever the
+        // downsample made of it — so the counter goes to zero here and not in
+        // the `rows.is_empty()` arm, which would leave it claiming samples
+        // that no longer exist.
+        self.pending_samples = 0;
         if rows.is_empty() {
             return None;
         }
@@ -2849,6 +2871,75 @@ mod tests {
         // Drained.
         assert!(ms.take_log_flush_batch().is_none());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// **#1211.** The count is maintained, not walked, so the only thing that
+    /// can go wrong is the two of them disagreeing. Every path that touches
+    /// `series.pending` is exercised: a fresh series, an existing one, a
+    /// sample too old to be appended (`Dropped` — buffered by nobody), an
+    /// out-of-order one (`Reordered` — buffered), a non-numeric value, and the
+    /// drain.
+    #[test]
+    fn pending_count_agrees_with_a_full_walk() {
+        let path = temp_db_path("pending-count");
+        let persistent = PersistentStore::open(&path).expect("open");
+        let mut store = MetricStore::new(4, Some(persistent));
+
+        let walk =
+            |st: &MetricStore| -> usize { st.series.values().map(|s| s.pending.len()).sum() };
+
+        assert_eq!(store.pending_sample_count(), walk(&store));
+        assert!(!store.has_pending());
+
+        // Two series, in order.
+        for i in 0..4i64 {
+            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 1_000));
+            store.record(ORIGIN, "mem", &point("mem", i as f64, i * 1_000));
+        }
+        assert_eq!(store.pending_sample_count(), walk(&store));
+        assert_eq!(store.pending_sample_count(), 8);
+        assert!(store.has_pending());
+
+        // Out of order, and old enough to fall out of a 4-deep ring.
+        store.record(ORIGIN, "cpu", &point("cpu", 9.0, 1_500));
+        store.record(ORIGIN, "cpu", &point("cpu", 9.0, -100_000));
+        assert_eq!(
+            store.pending_sample_count(),
+            walk(&store),
+            "a reordered or dropped push must not desynchronise the counter"
+        );
+
+        // A text value is not a series at all.
+        let mut text = point("cpu", 0.0, 5_000);
+        text.value = TelemetryValue::Text("hello".into());
+        store.record(ORIGIN, "cpu", &text);
+        assert_eq!(store.pending_sample_count(), walk(&store));
+
+        // The drain zeroes it.
+        let _ = store.take_flush_batch().expect("batch");
+        assert_eq!(store.pending_sample_count(), 0);
+        assert_eq!(store.pending_sample_count(), walk(&store));
+        assert!(!store.has_pending());
+
+        // And it climbs again from zero.
+        store.record(ORIGIN, "cpu", &point("cpu", 1.0, 500_000));
+        assert_eq!(store.pending_sample_count(), walk(&store));
+        assert_eq!(store.pending_sample_count(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// With no redb handle nothing is buffered, so the counter must stay at
+    /// zero however much is recorded — the #1066 leak, from the other side.
+    #[test]
+    fn nothing_is_pending_without_a_persistent_store() {
+        let mut store = MetricStore::new(10, None);
+        for i in 0..50i64 {
+            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 1_000));
+        }
+        assert_eq!(store.pending_sample_count(), 0);
+        assert!(!store.has_pending());
+        assert!(store.take_flush_batch().is_none());
     }
 
     #[test]
