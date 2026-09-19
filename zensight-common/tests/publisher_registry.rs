@@ -44,11 +44,39 @@ async fn declares_once_per_key_and_reuses() {
     assert_eq!(registry.len().await, 2);
 
     // Delete on an already-declared key reuses its publisher (no growth).
+    //
+    // With the class it was DECLARED under (#1155). This used to pass
+    // `QosClass::Alert` — a different class from the `Telemetry` the key was
+    // declared with — to make the point that the cache is keyed on the key
+    // alone. That is still true, and it is exactly the thing that made the
+    // mismatch invisible: the publisher is reused, so the delete silently went
+    // out under Telemetry's BestEffort/Drop rather than Alert's
+    // Reliable/Block. The rule is now one class per key, and the case below
+    // pins what happens when a caller breaks it.
     registry
-        .delete("pubreg-test/a", QosClass::Alert)
+        .delete("pubreg-test/a", QosClass::Telemetry)
         .await
         .unwrap();
     assert_eq!(registry.len().await, 2);
+}
+
+/// #1155: the delete path goes through `ensure` too, so a second class is
+/// caught there as well as on `put`.
+///
+/// This is the case the test above used to perform silently. A tombstone sent
+/// under the wrong class is the worst version of the bug — an alert's resolve
+/// riding BestEffort/Drop means the alert can stay firing forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[should_panic(expected = "one key, one class")]
+async fn deleting_under_a_second_class_is_caught() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let registry = PublisherRegistry::new(session);
+
+    registry
+        .put("pubreg-mismatch/a", b"one".to_vec(), QosClass::Telemetry)
+        .await
+        .unwrap();
+    let _ = registry.delete("pubreg-mismatch/a", QosClass::Alert).await;
 }
 
 /// #811: every baseline put is counted (messages and payload bytes) into the
