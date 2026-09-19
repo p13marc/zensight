@@ -582,6 +582,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gui,store: the hot store grew without bound and reserved 57 KB per series
+  before the second sample** (#1115). `MetricStore.series` had **no eviction at
+  all**, and each series eagerly allocated `VecDeque::with_capacity(3600)`.
+
+  The GUI subscribes `v1/*/telemetry/**` by default and on a 50-host fleet
+  reaches 10–15 k series — sysinfo per CPU, per mount, per interface; systemd
+  per unit; container, probe and pve with churning `{name}`/`{target}`/`{vmid}`
+  chunks. So **the reserve alone was 600–860 MB**, most of it for rings holding
+  a handful of samples, and none of it ever returned.
+
+  Three mechanisms, and only the last is a backstop:
+
+  - **a ring allocates what it holds.** `VecDeque` grows geometrically, so a
+    full ring still ends up with one allocation of the right size; what is gone
+    is paying for 3 600 slots before the second sample arrives.
+  - **eviction, in two shapes.** The GUI's `evict_stale_devices` reaped
+    `DeviceState` and returned a *count*, so nothing could tell the store what
+    to drop and its copy stayed for the life of the process; it returns the
+    devices now and the store drops their series with them. Beside it,
+    `evict_idle_series` reaps a series whose device is still very much alive —
+    a container that ran for an hour, a probe target removed from the config, a
+    guest destroyed. 24 h for a device, because a known-down host's card should
+    stay visible; **2 h for a series**, which has no card, and which is longer
+    than any chart window the GUI offers so nothing is reaped out from under
+    something on screen.
+  - **`MAX_HOT_SERIES` (40 000)**, a ceiling for a label explosion. A new
+    series past it is refused and **counted** — `refused_series()` is a counter
+    rather than a flag because the rate is the diagnosis, and a store that
+    quietly stopped recording would be indistinguishable from a fleet that went
+    quiet. Series already held keep recording, so a store at its ceiling still
+    serves the chart somebody is looking at.
+
+  **A series with unflushed samples is never evicted**, whatever its age:
+  dropping it would discard history the flush is about to write, which is a
+  different and worse bug than the one this fixes.
+
+  Interner ids are not reused. They are dense ordinals that name rows in the
+  samples table, so reusing one would silently re-label somebody else's
+  history; the hole costs 24 bytes. `live_len()` is what is currently named and
+  `len()` is the id space, and the two diverge by design.
+
+  The issue's acceptance criterion — *"a test recording 1 000 series that go
+  idle asserts memory returns"* — is `a_thousand_idle_series_are_reaped`. Four
+  of the five new store tests fail with the mechanisms reverted.
+
 - **`decode_auto` turned a JSON scalar into a different number, and the write
   half of `<topic>/set` read JSON only** (#1148). Two halves of one thing: the
   sniff was doing a job the wire already answered.

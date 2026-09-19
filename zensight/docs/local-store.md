@@ -37,6 +37,48 @@ is the right trade for a cache whose contents a fleet service also holds — and
 the store is never fatal: if the file cannot be opened at all, the GUI keeps
 the hot rings and says so in the log.
 
+## What bounds the hot rings (#1115)
+
+Three mechanisms, and only one of them is the backstop.
+
+| | |
+|---|---|
+| **Lazy allocation** | a ring allocates what it holds, not its capacity. It used to reserve 3 600 × 16 B the moment a metric was first seen |
+| **Eviction** | a device reaped from the dashboard takes its series with it, and a series idle for `SERIES_IDLE_TTL_MS` (2 h) is dropped on its own |
+| **`MAX_HOT_SERIES`** | 40 000, a hard ceiling. New series past it are **refused and counted**, never silently dropped |
+
+The numbers matter. The GUI subscribes `v1/*/telemetry/**` by default and on a
+50-host fleet reaches 10–15 k series — sysinfo per CPU, per mount, per
+interface; systemd per unit; container, probe and pve with churning
+`{name}`/`{target}`/`{vmid}` chunks. At 3 600 pre-allocated slots each, the
+**reserve alone was 600–860 MB**, most of it for rings holding a handful of
+samples.
+
+The two evictions answer different questions and both are needed. A *device*
+eviction reaps a host that went away for good; it runs at 24 h, because a
+known-down host's card should stay visible. A *series* eviction reaps a series
+whose device is still very much alive — a container that ran for an hour, a
+probe target removed from the config, a guest destroyed. It runs at 2 h:
+longer than any chart window the GUI offers, so nothing is reaped out from
+under something on screen, and short enough that a day of churn does not
+accumulate.
+
+**A series with unflushed samples is never evicted**, whatever its age.
+Dropping it would discard history the flush is about to write — a different and
+worse bug than the one this fixes. It goes on the next sweep, after the flush.
+
+`MAX_HOT_SERIES` is a backstop for a label explosion, not the mechanism. It is
+roughly three times what a 50-host fleet reaches, so a deployment that is
+merely large never meets it; one that does has something wrong upstream, and
+`MetricStore::refused_series()` is a **counter** rather than a flag because the
+rate is the diagnosis — one over the cap and four hundred a minute are
+different problems.
+
+Interner ids are **not reused** when a series is evicted. They are dense
+ordinals that name rows in the samples table, and reusing one would silently
+re-label somebody else's history; the hole costs 24 bytes. `live_len()` is what
+is currently named, `len()` is the id space, and the two diverge by design.
+
 ## Where the GUI reads it
 
 | Surface | Reads |

@@ -649,6 +649,65 @@ impl MetricInterner {
         id
     }
 
+    /// Forget every id belonging to `device`, returning them (#1115).
+    ///
+    /// The **path→id map and the by-device index** are cleared; `paths` and
+    /// `meta` keep their slot, holding an empty string. That is not
+    /// untidiness — ids are dense ordinals that name rows in the samples
+    /// table, and reusing one would silently re-label somebody else's history.
+    /// A hole costs 24 bytes; a reused id costs correctness.
+    ///
+    /// The caller drops the corresponding hot rings, which is where the memory
+    /// actually is.
+    pub fn forget_device(&mut self, device: &str) -> Vec<MetricId> {
+        let Some(ids) = self.by_device.remove(device) else {
+            return Vec::new();
+        };
+        for &id in &ids {
+            if let Some(path) = self.paths.get_mut(id.0 as usize) {
+                self.ids.remove(path.as_str());
+                path.clear();
+            }
+            if let Some(m) = self.meta.get_mut(id.0 as usize) {
+                *m = None;
+            }
+        }
+        ids
+    }
+
+    /// Forget one id, by the same rules as [`forget_device`](Self::forget_device).
+    pub fn forget(&mut self, id: MetricId) {
+        if self.paths.get(id.0 as usize).is_none_or(String::is_empty) {
+            return;
+        }
+        // Read the device key before the path is cleared — it is derived from
+        // the path.
+        let device = self.device_key(id);
+        let path = &mut self.paths[id.0 as usize];
+        self.ids.remove(path.as_str());
+        path.clear();
+        if let Some(m) = self.meta.get_mut(id.0 as usize) {
+            *m = None;
+        }
+        if let Some(d) = device
+            && let Some(ids) = self.by_device.get_mut(&d)
+        {
+            ids.retain(|&i| i != id);
+            if ids.is_empty() {
+                self.by_device.remove(&d);
+            }
+        }
+    }
+
+    /// How many paths are currently named — holes from
+    /// [`forget_device`](Self::forget_device) excluded.
+    ///
+    /// Distinct from [`len`](Self::len), which is the id space and never
+    /// shrinks because ids name rows on disk.
+    pub fn live_len(&self) -> usize {
+        self.ids.len()
+    }
+
     /// Ids + display metric names for a device, where `device` is
     /// `"<producer>/<origin>/<source>"` (see [`device_prefix`]).
     /// O(metrics-for-that-device) via the `by_device` index —
@@ -766,10 +825,24 @@ pub struct RingBuffer {
 impl RingBuffer {
     /// Create a ring with the given fixed capacity (minimum 1), unbounded in
     /// time.
+    ///
+    /// **The backing buffer is not pre-allocated** (#1115). It used to be
+    /// `VecDeque::with_capacity(capacity)`, and the GUI's capacity is 3 600
+    /// samples — 57 KB reserved the moment a metric is first seen, whether it
+    /// ever receives a second sample or not. On a 50-host fleet the GUI
+    /// subscribes `v1/*/telemetry/**` and reaches 10–15 k series (sysinfo per
+    /// CPU, per mount, per interface; systemd per unit; container, probe and
+    /// pve with churning `{name}`/`{target}`/`{vmid}` chunks), so the reserve
+    /// alone was **600–860 MB** — most of it for rings holding a handful of
+    /// samples each.
+    ///
+    /// `VecDeque` grows geometrically, so a full ring still ends up with one
+    /// allocation of the right size; what is gone is paying for 3 600 slots
+    /// before the second sample arrives.
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
         Self {
-            buf: VecDeque::with_capacity(capacity),
+            buf: VecDeque::new(),
             capacity,
             window_ms: None,
         }
@@ -1860,6 +1933,21 @@ pub struct MetricStore {
     /// Samples buffered across every series, maintained rather than counted
     /// (#1211). See [`pending_sample_count`](Self::pending_sample_count).
     pending_samples: usize,
+    /// Hard ceiling on live series, or `None` for unbounded (#1115).
+    ///
+    /// A backstop, not the mechanism: eviction is what keeps the number down
+    /// in ordinary operation. This is what stops a label explosion from
+    /// filling memory faster than any sweep can reap it — the 2026-08-17
+    /// sequence `docs/ops/SIZING.md` is written about, one layer up.
+    max_series: Option<usize>,
+    /// New series refused because [`max_series`](Self::max_series) was
+    /// reached. **Counted, never silent** — a consumer publishes it as a
+    /// `cardinality-budget` finding, and a store that quietly stopped
+    /// recording would be indistinguishable from a fleet that went quiet.
+    refused_series: u64,
+    /// Whether the last `record` was at the cap, so the warning is logged once
+    /// per transition rather than once per sample (the #880 lesson).
+    at_cap: bool,
 }
 
 impl MetricStore {
@@ -1895,6 +1983,9 @@ impl MetricStore {
             event_pending: Vec::new(),
             timeline_pending: Vec::new(),
             pending_samples: 0,
+            max_series: None,
+            refused_series: 0,
+            at_cap: false,
         }
     }
 
@@ -1975,6 +2066,30 @@ impl MetricStore {
             return Pushed::Dropped;
         };
         let key = Self::metric_key(origin, subject, point);
+        // The cap applies to a *new* series only (#1115): one already held
+        // keeps recording, so a store at its ceiling still serves the chart
+        // somebody is looking at.
+        if let Some(max) = self.max_series
+            && self.series.len() >= max
+            && self
+                .interner
+                .get(&key)
+                .is_none_or(|id| !self.series.contains_key(&id))
+        {
+            self.refused_series += 1;
+            if !self.at_cap {
+                self.at_cap = true;
+                tracing::warn!(
+                    max,
+                    held = self.series.len(),
+                    "store: series cap reached — new series are refused and counted until \
+                     eviction frees a slot. This is a backstop; if it is firing, something \
+                     is minting labels"
+                );
+            }
+            return Pushed::Dropped;
+        }
+        self.at_cap = false;
         let before = self.interner.len();
         let meta = MetricMeta {
             kind: value.kind(),
@@ -2009,6 +2124,103 @@ impl MetricStore {
             }
         }
         pushed
+    }
+
+    /// Drop every hot ring belonging to `device`, and forget its ids (#1115).
+    ///
+    /// The GUI's `evict_stale_devices` reaped `DeviceState` and **left the
+    /// store's copy**, so a host that went away for good kept its rings for
+    /// the life of the process. Ephemeral chunks make that worse than it
+    /// sounds: a `{name}` that is a container id, a `{target}` that is a
+    /// one-off probe, a `{vmid}` that was destroyed — they add for days and
+    /// never leave.
+    ///
+    /// **A series with unflushed samples is kept**, whatever its age. Dropping
+    /// it would discard history the flush is about to write, which is a
+    /// different and worse bug than the one this fixes. It goes on the next
+    /// sweep, after the flush.
+    ///
+    /// Returns how many series were dropped.
+    pub fn evict_device(&mut self, device: &str) -> usize {
+        let ids = self.interner.forget_device(device);
+        let mut dropped = 0;
+        for id in ids {
+            match self.series.get(&id) {
+                Some(s) if !s.pending.is_empty() => {
+                    // Unflushed. Put the id back so the path still resolves
+                    // for the flush that is about to write it.
+                    continue;
+                }
+                Some(_) => {
+                    self.series.remove(&id);
+                    dropped += 1;
+                }
+                None => {}
+            }
+        }
+        dropped
+    }
+
+    /// Drop hot rings whose newest sample is older than `ttl_ms` (#1115).
+    ///
+    /// The per-series counterpart to [`evict_device`](Self::evict_device), for
+    /// the case a device eviction cannot reach: a host that is still very much
+    /// alive, publishing a *different* set of series than it was yesterday.
+    /// One container that ran for an hour, one probe target removed from the
+    /// config, one guest destroyed — the device stays, and its dead series sit
+    /// in the map forever.
+    ///
+    /// Measured against the newest **sample**, not the wall clock of the
+    /// store, so a test does not have to own the clock — the same rule
+    /// `RingBuffer`'s time window follows.
+    ///
+    /// As in `evict_device`, a series with unflushed samples is kept.
+    pub fn evict_idle_series(&mut self, now_ms: i64, ttl_ms: i64) -> usize {
+        let stale: Vec<MetricId> = self
+            .series
+            .iter()
+            .filter(|(_, s)| s.pending.is_empty())
+            .filter(|(_, s)| {
+                s.hot
+                    .newest()
+                    .map(|sample| sample.ts)
+                    // A ring with no samples at all is stale by definition —
+                    // it is an id that was interned and never fed.
+                    .is_none_or(|ts| now_ms.saturating_sub(ts) > ttl_ms)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &stale {
+            self.series.remove(id);
+            self.interner.forget(*id);
+        }
+        stale.len()
+    }
+
+    /// How many hot series are held. The number #1115 is about.
+    pub fn series_count(&self) -> usize {
+        self.series.len()
+    }
+
+    /// Cap the number of live series, or `None` for unbounded (#1115).
+    ///
+    /// Past the cap a **new** series is refused and counted; the ones already
+    /// held keep recording. First-come is deliberate here in a way it was not
+    /// in #1145: there is no producer to be fair between — the store is one
+    /// process's own memory — and refusing the newest arrival is what keeps
+    /// the series an operator is currently watching alive.
+    pub fn set_max_series(&mut self, max: Option<usize>) {
+        self.max_series = max;
+    }
+
+    /// New series refused because the cap was reached.
+    ///
+    /// A consumer publishes this as a `cardinality-budget` finding. It is a
+    /// **counter**, not a flag, because the rate is the diagnosis: a store
+    /// sitting one over its cap and a store refusing four hundred a minute are
+    /// different problems.
+    pub fn refused_series(&self) -> u64 {
+        self.refused_series
     }
 
     /// Whether there are pending samples awaiting flush.
@@ -2328,6 +2540,149 @@ mod tests {
             labels: Map::new(),
             unit: None,
         }
+    }
+
+    // ── #1115: the hot store is bounded, and a ring costs what it holds ────
+
+    /// **A ring does not reserve its capacity before it has samples.**
+    ///
+    /// The GUI's capacity is 3 600 × 16 B, reserved the moment a metric is
+    /// first seen — whether it ever receives a second sample or not. On a
+    /// 50-host fleet that is 10–15 k series and 600–860 MB of reserve, most of
+    /// it for rings holding a handful of samples.
+    #[test]
+    fn a_ring_costs_what_it_holds_not_what_it_could_hold() {
+        let mut r = RingBuffer::new(3_600);
+        assert_eq!(r.buf.capacity(), 0, "nothing is reserved before a sample");
+        r.push(Sample { ts: 1, value: 1.0 });
+        assert!(
+            r.buf.capacity() < 64,
+            "one sample must not reserve 3 600 slots: {}",
+            r.buf.capacity()
+        );
+        // And the cap still holds.
+        for i in 0..5_000 {
+            r.push(Sample {
+                ts: i as i64 + 2,
+                value: 1.0,
+            });
+        }
+        assert_eq!(r.len(), 3_600, "capacity is still the bound");
+    }
+
+    /// **A thousand series that go idle give their memory back.**
+    ///
+    /// The issue's acceptance criterion. `MetricStore.series` had no eviction
+    /// at all: the GUI's `evict_stale_devices` reaped `DeviceState` and left
+    /// the store's copy, and ephemeral `{name}`/`{target}`/`{vmid}` chunks add
+    /// for days and never leave.
+    #[test]
+    fn a_thousand_idle_series_are_reaped() {
+        let mut store = MetricStore::new(3_600, None);
+        for i in 0..1_000 {
+            store.record(ORIGIN, &format!("ephemeral{i}"), &point("m", 1.0, 1_000));
+        }
+        assert_eq!(store.series_count(), 1_000);
+
+        // Nothing is idle yet at the sample's own timestamp.
+        assert_eq!(store.evict_idle_series(1_000, 60_000), 0);
+
+        // An hour later, every one of them is.
+        let dropped = store.evict_idle_series(1_000 + 3_600_000, 60_000);
+        assert_eq!(dropped, 1_000, "every idle series goes");
+        assert_eq!(store.series_count(), 0);
+        assert_eq!(
+            store.interner.live_len(),
+            0,
+            "and the interner stops naming them — it was unbounded too"
+        );
+    }
+
+    /// A series still publishing is **not** idle, in the same sweep that reaps
+    /// its neighbours.
+    #[test]
+    fn a_live_series_survives_the_sweep_that_reaps_its_neighbours() {
+        let mut store = MetricStore::new(3_600, None);
+        for i in 0..10 {
+            store.record(ORIGIN, &format!("old{i}"), &point("m", 1.0, 1_000));
+        }
+        store.record(ORIGIN, "live", &point("m", 1.0, 3_600_000));
+
+        let dropped = store.evict_idle_series(3_600_000, 60_000);
+        assert_eq!(dropped, 10, "the ten stale ones");
+        assert_eq!(store.series_count(), 1);
+        let live = store.interner.get(&series("live")).expect("still named");
+        assert_eq!(
+            store.hot_samples_by_id(live).len(),
+            1,
+            "the live series is untouched"
+        );
+    }
+
+    /// Evicting a **device** takes its series with it — the half
+    /// `evict_stale_devices` could not do, because it returned a count.
+    #[test]
+    fn evicting_a_device_drops_its_series() {
+        let mut store = MetricStore::new(3_600, None);
+        let mut other = point("m", 1.0, 1_000);
+        other.source = "dev2".to_string();
+        for i in 0..5 {
+            store.record(ORIGIN, &format!("a{i}"), &point("m", 1.0, 1_000));
+            store.record(ORIGIN, &format!("b{i}"), &other);
+        }
+        assert_eq!(store.series_count(), 10);
+
+        let dropped = store.evict_device(&device_prefix("sysinfo", ORIGIN, "dev1"));
+        assert_eq!(dropped, 5, "only that device's series");
+        assert_eq!(store.series_count(), 5);
+        let kept = store
+            .interner
+            .get(&series_path(ORIGIN, "sysinfo", "b0"))
+            .expect("still named");
+        assert_eq!(
+            store.hot_samples_by_id(kept).len(),
+            1,
+            "the other device is untouched"
+        );
+    }
+
+    /// The cap refuses a **new** series and counts it; the ones already held
+    /// keep recording, so a store at its ceiling still serves the chart
+    /// somebody is looking at.
+    #[test]
+    fn the_series_cap_refuses_the_new_and_never_silently() {
+        let mut store = MetricStore::new(3_600, None);
+        store.set_max_series(Some(3));
+        for i in 0..3 {
+            assert_ne!(
+                store.record(ORIGIN, &format!("s{i}"), &point("m", 1.0, 1_000)),
+                Pushed::Dropped
+            );
+        }
+        assert_eq!(store.series_count(), 3);
+        assert_eq!(store.refused_series(), 0);
+
+        assert_eq!(
+            store.record(ORIGIN, "s3", &point("m", 1.0, 1_000)),
+            Pushed::Dropped,
+            "a new series past the cap is refused"
+        );
+        assert_eq!(store.refused_series(), 1, "and counted, never silent");
+        assert_eq!(store.series_count(), 3);
+
+        // An existing series keeps recording.
+        assert_eq!(
+            store.record(ORIGIN, "s0", &point("m", 2.0, 2_000)),
+            Pushed::Appended
+        );
+
+        // And eviction frees a slot, which is the mechanism the cap backstops.
+        store.evict_idle_series(3_600_000, 60_000);
+        assert_eq!(
+            store.record(ORIGIN, "s3", &point("m", 1.0, 3_600_000)),
+            Pushed::Appended,
+            "a freed slot is usable"
+        );
     }
 
     #[test]
