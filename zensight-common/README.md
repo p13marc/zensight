@@ -63,7 +63,7 @@ cargo test -p zensight-common
 - [Registry honesty](docs/registry-honesty.md) — the four checks that keep `introspect` truthful,
   and what none of them covers.
 - [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) — the deployed keyspace profile
-  (normative spec: [`../docs/rfcs/keyspace-v2/`](../docs/rfcs/keyspace-v2/00-index.md)).
+  (normative spec: [`../docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md)).
 
 ## License
 

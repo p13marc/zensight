@@ -39,6 +39,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The repo-level docs rows of the 2026-09-06 review, and a guard for the
+  largest class** (#1158). Every one of these is a sentence a reader would act
+  on and be wrong.
+
+  **19 broken relative links**, and they had one shape between them: something
+  moved and the links did not. Eight pointed into `docs/rfcs/keyspace-v2/` and
+  `rfcs/keyspace-v2/`, which left for the zenkey repo with the RFC extraction;
+  two at `zensight-keyspace/registry/`, which is now
+  `zensight-common/registry/`; one at a file that moved into `docs/design/` and
+  was lowercased on the way. New `scripts/check-doc-links.sh`, in `ci.yml`'s
+  `lint` job, resolves all 471 relative links with no network — an
+  external-URL checker is a gate that fails when someone else's site is down.
+
+  **`RELEASING.md`'s counts were all wrong**: 25 crates / 27 manifests / 18
+  binaries / 19 images, against 31 / 31 / 20 / 21. bmc and `zensight-desired`
+  were missing from both artifact lists. The file now says how to re-derive
+  them, because they are countable and this is the second time they have
+  rotted.
+
+  **`docs/ARCHITECTURE.md` never mentioned bmc, pve, container or probe** —
+  both mermaid rosters stopped at parallax, and the source-tree block omitted
+  store, historian, desired, conformance, btf and rerun. **`docs/README.md`**'s
+  per-crate index omitted `zensight/docs/media-receiver.md`, three of the logs
+  sensor's six pages, and btf and rerun entirely; its `just run` line named
+  four sensors for six.
+
+- **The release pipeline can no longer roll the fleet back, and waits for CI**
+  (#1095).
+
+  **`:latest` only moves for the newest release.** The `workflow_dispatch`
+  input is "existing bare-semver tag to re-release" and nothing checked it was
+  the newest, so re-releasing 0.11.0 after 0.13.0 silently rolled all 21
+  images' `:latest` back — for every quadlet in `packaging/`, all of which pull
+  `:latest`. The newest tag is read from the **API**, not from the job's
+  `--depth 1 --branch <tag>` clone, which fetches that tag and no other and
+  would therefore always answer "yes"; and an unreadable tag list leaves
+  `:latest` alone rather than guessing, because a stale `:latest` is fixed by
+  the next release and a backwards one is what this prevents.
+
+  **Nothing is published until CI has passed on the release commit.** A new
+  `gate` job polls `/commits/<sha>/status` and every other job needs it.
+  `ci.yml` fires on the same tag but in a different concurrency group, and its
+  own header calls that run a *"parallel signal, not a gate"* — so images were
+  built, smoke-tested and pushed while the suite might still be running, or
+  red. It reads `RELEASE_SHA`, never `github.sha`, because a
+  `workflow_dispatch` executes on a branch ref while the thing being released
+  is a tag. It also waits for **as many statuses as `ci.yml` declares jobs**,
+  counted from that file rather than hardcoded: a status appears when its job
+  *starts*, and with one runner the combined state can read `success` over a
+  single finished job while five have not begun — which would be exactly the
+  false green the gate exists to prevent.
+
+  **Secrets are off every command line.** `buildah login -p` becomes
+  `--password-stdin`; the two `http://forgejo:$TOKEN@…` clone/push URLs become
+  a 0600 credential file (the raw one was interpolated into the rendered script
+  *and* written into `.git/config`); and the nine `curl -H "Authorization:
+  token …"` call sites read the header from a 0600 `curl --config` file. All of
+  those put the token in the runner's process table.
+
 - **demo-smoke's dashboard-drift guard covers the dashboard it was written
   for** (#1096). The guard deferred `zensight_netlink_`, and **all 18 metric
   names in `demo/prometheus/dashboards/zensight-network.json` start with it** —
@@ -410,6 +469,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it read as project config — beside a repo whose CI is Forgejo and which
   has no `.github/` at all. Git keeps both.
 
+### Added
+
+- **`listening` sees UDP** (#1138). `ListeningExpectation` gains `proto`
+  (`tcp` · `udp` · `both`, **`tcp` by default**) and `dual_stack`, and
+  `read_listeners` reads `/proc/net/{udp,udp6}` beside the TCP tables.
+
 ### Fixed
 
 - **Cardinality caps locked out the innocent** (#1145). At `max_series` both
@@ -475,6 +540,299 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no gRPC channel and no export timer.
 
   All four tests fail on the parent commit.
+
+- **exporter-prometheus: `zensight_alert` carried an unbounded free-text
+  `summary` label** (#1144). A summary typically embeds the measured value —
+  *"disk /var 91 % full"*, *"load 14.2 > 8.0"* — so every distinct wording
+  minted a TSDB series that lived for the retention period, multiplied by a
+  churning `acked`. The canonical Prometheus cardinality anti-pattern, on the
+  family that exists to be scraped by Alertmanager.
+
+  A single scrape could not show it, which is why it looked harmless: this
+  exporter's own store holds one alert at a time, and the TSDB is what
+  remembers. So the fix is asserted where the claim is actually made — the
+  series a given alert renders does not vary with its summary. Alertmanager
+  wants a summary as an *annotation* and gets it from the alert document;
+  `alert_key` identifies the series. `summary` stays in the reserved set so a
+  sensor's own structured label of that name cannot put the free text back.
+
+  Two siblings the issue bundled. `is_acked` builds its `AlertRef` from
+  `alert.protocol`'s `Display` while the correlator builds it from the key's
+  producer chunk; they are the same string today and **nothing said so**, so a
+  producer whose chunk diverged would have rendered `acked="false"` forever,
+  silently, for every alert it ever raised. One ref now goes through both
+  constructors for every protocol. And `# TYPE`, `# HELP` and the unit note
+  are taken from `series[0]` of a group that came out of a `HashMap` — so a
+  family whose series disagree emitted a TYPE that depended on hash order. The
+  group is sorted before anything is read from it.
+
+- **exporter-prometheus: a failed remote-write push lost its samples for
+  good** (#1143). `build_write_request_since` read the per-series watermark
+  and wrote it back **in the same closure**, while *building* the request —
+  before a byte had been sent. A push that then failed (connection refused, a
+  503 from an overloaded Mimir, an auth blip) had already marked every series
+  in it delivered, so the next tick skipped each one whose point timestamp had
+  not moved since. For a series slower than the push interval — sysinfo at
+  60 s against the 30 s default — that datapoint was gone permanently, while
+  `run`'s own doc promised "push failures are logged and retried on the next
+  tick". The tick retried. The samples did not.
+
+  Building is side-effect-free now: it returns a `PendingPush` carrying the
+  watermarks it *would* set, and `push_once` commits them after a 2xx and at
+  no other moment. Pruning the map to the collector's live series stays at
+  build time, because that is a fact about the collector rather than about
+  this push.
+
+  And a **bounded retry backlog**, because the watermark fix alone only
+  replays a series whose value has not moved: the collector keeps one value
+  per series, so a datapoint superseded during an outage exists nowhere else.
+  Up to `MAX_BACKLOG_SERIES` (20 000 — a few MB, about an hour of 30-second
+  pushes for a 1 000-series fleet) are held, oldest dropped first, and sent
+  ahead of the fresh ones so each series' samples stay in ascending timestamp
+  order. The merged request is deduplicated on `(labels, timestamp)`: when the
+  value has not moved, the collector's re-offer and the backlog's copy are the
+  same sample, and sending both is the duplicate #759 exists to avoid.
+
+  Both acceptance tests fail on the parent commit. A sink that 503s once and
+  then accepts receives **nothing at all** on the second push ("exactly one
+  delivery: left 0, right 1"), and a value that moved during the outage
+  arrives as `[0.9]` where `[0.5, 0.9]` is owed.
+
+- **netflow: the rollup map was unbounded** (#1139). NetFlow is UDP with no
+  handshake and the exporter name defaults to the datagram's source address,
+  so `Rollups::per_exporter` grew by one **permanent** aggregate per address
+  ever seen — a /16 sweep was 65 000 entries, a spoofing sender was unbounded
+  — and every one was re-published at three or more keys, every rollup period,
+  forever.
+
+  The parser map next door had been capped with an LRU and a comment
+  explaining exactly this since it was written. Evicting a parser did not
+  evict its aggregate, and the rollup is the more expensive of the two: a
+  parser comes back on the next template refresh, an aggregate nothing evicts
+  never leaves.
+
+  All three per-exporter maps now share **one** `MAX_EXPORTERS` and evict
+  least-recently-seen. The cap had been written down twice, as 256 and 512,
+  with the sampling registry's own comment claiming it matched "the parser
+  map's own cap". An evicted exporter's counters restart from zero if it comes
+  back, which a TSDB reads as a counter reset — recoverable, and a smaller lie
+  than an aggregate for an address that sent one spoofed datagram in March.
+
+  Without the eviction the acceptance test holds **769** exporters against a
+  cap of 256.
+
+- **hostspec: `forbid: true` on a UDP port was a false all-clear** (#1138).
+  `listening` parsed `/proc/net/tcp{,6}` only and the expectation had no
+  protocol field, so there was no way to say otherwise. `{port: 53}` for a
+  resolver or `{port: 514}` for a syslog receiver was a permanent false
+  *"nothing is listening"* — and `{port: 53, forbid: true}`, which is how an
+  operator writes *"this host must not expose an open resolver"*, reported
+  **clean** while the port was wide open. From the sensor whose entire purpose
+  is machine-checked assertions.
+
+  `proto` defaults to `tcp`, so every expectation written before this means
+  what it meant and matches what it matched; a `tcp` expectation is **not**
+  satisfied by a UDP listener on the same port, and `both` is satisfied by
+  either. Findings carry a `proto` label, and the summary reads `53/udp`.
+
+  `dual_stack` comes with it. The exact `0.0.0.0` / `::` comparison is
+  deliberate and stays the default — it is what lets each family be forbidden
+  alone — but *"not world-reachable"* is the commoner intent by far, and
+  writing it needed two expectations that had to be kept in step.
+
+  UDP has no listen state: the parser selects `st == 07` (`TCP_CLOSE`), which
+  is what an unconnected datagram socket reports and what `ss -ulnp` counts as
+  listening. `read_listeners` is `Unreadable` only when **no** table could be
+  read, so a kernel built without IPv6 is an absent table rather than a failed
+  observation.
+
+### Changed — BREAKING
+
+- **gnmi: `tls.skip_verify` is refused at startup** (#1137). It was documented
+  as "disables server-certificate validation — development only", shipped in
+  `configs/gnmi.json5`, and did **nothing**: the connect path logged a warning
+  and built the same TLS config. An operator set it, read the warning
+  confirming it was off, and watched the connection keep failing
+  `UnknownIssuer` while the backoff climbed to 300 s — with no per-target error
+  document, only the log line they had already dismissed.
+
+  A flag that cannot do what it says refuses loudly rather than sitting inert,
+  which is the call `bmc` already makes for `ipmi`, and the refusal names
+  `ca_cert`: a switch's own self-signed certificate works there, which is what
+  an operator reaching for `skip_verify` actually needs. With
+  `tls.enabled: false` there is nothing to verify, so the flag stays inert
+  rather than a lie and a config carrying it still starts.
+
+### Fixed
+
+- **gnmi: one awkward leaf name tore the subscription down** (#1137). Path
+  elements went into the key **unslugged** — the one remote sensor that did
+  not slug at that boundary. `Ethernet1/1/1`, an ordinary Arista interface
+  name, split the key into extra chunks and published that leaf at a different
+  subject depth from every other interface's; a `*`, `?` or `#` in a
+  description leaf made the key **illegal**, so `put_point` returned `Err` —
+  and that `Err` propagated out of `process_notification`, out of
+  `subscribe_loop`, into `run`'s error arm. A working subscription, torn down
+  and reconnected with backoff, because one leaf had an awkward name.
+
+  Slugged per **element**, before the join: the join is where the element
+  boundary is lost, and the boundary is exactly what a key needs. A failed
+  publish drops the **point** now, not the connection — the stream is the
+  expensive thing.
+
+  Two more on the same path. `notification.delete` tombstones the key; it was
+  ignored, so the last value a removed leaf ever had stayed on the bus forever
+  (a chart showing the optical power of a transceiver that is in someone's
+  pocket). And two targets may not share a `name`, as `bmc` and `probe`
+  already refuse — it is the key chunk *and* the `source` of every point, so a
+  duplicate publishes over the other with nothing on the bus to say which
+  device a reading came from.
+
+- **probe: an ICMP burst against a hostname reported 100 % loss forever**
+  (#1135). The burst path parsed an `IpAddr` and returned "this probe did not
+  answer" for anything else — and an ICMP burst target is a bare host **by
+  design**, since `validate()` only requires `host:port` for tcp. So
+  `{kind: "burst", transport: "icmp", target: "gw.example.net"}` published
+  `loss_pct: 100` every interval and a critical `probe-down` over a perfectly
+  healthy link, while the plain `icmp` check resolved names four hundred lines
+  away.
+
+  The target is resolved **once, before any packet**, and a name that does not
+  resolve fails the *check* with a sentence that says so rather than being
+  reported as loss. Resolving once is also what makes a burst one path: a
+  per-packet lookup — which is what `TcpStream::connect(host)` was doing — lets
+  a round-robin name spread a burst over several hosts and calls the result one
+  target's latency distribution. The tcp arm keeps the whole answer in order,
+  as `connect` would, so a dual-stack name whose first address is unreachable
+  still works.
+
+  The resolution is the bug and it needs no privilege, so it is tested
+  directly: `an_icmp_burst_resolves_its_name` and
+  `an_unresolvable_icmp_burst_is_a_check_error` both fail on the parent
+  commit, in a default build with the `icmp` feature off.
+
+- **probe: `follow_redirects` was documented, wire-carried and read nowhere**
+  (#1134). reqwest's redirect policy lives on the **client**; this flag lives
+  on the **target**. The poller built one shared client with
+  `Policy::limited(10)`, so every target followed — and a target written
+  `{follow_redirects: false, expect_status: [200]}` against an endpoint that
+  starts answering `302 → /login` followed it, got 200 from the login page and
+  reported **up**. The check written to catch exactly that reported green.
+
+  The client is built with `Policy::none()` now and `check::http` walks the
+  chain itself, which also fixes the two things that could not be fixed while
+  the policy lived on the client:
+
+  - `redirects` is the **chain**, in order, which is what the README has
+    always promised. It was "the final URL if it differs from the configured
+    string", so `https://example.com` reported a redirect to
+    `https://example.com/` every poll — a URL parser normalising, read as a
+    server redirecting.
+  - **Every hop** is host-checked, not only the last. A chain that leaves the
+    configured host and comes back has still left it.
+
+  Three siblings the issue bundled. The off-host comparison is
+  case-insensitive, so `Example.com` no longer reports a redirect against its
+  own answer. `Target::host()`'s `Http` arm trims IPv6 brackets and splits the
+  port safely — `rsplit_once(':')` cut `[::1]` at a colon *inside* the
+  address, so `https://[::1]:8443/` was a permanent
+  `probe-redirect-off-host`. And DNS `expect_addrs` is **any**, as both the
+  README and `docs/reference.md` say; it required *all*, which made a
+  round-robin name with two A records a permanent critical, since a resolver
+  hands back one.
+
+  Five of the six new tests fail on the parent commit, and the sixth is the
+  reason `http_client` is now a shared `pub fn`: the bug was one line in that
+  builder, so a test that constructed its own client would have proved nothing
+  about the sensor.
+
+- **modbus: a silent slave stopped its device forever, and nothing on the bus
+  said so** (#1133). `timeout_ms` applied to `tcp::connect_slave` and to
+  nothing else. The realistic shape of a dead PLC is not a refused connection
+  — the TCP handshake completes, because the kernel answers that, and then
+  nothing comes back — and `run()` awaits the poll, so the first read against
+  one stopped that device **permanently**. `alive` stayed declared throughout,
+  because the sensor's liveliness token is about the process and not about the
+  device.
+
+  Every read is bounded now, on TCP and RTU. `retries` is read — it was
+  documented in `docs/reference.md` and honoured by nothing — and means
+  retries, not attempts, so a cycle is bounded at `timeout_ms × (retries + 1)`
+  per register. A **timeout** is not retried on the same connection: the slave
+  accepted the socket and did not answer, and asking again down the same
+  half-open pipe buys another `timeout_ms` and the same silence. An error that
+  came back *as* an error is retried.
+
+  A cycle in which **no** register answered is a failed cycle rather than an
+  empty one — it used to return `Ok(0)`, indistinguishable from a device with
+  nothing configured — and it reaches the bus through the framework's
+  per-device liveness. `state/modbus/device/<device>/liveness` had been
+  advertised in this crate's reference since the crate existed with **no
+  publisher**: `grep liveness src/` came back empty.
+
+  Three more on the same path. The connection is **reused** across polls and
+  dropped after a failed cycle; one fresh TCP connection per poll with no
+  `disconnect()` is how a PLC runs out, since they cap concurrent connections
+  at four to eight. A register block over the **protocol's own ceiling** (125
+  registers for holding/input, 2 000 bits for coils/discrete) is refused at
+  startup, where a config error belongs — above it the read is not slow, it is
+  illegal, and a permissive stack truncates it into a short window published
+  under the configured names. And `serialization` is honoured: `main.rs`
+  hard-coded `Format::Json` while `configs/modbus.json5` has shipped
+  `serialization: "cbor"` all along, so the one knob the operator set was the
+  one thing this sensor ignored.
+
+  The acceptance test is the issue's: a fake slave that accepts and never
+  answers. On the parent commit it fails with *"the poll never returned — a
+  silent slave stops this device forever"*, after the full ten-second test
+  timeout.
+
+- **pve: a corosync blip paged for every guest in the cluster** (#1132).
+  **BREAKING for the `pve` keyspace**: a non-shared pool's `{store}` chunk is
+  `{node}-{name}` unconditionally, so a single-node deployment's
+  `storage/local-lvm` becomes `storage/pve-local-lvm`.
+
+  `/cluster/resources` on a node that has lost quorum **still answers**, and
+  reports the guests on the far side of the partition as `status: "unknown"` —
+  which `is_running()` reads as "not running". A ninety-second blip therefore
+  fired a **critical** `guest-not-running` for every VM in the cluster,
+  alongside `cluster-not-quorate`, and none of them had stopped. Quorum was
+  already fetched, already parsed and already in scope at the defect; only
+  `RULE_QUORUM` ever read it.
+
+  Every guest rule is held now when the cluster is not quorate, and a guest on
+  a node the cluster lists as `online: false` is held on its own — guests on
+  nodes that answered are graded as usual in the same sweep. **Holding is two
+  halves**: `grade` declining to fire is not enough, because the poller
+  reconciles every rule every sweep and a fleet-wide reconcile reads "did not
+  fire" as "recovered". The three guest rules reconcile **per node** now, over
+  the nodes the sweep could speak for. `guest/{vmid}/running` is not published
+  at all for a held guest, because a `0` there is this sensor turning "we
+  cannot see it" into "it stopped". A `/cluster/status` read that *failed* is
+  graded as non-quorate rather than as standalone: folding the two together
+  would turn the guard off exactly when the cluster API is the thing that is
+  unwell. This is SNMP's `device_answered` and BMC's `chassis.is_none()`, one
+  API over.
+
+  Two siblings the issue bundled, both on the same sweep:
+
+  - **The storage key stops depending on who answered.** A non-shared pool got
+    the node in its chunk only if *this sweep* saw the name twice — so when
+    node B dropped out, node A's `local-lvm` moved from
+    `storage/pve1-local-lvm` to `storage/local-lvm`, its series restarted
+    under a new name, and the old state document became an LWW ghost nothing
+    would overwrite again. The disambiguator is `shared`, a property of the
+    pool.
+  - **`/cluster/ha/status/current` is a status feed, not a resource list.**
+    Its rows carry a `type`, and taking them wholesale put `quorum`, `lrm` and
+    `master` in the cluster document as HA *services* — three or four phantoms
+    per node that no `ha-manager` command would name. Only `type: "service"`
+    rows are HA resources.
+
+  Both acceptance tests fail on the parent commit: the non-quorate fixture
+  fires `["cluster-not-quorate", "guest-not-running"]` where it must fire only
+  the first, and the offline-node fixture grades a guest on the node that did
+  not answer.
 
 - **The eBPF workflow denies warnings, pins its compiler, and runs on a tag**
   (#1094). Three ways the one job that guards an opt-in feature was weaker than
@@ -8618,7 +8976,7 @@ shim, and a 0.7.0 deployment will not interoperate with a 0.8.0 one.**
 Upgrading from 0.7.0? Read the migration table in
 [`docs/plans/keyspace-v2/RETROSPECTIVE.md`](docs/plans/keyspace-v2/RETROSPECTIVE.md)
 (§2, "The keys themselves" / "What was *deleted*") — it maps every old key to its
-v1 form. The normative spec is [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md);
+v1 form. The normative spec is [`docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md);
 the deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
 
 ### Changed — BREAKING

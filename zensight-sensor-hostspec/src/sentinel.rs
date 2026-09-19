@@ -39,8 +39,8 @@ use zensight_sensor_core::AlertReporter;
 // (and the e2e) read unchanged.
 pub use zensight_common::hostspec::{
     AbsentExpectation, AssertionResult, AssertionStatus, ContentExpectation, ExpectationsConfig,
-    FileExpectation, HostspecEvaluation, ListeningExpectation, MountExpectation, PermsExpectation,
-    SymlinkExpectation, parse_mode,
+    FileExpectation, HostspecEvaluation, ListenProto, ListeningExpectation, MountExpectation,
+    PermsExpectation, SymlinkExpectation, parse_mode,
 };
 
 use crate::observe::{
@@ -273,16 +273,21 @@ pub fn check_listening(
     let subj = ("port", port_s.as_str());
     let listeners = match listeners {
         Observation::Present(l) => l,
-        Observation::Absent => return vec![unreadable(subj, "listeners", "/proc/net/tcp missing")],
+        Observation::Absent => {
+            return vec![unreadable(subj, "listeners", "/proc/net tables missing")];
+        }
         Observation::Unreadable(e) => return vec![unreadable(subj, "listeners", e)],
     };
     let want_addr: Option<std::net::IpAddr> = exp.addr.as_deref().and_then(|a| a.parse().ok());
     let matched = listeners.iter().any(|l| {
         l.port == exp.port
+            && exp.proto.accepts(l.proto)
             && match want_addr {
                 // `0.0.0.0` and `::` are distinct wildcards on purpose —
                 // an exact comparison is what lets an operator forbid each.
-                Some(a) => l.addr == a,
+                // `dual_stack` is how an operator says "I meant both" once,
+                // instead of keeping two expectations in step (#1138).
+                Some(a) => l.addr == a || (exp.dual_stack && both_wildcards(a, l.addr)),
                 None => true,
             }
     });
@@ -295,21 +300,28 @@ pub fn check_listening(
         if let Some(a) = &exp.addr {
             v.labels.push(("addr".into(), a.clone()));
         }
+        // Which transport the assertion was about, so a `port 53` finding is
+        // legible without reading the config back (#1138).
+        v.labels.push(("proto".into(), exp.proto.as_str().into()));
         vec![v]
     };
+    let where_ = format!(
+        "{}:{}/{}",
+        exp.addr.as_deref().unwrap_or("*"),
+        exp.port,
+        exp.proto.as_str()
+    );
     match (matched, exp.forbid) {
-        (true, true) => mk(format!(
-            "expected NO listener on {}:{}, and one exists",
-            exp.addr.as_deref().unwrap_or("*"),
-            exp.port
-        )),
-        (false, false) => mk(format!(
-            "expected a listener on {}:{}, and none exists",
-            exp.addr.as_deref().unwrap_or("*"),
-            exp.port
-        )),
+        (true, true) => mk(format!("expected NO listener on {where_}, and one exists")),
+        (false, false) => mk(format!("expected a listener on {where_}, and none exists")),
         _ => Vec::new(),
     }
+}
+
+/// Whether two addresses are the unspecified address of their families —
+/// `0.0.0.0` and `::`, in either order.
+fn both_wildcards(a: std::net::IpAddr, b: std::net::IpAddr) -> bool {
+    a.is_unspecified() && b.is_unspecified()
 }
 
 pub fn check_symlink(exp: &SymlinkExpectation, obs: &Observation<FileFacts>) -> Vec<Violation> {
@@ -1117,49 +1129,134 @@ mod tests {
         assert!(v[0].summary.contains("exist"));
     }
 
+    fn tcp(addr: &str, port: u16) -> ListenEntry {
+        ListenEntry {
+            addr: addr.parse().unwrap(),
+            port,
+            proto: ListenProto::Tcp,
+        }
+    }
+
+    fn udp(addr: &str, port: u16) -> ListenEntry {
+        ListenEntry {
+            addr: addr.parse().unwrap(),
+            port,
+            proto: ListenProto::Udp,
+        }
+    }
+
     fn listeners() -> Observation<Vec<ListenEntry>> {
         Observation::Present(vec![
-            ListenEntry {
-                addr: "10.8.0.1".parse().unwrap(),
-                port: 8443,
-            },
-            ListenEntry {
-                addr: "0.0.0.0".parse().unwrap(),
-                port: 80,
-            },
-            ListenEntry {
-                addr: "::".parse().unwrap(),
-                port: 81,
-            },
+            tcp("10.8.0.1", 8443),
+            tcp("0.0.0.0", 80),
+            tcp("::", 81),
+            // A resolver and a syslog receiver: UDP only, which `listening`
+            // could not see at all before #1138.
+            udp("0.0.0.0", 53),
+            udp("0.0.0.0", 514),
         ])
+    }
+
+    fn listening(name: &str, port: u16, addr: Option<&str>, forbid: bool) -> ListeningExpectation {
+        ListeningExpectation {
+            name: name.into(),
+            port,
+            proto: ListenProto::Tcp,
+            addr: addr.map(str::to_string),
+            dual_stack: false,
+            forbid,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+            recover_after_secs: None,
+        }
+    }
+
+    /// **#1138, the acceptance.** A UDP listener satisfies `{port, proto:
+    /// udp}` and violates a `forbid` on it.
+    ///
+    /// `listening` read `/proc/net/tcp{,6}` only, so `{port: 53}` for a
+    /// resolver was a permanent false "nothing is listening" — and
+    /// `forbid: true` on a UDP port, which is how an operator writes *"this
+    /// host must not expose an open resolver"*, was a **false all-clear from
+    /// the sensor whose whole purpose is machine-checked assertions**.
+    #[test]
+    fn a_udp_listener_is_seen_and_can_be_forbidden() {
+        let mut want = listening("resolver", 53, None, false);
+        want.proto = ListenProto::Udp;
+        assert!(
+            check_listening(&want, &listeners()).is_empty(),
+            "a UDP resolver on :53 satisfies a udp expectation"
+        );
+
+        let mut forbid = listening("no-open-resolver", 53, Some("0.0.0.0"), true);
+        forbid.proto = ListenProto::Udp;
+        let v = check_listening(&forbid, &listeners());
+        assert_eq!(v.len(), 1, "an open resolver must be a violation");
+        assert!(
+            v[0].labels.iter().any(|(k, x)| k == "proto" && x == "udp"),
+            "the finding says which transport it is about: {:?}",
+            v[0].labels
+        );
+        assert!(v[0].summary.contains("53/udp"), "{}", v[0].summary);
+    }
+
+    /// The default is `tcp`, so every expectation written before #1138 means
+    /// exactly what it meant — and a TCP expectation is NOT satisfied by a
+    /// UDP listener on the same port.
+    #[test]
+    fn the_default_proto_is_tcp_and_does_not_see_udp() {
+        let want = listening("dns-tcp", 53, None, false);
+        assert_eq!(want.proto, ListenProto::Tcp);
+        assert_eq!(
+            check_listening(&want, &listeners()).len(),
+            1,
+            "a UDP :53 must not satisfy a TCP expectation"
+        );
+
+        let mut both = want.clone();
+        both.proto = ListenProto::Both;
+        assert!(
+            check_listening(&both, &listeners()).is_empty(),
+            "`both` is satisfied by either"
+        );
+    }
+
+    /// `dual_stack` is how an operator says "not world-reachable" once
+    /// instead of keeping two expectations in step (#1138). Off, the exact
+    /// comparison stands — that is what lets each family be forbidden alone.
+    #[test]
+    fn dual_stack_makes_the_two_wildcards_one() {
+        let mut forbid = listening("no-any", 81, Some("0.0.0.0"), true);
+        assert!(
+            check_listening(&forbid, &listeners()).is_empty(),
+            "off: `::` does not satisfy a 0.0.0.0 forbid"
+        );
+        forbid.dual_stack = true;
+        assert_eq!(
+            check_listening(&forbid, &listeners()).len(),
+            1,
+            "on: the `::` listener on :81 is a violation"
+        );
+
+        // It is about the WILDCARDS, not about any address pair.
+        let mut specific = listening("vpn", 8443, Some("0.0.0.0"), true);
+        specific.dual_stack = true;
+        assert!(
+            check_listening(&specific, &listeners()).is_empty(),
+            "10.8.0.1 is not a wildcard and must not be swept up"
+        );
     }
 
     #[test]
     fn listening_require_and_forbid() {
-        let mut e = ListeningExpectation {
-            name: "vpn".into(),
-            port: 8443,
-            addr: Some("10.8.0.1".into()),
-            forbid: false,
-            severity: AlertSeverity::Warning,
-            for_secs: None,
-            recover_after_secs: None,
-        };
+        let mut e = listening("vpn", 8443, Some("10.8.0.1"), false);
         assert!(check_listening(&e, &listeners()).is_empty());
         e.port = 8444;
         assert_eq!(check_listening(&e, &listeners()).len(), 1);
 
         // Forbid the v4 wildcard: fires for :80, not for :81 (`::` is a
         // DIFFERENT wildcard — the distinction is deliberate and documented).
-        let forbid4 = ListeningExpectation {
-            name: "no-any4".into(),
-            port: 80,
-            addr: Some("0.0.0.0".into()),
-            forbid: true,
-            severity: AlertSeverity::Warning,
-            for_secs: None,
-            recover_after_secs: None,
-        };
+        let forbid4 = listening("no-any4", 80, Some("0.0.0.0"), true);
         assert_eq!(check_listening(&forbid4, &listeners()).len(), 1);
         let forbid4_on_81 = ListeningExpectation {
             port: 81,

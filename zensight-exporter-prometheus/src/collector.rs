@@ -643,12 +643,19 @@ impl MetricCollector {
         names.sort();
 
         for name in &names {
-            let series = &by_name[name];
+            let series = by_name.get_mut(name).expect("name came from this map");
             if series.is_empty() {
                 continue;
             }
+            // SORTED BEFORE ANYTHING IS TAKEN FROM `series[0]` (#1144). The
+            // group came out of a `HashMap`, so "the first series" was hash
+            // order — and `# TYPE`, `# HELP` and the unit note are all taken
+            // from it. Two series of one family that disagree (a counter and
+            // a gauge under one name, which the mapping can produce) made the
+            // emitted TYPE depend on iteration order: a body that is valid or
+            // invalid run to run, on identical input.
+            series.sort_by(|a, b| (&a.key.name, &a.key.labels).cmp(&(&b.key.name, &b.key.labels)));
 
-            // Get type from first series
             let metric_type = series[0].metric_type;
 
             // `# HELP` from the registry's own sentence for this subject

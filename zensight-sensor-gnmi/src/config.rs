@@ -171,7 +171,15 @@ pub struct TlsConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Skip certificate verification (not recommended for production)
+    /// **Refused at startup** (#1137).
+    ///
+    /// It was documented as "disables server-certificate validation —
+    /// development only", shipped in `configs/gnmi.json5`, and did nothing at
+    /// all: the connect path logged a warning and built the same TLS config.
+    /// A flag that cannot do what it says refuses loudly rather than sitting
+    /// inert — the same call bmc makes for `ipmi` — and the refusal names
+    /// `ca_cert`, which takes the device's own self-signed certificate and is
+    /// what an operator reaching for this actually needs.
     #[serde(default)]
     pub skip_verify: bool,
 
@@ -322,15 +330,51 @@ impl zensight_sensor_core::SensorConfig for GnmiConfig {
                 "At least one target must be configured",
             ));
         }
+        // Duplicate names are refused, as bmc and probe already refuse them
+        // (#1137). The name is the key chunk AND the `source` of every point,
+        // so two targets sharing one publish over each other with nothing on
+        // the bus to say which device a reading came from.
+        let mut seen = std::collections::HashSet::new();
         for target in &self.gnmi.targets {
             if target.name.is_empty() {
                 return Err(zensight_sensor_core::SensorError::config(
                     "Target name cannot be empty",
                 ));
             }
+            if !seen.insert(target.name.as_str()) {
+                return Err(zensight_sensor_core::SensorError::config(format!(
+                    "Target name '{}' is used twice — it is the key chunk and the `source` of \
+                     every point, so two targets sharing one silently publish over each other",
+                    target.name
+                )));
+            }
             if target.address.is_empty() {
                 return Err(zensight_sensor_core::SensorError::config(format!(
                     "Target '{}' has no address",
+                    target.name
+                )));
+            }
+            // REFUSED, not warned about (#1137). `skip_verify` was documented
+            // as "disables server-certificate validation — development only",
+            // shipped in `configs/gnmi.json5`, and did **nothing**: the
+            // connect path logged a warning and built the same `tls_config`.
+            // An operator set it, read the warning confirming it was off, and
+            // watched the connection keep failing `UnknownIssuer` while the
+            // backoff climbed to 300 s — with no per-target error document,
+            // only the log line they had already dismissed.
+            //
+            // The same call bmc makes for `ipmi`: a flag that cannot do what
+            // it says refuses at startup and names the working alternative,
+            // rather than being quietly inert. `ca_cert` takes the switch's
+            // own self-signed certificate as a CA, which is what an operator
+            // reaching for `skip_verify` actually needs.
+            if target.tls.enabled && target.tls.skip_verify {
+                return Err(zensight_sensor_core::SensorError::config(format!(
+                    "Target '{}' sets tls.skip_verify, which this build does not implement — it \
+                     logged a warning and verified the certificate anyway (#1137). Point \
+                     `tls.ca_cert` at the CA that signed the device's certificate; a switch's \
+                     own self-signed certificate works there, which is what skip_verify was \
+                     reached for",
                     target.name
                 )));
             }
@@ -410,6 +454,77 @@ mod tests {
         assert_eq!(GnmiEncoding::Proto.to_proto(), 2);
         assert_eq!(GnmiEncoding::Ascii.to_proto(), 3);
         assert_eq!(GnmiEncoding::JsonIetf.to_proto(), 4);
+    }
+
+    fn cfg_with(targets: Vec<GnmiTarget>) -> GnmiConfig {
+        // Through the real parser, so the test cannot construct a shape the
+        // file format cannot produce.
+        let mut c: GnmiConfig =
+            json5::from_str(r#"{ zenoh: { mode: "peer" }, gnmi: { targets: [] } }"#)
+                .expect("a minimal config parses");
+        c.gnmi.targets = targets;
+        c
+    }
+
+    fn a_target(name: &str) -> GnmiTarget {
+        GnmiTarget {
+            name: name.into(),
+            address: "sw:9339".into(),
+            credentials: None,
+            tls: Default::default(),
+            subscriptions: vec![],
+            encoding: GnmiEncoding::Json,
+            counter_paths: Vec::new(),
+            gauge_paths: Vec::new(),
+            max_clock_skew_secs: 300,
+        }
+    }
+
+    /// **#1137.** A flag that cannot do what it says refuses at startup and
+    /// names the working alternative — bmc's `ipmi` call, one protocol over.
+    ///
+    /// It was documented as "disables server-certificate validation", shipped
+    /// in `configs/gnmi.json5`, and did NOTHING: the connect path logged a
+    /// warning and built the same TLS config. An operator set it, read the
+    /// warning confirming it was off, and watched the connection keep failing
+    /// `UnknownIssuer` while the backoff climbed to 300 s.
+    #[test]
+    fn skip_verify_is_refused_and_names_ca_cert() {
+        use zensight_sensor_core::SensorConfig;
+        let mut t = a_target("sw1");
+        t.tls.enabled = true;
+        t.tls.skip_verify = true;
+        let err = cfg_with(vec![t]).validate().unwrap_err().to_string();
+        assert!(err.contains("skip_verify"), "{err}");
+        assert!(
+            err.contains("ca_cert"),
+            "the refusal must name what to use instead: {err}"
+        );
+    }
+
+    /// Without TLS there is nothing to verify, so the flag is inert rather
+    /// than a lie, and a config carrying it from an earlier life still starts.
+    #[test]
+    fn skip_verify_without_tls_is_not_refused() {
+        use zensight_sensor_core::SensorConfig;
+        let mut t = a_target("sw1");
+        t.tls.skip_verify = true;
+        assert!(cfg_with(vec![t]).validate().is_ok());
+    }
+
+    /// **#1137.** The name is the key chunk AND the `source` of every point,
+    /// so two targets sharing one publish over each other with nothing on the
+    /// bus to say which device a reading came from. bmc and probe already
+    /// refuse this.
+    #[test]
+    fn a_duplicate_target_name_is_refused() {
+        use zensight_sensor_core::SensorConfig;
+        let err = cfg_with(vec![a_target("sw1"), a_target("sw1")])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sw1"), "{err}");
+        assert!(err.contains("twice"), "{err}");
     }
 
     #[test]
