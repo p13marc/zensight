@@ -319,6 +319,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **probe: an ICMP burst against a hostname reported 100 % loss forever**
+  (#1135). The burst path parsed an `IpAddr` and returned "this probe did not
+  answer" for anything else — and an ICMP burst target is a bare host **by
+  design**, since `validate()` only requires `host:port` for tcp. So
+  `{kind: "burst", transport: "icmp", target: "gw.example.net"}` published
+  `loss_pct: 100` every interval and a critical `probe-down` over a perfectly
+  healthy link, while the plain `icmp` check resolved names four hundred lines
+  away.
+
+  The target is resolved **once, before any packet**, and a name that does not
+  resolve fails the *check* with a sentence that says so rather than being
+  reported as loss. Resolving once is also what makes a burst one path: a
+  per-packet lookup — which is what `TcpStream::connect(host)` was doing — lets
+  a round-robin name spread a burst over several hosts and calls the result one
+  target's latency distribution. The tcp arm keeps the whole answer in order,
+  as `connect` would, so a dual-stack name whose first address is unreachable
+  still works.
+
+  The resolution is the bug and it needs no privilege, so it is tested
+  directly: `an_icmp_burst_resolves_its_name` and
+  `an_unresolvable_icmp_burst_is_a_check_error` both fail on the parent
+  commit, in a default build with the `icmp` feature off.
+
 - **probe: `follow_redirects` was documented, wire-carried and read nowhere**
   (#1134). reqwest's redirect policy lives on the **client**; this flag lives
   on the **target**. The poller built one shared client with
