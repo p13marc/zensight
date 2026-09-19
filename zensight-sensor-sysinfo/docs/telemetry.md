@@ -8,8 +8,66 @@ Every family is gated by a `collect.*` flag (see
 [configuration.md](configuration.md)); the families marked **default off** are
 opt-in. Linux-only families degrade gracefully — an absent `/proc`/`/sys` file
 is skipped, never emitted as a zero. Per-mount / per-interface / per-device keys
-are sanitized for the key expression (e.g. `/` → `_`, the root mount → `root`)
-and carry the original name back in a label.
+are **slugged** for the key expression and carry the original name back in a
+label — see [Slugged key chunks](#slugged-key-chunks-1153) below.
+
+## Slugged key chunks (#1153)
+
+A key chunk must be lowercase alphanumerics, `.`, `-`, `_`, beginning and
+ending alphanumeric (RFC 03 §1.5). Mount points, hwmon labels, RAPL zones and
+battery names are none of those things, so they are **slugged** with
+`zenkey::Chunk::slug` — through `zensight_sensor_core::key::device_chunk`,
+which is the only place in the tree that does it.
+
+A name that is already a legal chunk **passes through untouched**, which is
+most of them:
+
+| Value | Key chunk |
+|---|---|
+| `eth0`, `enp3s0`, `nvme0n1`, `coretemp`, `package-0` | unchanged |
+| `/` | `x-_x2f` |
+| `/var` | `x-_x2fvar` |
+| `/var/lib/docker` | `x-_x2fvar_x2flib_x2fdocker` |
+| `intel-rapl:0` | `x-intel-rapl_x3a0` |
+| `BAT0` | `x-_x42_x41_x540` |
+| `Package id 0` | `x-_x50ackage_x20id_x200` |
+
+**The key is an identifier; the label is the name.** The readable value rides
+the payload's own label (`mount`, `zone`, `name`), and any consumer showing a
+chunk to a person decodes it with `zensight_common::slug::display_chunk`,
+which returns the *true* value. The frontend and both exporters do.
+
+### What this replaced, and why it is a correctness fix
+
+Until #1153 this sensor used a hand-rolled `sanitize_key`: lowercase, collapse
+each run of illegal bytes to one `_`, map an alphanumeric-free value to the
+literal `root`. That is readable and **lossy**, and the collisions are ordinary
+paths on an ordinary host:
+
+| These two values | …became this one chunk |
+|---|---|
+| `/var/lib/docker` and `/var/lib_docker` | `var_lib_docker` |
+| `/srv/A` and `/srv/a` | `srv_a` |
+| `/` and any alphanumeric-free path | `root` |
+| `nvme0n1p1` and `NVME0N1P1` | `nvme0n1p1` |
+
+Two mounts that collide publish to **one key**. Last writer wins every
+interval, so one filesystem's usage is reported as another's, and nothing
+reports a problem because both documents are individually well-formed.
+
+`Chunk::slug` cannot do that: it has a documented left inverse
+(`unslug(slug(v)) == Some(v)` for every `v`), which is injectivity.
+
+### Migration
+
+**Keys change for anything that needed escaping** — mounts, hwmon labels with
+spaces or uppercase, RAPL zones, batteries. Interfaces, disks and most chips do
+not move. A dashboard that hard-codes `disk/root/...` or `disk/var/...` needs
+`disk/x-_x2f/...` and `disk/x-_x2fvar/...`.
+
+Prometheus and OTel series are **better off**, not merely different: the
+`device` attribute is decoded, so it now reads `/var/lib/docker` where it used
+to read `var_lib_docker` — which was readable and ambiguous.
 
 ## Metric families
 

@@ -769,6 +769,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two mounts could share one key, and the later one won** (#1153).
+  `zensight-sensor-sysinfo` slugged foreign names — mount points, interfaces,
+  hwmon chips and labels, RAPL zones, batteries, SMART devices, md arrays —
+  with a hand-rolled `sanitize_key`: lowercase, collapse each run of illegal
+  bytes to one `_`, map an alphanumeric-free value to the literal `root`. It is
+  readable and it is **lossy**, and the collisions are ordinary paths on an
+  ordinary host:
+
+  | These two values | …became this one chunk |
+  |---|---|
+  | `/var/lib/docker` and `/var/lib_docker` | `var_lib_docker` |
+  | `/srv/A` and `/srv/a` | `srv_a` |
+  | `/` and any alphanumeric-free path | `root` |
+  | `nvme0n1p1` and `NVME0N1P1` | `nvme0n1p1` |
+
+  Two mounts that collide publish to one key: last writer wins every interval,
+  one filesystem's usage is reported as another's, and nothing reports a
+  problem because both documents are individually well-formed.
+
+  The new `zensight_sensor_core::key::device_chunk` is `zenkey::Chunk::slug`
+  and nothing else, so the property comes from the grammar crate: `chunk_slug`
+  has a documented **left inverse**, which is injectivity. Distinct values
+  cannot share a chunk.
+
+  **`zensight-sensor-netflow` had the same class of bug, and a worse one.**
+  `exporter_slug` mapped `.` and `:` to `-`, so `a.b`, `a:b` and a device named
+  `a-b` shared one set of counters — and it could emit a chunk that is not
+  legal at all: `::1` became `--1`, and a chunk may not begin with `-`. An
+  ordinary IPv6 loopback produced a malformed key. Its test was called
+  `exporter_slug_is_one_chunk`.
+
+  `zensight-sensor-netlink` interpolated the kernel's interface name raw; the
+  only check in that file is a `debug_assert!` on registry membership, which is
+  compiled out in release and never looked at the chunk anyway.
+
+  **Keys change for anything that needed escaping.** `/var` is now `x-_x2fvar`,
+  not `var`. Names that are already legal chunks — `eth0`, `enp3s0`,
+  `nvme0n1`, `coretemp`, and every ordinary IPv4 exporter address — are
+  **unchanged**. A dashboard hard-coding `disk/root/...` wants `disk/x-_x2f/...`.
+
+  **Consumers are better off, not merely different.** The key is an identifier
+  and the label is the name: the frontend and `semconv` (which feeds both
+  exporters) decode the chunk with the new `zensight_common::slug::display_chunk`,
+  so a Prometheus `device` attribute now reads `/var/lib/docker` where it used
+  to read `var_lib_docker` — readable, and possibly a different mount.
+
+  The slug table is **pinned by a test**. `Chunk::slug` lives in a crate this
+  workspace pins by version; if an upstream release changes the escaping, every
+  key derived from a foreign name moves silently on the next `cargo update`,
+  for an entire fleet. `the_slug_table_is_pinned` fails in CI instead
+  (upstream zenkey #418).
+
 - **Nine units went from 5.6 to 1.7 `systemd-analyze security` exposure — the
   gap was writing order, not requirement** (#1204). Four units
   (`bmc`/`container`/`probe`/`pve`, the newest) carried the full sandbox block;

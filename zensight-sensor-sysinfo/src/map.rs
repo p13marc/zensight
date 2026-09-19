@@ -71,36 +71,31 @@ impl Metric {
     }
 }
 
-/// Sanitize a foreign value (mount, iface, hwmon chip/label, RAPL zone,
-/// battery name) into a grammar-legal key chunk (RFC 03 §2 charset:
-/// `[a-z0-9._-]`, alnum at the boundaries): lowercase, collapse runs of
-/// excluded characters into a single `_`, trim illegal boundary bytes.
+/// Slug a foreign name into a key chunk (#1153).
 ///
-/// Readable and lossy by choice — the friendly original rides as a payload
-/// label (`name`/`label`/`zone`), the key chunk is only an identifier. The
-/// typed registry refinement (`Subject::parse_metric`) rejects illegal
-/// chunks, so anything laxer than the grammar here silently drops the
-/// family from every consumer.
+/// Delegates to [`zensight_sensor_core::key::device_chunk`], which is
+/// `zenkey::Chunk::slug` and therefore **injective** — it has a documented
+/// left inverse, so two distinct values cannot land on one chunk.
 ///
-/// An input that reduces to the empty string (notably the root mount `"/"`)
-/// would produce an empty key chunk, which Zenoh rejects (`disk//total`), so it
-/// is mapped to the literal `root`.
+/// It used to be a hand-rolled reduction: lowercase, collapse every run of
+/// illegal characters to one `_`, map an all-illegal value to the literal
+/// `root`. That is lossy, and the collisions were ordinary paths on an
+/// ordinary host — `/var/lib/docker` and `/var/lib_docker` both became
+/// `var_lib_docker`, `/srv/A` and `/srv/a` both `srv_a`, `/` and any
+/// alphanumeric-free path both `root`. Two mounts sharing a chunk publish to
+/// **one key**: last writer wins every interval, one filesystem's usage is
+/// reported as another's, and nothing complains, because both documents are
+/// individually well-formed.
+///
+/// **This changes published keys** for anything that needed escaping —
+/// `/var` is now `x-_x2fvar`, not `var`. The key is an identifier; the
+/// readable path still rides the payload's own `mount` label, and a consumer
+/// that wants to show it calls `core::key::display_chunk`, which recovers the
+/// *true* path rather than the old ambiguous reduction of it.
 pub fn sanitize_key(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
-        let c = c.to_ascii_lowercase();
-        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-' {
-            result.push(c);
-        } else if !result.ends_with('_') && !result.is_empty() {
-            result.push('_');
-        }
-    }
-    let trimmed = result.trim_matches(|c| !matches!(c, 'a'..='z' | '0'..='9'));
-    if trimmed.is_empty() {
-        "root".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    zensight_sensor_core::key::device_chunk(s)
+        .as_str()
+        .to_string()
 }
 
 // ===========================================================================
@@ -1533,23 +1528,56 @@ pub fn build_histogram(counts: &[u64; MAX_SLOTS], unit: &str) -> Histogram {
 mod tests {
     use super::*;
 
+    /// #1153: the slug is injective now, and these are the values it used to
+    /// merge. A name that is already a legal chunk passes through untouched,
+    /// so `eth0` and the hwmon chips are unchanged; only names carrying `/`,
+    /// uppercase, spaces or `:` move.
     #[test]
     fn test_sanitize_key() {
-        // The root mount reduces to the literal `root` (empty chunks are
-        // forbidden in Zenoh key expressions).
-        assert_eq!(sanitize_key("/"), "root");
-        assert_eq!(sanitize_key("/home"), "home");
-        assert_eq!(sanitize_key("/home/user"), "home_user");
+        // Already-legal chunks pass through — most interfaces and chips.
         assert_eq!(sanitize_key("eth0"), "eth0");
-        assert_eq!(sanitize_key("my interface"), "my_interface");
-        // Grammar-illegal bytes (RFC 03 §2): uppercase folds, others map to `_`.
-        assert_eq!(sanitize_key("CPU_Fan"), "cpu_fan");
-        assert_eq!(sanitize_key("intel-rapl:0"), "intel-rapl_0");
-        assert_eq!(sanitize_key("BAT0"), "bat0");
-        assert_eq!(sanitize_key("Package id 0"), "package_id_0");
-        // Boundary bytes must be alnum.
-        assert_eq!(sanitize_key(".hidden-"), "hidden");
-        assert_eq!(sanitize_key("_"), "root");
+        assert_eq!(sanitize_key("enp3s0"), "enp3s0");
+        assert_eq!(sanitize_key("package-0"), "package-0");
+
+        // Anything else is hex-escaped, reversibly.
+        assert_eq!(sanitize_key("/"), "x-_x2f");
+        assert_eq!(sanitize_key("/home"), "x-_x2fhome");
+        assert_eq!(sanitize_key("/home/user"), "x-_x2fhome_x2fuser");
+        assert_eq!(sanitize_key("my interface"), "x-my_x20interface");
+        assert_eq!(sanitize_key("CPU_Fan"), "x-_x43_x50_x55_x5f_x46an");
+        assert_eq!(sanitize_key("intel-rapl:0"), "x-intel-rapl_x3a0");
+        assert_eq!(sanitize_key("BAT0"), "x-_x42_x41_x540");
+        assert_eq!(sanitize_key("Package id 0"), "x-_x50ackage_x20id_x200");
+    }
+
+    /// The bug this replaced, kept as a regression test: each pair is two
+    /// values an ordinary host really has, and the old reduction gave both the
+    /// same chunk — so they published to one key and the later one won.
+    #[test]
+    fn distinct_devices_no_longer_share_a_key() {
+        for (a, b) in [
+            ("/var/lib/docker", "/var/lib_docker"),
+            ("/srv/A", "/srv/a"),
+            ("/", "/!!!"),
+            ("nvme0n1p1", "NVME0N1P1"),
+            ("Package id 0", "package-id-0"),
+        ] {
+            assert_ne!(
+                sanitize_key(a),
+                sanitize_key(b),
+                "{a:?} and {b:?} must not share a key chunk"
+            );
+        }
+    }
+
+    /// And the chunk decodes back to the real path, which the old one could
+    /// not do even in principle.
+    #[test]
+    fn a_mount_chunk_decodes_to_the_mount() {
+        assert_eq!(
+            zensight_sensor_core::key::display_chunk(&sanitize_key("/var/lib/docker")),
+            "/var/lib/docker"
+        );
     }
 
     #[test]
@@ -1723,10 +1751,10 @@ mod tests {
             used: 250,
         }];
         let m = map_inodes(&stats);
-        assert!(m.iter().any(|x| x.metric == "disk/home/inodes_total"));
+        assert!(m.iter().any(|x| x.metric == "disk/x-_x2fhome/inodes_total"));
         let pct = m
             .iter()
-            .find(|x| x.metric == "disk/home/inode_used_percent")
+            .find(|x| x.metric == "disk/x-_x2fhome/inode_used_percent")
             .unwrap();
         assert_eq!(pct.value, TelemetryValue::Gauge(25.0));
         // labels preserve the original mount path.
@@ -1905,8 +1933,9 @@ mod tests {
         let s = PowerSample {
             // The real shapes: `zone` is the powercap directory name, `name` is
             // the label read out of it. The colon is grammar-illegal (RFC 03
-            // §2), so `sanitize_key` maps it to `_`; the raw zone rides as the
-            // `zone` label and the friendly name as `name`.
+            // §2), so the slug hex-escapes it (#1153 — reversibly, where the
+            // old reduction to `_` was not); the raw zone rides as the `zone`
+            // label and the friendly name as `name`.
             rapl_watts: vec![("intel-rapl:0".to_string(), "package-0".to_string(), 12.5)],
             fans: vec![FanReading {
                 chip: "nct6798".to_string(),
@@ -1923,7 +1952,7 @@ mod tests {
         let m = map_power(&s);
         let rapl = m
             .iter()
-            .find(|x| x.metric == "power/rapl/intel-rapl_0/watts")
+            .find(|x| x.metric == "power/rapl/x-intel-rapl_x3a0/watts")
             .expect("the zone reaches the key sanitized (colon is grammar-illegal)");
         assert_eq!(rapl.value, TelemetryValue::Gauge(12.5));
         // The friendly name rides as a label — it is what the GUI displays.
@@ -1943,14 +1972,14 @@ mod tests {
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "battery/bat0/capacity")
+                .find(|x| x.metric == "battery/x-_x42_x41_x540/capacity")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(87.0)
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "battery/bat0/status")
+                .find(|x| x.metric == "battery/x-_x42_x41_x540/status")
                 .unwrap()
                 .value,
             TelemetryValue::Text("Discharging".to_string())

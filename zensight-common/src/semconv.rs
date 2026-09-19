@@ -87,7 +87,17 @@ impl Entry {
         }
         for (var, attr) in self.var_renames {
             if let Some((_, value)) = vars.iter().find(|(n, _)| n == var) {
-                attributes.push((*attr, value.clone()));
+                // Decoded (#1153). A subject variable is a key CHUNK, and a
+                // chunk is an identifier: since the producers slug injectively,
+                // `/var/lib/docker` rides as `x-_x2fvar_x2flib_x2fdocker`.
+                // An exporter attribute is read by a person, so it gets the
+                // value back — which is also strictly more correct than what
+                // it replaced, because the old lossy slug's `var_lib_docker`
+                // could have been either of two mounts.
+                //
+                // A chunk that never needed escaping decodes to itself, so
+                // `eth0` and `sda` are unaffected.
+                attributes.push((*attr, crate::slug::display_chunk(value)));
             }
         }
         SemConv {
@@ -426,22 +436,42 @@ mod tests {
     /// rename is the whole point: a table that assumed identity would have to
     /// compute the value itself.
     ///
-    /// The mount is slugged into the key by the sensor (`sanitize_key`: `/var`
-    /// -> `var`, `/` -> `root`), because a key chunk must begin and end
-    /// alphanumeric. The sensor also carries the *unslugged* path in its own
-    /// `mount` label, so both survive the merge under different names.
+    /// **The value is decoded** (#1153). The sensor slugs the mount into the
+    /// key with `zenkey::Chunk::slug`, which is injective, so `/var` is
+    /// `x-_x2fvar` on the wire; the attribute a person reads gets `/var` back.
+    ///
+    /// Before #1153 the sensor used a lossy reduction — `/var` -> `var`,
+    /// `/` -> `root` — and the attribute carried that. It was readable and it
+    /// was ambiguous: `/var/lib/docker` and `/var/lib_docker` both reduced to
+    /// `var_lib_docker`, so a dashboard row labelled that way named one of two
+    /// filesystems and there was no way to tell which.
     #[test]
-    fn filesystem_renames_mount_to_device() {
-        let f = sc("disk/var/used");
+    fn filesystem_renames_mount_to_device_and_decodes_it() {
+        let f = sc("disk/x-_x2fvar/used");
         assert_eq!(f.name, "system.filesystem.usage");
         assert_eq!(
             f.attributes,
-            vec![("state", "used".to_string()), ("device", "var".to_string())]
+            vec![
+                ("state", "used".to_string()),
+                ("device", "/var".to_string())
+            ]
         );
 
-        let root = sc("disk/root/usage_percent");
+        let root = sc("disk/x-_x2f/usage_percent");
         assert_eq!(root.name, "system.filesystem.utilization");
-        assert_eq!(root.attributes, vec![("device", "root".to_string())]);
+        assert_eq!(root.attributes, vec![("device", "/".to_string())]);
+    }
+
+    /// A chunk that never needed escaping is untouched by the decode, which is
+    /// most of them — interfaces, disks, cores.
+    #[test]
+    fn an_unescaped_variable_is_unchanged_by_the_decode() {
+        let d = sc("disk/sda/io/read_bytes");
+        assert!(
+            d.attributes.contains(&("device", "sda".to_string())),
+            "got {:?}",
+            d.attributes
+        );
     }
 
     /// An aggregate and its per-entity refinement share a family, told apart by
