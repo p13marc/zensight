@@ -262,6 +262,7 @@ so one device's recovery never resolves another's alerts.
 |------|-----------|----------|
 | `device_unreachable` | N consecutive poll cycles failed entirely at the transport level (default N=3) | critical |
 | `interface_down` | `ifOperStatus != up` while `ifAdminStatus == up` | warning |
+| `interface_index_changed` | an ifIndex's interface **name** changed since the last cycle (#1142) — a renumbering | warning |
 | `interface_errors` | error/discard rate above `per_sec` (default 1/s), per direction+kind | warning |
 | `interface_utilization` | octet rate ×8 vs `ifHighSpeed`/`ifSpeed` above `percent` (default 90) | warning |
 | `device_rebooted` | sysUpTime went backwards; holds `hold_secs` (default 300) then auto-resolves | info |
@@ -276,6 +277,37 @@ so one device's recovery never resolves another's alerts.
 | `nas_array_degraded` | a RAID group or ZFS pool is degraded/crashed/faulted. A Synology array that is **repairing, expanding, migrating or syncing** is a planned operation and fires nothing | critical |
 | `nas_disk_failed` | a physical disk reports a failure. An **empty bay** (QNAP `noDisk`) and an appliance that declines to answer (`unknown`) are neither | critical |
 | `nas_volume_full` | a RAID group / ZFS pool above `percent` used — **no default**. Distinct from `storage_usage`: hrStorage lists mounted *filesystems*, and a pool at 95 % under a half-empty filesystem is exactly what it cannot see | warning |
+
+### `interface_index_changed`, and the `if_name` label (#1142)
+
+An ifIndex is **not stable**. A reboot, a line-card insertion or a firmware
+upgrade renumbers the table on most switches, and every series keyed by the
+index then silently describes a different physical port:
+`if.in_octets{index="3"}` was the uplink and is now a desk port, with no
+discontinuity anywhere to notice. The graph is a straight line through two
+different cables. LibreNMS reports this explicitly; so does this.
+
+Two halves:
+
+- **`if_name` beside `index` on interface telemetry.** Alert labels already
+  carried it; telemetry labels carried only `index`, so the two could not be
+  joined and a query could not follow a port across a renumbering.
+- **`interface_index_changed`**, which fires for the cycle in which a name
+  moved and then reconciles away. A renumbering is an *event*: what an operator
+  needs is to have been told, once, that a dashboard's history now spans two
+  ports. The alert carries `if_index`, `if_name` and `previous_if_name`.
+
+Only a *changed* name is churn. An index that appeared, or one that went away,
+is an interface added or removed — a different and much less confusing event,
+and reporting it here would fire on every line card ever inserted.
+
+**The label lags by one cycle, and that is stated rather than hidden.** The
+interface table is only complete at the end of a cycle, so a point published
+during cycle N carries the name the index had in cycle N−1 — the same
+arrangement `ifHighSpeed` already uses for the rate ceiling (#1074). On the one
+cycle in which a renumbering happens, that label is stale. That cycle is
+exactly the one `interface_index_changed` fires for: **the alert is the
+load-bearing half and the label is the convenience.**
 
 The last nine read what the `ups`, `pdu-*` and `nas-*` profiles walk (see *Device
 profiles* below). A device with neither profile produces no observation for

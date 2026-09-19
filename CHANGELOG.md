@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **snmp: a renumbered ifIndex says so, and interface telemetry carries the
+  interface's name** (#1142). An ifIndex is not stable — a reboot, a line-card
+  insertion or a firmware upgrade renumbers the table on most switches — and
+  alert labels carried `if_name` while telemetry labels carried only `index`.
+  So after a renumbering `if.in_octets{index="3"}` silently continued
+  describing a **different physical port**, with no discontinuity anywhere to
+  notice: the graph is a straight line through two different cables.
+
+  Two halves, and LibreNMS does both. `if_name` rides beside `index` on every
+  interface point, so a query can follow a port across the change. And
+  `interface_index_changed` fires for the cycle in which a name moved, carrying
+  `if_index`, `if_name` and `previous_if_name`, then reconciles away — a
+  renumbering is an *event*, and what an operator needs is to have been told,
+  once, that a dashboard's history now spans two ports.
+
+  Only a **changed** name is churn. An index that appeared, or one that went
+  away, is an interface added or removed — a different and much less confusing
+  event, and reporting it here would fire on every line card ever inserted.
+
+  **The label lags by one cycle, and the docs say so rather than hiding it.**
+  The interface table is only complete at the end of a cycle, so a point
+  published during cycle N carries the name the index had in cycle N−1 — the
+  same arrangement `ifHighSpeed` already uses for the rate ceiling (#1074). On
+  the one cycle in which a renumbering happens that label is stale, and that
+  cycle is exactly the one the alert fires for: the alert is the load-bearing
+  half.
+
+  BGP peer state and LLDP/CDP neighbours, which the issue also raises, are not
+  here: they are a different MIB walk and, for the neighbours, relationship
+  evidence into the catalog edge family — a larger piece than the index
+  problem, and filed rather than folded in.
+
 - **probe: a trust anchor per target — the sensor could not check the
   certificates it exists to check** (#1136). The root store was
   `webpki_roots::TLS_SERVER_ROOTS` and **nothing else**: no `ca_file`, no
