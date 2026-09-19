@@ -7,6 +7,7 @@ use iced::{Alignment, Color, Element, Length, Theme};
 use iced_anim::widget::button;
 
 use crate::message::Message;
+use crate::view::tokens::font;
 
 /// Toast notification severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,14 +119,14 @@ pub fn toast_overlay<'a>(state: &'a ToastState) -> Element<'a, Message> {
         let severity_color = toast.severity.color();
 
         let label = text(toast.severity.label())
-            .size(11)
+            .size(font::DENSE)
             .style(move |_theme: &Theme| text::Style {
                 color: Some(severity_color),
             });
 
-        let message = text(&toast.message).size(12);
+        let message = text(&toast.message).size(font::CAPTION);
 
-        let dismiss_btn = button(text("×").size(14))
+        let dismiss_btn = button(text("×").size(font::BODY))
             .on_press(Message::DismissToast(toast.id))
             .style(iced::widget::button::text)
             .padding([0, 4]);

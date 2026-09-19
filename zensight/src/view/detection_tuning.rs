@@ -13,6 +13,7 @@ use iced_anim::widget::button;
 use crate::message::Message;
 use crate::view::components::card;
 use crate::view::theme;
+use crate::view::tokens::font;
 
 /// The tunable detectors, in display order: (config key, label, has-threshold).
 /// Mirrors `zensight_sensor_netring::command::detector_names`.
@@ -246,10 +247,10 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
         color: Some(theme::colors(t).text_muted()),
     };
 
-    let refresh = button(text("Refresh").size(12))
+    let refresh = button(text("Refresh").size(font::CAPTION))
         .on_press(Message::RefreshDetectorConfig)
         .style(iced::widget::button::secondary);
-    let mut header = row![text("Detection Tuning (netring)").size(16)];
+    let mut header = row![text("Detection Tuning (netring)").size(font::EMPHASIS)];
     if let Some(v) = &state.detectors_verdict {
         header = header.push(crate::view::components::verdict::verdict_badge(v));
     }
@@ -265,7 +266,7 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
             .clone()
             .unwrap_or_else(|| "Open with a live netring sensor, then Refresh.".to_string());
         return column![
-            card(column![header, text(note).size(12).style(muted)].spacing(8)),
+            card(column![header, text(note).size(font::CAPTION).style(muted)].spacing(8)),
             capture_focus_card(state),
             threat_intel_card(state),
         ]
@@ -276,7 +277,7 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
     // Per-detector rows: mute/unmute + optional threshold edit.
     let mut detectors = column![].spacing(6);
     for d in &state.detectors {
-        let toggle = button(text(if d.enabled { "On" } else { "Off" }).size(12))
+        let toggle = button(text(if d.enabled { "On" } else { "Off" }).size(font::CAPTION))
             .on_press(Message::ToggleNetringDetector(d.name.clone()))
             .style(if d.enabled {
                 iced::widget::button::primary
@@ -285,25 +286,27 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
             });
         let mut r = row![
             toggle,
-            text(d.label.clone()).size(13).width(Length::Fixed(190.0)),
+            text(d.label.clone())
+                .size(font::BODY)
+                .width(Length::Fixed(190.0)),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
         if d.threshold.is_some() {
             let name = d.name.clone();
-            r = r.push(text("threshold").size(11).style(muted));
+            r = r.push(text("threshold").size(font::DENSE).style(muted));
             r = r.push(
                 text_input("", &d.threshold_input)
                     .on_input(move |v| Message::SetNetringThresholdInput {
                         detector: name.clone(),
                         value: v,
                     })
-                    .size(12)
+                    .size(font::CAPTION)
                     .padding(4)
                     .width(Length::Fixed(80.0)),
             );
             r = r.push(
-                button(text("Apply").size(12))
+                button(text("Apply").size(font::CAPTION))
                     .on_press(Message::ApplyNetringThreshold(d.name.clone()))
                     .style(iced::widget::button::secondary),
             );
@@ -313,13 +316,13 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
 
     // Allowlist editor: chips with remove + an add field.
     let mut chips: Vec<Element<'_, Message>> =
-        vec![text("Allowlist:").size(13).style(muted).into()];
+        vec![text("Allowlist:").size(font::BODY).style(muted).into()];
     if state.allowlist.is_empty() {
-        chips.push(text("(none)").size(12).style(muted).into());
+        chips.push(text("(none)").size(font::CAPTION).style(muted).into());
     }
     for entry in &state.allowlist {
         chips.push(
-            button(text(format!("{entry}  ✕")).size(12))
+            button(text(format!("{entry}  ✕")).size(font::CAPTION))
                 .on_press(Message::RemoveNetringAllowlist(entry.clone()))
                 .style(iced::widget::button::secondary)
                 .into(),
@@ -332,10 +335,10 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
         text_input("host or SLD to allowlist", &state.new_entry)
             .on_input(Message::SetNetringAllowlistInput)
             .on_submit(Message::AddNetringAllowlist)
-            .size(12)
+            .size(font::CAPTION)
             .padding(5)
             .width(Length::Fixed(220.0)),
-        button(text("Add").size(12))
+        button(text("Add").size(font::CAPTION))
             .on_press(Message::AddNetringAllowlist)
             .style(iced::widget::button::primary),
     ]
@@ -350,7 +353,7 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
                 allowlist_row,
                 add_row,
                 text("Tuning applies without a sensor restart. Enabling a detector that was off at startup needs a restart.")
-                    .size(10)
+                    .size(font::MICRO)
                     .style(muted),
             ]
             .spacing(10),
@@ -375,7 +378,7 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
         color: Some(theme::colors(t).danger()),
     };
 
-    let mut header = row![text("Capture Focus (netring)").size(16)]
+    let mut header = row![text("Capture Focus (netring)").size(font::EMPHASIS)]
         .spacing(8)
         .align_y(Alignment::Center);
     if let Some(v) = &state.capture_filter_verdict {
@@ -388,13 +391,13 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
         )
         .on_input(Message::SetPacketFilterInput)
         .on_submit(Message::ApplyPacketFilter)
-        .size(12)
+        .size(font::CAPTION)
         .padding(5)
         .width(Length::Fixed(320.0)),
-        button(text("Apply").size(12))
+        button(text("Apply").size(font::CAPTION))
             .on_press(Message::ApplyPacketFilter)
             .style(iced::widget::button::primary),
-        button(text("Clear").size(12))
+        button(text("Clear").size(font::CAPTION))
             .on_press(Message::ClearPacketFilter)
             .style(iced::widget::button::secondary),
     ]
@@ -405,7 +408,7 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
         header,
         input_row,
         text("Grammar: tcp|udp|icmp, [src|dst] port N, [src|dst] host IP, [src|dst] net CIDR, combined with and/or/!/parens.")
-            .size(10)
+            .size(font::MICRO)
             .style(muted),
     ]
     .spacing(8);
@@ -414,23 +417,31 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
         None => {
             body = body.push(
                 text("Refresh to load the live capture filter.")
-                    .size(12)
+                    .size(font::CAPTION)
                     .style(muted),
             );
         }
         Some(cf) if !cf.enabled || cf.reloadable == 0 => {
             body = body.push(
                 text("Capture-focus is disabled on this sensor (set capture_focus.enabled). Live capture only.")
-                    .size(12)
+                    .size(font::CAPTION)
                     .style(muted),
             );
         }
         Some(cf) => {
             body = body
-                .push(text(format!("current: {}", cf.current)).size(12))
-                .push(text(format!("base: {}", cf.base)).size(11).style(muted));
+                .push(text(format!("current: {}", cf.current)).size(font::CAPTION))
+                .push(
+                    text(format!("base: {}", cf.base))
+                        .size(font::DENSE)
+                        .style(muted),
+                );
             if let Some(err) = &cf.last_error {
-                body = body.push(text(format!("✕ rejected: {err}")).size(12).style(danger));
+                body = body.push(
+                    text(format!("✕ rejected: {err}"))
+                        .size(font::CAPTION)
+                        .style(danger),
+                );
             }
         }
     }
@@ -453,16 +464,16 @@ fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
     let ioc_row = row![
         text_input("IOCs, one per line (IP or domain)", &state.threat_ioc_input)
             .on_input(Message::SetThreatIocInput)
-            .size(12)
+            .size(font::CAPTION)
             .padding(5)
             .width(Length::Fixed(320.0)),
-        button(text("Apply IOCs").size(12))
+        button(text("Apply IOCs").size(font::CAPTION))
             .on_press(Message::ApplyThreatIoc)
             .style(iced::widget::button::primary),
-        button(text("Reload files").size(12))
+        button(text("Reload files").size(font::CAPTION))
             .on_press(Message::ReloadThreatIocFiles)
             .style(iced::widget::button::secondary),
-        button(text("Clear").size(12))
+        button(text("Clear").size(font::CAPTION))
             .on_press(Message::ClearThreatIoc)
             .style(iced::widget::button::secondary),
     ]
@@ -472,17 +483,17 @@ fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
     let yara_row = row![
         text_input("YARA rules source", &state.threat_yara_input)
             .on_input(Message::SetThreatYaraInput)
-            .size(12)
+            .size(font::CAPTION)
             .padding(5)
             .width(Length::Fixed(320.0)),
-        button(text("Apply YARA").size(12))
+        button(text("Apply YARA").size(font::CAPTION))
             .on_press(Message::ApplyThreatYara)
             .style(iced::widget::button::primary),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let mut ti_header = row![text("Threat Intel (netring)").size(16)]
+    let mut ti_header = row![text("Threat Intel (netring)").size(font::EMPHASIS)]
         .spacing(8)
         .align_y(Alignment::Center);
     if let Some(v) = &state.threat_intel_verdict {
@@ -494,7 +505,7 @@ fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
         None => {
             body = body.push(
                 text("Refresh to load the live threat-intel status.")
-                    .size(12)
+                    .size(font::CAPTION)
                     .style(muted),
             );
         }
@@ -504,11 +515,11 @@ fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
             } else {
                 "IOC: not armed (set threat.reload=true or provide startup indicators)".to_string()
             };
-            body = body.push(text(ioc_line).size(12));
+            body = body.push(text(ioc_line).size(font::CAPTION));
             if !ti.ioc_files.is_empty() {
                 body = body.push(
                     text(format!("files: {}", ti.ioc_files.join(", ")))
-                        .size(11)
+                        .size(font::DENSE)
                         .style(muted),
                 );
             }
@@ -517,10 +528,10 @@ fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
             } else {
                 "YARA: not armed (build --features yara + threat.reload/threat.yara.file)"
             };
-            body = body.push(text(yara_line).size(12).style(muted));
+            body = body.push(text(yara_line).size(font::CAPTION).style(muted));
             if let Some(last) = &ti.last_reload {
                 let is_err = last.starts_with("error");
-                let line = text(format!("last: {last}")).size(11);
+                let line = text(format!("last: {last}")).size(font::DENSE);
                 body = body.push(if is_err { line.style(danger) } else { line });
             }
         }

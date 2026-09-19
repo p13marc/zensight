@@ -48,6 +48,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::groups::{GroupTag, GroupsState, device_group_tags, group_filter_bar};
 use crate::view::icons::{self, IconSize};
 use crate::view::overview::{OverviewState, overview_section};
+use crate::view::tokens::font;
 
 /// State for a single device on the dashboard.
 #[derive(Debug, Clone)]
@@ -707,7 +708,7 @@ fn render_fleet_summary<'a>(
         return row![].into();
     }
 
-    let mut bar = row![text("Fleet:").size(14)]
+    let mut bar = row![text("Fleet:").size(font::BODY)]
         .spacing(10)
         .align_y(Alignment::Center);
 
@@ -837,9 +838,9 @@ fn render_header(
     _unacknowledged_alerts: usize,
     group_by_host: bool,
 ) -> Element<'_, Message> {
-    let title = text("ZenSight Dashboard").size(24);
+    let title = text("ZenSight Dashboard").size(font::TITLE);
 
-    let device_count = text(format!("{} devices", state.devices.len())).size(14);
+    let device_count = text(format!("{} devices", state.devices.len())).size(font::BODY);
 
     // Theme toggle button - show moon when dark (click to go light), sun when light (click to go dark)
     let theme_icon = match theme {
@@ -860,7 +861,7 @@ fn render_header(
         DashboardViewMode::Table => "Grid",
     };
     let view_mode_button = button(
-        row![view_mode_icon, text(view_mode_label).size(14)]
+        row![view_mode_icon, text(view_mode_label).size(font::BODY)]
             .spacing(6)
             .align_y(Alignment::Center),
     )
@@ -871,7 +872,7 @@ fn render_header(
     let search_button = button(
         row![
             icons::search(IconSize::Medium),
-            text("Search (Ctrl+K)").size(14)
+            text("Search (Ctrl+K)").size(font::BODY)
         ]
         .spacing(6)
         .align_y(Alignment::Center),
@@ -889,7 +890,7 @@ fn render_header(
             } else {
                 "Group: Source"
             })
-            .size(14)
+            .size(font::BODY)
         ]
         .spacing(6)
         .align_y(Alignment::Center),
@@ -918,11 +919,12 @@ fn render_header(
     let mut header_col = Column::new().push(header_row);
 
     if let Some(ref error) = state.last_error {
-        let error_text = text(format!("Error: {}", error))
-            .size(12)
-            .style(|theme: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(theme).danger()),
-            });
+        let error_text =
+            text(format!("Error: {}", error))
+                .size(font::CAPTION)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).danger()),
+                });
         header_col = header_col.push(error_text);
     }
 
@@ -938,7 +940,7 @@ fn render_sensor_health_summary(
         return row![].into();
     }
 
-    let label = text("Sensors:").size(12);
+    let label = text("Sensors:").size(font::CAPTION);
 
     let mut sensor_row = row![label].spacing(10).align_y(Alignment::Center);
 
@@ -973,10 +975,10 @@ fn render_sensor_health_summary(
         );
 
         let sensor_indicator = tooltip(
-            row![status_icon, text(label).size(11)]
+            row![status_icon, text(label).size(font::DENSE)]
                 .spacing(4)
                 .align_y(Alignment::Center),
-            container(text(tooltip_content).size(10))
+            container(text(tooltip_content).size(font::MICRO))
                 .padding(6)
                 .style(container::rounded_box),
             tooltip::Position::Bottom,
@@ -1000,7 +1002,7 @@ fn render_protocol_filters<'a>(
     }
 
     // Protocol filter buttons
-    let filter_label = text("Filter:").size(14);
+    let filter_label = text("Filter:").size(font::BODY);
 
     let mut filter_row = row![filter_label].spacing(10).align_y(Alignment::Center);
 
@@ -1009,7 +1011,8 @@ fn render_protocol_filters<'a>(
             state.protocol_filters.is_empty() || state.protocol_filters.contains(&protocol);
 
         let label = format!("{}", protocol);
-        let btn = button(text(label).size(12)).on_press(Message::ToggleProtocolFilter(protocol));
+        let btn = button(text(label).size(font::CAPTION))
+            .on_press(Message::ToggleProtocolFilter(protocol));
 
         let btn = if is_active {
             btn.style(iced::widget::button::primary)
@@ -1035,9 +1038,9 @@ fn render_protocol_filters<'a>(
     let filtered_count = filtered.len();
     let total_count = state.devices.len();
     let count_text = if filtered_count == total_count {
-        text(format!("{} devices", total_count)).size(12)
+        text(format!("{} devices", total_count)).size(font::CAPTION)
     } else {
-        text(format!("{} of {} devices", filtered_count, total_count)).size(12)
+        text(format!("{} of {} devices", filtered_count, total_count)).size(font::CAPTION)
     };
 
     row![filter_row, search_row, count_text]
@@ -1068,7 +1071,7 @@ fn render_device_grid<'a>(
         } else {
             "No devices match the current filters"
         };
-        return container(text(message).size(16))
+        return container(text(message).size(font::EMPHASIS))
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
@@ -1199,7 +1202,7 @@ fn render_host_card<'a>(
     };
     let status_indicator = tooltip(
         status_indicator_dot,
-        container(text(status_tooltip_text).size(11))
+        container(text(status_tooltip_text).size(font::DENSE))
             .padding(6)
             .style(container::rounded_box),
         tooltip::Position::Top,
@@ -1214,14 +1217,16 @@ fn render_host_card<'a>(
         .map(|f| f.id.protocol.display_name().to_string())
         .collect();
     let host_name = tooltip(
-        text(host.display_name.clone()).size(16),
-        container(text(format!("{} · {}", host.display_name, protocols.join(", "))).size(12))
-            .padding(6)
-            .style(container::rounded_box),
+        text(host.display_name.clone()).size(font::EMPHASIS),
+        container(
+            text(format!("{} · {}", host.display_name, protocols.join(", "))).size(font::CAPTION),
+        )
+        .padding(6)
+        .style(container::rounded_box),
         tooltip::Position::Top,
     );
 
-    let metric_count = text(format!("{} metrics", host.metric_count())).size(12);
+    let metric_count = text(format!("{} metrics", host.metric_count())).size(font::CAPTION);
 
     // Firing-alert rollup across the host's facet sources (#306).
     let alert_badge: Option<Element<'a, Message>> = (alert_count > 0).then(|| {
@@ -1268,16 +1273,18 @@ fn render_host_card<'a>(
         let mut chip_label = row![
             animated_status_indicator(fstatus, 8.0),
             icons::protocol_icon::<Message>(facet.id.protocol, IconSize::Small),
-            text(facet.id.protocol.display_name()).size(11),
+            text(facet.id.protocol.display_name()).size(font::DENSE),
         ]
         .spacing(4)
         .align_y(Alignment::Center);
         if dup_protocols.contains(&facet.id.protocol) {
-            chip_label = chip_label.push(text(format!("· {}", facet.id.source)).size(11).style(
-                |t: &Theme| text::Style {
-                    color: Some(crate::view::theme::colors(t).text_muted()),
-                },
-            ));
+            chip_label = chip_label.push(
+                text(format!("· {}", facet.id.source))
+                    .size(font::DENSE)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(t).text_muted()),
+                    }),
+            );
         }
         let chip = button(chip_label)
             .on_press(Message::SelectDevice(facet.id.clone()))
@@ -1285,7 +1292,7 @@ fn render_host_card<'a>(
             .style(iced::widget::button::secondary);
         facet_row = facet_row.push(tooltip(
             chip,
-            container(text(format!("{} metrics", facet.metric_count)).size(11))
+            container(text(format!("{} metrics", facet.metric_count)).size(font::DENSE))
                 .padding(6)
                 .style(container::rounded_box),
             tooltip::Position::Bottom,
@@ -1310,7 +1317,7 @@ fn render_host_card<'a>(
         };
         card_content = card_content.push(
             text(caption)
-                .size(11)
+                .size(font::DENSE)
                 .style(move |_: &Theme| text::Style { color: Some(color) }),
         );
         // Reverse wire affordance (#314): the correlator fused observed-asset
@@ -1323,7 +1330,7 @@ fn render_host_card<'a>(
         if !wire.is_empty() {
             card_content = card_content.push(
                 text(format!("seen on the wire as {}", wire.join(" · ")))
-                    .size(11)
+                    .size(font::DENSE)
                     .style(|t: &Theme| text::Style {
                         color: Some(crate::view::theme::colors(t).text_muted()),
                     }),
@@ -1356,7 +1363,7 @@ fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
 
     // Status column with animated indicator
     let status_column = table::column(
-        text("Status").size(12),
+        text("Status").size(font::CAPTION),
         |device: &DeviceState| -> Element<'_, Message> {
             let status = device.effective_status();
             let label = match status {
@@ -1368,7 +1375,7 @@ fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
 
             row![
                 animated_status_indicator(status, 10.0),
-                text(label).size(11)
+                text(label).size(font::DENSE)
             ]
             .spacing(6)
             .align_y(Alignment::Center)
@@ -1379,10 +1386,10 @@ fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
 
     // Device name column (clickable)
     let name_column = table::column(
-        text("Device").size(12),
+        text("Device").size(font::CAPTION),
         |device: &DeviceState| -> Element<'_, Message> {
             let device_id = device.id.clone();
-            button(text(&device.id.source).size(11))
+            button(text(&device.id.source).size(font::DENSE))
                 .on_press(Message::SelectDevice(device_id))
                 .style(iced::widget::button::text)
                 .padding(0)
@@ -1393,11 +1400,11 @@ fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
 
     // Protocol column with icon
     let protocol_column = table::column(
-        text("Protocol").size(12),
+        text("Protocol").size(font::CAPTION),
         |device: &DeviceState| -> Element<'_, Message> {
             row![
                 icons::protocol_icon::<Message>(device.id.protocol, IconSize::Small),
-                text(device.id.protocol.display_name()).size(11)
+                text(device.id.protocol.display_name()).size(font::DENSE)
             ]
             .spacing(4)
             .align_y(Alignment::Center)
@@ -1408,20 +1415,22 @@ fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
 
     // Metrics count column
     let metrics_column = table::column(
-        text("Metrics").size(12),
+        text("Metrics").size(font::CAPTION),
         |device: &DeviceState| -> Element<'_, Message> {
-            text(format!("{}", device.metric_count)).size(11).into()
+            text(format!("{}", device.metric_count))
+                .size(font::DENSE)
+                .into()
         },
     )
     .width(70);
 
     // Last update column
     let update_column = table::column(
-        text("Last Update").size(12),
+        text("Last Update").size(font::CAPTION),
         |device: &DeviceState| -> Element<'_, Message> {
             let ago = format_time_ago(device.last_update);
             text(ago)
-                .size(11)
+                .size(font::DENSE)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 })
@@ -1432,10 +1441,10 @@ fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
 
     // Actions column
     let actions_column = table::column(
-        text("").size(12),
+        text("").size(font::CAPTION),
         |device: &DeviceState| -> Element<'_, Message> {
             let device_id = device.id.clone();
-            button(text("View").size(10))
+            button(text("View").size(font::MICRO))
                 .on_press(Message::SelectDevice(device_id))
                 .style(iced::widget::button::secondary)
                 .padding([2, 8])
@@ -1498,20 +1507,20 @@ fn render_pagination_controls_with_count(
 ) -> Element<'static, Message> {
     // Previous button
     let prev_btn = if current_page > 0 {
-        button(text("<").size(14))
+        button(text("<").size(font::BODY))
             .on_press(Message::PrevPage)
             .style(iced::widget::button::secondary)
     } else {
-        button(text("<").size(14)).style(iced::widget::button::secondary)
+        button(text("<").size(font::BODY)).style(iced::widget::button::secondary)
     };
 
     // Next button
     let next_btn = if current_page + 1 < total_pages {
-        button(text(">").size(14))
+        button(text(">").size(font::BODY))
             .on_press(Message::NextPage)
             .style(iced::widget::button::secondary)
     } else {
-        button(text(">").size(14)).style(iced::widget::button::secondary)
+        button(text(">").size(font::BODY)).style(iced::widget::button::secondary)
     };
 
     // Page numbers
@@ -1524,13 +1533,14 @@ fn render_pagination_controls_with_count(
         if let Some(last) = last_shown
             && page > last + 1
         {
-            page_row = page_row.push(text("...").size(14));
+            page_row = page_row.push(text("...").size(font::BODY));
         }
 
         let page_btn = if page == current_page {
-            button(text(format!("{}", page + 1)).size(14)).style(iced::widget::button::primary)
+            button(text(format!("{}", page + 1)).size(font::BODY))
+                .style(iced::widget::button::primary)
         } else {
-            button(text(format!("{}", page + 1)).size(14))
+            button(text(format!("{}", page + 1)).size(font::BODY))
                 .on_press(Message::GoToPage(page))
                 .style(iced::widget::button::secondary)
         };
@@ -1543,7 +1553,7 @@ fn render_pagination_controls_with_count(
     // Page info
     let start = current_page * devices_per_page + 1;
     let end = ((current_page + 1) * devices_per_page).min(filtered_count);
-    let info = text(format!("Showing {}-{} of {}", start, end, filtered_count)).size(12);
+    let info = text(format!("Showing {}-{} of {}", start, end, filtered_count)).size(font::CAPTION);
 
     row![page_row, info]
         .spacing(20)

@@ -50,6 +50,7 @@ use crate::message::Message;
 use crate::view::device::DeviceDetailState;
 use crate::view::specialized::parallax_detail::TileState;
 use crate::view::theme;
+use crate::view::tokens::font;
 use crate::view::tokens::space;
 
 /// How a number that was never measured is written. One spelling, so a reader
@@ -489,8 +490,8 @@ fn stage_card<'a>(stage: &Stage) -> Element<'a, Message> {
         None => NOT_ASKED.to_string(),
     };
     let mut card = column![
-        text(stage.name.to_string()).size(11).style(muted),
-        text(rate).size(16),
+        text(stage.name.to_string()).size(font::DENSE).style(muted),
+        text(rate).size(font::EMPHASIS),
         // The first link is the producer's declared offer, not a measurement,
         // and the panel says so rather than letting a reader assume otherwise.
         text(if stage.measured {
@@ -498,12 +499,16 @@ fn stage_card<'a>(stage: &Stage) -> Element<'a, Message> {
         } else {
             "offered"
         })
-        .size(10)
+        .size(font::MICRO)
         .style(dimmed),
     ]
     .spacing(space::XS);
     for (label, value) in &stage.detail {
-        card = card.push(text(format!("{label} {value}")).size(11).style(dimmed));
+        card = card.push(
+            text(format!("{label} {value}"))
+                .size(font::DENSE)
+                .style(dimmed),
+        );
     }
     container(card)
         .padding(space::SM)
@@ -518,7 +523,7 @@ fn hop<'a>(loss: Option<f32>) -> Element<'a, Message> {
         Some(_) => "→".to_string(),
         None => "→ ?".to_string(),
     };
-    container(text(label).size(12).style(hop_style(loss)))
+    container(text(label).size(font::CAPTION).style(hop_style(loss)))
         .padding(space::XS)
         .center_y(Length::Fill)
         .into()
@@ -528,9 +533,13 @@ fn hop<'a>(loss: Option<f32>) -> Element<'a, Message> {
 /// by value — the panel's data is computed per render and the widgets outlive
 /// the struct it came out of.
 fn facts<'a>(name: &'static str, facts: Vec<(&'static str, String)>) -> Element<'a, Message> {
-    let mut card = column![text(name).size(11).style(muted)].spacing(space::XS);
+    let mut card = column![text(name).size(font::DENSE).style(muted)].spacing(space::XS);
     for (label, value) in facts {
-        card = card.push(text(format!("{label} {value}")).size(11).style(dimmed));
+        card = card.push(
+            text(format!("{label} {value}"))
+                .size(font::DENSE)
+                .style(dimmed),
+        );
     }
     container(card)
         .padding(space::SM)
@@ -566,7 +575,7 @@ pub fn health_panel<'a>(
 
     column![
         text(health.verdict.sentence())
-            .size(13)
+            .size(font::BODY)
             .style(verdict_style),
         iced::widget::scrollable(chain).direction(iced::widget::scrollable::Direction::Horizontal(
             iced::widget::scrollable::Scrollbar::default()

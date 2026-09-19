@@ -33,6 +33,7 @@ use zensight_common::Protocol;
 use crate::message::Message;
 use crate::view::components::Sparkline;
 use crate::view::device::DeviceDetailState;
+use crate::view::tokens::font;
 
 pub use syslog::{
     LogExport, SyslogFilterState, SyslogMessage, log_bundle_kind_from_filter, logs_view,
@@ -113,7 +114,7 @@ pub fn metric_trend_and_alert<'a>(state: &DeviceDetailState, metric: &str) -> El
     use iced::widget::{button, row, text};
     let spark = metric_sparkline(state, metric);
     let value = numeric_metric(state, metric);
-    let mut alert = button(text("alert").size(10)).padding([2, 8]);
+    let mut alert = button(text("alert").size(font::MICRO)).padding([2, 8]);
     if let Some(value) = value {
         alert = alert.on_press(Message::PromoteMetricToAlert {
             device: state.device_id.clone(),

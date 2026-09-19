@@ -517,7 +517,7 @@ fn entity_cell<'a>(
             }
             match e.members.iter().find_map(crate::entity::member_key) {
                 Some((protocol, source)) => container(
-                    button(text(label).size(12))
+                    button(text(label).size(font::CAPTION))
                         .padding([2, 6])
                         .style(iced::widget::button::text)
                         .on_press(Message::SelectDeviceNamed { protocol, source }),
@@ -528,7 +528,7 @@ fn entity_cell<'a>(
             }
         }
         None => text("wire-only")
-            .size(12)
+            .size(font::CAPTION)
             .style(dim)
             .width(Length::Fixed(170.0))
             .into(),
@@ -596,10 +596,12 @@ fn render_fingerprints(state: &InventoryState) -> Element<'_, Message> {
         // SNI-bearing rows can be added to the netring host allowlist (reusing the
         // detection-tuning command channel, #121); other rows are informational.
         let action: Element<'_, Message> = match &f.allowlist_host {
-            Some(host) if !host.is_empty() && host != "-" => button(text("allowlist").size(10))
-                .padding([2, 8])
-                .on_press(Message::AddNetringAllowlistEntry(host.clone()))
-                .into(),
+            Some(host) if !host.is_empty() && host != "-" => {
+                button(text("allowlist").size(font::MICRO))
+                    .padding([2, 8])
+                    .on_press(Message::AddNetringAllowlistEntry(host.clone()))
+                    .into()
+            }
             _ => cell("", 90),
         };
         list = list.push(
@@ -618,7 +620,7 @@ fn render_fingerprints(state: &InventoryState) -> Element<'_, Message> {
 
 fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
     text(s.to_string())
-        .size(12)
+        .size(font::CAPTION)
         .width(Length::Fixed(width as f32))
         .into()
 }

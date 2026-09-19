@@ -133,15 +133,18 @@ pub fn netflow_traffic_view(state: &DeviceDetailState) -> Element<'_, Message> {
 /// Render the header with back button and exporter info.
 fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
-    let exporter_name = text(format!("Exporter: {}", state.device_id.source)).size(24);
+    let exporter_name = text(format!("Exporter: {}", state.device_id.source)).size(font::TITLE);
 
     row![back_button, protocol_icon, exporter_name]
         .spacing(15)
@@ -224,7 +227,7 @@ fn render_summary(state: &DeviceDetailState) -> Element<'_, Message> {
 fn render_protocol_distribution(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = row![
         icons::protocol(IconSize::Medium),
-        text("Protocol Distribution").size(16)
+        text("Protocol Distribution").size(font::EMPHASIS)
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -278,7 +281,7 @@ fn render_protocol_distribution(state: &DeviceDetailState) -> Element<'_, Messag
             .map(str::to_string)
             .unwrap_or_else(|_| proto.clone());
         bars.push(
-            row![bar, text(format!("{name} {pct:.0}%")).size(11)]
+            row![bar, text(format!("{name} {pct:.0}%")).size(font::DENSE)]
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .into(),
@@ -298,7 +301,7 @@ fn render_protocol_distribution(state: &DeviceDetailState) -> Element<'_, Messag
 fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = row![
         icons::chart(IconSize::Medium),
-        text("Top Talkers (by bytes)").size(16)
+        text("Top Talkers (by bytes)").size(font::EMPHASIS)
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -332,13 +335,13 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
     for (i, ((src, dst), bytes)) in sorted.into_iter().take(10).enumerate() {
         let row_content = row![
             text(format!("{}.", i + 1))
-                .size(11)
+                .size(font::DENSE)
                 .width(Length::Fixed(25.0)),
-            text(src).size(11).width(Length::Fixed(160.0)),
-            text("→").size(11),
-            text(dst).size(11).width(Length::Fixed(160.0)),
+            text(src).size(font::DENSE).width(Length::Fixed(160.0)),
+            text("→").size(font::DENSE),
+            text(dst).size(font::DENSE).width(Length::Fixed(160.0)),
             text(format_bytes(bytes as f64))
-                .size(11)
+                .size(font::DENSE)
                 .width(Length::Fixed(80.0))
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).primary()),
@@ -367,7 +370,7 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
 fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = row![
         icons::table(IconSize::Medium),
-        text("Recent Flows").size(16)
+        text("Recent Flows").size(font::EMPHASIS)
     ]
     .spacing(8)
     .align_y(Alignment::Center);

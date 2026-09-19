@@ -2051,7 +2051,7 @@ fn has_prefix(state: &DeviceDetailState, prefix: &str) -> bool {
 
 fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
     text(s.to_string())
-        .size(12)
+        .size(font::CAPTION)
         .width(Length::Fixed(width as f32))
         .into()
 }

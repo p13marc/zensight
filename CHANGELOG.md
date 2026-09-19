@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The design system's type scale is enforced, and the doc points at a CI file
+  that exists** (#1125). The colour guard has been real and thorough since #28.
+  The dimensional half was a rule in `design-system.md` with **nothing
+  enforcing it**, and it had rotted to 341 off-scale calls — `.size(11)` 188
+  times, `.size(10)` 92, `.size(13)` 41 — worst in the densest views. The doc
+  cited `.github/workflows/rust.yml`; CI is Forgejo Actions and there is no
+  `.github/` in this repository. A guard nobody can find is one nobody
+  maintains.
+
+  **Two of the "off-scale" values were a finding, not drift.**
+  `.size(9)`/`.size(10)`/`.size(11)` appeared **281 times**, concentrated in
+  exactly the views where a 12 px cell does not fit — `specialized/sysinfo.rs`,
+  `specialized/syslog.rs`, `device.rs`. That is a requirement the five-step
+  scale did not have. `font::MICRO` (10) and `font::DENSE` (11) name it, so 598
+  of the 662 call sites became constants with **zero pixels moved**. The
+  alternative was resizing 281 dense cells up to `CAPTION`, which is a layout
+  change made silently.
+
+  The remaining 64 were one view's private spelling of the scale it already
+  had — `security.rs` used 13/18/22 for body/section/title — and are mapped to
+  the real steps.
+
+  **Spacing ratchets rather than failing.** `.padding(N)`/`.spacing(N)` are
+  ~350 sites and moving them is a layout change, not a rename: `.spacing(10)`
+  appears 102 times and both `SM` (8) and `MD` (16) are defensible readings of
+  it. A count that may only go down is what an unseen sweep is worth; a wall
+  would either block the repo or be waved through with an allowlist nobody
+  reads. CI fails in **both** directions, so a sweep that forgets to lower the
+  ceiling is caught too.
+
+  One test needed a taller viewport rather than a different assertion: putting
+  the page title and section headers on the real scale pushed the security
+  view's anomaly row below 768 px, and `test_security_drilldown_and_filter`
+  clicks it. The assertion is about the interaction, not about how much of a
+  page fits on one screen.
+
 - **snmp: a renumbered ifIndex says so, and interface telemetry carries the
   interface's name** (#1142). An ifIndex is not stable — a reboot, a line-card
   insertion or a firmware upgrade renumbers the table on most switches — and

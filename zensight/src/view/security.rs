@@ -209,15 +209,18 @@ fn sev_rank(s: AlertSeverity) -> u8 {
 
 fn render_header<'a>(count: usize, sec: &SecurityState) -> Element<'a, Message> {
     let back = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::CloseSecurity)
     .style(iced::widget::button::secondary);
 
     // Cross-link back to the operational Alerts surface (#39).
-    let all_alerts = button(text("← All alerts").size(13))
+    let all_alerts = button(text("← All alerts").size(font::BODY))
         .on_press(Message::OpenAlerts)
         .style(iced::widget::button::secondary);
 
@@ -228,7 +231,7 @@ fn render_header<'a>(count: usize, sec: &SecurityState) -> Element<'a, Message> 
         } else {
             "Hide info"
         })
-        .size(13),
+        .size(font::BODY),
     )
     .on_press(Message::ToggleSecurityHideInfo)
     .style(if sec.hide_info {
@@ -239,8 +242,10 @@ fn render_header<'a>(count: usize, sec: &SecurityState) -> Element<'a, Message> 
 
     let header_row = row![
         back,
-        text("Security — Network Anomalies").size(22),
-        text(format!("({count} active)")).size(13).style(dim),
+        text("Security — Network Anomalies").size(font::TITLE),
+        text(format!("({count} active)"))
+            .size(font::BODY)
+            .style(dim),
         all_alerts,
         filter,
     ]
@@ -258,7 +263,7 @@ fn render_header<'a>(count: usize, sec: &SecurityState) -> Element<'a, Message> 
 /// NDR console leads with. Anomalies whose detector carries no technique fall
 /// into an "Untagged" bucket so nothing is hidden.
 fn render_by_tactic<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
-    let title = text("By ATT&CK tactic").size(18);
+    let title = text("By ATT&CK tactic").size(font::SECTION);
     // tactic -> (count, set of technique IDs seen)
     let mut by_tactic: BTreeMap<&'static str, (usize, std::collections::BTreeSet<String>)> =
         BTreeMap::new();
@@ -292,10 +297,12 @@ fn render_by_tactic<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
         list = list.push(
             row![
                 text(tactic.to_string())
-                    .size(13)
+                    .size(font::BODY)
                     .width(Length::Fixed(180.0)),
-                text(format!("{n} anomalies")).size(12).style(dim),
-                text(techs_line).size(11).style(dim),
+                text(format!("{n} anomalies"))
+                    .size(font::CAPTION)
+                    .style(dim),
+                text(techs_line).size(font::DENSE).style(dim),
             ]
             .spacing(10),
         );
@@ -305,7 +312,7 @@ fn render_by_tactic<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
 
 /// Rank offending sources by anomaly count.
 fn render_by_source<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
-    let title = text("Top offenders").size(18);
+    let title = text("Top offenders").size(font::SECTION);
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for a in anomalies {
         let src = a
@@ -327,8 +334,12 @@ fn render_by_source<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
     for (src, n) in ranked.iter().take(20) {
         list = list.push(
             row![
-                text(src.clone()).size(13).width(Length::Fixed(240.0)),
-                text(format!("{n} anomalies")).size(12).style(dim),
+                text(src.clone())
+                    .size(font::BODY)
+                    .width(Length::Fixed(240.0)),
+                text(format!("{n} anomalies"))
+                    .size(font::CAPTION)
+                    .style(dim),
             ]
             .spacing(10),
         );
@@ -339,11 +350,13 @@ fn render_by_source<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
 /// Group anomalies by detector (`rule`) and render one card per detector, each
 /// row clickable to expand its evidence labels (#48).
 fn render_by_detector<'a>(anomalies: &[&'a Alert], sec: &'a SecurityState) -> Element<'a, Message> {
-    let title = text("By detector").size(18);
+    let title = text("By detector").size(font::SECTION);
     if anomalies.is_empty() {
         return column![
             title,
-            text("Quiet — no active anomalies").size(13).style(dim)
+            text("Quiet — no active anomalies")
+                .size(font::BODY)
+                .style(dim)
         ]
         .spacing(8)
         .into();
@@ -408,10 +421,12 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
     let color = sev.color();
 
     let summary_line = row![
-        text(if expanded { "▾" } else { "▸" }).size(11),
-        text(a.summary.clone()).size(13).width(Length::Fixed(420.0)),
+        text(if expanded { "▾" } else { "▸" }).size(font::DENSE),
+        text(a.summary.clone())
+            .size(font::CAPTION)
+            .width(Length::Fixed(420.0)),
         text(sev.name())
-            .size(11)
+            .size(font::DENSE)
             .style(move |_t: &Theme| text::Style { color: Some(color) }),
     ]
     .spacing(10)
@@ -464,7 +479,7 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
             } else {
                 "Show flows"
             })
-            .size(11),
+            .size(font::DENSE),
         )
         .padding([3, 9])
         .style(iced::widget::button::secondary)
@@ -488,7 +503,7 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
                 "Capture available: {} · {} pkts · {size_mib:.1} MiB",
                 cap.filename, cap.packets
             ))
-            .size(11)
+            .size(font::DENSE)
             .style(dim),
         ]
         .spacing(10)
@@ -498,7 +513,7 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
         // pre-wire-v2 and could not answer this GUI anyway.
         if let (Some(id), Some(prefix)) = (&cap.artifact_id, &cap.artifact_prefix) {
             line = line.push(
-                button(text("Download").size(11))
+                button(text("Download").size(font::DENSE))
                     .padding([3, 9])
                     .style(iced::widget::button::secondary)
                     .on_press(Message::DownloadCaptureBlob {
@@ -510,9 +525,17 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
                     }),
             );
         } else if cap.artifact_id.is_some() {
-            line = line.push(text("(sensor too old to serve it)").size(10).style(dim));
+            line = line.push(
+                text("(sensor too old to serve it)")
+                    .size(font::MICRO)
+                    .style(dim),
+            );
         } else {
-            line = line.push(text("(expired — on sensor disk only)").size(10).style(dim));
+            line = line.push(
+                text("(expired — on sensor disk only)")
+                    .size(font::MICRO)
+                    .style(dim),
+            );
         }
         detail = detail.push(line);
     }
@@ -545,18 +568,20 @@ fn render_pivot_flows<'a>(
     }
     let mut list = Column::new().spacing(2).push(
         row![
-            text("src").size(10).width(Length::Fixed(170.0)),
-            text("dst").size(10).width(Length::Fixed(170.0)),
-            text("proto").size(10).width(Length::Fixed(50.0)),
-            text("bytes").size(10).width(Length::Fixed(80.0)),
-            text("community_id").size(10).width(Length::Fixed(260.0)),
-            text("process").size(10).width(Length::Fixed(60.0)),
+            text("src").size(font::MICRO).width(Length::Fixed(170.0)),
+            text("dst").size(font::MICRO).width(Length::Fixed(170.0)),
+            text("proto").size(font::MICRO).width(Length::Fixed(50.0)),
+            text("bytes").size(font::MICRO).width(Length::Fixed(80.0)),
+            text("community_id")
+                .size(font::MICRO)
+                .width(Length::Fixed(260.0)),
+            text("process").size(font::MICRO).width(Length::Fixed(60.0)),
         ]
         .spacing(8),
     );
     for f in records.iter().take(100) {
         // Flow ↔ process join (#309): "this beacon is curl run by uid 1000".
-        let who = button(text("who?").size(11))
+        let who = button(text("who?").size(font::DENSE))
             .padding([1, 6])
             .style(iced::widget::button::text)
             .on_press(Message::FetchFlowAttribution {
@@ -567,14 +592,20 @@ fn render_pivot_flows<'a>(
             });
         list = list.push(
             row![
-                text(f.src.clone()).size(11).width(Length::Fixed(170.0)),
-                text(f.dst.clone()).size(11).width(Length::Fixed(170.0)),
-                text(f.proto.clone()).size(11).width(Length::Fixed(50.0)),
+                text(f.src.clone())
+                    .size(font::DENSE)
+                    .width(Length::Fixed(170.0)),
+                text(f.dst.clone())
+                    .size(font::DENSE)
+                    .width(Length::Fixed(170.0)),
+                text(f.proto.clone())
+                    .size(font::DENSE)
+                    .width(Length::Fixed(50.0)),
                 text(f.bytes.to_string())
-                    .size(11)
+                    .size(font::DENSE)
                     .width(Length::Fixed(80.0)),
                 text(f.community_id.clone().unwrap_or_else(|| "-".into()))
-                    .size(11)
+                    .size(font::DENSE)
                     .width(Length::Fixed(260.0)),
                 who,
             ]
@@ -593,22 +624,22 @@ fn render_pivot_flows<'a>(
     if let Some((key, fetch)) = &sec.attribution {
         let line: Element<'a, Message> = match fetch {
             Fetch::Idle | Fetch::Loading => text(format!("{key}: looking up owning process…"))
-                .size(11)
+                .size(font::DENSE)
                 .style(dim)
                 .into(),
             Fetch::Error(e) => text(format!("{key}: unattributed ({e})"))
-                .size(11)
+                .size(font::DENSE)
                 .style(dim)
                 .into(),
             Fetch::Ready(Some(a)) => {
                 text(format!("{key}: {} — endpoint {}", a.display(), a.endpoint))
-                    .size(11)
+                    .size(font::DENSE)
                     .into()
             }
             Fetch::Ready(None) => text(format!(
                 "{key}: unattributed (no matching socket on any netlink host)"
             ))
-            .size(11)
+            .size(font::DENSE)
             .style(dim)
             .into(),
         };
@@ -620,10 +651,10 @@ fn render_pivot_flows<'a>(
 fn evidence_line<'a>(k: &str, v: &str) -> Element<'a, Message> {
     row![
         text(format!("{k}:"))
-            .size(11)
+            .size(font::DENSE)
             .width(Length::Fixed(160.0))
             .style(dim),
-        text(v.to_string()).size(11),
+        text(v.to_string()).size(font::DENSE),
     ]
     .spacing(8)
     .into()

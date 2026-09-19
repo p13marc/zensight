@@ -12,6 +12,7 @@ use crate::message::Message;
 use crate::view::alerts::AlertFilterPreset;
 use crate::view::groups::GroupsState;
 use crate::view::icons::{self, IconSize};
+use crate::view::tokens::font;
 use zensight_common::{LinkProfile, Protocol};
 
 /// Persistent settings that are saved to disk.
@@ -679,22 +680,28 @@ pub fn settings_view(state: &SettingsState) -> Element<'_, Message> {
 /// Render header with back button.
 fn render_header(state: &SettingsState) -> Element<'_, Message> {
     let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::CloseSettings)
     .style(iced::widget::button::secondary);
 
-    let title = row![icons::settings(IconSize::XLarge), text("Settings").size(24)]
-        .spacing(10)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::settings(IconSize::XLarge),
+        text("Settings").size(font::TITLE)
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
 
     let modified_indicator: Element<'_, Message> = if state.modified {
         row![
             icons::status_warning(IconSize::Small),
             text("(unsaved changes)")
-                .size(12)
+                .size(font::CAPTION)
                 .style(|theme: &Theme| text::Style {
                     color: Some(crate::view::theme::colors(theme).warning()),
                 })
@@ -714,10 +721,10 @@ fn render_header(state: &SettingsState) -> Element<'_, Message> {
 
 /// Render Zenoh connection section.
 fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
-    let section_title = text("Zenoh Connection").size(18);
+    let section_title = text("Zenoh Connection").size(font::SECTION);
 
     // Mode picker
-    let mode_label = text("Mode:").size(14);
+    let mode_label = text("Mode:").size(font::BODY);
     let mode_picker = pick_list(
         ZenohMode::ALL,
         Some(state.zenoh_mode),
@@ -730,7 +737,7 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
         ZenohMode::Peer => "Connects to peers and routers, enables discovery",
         ZenohMode::Router => "Accepts connections, routes traffic between nodes",
     })
-    .size(11)
+    .size(font::DENSE)
     .style(|theme: &Theme| text::Style {
         color: Some(crate::view::theme::colors(theme).text_dimmed()),
     });
@@ -740,7 +747,7 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
         .align_y(Alignment::Center);
 
     // Connect endpoints
-    let connect_label = text("Connect endpoints:").size(14);
+    let connect_label = text("Connect endpoints:").size(font::BODY);
     let connect_input = text_input(
         "tcp/localhost:7447, tcp/192.168.1.1:7447",
         &state.zenoh_connect,
@@ -750,26 +757,26 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
     .width(Length::Fixed(400.0));
 
     let connect_help = text("Comma-separated Zenoh locators to connect to")
-        .size(11)
+        .size(font::DENSE)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     // Listen endpoints
-    let listen_label = text("Listen endpoints:").size(14);
+    let listen_label = text("Listen endpoints:").size(font::BODY);
     let listen_input = text_input("tcp/0.0.0.0:7448", &state.zenoh_listen)
         .on_input(Message::SetZenohListen)
         .padding(8)
         .width(Length::Fixed(400.0));
 
     let listen_help = text("Comma-separated Zenoh locators to listen on (for router/peer mode)")
-        .size(11)
+        .size(font::DENSE)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     // Link profile (#364): standard vs. constrained (low-bandwidth links).
-    let profile_label = text("Link profile:").size(14);
+    let profile_label = text("Link profile:").size(font::BODY);
     let profile_picker = pick_list(
         LinkProfile::ALL,
         Some(state.link_profile),
@@ -785,13 +792,13 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
             "Low bandwidth: no history/recovery traffic; history comes from the local store"
         }
     })
-    .size(11)
+    .size(font::DENSE)
     .style(|theme: &Theme| text::Style {
         color: Some(crate::view::theme::colors(theme).text_dimmed()),
     });
 
     // Subscription scope (#364): narrow the zensight/** telemetry firehose.
-    let scope_label = text("Subscription scope:").size(14);
+    let scope_label = text("Subscription scope:").size(font::BODY);
     let scope_input = text_input(
         "v1/*/telemetry/netring/**, zensight/v1/*/telemetry/sysinfo/**",
         &state.subscription_scope,
@@ -803,7 +810,7 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
         "Comma-separated telemetry key expressions; empty = everything (zensight/v1/*/telemetry/**). \
          Health, alerts, and entities are unaffected.",
     )
-    .size(11)
+    .size(font::DENSE)
     .style(|theme: &Theme| text::Style {
         color: Some(crate::view::theme::colors(theme).text_dimmed()),
     });
@@ -830,17 +837,17 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
 
 /// Render display settings section.
 fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
-    let section_title = text("Display Settings").size(18);
+    let section_title = text("Display Settings").size(font::SECTION);
 
     // Stale threshold
-    let threshold_label = text("Stale threshold (seconds):").size(14);
+    let threshold_label = text("Stale threshold (seconds):").size(font::BODY);
     let threshold_input = text_input("120", &state.stale_threshold_secs)
         .on_input(Message::SetStaleThreshold)
         .padding(8)
         .width(Length::Fixed(100.0));
 
     let threshold_help = text("Devices not updated within this time are marked as unhealthy")
-        .size(11)
+        .size(font::DENSE)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
@@ -850,14 +857,14 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         .align_y(Alignment::Center);
 
     // Max history
-    let history_label = text("Max metric history per device:").size(14);
+    let history_label = text("Max metric history per device:").size(font::BODY);
     let history_input = text_input("500", &state.max_history)
         .on_input(Message::SetMaxHistory)
         .padding(8)
         .width(Length::Fixed(100.0));
 
     let history_help = text("Maximum data points to keep per metric (10-10000)")
-        .size(11)
+        .size(font::DENSE)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
@@ -867,7 +874,7 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         .align_y(Alignment::Center);
 
     // Live-video frame-age deadline (#716).
-    let latency_label = text("Live video latency deadline (ms):").size(14);
+    let latency_label = text("Live video latency deadline (ms):").size(font::BODY);
     let latency_input = text_input("1500", &state.max_live_latency_ms)
         .on_input(Message::SetMaxLiveLatency)
         .padding(8)
@@ -875,7 +882,7 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
 
     let latency_help =
         text("Shed video frames older than this on arrival, 0 to disable (100-30000)")
-            .size(11)
+            .size(font::DENSE)
             .style(|theme: &Theme| text::Style {
                 color: Some(crate::view::theme::colors(theme).text_dimmed()),
             });
@@ -887,12 +894,15 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
     // Desktop notifications (#26): opt-in, CRITICAL firing transitions only.
     let notif_toggle = iced::widget::toggler(state.desktop_notifications)
         .on_toggle(|_| Message::ToggleDesktopNotifications)
-        .size(18);
-    let notif_row = row![text("Desktop notifications:").size(14), notif_toggle,]
-        .spacing(10)
-        .align_y(Alignment::Center);
+        .size(font::SECTION);
+    let notif_row = row![
+        text("Desktop notifications:").size(font::BODY),
+        notif_toggle,
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
     let notif_help = text("Show a desktop alert when a CRITICAL alert fires (opt-in)")
-        .size(11)
+        .size(font::DENSE)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
@@ -918,19 +928,22 @@ fn render_actions(state: &SettingsState) -> Element<'_, Message> {
 
     // Error message
     if let Some(error) = &state.error {
-        let error_text = text(format!("Error: {}", error))
-            .size(14)
-            .style(|theme: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(theme).danger()),
-            });
+        let error_text =
+            text(format!("Error: {}", error))
+                .size(font::BODY)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).danger()),
+                });
         content = content.push(error_text);
     }
 
     // Success message
     if let Some(success) = &state.success {
-        let success_text = text(success).size(14).style(|theme: &Theme| text::Style {
-            color: Some(crate::view::theme::colors(theme).success()),
-        });
+        let success_text = text(success)
+            .size(font::BODY)
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).success()),
+            });
         content = content.push(success_text);
     }
 
@@ -939,7 +952,7 @@ fn render_actions(state: &SettingsState) -> Element<'_, Message> {
     let validation = state.validate();
     if let Err(ref problem) = validation {
         let warn = text(format!("⚠ {problem}"))
-            .size(12)
+            .size(font::CAPTION)
             .style(|theme: &Theme| text::Style {
                 color: Some(crate::view::theme::colors(theme).warning()),
             });
@@ -948,12 +961,12 @@ fn render_actions(state: &SettingsState) -> Element<'_, Message> {
 
     // Buttons
     let mut save_button =
-        button(text("Save Settings").size(14)).style(iced::widget::button::primary);
+        button(text("Save Settings").size(font::BODY)).style(iced::widget::button::primary);
     if validation.is_ok() {
         save_button = save_button.on_press(Message::SaveSettings);
     }
 
-    let reset_button = button(text("Reset to Defaults").size(14))
+    let reset_button = button(text("Reset to Defaults").size(font::BODY))
         .on_press(Message::ResetSettings)
         .style(iced::widget::button::secondary);
 
@@ -963,7 +976,7 @@ fn render_actions(state: &SettingsState) -> Element<'_, Message> {
 
     // Note about restart
     let note = text("Note: Zenoh connection changes require application restart to take effect")
-        .size(11)
+        .size(font::DENSE)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_muted()),
         });

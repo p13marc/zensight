@@ -547,7 +547,7 @@ fn render_trap_feed<'a>(
                 shown.len(),
                 matched.len()
             ))
-            .size(10)
+            .size(font::MICRO)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             }),
@@ -588,7 +588,7 @@ fn render_event_row<'a>(
 
     let mut row = row![
         text(crate::view::formatting::format_timestamp(record.timestamp))
-            .size(10)
+            .size(font::MICRO)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             }),
@@ -616,13 +616,13 @@ fn render_event_row<'a>(
         // written before that field existed — keep the device-scoped pivot,
         // which is the honest link when there is no key to follow.
         row = row.push(match &record.alert_key {
-            Some(key) => iced::widget::button(text("alert →").size(10))
+            Some(key) => iced::widget::button(text("alert →").size(font::MICRO))
                 .on_press(Message::OpenAlertForKey {
                     source: record.source.clone(),
                     alert_key: key.clone(),
                 })
                 .style(iced::widget::button::text),
-            None => iced::widget::button(text("alerts →").size(10))
+            None => iced::widget::button(text("alerts →").size(font::MICRO))
                 .on_press(Message::OpenAlertsForSource(record.source.clone()))
                 .style(iced::widget::button::text),
         });
@@ -755,9 +755,11 @@ fn render_event_filters<'a>(
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
         text(value).size(font::EMPHASIS)
     ]
     .spacing(2)
@@ -773,9 +775,11 @@ fn render_status_stat<'a>(
     let led = StatusLed::new(state).with_size(10.0);
 
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
         row![led.view(), text(count.to_string()).size(font::EMPHASIS)]
             .spacing(space::XS)
             .align_y(Alignment::Center)
@@ -811,7 +815,7 @@ fn render_top_talkers<'a>(
         .map(|(i, iface)| {
             let util: Element<'a, Message> = match iface.util_pct() {
                 Some(pct) => text(format!("{pct:.0}%"))
-                    .size(10)
+                    .size(font::MICRO)
                     .style(move |t: &Theme| text::Style {
                         color: Some(if pct > 90.0 {
                             theme::colors(t).danger()
@@ -822,11 +826,11 @@ fn render_top_talkers<'a>(
                         }),
                     })
                     .into(),
-                None => text("").size(10).into(),
+                None => text("").size(font::MICRO).into(),
             };
             row![
                 text(format!("{}.", i + 1))
-                    .size(10)
+                    .size(font::MICRO)
                     .width(Length::Fixed(20.0)),
                 StatusLed::new(if iface.is_up() {
                     StatusLedState::Active
@@ -842,12 +846,12 @@ fn render_top_talkers<'a>(
                     "In: {}",
                     format_rate(iface.entry.rates.in_octets_per_sec.unwrap_or(0.0))
                 ))
-                .size(10),
+                .size(font::MICRO),
                 text(format!(
                     "Out: {}",
                     format_rate(iface.entry.rates.out_octets_per_sec.unwrap_or(0.0))
                 ))
-                .size(10),
+                .size(font::MICRO),
                 util,
             ]
             .spacing(space::SM)

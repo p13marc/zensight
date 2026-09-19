@@ -2113,7 +2113,7 @@ fn dir_split(bytes_initiator: u64, bytes_responder: u64) -> String {
 
 fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
     text(s.to_string())
-        .size(12)
+        .size(font::CAPTION)
         .width(Length::Fixed(width as f32))
         .into()
 }
@@ -2148,7 +2148,7 @@ fn pivot_button<'a>(
 /// A fixed-width table cell whose text is tinted by `style` (e.g. drop-rate).
 fn cell_styled<'a>(s: &str, width: u16, style: fn(&Theme) -> text::Style) -> Element<'a, Message> {
     text(s.to_string())
-        .size(12)
+        .size(font::CAPTION)
         .width(Length::Fixed(width as f32))
         .style(style)
         .into()

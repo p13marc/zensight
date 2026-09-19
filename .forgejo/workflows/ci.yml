@@ -462,6 +462,47 @@ jobs:
             exit 1
           fi
 
+      # D2's other half (#1125): the TYPE scale. The colour guard above has
+      # been real and thorough since #28; the dimensional half was a rule in
+      # `design-system.md` with nothing enforcing it, and it had rotted to 341
+      # off-scale calls — `.size(11)` 188 times, `.size(10)` 92, `.size(13)` 41.
+      #
+      # `view/components/` is exempt for the same reason it is exempt from the
+      # colour guard: it is the widget kit, and a kit that could not pick its
+      # own metrics would have nothing to offer.
+      - name: no raw font sizes (D2 type-scale guard)
+        run: |
+          hits=$(grep -rnE "\.size\([0-9]" zensight/src --include='*.rs' \
+            | grep -vE "view/tokens\.rs|view/components/" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Raw .size(N) outside the design-system modules — use view::tokens::font:"
+            echo "$hits"
+            exit 1
+          fi
+
+      # The SPACING half of the same rule, as a RATCHET rather than a wall
+      # (#1125). Padding and spacing are ~350 sites and moving them is a
+      # layout change, not a rename: `.spacing(10)` appears 102 times and
+      # `8` and `16` are both defensible readings of it. A number that can
+      # only go down is what an unseen sweep is worth; a wall here would
+      # either block the repo or be waved through with an allowlist nobody
+      # reads. Lower the number when you sweep a file; CI fails if it rises.
+      - name: raw spacing does not grow (D2 spacing ratchet)
+        run: |
+          ceiling=$(cat zensight/src/view/.spacing-ratchet)
+          n=$(grep -rcE "\.(padding|spacing)\([0-9]" zensight/src --include='*.rs' \
+            | grep -vE "view/tokens\.rs|view/components/" \
+            | awk -F: '{s+=$2} END {print s+0}')
+          echo "raw padding/spacing literals: $n (ceiling $ceiling)"
+          if [ "$n" -gt "$ceiling" ]; then
+            echo "::error::Raw .padding(N)/.spacing(N) rose from $ceiling to $n — use view::tokens::space"
+            exit 1
+          fi
+          if [ "$n" -lt "$ceiling" ]; then
+            echo "::error::$((ceiling - n)) fewer than the ceiling — lower zensight/src/view/.spacing-ratchet to $n so it cannot come back"
+            exit 1
+          fi
+
       # R5 (#356): every publication must go through a declared publisher.
       - name: declared-publishers only (R5 guard)
         run: |

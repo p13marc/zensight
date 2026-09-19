@@ -9,6 +9,7 @@ use crate::message::Message;
 use crate::view::alerts::Severity;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::tokens::font;
 use zensight_common::ComparisonOp;
 
 /// The kind of expectation being authored.
@@ -778,14 +779,17 @@ pub fn expectations_view(state: &ExpectationsState) -> Element<'_, Message> {
 
 fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
     let back = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::CloseExpectations)
     .style(iced::widget::button::secondary);
 
-    let refresh = button(text("Refresh").size(13))
+    let refresh = button(text("Refresh").size(font::BODY))
         .on_press(Message::RefreshExpectations)
         .style(iced::widget::button::secondary);
 
@@ -819,7 +823,7 @@ fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
     let scope: Element<'_, Message> = match (&state.host, state.target) {
         (Some(h), t) if t != ExpTarget::Thresholds => {
             text(format!("Applies to this host only ({}).", h.chunk))
-                .size(12)
+                .size(font::CAPTION)
                 .style(dim)
                 .into()
         }
@@ -836,7 +840,7 @@ fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
             ExpTarget::Thresholds => "Thresholds".to_string(),
             t => format!("Expectations ({t} sentinel)"),
         })
-        .size(22),
+        .size(font::TITLE),
         target,
         host,
         scope,
@@ -908,15 +912,15 @@ fn render_form(state: &ExpectationsState) -> Element<'_, Message> {
     )
     .width(Length::Fixed(120.0));
 
-    let add = button(text("Add & Push").size(13))
+    let add = button(text("Add & Push").size(font::BODY))
         .on_press(Message::AddExpectation)
         .style(iced::widget::button::primary);
 
     column![
-        text("Declare an expectation").size(18),
+        text("Declare an expectation").size(font::SECTION),
         form.push(severity).push(add),
         text("Pushed to all netlink sensors via the command channel.")
-            .size(11)
+            .size(font::DENSE)
             .style(dim),
     ]
     .spacing(10)
@@ -977,15 +981,15 @@ fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
         _ => {}
     }
 
-    let add = button(text("Add & Push").size(13))
+    let add = button(text("Add & Push").size(font::BODY))
         .on_press(Message::AddExpectation)
         .style(iced::widget::button::primary);
 
     column![
-        text("Declare a systemd expectation").size(18),
+        text("Declare a systemd expectation").size(font::SECTION),
         form.push(add),
         text("The full expectation set is pushed to the systemd sentinel via SetExpectations.")
-            .size(11)
+            .size(font::DENSE)
             .style(dim),
     ]
     .spacing(10)
@@ -1043,8 +1047,8 @@ fn render_no_host(state: &ExpectationsState) -> Element<'_, Message> {
         )
     };
     column![
-        text("No host chosen.").size(14),
-        text(why).size(12).style(dim),
+        text("No host chosen.").size(font::BODY),
+        text(why).size(font::CAPTION).style(dim),
     ]
     .spacing(6)
     .into()
@@ -1061,13 +1065,13 @@ fn render_thresholds_form(state: &ExpectationsState) -> Element<'_, Message> {
         // Not an error — nobody has promoted a metric yet. Say what to do
         // rather than showing an empty form that pushes nowhere (#867).
         return column![
-            text("No producer selected.").size(14),
+            text("No producer selected.").size(font::BODY),
             text(
                 "A threshold rule belongs to one host's sensor, so this form needs to know \
                  which. Open a device, find the metric you care about, and press its \
                  \u{201c}alert\u{201d} button — that is what fills this in."
             )
-            .size(12)
+            .size(font::CAPTION)
             .style(dim),
         ]
         .spacing(8)
@@ -1098,12 +1102,12 @@ fn render_thresholds_form(state: &ExpectationsState) -> Element<'_, Message> {
         Message::SetExpectationSeverity,
     )
     .width(Length::Fixed(110.0));
-    let add = button(text("Add rule").size(13))
+    let add = button(text("Add rule").size(font::BODY))
         .on_press(Message::AddExpectation)
         .style(iced::widget::button::primary);
 
     let mut col = column![
-        text("Add a threshold rule").size(18),
+        text("Add a threshold rule").size(font::SECTION),
         row![name, metric, op, value, severity, add]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -1114,11 +1118,15 @@ fn render_thresholds_form(state: &ExpectationsState) -> Element<'_, Message> {
     // that lost a race with `@desired` looks like a push that did nothing.
     if let Some(applied) = &state.thresholds_applied {
         let src = format!("{:?}", applied.source).to_lowercase();
-        col = col.push(text(format!("In force from: {src}")).size(12).style(dim));
+        col = col.push(
+            text(format!("In force from: {src}"))
+                .size(font::CAPTION)
+                .style(dim),
+        );
         if let Some(rejected) = &applied.last_rejected {
             col = col.push(
                 text(format!("Last refused desired document: {}", rejected.error))
-                    .size(11)
+                    .size(font::DENSE)
                     .style(dim),
             );
         }
@@ -1140,7 +1148,7 @@ fn render_thresholds_form(state: &ExpectationsState) -> Element<'_, Message> {
                 })
                 .unwrap_or_default()
         ))
-        .size(12)
+        .size(font::CAPTION)
         .style(dim),
     );
     col = col.push(
@@ -1150,7 +1158,7 @@ fn render_thresholds_form(state: &ExpectationsState) -> Element<'_, Message> {
              `value`) and a refusal keeps the previous set. To hold a rule across the \
              fleet, publish it on @desired instead.",
         )
-        .size(11)
+        .size(font::DENSE)
         .style(dim),
     );
     col.into()
@@ -1223,12 +1231,12 @@ fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
         }
     }
 
-    let add = button(text("Add & Push").size(13))
+    let add = button(text("Add & Push").size(font::BODY))
         .on_press(Message::AddExpectation)
         .style(iced::widget::button::primary);
 
     column![
-        text("Declare a host assertion").size(18),
+        text("Declare a host assertion").size(font::SECTION),
         form.push(add),
         text(
             "The whole set replaces the sensor's over expectations/set (validated there; \
@@ -1236,7 +1244,7 @@ fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
              per-assertion severity/debounce are config-file territory — pushing from \
              here rewrites the set with this form's fields only.",
         )
-        .size(11)
+        .size(font::DENSE)
         .style(dim),
     ]
     .spacing(10)
@@ -1250,7 +1258,7 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
         ExpTarget::Hostspec => state.hostspec.rows(),
         ExpTarget::Thresholds => threshold_rows(&state.thresholds),
     };
-    let title = text(format!("Configured ({})", rows.len())).size(18);
+    let title = text(format!("Configured ({})", rows.len())).size(font::SECTION);
     // The reply's schema verdict rides beside the count (#791): three
     // states, and "not checked" reads as absent, never as a pass.
     let verdict = match state.target {
@@ -1276,14 +1284,14 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
         if state.target == ExpTarget::Hostspec && state.hostspec_verdict.is_some() {
             let mut col = column![
                 title,
-                text("This host is held to nothing.").size(14),
+                text("This host is held to nothing.").size(font::BODY),
                 text(
                     "That is a valid state, not a failure: the sweep runs, the \
                      failing-assertion gauge reads 0, and the sensor is healthy. \
                      Author an assertion in the form above and press Push to hold \
                      this host to something."
                 )
-                .size(12)
+                .size(font::CAPTION)
                 .style(dim),
             ]
             .spacing(8);
@@ -1291,8 +1299,16 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
             // it is being held to, and a rendering of it would be a second
             // opinion nobody asked for.
             if let Some(spec) = state.hostspec_spec.as_deref() {
-                col = col.push(text("@rpc/hostspec/spec answers:").size(11).style(dim));
-                col = col.push(text(spec.to_string()).size(11).font(iced::Font::MONOSPACE));
+                col = col.push(
+                    text("@rpc/hostspec/spec answers:")
+                        .size(font::DENSE)
+                        .style(dim),
+                );
+                col = col.push(
+                    text(spec.to_string())
+                        .size(font::DENSE)
+                        .font(iced::Font::MONOSPACE),
+                );
             }
             return col.into();
         }
@@ -1300,21 +1316,25 @@ fn render_current(state: &ExpectationsState) -> Element<'_, Message> {
             .status_note
             .clone()
             .unwrap_or_else(|| "Press Refresh to load the current set.".into());
-        return column![title, text(note).size(13).style(dim)]
+        return column![title, text(note).size(font::BODY).style(dim)]
             .spacing(8)
             .into();
     }
 
     let mut list = Column::new().spacing(5);
     for r in rows {
-        let remove = button(text("Remove").size(11))
+        let remove = button(text("Remove").size(font::DENSE))
             .on_press(Message::RemoveExpectation(r.rule.clone()))
             .style(iced::widget::button::danger);
         list = list.push(
             row![
-                text(r.rule).size(13).width(Length::Fixed(200.0)),
-                text(r.detail).size(12).width(Length::Fixed(220.0)),
-                text(r.severity).size(11).width(Length::Fixed(80.0)),
+                text(r.rule).size(font::BODY).width(Length::Fixed(200.0)),
+                text(r.detail)
+                    .size(font::CAPTION)
+                    .width(Length::Fixed(220.0)),
+                text(r.severity)
+                    .size(font::DENSE)
+                    .width(Length::Fixed(80.0)),
                 remove,
             ]
             .spacing(10)

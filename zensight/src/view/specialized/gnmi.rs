@@ -16,6 +16,7 @@ use crate::view::components::{card, empty_state};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::tokens::font;
 use crate::view::tokens::space;
 
 /// Render the gNMI streaming telemetry specialized view.
@@ -43,17 +44,20 @@ pub fn gnmi_streaming_view(state: &DeviceDetailState) -> Element<'_, Message> {
 /// Render the header with back button and target info.
 fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
-    let device_name = text(&state.device_id.source).size(24);
+    let device_name = text(&state.device_id.source).size(font::TITLE);
 
-    let metric_count = text(format!("{} paths", state.metrics.len())).size(14);
+    let metric_count = text(format!("{} paths", state.metrics.len())).size(font::BODY);
 
     row![back_button, protocol_icon, device_name, metric_count]
         .spacing(15)
@@ -80,9 +84,12 @@ fn render_device_info(state: &DeviceDetailState) -> Element<'_, Message> {
     for (label, path) in system_paths {
         if let Some(value) = get_metric_text(state, path) {
             info_items.push(
-                row![text(format!("{}:", label)).size(12), text(value).size(12)]
-                    .spacing(8)
-                    .into(),
+                row![
+                    text(format!("{}:", label)).size(font::CAPTION),
+                    text(value).size(font::CAPTION)
+                ]
+                .spacing(8)
+                .into(),
             );
         }
     }
@@ -92,9 +99,12 @@ fn render_device_info(state: &DeviceDetailState) -> Element<'_, Message> {
         && let Some(target) = point.labels.get("target")
     {
         info_items.push(
-            row![text("Target:").size(12), text(target).size(12)]
-                .spacing(8)
-                .into(),
+            row![
+                text("Target:").size(font::CAPTION),
+                text(target).size(font::CAPTION)
+            ]
+            .spacing(8)
+            .into(),
         );
     }
 
@@ -113,7 +123,7 @@ fn render_device_info(state: &DeviceDetailState) -> Element<'_, Message> {
 fn render_subscriptions(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = row![
         icons::subscription(IconSize::Medium),
-        text("Active Subscriptions").size(16)
+        text("Active Subscriptions").size(font::EMPHASIS)
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -141,14 +151,18 @@ fn render_subscriptions(state: &DeviceDetailState) -> Element<'_, Message> {
 
     for (prefix, count) in sorted_subs.into_iter().take(10) {
         let sub_row = row![
-            text("•").size(12).style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).success()),
-            }),
-            text(prefix).size(12).style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).primary()),
-            }),
+            text("•")
+                .size(font::CAPTION)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).success()),
+                }),
+            text(prefix)
+                .size(font::CAPTION)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).primary()),
+                }),
             text(format!("({} paths)", count))
-                .size(10)
+                .size(font::MICRO)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 }),
@@ -168,9 +182,12 @@ fn render_subscriptions(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Render the path browser as a sorted list of paths with values.
 fn render_path_browser(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![icons::tree(IconSize::Medium), text("Path Browser").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::tree(IconSize::Medium),
+        text("Path Browser").size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     // Collect and sort paths
     let mut paths: Vec<(String, String)> = state
@@ -209,13 +226,15 @@ fn render_path_browser(state: &DeviceDetailState) -> Element<'_, Message> {
         };
 
         let path_row = row![
-            text(indent_str).size(10),
-            text("○").size(10).style(|t: &Theme| text::Style {
+            text(indent_str).size(font::MICRO),
+            text("○").size(font::MICRO).style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).primary()),
             }),
-            text(last_segment.to_string()).size(11).style(name_style),
+            text(last_segment.to_string())
+                .size(font::DENSE)
+                .style(name_style),
             text(format!(": {}", value_display))
-                .size(10)
+                .size(font::MICRO)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).success()),
                 }),

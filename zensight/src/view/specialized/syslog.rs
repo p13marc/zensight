@@ -20,6 +20,7 @@ use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
 use crate::view::time_range::TimeRange;
+use crate::view::tokens::font;
 use crate::view::tokens::space;
 
 /// Syslog severity — the one canonical model (#557), re-exported under the name
@@ -433,7 +434,7 @@ pub fn syslog_event_view<'a>(
         } else {
             "▸"
         })
-        .size(12),
+        .size(font::CAPTION),
     )
     .on_press(Message::ToggleLogStatsPanel)
     .padding([2, 8])
@@ -544,14 +545,14 @@ fn render_logs_rollup<'a>(
         } else {
             3.min(total)
         };
-        col = col.push(text("by unit (top)").size(12).style(muted));
+        col = col.push(text("by unit (top)").size(font::CAPTION).style(muted));
         for (unit, n) in units.into_iter().take(shown) {
             col = col.push(
                 row![
                     text(format!("  {unit}"))
-                        .size(12)
+                        .size(font::CAPTION)
                         .width(Length::Fixed(220.0)),
-                    text(n.to_string()).size(12),
+                    text(n.to_string()).size(font::CAPTION),
                 ]
                 .spacing(8),
             );
@@ -563,7 +564,7 @@ fn render_logs_rollup<'a>(
                 format!("Show all {total}")
             };
             col = col.push(
-                button(text(label).size(12))
+                button(text(label).size(font::CAPTION))
                     .on_press(Message::ToggleLogStatsAllUnits)
                     .padding([2, 8])
                     .style(iced::widget::button::text),
@@ -659,7 +660,7 @@ pub fn logs_view<'a>(
             } else {
                 "Filters"
             })
-            .size(14)
+            .size(font::BODY)
         ]
         .spacing(6)
         .align_y(Alignment::Center),
@@ -673,9 +674,9 @@ pub fn logs_view<'a>(
 
     let header = row![
         icons::log(IconSize::Large),
-        text("Logs").size(24),
+        text("Logs").size(font::TITLE),
         text(format!("{} buffered", messages.len()))
-            .size(13)
+            .size(font::BODY)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             }),
@@ -691,8 +692,8 @@ pub fn logs_view<'a>(
         let short: String = inv.chars().take(12).collect();
         content = content.push(card(
             row![
-                text(format!("Showing one unit run · invocation {short}…")).size(12),
-                button(text("Clear run filter").size(11))
+                text(format!("Showing one unit run · invocation {short}…")).size(font::CAPTION),
+                button(text("Clear run filter").size(font::DENSE))
                     .padding([3, 9])
                     .style(iced::widget::button::secondary)
                     .on_press(Message::ClearLogsInvocationFilter),
@@ -706,8 +707,8 @@ pub fn logs_view<'a>(
     if let Some(rule) = &filter_state.alert_pivot {
         content = content.push(card(
             row![
-                text(format!("Filtered from alert · {rule}")).size(12),
-                button(text("Clear").size(11))
+                text(format!("Filtered from alert · {rule}")).size(font::CAPTION),
+                button(text("Clear").size(font::DENSE))
                     .padding([3, 9])
                     .style(iced::widget::button::secondary)
                     .on_press(Message::ClearLogsAlertPivot),
@@ -724,7 +725,7 @@ pub fn logs_view<'a>(
             text(format!(
                 "Sensor history unavailable ({err}) — showing this viewer's cached logs only"
             ))
-            .size(12)
+            .size(font::CAPTION)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).status_warning()),
             }),
@@ -751,7 +752,7 @@ fn render_header<'a>(
     filter_state: &'a SyslogFilterState,
     message_count: usize,
 ) -> Element<'a, Message> {
-    let count_text = text(format!("{} messages", message_count)).size(14);
+    let count_text = text(format!("{} messages", message_count)).size(font::BODY);
 
     // Filter toggle button
     let filter_button = {
@@ -763,7 +764,7 @@ fn render_header<'a>(
             "Filters"
         };
         button(
-            row![icon, text(label).size(14)]
+            row![icon, text(label).size(font::BODY)]
                 .spacing(6)
                 .align_y(Alignment::Center),
         )
@@ -789,7 +790,7 @@ fn render_filter_panel<'a>(
 ) -> Element<'a, Message> {
     let title = row![
         icons::toggle(IconSize::Medium),
-        text("Sensor Filters").size(16)
+        text("Sensor Filters").size(font::EMPHASIS)
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -802,7 +803,7 @@ fn render_filter_panel<'a>(
         .unwrap_or(SEVERITY_OPTIONS[0].clone());
 
     let severity_picker = row![
-        text("Min Severity:").size(13),
+        text("Min Severity:").size(font::BODY),
         pick_list(
             SEVERITY_OPTIONS.as_slice(),
             Some(current_severity),
@@ -817,7 +818,7 @@ fn render_filter_panel<'a>(
     // apply, narrowing both the events query (server-side history depth) and the
     // filtered export.
     let time_range_picker = row![
-        text("Time range:").size(13),
+        text("Time range:").size(font::BODY),
         pick_list(
             TimeRange::ALL.as_slice(),
             Some(filter_state.time_range),
@@ -837,10 +838,10 @@ fn render_filter_panel<'a>(
         .collect();
     facilities.sort();
 
-    let facility_label = text("Facilities:").size(13);
+    let facility_label = text("Facilities:").size(font::BODY);
     let facility_checkboxes: Element<'_, Message> = if facilities.is_empty() {
         text("(none)")
-            .size(12)
+            .size(font::CAPTION)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             })
@@ -853,7 +854,7 @@ fn render_filter_panel<'a>(
             let facility_label = facility.clone();
             let facility_msg = facility.clone();
             // Use a button as a toggle instead of checkbox
-            let btn = button(text(facility_label).size(12))
+            let btn = button(text(facility_label).size(font::CAPTION))
                 .on_press(Message::ToggleSyslogFacility(facility_msg))
                 .style(if is_selected {
                     iced::widget::button::primary
@@ -881,12 +882,12 @@ fn render_filter_panel<'a>(
     let unit_row: Element<'_, Message> = if units.is_empty() {
         text("").into()
     } else {
-        let mut chips: Vec<Element<'_, Message>> = vec![text("Units:").size(13).into()];
+        let mut chips: Vec<Element<'_, Message>> = vec![text("Units:").size(font::BODY).into()];
         for unit in units.into_iter().take(50) {
             let is_selected = filter_state.selected_units.contains(&unit);
             let label = unit.clone();
             chips.push(
-                button(text(label).size(12))
+                button(text(label).size(font::CAPTION))
                     .on_press(Message::ToggleSyslogUnit(unit))
                     .style(if is_selected {
                         iced::widget::button::primary
@@ -915,12 +916,12 @@ fn render_filter_panel<'a>(
     let boot_row: Element<'_, Message> = if boots.is_empty() {
         text("").into()
     } else {
-        let mut chips: Vec<Element<'_, Message>> = vec![text("Boots:").size(13).into()];
+        let mut chips: Vec<Element<'_, Message>> = vec![text("Boots:").size(font::BODY).into()];
         for boot in boots.into_iter().take(20) {
             let is_selected = filter_state.selected_boots.contains(&boot);
             let short: String = boot.chars().take(8).collect();
             chips.push(
-                button(text(short).size(12))
+                button(text(short).size(font::CAPTION))
                     .on_press(Message::ToggleSyslogBoot(boot))
                     .style(if is_selected {
                         iced::widget::button::primary
@@ -938,10 +939,10 @@ fn render_filter_panel<'a>(
 
     // App filter input
     let app_filter_row = row![
-        text("App Pattern:").size(13),
+        text("App Pattern:").size(font::BODY),
         text_input("e.g., systemd-*", &filter_state.app_filter)
             .on_input(Message::SetSyslogAppFilter)
-            .size(13)
+            .size(font::BODY)
             .padding(6)
             .width(Length::Fixed(200.0))
     ]
@@ -951,34 +952,36 @@ fn render_filter_panel<'a>(
     // Message filter input (#554): regex, with a subtle hint when the pattern
     // isn't valid regex (we fall back to a substring match rather than error).
     let mut msg_filter_row = row![
-        text("Message Pattern:").size(13),
+        text("Message Pattern:").size(font::BODY),
         text_input("e.g., error|failed", &filter_state.message_filter)
             .on_input(Message::SetSyslogMessageFilter)
-            .size(13)
+            .size(font::BODY)
             .padding(6)
             .width(Length::Fixed(200.0))
     ]
     .spacing(10)
     .align_y(Alignment::Center);
     if message_filter_is_substring_fallback(&filter_state.message_filter) {
-        msg_filter_row =
-            msg_filter_row.push(text("invalid regex — matching as text").size(11).style(
-                |t: &Theme| text::Style {
+        msg_filter_row = msg_filter_row.push(
+            text("invalid regex — matching as text")
+                .size(font::DENSE)
+                .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
-                },
-            ));
+                }),
+        );
     }
 
     // Action buttons
-    let apply_button = button(row![text("Apply to Sensor").size(13)].align_y(Alignment::Center))
-        .on_press(Message::ApplySyslogFilters)
-        .style(if filter_state.modified {
-            iced::widget::button::primary
-        } else {
-            iced::widget::button::secondary
-        });
+    let apply_button =
+        button(row![text("Apply to Sensor").size(font::BODY)].align_y(Alignment::Center))
+            .on_press(Message::ApplySyslogFilters)
+            .style(if filter_state.modified {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            });
 
-    let clear_button = button(row![text("Clear").size(13)].align_y(Alignment::Center))
+    let clear_button = button(row![text("Clear").size(font::BODY)].align_y(Alignment::Center))
         .on_press(Message::ClearSyslogFilters)
         .style(iced::widget::button::secondary);
 
@@ -992,8 +995,9 @@ fn render_filter_panel<'a>(
         } else {
             "Export filtered logs".to_string()
         };
-        let mut export_button = button(row![text(label).size(13)].align_y(Alignment::Center))
-            .style(iced::widget::button::secondary);
+        let mut export_button =
+            button(row![text(label).size(font::BODY)].align_y(Alignment::Center))
+                .style(iced::widget::button::secondary);
         if !exp.busy {
             export_button = export_button.on_press(Message::StartArtifact {
                 producer: Protocol::Logs.as_str().to_string(),
@@ -1008,7 +1012,7 @@ fn render_filter_panel<'a>(
                 LogBundleFormat::Jsonl => "as JSONL",
                 LogBundleFormat::Text => "as text",
             })
-            .size(12),
+            .size(font::CAPTION),
         )
         .on_press(Message::ToggleLogExportFormat)
         .style(iced::widget::button::text);
@@ -1018,7 +1022,7 @@ fn render_filter_panel<'a>(
     // Honest caption when the active filter has dimensions the bundle can't carry.
     let export_note: Element<'_, Message> = match export.and(log_export_caveats(filter_state)) {
         Some(note) => text(note)
-            .size(11)
+            .size(font::DENSE)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             })
@@ -1037,7 +1041,7 @@ fn render_filter_panel<'a>(
             "Sensor stats: {} received, {} passed ({}%), {} filtered",
             stats.messages_received, stats.messages_passed, passed_pct, stats.messages_filtered
         ))
-        .size(11)
+        .size(font::DENSE)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         })
@@ -1133,7 +1137,7 @@ fn render_severity_summary<'a>(
         if count > 0 || sev as u8 <= SyslogSeverity::Warning as u8 {
             let color = theme::severity_color(sev);
             let label = text(format!("{}: {}", sev.label(), count))
-                .size(12)
+                .size(font::CAPTION)
                 .style(move |_theme: &Theme| text::Style { color: Some(color) });
             severity_items.push(label.into());
         }
@@ -1149,13 +1153,13 @@ fn render_severity_summary<'a>(
         text(format!(
             "Showing {filtered_count} of {total_count} (local buffer)"
         ))
-        .size(12)
+        .size(font::CAPTION)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         })
     } else {
         text(format!("{total_count} messages (local buffer)"))
-            .size(12)
+            .size(font::CAPTION)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             })
@@ -1169,11 +1173,13 @@ fn render_severity_summary<'a>(
     if nonzero >= 2 {
         let per_min: f64 = rate.iter().sum::<f64>() / (RATE_WINDOW_MS as f64 / 60_000.0);
         let trend = row![
-            text("rate (10m)").size(12).style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            }),
+            text("rate (10m)")
+                .size(font::CAPTION)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
             Sparkline::new(rate).with_size(120.0, 20.0).view(),
-            text(format!("{per_min:.0}/min")).size(12),
+            text(format!("{per_min:.0}/min")).size(font::CAPTION),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -1199,7 +1205,7 @@ const COL_APP: f32 = 100.0;
 
 fn muted_cell(value: String, width: f32) -> Element<'static, Message> {
     text(value)
-        .size(10)
+        .size(font::MICRO)
         .width(Length::Fixed(width))
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
@@ -1212,16 +1218,19 @@ fn render_log_stream<'a>(
     filter_state: &'a SyslogFilterState,
 ) -> Element<'a, Message> {
     // Header bar: title + live-tail follow/pause + jump-to-now (#93).
-    let title = row![icons::log(IconSize::Medium), text("Log Stream").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::log(IconSize::Medium),
+        text("Log Stream").size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
     let follow_btn = button(
         text(if filter_state.paused {
             "⏸ Paused"
         } else {
             "● Live"
         })
-        .size(12),
+        .size(font::CAPTION),
     )
     .on_press(Message::ToggleLogFollow)
     .style(if filter_state.paused {
@@ -1238,7 +1247,7 @@ fn render_log_stream<'a>(
     .align_y(Alignment::Center);
     if filter_state.paused {
         header_bar = header_bar.push(
-            button(text("Jump to now ⤓").size(12))
+            button(text("Jump to now ⤓").size(font::CAPTION))
                 .on_press(Message::LogsJumpToNow)
                 .style(iced::widget::button::secondary),
         );
@@ -1254,9 +1263,11 @@ fn render_log_stream<'a>(
         };
         return column![
             header_bar,
-            text(empty_text).size(12).style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            })
+            text(empty_text)
+                .size(font::CAPTION)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                })
         ]
         .spacing(10)
         .into();
@@ -1273,7 +1284,7 @@ fn render_log_stream<'a>(
 
     // Column header row, aligned to the per-row widths.
     let head = |label: &'static str, w: f32| -> Element<'static, Message> {
-        text(label).size(11).width(Length::Fixed(w)).into()
+        text(label).size(font::DENSE).width(Length::Fixed(w)).into()
     };
     let header_row = row![
         head("Time", COL_TIME),
@@ -1283,7 +1294,7 @@ fn render_log_stream<'a>(
         head("Facility", COL_FAC),
         head("Unit", COL_UNIT),
         head("App", COL_APP),
-        text("Message").size(11).width(Length::Fill),
+        text("Message").size(font::DENSE).width(Length::Fill),
     ]
     .spacing(8)
     .padding([0, 6]);
@@ -1303,7 +1314,7 @@ fn render_log_stream<'a>(
         let cells = row![
             muted_cell(format_timestamp(msg.timestamp), COL_TIME),
             text(msg.severity.label())
-                .size(10)
+                .size(font::MICRO)
                 .width(Length::Fixed(COL_SEV))
                 .style(move |_t: &Theme| text::Style {
                     color: Some(severity_color),
@@ -1316,12 +1327,12 @@ fn render_log_stream<'a>(
                 COL_UNIT
             ),
             text(msg.app_name.clone())
-                .size(10)
+                .size(font::MICRO)
                 .width(Length::Fixed(COL_APP))
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).primary()),
                 }),
-            text(message_text).size(11).width(Length::Fill),
+            text(message_text).size(font::DENSE).width(Length::Fill),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -1349,7 +1360,7 @@ fn render_log_stream<'a>(
         } else {
             format!("{matched} matching lines")
         })
-        .size(11)
+        .size(font::DENSE)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         }),
@@ -1358,7 +1369,7 @@ fn render_log_stream<'a>(
     .align_y(Alignment::Center);
     if shown < matched {
         footer = footer.push(
-            button(text(format!("Show {LOG_PAGE_STEP} more")).size(11))
+            button(text(format!("Show {LOG_PAGE_STEP} more")).size(font::DENSE))
                 .on_press(Message::ShowMoreLogs)
                 .padding([3, 9])
                 .style(iced::widget::button::secondary),
@@ -1367,18 +1378,18 @@ fn render_log_stream<'a>(
     // Deeper history comes from the sensors, not the buffer — a separate
     // affordance, because it costs a round trip.
     if filter_state.loading_older {
-        footer = footer.push(text("Loading older…").size(11));
+        footer = footer.push(text("Loading older…").size(font::DENSE));
     } else if filter_state.exhausted {
         footer = footer.push(
             text("No older records")
-                .size(11)
+                .size(font::DENSE)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 }),
         );
     } else {
         footer = footer.push(
-            button(text("Load older").size(11))
+            button(text("Load older").size(font::DENSE))
                 .on_press(Message::LoadOlderLogs)
                 .padding([3, 9])
                 .style(iced::widget::button::secondary),
@@ -1398,12 +1409,12 @@ fn render_log_detail(msg: &SyslogMessage) -> Element<'static, Message> {
     let line = |label: String, value: String| -> Element<'static, Message> {
         row![
             text(label)
-                .size(11)
+                .size(font::DENSE)
                 .width(Length::Fixed(150.0))
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 }),
-            text(value).size(11),
+            text(value).size(font::DENSE),
         ]
         .spacing(8)
         .into()
@@ -1421,7 +1432,7 @@ fn render_log_detail(msg: &SyslogMessage) -> Element<'static, Message> {
     if let Some(unit) = &msg.unit {
         // Identity pivot (#313): a journald line resolves to its unit *run* —
         // clicking opens the systemd unit drill-down for this host.
-        let chip = button(text(unit.clone()).size(11))
+        let chip = button(text(unit.clone()).size(font::DENSE))
             .padding([2, 8])
             .style(iced::widget::button::secondary)
             .on_press(Message::PivotToUnit {
@@ -1431,7 +1442,7 @@ fn render_log_detail(msg: &SyslogMessage) -> Element<'static, Message> {
         col = col.push(
             row![
                 text("unit")
-                    .size(11)
+                    .size(font::DENSE)
                     .width(Length::Fixed(150.0))
                     .style(|t: &Theme| text::Style {
                         color: Some(theme::colors(t).text_muted()),
@@ -1451,22 +1462,30 @@ fn render_log_detail(msg: &SyslogMessage) -> Element<'static, Message> {
     if let Some(id) = &msg.msg_id {
         col = col.push(line("MESSAGE_ID".into(), id.clone()));
         if let Some(explanation) = message_catalog(id) {
-            col = col.push(text(explanation).size(11).style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).primary()),
-            }));
+            col = col.push(
+                text(explanation)
+                    .size(font::DENSE)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).primary()),
+                    }),
+            );
         }
     }
 
     col = col
-        .push(text("message").size(11).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }))
-        .push(text(msg.message.clone()).size(12));
+        .push(
+            text("message")
+                .size(font::DENSE)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+        )
+        .push(text(msg.message.clone()).size(font::CAPTION));
 
     if !msg.structured.is_empty() {
         col = col.push(
             text("journald fields")
-                .size(11)
+                .size(font::DENSE)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 }),

@@ -11,6 +11,24 @@
 /// Typographic scale (pixels). Five steps, used app-wide. `f32` so it feeds
 /// `text(..).size(..)` (Iced `Pixels`) directly.
 pub mod font {
+    /// **Dense table cells and per-row metadata** — the step the five-step
+    /// scale did not have (#1125).
+    ///
+    /// Named rather than swept away. `.size(9)`/`.size(10)`/`.size(11)`
+    /// appeared **281 times** across the views, concentrated in exactly the
+    /// places a 12 px cell does not fit: `specialized/sysinfo.rs`,
+    /// `specialized/syslog.rs`, `device.rs`. That is not drift from the scale,
+    /// it is a requirement the scale was missing — and resizing 281 dense
+    /// cells up to `CAPTION` is a layout change, not a tidy-up.
+    ///
+    /// Use it where a row is genuinely dense. `CAPTION` is still the default
+    /// for a label.
+    pub const DENSE: f32 = 11.0;
+    /// The smallest step: superscripts, unit suffixes, axis ticks.
+    ///
+    /// Below this, text stops being legible at 100 % scaling, which is why
+    /// there is no fourth small step.
+    pub const MICRO: f32 = 10.0;
     /// Captions, labels, dense table cells, metadata.
     pub const CAPTION: f32 = 12.0;
     /// Default body text.
@@ -58,6 +76,8 @@ mod tests {
 
     #[test]
     fn type_scale_is_monotonic() {
+        assert!(font::MICRO < font::DENSE);
+        assert!(font::DENSE < font::CAPTION);
         assert!(font::CAPTION < font::BODY);
         assert!(font::BODY < font::EMPHASIS);
         assert!(font::EMPHASIS < font::SECTION);

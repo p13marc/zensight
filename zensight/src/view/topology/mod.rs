@@ -33,6 +33,7 @@ pub use model::{
     merge_flow_stats, node_health, render_node_position, roles_from_assets,
 };
 
+use crate::view::tokens::font;
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
 pub use tiered::{PositionTween, TierBand, TieredLayout, tiered_layout, tween_at};
 
@@ -1204,30 +1205,33 @@ pub fn topology_view<'a>(
 /// Render the topology header.
 fn render_header(state: &TopologyState) -> Element<'_, Message> {
     let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::CloseTopology)
     .style(iced::widget::button::secondary);
 
-    let title = text("Network Topology").size(24);
+    let title = text("Network Topology").size(font::TITLE);
 
-    let node_count = text(format!("{} nodes", state.nodes.len())).size(14);
-    let edge_count = text(format!("{} connections", state.edges.len())).size(14);
+    let node_count = text(format!("{} nodes", state.nodes.len())).size(font::BODY);
+    let edge_count = text(format!("{} connections", state.edges.len())).size(font::BODY);
 
     // Show layout status. "Manual"/"Adjusting" only describe the force
     // simulation; the deterministic layouts are simply what they are (#442).
     let layout_status = if state.tween_active() {
-        text("Layout: animating…").size(10)
+        text("Layout: animating…").size(font::MICRO)
     } else if state.prefs.layout != LayoutMode::Force {
-        text("Layout: Stable").size(10)
+        text("Layout: Stable").size(font::MICRO)
     } else if !state.auto_layout {
-        text("Layout: Manual").size(10)
+        text("Layout: Manual").size(font::MICRO)
     } else if state.layout_stable {
-        text("Layout: Stable").size(10)
+        text("Layout: Stable").size(font::MICRO)
     } else {
-        text("Layout: Adjusting...").size(10)
+        text("Layout: Adjusting...").size(font::MICRO)
     };
 
     // Show search match count if searching (#392): highlight mode counts
@@ -1238,22 +1242,22 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
             model::SearchAction::Hide(_) => format!("{} shown", state.render.nodes.len()),
             _ => format!("{} matches", highlighted),
         };
-        Some(text(label).size(10))
+        Some(text(label).size(font::MICRO))
     } else {
         None
     };
 
-    let zoom_label = text(format!("{}%", (state.zoom * 100.0) as i32)).size(12);
+    let zoom_label = text(format!("{}%", (state.zoom * 100.0) as i32)).size(font::CAPTION);
 
-    let zoom_out_btn = button(text("-").size(14))
+    let zoom_out_btn = button(text("-").size(font::BODY))
         .on_press(Message::TopologyZoomOut)
         .style(iced::widget::button::secondary);
 
-    let zoom_in_btn = button(text("+").size(14))
+    let zoom_in_btn = button(text("+").size(font::BODY))
         .on_press(Message::TopologyZoomIn)
         .style(iced::widget::button::secondary);
 
-    let reset_btn = button(text("Reset").size(12))
+    let reset_btn = button(text("Reset").size(font::CAPTION))
         .on_press(Message::TopologyZoomReset)
         .style(iced::widget::button::secondary);
 
@@ -1266,7 +1270,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
             } else {
                 "Auto Layout: OFF"
             })
-            .size(12),
+            .size(font::CAPTION),
         )
         .on_press(Message::TopologyToggleAutoLayout)
         .style(if state.auto_layout {
@@ -1311,15 +1315,16 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     }
 
     // Second control row (#392): lens selector + edge-label mode.
-    let mut lens_row = row![text("Lens:").size(12)]
+    let mut lens_row = row![text("Lens:").size(font::CAPTION)]
         .spacing(8)
         .align_y(Alignment::Center);
     for lens in Lens::ALL {
-        let btn = button(text(lens.label()).size(12)).style(if state.prefs.lens == lens {
-            iced::widget::button::primary
-        } else {
-            iced::widget::button::secondary
-        });
+        let btn =
+            button(text(lens.label()).size(font::CAPTION)).style(if state.prefs.lens == lens {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            });
         let btn = if state.prefs.lens == lens {
             btn
         } else {
@@ -1336,10 +1341,10 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     .text_size(12)
     .padding(4);
     lens_row = lens_row
-        .push(text("Edge labels:").size(12))
+        .push(text("Edge labels:").size(font::CAPTION))
         .push(label_picker);
     lens_row = lens_row.push(
-        button(text("Legend").size(12))
+        button(text("Legend").size(font::CAPTION))
             .on_press(Message::TopologyToggleLegend)
             .style(if state.show_legend {
                 iced::widget::button::primary
@@ -1367,7 +1372,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     lens_row = lens_row.push(layout_picker);
     if !state.prefs.expanded_groups.is_empty() {
         lens_row = lens_row.push(
-            button(text("Regroup").size(12))
+            button(text("Regroup").size(font::CAPTION))
                 .on_press(Message::TopologyRegroup)
                 .style(iced::widget::button::secondary),
         );
@@ -1378,21 +1383,21 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
             iced::widget::checkbox(state.prefs.filters.hide_idle)
                 .label("Hide idle")
                 .on_toggle(|_| Message::TopologyToggleHideIdle)
-                .size(14)
+                .size(font::BODY)
                 .text_size(12),
         )
         .push(
             iced::widget::checkbox(state.prefs.filters.hide_passive)
                 .label("Hide passive")
                 .on_toggle(|_| Message::TopologyToggleHidePassive)
-                .size(14)
+                .size(font::BODY)
                 .text_size(12),
         )
         .push(
             iced::widget::checkbox(state.prefs.filters.hide_external)
                 .label("Hide external")
                 .on_toggle(|_| Message::TopologyToggleHideExternal)
-                .size(14)
+                .size(font::BODY)
                 .text_size(12),
         );
 
@@ -1405,7 +1410,9 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     )
     .text_size(12)
     .padding(4);
-    lens_row = lens_row.push(text("Flows:").size(12)).push(top_n_picker);
+    lens_row = lens_row
+        .push(text("Flows:").size(font::CAPTION))
+        .push(top_n_picker);
     let flows_shown = state
         .render
         .edges
@@ -1418,7 +1425,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
                 "showing top {flows_shown} of {} flows",
                 state.render.total_flow_edges
             ))
-            .size(10),
+            .size(font::MICRO),
         );
     }
 
@@ -1437,17 +1444,18 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
             .map(|n| n.label.clone())
             .unwrap_or_else(|| focus.root.clone());
         let mut focus_row = row![
-            text(format!("Focus: {root_label}")).size(12),
-            text("hops:").size(11),
+            text(format!("Focus: {root_label}")).size(font::CAPTION),
+            text("hops:").size(font::DENSE),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
         for hops in 1..=3u8 {
-            let btn = button(text(format!("{hops}")).size(11)).style(if focus.hops == hops {
-                iced::widget::button::primary
-            } else {
-                iced::widget::button::secondary
-            });
+            let btn =
+                button(text(format!("{hops}")).size(font::DENSE)).style(if focus.hops == hops {
+                    iced::widget::button::primary
+                } else {
+                    iced::widget::button::secondary
+                });
             let btn = if focus.hops == hops {
                 btn
             } else {
@@ -1456,7 +1464,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
             focus_row = focus_row.push(btn);
         }
         focus_row = focus_row.push(
-            button(text("Exit focus").size(11))
+            button(text("Exit focus").size(font::DENSE))
                 .on_press(Message::TopologyExitFocus)
                 .style(iced::widget::button::secondary),
         );
@@ -1487,11 +1495,11 @@ fn render_legend(lens: Lens, layout: LayoutMode) -> Element<'static, Message> {
     if layout == LayoutMode::Tiered {
         legend = legend.push(
             text("rows: Internet → gateways & infrastructure → hosts by subnet → discovered")
-                .size(10),
+                .size(font::MICRO),
         );
     }
     for entry in entries {
-        legend = legend.push(text(*entry).size(10));
+        legend = legend.push(text(*entry).size(font::MICRO));
     }
     container(legend).padding(8).into()
 }
