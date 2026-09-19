@@ -582,6 +582,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gui: closing the window threw away the last fifteen seconds of history, and
+  every parallax stream's refcount** (#1119). Flush batches drain every 15
+  ticks; `main.rs` registered no `window::close_requests()` subscription,
+  `iced::application` has no exit hook, and `MetricStore` has no `Drop`. So
+  nothing ran at close, and what was pending went with the window — **the
+  fifteen seconds an operator was watching when they decided to quit and go
+  look.**
+
+  The handler flushes **synchronously**, which every other write in this
+  application deliberately does not. There is no *later*: the event loop is
+  about to end and a `Task::future` scheduled at close is dropped with it.
+
+  Bounded at two seconds, because a wedged redb must not turn "close the
+  window" into "the window will not close" — an operator who has decided to
+  quit reaches for the force-quit, and then nothing is written at all. The
+  budget is checked **between** the three writes rather than interrupting one:
+  a half-written transaction is worse than a missing one, and redb's own commit
+  is atomic. Whatever does not fit is what closing lost unconditionally before.
+
+  The same handler tears the parallax preview tiles down **first**, so their
+  `close_stream` GETs are in flight before `window::close` ends the runtime.
+  Without it every tile left the sensor holding a viewer refcount until its
+  idle reaper fired.
+
+  The acceptance test records a sample, flushes on exit, and **reopens the
+  file** to read the row back — asserting against the same handle would prove
+  only that the batch was handed over. A fourth test asserts the wiring
+  itself: `exit_flush` being correct is worth nothing if nothing calls it, and
+  the bug was never in a write path.
+
 - **gui,store: the hot store grew without bound and reserved 57 KB per series
   before the second sample** (#1115). `MetricStore.series` had **no eviction at
   all**, and each series eagerly allocated `VecDeque::with_capacity(3600)`.
