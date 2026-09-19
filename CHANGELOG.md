@@ -247,6 +247,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **modbus: a silent slave stopped its device forever, and nothing on the bus
+  said so** (#1133). `timeout_ms` applied to `tcp::connect_slave` and to
+  nothing else. The realistic shape of a dead PLC is not a refused connection
+  — the TCP handshake completes, because the kernel answers that, and then
+  nothing comes back — and `run()` awaits the poll, so the first read against
+  one stopped that device **permanently**. `alive` stayed declared throughout,
+  because the sensor's liveliness token is about the process and not about the
+  device.
+
+  Every read is bounded now, on TCP and RTU. `retries` is read — it was
+  documented in `docs/reference.md` and honoured by nothing — and means
+  retries, not attempts, so a cycle is bounded at `timeout_ms × (retries + 1)`
+  per register. A **timeout** is not retried on the same connection: the slave
+  accepted the socket and did not answer, and asking again down the same
+  half-open pipe buys another `timeout_ms` and the same silence. An error that
+  came back *as* an error is retried.
+
+  A cycle in which **no** register answered is a failed cycle rather than an
+  empty one — it used to return `Ok(0)`, indistinguishable from a device with
+  nothing configured — and it reaches the bus through the framework's
+  per-device liveness. `state/modbus/device/<device>/liveness` had been
+  advertised in this crate's reference since the crate existed with **no
+  publisher**: `grep liveness src/` came back empty.
+
+  Three more on the same path. The connection is **reused** across polls and
+  dropped after a failed cycle; one fresh TCP connection per poll with no
+  `disconnect()` is how a PLC runs out, since they cap concurrent connections
+  at four to eight. A register block over the **protocol's own ceiling** (125
+  registers for holding/input, 2 000 bits for coils/discrete) is refused at
+  startup, where a config error belongs — above it the read is not slow, it is
+  illegal, and a permissive stack truncates it into a short window published
+  under the configured names. And `serialization` is honoured: `main.rs`
+  hard-coded `Format::Json` while `configs/modbus.json5` has shipped
+  `serialization: "cbor"` all along, so the one knob the operator set was the
+  one thing this sensor ignored.
+
+  The acceptance test is the issue's: a fake slave that accepts and never
+  answers. On the parent commit it fails with *"the poll never returned — a
+  silent slave stops this device forever"*, after the full ten-second test
+  timeout.
+
 - **The eBPF workflow denies warnings, pins its compiler, and runs on a tag**
   (#1094). Three ways the one job that guards an opt-in feature was weaker than
   the tree around it.
