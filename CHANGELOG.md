@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The BMC's thermal, fan and power readings are in the GUI, each beside the
+  limits its own hardware declared** (#1127). `zensight-sensor-bmc` has
+  published `thermal/{s}/celsius` with `upper_warning_c`/`upper_critical_c` as
+  sibling subjects, `fan/{f}/rpm`, `psu/{p}/input_watts` beside
+  `capacity_watts` and `present`, and the chassis rollup, since #953 — and
+  `specialized/mod.rs` answered `Protocol::Bmc => None`, so **nothing in the
+  frontend read any of it**. A fan at 12 000 RPM against a 14 000 limit
+  rendered exactly like one at 3 000, because neither rendered at all.
+
+  The new `components::limit_table` takes `(reading, warning, critical,
+  present)` rows and holds three distinctions the old panels blurred:
+  **absent is not zero** (an empty supply bay renders "absent", and is graded
+  against nothing), **unmetered is not zero** (a BMC that publishes a supply's
+  rating but never its draw renders "not metered" — an idle machine and an
+  unmetered one are different machines), and **no declared limit means no
+  verdict** rather than a colour picked from a fraction.
+
+  That last rule found a second bug. `sysinfo`'s temperature panel read
+  `sensors/{chip}/{label}/critical` and then coloured against `crit * 0.9` and
+  `crit * 0.75` — two thresholds the GUI invented — while hwmon's real warning
+  threshold, `temp*_max`, was **already on the wire** at
+  `sensors/{chip}/{label}/max` and had never been read. On an NVMe controller
+  that warns at 70 °C and shuts down at 85, `crit * 0.75` is 63.75; on a chip
+  with `max` at 45 °C and `crit` at 100, the old rule paints 60 °C green,
+  fifteen degrees past the manufacturer's line. Both panels now grade against
+  the publisher's own numbers, which are the only ones that mean anything.
+
+  One panel per **chassis**, not per endpoint: the folding goes through the
+  registry's `{chassis}` chunk rather than `split('/')`, because #1130 made
+  that chunk `{endpoint}-{id}` and reading it positionally is how a blade
+  enclosure's chassis get mixed back together. An unreachable BMC keeps its
+  tab and says its readings are the last it gave, rather than disappearing.
+
 - **The design system's type scale is enforced, and the doc points at a CI file
   that exists** (#1125). The colour guard has been real and thorough since #28.
   The dimensional half was a rule in `design-system.md` with **nothing

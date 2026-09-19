@@ -6,6 +6,7 @@
 pub mod data_table;
 pub mod gauge;
 pub mod kit;
+pub mod limit_table;
 pub mod progress_bar;
 pub mod sparkline;
 pub mod status_led;
@@ -15,6 +16,7 @@ pub mod verdict;
 pub use data_table::{Column, DataTable, SortKey, TableState};
 pub use gauge::{Gauge, GaugeStyle};
 pub use kit::{badge, card, empty_state, metric_tile, rgb, rgba, section_header};
+pub use limit_table::{LimitRow, LimitVerdict, limit_table};
 pub use progress_bar::{ProgressBar, ProgressBarStyle, fraction_bar};
 pub use sparkline::Sparkline;
 pub use status_led::{StatusLed, StatusLedState};

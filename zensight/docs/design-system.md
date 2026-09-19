@@ -119,7 +119,8 @@ can't be silently reordered.
 ## `components/` — the widget kit
 
 `src/view/components/` is the shared widget kit (`tabs.rs`, `data_table.rs`,
-`gauge.rs`, `sparkline.rs`, `progress_bar.rs`, `status_led.rs`, and `kit.rs`).
+`gauge.rs`, `sparkline.rs`, `progress_bar.rs`, `status_led.rs`, `limit_table.rs`,
+and `kit.rs`).
 Because it lives under `view/components/`, it is allowed to construct colors —
 data-driven series colors are built with the helpers in `kit.rs`:
 
@@ -150,6 +151,40 @@ passing check** — same failure #746 removed from the fleet view. Six reasons,
 two groups; the full reason always rides the label. A property test in
 `verdict.rs` pins "never green"; don't add a verdict rendering anywhere else
 without going through this component.
+
+### The limit table (`limit_table.rs`, #1127)
+
+`limit_table(&[LimitRow], empty)` renders a reading beside the limits **its own
+publisher declared** for it. Use it for anything with a threshold on the wire:
+BMC thermal/fan/PSU, hwmon temperatures.
+
+```rust
+LimitRow::new(format!("{chip}/{label}"), temp, "°C")
+    .with_limits(hwmon_max, hwmon_crit)   // the host's numbers, not ours
+    .with_precision(1)
+```
+
+Three distinctions it exists to hold, each of which was blurred somewhere
+before it existed:
+
+| Row | Renders | Verdict |
+|---|---|---|
+| `reading: Some(v)` | the number | graded, if a limit was declared |
+| `reading: None` | `not metered` | none — the publisher never measured it |
+| `present: false` | `absent` | none, **even with limits declared** |
+
+- **Absent is not zero.** An empty supply bay drawing no power is not a supply
+  drawing 0 W, and it is graded against nothing.
+- **Unmetered is not zero.** A BMC that publishes a supply's rated capacity but
+  never its draw has not told us the draw is zero.
+- **No declared limit, no verdict.** The table never derives a threshold. The
+  rule that made this a component: `sysinfo`'s old panel coloured against
+  `crit * 0.9` and `crit * 0.75` while hwmon's real `temp*_max` sat unread one
+  key away. A fraction of somebody else's critical limit is not a limit.
+
+If a publisher gives you only a ceiling and no warning level, pass it as the
+**critical** one and leave `warning` at `None` — do not invent a step beneath
+it.
 
 ## Adding a color: checklist
 
