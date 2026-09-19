@@ -39,6 +39,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The release pipeline can no longer roll the fleet back, and waits for CI**
+  (#1095).
+
+  **`:latest` only moves for the newest release.** The `workflow_dispatch`
+  input is "existing bare-semver tag to re-release" and nothing checked it was
+  the newest, so re-releasing 0.11.0 after 0.13.0 silently rolled all 21
+  images' `:latest` back — for every quadlet in `packaging/`, all of which pull
+  `:latest`. The newest tag is read from the **API**, not from the job's
+  `--depth 1 --branch <tag>` clone, which fetches that tag and no other and
+  would therefore always answer "yes"; and an unreadable tag list leaves
+  `:latest` alone rather than guessing, because a stale `:latest` is fixed by
+  the next release and a backwards one is what this prevents.
+
+  **Nothing is published until CI has passed on the release commit.** A new
+  `gate` job polls `/commits/<sha>/status` and every other job needs it.
+  `ci.yml` fires on the same tag but in a different concurrency group, and its
+  own header calls that run a *"parallel signal, not a gate"* — so images were
+  built, smoke-tested and pushed while the suite might still be running, or
+  red. It reads `RELEASE_SHA`, never `github.sha`, because a
+  `workflow_dispatch` executes on a branch ref while the thing being released
+  is a tag. It also waits for **as many statuses as `ci.yml` declares jobs**,
+  counted from that file rather than hardcoded: a status appears when its job
+  *starts*, and with one runner the combined state can read `success` over a
+  single finished job while five have not begun — which would be exactly the
+  false green the gate exists to prevent.
+
+  **Secrets are off every command line.** `buildah login -p` becomes
+  `--password-stdin`; the two `http://forgejo:$TOKEN@…` clone/push URLs become
+  a 0600 credential file (the raw one was interpolated into the rendered script
+  *and* written into `.git/config`); and the nine `curl -H "Authorization:
+  token …"` call sites read the header from a 0600 `curl --config` file. All of
+  those put the token in the runner's process table.
+
 - **demo-smoke's dashboard-drift guard covers the dashboard it was written
   for** (#1096). The guard deferred `zensight_netlink_`, and **all 18 metric
   names in `demo/prometheus/dashboards/zensight-network.json` start with it** —

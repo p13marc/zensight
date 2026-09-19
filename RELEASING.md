@@ -128,6 +128,23 @@ git push origin X.Y.Z
 ```
 
 
+> **The release now WAITS for CI on the tag's own commit (#1095).** `release.yml`
+> opens with a `gate` job that polls `/commits/<sha>/status` until every one of
+> `ci.yml`'s jobs has reported success, and every other job needs it. Before
+> this, images were built, smoke-tested and **pushed** while the suite might
+> still be running or red — `ci.yml`'s own header calls the tag run a "parallel
+> signal, not a gate". Expect the release run to sit in `gate` for as long as
+> the suite takes; it prints `combined state=… over n/6 status(es)` each minute
+> so you can see it waiting rather than hung. It refuses on a red suite and
+> times out after 80 minutes with instructions.
+
+> **`:latest` only moves for the newest release (#1095).** Re-dispatching an
+> older tag builds and attaches everything as before but leaves `:latest`
+> where it is, saying so in the log. Every quadlet in `packaging/` pulls
+> `:latest`, so the old behaviour meant a re-run of 0.11.0 rolled the whole
+> fleet back. The newest tag is read from the API, not from the job's shallow
+> clone, and an unreadable tag list leaves `:latest` alone rather than guessing.
+
 > **The tag takes no `v` prefix.** `release.yml` triggers on `[0-9]+.[0-9]+.[0-9]+`;
 > `v0.8.0` matches nothing and silently does nothing. Tags are **annotated** (`-a`), message
 > `ZenSight <version>[ — <theme>]`.

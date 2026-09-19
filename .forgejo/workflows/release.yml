@@ -24,7 +24,94 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # NOTHING IS PUBLISHED UNTIL CI HAS PASSED ON THIS COMMIT (#1095).
+  #
+  # ci.yml also fires on the tag pattern, but in a different concurrency group,
+  # and its own header calls that run a "parallel signal, not a gate" — so
+  # images were built, smoke-tested and PUSHED while the suite might still be
+  # running, or red. `workflow_run` exists in none of the four workflows on
+  # this instance, so the gate is a poll of the commit's combined status.
+  #
+  # It reads RELEASE_SHA, never `github.sha`: on a workflow_dispatch this run
+  # executes on a BRANCH ref while the thing being released is the tag, and
+  # "the same SHA" has to mean the tag's commit or the gate checks the wrong
+  # tree.
+  #
+  # THIS JOB HOLDS A RUNNER LANE WHILE IT WAITS, and on a tag push the thing it
+  # waits for is ci.yml's run on that same tag — which needs lanes of its own.
+  # That is survivable only because the runner has more than one (three
+  # concurrent jobs observed), and it is bounded either way by the 80-minute
+  # timeout below rather than hanging. If the fleet ever drops to a
+  # single-lane runner, this becomes a deadlock and the gate has to move to a
+  # separate runner label or a pre-tag check.
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Wait for CI to pass on the release commit
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
+          sha=$(git rev-parse "$tag^{commit}")
+          echo "gating on $tag -> $sha"
+
+          # The token never reaches a command line (#1095): curl reads it from
+          # a config file, so it is not in the runner's process table.
+          cfg=$(mktemp); chmod 600 "$cfg"
+          printf 'header = "Authorization: token %s"\n' "$TOKEN" > "$cfg"
+          trap 'rm -f "$cfg"' EXIT
+
+          # HOW MANY STATUSES TO EXPECT, counted from ci.yml itself rather
+          # than hardcoded. A commit status appears when its job STARTS, and
+          # with one runner the jobs queue — so early in a run the combined
+          # state can be `success` over a single finished job while five have
+          # not begun. Waiting for green over too few statuses is the exact
+          # false-green this gate exists to prevent.
+          want=$(awk '/^jobs:/{f=1;next} f && /^  [a-z0-9_-]+:$/{n++} END{print n+0}' \
+                   .forgejo/workflows/ci.yml)
+          echo "ci.yml declares $want jobs; the gate waits for that many statuses"
+          [ "$want" -gt 0 ] || { echo "::error::could not count ci.yml's jobs"; exit 1; }
+
+          api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
+          # One runner, jobs queue serially across every open PR, so the tag's
+          # own CI run can take a long while even to APPEAR. 80 * 60s.
+          for i in $(seq 80); do
+            body=$(curl -sf --config "$cfg" "$api/commits/$sha/status" || echo '{}')
+            state=$(printf '%s' "$body" | jq -r '.state // "none"')
+            n=$(printf '%s' "$body" | jq -r '(.statuses // []) | length')
+            echo "[$i/80] combined state=$state over $n/$want status(es)"
+            case "$state" in
+              success)
+                if [ "$n" -ge "$want" ]; then
+                  printf '%s' "$body" | jq -r '.statuses[] | "  \(.context): \(.status)"'
+                  echo "CI is green on $sha over all $n statuses — publishing"
+                  exit 0
+                fi
+                echo "  green so far, but only $n of $want jobs have reported — still waiting" ;;
+              failure|error)
+                echo "::error::CI is $state on $sha; refusing to publish this release"
+                printf '%s' "$body" | jq -r '.statuses[] | "  \(.context): \(.status)"'
+                exit 1 ;;
+            esac
+            sleep 60
+          done
+
+          echo "::error::CI never reached a conclusion for $sha within 80 minutes."
+          echo "A tag push starts ci.yml on the same ref; a workflow_dispatch of an OLD"
+          echo "tag relies on the statuses recorded when that tag was pushed. If this"
+          echo "commit legitimately has no CI run, push the tag rather than dispatching"
+          echo "it, or record a status for $sha before re-dispatching."
+          exit 1
+
   release:
+    needs: gate
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -52,9 +139,16 @@ jobs:
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -eu
+          # The token is read from a 0600 curl config, never passed as an
+          # argv element (#1095) — `-H "Authorization: token $T"` is visible
+          # in the runner's process table for the life of the request.
+          cfg=$(mktemp); chmod 600 "$cfg"
+          printf 'header = "Authorization: token %s"\n' "$TOKEN" > "$cfg"
+          trap 'rm -f "$cfg"' EXIT
           api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
-          if ! curl -sf -H "Authorization: token $TOKEN" "$api/releases/tags/${RELEASE_TAG}" >/dev/null; then
-            curl -sf -X POST -H "Authorization: token $TOKEN" -H "Content-Type: application/json" \
+          if ! curl -sf --config "$cfg" "$api/releases/tags/${RELEASE_TAG}" >/dev/null; then
+            curl -sf --config "$cfg" -X POST -H "Content-Type: application/json" \
               -d "{\"tag_name\":\"${RELEASE_TAG}\",\"name\":\"${RELEASE_TAG}\",\"target_commitish\":\"${RELEASE_SHA}\"}" \
               "$api/releases" >/dev/null
           fi
@@ -64,14 +158,24 @@ jobs:
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # `set -u` only, deliberately: the delete-then-upload loop below
+          # tolerates a 404 from a missing asset, which is the normal
+          # first-run case, and `-e` would abort on it.
+          set -u
+          # The token is read from a 0600 curl config, never passed as an
+          # argv element (#1095) — `-H "Authorization: token $T"` is visible
+          # in the runner's process table for the life of the request.
+          cfg=$(mktemp); chmod 600 "$cfg"
+          printf 'header = "Authorization: token %s"\n' "$TOKEN" > "$cfg"
+          trap 'rm -f "$cfg"' EXIT
           api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
-          rid=$(curl -sf -H "Authorization: token $TOKEN" "$api/releases/tags/${RELEASE_TAG}" | jq -r .id)
+          rid=$(curl -sf --config "$cfg" "$api/releases/tags/${RELEASE_TAG}" | jq -r .id)
           for f in dist/release/*; do
             name=$(basename "$f")
-            for aid in $(curl -sf -H "Authorization: token $TOKEN" "$api/releases/$rid/assets" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id'); do
-              curl -sf -X DELETE -H "Authorization: token $TOKEN" "$api/releases/$rid/assets/$aid" >/dev/null
+            for aid in $(curl -sf --config "$cfg" "$api/releases/$rid/assets" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id'); do
+              curl -sf --config "$cfg" -X DELETE "$api/releases/$rid/assets/$aid" >/dev/null
             done
-            curl -sf -X POST -H "Authorization: token $TOKEN" -F "attachment=@$f" "$api/releases/$rid/assets?name=$name" >/dev/null
+            curl -sf --config "$cfg" -X POST -F "attachment=@$f" "$api/releases/$rid/assets?name=$name" >/dev/null
             echo "attached $name"
           done
 
@@ -104,9 +208,16 @@ jobs:
       - name: Clone release tag
         # no checkout action in this job -> resolve the tag inline
         run: |
+          set -eu
           tag="${{ inputs.tag || github.ref_name }}"
+          # The token goes in a 0600 credential file, not in the URL (#1095):
+          # a URL-embedded credential is echoed by git in its own error
+          # messages and lands in .git/config.
+          printf 'http://forgejo:%s@10.10.0.30:3000\n' "$GITHUB_TOKEN" > "$HOME/.git-credentials"
+          chmod 600 "$HOME/.git-credentials"
+          git config --global credential.helper store
           git clone --depth 1 --branch "$tag" \
-            "http://forgejo:${GITHUB_TOKEN}@10.10.0.30:3000/${GITHUB_REPOSITORY}.git" src
+            "http://10.10.0.30:3000/${GITHUB_REPOSITORY}.git" src
           echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -122,6 +233,47 @@ jobs:
           cd src && scripts/ci-build-deps.sh
           # buildah and jq are this job's tooling, not build dependencies.
           apt-get install -y buildah jq
+      # IS THIS THE NEWEST RELEASE? (#1095)
+      #
+      # The workflow_dispatch input is "existing bare-semver tag to
+      # re-release", and nothing checked it was the newest — so re-releasing
+      # 0.11.0 after 0.13.0 silently rolled all 21 images' `:latest` back, for
+      # every quadlet in packaging/, all of which pull `:latest`.
+      #
+      # The tag list comes from the API, NOT from the checkout: this job clones
+      # `--depth 1 --branch <tag>`, which fetches that tag and no other, so a
+      # local `git tag` would always report the release as the newest thing
+      # that exists and answer "yes" every time.
+      #
+      # AND IT FAILS CLOSED. If the tag list cannot be read, `:latest` is left
+      # alone: leaving it stale is recoverable by the next release, moving it
+      # backwards is what this exists to prevent.
+      - name: Decide whether :latest moves
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          cfg=$(mktemp); chmod 600 "$cfg"
+          printf 'header = "Authorization: token %s"\n' "$TOKEN" > "$cfg"
+          trap 'rm -f "$cfg"' EXIT
+          api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
+
+          tags=$(curl -sf --config "$cfg" "$api/tags?limit=200" \
+                 | jq -r '.[].name' \
+                 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          if [ -z "$tags" ]; then
+            echo "PUSH_LATEST=0" >> "$GITHUB_ENV"
+            echo "::warning::could not read the repository's tag list; leaving :latest untouched rather than guessing"
+            exit 0
+          fi
+          newest=$(printf '%s\n' "$tags" | sort -V | tail -1)
+          echo "newest semver tag: $newest; releasing: $RELEASE_TAG"
+          if [ "$newest" = "$RELEASE_TAG" ]; then
+            echo "PUSH_LATEST=1" >> "$GITHUB_ENV"
+          else
+            echo "PUSH_LATEST=0" >> "$GITHUB_ENV"
+            echo "::warning::$RELEASE_TAG is not the newest release ($newest) — :latest will NOT be moved"
+          fi
       - name: Build release binaries
         run: |
           cd src
@@ -308,8 +460,15 @@ jobs:
           '
           buildah --storage-driver vfs rm "$ctr"
       - name: Push images
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
-          buildah --storage-driver vfs login --tls-verify=false -u marcpardo -p "${{ secrets.REGISTRY_TOKEN }}" "$REGISTRY"
+          # --password-stdin (#1095): with -p the registry token is an argv
+          # element, visible to anything that can read the runner's process
+          # table for as long as the login takes.
+          printf '%s' "$REGISTRY_TOKEN" \
+            | buildah --storage-driver vfs login --tls-verify=false \
+                -u marcpardo --password-stdin "$REGISTRY"
           for c in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
                    zensight-sensor-gnmi zensight-sensor-modbus zensight-sensor-netflow \
                    zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
@@ -325,20 +484,35 @@ jobs:
                    zensight-sensors; do
             image="$REGISTRY/marcpardo/$c"
             buildah --storage-driver vfs push --tls-verify=false "$image:${RELEASE_TAG}"
-            buildah --storage-driver vfs push --tls-verify=false "$image:latest"
+            # :latest ONLY WHEN THIS IS THE NEWEST RELEASE (#1095). The
+            # workflow_dispatch input is "existing bare-semver tag to
+            # re-release" and nothing checked it was the newest, so
+            # re-releasing 0.11.0 after 0.13.0 silently rolled all 21 images'
+            # :latest back — for every quadlet in packaging/, all of which pull
+            # :latest.
+            if [ "${PUSH_LATEST:-1}" = "1" ]; then
+              buildah --storage-driver vfs push --tls-verify=false "$image:latest"
+            fi
           done
+          if [ "${PUSH_LATEST:-1}" != "1" ]; then
+            echo "::warning::${RELEASE_TAG} is not the newest release — pushed 21 :${RELEASE_TAG} tags and left :latest where it was"
+          fi
       - name: Attach tarball to the release
         run: |
           cd src
           name="zensight-${RELEASE_TAG}-linux-amd64"
           api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
-          auth="Authorization: token ${GITHUB_TOKEN}"
-          rid=$(curl -sf -H "$auth" "$api/releases/tags/${RELEASE_TAG}" | jq .id)
+          # 0600 curl config rather than -H "$auth" (#1095): the header is
+          # an argv element at every call site otherwise.
+          cfg=$(mktemp); chmod 600 "$cfg"
+          printf 'header = "Authorization: token %s"\n' "${GITHUB_TOKEN}" > "$cfg"
+          trap 'rm -f "$cfg"' EXIT
+          rid=$(curl -sf --config "$cfg" "$api/releases/tags/${RELEASE_TAG}" | jq .id)
           f="$name.tar.gz"
           # idempotent on re-runs: drop a stale same-name asset first
-          aid=$(curl -sf -H "$auth" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
-          [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
-          curl -sf -H "$auth" -F "attachment=@dist/release/$f" \
+          aid=$(curl -sf --config "$cfg" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
+          [ -n "$aid" ] && curl -sf --config "$cfg" -X DELETE "$api/releases/$rid/assets/$aid" || true
+          curl -sf --config "$cfg" -F "attachment=@dist/release/$f" \
             "$api/releases/$rid/assets?name=$f" >/dev/null
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -386,7 +560,15 @@ jobs:
           git init -q -b flatpak-export
           git add -A
           git -c user.name=ci -c user.email=ci@marcpardo.eu commit -q -m "flatpak export ${RELEASE_TAG}"
-          git push --force "http://forgejo:${{ secrets.GITHUB_TOKEN }}@10.10.0.30:3000/${GITHUB_REPOSITORY}.git" HEAD:flatpak-export
+          # Credential file, not a URL (#1095): the raw expression above used
+          # to be interpolated into the rendered script text AND written into
+          # this repo's .git/config.
+          printf 'http://forgejo:%s@10.10.0.30:3000\n' "$GITHUB_TOKEN" > "$HOME/.git-credentials"
+          chmod 600 "$HOME/.git-credentials"
+          git config --global credential.helper store
+          git push --force "http://10.10.0.30:3000/${GITHUB_REPOSITORY}.git" HEAD:flatpak-export
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # curl attach, not forgejo-release: by this point the release job has
       # already created the release object, and a second forgejo-release
       # upload against the same tag 409s (seen on the 0.9.0 maiden run).
@@ -394,11 +576,15 @@ jobs:
         run: |
           f="zensight-${RELEASE_TAG}.flatpak"
           api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
-          auth="Authorization: token ${GITHUB_TOKEN}"
-          rid=$(curl -sf -H "$auth" "$api/releases/tags/${RELEASE_TAG}" | jq .id)
-          aid=$(curl -sf -H "$auth" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
-          [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
-          curl -sf -H "$auth" -F "attachment=@dist/release/$f" \
+          # 0600 curl config rather than -H "$auth" (#1095): the header is
+          # an argv element at every call site otherwise.
+          cfg=$(mktemp); chmod 600 "$cfg"
+          printf 'header = "Authorization: token %s"\n' "${GITHUB_TOKEN}" > "$cfg"
+          trap 'rm -f "$cfg"' EXIT
+          rid=$(curl -sf --config "$cfg" "$api/releases/tags/${RELEASE_TAG}" | jq .id)
+          aid=$(curl -sf --config "$cfg" "$api/releases/$rid/assets" | jq ".[] | select(.name==\"$f\") | .id" | head -1)
+          [ -n "$aid" ] && curl -sf --config "$cfg" -X DELETE "$api/releases/$rid/assets/$aid" || true
+          curl -sf --config "$cfg" -F "attachment=@dist/release/$f" \
             "$api/releases/$rid/assets?name=$f" >/dev/null
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -419,20 +605,24 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
           tag="${{ inputs.tag || github.ref_name }}"
           api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
-          auth="Authorization: token ${GITHUB_TOKEN}"
-          rid=$(curl -sf -H "$auth" "$api/releases/tags/$tag" | jq .id)
+          # 0600 curl config rather than -H "$auth" (#1095): the header is
+          # an argv element at every call site otherwise.
+          cfg=$(mktemp); chmod 600 "$cfg"
+          printf 'header = "Authorization: token %s"\n' "${GITHUB_TOKEN}" > "$cfg"
+          trap 'rm -f "$cfg"' EXIT
+          rid=$(curl -sf --config "$cfg" "$api/releases/tags/$tag" | jq .id)
           mkdir -p sums && cd sums
-          curl -sf -H "$auth" "$api/releases/$rid/assets" > .assets.json
+          curl -sf --config "$cfg" "$api/releases/$rid/assets" > .assets.json
           # every asset except a stale SHA256SUMS itself (dispatch re-run)
           jq -r '.[] | select(.name != "SHA256SUMS") | "\(.uuid) \(.name)"' .assets.json \
             | while read -r uuid name; do
-                curl -sf -H "$auth" -o "$name" "http://10.10.0.30:3000/attachments/$uuid"
+                curl -sf --config "$cfg" -o "$name" "http://10.10.0.30:3000/attachments/$uuid"
               done
           sha256sum * > SHA256SUMS
           # idempotent on re-runs: drop the stale SHA256SUMS first
           aid=$(jq '.[] | select(.name=="SHA256SUMS") | .id' .assets.json | head -1)
-          [ -n "$aid" ] && curl -sf -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid" || true
-          curl -sf -H "$auth" -F "attachment=@SHA256SUMS" \
+          [ -n "$aid" ] && curl -sf --config "$cfg" -X DELETE "$api/releases/$rid/assets/$aid" || true
+          curl -sf --config "$cfg" -F "attachment=@SHA256SUMS" \
             "$api/releases/$rid/assets?name=SHA256SUMS" >/dev/null
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
