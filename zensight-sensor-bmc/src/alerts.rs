@@ -49,7 +49,9 @@ pub struct Observation<'a> {
     /// a separate machine that publishes for itself; it rides in the labels,
     /// where a rename costs nothing and where `alert_key` cannot see it.
     pub source: &'a str,
-    /// The operator's name for the chassis.
+    /// The operator's name for the BMC endpoint — one Redfish service, which
+    /// on a blade enclosure or a four-node twin fronts SEVERAL chassis. It is
+    /// not by itself a name for the thing an alert is about (#1130).
     pub endpoint: &'a str,
     /// `None` when the BMC did not answer this cycle.
     pub chassis: Option<&'a Chassis>,
@@ -61,6 +63,30 @@ pub struct Observation<'a> {
     pub known_present: &'a [String],
     /// Consecutive cycles in which the BMC did not answer.
     pub consecutive_failures: u32,
+}
+
+impl Observation<'_> {
+    /// The `{chassis}` chunk this observation's alerts are labelled and
+    /// reconciled by — the same string the poller puts in the key.
+    ///
+    /// With no chassis there is nothing but the endpoint to name: a BMC that
+    /// did not answer returned no chassis list, and `bmc-unreachable` is a
+    /// statement about the endpoint anyway.
+    fn chassis_label(&self) -> String {
+        match self.chassis {
+            Some(c) => crate::chassis_chunk(self.endpoint, &c.id),
+            None => crate::endpoint_chunk(self.endpoint),
+        }
+    }
+
+    /// How a summary names where the fault is, for a human. The chunk is for
+    /// machines; `rack-a-1 chassis 2` is for the person reading the page.
+    fn site(&self) -> String {
+        match self.chassis {
+            Some(c) => format!("{} chassis {}", self.endpoint, c.id),
+            None => self.endpoint.to_string(),
+        }
+    }
 }
 
 fn alert(
@@ -79,7 +105,13 @@ fn alert(
         summary,
     );
     let mut map = HashMap::new();
-    map.insert("chassis".to_string(), obs.endpoint.to_string());
+    // The label is the KEY CHUNK, not the endpoint name. `alert_key` hashes
+    // the discriminating labels, so with the endpoint here two chassis of one
+    // service that both have a PSU `0` produced the SAME alert key — each
+    // sweep overwriting the other's alert (#1130). It is also what the poller
+    // reconciles under, and a label that disagrees with the key it reconciles
+    // by resolves the wrong alert.
+    map.insert("chassis".to_string(), obs.chassis_label());
     for (k, v) in labels {
         map.insert((*k).to_string(), v.clone());
     }
@@ -140,7 +172,7 @@ pub fn grade(cfg: &AlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
                 },
                 format!(
                     "{}: {name} health is {} (state {})",
-                    obs.endpoint,
+                    obs.site(),
                     psu.health.as_str(),
                     psu.state.as_str()
                 ),
@@ -160,7 +192,7 @@ pub fn grade(cfg: &AlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
                 obs,
                 RULE_PSU_ABSENT,
                 AlertSeverity::Warning,
-                format!("{}: {name} was present and now reads absent", obs.endpoint),
+                format!("{}: {name} was present and now reads absent", obs.site()),
                 &labels,
             ));
         }
@@ -180,7 +212,7 @@ pub fn grade(cfg: &AlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
                 },
                 format!(
                     "{}: power redundancy group {} is {}",
-                    obs.endpoint,
+                    obs.site(),
                     psu.redundancy_group.as_deref().unwrap_or("(unnamed)"),
                     if failed { "lost" } else { "degraded" }
                 ),
@@ -206,7 +238,7 @@ pub fn grade(cfg: &AlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
                 AlertSeverity::Critical,
                 format!(
                     "{}: {name} health is {}{speed}",
-                    obs.endpoint,
+                    obs.site(),
                     fan.health.as_str()
                 ),
                 &[("fan", fan.id.clone()), ("fan_name", name.clone())],
@@ -245,7 +277,7 @@ pub fn grade(cfg: &AlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             } else {
                 AlertSeverity::Warning
             },
-            format!("{}: {name}{reading}{threshold}", obs.endpoint),
+            format!("{}: {name}{reading}{threshold}", obs.site()),
             &[("sensor", sensor.id.clone()), ("sensor_name", name.clone())],
         ));
     }
@@ -270,7 +302,7 @@ pub fn grade(cfg: &AlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             format!(
                 "{}: the BMC reports the chassis as {} — check its own event log for what \
                  this sensor does not enumerate",
-                obs.endpoint,
+                obs.site(),
                 chassis.health.as_str()
             ),
             &[],
@@ -286,8 +318,12 @@ mod tests {
     use zensight_common::bmc::{Health, RedfishSurface};
 
     fn chassis(health: Health) -> Chassis {
+        chassis_id("1", health)
+    }
+
+    fn chassis_id(id: &str, health: Health) -> Chassis {
         Chassis {
-            id: "1".into(),
+            id: id.into(),
             name: None,
             manufacturer: None,
             model: None,
@@ -401,9 +437,62 @@ mod tests {
             );
             let a = out.iter().find(|a| a.rule == RULE_PSU_FAILED).unwrap();
             assert_eq!(a.severity, want);
-            assert_eq!(a.labels["chassis"], "rack-a-1");
+            assert_eq!(a.labels["chassis"], "rack-a-1-1");
             assert_eq!(a.labels["psu"], "0");
         }
+    }
+
+    /// **#1130.** The label is the key chunk — endpoint AND chassis — because
+    /// `alert_key` hashes the discriminating labels. With the endpoint alone,
+    /// two chassis of one Redfish service that each have a PSU `0` produced
+    /// the SAME key, and each sweep overwrote the other's alert.
+    #[test]
+    fn two_chassis_of_one_endpoint_do_not_share_an_alert_key() {
+        let cfg = AlertsConfig::default();
+        let supplies = [psu("0", Health::Critical, State::Enabled)];
+
+        let c1 = chassis_id("1", Health::OK);
+        let c2 = chassis_id("2", Health::OK);
+        let a1 = grade(&cfg, &obs(Some(&c1), &supplies, &[], &[], &[], 0));
+        let a2 = grade(&cfg, &obs(Some(&c2), &supplies, &[], &[], &[], 0));
+
+        let k1 = a1.iter().find(|a| a.rule == RULE_PSU_FAILED).unwrap();
+        let k2 = a2.iter().find(|a| a.rule == RULE_PSU_FAILED).unwrap();
+        assert_eq!(k1.labels["chassis"], "rack-a-1-1");
+        assert_eq!(k2.labels["chassis"], "rack-a-1-2");
+        assert_ne!(
+            k1.alert_key(),
+            k2.alert_key(),
+            "two chassis, one endpoint, the same bay id — these must be two alerts"
+        );
+    }
+
+    /// The label and the summary answer different questions: the label is what
+    /// the key and the reconcile use, the summary is what a person reads.
+    #[test]
+    fn the_summary_names_the_chassis_the_label_encodes() {
+        let c = chassis_id("2", Health::OK);
+        let supplies = [psu("0", Health::Critical, State::Enabled)];
+        let out = grade(
+            &AlertsConfig::default(),
+            &obs(Some(&c), &supplies, &[], &[], &[], 0),
+        );
+        let a = out.iter().find(|a| a.rule == RULE_PSU_FAILED).unwrap();
+        assert!(
+            a.summary.starts_with("rack-a-1 chassis 2:"),
+            "summary was {:?}",
+            a.summary
+        );
+    }
+
+    /// `bmc-unreachable` is about the Redfish service, and a BMC that did not
+    /// answer returned no chassis list — so its label is the endpoint's chunk,
+    /// not a chassis chunk this sensor would have had to invent.
+    #[test]
+    fn the_unreachable_alert_is_labelled_with_the_endpoint() {
+        let out = grade(&AlertsConfig::default(), &obs(None, &[], &[], &[], &[], 3));
+        let a = out.iter().find(|a| a.rule == RULE_UNREACHABLE).unwrap();
+        assert_eq!(a.labels["chassis"], "rack-a-1");
     }
 
     /// `Unknown` is the BMC declining to say. Treating it as a fault is paging

@@ -236,6 +236,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **bmc: every chassis of an enclosure wrote the endpoint's keys, and only
+  the first was graded** (#1130). **BREAKING for the `bmc` keyspace**: the
+  `{chassis}` chunk is `{endpoint}-{Redfish chassis id}` — `rack-a-1-1`, not
+  `rack-a-1`. Dashboards and recording rules that name a bmc series follow.
+
+  `publish` wrote `Chunk::slug(&endpoint.name)` into every key, and
+  `sweep.chassis.id` was never consulted — though the registry's own header
+  says *"the chassis rides in the key path and in the labels"* and
+  `zensight-common/src/bmc.rs` calls `Chassis.id` *"the chunk in the key"*. On
+  a blade enclosure or a four-node Twin, where one Redfish service fronts
+  several chassis, every one of them published
+  `telemetry/bmc/rack-a-1/psu/0/input_watts` and
+  `state/bmc/chassis/rack-a-1/psu/0`: last writer wins, alternating each
+  sweep. The per-chassis evidence scoping #1110 established was undone the
+  same way — one document, overwritten per chassis.
+
+  Grading was worse than incomplete. `assert_endpoint` took `sweeps.first()`,
+  and the per-rule reconcile is scoped to the label — so a `still` list
+  computed from chassis 1 did not merely miss chassis 2's failed supply, it
+  **resolved** it, every sweep. And because `alert_key` hashes the
+  discriminating labels and `chassis` was the endpoint's name, two bays `0` of
+  one service shared an alert key even where grading reached them.
+
+  Now: each chassis is published, graded and reconciled in its own namespace;
+  `known_present` (the `psu-absent` memory) is per chassis, so one chassis's
+  history no longer speaks for another's empty bay; a chassis that **leaves**
+  the `Chassis` collection has its rules reconciled to empty, while one that
+  is still listed but unsweepable keeps its state, because "we could not read
+  it" is not "it recovered". `reachable` and `bmc-unreachable` stay the
+  endpoint's — a BMC that did not answer returned no chassis list to name them
+  with. Summaries read `rack-a-1 chassis 2: PSU 1 health is Critical`.
+
+  One chunk rather than two levels, so no registry family moved and nothing
+  retires; the `{chassis}` cardinality budgets go 64 → 256.
+
+  It survived two releases because `tests/e2e.rs` listed **one** member in a
+  `Chassis` collection whose other members it was already routing, and every
+  test called `client.sweep("1")` directly instead of going through `Poller` —
+  the same fixture-shaped-to-the-client pattern #1131 called out one file over.
+  The new enclosure test drives the real poller against three chassis and
+  fails on the parent commit.
+
 - **bmc: no thermal telemetry at all on the modern Redfish surface** (#1131).
   `ThermalMetrics` is a **singleton** — no `Members`, the readings on the body
   as `TemperatureReadingsCelsius` — and the client read it as a collection. It

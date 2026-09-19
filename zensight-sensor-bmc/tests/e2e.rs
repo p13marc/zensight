@@ -31,8 +31,19 @@ struct Fixture {
     repaired: Arc<AtomicBool>,
 }
 
+/// **Every** bay this service fronts, which is what a blade enclosure or a
+/// four-node Twin looks like.
+///
+/// It listed only chassis 1 until #1130, while routing 2 and 3 — so no test
+/// ever reached the poller's multi-chassis path, and the poller graded
+/// `sweeps.first()` and wrote every chassis's series under the ENDPOINT's name
+/// for two releases without a single assertion noticing.
 async fn chassis_collection() -> Json<Value> {
-    Json(json!({"Members": [{"@odata.id": "/redfish/v1/Chassis/1"}]}))
+    Json(json!({"Members": [
+        {"@odata.id": "/redfish/v1/Chassis/1"},
+        {"@odata.id": "/redfish/v1/Chassis/2"},
+        {"@odata.id": "/redfish/v1/Chassis/3"},
+    ]}))
 }
 
 async fn chassis_one() -> Json<Value> {
@@ -196,6 +207,22 @@ async fn legacy_thermal(State(f): State<Fixture>) -> Result<Json<Value>, axum::h
     ))
 }
 
+/// Chassis 2's own supplies, on the legacy surface, with a **failing bay
+/// `0`** — the same bay id chassis 1 uses.
+///
+/// Two chassis of one service numbering their bays from zero is the normal
+/// case, and it is what made #1130 sharp: with the endpoint's name in the key
+/// and in the `chassis` label, these two supplies shared a key AND an
+/// `alert_key`.
+async fn chassis_two_power() -> Json<Value> {
+    Json(json!({"PowerSupplies": [{
+        "MemberId": "0",
+        "Name": "PSU 1",
+        "Status": {"Health": "Critical", "State": "Enabled"},
+        "PowerInputWatts": 0.0,
+    }]}))
+}
+
 async fn power_subsystem(State(f): State<Fixture>) -> Result<Json<Value>, axum::http::StatusCode> {
     if !f.modern || f.bare.load(Ordering::Relaxed) {
         return Err(axum::http::StatusCode::NOT_FOUND);
@@ -278,6 +305,7 @@ async fn spawn(fixture: Fixture) -> SocketAddr {
             get(system_one_nic1),
         )
         .route("/redfish/v1/Chassis/1/Power", get(legacy_power))
+        .route("/redfish/v1/Chassis/2/Power", get(chassis_two_power))
         .route("/redfish/v1/Chassis/1/Thermal", get(legacy_thermal))
         .route("/redfish/v1/Chassis/1/PowerSubsystem", get(power_subsystem))
         .route(
@@ -508,7 +536,7 @@ async fn the_documented_faults_each_assert_once_and_then_resolve() {
     // label (#883). Filing it under the chassis would put it on no host's card.
     for a in &firing {
         assert_eq!(a.source, "mgmt01", "{} is filed under {}", a.rule, a.source);
-        assert_eq!(a.labels["chassis"], "rack-a-1");
+        assert_eq!(a.labels["chassis"], "rack-a-1-1");
     }
 
     // The supply is replaced; the fan and the temperature are not.
@@ -585,5 +613,202 @@ async fn the_identity_claim_is_scoped_to_this_chassis() {
         other.macs.iter().all(|m| !sweep.macs.contains(m)),
         "two bays of one enclosure claimed each other's MACs — the catalog's \
          strongest merge key after host_id"
+    );
+}
+
+/// **#1130 — the enclosure test.** One Redfish service, three chassis, and a
+/// failing supply in bay `0` of chassis **2**, which is the same bay id
+/// chassis 1 uses.
+///
+/// Three things were wrong and each one is asserted here.
+///
+/// 1. `publish` wrote `Chunk::slug(&endpoint.name)` into every key, so both
+///    chassis published `telemetry/bmc/rack-a-1/psu/0/…` and
+///    `state/bmc/chassis/rack-a-1/psu/0` — last writer wins, alternating each
+///    sweep. The registry's own header says *"the chassis rides in the key
+///    path and in the labels"*, and `zensight-common/src/bmc.rs` calls
+///    `Chassis.id` *"the chunk in the key"*. Neither was true.
+/// 2. `assert_endpoint` graded `sweeps.first()` — so chassis 2's failure was
+///    never seen. Worse than missed: the per-rule reconcile is scoped to the
+///    endpoint, so a `still` list computed from chassis 1 **resolved** it.
+/// 3. `alert_key` hashes the discriminating labels, and `chassis` was the
+///    endpoint's name, so the two bays produced the same key even if grading
+///    had reached them.
+///
+/// The old fixture could not catch any of it: it listed one chassis in a
+/// collection whose other members it was already routing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_chassis_of_an_enclosure_gets_its_own_keys_and_its_own_verdict() {
+    use std::collections::HashMap;
+
+    let addr = spawn(fixture(false)).await;
+    let session = Arc::new(
+        zenoh::open({
+            let mut c = zenoh::Config::default();
+            c.insert_json5("scouting/multicast/enabled", "false")
+                .unwrap();
+            c.insert_json5("scouting/gossip/enabled", "false").unwrap();
+            // State documents ride AdvancedPublishers, which refuse to exist
+            // without timestamping.
+            c.insert_json5("timestamping/enabled", "true").unwrap();
+            c
+        })
+        .await
+        .expect("open zenoh"),
+    );
+    let telemetry_sub = session
+        .declare_subscriber("v1/*/telemetry/bmc/**")
+        .await
+        .unwrap();
+    let states_sub = session
+        .declare_subscriber("v1/*/state/bmc/chassis/**")
+        .await
+        .unwrap();
+    let alerts_sub = session
+        .declare_subscriber("v1/*/state/bmc/alert/*")
+        .await
+        .unwrap();
+
+    let format = zensight_common::Format::Json;
+    let publisher = zensight_sensor_core::Publisher::new(session.clone(), "bmc", format);
+    let reporter = Arc::new(zensight_sensor_core::AlertReporter::new(
+        publisher.clone(),
+        zensight_common::Protocol::Bmc,
+        format,
+    ));
+    let states = Arc::new(
+        zensight_sensor_core::AdvancedPublisherRegistry::new(
+            session.clone(),
+            zensight_sensor_core::v1::for_producer("bmc").telemetry_prefix(),
+            format,
+            zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+        )
+        .with_qos(zensight_sensor_bmc::poller::STATE_QOS),
+    );
+
+    let endpoint = zensight_sensor_bmc::config::Endpoint {
+        name: "rack-a-1".into(),
+        address: addr.to_string(),
+        transport: Default::default(),
+        username: "monitor".into(),
+        password: "secret".into(),
+        interval_secs: None,
+        timeout_secs: None,
+        ca_file: None,
+        insecure: true,
+        enabled: true,
+    };
+    let cfg = zensight_sensor_bmc::config::BmcConfig {
+        endpoints: vec![endpoint.clone()],
+        evidence: false,
+        ..Default::default()
+    };
+    let mut clients = HashMap::new();
+    clients.insert("rack-a-1".to_string(), Arc::new(client(addr)));
+
+    let mut poller = zensight_sensor_bmc::poller::Poller::new(
+        cfg,
+        "mgmt01".to_string(),
+        clients,
+        publisher,
+        states,
+        None,
+        Some(reporter),
+        Arc::new(zensight_sensor_core::SensorHealth::new("bmc")),
+    );
+    poller.poll_endpoint(&endpoint).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let mut telemetry_keys = Vec::new();
+    while let Ok(Some(s)) = telemetry_sub.try_recv() {
+        telemetry_keys.push(s.key_expr().as_str().to_string());
+    }
+    let mut state_keys = Vec::new();
+    while let Ok(Some(s)) = states_sub.try_recv() {
+        state_keys.push(s.key_expr().as_str().to_string());
+    }
+    let mut alerts = Vec::new();
+    while let Ok(Some(s)) = alerts_sub.try_recv() {
+        if s.kind() == zenoh::sample::SampleKind::Put {
+            alerts.push(
+                zensight_common::decode_auto::<zensight_common::Alert>(&s.payload().to_bytes())
+                    .expect("alert decodes"),
+            );
+        }
+    }
+
+    // 1. Each chassis has its own key namespace, and neither is the bare
+    //    endpoint name.
+    let bay_zero: Vec<&String> = telemetry_keys
+        .iter()
+        .filter(|k| k.contains("/psu/0/"))
+        .collect();
+    assert!(
+        bay_zero
+            .iter()
+            .any(|k| k.contains("/bmc/rack-a-1-1/psu/0/")),
+        "chassis 1's bay 0 is missing from {telemetry_keys:#?}"
+    );
+    assert!(
+        bay_zero
+            .iter()
+            .any(|k| k.contains("/bmc/rack-a-1-2/psu/0/")),
+        "chassis 2's bay 0 is missing — only the first chassis was published \
+         (#1130). Keys: {telemetry_keys:#?}"
+    );
+    assert!(
+        !telemetry_keys
+            .iter()
+            .any(|k| k.contains("/bmc/rack-a-1/psu/")),
+        "a supply was published under the ENDPOINT's chunk, which every \
+         chassis of this service shares: {telemetry_keys:#?}"
+    );
+
+    // `reachable` is the one series that IS the endpoint's, because a BMC that
+    // did not answer returned no chassis list to name it with.
+    assert!(
+        telemetry_keys
+            .iter()
+            .any(|k| k.ends_with("/bmc/rack-a-1/reachable")),
+        "reachable must stay endpoint-scoped: {telemetry_keys:#?}"
+    );
+
+    // 2. The state documents follow the key, not the endpoint.
+    for want in [
+        "chassis/rack-a-1-1",
+        "chassis/rack-a-1-2",
+        "chassis/rack-a-1-3",
+    ] {
+        assert!(
+            state_keys.iter().any(|k| k.contains(want)),
+            "no state document for {want}: {state_keys:#?}"
+        );
+    }
+
+    // 3. The failure on chassis 2 is graded and labelled with ITS chunk.
+    let psu_failed: Vec<&zensight_common::Alert> = alerts
+        .iter()
+        .filter(|a| a.rule == alerts::RULE_PSU_FAILED)
+        .collect();
+    assert!(
+        psu_failed
+            .iter()
+            .any(|a| a.labels.get("chassis").map(String::as_str) == Some("rack-a-1-2")),
+        "chassis 2's failed supply was not asserted — only `sweeps.first()` \
+         was graded (#1130). Alerts: {:#?}",
+        alerts
+            .iter()
+            .map(|a| (&a.rule, &a.labels))
+            .collect::<Vec<_>>()
+    );
+
+    // And chassis 1's bay 0 — failing on the same fixture — is a SEPARATE
+    // alert, not the same key overwritten.
+    let keys: std::collections::BTreeSet<String> =
+        psu_failed.iter().map(|a| a.alert_key()).collect();
+    assert!(
+        keys.len() >= 2,
+        "two chassis, one endpoint, the same bay id — these must be distinct \
+         alerts, got {keys:?}"
     );
 }
