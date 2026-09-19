@@ -414,7 +414,14 @@ cat > "$outdir/systemd.json5" <<JSON5
 {
   zenoh: { mode: "peer", serialization: "json" },
   // On-demand redacted debug bundle (Sensors → report) — safe to enable.
-  report: { enabled: true, max_bytes: 67108864, cooldown_secs: 30, ttl_secs: 600, chunk_size: 524288 },
+  //
+  // Under `artifacts:`, which is where `SystemdSensorConfig` declares it. It
+  // was at the top level, so it parsed clean and was DISCARDED: the demo asked
+  // for report downloads and silently never got them. Found by #1150's strict
+  // loader, which is the failure mode it exists to remove.
+  artifacts: {
+    report: { enabled: true, max_bytes: 67108864, cooldown_secs: 30, ttl_secs: 600, chunk_size: 524288 },
+  },
   systemd: {
     poll_interval_secs: 15,
     // Curated per-unit stream (timers + sockets + a few high-value services).

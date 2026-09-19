@@ -118,12 +118,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it had already joined the bus.
 
   `scripts/demo-verify.sh` gains **phase 3b**, which runs `--check-config` over
-  every config this repository ships, through the binary that owns it, and then
+  every config the script builds a binary for, through that binary, and then
   checks that a `poll_interval_sec` typo is refused. The per-crate tests already
   parsed those files into the crate's own type; nothing had ever run the binary
   over one, and a flag CI never executes is a flag that stops working quietly.
-  It asserts a **count** of at least fifteen rather than an absence of failures,
-  because a loop whose binaries all went missing reports success just as loudly.
+  The pairs are **named**, not globbed: this is a seven-binary debug run, not a
+  workspace build, and a loop that skips an absent binary reports success just
+  as loudly as one that checked it.
+
+  **It found one immediately.** `gen-configs.sh` writes the systemd sensor's
+  config from scratch and put `report: {…}` at the **top level**, where
+  `SystemdSensorConfig` declares it under `artifacts:`. So the demo and the
+  conformance rig have been asking for on-demand report downloads and silently
+  getting none, for as long as that block has existed. That is precisely the
+  failure this issue is about, caught by the check this issue adds.
 
   One thing this exposed: `SensorConfig::validate` flattened `zensight-sensor-logs`'
   anyhow context with `{e}`, so a bad IANA zone reported `listener 0 timezone`
