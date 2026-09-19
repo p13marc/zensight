@@ -22,6 +22,8 @@
 #   keep_logs_on_failure / logs_note — the evidence outlives the trap
 #   still_running / children_died_note — a dead child and an undiscovered one
 #                    are different failures and must not render identically
+#   stop_children  — a child that ignores SIGTERM costs seconds, not a job
+#                    timeout (#1211)
 
 # --- 1. Preflight ----------------------------------------------------------
 #
@@ -100,6 +102,43 @@ still_running() {
         kill -0 "$pid" 2>/dev/null || return 1
     done
     return 0
+}
+
+# --- 4. A child that will not stop must not cost a whole CI lane -----------
+#
+# Every one of these scripts ended its EXIT trap with `kill $pid` then
+# `wait $pid`, and `wait` on a process that does not die is unbounded. On
+# 2026-09-09 and again on 2026-09-19 that turned a demo-verify failure at the
+# four-minute mark into a **45-minute** demo-smoke job, three times over, on a
+# two-lane runner — the script had already printed its diagnosis and was then
+# held by one child until the job timeout killed the container.
+#
+# The child in question was a wedged historian (#1211), which is a bug in its
+# own right. But "a monitoring harness can be held open forever by the thing it
+# is monitoring" is a defect of the harness, and no fix to one producer closes
+# it: TERM, give it a moment, then KILL.
+#
+# The grace is per-round rather than per-process, so N children cost one wait,
+# not N.
+stop_children() {
+    local grace="${STOP_GRACE_SECS:-5}" pid i
+    for pid in "$@"; do
+        [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    for ((i = 0; i < grace * 10; i++)); do
+        still_running "$@" || break
+        sleep 0.1
+    done
+    for pid in "$@"; do
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            printf 'warn: pid %s ignored SIGTERM for %ss; killing\n' "$pid" "$grace" >&2
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+    # Now `wait` is bounded: everything above is either gone or SIGKILLed.
+    for pid in "$@"; do
+        [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+    done
 }
 
 # Which of the pids we started are gone. Prints nothing when all are alive.
