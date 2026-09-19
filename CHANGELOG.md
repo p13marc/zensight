@@ -39,6 +39,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The repo-level docs rows of the 2026-09-06 review, and a guard for the
+  largest class** (#1158). Every one of these is a sentence a reader would act
+  on and be wrong.
+
+  **19 broken relative links**, and they had one shape between them: something
+  moved and the links did not. Eight pointed into `docs/rfcs/keyspace-v2/` and
+  `rfcs/keyspace-v2/`, which left for the zenkey repo with the RFC extraction;
+  two at `zensight-keyspace/registry/`, which is now
+  `zensight-common/registry/`; one at a file that moved into `docs/design/` and
+  was lowercased on the way. New `scripts/check-doc-links.sh`, in `ci.yml`'s
+  `lint` job, resolves all 471 relative links with no network — an
+  external-URL checker is a gate that fails when someone else's site is down.
+
+  **`RELEASING.md`'s counts were all wrong**: 25 crates / 27 manifests / 18
+  binaries / 19 images, against 31 / 31 / 20 / 21. bmc and `zensight-desired`
+  were missing from both artifact lists. The file now says how to re-derive
+  them, because they are countable and this is the second time they have
+  rotted.
+
+  **`docs/ARCHITECTURE.md` never mentioned bmc, pve, container or probe** —
+  both mermaid rosters stopped at parallax, and the source-tree block omitted
+  store, historian, desired, conformance, btf and rerun. **`docs/README.md`**'s
+  per-crate index omitted `zensight/docs/media-receiver.md`, three of the logs
+  sensor's six pages, and btf and rerun entirely; its `just run` line named
+  four sensors for six.
+
+- **The release pipeline can no longer roll the fleet back, and waits for CI**
+  (#1095).
+
+  **`:latest` only moves for the newest release.** The `workflow_dispatch`
+  input is "existing bare-semver tag to re-release" and nothing checked it was
+  the newest, so re-releasing 0.11.0 after 0.13.0 silently rolled all 21
+  images' `:latest` back — for every quadlet in `packaging/`, all of which pull
+  `:latest`. The newest tag is read from the **API**, not from the job's
+  `--depth 1 --branch <tag>` clone, which fetches that tag and no other and
+  would therefore always answer "yes"; and an unreadable tag list leaves
+  `:latest` alone rather than guessing, because a stale `:latest` is fixed by
+  the next release and a backwards one is what this prevents.
+
+  **Nothing is published until CI has passed on the release commit.** A new
+  `gate` job polls `/commits/<sha>/status` and every other job needs it.
+  `ci.yml` fires on the same tag but in a different concurrency group, and its
+  own header calls that run a *"parallel signal, not a gate"* — so images were
+  built, smoke-tested and pushed while the suite might still be running, or
+  red. It reads `RELEASE_SHA`, never `github.sha`, because a
+  `workflow_dispatch` executes on a branch ref while the thing being released
+  is a tag. It also waits for **as many statuses as `ci.yml` declares jobs**,
+  counted from that file rather than hardcoded: a status appears when its job
+  *starts*, and with one runner the combined state can read `success` over a
+  single finished job while five have not begun — which would be exactly the
+  false green the gate exists to prevent.
+
+  **Secrets are off every command line.** `buildah login -p` becomes
+  `--password-stdin`; the two `http://forgejo:$TOKEN@…` clone/push URLs become
+  a 0600 credential file (the raw one was interpolated into the rendered script
+  *and* written into `.git/config`); and the nine `curl -H "Authorization:
+  token …"` call sites read the header from a 0600 `curl --config` file. All of
+  those put the token in the runner's process table.
+
 - **demo-smoke's dashboard-drift guard covers the dashboard it was written
   for** (#1096). The guard deferred `zensight_netlink_`, and **all 18 metric
   names in `demo/prometheus/dashboards/zensight-network.json` start with it** —
@@ -452,6 +511,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers. On the parent commit it fails with *"the poll never returned — a
   silent slave stops this device forever"*, after the full ten-second test
   timeout.
+
+- **pve: a corosync blip paged for every guest in the cluster** (#1132).
+  **BREAKING for the `pve` keyspace**: a non-shared pool's `{store}` chunk is
+  `{node}-{name}` unconditionally, so a single-node deployment's
+  `storage/local-lvm` becomes `storage/pve-local-lvm`.
+
+  `/cluster/resources` on a node that has lost quorum **still answers**, and
+  reports the guests on the far side of the partition as `status: "unknown"` —
+  which `is_running()` reads as "not running". A ninety-second blip therefore
+  fired a **critical** `guest-not-running` for every VM in the cluster,
+  alongside `cluster-not-quorate`, and none of them had stopped. Quorum was
+  already fetched, already parsed and already in scope at the defect; only
+  `RULE_QUORUM` ever read it.
+
+  Every guest rule is held now when the cluster is not quorate, and a guest on
+  a node the cluster lists as `online: false` is held on its own — guests on
+  nodes that answered are graded as usual in the same sweep. **Holding is two
+  halves**: `grade` declining to fire is not enough, because the poller
+  reconciles every rule every sweep and a fleet-wide reconcile reads "did not
+  fire" as "recovered". The three guest rules reconcile **per node** now, over
+  the nodes the sweep could speak for. `guest/{vmid}/running` is not published
+  at all for a held guest, because a `0` there is this sensor turning "we
+  cannot see it" into "it stopped". A `/cluster/status` read that *failed* is
+  graded as non-quorate rather than as standalone: folding the two together
+  would turn the guard off exactly when the cluster API is the thing that is
+  unwell. This is SNMP's `device_answered` and BMC's `chassis.is_none()`, one
+  API over.
+
+  Two siblings the issue bundled, both on the same sweep:
+
+  - **The storage key stops depending on who answered.** A non-shared pool got
+    the node in its chunk only if *this sweep* saw the name twice — so when
+    node B dropped out, node A's `local-lvm` moved from
+    `storage/pve1-local-lvm` to `storage/local-lvm`, its series restarted
+    under a new name, and the old state document became an LWW ghost nothing
+    would overwrite again. The disambiguator is `shared`, a property of the
+    pool.
+  - **`/cluster/ha/status/current` is a status feed, not a resource list.**
+    Its rows carry a `type`, and taking them wholesale put `quorum`, `lrm` and
+    `master` in the cluster document as HA *services* — three or four phantoms
+    per node that no `ha-manager` command would name. Only `type: "service"`
+    rows are HA resources.
+
+  Both acceptance tests fail on the parent commit: the non-quorate fixture
+  fires `["cluster-not-quorate", "guest-not-running"]` where it must fire only
+  the first, and the offline-node fixture grades a guest on the node that did
+  not answer.
 
 - **The eBPF workflow denies warnings, pins its compiler, and runs on a tag**
   (#1094). Three ways the one job that guards an opt-in feature was weaker than
@@ -8595,7 +8701,7 @@ shim, and a 0.7.0 deployment will not interoperate with a 0.8.0 one.**
 Upgrading from 0.7.0? Read the migration table in
 [`docs/plans/keyspace-v2/RETROSPECTIVE.md`](docs/plans/keyspace-v2/RETROSPECTIVE.md)
 (§2, "The keys themselves" / "What was *deleted*") — it maps every old key to its
-v1 form. The normative spec is [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md);
+v1 form. The normative spec is [`docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md);
 the deployed-profile summary is [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
 
 ### Changed — BREAKING

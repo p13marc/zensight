@@ -37,10 +37,10 @@ sensor's `actions` block already is — as a separate and deliberate decision.
 | | |
 |---|---|
 | `state/pve/guest/{vmid}` | runtime status joined with the config facts that decide the *next* reboot: `onboot`, per-NIC `firewall`, per-disk `backup=0`, provisioned size |
-| `state/pve/storage/{store}` | capacity, use, and **allocated** — the sum of declared volume sizes, which is what over-commits a thin pool and is invisible in `used`. Reported by the plugin where it can be, otherwise derived from the guests' disk lines and labelled as such (#881) |
+| `state/pve/storage/{store}` — `{node}-{name}` for a non-shared pool, the bare name for a shared one (#1132) | capacity, use, and **allocated** — the sum of declared volume sizes, which is what over-commits a thin pool and is invisible in `used`. Reported by the plugin where it can be, otherwise derived from the guests' disk lines and labelled as such (#881) |
 | `state/pve/backup/{vmid}` | last vzdump outcome plus the newest two stored volumes, so "it succeeded and shrank" is expressible |
 | `state/pve/backup/job/{node}` | the last **whole-job** vzdump run — a job configured `all 1` names no guest, so it is one fact graded once rather than a failure of every guest it covered (#880) |
-| `state/pve/cluster` | quorum, members, HA resources, replication results |
+| `state/pve/cluster` | quorum, members, HA resources (`type: "service"` rows only — the endpoint is a status feed, #1132), replication results |
 | `state/pve/evidence/device/{vmid}` | a third-party identity claim per guest — name and configured MACs — so the hypervisor's view of a VM fuses with that VM's own sensors in the catalog |
 | `telemetry/pve/…` | per-guest cpu/mem/disk/uptime/running, per-pool bytes and ratios, per-guest backup size/age/duration, cluster counts |
 | `state/pve/alert/{alert_key}` | ten rules, each reconciled every sweep |

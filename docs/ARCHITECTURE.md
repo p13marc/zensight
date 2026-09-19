@@ -20,7 +20,7 @@ flowchart TD
         LogsSensor["zensight-sensor-logs"]
         SysinfoSensor["zensight-sensor-sysinfo"]
         NetflowSensor["zensight-sensor-netflow"]
-        OtherSensors["... modbus, gnmi, netlink,<br/>netring, systemd, hostspec, parallax"]
+        OtherSensors["... modbus, gnmi, netlink, netring,<br/>systemd, hostspec, parallax,<br/>pve, container, probe, bmc"]
     end
 
     SNMPDev --> SnmpSensor
@@ -141,7 +141,7 @@ flowchart BT
 
     subgraph Apps["Applications"]
         Frontend["zensight (frontend)<br/>Iced 0.14 GUI"]
-        SensorApps["zensight-sensor-*<br/>snmp, logs, sysinfo, netflow, modbus,<br/>gnmi, netlink, netring, systemd, hostspec, parallax"]
+        SensorApps["zensight-sensor-* (15)<br/>snmp, logs, sysinfo, netflow, modbus, gnmi,<br/>netlink, netring, systemd, hostspec, parallax,<br/>pve, container, probe, bmc"]
         PromExp["zensight-exporter-prometheus<br/>HTTP /metrics"]
         OtelExp["zensight-exporter-otel<br/>OTLP gRPC/HTTP"]
     end
@@ -596,16 +596,25 @@ zensight/                            # Workspace root
 ├── zensight/                        # Iced frontend            (see zensight/docs/)
 ├── zensight-common/                 # shared model             (see zensight-common/docs/)
 ├── (zenkey)                         # keyspace RFC + grammar/registry crate + zenctl — external repo: https://github.com/p13marc/zenkey
+├── zensight-store/                  # tiered time-series store (see zensight-store/README.md)
+├── zensight-historian/              # durable fleet history    (see zensight-historian/docs/)
+├── zensight-desired/                # the fleet policy compiler (see zensight-desired/docs/)
 ├── zensight-sensor-core/            # sensor framework         (see zensight-sensor-core/docs/)
 ├── zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/   # protocol sensors
 ├── zensight-sensor-{netlink,netring,systemd,hostspec}/        # Linux / wire / systemd / desired-state sensors
+├── zensight-sensor-{pve,container,probe,bmc}/                 # hypervisor / OCI / outside-in / out-of-band
+├── zensight-sensor-parallax/        # live video on the @media plane
 ├── zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/          # opt-in eBPF programs
+├── zensight-btf/                    # BTF/CO-RE offsets for the eBPF path
 ├── zensight-correlator/             # identity correlator      (see zensight-correlator/docs/)
 ├── zensight-exporter-{prometheus,otel}/   # exporters
+├── zensight-conformance/            # CI harness: zenkey-fleet's RFC judges (publish = false)
+├── zensight-rerun/                  # rerun evaluation harness (publish = false)
 ├── (zblob)                          # large-data transfer — external repo: https://github.com/p13marc/zblob
 │
 ├── configs/                         # one example JSON5 config per crate
-└── packaging/                       # .deb/.rpm + hardened systemd units
+├── scripts/                         # the executing gates + the lint guards' scripts
+└── packaging/                       # hardened systemd units + quadlets (see packaging/README.md)
 ```
 
 > For the full key tree see [KEYSPACE.md](KEYSPACE.md); for per-crate details see each

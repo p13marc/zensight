@@ -76,7 +76,7 @@ The wire types this framework publishes (`TelemetryPoint`, `Alert`, `HostEvidenc
 `ArtifactRequest`, `QosClass`, …) live in and are documented under
 [`zensight-common`](../zensight-common/README.md). The deployed key contract is
 summarized in [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) (normative spec:
-[`../docs/rfcs/keyspace-v2/`](../docs/rfcs/keyspace-v2/00-index.md)).
+[`../docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md)).
 
 ## License
 
