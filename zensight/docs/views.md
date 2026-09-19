@@ -849,6 +849,32 @@ health over a fleet nothing checked is the one answer this table must not give.
 Rows are keyed `host/name`: a container name is unique on its host and nowhere
 else, and two hosts running `redis` are two containers.
 
+**Probe** (`view/specialized/probe.rs` + `view/overview/probe.rs`, #1126) —
+outside-in synthetic checks. A probe **device is a vantage point**: the sensor
+puts the reporting host in the payload's `source`, so one device card is one
+host's view of its targets, and the same target checked from two hosts is two
+rows in two tables. That is the point — *"is it down, or is it down from
+here"* is the question a synthetic check answers.
+
+Four renderings are the sensor's doctrine rather than this view's taste, and
+each is stated in `probe.toml`'s own descriptions:
+
+- **A timeout is a state, not a flavour of failure.** A timed-out check
+  publishes both `up = 0` and `timeout = 1`; the view reads `timeout` first.
+  Reading `up` first prints "down" where "timed out after 20.0 s" was
+  available, and that substitution is what the sensor's eight-day outage
+  post-mortem is about. `duration_ms` is published on a timeout *because* the
+  duration is the diagnosis, so it rides the label.
+- **100 % loss is not a p95 of 0 ms.** The RTT series are absent at total loss.
+- **Expired is not 0 days left.** `tls_days_to_expiry` is negative once
+  `notAfter` has passed; the view labels it as expired and never clamps.
+- **Stratum 0 is a refusal**, spelled out in words, because the number reads
+  like the best one available.
+
+The certificate list's 30-day window is *the list's filter, not a threshold any
+publisher declared* — the real day count is always on the row, and nothing is
+graded as though the sensor had judged it.
+
 ## Zero, absent, and unreadable are three different things
 
 The latency panel above can say `available: false` because it *asks* a question

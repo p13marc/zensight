@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A probe view: "timed out after 20.0 s" is now a sentence the GUI can say**
+  (#1126). `probe.toml`'s header is an eight-day outage post-mortem whose
+  thesis is that *"timeout, 20 s" said once would have ended it*. Since #820
+  the sensor has published `{target}/up`, `duration_ms`, `timeout`,
+  `http_status`, `tls_days_to_expiry`, `tls_chain_valid`, the burst series and
+  the NTP set — and `specialized/mod.rs` answered `Protocol::Probe => None`.
+  The sentence that would have ended the outage was on the bus and rendered
+  nowhere.
+
+  One table per **vantage point** — the sensor puts the reporting host in the
+  payload's `source`, so a probe device *is* a vantage — plus a fleet-wide list
+  of certificates expiring or already expired, which is not a fact about any
+  one vantage.
+
+  Four renderings are the sensor's own doctrine, each stated in the registry
+  and each wrong in a specific way if taken naively:
+
+  - **A timeout is its own state.** A timed-out check publishes *both*
+    `up = 0` and `timeout = 1`, so reading `up` first collapses the two states
+    the sensor separated on purpose — "a connection that hangs is a different
+    diagnosis from one that is refused" — and prints "down" where "timed out
+    after 20.0 s" was available. The fleet counts keep them apart too.
+  - **100 % loss is not a p95 of 0 ms.** The RTT series are *absent* at total
+    loss, not zero; a zero would make the deadest target in the fleet read as
+    the fastest.
+  - **Expired is not "0 days left".** `tls_days_to_expiry` goes negative
+    deliberately, because clamping "would make 'expired an hour ago' and
+    'expires in a month' look equally survivable". Negatives render as expired
+    and sort above "expires tomorrow" with no special case.
+  - **Stratum 0 is a kiss-o'-death refusal**, never a valid time source — and
+    "stratum 0" reads like the best possible number to anyone who does not know
+    that, so it is named in words.
+
+  A target checked from two vantages is two rows, never deduplicated: a
+  certificate that validates from inside the network and not from outside it is
+  a split-horizon misconfiguration, and one row would report whichever vantage
+  was folded last.
+
 - **PVE backup freshness, container patch drift — and eight protocol tabs that
   could never be reached** (#1128). `cluster/quorate`,
   `backup/{vmid}/age_secs` + `ok`, `storage/{s}/overcommit_ratio`,

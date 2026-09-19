@@ -9,6 +9,7 @@ pub mod modbus;
 pub mod netflow;
 pub mod netlink;
 pub mod netring;
+pub mod probe;
 pub mod pve;
 pub mod snmp;
 pub mod sysinfo;
@@ -168,7 +169,7 @@ pub fn overview_section<'a>(
             // history) is a follow-up, not a blocker.
             Protocol::Container => containers::container_overview(&protocol_devices),
             // #820: one device per configured target.
-            Protocol::Probe => generic_overview(&protocol_devices, "probe targets"),
+            Protocol::Probe => probe::probe_overview(&protocol_devices),
             // #898: the historian is one device per running instance, and what
             // it has to say about itself is its health document and its store
             // statistics — not a device table. The generic view renders the
