@@ -14440,6 +14440,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
+ "zenkey",
  "zenoh",
  "zensight-common",
  "zensight-sensor-core",

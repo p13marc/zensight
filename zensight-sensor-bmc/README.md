@@ -45,6 +45,18 @@ point that polls it, not a machine that publishes for itself.
 | `state/bmc/evidence/device/{chassis}` | the BMC's view of the machine it manages, for the catalog |
 | `state/bmc/alert/{key}` | the assertions below |
 
+`{chassis}` is **`{endpoint}-{Redfish chassis id}`** (#1130), and both halves
+are load-bearing. A Redfish chassis id is `1`, `2`, `Self` or `Enclosure` —
+unique inside one service and nowhere else — so it cannot stand alone on a
+fleet. The endpoint's name is fleet-unique and says nothing about *which*
+chassis, which on a blade enclosure or a four-node Twin is several: it was the
+whole chunk until #1130, so every chassis of such a service wrote one
+another's keys and took turns winning.
+
+`reachable` is the one exception, and stays the **endpoint's**: a BMC that did
+not answer returned no chassis list, and inventing a chunk for it would claim
+a chassis this sensor has never seen.
+
 ## Three rules the whole crate is arranged around
 
 - **An identity claim describes one machine.** The evidence document is scoped
@@ -83,6 +95,14 @@ Redfish 2020.4 deprecated `Chassis/{id}/Power` and `Thermal` for
 serves only the old pair. The client tries the new one, falls back, and
 **records which answered** in the chassis document — because a reading absent
 on one is a different fact from the same reading absent on the other.
+
+The two generations are not the same shape, and the difference is not uniform.
+`PowerSupplies` and `Fans` are collections on both — a `Members` array of
+links. **`ThermalMetrics` is a singleton**: no `Members`, the readings sit on
+the body as `TemperatureReadingsCelsius`, an array of reduced sensor excerpts.
+Reading it as a collection (#1131) returned nothing on every BMC serving the
+modern surface, so this sensor published no temperature at all there while the
+legacy path worked — an inversion where newer firmware reported *less*.
 
 ## Running it
 

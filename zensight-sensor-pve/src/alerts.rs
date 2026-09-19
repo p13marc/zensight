@@ -30,6 +30,14 @@ pub const RULE_BACKUP_SHRUNK: &str = "backup-shrunk";
 pub const RULE_QUORUM: &str = "cluster-not-quorate";
 pub const RULE_REPLICATION: &str = "replication-failed";
 
+/// The rules that are about ONE GUEST, and therefore about one node.
+///
+/// They reconcile per node rather than fleet-wide (#1132), so a node that did
+/// not answer this sweep keeps its guests' alerts instead of having them
+/// announced as recovered. Every alert these raise carries a `node` label —
+/// `base` in `grade` puts it there — which is what makes the scoping possible.
+pub const GUEST_RULES: &[&str] = &[RULE_ONBOOT, RULE_NOT_RUNNING, RULE_NIC_FIREWALL];
+
 /// Every rule this sensor can raise. The poller reconciles each one every
 /// sweep, so a rule that stops firing resolves — including one whose whole
 /// input disappeared (a guest that was deleted).
@@ -88,8 +96,44 @@ fn alert(
     a
 }
 
+/// Whether this sweep can speak for a guest at all (#1132).
+///
+/// `/cluster/resources` on a node that has lost quorum still answers. It
+/// reports the guests on the far side of the partition as `status: "unknown"`
+/// — and `is_running()` is `status == "running"`, so every one of them looked
+/// stopped. A ninety-second corosync blip fired a **critical**
+/// `guest-not-running` for every VM in the cluster, none of which had stopped.
+///
+/// Two ways a guest is unobservable, and both hold every rule rather than
+/// grading on what the API happened to say:
+///
+/// - **The cluster is not quorate.** A node without quorum is not entitled to
+///   an opinion about anything but itself, and Proxmox's own tooling refuses
+///   to act in that state.
+/// - **The guest's node is listed and offline.** Its guests are unreachable,
+///   not stopped.
+///
+/// A standalone node (`cluster: None`, or `quorate: None`) is always
+/// observable: there is no quorum to have or lose. This is SNMP's
+/// `device_answered` and BMC's `chassis.is_none()` guard, one API over — and
+/// the lesson both of those already paid for.
+pub fn guest_is_observable(cluster: Option<&PveClusterHealth>, node: &str) -> bool {
+    let Some(c) = cluster else {
+        return true;
+    };
+    if c.quorate == Some(false) {
+        return false;
+    }
+    !c.nodes.iter().any(|n| n.name == node && !n.online)
+}
+
 /// Grade one sweep. Returns every currently-firing alert; the caller
 /// reconciles per rule, so anything absent here resolves.
+///
+/// **Absence is not resolution for a guest whose node did not answer.** The
+/// caller reconciles the guest rules per node (`reconcile_labeled(rule,
+/// "node", …)`) and skips the nodes this function held, so a guest nobody can
+/// see keeps its previous state instead of being announced as recovered.
 pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
     let mut out = Vec::new();
     if !cfg.enabled {
@@ -97,6 +141,10 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
     }
 
     for g in obs.guests {
+        // Held, not graded (#1132) — see `guest_is_observable`.
+        if !guest_is_observable(obs.cluster, &g.node) {
+            continue;
+        }
         // A template is a stamp, not a guest: it has no business being
         // `onboot`, running, or firewalled.
         if g.template || cfg.exempt_vmids.contains(&g.vmid) {
@@ -470,6 +518,112 @@ mod tests {
         }
     }
 
+    fn obs_with_cluster<'a>(
+        guests: &'a [PveGuest],
+        cluster: &'a PveClusterHealth,
+    ) -> Observation<'a> {
+        Observation {
+            cluster: Some(cluster),
+            ..obs(guests)
+        }
+    }
+
+    fn cluster(quorate: Option<bool>, nodes: Vec<PveNodeStatus>) -> PveClusterHealth {
+        PveClusterHealth {
+            name: Some("cl".into()),
+            quorate,
+            nodes,
+            ha: vec![],
+            replication: vec![],
+            guests_total: 1,
+            guests_running: 0,
+            observed_at_ms: 0,
+        }
+    }
+
+    fn node(name: &str, online: bool) -> PveNodeStatus {
+        PveNodeStatus {
+            name: name.into(),
+            online,
+            local: false,
+            ip: None,
+        }
+    }
+
+    /// **#1132, the acceptance.** `/cluster/resources` on a node that has lost
+    /// quorum still answers, and reports the guests on the far side of the
+    /// partition as `status: "unknown"` — which `is_running()` reads as "not
+    /// running". A ninety-second corosync blip therefore fired a **critical**
+    /// `guest-not-running` for every VM in the cluster, none of which had
+    /// stopped.
+    #[test]
+    fn a_non_quorate_sweep_fires_only_the_quorum_rule() {
+        // Set to start at boot, and reported as `unknown` — exactly what a
+        // guest on the far side of a partition looks like.
+        let mut g = guest(140, true, false, true);
+        g.status = "unknown".into();
+        let guests = [g];
+        let c = cluster(Some(false), vec![node("pve", true), node("pve2", true)]);
+
+        assert_eq!(
+            rules(&grade(
+                &PveAlertsConfig::default(),
+                &obs_with_cluster(&guests, &c)
+            )),
+            vec![RULE_QUORUM],
+            "a node without quorum is not entitled to an opinion about a \
+             guest it cannot see"
+        );
+    }
+
+    /// The same guest, the same reply, with quorum: now it IS a fault.
+    #[test]
+    fn a_quorate_sweep_still_grades_the_guest() {
+        let mut g = guest(140, true, false, true);
+        g.status = "unknown".into();
+        let guests = [g];
+        let c = cluster(Some(true), vec![node("pve", true)]);
+        assert!(
+            rules(&grade(
+                &PveAlertsConfig::default(),
+                &obs_with_cluster(&guests, &c)
+            ))
+            .contains(&RULE_NOT_RUNNING),
+            "with quorum, `unknown` is the hypervisor's answer and not a \
+             partition — the guard must not swallow a real fault"
+        );
+    }
+
+    /// Quorum is a cluster-wide hold; an offline **node** is a narrower one.
+    /// A guest on a node the cluster lists as down is unreachable, not
+    /// stopped — and a guest on a node that is up is graded as usual in the
+    /// same sweep.
+    #[test]
+    fn an_offline_node_holds_only_its_own_guests() {
+        let mut far = guest(140, true, false, true);
+        far.node = "pve2".into();
+        far.status = "unknown".into();
+        let near = guest(141, false, true, true); // onboot off: a real finding
+        let guests = [far, near];
+        let c = cluster(Some(true), vec![node("pve", true), node("pve2", false)]);
+
+        let fired = grade(&PveAlertsConfig::default(), &obs_with_cluster(&guests, &c));
+        assert_eq!(rules(&fired), vec![RULE_ONBOOT]);
+        assert_eq!(
+            fired[0].labels["vmid"], "141",
+            "the finding must be the one on the node that answered"
+        );
+    }
+
+    /// A standalone node has no quorum to have or lose, and must not be held
+    /// by a guard built for clusters.
+    #[test]
+    fn a_standalone_node_is_always_observable() {
+        assert!(guest_is_observable(None, "pve"));
+        let c = cluster(None, vec![]);
+        assert!(guest_is_observable(Some(&c), "pve"));
+    }
+
     fn rules(alerts: &[Alert]) -> Vec<&str> {
         let mut r: Vec<&str> = alerts.iter().map(|a| a.rule.as_str()).collect();
         r.sort_unstable();
@@ -751,6 +905,11 @@ mod tests {
 
     /// Every rule the grader can emit must be in ALL_RULES, or the poller
     /// never reconciles it and a resolved condition keeps firing forever.
+    ///
+    /// Graded **twice** since #1132: `cluster-not-quorate` needs
+    /// `quorate: Some(false)`, and that is exactly the state in which the
+    /// guest rules are held — the two can no longer be observed in one sweep,
+    /// which is the point of the guard. The union is what this test is about.
     #[test]
     fn every_emitted_rule_is_reconciled() {
         // Two guests, because `onboot=0` and "set to start at boot but
@@ -811,21 +970,28 @@ mod tests {
             age_secs: Some(60),
             observed_at_ms: 0,
         }];
-        let a = grade(
-            &cfg,
-            &Observation {
-                backup_jobs: &jobs,
-                source: "pve",
-                guests: &g,
-                pools: &pools,
-                backups: &b,
-                cluster: Some(&c),
-            },
-        );
-        let fired: std::collections::HashSet<&str> = a.iter().map(|x| x.rule.as_str()).collect();
+        let quorate = PveClusterHealth {
+            quorate: Some(true),
+            ..c.clone()
+        };
+        let mut fired: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for cluster in [&c, &quorate] {
+            let a = grade(
+                &cfg,
+                &Observation {
+                    backup_jobs: &jobs,
+                    source: "pve",
+                    guests: &g,
+                    pools: &pools,
+                    backups: &b,
+                    cluster: Some(cluster),
+                },
+            );
+            fired.extend(a.iter().map(|x| x.rule.clone()));
+        }
         assert_eq!(fired.len(), ALL_RULES.len(), "fired: {fired:?}");
         for r in &fired {
-            assert!(ALL_RULES.contains(r), "{r} is not reconciled");
+            assert!(ALL_RULES.contains(&r.as_str()), "{r} is not reconciled");
         }
     }
 }

@@ -111,6 +111,6 @@ function, pure and clock-free, if a consumer would rather link it than reimpleme
   historical passive-DNS (pdns) InfluxDB tier.
 - [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) — the deployed fleet-wide
   key-expression profile (normative spec:
-  [`../docs/rfcs/keyspace-v2/`](../docs/rfcs/keyspace-v2/00-index.md)).
+  [`../docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md)).
 - [`../docs/design/correlation.md`](../docs/design/correlation.md) — the full
   correlation design rationale (why these rules, ranks, and confidences).
