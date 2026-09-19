@@ -2,7 +2,7 @@
 
 The keys the catalog (correlator) consumes and produces. The deployed fleet-wide
 profile lives in [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) (normative
-spec: [`../../docs/rfcs/keyspace-v2/`](../../docs/rfcs/keyspace-v2/00-index.md));
+spec: [`../../docs/rfcs/keyspace-v2/`](https://github.com/p13marc/zenkey/blob/main/rfcs/00-index.md));
 this page is the correlator-scoped slice. All key builders are in
 `zensight-common/src/keyexpr.rs`.
 

@@ -9,7 +9,7 @@
 //!
 //! Everything published here is an observation. There is no write path.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -418,10 +418,18 @@ impl Poller {
     ) -> Option<PveClusterHealth> {
         let (name, quorate, nodes) = match self.client.cluster_status().await {
             Ok(Some(t)) => t,
+            // A standalone node: there is no quorum to have or lose.
             Ok(None) => (None, None, Vec::new()),
             Err(e) => {
-                tracing::debug!(error = %e, "pve: cluster status unavailable");
-                (None, None, Vec::new())
+                // NOT the same thing (#1132). `quorate: None` is what says
+                // "standalone", and standalone is what makes every guest
+                // observable — so folding a failed read into it would silently
+                // turn the quorum hold OFF exactly when the cluster API is the
+                // thing that is unwell. `warn`, not `debug`, for the same
+                // reason: this is a degraded sweep, not a quiet detail.
+                tracing::warn!(error = %e, "pve: cluster status unreadable; \
+                    treating this sweep as non-quorate rather than standalone");
+                (None, Some(false), Vec::new())
             }
         };
         let ha = self.client.ha_status().await.unwrap_or_default();
@@ -469,10 +477,17 @@ impl Poller {
                     }
                 }
             }
-            points.push((
-                format!("guest/{}/running", g.vmid),
-                if g.is_running() { 1.0 } else { 0.0 },
-            ));
+            // Not published at all for a guest this sweep cannot speak for
+            // (#1132): on a node that lost quorum `/cluster/resources` reports
+            // the far side as `status: "unknown"`, and a `0` here is this
+            // sensor inventing "it stopped" out of "we cannot see it" — the
+            // same claim every other metric in this block refuses to make.
+            if alerts::guest_is_observable(sweep.cluster.as_ref(), &g.node) {
+                points.push((
+                    format!("guest/{}/running", g.vmid),
+                    if g.is_running() { 1.0 } else { 0.0 },
+                ));
+            }
             points.push((
                 format!("guest/{}/uptime_secs", g.vmid),
                 g.uptime_secs.unwrap_or(0) as f64,
@@ -534,22 +549,22 @@ impl Poller {
         for p in &sweep.pools {
             // Operator-chosen, so it must be slugged before it can reach a key
             // — the same foreign-value boundary #843 established for units.
-            // A non-shared pool that shares its NAME with one on another
-            // node (`local`, `local-lvm` — every cluster) gets the node in
-            // its key chunk, or two pools would take turns overwriting one
-            // `storage/local` document. A name that is unique across the
-            // cluster keeps the bare chunk it has always had, so a
-            // single-node deployment's keys do not move.
-            let slug = if sweep
-                .pools
-                .iter()
-                .filter(|q| q.storage == p.storage)
-                .count()
-                > 1
-            {
-                zenkey::Chunk::slug(format!("{}-{}", p.node, p.storage))
-            } else {
+            // A non-shared pool gets the node in its key chunk, because
+            // `local` and `local-lvm` exist once per node in every cluster and
+            // two of them would take turns overwriting one `storage/local`
+            // document. A SHARED pool is one thing seen from several nodes, so
+            // it keeps the bare chunk.
+            //
+            // The disambiguator is `shared` — a property of the pool — and not
+            // "did this sweep see the name twice" (#1132). It was the latter,
+            // which made the KEY depend on which nodes answered: when node B
+            // dropped out, node A's `local-lvm` moved from
+            // `storage/pve1-local-lvm` to `storage/local-lvm` and the old
+            // state document became an LWW ghost nothing would ever overwrite.
+            let slug = if p.shared {
                 zenkey::Chunk::slug(&p.storage)
+            } else {
+                zenkey::Chunk::slug(format!("{}-{}", p.node, p.storage))
             };
             let stem = format!("storage/{slug}");
             for (suffix, value) in [
@@ -740,8 +755,29 @@ impl Poller {
             // Every rule reconciles every sweep, including the ones that fired
             // nothing — otherwise a condition that cleared (someone set
             // onboot=1) keeps firing until the sensor restarts.
+            //
+            // EXCEPT the guest rules on a node we cannot see (#1132). Those
+            // reconcile **per node**, and only for the nodes this sweep could
+            // speak for: `grade` held the others, and a fleet-wide reconcile
+            // would read that hold as "recovered" and resolve a real alert on
+            // the far side of a corosync partition. Absence of evidence is the
+            // one thing a reconcile must never treat as evidence of absence.
+            let nodes: BTreeSet<&str> = sweep.guests.iter().map(|g| g.node.as_str()).collect();
             for rule in alerts::ALL_RULES {
                 let still = by_rule.remove(*rule).unwrap_or_default();
+                if alerts::GUEST_RULES.contains(rule) {
+                    for node in &nodes {
+                        if !alerts::guest_is_observable(sweep.cluster.as_ref(), node) {
+                            continue;
+                        }
+                        if let Err(e) = reporter.reconcile_labeled(rule, "node", node, &still).await
+                        {
+                            tracing::warn!(rule = %rule, node = %node, error = %e,
+                                "pve: alert reconcile failed");
+                        }
+                    }
+                    continue;
+                }
                 if let Err(e) = reporter.reconcile(rule, &still).await {
                     tracing::warn!(rule = %rule, error = %e, "pve: alert reconcile failed");
                 }

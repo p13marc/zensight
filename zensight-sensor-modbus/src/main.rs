@@ -5,7 +5,6 @@
 
 use anyhow::Result;
 use tracing::info;
-use zensight_common::serialization::Format;
 use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 use zensight_sensor_modbus::config::ModbusSensorConfig;
 use zensight_sensor_modbus::poller::ModbusPoller;
@@ -50,8 +49,11 @@ async fn main() -> Result<()> {
     let session = runner.session().clone();
     let modbus_config = runner.config().modbus.clone();
 
-    // Serialization format (default to JSON)
-    let format = Format::Json;
+    // The operator's `serialization`, like every sibling sensor (#1133). It
+    // was hard-coded to JSON here while the shared config block offered the
+    // knob and the default is CBOR, so a deployment that set it got JSON from
+    // this one producer and had no way to tell.
+    let format = runner.config().serialization;
 
     // This sensor's FIRST alerting surface (#931). It had none — no
     // `AlertReporter`, no `alerts.rs`, no `alert/{alert_key}` subject — so an
@@ -93,7 +95,8 @@ async fn main() -> Result<()> {
     // Start pollers for each device
     for device in &modbus_config.devices {
         let poller = ModbusPoller::new(device.clone(), &modbus_config, session.clone(), format)
-            .with_thresholds(thresholds.clone());
+            .with_thresholds(thresholds.clone())
+            .with_health(runner.health());
 
         info!(
             "Starting poller for device '{}' ({:?})",
