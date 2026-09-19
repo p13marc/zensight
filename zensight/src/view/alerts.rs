@@ -883,16 +883,19 @@ pub fn alerts_view(state: &AlertsState) -> Element<'_, Message> {
 /// Render header with back button.
 fn render_header(state: &AlertsState) -> Element<'_, Message> {
     let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::CloseAlerts)
     .style(iced::widget::button::secondary);
 
     let title = row![
         icons::alert(IconSize::XLarge),
-        text("Alerts & Notifications").size(24)
+        text("Alerts & Notifications").size(font::TITLE)
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -909,9 +912,11 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         }
         row![
             icons::status_warning(IconSize::Small),
-            text(label).size(14).style(|theme: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(theme).warning()),
-            })
+            text(label)
+                .size(font::BODY)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).warning()),
+                })
         ]
         .spacing(5)
         .align_y(Alignment::Center)
@@ -920,11 +925,11 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         row![].into()
     };
 
-    let expectations_button = button(text("Expectations").size(13))
+    let expectations_button = button(text("Expectations").size(font::BODY))
         .on_press(Message::OpenExpectations)
         .style(iced::widget::button::secondary);
 
-    let security_button = button(text("Security").size(13))
+    let security_button = button(text("Security").size(font::BODY))
         .on_press(Message::OpenSecurity)
         .style(iced::widget::button::secondary);
 
@@ -1403,7 +1408,7 @@ fn render_external_alert_row<'a>(
         focused.then(|| badge(crate::view::theme::SEVERITY_INFO, "linked from event"));
 
     let kind = text(if acked { "ack'd" } else { alert.kind.as_str() })
-        .size(10)
+        .size(font::MICRO)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
@@ -1411,8 +1416,8 @@ fn render_external_alert_row<'a>(
     let summary: Element<'a, Message> = if alert.summary.len() > MAX_ALERT_MESSAGE_LEN {
         let truncated = format!("{}...", &alert.summary[..MAX_ALERT_MESSAGE_LEN]);
         tooltip(
-            text(truncated).size(13),
-            container(text(alert.summary.clone()).size(12))
+            text(truncated).size(font::BODY),
+            container(text(alert.summary.clone()).size(font::CAPTION))
                 .padding(8)
                 .max_width(400.0)
                 .style(container::rounded_box),
@@ -1420,17 +1425,17 @@ fn render_external_alert_row<'a>(
         )
         .into()
     } else {
-        text(alert.summary.clone()).size(13).into()
+        text(alert.summary.clone()).size(font::BODY).into()
     };
 
     let source = text(format!("{}/{}", alert.protocol, alert.source))
-        .size(11)
+        .size(font::DENSE)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     let time = text(format_timestamp(alert.timestamp))
-        .size(11)
+        .size(font::DENSE)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
@@ -1468,7 +1473,7 @@ fn render_external_alert_row<'a>(
             .cloned();
         if unit.is_some() || pattern.is_some() {
             col = col.push(
-                button(text("view logs →").size(11))
+                button(text("view logs →").size(font::DENSE))
                     .on_press(Message::PivotToLogsFromAlert {
                         rule: alert.rule.clone(),
                         unit,
@@ -1497,7 +1502,7 @@ fn alert_detail_line<'a>(labels: &HashMap<String, String>) -> Option<Element<'a,
         .into_iter()
         .map(|(disp, v)| {
             text(format!("{disp}: {v}"))
-                .size(10)
+                .size(font::MICRO)
                 .style(|theme: &Theme| text::Style {
                     color: Some(crate::view::theme::colors(theme).text_muted()),
                 })

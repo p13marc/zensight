@@ -11,6 +11,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
+use crate::view::tokens::font;
 
 #[derive(Default)]
 struct NetringAgg {
@@ -86,7 +87,7 @@ pub fn netring_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Eleme
 
 fn muted<'a>(s: &'a str) -> Element<'a, Message> {
     text(s)
-        .size(12)
+        .size(font::CAPTION)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         })
@@ -95,10 +96,12 @@ fn muted<'a>(s: &'a str) -> Element<'a, Message> {
 
 fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
-        text(value).size(16)
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        text(value).size(font::EMPHASIS)
     ]
     .spacing(2)
     .into()
@@ -107,10 +110,12 @@ fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
 fn status_stat<'a>(label: &'a str, count: usize, state: StatusLedState) -> Element<'a, Message> {
     let led = StatusLed::new(state).with_size(10.0);
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
-        row![led.view(), text(count.to_string()).size(16)]
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        row![led.view(), text(count.to_string()).size(font::EMPHASIS)]
             .spacing(6)
             .align_y(Alignment::Center)
     ]

@@ -11,6 +11,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState, empty_state};
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
+use crate::view::tokens::font;
 
 /// Host resource summary.
 struct HostSummary {
@@ -144,10 +145,12 @@ fn calculate_memory_average(summaries: &[HostSummary]) -> (f64, usize) {
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
-        text(value).size(16)
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        text(value).size(font::EMPHASIS)
     ]
     .spacing(2)
     .into()
@@ -156,17 +159,21 @@ fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
 /// Render an alert stat (red if > 0).
 fn render_alert_stat<'a>(label: &'a str, count: usize) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
-        text(count.to_string()).size(16).style(move |t: &Theme| {
-            let color = if count > 0 {
-                theme::colors(t).danger()
-            } else {
-                theme::colors(t).success()
-            };
-            text::Style { color: Some(color) }
-        })
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        text(count.to_string())
+            .size(font::EMPHASIS)
+            .style(move |t: &Theme| {
+                let color = if count > 0 {
+                    theme::colors(t).danger()
+                } else {
+                    theme::colors(t).success()
+                };
+                text::Style { color: Some(color) }
+            })
     ]
     .spacing(2)
     .into()
@@ -179,7 +186,7 @@ fn render_host_bars<'a>(summaries: &[HostSummary]) -> Element<'a, Message> {
     }
 
     let title = text("Host Resources")
-        .size(12)
+        .size(font::CAPTION)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         });
@@ -200,7 +207,7 @@ fn render_host_bars<'a>(summaries: &[HostSummary]) -> Element<'a, Message> {
     if remaining > 0 {
         content = content.push(
             text(format!("... and {} more hosts", remaining))
-                .size(10)
+                .size(font::MICRO)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 }),
@@ -219,7 +226,7 @@ fn render_host_row<'a>(host: &HostSummary) -> Element<'a, Message> {
     })
     .with_size(8.0);
 
-    let name = text(truncate_name(&host.name, 15)).size(11);
+    let name = text(truncate_name(&host.name, 15)).size(font::DENSE);
 
     let cpu_bar = render_mini_bar(host.cpu_usage, "CPU");
     let mem_pct = host
@@ -284,7 +291,7 @@ fn render_mini_bar<'a>(value: Option<f64>, _label: &str) -> Element<'a, Message>
         ..Default::default()
     });
 
-    let value_text = text(format!("{:.0}%", pct)).size(9);
+    let value_text = text(format!("{:.0}%", pct)).size(font::MICRO);
 
     row![bar, value_text]
         .spacing(4)

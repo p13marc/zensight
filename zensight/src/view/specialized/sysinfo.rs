@@ -24,6 +24,7 @@ use crate::view::icons::{self, IconSize};
 use crate::view::specialized::sysinfo_detail::{PidVerdict, ProcessSort, pid_filter_verdict};
 use crate::view::specialized::systemd_detail::unit_from_cgroup;
 use crate::view::theme;
+use crate::view::tokens::font;
 use crate::view::tokens::space;
 
 /// Render the sysinfo host specialized view.
@@ -109,15 +110,18 @@ fn render_header<'a>(
     use iced::widget::button;
 
     let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
-    let host_name = text(&state.device_id.source).size(24);
+    let host_name = text(&state.device_id.source).size(font::TITLE);
 
     // What this host is, from the catalog's entity document (#1019).
     //
@@ -143,11 +147,13 @@ fn render_header<'a>(
         })
         .unwrap_or_else(|| "Unknown OS".to_string());
 
-    let os_text = text(os_info).size(14).style(|t: &Theme| text::Style {
-        color: Some(theme::colors(t).text_muted()),
-    });
+    let os_text = text(os_info)
+        .size(font::BODY)
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
+        });
 
-    let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
+    let metric_count = text(format!("{} metrics", state.metrics.len())).size(font::BODY);
 
     let mut header = row![back_button, protocol_icon, host_name, os_text, metric_count]
         .spacing(15)
@@ -185,10 +191,12 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
 
         info_items.push(
             row![
-                text("Uptime:").size(12),
-                text(uptime_str).size(12).style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).success()),
-                })
+                text("Uptime:").size(font::CAPTION),
+                text(uptime_str)
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).success()),
+                    })
             ]
             .spacing(8)
             .into(),
@@ -210,9 +218,12 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
         );
 
         info_items.push(
-            row![text("Load:").size(12), text(load_str).size(12)]
-                .spacing(8)
-                .into(),
+            row![
+                text("Load:").size(font::CAPTION),
+                text(load_str).size(font::CAPTION)
+            ]
+            .spacing(8)
+            .into(),
         );
     }
 
@@ -220,9 +231,12 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
     if let Some(boot_time) = get_metric_value(state, "system/boot_time") {
         let boot_str = format_timestamp(boot_time as i64);
         info_items.push(
-            row![text("Boot:").size(12), text(boot_str).size(12)]
-                .spacing(8)
-                .into(),
+            row![
+                text("Boot:").size(font::CAPTION),
+                text(boot_str).size(font::CAPTION)
+            ]
+            .spacing(8)
+            .into(),
         );
     }
 
@@ -239,9 +253,12 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Render CPU section with usage gauge and per-core breakdown.
 fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![icons::cpu(IconSize::Medium), text("CPU").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::cpu(IconSize::Medium),
+        text("CPU").size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     let mut cpu_content = Column::new().spacing(10);
 
@@ -264,11 +281,13 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
         .count();
 
     if core_count > 0 {
-        cpu_content = cpu_content.push(text(format!("{} cores", core_count)).size(12).style(
-            |t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            },
-        ));
+        cpu_content = cpu_content.push(
+            text(format!("{} cores", core_count))
+                .size(font::CAPTION)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+        );
     }
 
     // Per-core usage (sensor publishes as cpu/{N}/usage)
@@ -291,7 +310,7 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if !core_items.is_empty() {
-        cpu_content = cpu_content.push(text("Per-Core Usage").size(12));
+        cpu_content = cpu_content.push(text("Per-Core Usage").size(font::CAPTION));
         // Arrange in rows of 4
         let mut core_rows = Column::new().spacing(5);
         let mut current_row = Row::new().spacing(15);
@@ -315,9 +334,12 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Render memory section with usage bar.
 fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![icons::memory(IconSize::Medium), text("Memory").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::memory(IconSize::Medium),
+        text("Memory").size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     let mut mem_content = Column::new().spacing(10);
 
@@ -360,7 +382,7 @@ fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
         let available_gb = available / 1_073_741_824.0;
         mem_content = mem_content.push(
             text(format!("Available: {:.1} GB", available_gb))
-                .size(11)
+                .size(font::DENSE)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 }),
@@ -372,9 +394,12 @@ fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Render disk section with usage bars for each mount.
 fn render_disk_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![icons::disk(IconSize::Medium), text("Disk").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::disk(IconSize::Medium),
+        text("Disk").size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     let mut disk_content = Column::new().spacing(10);
 
@@ -423,9 +448,12 @@ fn render_disk_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Render network section with interface stats.
 fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![icons::network(IconSize::Medium), text("Network").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::network(IconSize::Medium),
+        text("Network").size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     let mut net_content = Column::new().spacing(8);
 
@@ -476,8 +504,8 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
         let mut iface_row = row![
             status_led.view(),
-            text(format!("rx: {}", rx_str)).size(11),
-            text(format!("tx: {}", tx_str)).size(11),
+            text(format!("rx: {}", rx_str)).size(font::DENSE),
+            text(format!("tx: {}", tx_str)).size(font::DENSE),
         ]
         .spacing(20)
         .align_y(Alignment::Center);
@@ -490,7 +518,7 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
                     format_bytes(rx_r),
                     format_bytes(tx_r)
                 ))
-                .size(10)
+                .size(font::MICRO)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 }),
@@ -521,9 +549,12 @@ fn has_cpu_times(state: &DeviceDetailState) -> bool {
 
 /// Render CPU times breakdown section (Linux-specific).
 fn render_cpu_times_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![icons::cpu(IconSize::Medium), text("CPU Times").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::cpu(IconSize::Medium),
+        text("CPU Times").size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     let mut content = Column::new().spacing(10);
 
@@ -566,9 +597,12 @@ fn has_disk_io(state: &DeviceDetailState) -> bool {
 
 /// Render disk I/O section (Linux-specific).
 fn render_disk_io_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![icons::disk(IconSize::Medium), text("Disk I/O").size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title = row![
+        icons::disk(IconSize::Medium),
+        text("Disk I/O").size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     let mut content = Column::new().spacing(8);
 
@@ -592,17 +626,26 @@ fn render_disk_io_section(state: &DeviceDetailState) -> Element<'_, Message> {
         let read_iops = get_metric_value(state, &format!("disk/{}/io/read_iops", device));
         let write_iops = get_metric_value(state, &format!("disk/{}/io/write_iops", device));
 
-        let mut row_items: Vec<Element<'_, Message>> = vec![text(device).size(12).into()];
+        let mut row_items: Vec<Element<'_, Message>> =
+            vec![text(device).size(font::CAPTION).into()];
 
         if let (Some(rr), Some(wr)) = (read_rate, write_rate) {
-            row_items.push(text(format!("R: {}/s", format_bytes(rr))).size(11).into());
-            row_items.push(text(format!("W: {}/s", format_bytes(wr))).size(11).into());
+            row_items.push(
+                text(format!("R: {}/s", format_bytes(rr)))
+                    .size(font::DENSE)
+                    .into(),
+            );
+            row_items.push(
+                text(format!("W: {}/s", format_bytes(wr)))
+                    .size(font::DENSE)
+                    .into(),
+            );
         }
 
         if let (Some(ri), Some(wi)) = (read_iops, write_iops) {
             row_items.push(
                 text(format!("{:.0}/{:.0} IOPS", ri, wi))
-                    .size(11)
+                    .size(font::DENSE)
                     .style(|t: &Theme| text::Style {
                         color: Some(theme::colors(t).text_muted()),
                     })
@@ -663,7 +706,7 @@ fn has_fans_or_power(state: &DeviceDetailState) -> bool {
 
 /// Render temperature sensors section (Linux-specific).
 fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![text("Temperatures").size(16)]
+    let title = row![text("Temperatures").size(font::EMPHASIS)]
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -686,7 +729,7 @@ fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message
     sensors.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
     for (chip, label, temp, critical) in &sensors {
-        let temp_text = text(format!("{:.1}°C", temp)).size(12);
+        let temp_text = text(format!("{:.1}°C", temp)).size(font::CAPTION);
         let styled_temp = if let Some(crit) = critical {
             if *temp >= *crit * 0.9 {
                 temp_text.style(|t: &Theme| text::Style {
@@ -705,9 +748,12 @@ fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message
             temp_text
         };
 
-        let sensor_row = row![text(format!("{}/{}", chip, label)).size(11), styled_temp,]
-            .spacing(15)
-            .align_y(Alignment::Center);
+        let sensor_row = row![
+            text(format!("{}/{}", chip, label)).size(font::DENSE),
+            styled_temp,
+        ]
+        .spacing(15)
+        .align_y(Alignment::Center);
 
         content = content.push(sensor_row);
     }
@@ -750,7 +796,7 @@ const RAPL_UNAVAILABLE: &str = "No RAPL zones are reporting. Either this CPU exp
 /// * **A missing battery is not a fault.** Servers have none; the block simply
 ///   does not appear.
 fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![text("Fans & power").size(16)].spacing(8);
+    let title = row![text("Fans & power").size(font::EMPHASIS)].spacing(8);
     let mut col = Column::new().spacing(4).push(title);
 
     // ── Fans ───────────────────────────────────────────────────────────────
@@ -774,13 +820,13 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
             col = col.push(
                 row![
                     text(format!("{chip}/{label}"))
-                        .size(12)
+                        .size(font::CAPTION)
                         .width(Length::Fixed(220.0))
                         .style(|t: &Theme| text::Style {
                             color: Some(theme::colors(t).text_muted()),
                         }),
                     // No `{:.0}` styling games: 0 renders as "0 RPM".
-                    text(format!("{rpm:.0} RPM")).size(12),
+                    text(format!("{rpm:.0} RPM")).size(font::CAPTION),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -813,7 +859,7 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
             // assertable.
             let mut battery_row = row![
                 text(name.clone())
-                    .size(12)
+                    .size(font::CAPTION)
                     .width(Length::Fixed(220.0))
                     .style(|t: &Theme| text::Style {
                         color: Some(theme::colors(t).text_muted()),
@@ -822,10 +868,10 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
             .spacing(8)
             .align_y(Alignment::Center);
             if let Some(c) = capacity {
-                battery_row = battery_row.push(text(format!("{c:.0}%")).size(12));
+                battery_row = battery_row.push(text(format!("{c:.0}%")).size(font::CAPTION));
             }
             if let Some(s) = status {
-                battery_row = battery_row.push(text(s).size(12));
+                battery_row = battery_row.push(text(s).size(font::CAPTION));
             }
             col = col.push(battery_row);
         }
@@ -856,12 +902,12 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
             col = col.push(
                 row![
                     text(display.clone())
-                        .size(12)
+                        .size(font::CAPTION)
                         .width(Length::Fixed(220.0))
                         .style(|t: &Theme| text::Style {
                             color: Some(theme::colors(t).text_muted()),
                         }),
-                    text(format!("{watts:.1} W")).size(12),
+                    text(format!("{watts:.1} W")).size(font::CAPTION),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -874,7 +920,7 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
 
 /// A sub-heading inside a card, for panels that group several families.
 fn sub_label<'a>(label: &'a str) -> Element<'a, Message> {
-    text(label).size(14).into()
+    text(label).size(font::BODY).into()
 }
 
 /// Check if TCP states data is available.
@@ -884,7 +930,7 @@ fn has_tcp_states(state: &DeviceDetailState) -> bool {
 
 /// Render TCP connection states section (Linux-specific).
 fn render_tcp_states_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![text("TCP Connections").size(16)]
+    let title = row![text("TCP Connections").size(font::EMPHASIS)]
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -892,7 +938,7 @@ fn render_tcp_states_section(state: &DeviceDetailState) -> Element<'_, Message> 
 
     // Total connections
     if let Some(total) = get_metric_value(state, "tcp/total") {
-        content = content.push(text(format!("Total: {:.0}", total)).size(12));
+        content = content.push(text(format!("Total: {:.0}", total)).size(font::CAPTION));
     }
 
     // State breakdown
@@ -916,7 +962,11 @@ fn render_tcp_states_section(state: &DeviceDetailState) -> Element<'_, Message> 
         if let Some(count) = get_metric_value(state, &format!("tcp/{}", key))
             && count > 0.0
         {
-            state_items.push(text(format!("{}: {:.0}", label, count)).size(11).into());
+            state_items.push(
+                text(format!("{}: {:.0}", label, count))
+                    .size(font::DENSE)
+                    .into(),
+            );
         }
     }
 
@@ -974,12 +1024,12 @@ fn kv_row<'a>(
     };
     row![
         text(label.to_string())
-            .size(12)
+            .size(font::CAPTION)
             .width(Length::Fixed(220.0))
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             }),
-        text(value).size(12),
+        text(value).size(font::CAPTION),
     ]
     .spacing(8)
     .into()
@@ -987,7 +1037,7 @@ fn kv_row<'a>(
 
 /// PSI / pressure-stall card (#47): the canonical saturation signal.
 fn render_psi_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![text("Pressure (PSI)").size(16)].spacing(8);
+    let title = row![text("Pressure (PSI)").size(font::EMPHASIS)].spacing(8);
     let mut col = Column::new().spacing(4).push(title);
     for (res, label) in [("cpu", "CPU"), ("io", "I/O"), ("memory", "Memory")] {
         // some/avg10 is the headline; pair it with a trend sparkline.
@@ -996,7 +1046,7 @@ fn render_psi_section(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(
                 row![
                     text(format!("{label} some avg10"))
-                        .size(12)
+                        .size(font::CAPTION)
                         .width(Length::Fixed(220.0))
                         .style(|t: &Theme| text::Style {
                             color: Some(theme::colors(t).text_muted()),
@@ -1005,7 +1055,7 @@ fn render_psi_section(state: &DeviceDetailState) -> Element<'_, Message> {
                         "{:.1}%",
                         get_metric_value(state, &some10).unwrap_or(0.0)
                     ))
-                    .size(12),
+                    .size(font::CAPTION),
                     super::metric_sparkline(state, &some10),
                 ]
                 .spacing(8)
@@ -1033,7 +1083,7 @@ fn render_psi_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// cgroup-v2 throttling / OOM / memory card (#47).
 fn render_cgroup_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![text("cgroup").size(16)].spacing(8);
+    let title = row![text("cgroup").size(font::EMPHASIS)].spacing(8);
     column![
         title,
         kv_row(
@@ -1067,7 +1117,7 @@ fn render_cgroup_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// System-health / saturation-ceiling card (#47): FD exhaustion, runqueue, churn.
 fn render_system_health_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![text("System health").size(16)].spacing(8);
+    let title = row![text("System health").size(font::EMPHASIS)].spacing(8);
     column![
         title,
         kv_row(
@@ -1108,7 +1158,7 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
     let sort_button = |sort: ProcessSort| {
         let active = detail.sort == sort;
         let label = format!("By {}", sort.label());
-        let mut b = button(text(label).size(11)).padding([4, 10]);
+        let mut b = button(text(label).size(font::DENSE)).padding([4, 10]);
         if !loading {
             b = b.on_press(Message::FetchSysinfoProcesses(sort));
         }
@@ -1124,7 +1174,7 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
         sort_button(ProcessSort::Mem),
         sort_button(ProcessSort::Io),
         text(if loading { "Fetching…" } else { "" })
-            .size(11)
+            .size(font::DENSE)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             }),
@@ -1137,31 +1187,31 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
     // Pid pivot banner (#313): the explorer was opened from a unit MainPID or a
     // socket owner — show the filter, its stale-generation verdict, and a way out.
     if let Some(f) = &detail.pid_filter {
-        let clear = button(text("Clear").size(11))
+        let clear = button(text("Clear").size(font::DENSE))
             .padding([3, 9])
             .style(iced::widget::button::secondary)
             .on_press(Message::ClearSysinfoPidFilter);
         let verdict: Element<'_, Message> = match detail.processes.ready() {
             Some(procs) => match pid_filter_verdict(procs, f) {
-                PidVerdict::Live => text("").size(11).into(),
+                PidVerdict::Live => text("").size(font::DENSE).into(),
                 PidVerdict::Reused => text("pid reused by another process — the original exited")
-                    .size(11)
+                    .size(font::DENSE)
                     .style(|t: &Theme| text::Style {
                         color: Some(theme::colors(t).warning()),
                     })
                     .into(),
                 PidVerdict::Gone => text("not in the fetched table — exited (or below top-N)")
-                    .size(11)
+                    .size(font::DENSE)
                     .style(|t: &Theme| text::Style {
                         color: Some(theme::colors(t).text_muted()),
                     })
                     .into(),
             },
-            None => text("").size(11).into(),
+            None => text("").size(font::DENSE).into(),
         };
         col = col.push(
             row![
-                text(format!("Filtered to pid {}", f.pid)).size(12),
+                text(format!("Filtered to pid {}", f.pid)).size(font::CAPTION),
                 verdict,
                 clear,
             ]
@@ -1193,17 +1243,17 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
         } else {
             let mut list = Column::new().spacing(3).push(
                 row![
-                    text("pid").size(10).width(70),
-                    text("name").size(10).width(160),
-                    text("user").size(10).width(90),
-                    text("cpu%").size(10).width(60),
-                    text("rss").size(10).width(90),
-                    text("vsz").size(10).width(90),
-                    text("thr").size(10).width(50),
-                    text("state").size(10).width(70),
-                    text("io r/w").size(10).width(140),
-                    text("unit").size(10).width(150),
-                    text("command").size(10).width(iced::Length::Fill),
+                    text("pid").size(font::MICRO).width(70),
+                    text("name").size(font::MICRO).width(160),
+                    text("user").size(font::MICRO).width(90),
+                    text("cpu%").size(font::MICRO).width(60),
+                    text("rss").size(font::MICRO).width(90),
+                    text("vsz").size(font::MICRO).width(90),
+                    text("thr").size(font::MICRO).width(50),
+                    text("state").size(font::MICRO).width(70),
+                    text("io r/w").size(font::MICRO).width(140),
+                    text("unit").size(font::MICRO).width(150),
+                    text("command").size(font::MICRO).width(iced::Length::Fill),
                 ]
                 .spacing(8),
             );
@@ -1221,7 +1271,7 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                 let unit_cell: Element<'_, Message> =
                     match p.cgroup.as_deref().and_then(unit_from_cgroup) {
                         Some(unit) => iced::widget::container(
-                            button(text(unit.clone()).size(11))
+                            button(text(unit.clone()).size(font::DENSE))
                                 .padding([2, 6])
                                 .style(iced::widget::button::text)
                                 .on_press(Message::PivotToUnit {
@@ -1231,36 +1281,38 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                         )
                         .width(150)
                         .into(),
-                        None => text("—").size(11).width(150).into(),
+                        None => text("—").size(font::DENSE).width(150).into(),
                     };
                 list = list.push(
                     row![
-                        text(p.pid.to_string()).size(11).width(70),
-                        text(p.name.clone()).size(11).width(160),
-                        text(p.user.clone().unwrap_or_default()).size(11).width(90),
-                        text(format!("{:.1}", p.cpu)).size(11).width(60),
-                        text(format_bytes(p.rss as f64)).size(11).width(90),
-                        text(format_bytes(p.vsz as f64)).size(11).width(90),
+                        text(p.pid.to_string()).size(font::DENSE).width(70),
+                        text(p.name.clone()).size(font::DENSE).width(160),
+                        text(p.user.clone().unwrap_or_default())
+                            .size(font::DENSE)
+                            .width(90),
+                        text(format!("{:.1}", p.cpu)).size(font::DENSE).width(60),
+                        text(format_bytes(p.rss as f64)).size(font::DENSE).width(90),
+                        text(format_bytes(p.vsz as f64)).size(font::DENSE).width(90),
                         text(p.threads.map(|t| t.to_string()).unwrap_or_default())
-                            .size(11)
+                            .size(font::DENSE)
                             .width(50),
-                        text(p.state.clone()).size(11).width(70),
+                        text(p.state.clone()).size(font::DENSE).width(70),
                         text(format!(
                             "{} / {}",
                             format_bytes(p.io_read as f64),
                             format_bytes(p.io_write as f64)
                         ))
-                        .size(11)
+                        .size(font::DENSE)
                         .width(140),
                         unit_cell,
-                        text(command).size(11).width(iced::Length::Fill),
+                        text(command).size(font::DENSE).width(iced::Length::Fill),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
                 );
             }
             col = col
-                .push(text(format!("{} processes", visible.len())).size(12))
+                .push(text(format!("{} processes", visible.len())).size(font::CAPTION))
                 .push(list);
         }
     } else {
@@ -1375,7 +1427,7 @@ fn section_style(t: &Theme) -> container::Style {
 /// or build cannot measure it" and "nothing answered" are different problems —
 /// so they get different empty states.
 fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = row![text("Saturation latency (eBPF)").size(16)].spacing(8);
+    let title = row![text("Saturation latency (eBPF)").size(font::EMPHASIS)].spacing(8);
     let mut col = Column::new().spacing(4).push(title);
 
     let detail = &state.sysinfo_detail;
@@ -1392,7 +1444,7 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
     let Some(report) = detail.latency.ready() else {
         return col
             .push(
-                button(text("Fetch latency histograms").size(12))
+                button(text("Fetch latency histograms").size(font::CAPTION))
                     .padding([4, 10])
                     .on_press(Message::FetchSysinfoLatency),
             )
@@ -1412,7 +1464,7 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
     col = col.push(
         text(format!("over the last {}s", report.window_secs))
-            .size(12)
+            .size(font::CAPTION)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             }),
@@ -1432,14 +1484,14 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
             continue;
         }
         rendered_any = true;
-        col = col.push(text(label).size(14)).push(
+        col = col.push(text(label).size(font::BODY)).push(
             row![
                 latency_stat("p50", hist.p50_us),
                 latency_stat("p95", hist.p95_us),
                 latency_stat("p99", hist.p99_us),
                 latency_stat("max", hist.max_us),
                 text(format!("{} samples", hist.total))
-                    .size(12)
+                    .size(font::CAPTION)
                     .style(|t: &Theme| text::Style {
                         color: Some(theme::colors(t).text_muted()),
                     }),
@@ -1459,7 +1511,7 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     col.push(
-        button(text("Refresh").size(12))
+        button(text("Refresh").size(font::CAPTION))
             .padding([4, 10])
             .on_press(Message::FetchSysinfoLatency),
     )
@@ -1475,10 +1527,12 @@ fn latency_stat<'a>(label: &'a str, us: u64) -> Element<'a, Message> {
         format!("{us} µs")
     };
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
-        text(value).size(14),
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        text(value).size(font::BODY),
     ]
     .spacing(2)
     .into()

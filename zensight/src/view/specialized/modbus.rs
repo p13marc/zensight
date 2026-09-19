@@ -15,6 +15,7 @@ use crate::view::components::{card, empty_state};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::tokens::font;
 use crate::view::tokens::space;
 
 /// Register type in Modbus.
@@ -79,17 +80,20 @@ pub fn modbus_plc_view(state: &DeviceDetailState) -> Element<'_, Message> {
 /// Render the header with back button and device info.
 fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
-    let device_name = text(&state.device_id.source).size(24);
+    let device_name = text(&state.device_id.source).size(font::TITLE);
 
-    let metric_count = text(format!("{} registers", state.metrics.len())).size(14);
+    let metric_count = text(format!("{} registers", state.metrics.len())).size(font::BODY);
 
     row![back_button, protocol_icon, device_name, metric_count]
         .spacing(15)
@@ -105,25 +109,31 @@ fn render_connection_info(state: &DeviceDetailState) -> Element<'_, Message> {
     if let Some(point) = state.metrics.values().next() {
         if let Some(addr) = point.labels.get("address") {
             info_items.push(
-                row![text("Address:").size(12), text(addr).size(12)]
-                    .spacing(8)
-                    .into(),
+                row![
+                    text("Address:").size(font::CAPTION),
+                    text(addr).size(font::CAPTION)
+                ]
+                .spacing(8)
+                .into(),
             );
         }
 
         if let Some(unit_id) = point.labels.get("unit_id") {
             info_items.push(
-                row![text("Unit ID:").size(12), text(unit_id).size(12)]
-                    .spacing(8)
-                    .into(),
+                row![
+                    text("Unit ID:").size(font::CAPTION),
+                    text(unit_id).size(font::CAPTION)
+                ]
+                .spacing(8)
+                .into(),
             );
         }
 
         if let Some(proto) = point.labels.get("modbus_type") {
             info_items.push(
                 row![
-                    text("Protocol:").size(12),
-                    text(format!("Modbus {}", proto.to_uppercase())).size(12)
+                    text("Protocol:").size(font::CAPTION),
+                    text(format!("Modbus {}", proto.to_uppercase())).size(font::CAPTION)
                 ]
                 .spacing(8)
                 .into(),
@@ -193,9 +203,12 @@ fn render_boolean_section<'a>(
     title: &'static str,
     registers: Vec<ModbusRegister>,
 ) -> Element<'a, Message> {
-    let title_row = row![icons::toggle(IconSize::Medium), text(title).size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title_row = row![
+        icons::toggle(IconSize::Medium),
+        text(title).size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     let mut led_grid: Vec<Element<'a, Message>> = Vec::new();
 
@@ -248,17 +261,20 @@ fn render_register_table<'a>(
     title: &'static str,
     registers: Vec<ModbusRegister>,
 ) -> Element<'a, Message> {
-    let title_row = row![icons::table(IconSize::Medium), text(title).size(16)]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    let title_row = row![
+        icons::table(IconSize::Medium),
+        text(title).size(font::EMPHASIS)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
 
     // Table header
     let header = container(
         row![
-            text("Address").size(11).width(Length::Fixed(70.0)),
-            text("Name").size(11).width(Length::Fill),
-            text("Value").size(11).width(Length::Fixed(100.0)),
-            text("Unit").size(11).width(Length::Fixed(60.0)),
+            text("Address").size(font::DENSE).width(Length::Fixed(70.0)),
+            text("Name").size(font::DENSE).width(Length::Fill),
+            text("Value").size(font::DENSE).width(Length::Fixed(100.0)),
+            text("Unit").size(font::DENSE).width(Length::Fixed(60.0)),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -273,10 +289,10 @@ fn render_register_table<'a>(
 
     for reg in registers.into_iter() {
         let addr_text = text(format!("{}", reg.address))
-            .size(11)
+            .size(font::DENSE)
             .width(Length::Fixed(70.0));
 
-        let name_text = text(reg.name).size(11).width(Length::Fill);
+        let name_text = text(reg.name).size(font::DENSE).width(Length::Fill);
 
         let value_str = match &reg.value {
             RegisterValue::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
@@ -285,11 +301,13 @@ fn render_register_table<'a>(
             RegisterValue::Unknown => "-".to_string(),
         };
 
-        let value_text = text(value_str).size(11).width(Length::Fixed(100.0));
+        let value_text = text(value_str)
+            .size(font::DENSE)
+            .width(Length::Fixed(100.0));
 
         let unit_str = reg.unit.unwrap_or_else(|| "-".to_string());
         let unit_text = text(unit_str)
-            .size(11)
+            .size(font::DENSE)
             .width(Length::Fixed(60.0))
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),

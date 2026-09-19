@@ -9,6 +9,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState, empty_state};
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
+use crate::view::tokens::font;
 
 /// Render the gNMI overview.
 pub fn gnmi_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<'a, Message> {
@@ -62,10 +63,12 @@ pub fn gnmi_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
-        text(value).size(16)
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        text(value).size(font::EMPHASIS)
     ]
     .spacing(2)
     .into()
@@ -80,10 +83,12 @@ fn render_status_stat<'a>(
     let led = StatusLed::new(state).with_size(10.0);
 
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
-        row![led.view(), text(count.to_string()).size(16)]
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        row![led.view(), text(count.to_string()).size(font::EMPHASIS)]
             .spacing(6)
             .align_y(Alignment::Center)
     ]
@@ -107,16 +112,16 @@ fn render_top_subscriptions<'a>(subscriptions: &HashMap<String, usize>) -> Eleme
         .take(5)
         .map(|(prefix, count)| {
             row![
-                text("•").size(11).style(|t: &Theme| text::Style {
+                text("•").size(font::DENSE).style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).success()),
                 }),
                 text(prefix.to_string())
-                    .size(11)
+                    .size(font::DENSE)
                     .style(|t: &Theme| text::Style {
                         color: Some(theme::colors(t).primary()),
                     }),
                 text(format!("({} paths)", count))
-                    .size(10)
+                    .size(font::MICRO)
                     .style(|t: &Theme| text::Style {
                         color: Some(theme::colors(t).text_muted()),
                     }),

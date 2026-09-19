@@ -24,6 +24,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::dashboard::DeviceState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::tokens::font;
 
 /// State for the overview section.
 #[derive(Debug, Clone)]
@@ -90,7 +91,7 @@ pub fn overview_section<'a>(
     };
 
     let header_btn = button(
-        row![toggle_icon, text("Protocol Overviews").size(14)]
+        row![toggle_icon, text("Protocol Overviews").size(font::BODY)]
             .spacing(6)
             .align_y(Alignment::Center),
     )
@@ -121,7 +122,7 @@ pub fn overview_section<'a>(
                     "{firing} firing alert{} →",
                     if firing == 1 { "" } else { "s" }
                 ))
-                .size(12)
+                .size(font::CAPTION)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).status_error()),
                 }),
@@ -131,7 +132,7 @@ pub fn overview_section<'a>(
             .into()
         } else {
             text("No firing alerts")
-                .size(12)
+                .size(font::CAPTION)
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).text_muted()),
                 })
@@ -177,7 +178,7 @@ pub fn overview_section<'a>(
         column![alert_tile, body].spacing(8).into()
     } else {
         text("Select a protocol tab to view aggregated metrics")
-            .size(12)
+            .size(font::CAPTION)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             })
@@ -229,7 +230,8 @@ fn render_protocol_tabs<'a>(
             let is_selected = state.selected_protocol == Some(proto);
 
             let icon = icons::protocol_icon(proto, IconSize::Small);
-            let label = text(format!("{} ({})", protocol_short_name(proto), count)).size(12);
+            let label =
+                text(format!("{} ({})", protocol_short_name(proto), count)).size(font::CAPTION);
 
             let btn = button(row![icon, label].spacing(6).align_y(Alignment::Center))
                 .on_press(Message::SelectOverviewProtocol(proto))
@@ -258,7 +260,7 @@ fn generic_overview<'a>(
 ) -> Element<'a, Message> {
     if devices.is_empty() {
         return text(format!("No {noun} available"))
-            .size(12)
+            .size(font::CAPTION)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             })
@@ -268,18 +270,18 @@ fn generic_overview<'a>(
     let metrics: usize = devices.values().map(|d| d.metric_count).sum();
     row![
         column![
-            text("Devices").size(10).style(muted),
-            text(devices.len().to_string()).size(16)
+            text("Devices").size(font::MICRO).style(muted),
+            text(devices.len().to_string()).size(font::EMPHASIS)
         ]
         .spacing(2),
         column![
-            text("Online").size(10).style(muted),
-            text(healthy.to_string()).size(16)
+            text("Online").size(font::MICRO).style(muted),
+            text(healthy.to_string()).size(font::EMPHASIS)
         ]
         .spacing(2),
         column![
-            text("Metrics").size(10).style(muted),
-            text(metrics.to_string()).size(16)
+            text("Metrics").size(font::MICRO).style(muted),
+            text(metrics.to_string()).size(font::EMPHASIS)
         ]
         .spacing(2),
     ]

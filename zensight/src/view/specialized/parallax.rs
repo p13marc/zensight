@@ -22,6 +22,7 @@ use crate::view::specialized::parallax_detail::{ParallaxDetailState, TileEnd, Ti
 use crate::view::specialized::parallax_h264;
 use crate::view::specialized::parallax_health;
 use crate::view::theme;
+use crate::view::tokens::font;
 use crate::view::tokens::space;
 
 /// Preview frame dimensions for the placeholder tile (16:9).
@@ -99,7 +100,7 @@ fn action_tooltip<'a>(
 ) -> Element<'a, Message> {
     tooltip(
         control,
-        container(text(hint).size(11))
+        container(text(hint).size(font::DENSE))
             .padding(6)
             .style(container::rounded_box),
         tooltip::Position::Top,
@@ -184,7 +185,7 @@ fn catalogue_row<'a>(
         let mut buttons = row![].spacing(space::XS);
         for spec in &stream.tiers {
             let is_live = live_tier.as_deref() == Some(spec.name.as_str());
-            let mut b = button(text(tier_button_label(spec)).size(12));
+            let mut b = button(text(tier_button_label(spec)).size(font::CAPTION));
             if !is_live {
                 b = b.on_press(Message::ParallaxOpenVideoTile {
                     stream: stream.stream.clone(),
@@ -198,7 +199,7 @@ fn catalogue_row<'a>(
         // state worth surfacing is the one the operator created and can undo.
         if open && detail.is_pinned(&stream.stream) {
             buttons = buttons.push(action_tooltip(
-                button(text("Auto").size(12)).on_press(Message::ParallaxAutoTier {
+                button(text("Auto").size(font::CAPTION)).on_press(Message::ParallaxAutoTier {
                     stream: stream.stream.clone(),
                 }),
                 "Pinned by your tier choice — hand tier selection back to the \
@@ -208,7 +209,7 @@ fn catalogue_row<'a>(
             ));
         }
         if open {
-            buttons = buttons.push(button(text("Close").size(12)).on_press(
+            buttons = buttons.push(button(text("Close").size(font::CAPTION)).on_press(
                 Message::ParallaxCloseTile {
                     stream: stream.stream.clone(),
                 },
@@ -222,14 +223,14 @@ fn catalogue_row<'a>(
         // no way to look at it.
         let mut buttons = row![].spacing(space::XS);
         if open {
-            buttons = buttons.push(button(text("Close").size(12)).on_press(
+            buttons = buttons.push(button(text("Close").size(font::CAPTION)).on_press(
                 Message::ParallaxCloseTile {
                     stream: stream.stream.clone(),
                 },
             ));
         } else {
             buttons = buttons.push(action_tooltip(
-                button(text("Preview").size(12)).on_press(Message::ParallaxOpenTile {
+                button(text("Preview").size(font::CAPTION)).on_press(Message::ParallaxOpenTile {
                     stream: stream.stream.clone(),
                 }),
                 "Open a live JPEG preview of this stream. Live H.264 video needs a \
@@ -239,26 +240,34 @@ fn catalogue_row<'a>(
         }
         buttons.into()
     };
-    let mut cells = row![text(&stream.stream).size(14).width(Length::Fixed(140.0)),]
-        .spacing(space::SM)
-        .align_y(iced::Alignment::Center);
+    let mut cells = row![
+        text(&stream.stream)
+            .size(font::BODY)
+            .width(Length::Fixed(140.0)),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
     // Native geometry (capability-bearing catalogue, #507) so the offered tiers
     // read as honest — no 720p tier on a 480p camera.
     if let (Some(w), Some(h)) = (stream.width, stream.height) {
         cells = cells.push(
             text(format!("{w}×{h}"))
-                .size(12)
+                .size(font::CAPTION)
                 .style(muted)
                 .width(Length::Fixed(80.0)),
         );
     }
     if stream.active {
-        cells = cells.push(text("live").size(12).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).success()),
-        }));
+        cells = cells.push(
+            text("live")
+                .size(font::CAPTION)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).success()),
+                }),
+        );
     }
     if let Some(description) = &stream.description {
-        cells = cells.push(text(description).size(12).style(muted));
+        cells = cells.push(text(description).size(font::CAPTION).style(muted));
     }
     cells = cells.push(Space::new().width(Length::Fill)).push(controls);
     cells.into()
@@ -274,7 +283,7 @@ fn tile<'a>(
 ) -> Element<'a, Message> {
     let picture: Element<'a, Message> = match (&tile.frame, &tile.ended) {
         (Some(handle), _) => preview_frame(handle.clone()),
-        (None, Some(end)) => container(text(end.text()).size(12).style(end_style(end)))
+        (None, Some(end)) => container(text(end.text()).size(font::CAPTION).style(end_style(end)))
             .width(Length::Fixed(PREVIEW_W as f32))
             .height(Length::Fixed(PREVIEW_H as f32))
             .center(Length::Fill)
@@ -307,9 +316,9 @@ fn tile<'a>(
     column![
         frame,
         row![
-            text(caption).size(12).style(muted),
+            text(caption).size(font::CAPTION).style(muted),
             Space::new().width(Length::Fill),
-            button(text("Close").size(11)).on_press(Message::ParallaxCloseTile {
+            button(text("Close").size(font::DENSE)).on_press(Message::ParallaxCloseTile {
                 stream: name.to_string(),
             }),
         ]
@@ -348,9 +357,9 @@ pub fn expanded_overlay(state: &DeviceDetailState) -> Option<Element<'_, Message
         format!("{name} · {profile} · waiting for frames…")
     };
     let header = row![
-        text(caption).size(14),
+        text(caption).size(font::BODY),
         Space::new().width(Length::Fill),
-        button(text("Close").size(12)).on_press(Message::ParallaxCollapseTile),
+        button(text("Close").size(font::CAPTION)).on_press(Message::ParallaxCollapseTile),
     ]
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
@@ -401,7 +410,7 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let header = row![
         icons::protocol_parallax::<Message>(IconSize::Medium),
-        text(format!("Live media — {source}")).size(16),
+        text(format!("Live media — {source}")).size(font::EMPHASIS),
     ]
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
@@ -409,33 +418,45 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut content = column![header].spacing(space::MD).padding(space::LG);
 
     // Stream catalogue: each stream offers a Live button per tier (#494/#502).
-    content = content.push(text("Streams").size(14));
+    content = content.push(text("Streams").size(font::BODY));
     if !parallax_h264::AVAILABLE {
-        content = content.push(text(parallax_h264::UNAVAILABLE_HINT).size(11).style(muted));
+        content = content.push(
+            text(parallax_h264::UNAVAILABLE_HINT)
+                .size(font::DENSE)
+                .style(muted),
+        );
     }
     match &detail.catalogue {
         Fetch::Idle => {
             content = content.push(
                 row![
-                    text("Stream catalogue not loaded.").size(12).style(muted),
-                    button(text("Load streams").size(12)).on_press(Message::FetchParallaxStreams),
+                    text("Stream catalogue not loaded.")
+                        .size(font::CAPTION)
+                        .style(muted),
+                    button(text("Load streams").size(font::CAPTION))
+                        .on_press(Message::FetchParallaxStreams),
                 ]
                 .spacing(space::SM)
                 .align_y(iced::Alignment::Center),
             );
         }
         Fetch::Loading => {
-            content = content.push(text("Loading stream catalogue…").size(12).style(muted));
+            content = content.push(
+                text("Loading stream catalogue…")
+                    .size(font::CAPTION)
+                    .style(muted),
+            );
         }
         Fetch::Error(message) => {
             content = content.push(
                 row![
                     text(format!("Catalogue unavailable: {message}"))
-                        .size(12)
+                        .size(font::CAPTION)
                         .style(|t: &Theme| text::Style {
                             color: Some(theme::colors(t).danger_text()),
                         }),
-                    button(text("Retry").size(12)).on_press(Message::FetchParallaxStreams),
+                    button(text("Retry").size(font::CAPTION))
+                        .on_press(Message::FetchParallaxStreams),
                 ]
                 .spacing(space::SM)
                 .align_y(iced::Alignment::Center),
@@ -444,7 +465,7 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
         Fetch::Ready(streams) if streams.is_empty() => {
             content = content.push(
                 text("This sensor advertises no streams.")
-                    .size(12)
+                    .size(font::CAPTION)
                     .style(muted),
             );
         }
@@ -461,11 +482,11 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
     if detail.tiles.is_empty() {
         content = content.push(
             text("No previews open — open a stream above to watch its live preview.")
-                .size(12)
+                .size(font::CAPTION)
                 .style(muted),
         );
     } else {
-        content = content.push(text("Live view").size(14));
+        content = content.push(text("Live view").size(font::BODY));
         let tiles: Vec<_> = detail.tiles.iter().collect();
         for chunk in tiles.chunks(TILES_PER_ROW) {
             let mut grid_row = row![].spacing(space::MD);

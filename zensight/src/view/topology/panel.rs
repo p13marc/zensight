@@ -17,6 +17,7 @@ use crate::view::components::Sparkline;
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized::attribution;
 use crate::view::specialized::fetch::Fetch;
+use crate::view::tokens::font;
 use crate::view::topology::graph::format_bytes;
 use zensight_store::MetricStore;
 
@@ -28,12 +29,12 @@ const SECTION_ROWS: usize = 6;
 
 /// Small section title.
 fn section(label: &str) -> Element<'_, Message> {
-    text(label).size(12).into()
+    text(label).size(font::CAPTION).into()
 }
 
 /// Dim single-line note.
 fn note(label: String) -> Element<'static, Message> {
-    text(label).size(10).into()
+    text(label).size(font::MICRO).into()
 }
 
 /// Generate a simple text-based progress bar.
@@ -60,7 +61,11 @@ pub fn node_panel<'a>(
     };
     let header = row![
         icons::protocol_icon(super::model::primary_protocol(node), IconSize::Large),
-        column![text(&node.label).size(16), text(subtitle).size(10)].spacing(2)
+        column![
+            text(&node.label).size(font::EMPHASIS),
+            text(subtitle).size(font::MICRO)
+        ]
+        .spacing(2)
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -68,19 +73,19 @@ pub fn node_panel<'a>(
     let status = match node.health {
         NodeHealth::Healthy => row![
             icons::status_healthy(IconSize::Small),
-            text("Healthy - receiving data").size(11)
+            text("Healthy - receiving data").size(font::DENSE)
         ],
         NodeHealth::Degraded => row![
             icons::status_warning(IconSize::Small),
-            text("Degraded - partial data or sensor trouble").size(11)
+            text("Degraded - partial data or sensor trouble").size(font::DENSE)
         ],
         NodeHealth::Down => row![
             icons::status_warning(IconSize::Small),
-            text("Down - all sensors report offline").size(11)
+            text("Down - all sensors report offline").size(font::DENSE)
         ],
         NodeHealth::Stale => row![
             icons::status_warning(IconSize::Small),
-            text("Stale - no recent data").size(11)
+            text("Stale - no recent data").size(font::DENSE)
         ],
     }
     .spacing(5)
@@ -156,7 +161,7 @@ pub fn node_panel<'a>(
         if let Some(values) = vitals_sparkline_values(entities, store, node) {
             items = items.push(
                 row![
-                    text("cpu 1h").size(9),
+                    text("cpu 1h").size(font::MICRO),
                     Sparkline::new(values).with_size(180.0, 22.0).view()
                 ]
                 .spacing(6)
@@ -194,7 +199,7 @@ pub fn node_panel<'a>(
             items = items.push(note(format!("{peer} — {}", format_rate(rate))));
         }
         items = items.push(
-            button(text("Open flow table ↗").size(11))
+            button(text("Open flow table ↗").size(font::DENSE))
                 .on_press(Message::TopologyOpenFlows)
                 .style(iced::widget::button::secondary)
                 .width(Length::Fill),
@@ -247,7 +252,7 @@ pub fn node_panel<'a>(
             let color = Severity::from(a.severity).color();
             items = items.push(
                 text(format!("● [{}] {} — {}", a.severity, a.rule, a.summary))
-                    .size(10)
+                    .size(font::MICRO)
                     .style(move |_: &iced::Theme| iced::widget::text::Style { color: Some(color) }),
             );
         }
@@ -262,7 +267,7 @@ pub fn node_panel<'a>(
             } else {
                 "Pin position"
             })
-            .size(11),
+            .size(font::DENSE),
         )
         .on_press(Message::TopologyTogglePin(node.id.clone()))
         .style(iced::widget::button::secondary)
@@ -272,7 +277,7 @@ pub fn node_panel<'a>(
         button(
             row![
                 icons::arrow_right(IconSize::Small),
-                text("View Device Details").size(11)
+                text("View Device Details").size(font::DENSE)
             ]
             .spacing(5)
             .align_y(Alignment::Center),
@@ -282,13 +287,13 @@ pub fn node_panel<'a>(
         .width(Length::Fill),
     );
     items = items.push(
-        button(text("Focus").size(11))
+        button(text("Focus").size(font::DENSE))
             .on_press(Message::TopologyFocusNode(node.id.clone()))
             .style(iced::widget::button::secondary)
             .width(Length::Fill),
     );
     items = items.push(
-        button(text("Clear Selection").size(11))
+        button(text("Clear Selection").size(font::DENSE))
             .on_press(Message::TopologyClearSelection)
             .style(iced::widget::button::secondary)
             .width(Length::Fill),
@@ -310,7 +315,7 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
     let to_label = node_label(state, &edge.to);
     let header = row![
         icons::network(IconSize::Large),
-        text(format!("{from_label} ⇄ {to_label}")).size(15),
+        text(format!("{from_label} ⇄ {to_label}")).size(font::BODY),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -393,8 +398,8 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
                         _ => {
                             items = items.push(
                                 row![
-                                    text(flow_line).size(10),
-                                    button(text("attr").size(9))
+                                    text(flow_line).size(font::MICRO),
+                                    button(text("attr").size(font::MICRO))
                                         .on_press(Message::FetchFlowAttribution {
                                             target: AttributionTarget::Topology,
                                             key,
@@ -412,8 +417,8 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
                     if let Some(cid) = &flow.community_id {
                         items = items.push(
                             row![
-                                text(format!("   {cid}")).size(9),
-                                button(text("copy").size(9))
+                                text(format!("   {cid}")).size(font::MICRO),
+                                button(text("copy").size(font::MICRO))
                                     .on_press(Message::TopologyCopyText(cid.clone()))
                                     .style(iced::widget::button::secondary)
                             ]
@@ -428,7 +433,7 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
             }
         }
         items = items.push(
-            button(text("Open flow table ↗").size(11))
+            button(text("Open flow table ↗").size(font::DENSE))
                 .on_press(Message::TopologyOpenFlows)
                 .style(iced::widget::button::secondary)
                 .width(Length::Fill),
@@ -437,7 +442,7 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
 
     items = items.push(rule::horizontal(1));
     items = items.push(
-        button(text("Clear Selection").size(11))
+        button(text("Clear Selection").size(font::DENSE))
             .on_press(Message::TopologyClearSelection)
             .style(iced::widget::button::secondary)
             .width(Length::Fill),

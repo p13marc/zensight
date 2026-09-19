@@ -2043,7 +2043,16 @@ fn test_security_drilldown_and_filter() {
 
     let sec = SecurityState::default();
     let tuning = zensight::view::detection_tuning::DetectionTuningState::default();
-    let mut ui = simulator(security_view(&alerts, &sec, &tuning));
+    // A taller viewport than the 1024×768 default (#1125). The type sweep put
+    // the page title and the section headers on the real scale — 22→24 and
+    // 18→20 — so the anomaly row now sits below 768 px and a click at the
+    // default size lands on nothing. The assertion is about the interaction,
+    // not about how much of the page fits on one screen.
+    let mut ui = iced_test::Simulator::with_size(
+        iced_test::core::Settings::default(),
+        iced::Size::new(1024.0, 1600.0),
+        security_view(&alerts, &sec, &tuning),
+    );
     let _ = ui.click("PortScanTRW from 10.0.0.5");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(

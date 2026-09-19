@@ -845,7 +845,7 @@ fn render_events(state: &DeviceDetailState) -> Element<'_, Message> {
             // redundant inside that device's own view.
             if let Some(key) = &record.alert_key {
                 row = row.push(
-                    iced::widget::button(text("alert →").size(10))
+                    iced::widget::button(text("alert →").size(font::MICRO))
                         .on_press(Message::OpenAlertForKey {
                             source: record.source.clone(),
                             alert_key: key.clone(),

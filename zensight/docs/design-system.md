@@ -18,12 +18,37 @@ Every color must originate in one of these locations:
 Anywhere else, a raw `Color::from_rgb(...)` / `Color::from_rgba(...)` is
 forbidden.
 
-### The CI color guard
+### The CI guards
 
-CI (`.github/workflows/rust.yml`) runs a merge-gating grep that fails the build
-if `Color::from_rgb` appears outside `view/theme.rs`, `view/tokens.rs`, and
-`view/components/`. So if a view needs a new color, add it to the palette (or
-plumb it through `ThemeColors`) rather than inlining a literal.
+CI is **Forgejo Actions** (`.forgejo/workflows/ci.yml`); there is no `.github/`
+in this repository, and this paragraph pointed at `.github/workflows/rust.yml`
+until #1125 — a guard nobody could find is one nobody maintains.
+
+Three merge-gating greps, in the `lint` job:
+
+- **colour** — `Color::from_rgb`/`::new`/the constants/`color!`/the struct
+  literal, anywhere outside `view/theme.rs`, `view/tokens.rs` and
+  `view/components/`. If a view needs a new colour, add it to the palette (or
+  plumb it through `ThemeColors`) rather than inlining a literal;
+- **type scale** — a raw `.size(N)` anywhere outside those same three places
+  (#1125). Use `view::tokens::font`;
+- **spacing** — a **ratchet**, not a wall (#1125). `.padding(N)`/`.spacing(N)`
+  are counted, and the count may not rise. See below for why that one is
+  different.
+
+### Why spacing ratchets instead of failing
+
+The type sweep was a rename: 598 of the 662 `.size(N)` calls were *already* on
+a scale step, and the rest were one view's private 13/18/22 spelling of
+body/section/title. Zero pixels moved for 90 % of them.
+
+Spacing is not like that. `.spacing(10)` appears 102 times and both `SM` (8)
+and `MD` (16) are defensible readings of it; `.spacing(6)` appears 59 times
+between `XS` and `SM`. Choosing, 350 times, is a **layout change** — the kind
+that wants somebody looking at the window, not a regex. So the count in
+`zensight/src/view/.spacing-ratchet` may only go down: sweep a file, lower the
+number, and it cannot come back. CI fails in **both** directions, so a sweep
+that forgets to lower the ceiling is caught too.
 
 ## `theme.rs` — colors
 
@@ -58,11 +83,13 @@ they live in `theme.rs`.
 `.size(13)` / `.padding(10)` / `.spacing(15)` calls so every view draws from one
 scale.
 
-**Type scale** (`FontSize`, five steps, pixels as `f32`):
+**Type scale** (`font`, seven steps, pixels as `f32`):
 
 | Token | px | Use |
 |-------|----|-----|
-| `CAPTION` | 12 | Captions, labels, dense table cells, metadata. |
+| `MICRO` | 10 | Superscripts, unit suffixes, axis ticks. The floor — below this, text stops being legible at 100 % scaling. |
+| `DENSE` | 11 | Dense table cells and per-row metadata. |
+| `CAPTION` | 12 | Captions, labels, metadata. |
 | `BODY` | 14 | Default body text. |
 | `EMPHASIS` | 16 | Emphasis, card titles, key values. |
 | `SECTION` | 20 | Section headers within a page. |
@@ -78,8 +105,16 @@ scale.
 | `LG` | 24 | Gap between sections. |
 | `XL` | 32 | Page-level padding / large separations. |
 
-Compile-time assertions in `tokens.rs` guard the ordering of these constants, so
-the scale can't be silently reordered.
+`MICRO` and `DENSE` are new in #1125, and they are a **finding**, not a
+loosening. `.size(9)`/`.size(10)`/`.size(11)` appeared **281 times**,
+concentrated in exactly the views where a 12 px cell does not fit —
+`specialized/sysinfo.rs`, `specialized/syslog.rs`, `device.rs`. That is not
+drift from the scale; it is a requirement the five-step scale did not have. The
+alternative was resizing 281 dense cells up to `CAPTION`, which is a layout
+change made silently. They are named so the guard can enforce something true.
+
+Assertions in `tokens.rs` guard the ordering of these constants, so the scale
+can't be silently reordered.
 
 ## `components/` — the widget kit
 

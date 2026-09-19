@@ -17,6 +17,7 @@ use crate::view::components::empty_state;
 use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized;
+use crate::view::tokens::font;
 
 /// Debounce delay for metric search input in milliseconds.
 const SEARCH_DEBOUNCE_MS: i64 = 300;
@@ -714,7 +715,7 @@ fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
         return None;
     }
     let mut tabs = Row::new().spacing(8).align_y(Alignment::Center);
-    tabs = tabs.push(text("Facets").size(13));
+    tabs = tabs.push(text("Facets").size(font::BODY));
     // Same protocol on several facets (different sources correlated into one
     // host) → append the source so the tabs stay distinguishable.
     let dup_protocols = crate::view::host::duplicated_protocols(facets.iter().map(|f| f.protocol));
@@ -733,16 +734,16 @@ fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
         let mut label = row![
             dot,
             icons::protocol_icon::<Message>(f.protocol, IconSize::Small),
-            text(f.protocol.display_name()).size(13),
+            text(f.protocol.display_name()).size(font::BODY),
         ]
         .spacing(5)
         .align_y(Alignment::Center);
         if dup_protocols.contains(&f.protocol) {
-            label = label.push(text(format!("· {}", f.source)).size(13).style(|t: &Theme| {
-                text::Style {
+            label = label.push(text(format!("· {}", f.source)).size(font::BODY).style(
+                |t: &Theme| text::Style {
                     color: Some(crate::view::theme::colors(t).text_muted()),
-                }
-            }));
+                },
+            ));
         }
         let tab = if f.active {
             button(label)
@@ -811,9 +812,13 @@ pub fn host_detail_view<'a>(ctx: DeviceViewCtx<'a, '_>) -> Element<'a, Message> 
     // reading a five-minute window as five minutes of history.
     if let Some(caveat) = ctx.history_source.caveat() {
         col = col.push(
-            container(text(caveat).size(12).style(|t: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(t).status_warning()),
-            }))
+            container(
+                text(caveat)
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(t).status_warning()),
+                    }),
+            )
             .padding([4, 20]),
         );
     }
@@ -875,17 +880,17 @@ fn entity_identity_details(entity: &HostEntity) -> Element<'static, Message> {
         facts.push(format!("names: {}", names.join(", ")));
     }
     for fact in facts {
-        col = col.push(text(fact).size(12));
+        col = col.push(text(fact).size(font::CAPTION));
     }
 
     // Resolution-group drill-down: one row per member claim.
-    col = col.push(text("Resolution group").size(13));
+    col = col.push(text("Resolution group").size(font::BODY));
     for m in &entity.members {
         let row = text(format!(
             "{}/{} · {} · confidence {:.2}",
             m.sensor, m.source, m.rule, m.confidence
         ))
-        .size(11);
+        .size(font::DENSE);
         col = col.push(row);
     }
 
@@ -896,7 +901,7 @@ fn entity_identity_details(entity: &HostEntity) -> Element<'static, Message> {
 /// chip, live/stale freshness, "N sources · M IPs", and the ▾/▸ details toggle.
 fn entity_identity_summary(entity: &HostEntity, expanded: bool) -> Element<'static, Message> {
     // Short entity-id chip.
-    let id_chip = container(text(entity.entity_id.clone()).size(11))
+    let id_chip = container(text(entity.entity_id.clone()).size(font::DENSE))
         .padding([2, 8])
         .style(container::rounded_box);
 
@@ -910,7 +915,7 @@ fn entity_identity_summary(entity: &HostEntity, expanded: bool) -> Element<'stat
         crate::view::theme::STATUS_ONLINE
     };
     let freshness = text(fresh_label)
-        .size(11)
+        .size(font::DENSE)
         .style(move |_: &Theme| text::Style {
             color: Some(fresh_color),
         });
@@ -920,12 +925,12 @@ fn entity_identity_summary(entity: &HostEntity, expanded: bool) -> Element<'stat
         entity.members.len(),
         entity.ips.len()
     ))
-    .size(12);
+    .size(font::CAPTION);
 
     let toggle = button(
         row![
-            text(if expanded { "▾" } else { "▸" }).size(11),
-            text("identity").size(11),
+            text(if expanded { "▾" } else { "▸" }).size(font::DENSE),
+            text("identity").size(font::DENSE),
         ]
         .spacing(4)
         .align_y(Alignment::Center),
@@ -1037,20 +1042,23 @@ fn render_header<'a>(
     facet_status: Option<DeviceStatus>,
 ) -> Element<'a, Message> {
     let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![
+            icons::arrow_left(IconSize::Medium),
+            text("Back").size(font::BODY)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
     // #35: step through the current filtered device set without returning to the
     // dashboard between hops.
-    let prev_button = button(text("‹").size(16))
+    let prev_button = button(text("‹").size(font::EMPHASIS))
         .on_press(Message::SelectAdjacentDevice { forward: false })
         .padding([4, 10])
         .style(iced::widget::button::secondary);
-    let next_button = button(text("›").size(16))
+    let next_button = button(text("›").size(font::EMPHASIS))
         .on_press(Message::SelectAdjacentDevice { forward: true })
         .padding([4, 10])
         .style(iced::widget::button::secondary);
@@ -1061,23 +1069,29 @@ fn render_header<'a>(
     let display_name: &str = identity
         .and_then(|(e, _)| e.hostname.as_deref().or(e.fqdn.as_deref()))
         .unwrap_or(&state.device_id.source);
-    let device_name = text(display_name.to_string()).size(24);
+    let device_name = text(display_name.to_string()).size(font::TITLE);
     let identity_summary: Option<Element<'static, Message>> =
         identity.map(|(entity, expanded)| entity_identity_summary(entity, expanded));
-    let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
+    let metric_count = text(format!("{} metrics", state.metrics.len())).size(font::BODY);
 
     let csv_button = button(
-        row![icons::export(IconSize::Small), text("CSV").size(12)]
-            .spacing(4)
-            .align_y(Alignment::Center),
+        row![
+            icons::export(IconSize::Small),
+            text("CSV").size(font::CAPTION)
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::ExportToCsv)
     .style(iced::widget::button::secondary);
 
     let json_button = button(
-        row![icons::export(IconSize::Small), text("JSON").size(12)]
-            .spacing(4)
-            .align_y(Alignment::Center),
+        row![
+            icons::export(IconSize::Small),
+            text("JSON").size(font::CAPTION)
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::ExportToJson)
     .style(iced::widget::button::secondary);
@@ -1087,14 +1101,15 @@ fn render_header<'a>(
     // reappears automatically if telemetry resumes.
     let forget_button: Option<Element<'a, Message>> = (facet_status == Some(DeviceStatus::Offline))
         .then(|| {
-            let btn = button(text("Forget").size(12))
+            let btn = button(text("Forget").size(font::CAPTION))
                 .on_press(Message::ForgetDevice(state.device_id.clone()))
                 .padding([2, 8])
                 .style(iced::widget::button::text);
             tooltip(
                 btn,
                 container(
-                    text("Remove this stale facet; it returns if telemetry resumes.").size(11),
+                    text("Remove this stale facet; it returns if telemetry resumes.")
+                        .size(font::DENSE),
                 )
                 .padding(6)
                 .style(container::rounded_box),
@@ -1110,18 +1125,18 @@ fn render_header<'a>(
     // what makes "this host and nothing else" expressible at all.
     let focus_button: Element<'a, Message> = match (&state.origin, state.focused) {
         (_, true) => tooltip(
-            button(text("Exit focus").size(12))
+            button(text("Exit focus").size(font::CAPTION))
                 .on_press(Message::SetFocusHost(None))
                 .padding([2, 8])
                 .style(iced::widget::button::primary),
-            container(text("Resubscribe to the whole fleet.").size(11))
+            container(text("Resubscribe to the whole fleet.").size(font::DENSE))
                 .padding(6)
                 .style(container::rounded_box),
             tooltip::Position::Bottom,
         )
         .into(),
         (Some(origin), false) => tooltip(
-            button(text("Focus this host").size(12))
+            button(text("Focus this host").size(font::CAPTION))
                 .on_press(Message::SetFocusHost(Some(origin.clone())))
                 .padding([2, 8])
                 .style(iced::widget::button::secondary),
@@ -1131,7 +1146,7 @@ fn render_header<'a>(
                      the link until you exit — the point of focus on a constrained \
                      link.",
                 )
-                .size(11),
+                .size(font::DENSE),
             )
             .padding(6)
             .style(container::rounded_box),
@@ -1140,10 +1155,10 @@ fn render_header<'a>(
         .into(),
         // Origin not learned yet: disabled (no `on_press`) rather than guessing.
         (None, false) => tooltip(
-            button(text("Focus this host").size(12))
+            button(text("Focus this host").size(font::CAPTION))
                 .padding([2, 8])
                 .style(iced::widget::button::secondary),
-            container(text("Waiting for this host's identity (health doc).").size(11))
+            container(text("Waiting for this host's identity (health doc).").size(font::DENSE))
                 .padding(6)
                 .style(container::rounded_box),
             tooltip::Position::Bottom,
@@ -1193,9 +1208,12 @@ fn render_chart_section<'a>(
         "Chart".to_string()
     };
 
-    let chart_title = row![icons::chart(IconSize::Medium), text(title_text).size(14)]
-        .spacing(6)
-        .align_y(Alignment::Center);
+    let chart_title = row![
+        icons::chart(IconSize::Medium),
+        text(title_text).size(font::BODY)
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
 
     // Time window buttons
     let time_buttons: Element<'_, Message> = Row::with_children(
@@ -1203,7 +1221,7 @@ fn render_chart_section<'a>(
             .iter()
             .map(|&window| {
                 let is_selected = state.chart.time_window() == window;
-                let btn = button(text(window.label()).size(11))
+                let btn = button(text(window.label()).size(font::DENSE))
                     .on_press(Message::SetChartTimeWindow(window))
                     .style(if is_selected {
                         iced::widget::button::primary
@@ -1221,8 +1239,8 @@ fn render_chart_section<'a>(
     let custom_input = text_input("min", &state.chart_custom_input)
         .on_input(Message::SetChartCustomMinutes)
         .width(Length::Fixed(64.0))
-        .size(11);
-    let custom_window = row![text("Custom:").size(11), custom_input]
+        .size(font::DENSE);
+    let custom_window = row![text("Custom:").size(font::DENSE), custom_input]
         .spacing(4)
         .align_y(Alignment::Center);
 
@@ -1233,7 +1251,7 @@ fn render_chart_section<'a>(
         } else {
             "Expand"
         })
-        .size(11),
+        .size(font::DENSE),
     )
     .on_press(Message::ToggleChartExpand)
     .style(iced::widget::button::secondary);
@@ -1258,13 +1276,13 @@ fn render_chart_section<'a>(
         .on_input(Message::SetChartRangeFrom)
         .on_submit(Message::ApplyChartRange)
         .width(Length::Fixed(150.0))
-        .size(11);
+        .size(font::DENSE);
     let to_input = text_input("YYYY-MM-DD HH:MM", &state.chart_to_input)
         .on_input(Message::SetChartRangeTo)
         .on_submit(Message::ApplyChartRange)
         .width(Length::Fixed(150.0))
-        .size(11);
-    let apply_btn = button(text("Apply").size(11))
+        .size(font::DENSE);
+    let apply_btn = button(text("Apply").size(font::DENSE))
         .on_press(Message::ApplyChartRange)
         .style(if range_active {
             iced::widget::button::primary
@@ -1272,9 +1290,9 @@ fn render_chart_section<'a>(
             iced::widget::button::secondary
         });
     let mut range_row = row![
-        text("Range (local):").size(11),
+        text("Range (local):").size(font::DENSE),
         from_input,
-        text("→").size(11),
+        text("→").size(font::DENSE),
         to_input,
         apply_btn,
     ]
@@ -1282,7 +1300,7 @@ fn render_chart_section<'a>(
     .align_y(Alignment::Center);
     if range_active {
         range_row = range_row.push(
-            button(text("Clear").size(11))
+            button(text("Clear").size(font::DENSE))
                 .on_press(Message::ClearChartRange)
                 .style(iced::widget::button::text),
         );
@@ -1303,14 +1321,15 @@ fn render_chart_section<'a>(
                     ..Default::default()
                 });
             let name = series.name.clone();
-            let toggle = button(text(if series.visible { "shown" } else { "hidden" }).size(10))
-                .on_press(Message::ToggleMetricVisibility(name.clone()))
-                .style(iced::widget::button::text);
-            let remove = button(text("×").size(12))
+            let toggle =
+                button(text(if series.visible { "shown" } else { "hidden" }).size(font::MICRO))
+                    .on_press(Message::ToggleMetricVisibility(name.clone()))
+                    .style(iced::widget::button::text);
+            let remove = button(text("×").size(font::CAPTION))
                 .on_press(Message::RemoveMetricFromChart(name.clone()))
                 .style(iced::widget::button::text);
             legend_row = legend_row.push(
-                row![swatch, text(name).size(11), toggle, remove]
+                row![swatch, text(name).size(font::DENSE), toggle, remove]
                     .spacing(4)
                     .align_y(Alignment::Center),
             );
@@ -1332,11 +1351,11 @@ fn render_chart_section<'a>(
             "Current: {}",
             stats.current.map_or("-".to_string(), format_value)
         ))
-        .size(12),
-        text(format!("Min: {}", format_value(stats.min))).size(12),
-        text(format!("Max: {}", format_value(stats.max))).size(12),
-        text(format!("Avg: {}", format_value(stats.avg))).size(12),
-        text(format!("Points: {}", stats.count)).size(12),
+        .size(font::CAPTION),
+        text(format!("Min: {}", format_value(stats.min))).size(font::CAPTION),
+        text(format!("Max: {}", format_value(stats.max))).size(font::CAPTION),
+        text(format!("Avg: {}", format_value(stats.avg))).size(font::CAPTION),
+        text(format!("Points: {}", stats.count)).size(font::CAPTION),
     ]
     .spacing(20);
 
@@ -1447,15 +1466,15 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     let search_input = text_input("Search metrics... (Ctrl+F)", state.filter_input())
         .id(DEVICE_SEARCH_ID.clone())
         .on_input(Message::SetMetricFilter)
-        .size(14)
+        .size(font::BODY)
         .padding(8)
         .width(Length::Fixed(300.0));
 
     // Count indicator
     let count_text = if state.metric_filter.is_empty() {
-        text(format!("{} metrics", total_count)).size(12)
+        text(format!("{} metrics", total_count)).size(font::CAPTION)
     } else {
-        text(format!("{} of {} metrics", filtered_count, total_count)).size(12)
+        text(format!("{} of {} metrics", filtered_count, total_count)).size(font::CAPTION)
     };
 
     let search_row = row![search_input, count_text]
@@ -1480,13 +1499,13 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     // Favorite/pin column (#27): a star toggles whether the metric is pinned to
     // the top of the table; persisted per device across restarts.
     let favorite_column = table::column(
-        text("").size(12),
+        text("").size(font::CAPTION),
         |row: MetricTableRow| -> Element<'_, Message> {
             let is_fav = row.is_favorite;
             let glyph = if is_fav { "★" } else { "☆" };
             button(
                 text(glyph)
-                    .size(14)
+                    .size(font::BODY)
                     .style(move |theme: &Theme| text::Style {
                         color: Some(if is_fav {
                             crate::view::theme::ACCENT_GOLD
@@ -1504,13 +1523,13 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     .width(34);
 
     let name_column = table::column(
-        text("Metric").size(12),
+        text("Metric").size(font::CAPTION),
         |row: MetricTableRow| -> Element<'_, Message> {
             let name = row.name.clone();
             let name_display = row.name;
             // Make the name clickable to select for chart
             if row.is_chartable {
-                button(text(name_display).size(12))
+                button(text(name_display).size(font::CAPTION))
                     .on_press(Message::SelectMetricForChart(name))
                     .style(if row.is_in_chart {
                         iced::widget::button::primary
@@ -1520,18 +1539,18 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                     .padding(0)
                     .into()
             } else {
-                text(name_display).size(12).into()
+                text(name_display).size(font::CAPTION).into()
             }
         },
     )
     .width(Length::FillPortion(3));
 
     let value_column = table::column(
-        text("Value").size(12),
+        text("Value").size(font::CAPTION),
         |row: MetricTableRow| -> Element<'_, Message> {
             let value = row.value;
             let is_stale = row.is_stale;
-            let value_widget = text(value).size(12).style(move |theme: &Theme| {
+            let value_widget = text(value).size(font::CAPTION).style(move |theme: &Theme| {
                 if is_stale {
                     text::Style {
                         color: Some(crate::view::theme::colors(theme).text_dimmed()),
@@ -1543,7 +1562,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
             if let Some(full) = row.full_value {
                 tooltip(
                     value_widget,
-                    container(text(full).size(11))
+                    container(text(full).size(font::DENSE))
                         .padding(6)
                         .max_width(400.0)
                         .style(container::rounded_box),
@@ -1558,11 +1577,11 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     .width(Length::FillPortion(2));
 
     let type_column = table::column(
-        text("Type").size(12),
+        text("Type").size(font::CAPTION),
         |row: MetricTableRow| -> Element<'_, Message> {
             let type_name = row.type_name;
             text(type_name)
-                .size(11)
+                .size(font::DENSE)
                 .style(|theme: &Theme| text::Style {
                     color: Some(crate::view::theme::colors(theme).text_dimmed()),
                 })
@@ -1572,7 +1591,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     .width(80);
 
     let trend_column = table::column(
-        text("Trend").size(12),
+        text("Trend").size(font::CAPTION),
         |row: MetricTableRow| -> Element<'_, Message> {
             let trend = row.trend;
             let color = match trend.as_str() {
@@ -1581,7 +1600,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                 _ => crate::view::theme::STATUS_UNKNOWN,
             };
             text(trend)
-                .size(14)
+                .size(font::BODY)
                 .style(move |_: &Theme| text::Style { color: Some(color) })
                 .into()
         },
@@ -1589,25 +1608,29 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     .width(50);
 
     let time_column = table::column(
-        text("Updated").size(12),
+        text("Updated").size(font::CAPTION),
         |row: MetricTableRow| -> Element<'_, Message> {
             let timestamp = row.timestamp;
             let is_stale = row.is_stale;
             if is_stale {
                 row![
-                    text(timestamp).size(11).style(|theme: &Theme| text::Style {
-                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
-                    }),
-                    text("stale").size(9).style(|_theme: &Theme| text::Style {
-                        color: Some(crate::view::theme::ACCENT_STALE),
-                    })
+                    text(timestamp)
+                        .size(font::DENSE)
+                        .style(|theme: &Theme| text::Style {
+                            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                        }),
+                    text("stale")
+                        .size(font::MICRO)
+                        .style(|_theme: &Theme| text::Style {
+                            color: Some(crate::view::theme::ACCENT_STALE),
+                        })
                 ]
                 .spacing(4)
                 .align_y(Alignment::Center)
                 .into()
             } else {
                 text(timestamp)
-                    .size(11)
+                    .size(font::DENSE)
                     .style(|theme: &Theme| text::Style {
                         color: Some(crate::view::theme::colors(theme).text_dimmed()),
                     })
@@ -1618,26 +1641,27 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     .width(120);
 
     let actions_column = table::column(
-        text("").size(12),
+        text("").size(font::CAPTION),
         |row: MetricTableRow| -> Element<'_, Message> {
             if row.is_chartable {
                 let metric_name = row.name.clone();
-                let chart_btn = button(text(if row.is_in_chart { "−" } else { "+" }).size(11))
-                    .on_press(if row.is_in_chart {
-                        Message::RemoveMetricFromChart(metric_name)
-                    } else {
-                        Message::AddMetricToChart(metric_name)
-                    })
-                    .style(if row.is_in_chart {
-                        iced::widget::button::danger
-                    } else {
-                        iced::widget::button::secondary
-                    })
-                    .padding([2, 8]);
+                let chart_btn =
+                    button(text(if row.is_in_chart { "−" } else { "+" }).size(font::DENSE))
+                        .on_press(if row.is_in_chart {
+                            Message::RemoveMetricFromChart(metric_name)
+                        } else {
+                            Message::AddMetricToChart(metric_name)
+                        })
+                        .style(if row.is_in_chart {
+                            iced::widget::button::danger
+                        } else {
+                            iced::widget::button::secondary
+                        })
+                        .padding([2, 8]);
 
                 // Promote this metric to an alert rule (#50): seeds the rule form
                 // with the metric path + current value and opens the authoring view.
-                let alert_btn = button(text("alert").size(10))
+                let alert_btn = button(text("alert").size(font::MICRO))
                     .on_press(Message::PromoteMetricToAlert {
                         device: row.device_id.clone(),
                         metric: row.name.clone(),

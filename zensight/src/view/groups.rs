@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::message::{DeviceId, Message};
 use crate::view::components::empty_state;
 use crate::view::icons::{self, IconSize};
+use crate::view::tokens::font;
 
 /// Predefined colors for groups (RGB 0.0-1.0).
 pub const GROUP_COLORS: &[(f32, f32, f32, &str)] = &[
@@ -349,26 +350,25 @@ pub fn device_group_tags(groups: Vec<GroupTag>) -> Element<'static, Message> {
 
     for group in groups.into_iter().take(3) {
         let color = group.color;
-        let tag =
-            container(text(group.name).size(9))
-                .padding([2, 6])
-                .style(move |_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(crate::view::components::kit::rgba(
-                        color, 0.3,
-                    ))),
-                    border: iced::Border {
-                        color: crate::view::components::kit::rgb(color),
-                        width: 1.0,
-                        radius: 3.0.into(),
-                    },
-                    text_color: Some(crate::view::components::kit::rgb(color)),
-                    ..Default::default()
-                });
+        let tag = container(text(group.name).size(font::MICRO))
+            .padding([2, 6])
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(crate::view::components::kit::rgba(
+                    color, 0.3,
+                ))),
+                border: iced::Border {
+                    color: crate::view::components::kit::rgb(color),
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                text_color: Some(crate::view::components::kit::rgb(color)),
+                ..Default::default()
+            });
         tag_row = tag_row.push(tag);
     }
 
     if count > 3 {
-        tag_row = tag_row.push(text(format!("+{}", count - 3)).size(9));
+        tag_row = tag_row.push(text(format!("+{}", count - 3)).size(font::MICRO));
     }
 
     tag_row.into()
@@ -382,11 +382,11 @@ pub fn group_filter_bar(state: &GroupsState) -> Element<'_, Message> {
         return row![].into();
     }
 
-    let label = text("Groups:").size(12);
+    let label = text("Groups:").size(font::CAPTION);
     let mut filter_row = row![label].spacing(8).align_y(Alignment::Center);
 
     // "All" button
-    let all_btn = button(text("All").size(11))
+    let all_btn = button(text("All").size(font::DENSE))
         .on_press(Message::SetGroupFilter(None))
         .style(if state.filter.is_none() {
             iced::widget::button::primary
@@ -400,9 +400,12 @@ pub fn group_filter_bar(state: &GroupsState) -> Element<'_, Message> {
         let color = group.color();
         let is_active = state.filter == Some(group.id);
 
-        let btn_content = row![color_indicator(color, 10.0), text(&group.name).size(11)]
-            .spacing(4)
-            .align_y(Alignment::Center);
+        let btn_content = row![
+            color_indicator(color, 10.0),
+            text(&group.name).size(font::DENSE)
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center);
 
         let btn = button(btn_content)
             .on_press(Message::SetGroupFilter(Some(group.id)))
@@ -417,9 +420,12 @@ pub fn group_filter_bar(state: &GroupsState) -> Element<'_, Message> {
 
     // Manage groups button
     let manage_btn = button(
-        row![icons::settings(IconSize::Small), text("Manage").size(11)]
-            .spacing(4)
-            .align_y(Alignment::Center),
+        row![
+            icons::settings(IconSize::Small),
+            text("Manage").size(font::DENSE)
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
     )
     .on_press(Message::OpenGroupsPanel)
     .style(iced::widget::button::secondary);
@@ -432,7 +438,7 @@ pub fn group_filter_bar(state: &GroupsState) -> Element<'_, Message> {
 /// Render the group management panel.
 pub fn groups_panel(state: &GroupsState) -> Element<'_, Message> {
     let header = row![
-        text("Manage Groups").size(18),
+        text("Manage Groups").size(font::SECTION),
         button(icons::close(IconSize::Small))
             .on_press(Message::CloseGroupsPanel)
             .style(iced::widget::button::secondary)
@@ -490,16 +496,16 @@ fn render_new_group_form(state: &GroupsState) -> Element<'_, Message> {
         color_row = color_row.push(color_btn);
     }
 
-    let add_btn = button(text("Add Group").size(12))
+    let add_btn = button(text("Add Group").size(font::CAPTION))
         .on_press(Message::AddGroup)
         .style(iced::widget::button::primary);
 
     column![
-        text("Create New Group").size(14),
+        text("Create New Group").size(font::BODY),
         row![name_input, add_btn]
             .spacing(10)
             .align_y(Alignment::Center),
-        row![text("Color:").size(11), color_row]
+        row![text("Color:").size(font::DENSE), color_row]
             .spacing(8)
             .align_y(Alignment::Center)
     ]
@@ -523,7 +529,7 @@ fn render_groups_list(state: &GroupsState) -> Element<'_, Message> {
         list = list.push(render_group_row(state, group, device_count));
     }
 
-    column![text("Existing Groups").size(14), list]
+    column![text("Existing Groups").size(font::BODY), list]
         .spacing(10)
         .into()
 }
@@ -555,11 +561,11 @@ fn render_group_row<'a>(
             color_row = color_row.push(color_btn);
         }
 
-        let save_btn = button(text("Save").size(11))
+        let save_btn = button(text("Save").size(font::DENSE))
             .on_press(Message::SaveGroupEdit)
             .style(iced::widget::button::primary);
 
-        let cancel_btn = button(text("Cancel").size(11))
+        let cancel_btn = button(text("Cancel").size(font::DENSE))
             .on_press(Message::CancelGroupEdit)
             .style(iced::widget::button::secondary);
 
@@ -592,9 +598,9 @@ fn render_group_row<'a>(
 
         let group_info = row![
             color_indicator(color, 14.0),
-            text(&group.name).size(13),
+            text(&group.name).size(font::BODY),
             text(format!("({} devices)", device_count))
-                .size(11)
+                .size(font::DENSE)
                 .style(|theme: &Theme| text::Style {
                     color: Some(crate::view::theme::colors(theme).text_dimmed()),
                 })
@@ -657,14 +663,14 @@ pub fn device_group_menu<'a>(
         let check_icon = if is_assigned {
             icons::check(IconSize::Small)
         } else {
-            text("  ").size(12).into()
+            text("  ").size(font::CAPTION).into()
         };
 
         let item = button(
             row![
                 check_icon,
                 color_indicator(color, 10.0),
-                text(group_name).size(11)
+                text(group_name).size(font::DENSE)
             ]
             .spacing(6)
             .align_y(Alignment::Center),

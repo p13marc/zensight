@@ -11,6 +11,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::components::empty_state;
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
+use crate::view::tokens::font;
 
 /// Flow record summary.
 struct FlowRecord {
@@ -134,10 +135,12 @@ fn collect_flows(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<FlowRecord> 
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        }),
-        text(value).size(16)
+        text(label)
+            .size(font::MICRO)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        text(value).size(font::EMPHASIS)
     ]
     .spacing(2)
     .into()
@@ -146,7 +149,7 @@ fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
 /// Render top talkers by bytes.
 fn render_top_talkers<'a>(flows: &[FlowRecord]) -> Element<'a, Message> {
     let title = text("Top Talkers (by bytes)")
-        .size(12)
+        .size(font::CAPTION)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         });
@@ -188,15 +191,15 @@ fn render_talker_row<'a>(
 ) -> Element<'a, Message> {
     row![
         text(format!("{}.", rank))
-            .size(10)
+            .size(font::MICRO)
             .width(Length::Fixed(20.0)),
-        text(src).size(11).width(Length::Fixed(120.0)),
-        text("→").size(11).style(|t: &Theme| text::Style {
+        text(src).size(font::DENSE).width(Length::Fixed(120.0)),
+        text("→").size(font::DENSE).style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         }),
-        text(dst).size(11).width(Length::Fixed(120.0)),
+        text(dst).size(font::DENSE).width(Length::Fixed(120.0)),
         text(format_bytes(bytes))
-            .size(11)
+            .size(font::DENSE)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).primary()),
             }),
@@ -209,7 +212,7 @@ fn render_talker_row<'a>(
 /// Render protocol distribution.
 fn render_protocol_distribution<'a>(flows: &[FlowRecord]) -> Element<'a, Message> {
     let title = text("Protocol Distribution")
-        .size(12)
+        .size(font::CAPTION)
         .style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).text_muted()),
         });
@@ -273,10 +276,13 @@ fn render_protocol_bar<'a>(
             ..Default::default()
         });
 
-    row![bar, text(format!("{} {:.0}%", protocol, pct)).size(11)]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+    row![
+        bar,
+        text(format!("{} {:.0}%", protocol, pct)).size(font::DENSE)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Format bytes as human-readable string.
