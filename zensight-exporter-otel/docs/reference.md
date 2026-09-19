@@ -171,6 +171,21 @@ tracing backend (Tempo/Jaeger) with no sensor-side changes.
   than re-publishing it, so nothing else re-supplies the firing edge.
 - Pending firings are bounded (`MAX_PENDING`); new firings past the bound are
   dropped with a warning.
+- **A lifecycle whose resolve never comes is forgotten** (#1146), two ways: its
+  producer's liveliness token going away drops it at once, and a TTL (one hour,
+  swept with the stale-series sweep) drops it eventually.
+
+  A `Resolved` used to be the only thing that drained the map, so a host that
+  died mid-alert left its entry forever — and once `MAX_PENDING` was reached,
+  **no span was emitted again for the rest of the process's life**, reported
+  only as a periodic warning. A slow ratchet on any fleet that reinstalls
+  hosts.
+
+  Expiring loses nothing: a lifecycle with no resolve has no end time, so
+  there is no span to synthesize from it — the same reason a `Resolved` for an
+  unseen key yields `None`. Sensors re-publish a firing alert, and a refresh
+  resets the clock the TTL is measured against, so a real incident outlives
+  any TTL above the alert-refresh interval.
 - Artifact-transfer spans are intentionally **not** synthesized — the exporter
   does not watch artifact status (the `@rpc`/`@blob` planes), only the alert
   state selector.

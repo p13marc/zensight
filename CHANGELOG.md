@@ -444,6 +444,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   past it the claim with the oldest `last_updated` is evicted — the one the
   TTL sweep would have taken next anyway. Without the cap the test holds
   50 101 claims.
+- **exporter-otel: three things keyed by origin that never shrank** (#1146).
+
+  **The alert-span tracker ratcheted.** A `Resolved` was the only thing that
+  drained it, so a host that died mid-alert left its entry forever — and once
+  `MAX_PENDING` (10 000) was reached, **no span was emitted again for the rest
+  of the process's life**, reported only as a periodic warning. A slow ratchet
+  on any fleet that reinstalls hosts. There is a TTL now, swept alongside the
+  stale-series sweep, and a **liveliness subscriber** — which this exporter
+  never had, though the Prometheus one has watched the same tokens since #758.
+  A producer whose token goes away will never send the `Resolved` its open
+  lifecycles are waiting for. Expiring loses nothing: a lifecycle with no
+  resolve has no end time and so no span, and a refresh resets the clock, so a
+  real incident outlives any TTL above the alert-refresh interval.
+
+  **Instrument handles were never dropped.** They sat in two `Vec`s "kept
+  alive for the lifetime of the exporter", and since each host has its own
+  meter (#755) there is one instrument per `(host, metric)` — fifty hosts and
+  two hundred metrics is ten thousand live callbacks, each holding an `Arc`
+  into the observation store and being invoked on every collection to observe
+  nothing. They are keyed like everything else now and dropped with the series
+  they observe, and `registered` is pruned with them: it was not, so a
+  returning host met its own stale kind entry.
+
+  **The per-host provider pool never shrank.** It was bounded by
+  `max_resources`, so it could not grow without limit — but on a fleet that
+  reinstalls hosts it filled with dead ones, and live hosts past the cap then
+  fell back to the flat resource and lost `host.name`, silently and
+  permanently. A host with no series left now keeps no resource, no provider,
+  no gRPC channel and no export timer.
+
+  All four tests fail on the parent commit.
 
 - **The eBPF workflow denies warnings, pins its compiler, and runs on a tag**
   (#1094). Three ways the one job that guards an opt-in feature was weaker than

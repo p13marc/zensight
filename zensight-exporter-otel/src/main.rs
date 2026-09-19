@@ -114,6 +114,10 @@ async fn main() -> anyhow::Result<()> {
     // exporters age a dead sensor out at the same rate.
     const STALE_AFTER: Duration = Duration::from_secs(300);
     const SWEEP_EVERY: Duration = Duration::from_secs(60);
+    /// How long an unresolved alert lifecycle is kept (#1146). An hour: long
+    /// enough that no real incident is forgotten mid-flight, short enough that
+    /// a reinstalled fleet does not ratchet the tracker to `MAX_PENDING`.
+    const SPAN_TTL: Duration = Duration::from_secs(3600);
     let cleanup_exporter = exporter.clone();
     let mut cleanup_shutdown = shutdown_rx.clone();
     let cleanup_task = tokio::spawn(async move {
@@ -122,6 +126,17 @@ async fn main() -> anyhow::Result<()> {
             tokio::select! {
                 _ = interval.tick() => {
                     cleanup_exporter.cleanup_stale_observations(STALE_AFTER);
+                    // The same sweep, for the same reason (#1146): a producer
+                    // that stopped reporting will not send the `Resolved` an
+                    // open lifecycle is waiting for. Without this the tracker
+                    // only ever grew, and at `MAX_PENDING` it stopped emitting
+                    // spans at all for the rest of the process's life.
+                    //
+                    // The TTL is generous next to the sweep, because sensors
+                    // re-publish a firing alert: a real incident refreshes
+                    // itself long before this, so what expires here is a
+                    // lifecycle whose producer is gone.
+                    cleanup_exporter.expire_alert_spans(SPAN_TTL);
                 }
                 _ = cleanup_shutdown.changed() => {
                     if *cleanup_shutdown.borrow() {

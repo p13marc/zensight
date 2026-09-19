@@ -194,6 +194,39 @@ impl TelemetrySubscriber {
             None
         };
 
+        // LIVELINESS (#1146). The Prometheus exporter has watched this since
+        // #758; this one never has, so an open alert lifecycle whose producer
+        // died sat in the span tracker until the process ended — and at
+        // `MAX_PENDING` the tracker stops emitting spans for anything, for
+        // good. RFC 04 §5: a producer holds a token at
+        // `…/state/<producer>/alive`, so the token vanishing IS "the sensor
+        // died", which is the one event that says a `Resolved` will never
+        // come.
+        //
+        // `history(true)` so a sensor already alive at startup is known, and
+        // not only ones that come up afterwards.
+        let liveliness = if self.exporter.wants_alert_stream() {
+            let alive_key = zensight_common::keyexpr::all_liveliness_wildcard();
+            info!(key_expr = %alive_key, "Watching sensor liveliness");
+            match session
+                .liveliness()
+                .declare_subscriber(&alive_key)
+                .history(true)
+                .await
+            {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    // Not fatal: without it an open lifecycle waits out the
+                    // TTL instead, which is the slower of the two answers but
+                    // is still an answer.
+                    warn!(error = %e, "Liveliness watch unavailable; a departed sensor's alert lifecycles wait out the TTL");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         info!("Subscriber started, waiting for telemetry...");
 
         loop {
@@ -232,6 +265,35 @@ impl TelemetrySubscriber {
                         }
                         Ok(_) => {}
                         Err(e) => warn!("Error receiving alert sample: {}", e),
+                    }
+                }
+
+                // A sensor's liveliness token went away: it will never send
+                // the `Resolved` its open lifecycles are waiting for (#1146).
+                sample = async { liveliness.as_ref().unwrap().recv_async().await },
+                    if liveliness.is_some() =>
+                {
+                    match sample {
+                        Ok(sample) if sample.kind() == SampleKind::Delete => {
+                            // The token names the ORIGIN chunk, and so does
+                            // every alert key. Parsed, not split by hand
+                            // (#475).
+                            if let Some(origin) =
+                                zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
+                                    .map(|p| p.origin.to_string())
+                            {
+                                let dropped = self.exporter.drop_origin_alert_spans(&origin);
+                                if dropped > 0 {
+                                    info!(
+                                        origin = %origin,
+                                        dropped,
+                                        "Sensor liveliness lost; forgot its open alert lifecycles"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => warn!("Error receiving liveliness sample: {}", e),
                     }
                 }
 
