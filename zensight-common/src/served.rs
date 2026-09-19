@@ -143,8 +143,29 @@ pub struct WriteQueryable {
 }
 
 /// One call on a write procedure. See [`WriteQueryable`].
+///
+/// # Dropping one is a third answer, and it is recorded (#1156)
+///
+/// [`executed`](Self::executed), [`executed_but`](Self::executed_but) and
+/// [`refused`](Self::refused) were designed as the only spellable answers, so
+/// that every call on a write procedure leaves an audit record. Dropping the
+/// value was a fourth path that spelled nothing: **no record and no reply**.
+/// An early `return`, a `?` on an unrelated error, or a `match` arm that falls
+/// through was enough, and the trail said the call never happened.
+///
+/// The [`Drop`] impl closes it. It records `executed` with an `error` naming
+/// the drop — the honest verdict, because the gate had already let the call
+/// through by the time a handler could drop it, and what the producer did
+/// before dropping is unknown. It **cannot reply**: `Drop` is not async. The
+/// caller sees the query end with no reply, which is what it saw before; what
+/// changes is that the trail no longer disagrees with reality.
 pub struct WriteQuery {
-    inner: zenoh::query::Query,
+    /// `None` once an answer has been given.
+    ///
+    /// An `Option` rather than a plain field because a type with a `Drop` impl
+    /// cannot have a field moved out of it, and the answer methods need to
+    /// consume the query to reply on it.
+    inner: Option<zenoh::query::Query>,
     procedure: String,
 }
 
@@ -203,7 +224,7 @@ impl WriteQueryable {
     /// Await the next call. `Err` when the session has closed.
     pub async fn recv_async(&self) -> zenoh::Result<WriteQuery> {
         self.inner.recv_async().await.map(|inner| WriteQuery {
-            inner,
+            inner: Some(inner),
             procedure: self.procedure.clone(),
         })
     }
@@ -215,14 +236,21 @@ impl WriteQueryable {
 }
 
 impl WriteQuery {
+    /// The live query. `Some` until an answer is given; see the `Drop` impl.
+    fn query(&self) -> &zenoh::query::Query {
+        self.inner
+            .as_ref()
+            .expect("a WriteQuery is only used before it answers")
+    }
+
     /// The call, with whatever the bus can say about its caller.
     pub fn request(&self) -> crate::rpc::RpcRequest {
-        crate::rpc::RpcRequest::from_query(&self.inner)
+        crate::rpc::RpcRequest::from_query(self.query())
     }
 
     /// The selector's parameters, for a procedure that takes some.
     pub fn parameters(&self) -> &zenoh::query::Parameters<'static> {
-        self.inner.parameters()
+        self.query().parameters()
     }
 
     /// The procedure this call is on, as it appears in an audit record.
@@ -248,7 +276,7 @@ impl WriteQuery {
     /// it was asked to. The verdict is still `executed` — the gate said yes and
     /// the producer acted — with the failure recorded in `error`.
     pub async fn executed_but(
-        self,
+        mut self,
         reply_key: &str,
         payload: impl Into<zenoh::bytes::ZBytes>,
         target: Option<&str>,
@@ -259,7 +287,9 @@ impl WriteQuery {
             .with_error(error);
         rec.target = target.map(str::to_string);
         crate::audit::record(&rec);
-        self.inner.reply(reply_key, payload).await
+        // `take` marks this call answered, so the `Drop` impl stays quiet.
+        let inner = self.inner.take().expect("a WriteQuery answers once");
+        inner.reply(reply_key, payload).await
     }
 
     /// Refuse the call, recording which switch refused it.
@@ -268,7 +298,7 @@ impl WriteQuery {
     /// (#866); failing that, the error *name*, which is at least a true
     /// statement about the class that refused.
     pub async fn refused(
-        self,
+        mut self,
         err: &crate::rpc::RpcError,
         target: Option<&str>,
     ) -> zenoh::Result<()> {
@@ -279,7 +309,27 @@ impl WriteQuery {
         rec.error = Some(err.message.clone());
         crate::audit::record(&rec);
         let payload = serde_json::to_vec(err).unwrap_or_default();
-        self.inner.reply_err(payload).await
+        let inner = self.inner.take().expect("a WriteQuery answers once");
+        inner.reply_err(payload).await
+    }
+}
+
+impl Drop for WriteQuery {
+    /// A handler that dropped the call still called a write procedure (#1156).
+    fn drop(&mut self) {
+        if self.inner.is_none() {
+            return; // answered properly
+        }
+        let mut rec = crate::audit::AuditRecord::executed(&self.procedure)
+            .with_request(&self.request())
+            .with_error(Some("handler dropped the call".to_string()));
+        rec.target = None;
+        crate::audit::record(&rec);
+        tracing::warn!(
+            procedure = %self.procedure,
+            "a write call was dropped without an answer — no reply was sent, and \
+             what the producer did before dropping is unknown (#1156)"
+        );
     }
 }
 

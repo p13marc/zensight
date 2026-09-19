@@ -31,6 +31,21 @@ a write procedure is not something a call site can spell.
 The record goes out *before* the reply on purpose: a lost reply is a retry, a
 lost record is a hole.
 
+**Dropping the value was a third answer, and it spelled nothing** (#1156).
+All three methods consume the `WriteQuery`, which is what makes "no `reply`, no
+`reply_err`" enforceable — and it also meant that simply *dropping* it wrote no
+record and sent no reply. An early `return`, a `?` on an unrelated error, or a
+`match` arm that falls through was enough, and the trail said the call never
+happened.
+
+`WriteQuery` now has a `Drop` impl that records `verdict=executed` with
+`error="handler dropped the call"`. `executed` is the honest verdict: by the
+time a handler can drop the value the gate has already let the call through,
+and what the producer did before dropping is unknown — "refused" would claim a
+gate said no when none did. It **cannot reply**, because `Drop` is not async;
+the caller sees the query end with no reply exactly as before. What changes is
+that the trail no longer disagrees with reality.
+
 Three checks back that up, in decreasing order of strength:
 
 1. **The type**, above.

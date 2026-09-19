@@ -769,6 +769,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A dropped write call left no audit record and no reply** (#1156).
+  `served::WriteQuery` exposes no `reply` and no `reply_err`: the only ways to
+  answer are `executed` / `executed_but` and `refused`, each writing its record
+  before replying, so "an unaudited answer is not something a call site can
+  spell" (#957). All three consume the value — which is what makes that
+  enforceable, and which also made **dropping** it a third path that spelled
+  nothing. An early `return`, a `?` on an unrelated error, or a `match` arm
+  that falls through was enough, and the trail said the call never happened.
+
+  `WriteQuery` now has a `Drop` impl recording `verdict=executed` with
+  `error="handler dropped the call"`. `executed` is the honest verdict: by the
+  time a handler can drop the value the gate has already let the call through,
+  and what the producer did before dropping is unknown — "refused" would claim
+  a gate said no when none did. It cannot reply, because `Drop` is not async;
+  the caller sees the query end with no reply exactly as before. What changes
+  is that the trail no longer disagrees with reality.
+
 - **A key published under two QoS classes silently rode the first one**
   (#1155). A Zenoh publisher carries its congestion control, priority,
   reliability and express flag from the moment it is declared and they cannot
