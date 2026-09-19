@@ -330,6 +330,9 @@ pub struct ZenSight {
     bandwidth: crate::view::bandwidth::BandwidthState,
     /// Fleet capabilities: what each host's build says it serves (#469).
     fleet: crate::view::fleet::FleetState,
+    /// Whether this process has ever been connected (#1116), so the freshness
+    /// indicator can tell a *re*connect from the first one.
+    has_connected: bool,
     /// Bus-explorer view state (#748): the live key-tree and its ledgers.
     explorer: crate::view::explorer::ExplorerState,
     /// Command handle on the running explorer pump (`None` = no pump). The
@@ -582,6 +585,7 @@ impl ZenSight {
             incidents: crate::view::incident::IncidentsState::default(),
             bandwidth: crate::view::bandwidth::BandwidthState::default(),
             fleet: crate::view::fleet::FleetState::default(),
+            has_connected: false,
             explorer: crate::view::explorer::ExplorerState::default(),
             explorer_ctl: None,
             // In demo mode keep history in-memory only (no disk churn / restart survival
@@ -2393,15 +2397,39 @@ impl ZenSight {
             }
 
             Message::AlertsSeed(alerts) => {
-                // Late-joiner seed: populate the firing set without toasting (these
-                // alerts fired before we connected).
-                for (origin, alert) in alerts {
-                    self.alerts.ingest_external_from(origin, alert);
-                }
+                // Late-joiner seed: **replace** the firing set, without
+                // toasting (these alerts fired before we connected).
+                //
+                // Replace, not add (#1116). An alert that resolved while this
+                // GUI was disconnected had its `Resolved` sample and tombstone
+                // delivered to a subscriber that no longer existed; the seed
+                // returns only what is *still* firing, so an additive seed
+                // left the resolved one in place for the life of the process —
+                // counted by the badge, drawn on the topology overlay, grouped
+                // into incidents, un-acknowledgeable.
+                self.alerts.seed_external(alerts);
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
                 self.refresh_netring_anomalies();
+            }
+
+            Message::CatalogSeed(snapshot) => {
+                // The same rule for the three operator-authored classes
+                // (#1116): a seed is a statement about a whole class, so it
+                // replaces one. An ack lifted, a silence expired or an
+                // incident closed while this GUI was away is gone from the
+                // catalog and must be gone from here.
+                let snapshot = *snapshot;
+                self.alerts.set_acks(
+                    snapshot
+                        .acks
+                        .into_iter()
+                        .map(|a| (a.alert_ref.clone(), a))
+                        .collect(),
+                );
+                self.alerts.set_silences(snapshot.silences);
+                self.alerts.set_incidents(snapshot.incidents);
             }
 
             Message::EntitySeed(entities) => {
@@ -2567,6 +2595,26 @@ impl ZenSight {
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Connected;
                 self.dashboard.last_error = None;
+                // The moment of RE-connect, for the freshness indicator
+                // (#1116). Without it a reconnected GUI looks exactly like one
+                // that has been watching all along, and the difference is
+                // whether anything on screen spans a gap.
+                //
+                // Not on the first connect of the process: nothing on screen
+                // predates it, so there is no gap to mark and a marker that is
+                // always on says nothing.
+                if self.has_connected {
+                    self.dashboard.reconnected_at =
+                        Some(zensight_common::current_timestamp_millis());
+                }
+                self.has_connected = true;
+
+                // The fleet sweep is asked once on open, because its answer is
+                // a build property (#745). It is also a *pre-disconnect*
+                // inventory the moment the session drops — a host that went
+                // away, or one that was redeployed, is not in it — so the
+                // reconnect invalidates it and the next open re-asks (#1116).
+                self.fleet.rows = crate::view::specialized::fetch::Fetch::Idle;
 
                 // Constrained profile (#364): there is no AdvancedSubscriber
                 // history burst on (re)connect, so seed the logs buffer from
@@ -6861,6 +6909,42 @@ impl ZenSight {
             device.focused = focus.as_deref() == Some(origin.as_str());
             device.origin = Some(origin);
         }
+        self.drop_state_outside_focus();
+    }
+
+    /// Drop every projection that the new subscription scope cannot keep true
+    /// (#1116).
+    ///
+    /// `SetFocusHost` re-declares the subscription narrowed to one origin, and
+    /// the other forty-nine hosts' alerts, sensor health, known sensors,
+    /// recent errors and interface tables were **frozen with no subscriber
+    /// that could retire them**. They stayed on the dashboard, in the badge
+    /// and on the map, at whatever value they held the moment focus was
+    /// entered, for as long as focus lasted.
+    ///
+    /// Un-focusing did not fix it: the liveliness replay covers only tokens
+    /// that are *currently alive*, so a sensor that died during focus has no
+    /// transition left to deliver and its stale row survives the un-focus too.
+    ///
+    /// Dropping is the honest answer. A projection the GUI is no longer
+    /// subscribed to is not *stale*, it is **unobserved** — and showing an
+    /// unobserved value as though it were current is the failure this whole
+    /// crate is arranged against. Focus re-seeds on connect, so the host in
+    /// scope fills in immediately.
+    fn drop_state_outside_focus(&mut self) {
+        let Some(focus) = self.link.focus.clone() else {
+            // Leaving focus: the seed that follows the reconnect replaces
+            // every class, so nothing has to be dropped here. What must not
+            // happen is keeping the one-host view's *narrowed* sets as though
+            // they described the fleet — and they do not, because they were
+            // scoped to one origin while focused.
+            self.alerts.external.clear();
+            self.alerts.external_origins_mut().clear();
+            self.dashboard.devices.clear();
+            return;
+        };
+        self.alerts.retain_origin(&focus);
+        self.dashboard.devices.retain(|id, _| id.origin == focus);
     }
 
     /// The parallax `stream/set` write key for `source`'s host: the concrete
@@ -9015,6 +9099,7 @@ impl ZenSight {
                 crate::history::TimeCursor::Live => None,
             },
             self.scrub_truncated,
+            self.dashboard.reconnected_at,
             main_view,
         );
 

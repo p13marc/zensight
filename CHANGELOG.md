@@ -590,6 +590,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gui: an alert that resolved during a blip stayed firing forever, and focus
+  mode froze the other forty-nine hosts** (#1116). `AlertsSeed` and the
+  catalog's ack / silence / incident seeds only **added**; only `EntitySeed`
+  replaced.
+
+  So a two-minute disconnect left the GUI permanently wrong. The alert resolves
+  on the bus while the GUI is away; its `Resolved` sample and its tombstone are
+  delivered to a subscriber that no longer exists; the seed on reconnect returns
+  only what is *still* firing. The resolved one therefore stayed in
+  `alerts.external` for the life of the process — **counted by the badge**,
+  drawn on the topology overlay, grouped into incidents, and un-acknowledgeable.
+
+  A seed is a **snapshot of a class**, so it replaces one. Three things make
+  that work:
+
+  - **the seed is yielded even when empty.** `if !seeded.is_empty()` was the
+    other half of the bug: an empty snapshot is the answer "nothing is firing",
+    and it has to replace just as loudly as a full one;
+  - **acks, silences and incidents arrive as one `CatalogSeed`** rather than as
+    a stream of additive `*Received` messages;
+  - **the live subscriber is declared before the seed GET is issued**, so a
+    sample that arrives while the GET is in flight is delivered *after* the seed
+    and re-adds itself. That is what makes replacing safe rather than lossy.
+
+  **Focus mode drops what leaves scope.** `SetFocusHost` re-declares the
+  subscription narrowed to one origin, and the other hosts' alerts and devices
+  had no subscriber that could retire them — frozen at whatever value they held
+  when focus was entered. Un-focusing did not fix it: the liveliness replay
+  covers only tokens that are *currently alive*, so a sensor that died during
+  focus has no transition left to deliver. A projection the GUI is no longer
+  subscribed to is not *stale*, it is **unobserved**, and showing an unobserved
+  value as though it were current is the failure this crate is arranged against.
+
+  The reconnect also invalidates the **fleet sweep** — asked once on open
+  because its answer is a build property, and a pre-disconnect inventory the
+  moment the session drops — and is marked in the freshness indicator for two
+  minutes, because a reconnected GUI otherwise looks exactly like one that has
+  been watching all along. Not on the first connect of the process: nothing on
+  screen predates it, and a marker that is always on says nothing.
+
+  The issue's acceptance criterion is
+  `an_alert_resolved_during_a_blip_is_gone_after_the_reconnect`.
+
 - **gui: closing the window threw away the last fifteen seconds of history, and
   every parallax stream's refcount** (#1119). Flush batches drain every 15
   ticks; `main.rs` registered no `window::close_requests()` subscription,

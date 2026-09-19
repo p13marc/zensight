@@ -105,10 +105,18 @@ pub fn age_string(age_ms: i64) -> String {
 
 /// The global freshness indicator for the top bar: a colored dot, the verdict
 /// label, and (when there is data) an "as of HH:MM:SS" stamp.
+/// How long after a reconnect the indicator says so (#1116).
+///
+/// Two minutes. Long enough that an operator who looked away during the blip
+/// still sees it, short enough that it does not become furniture — a marker
+/// that is always on says nothing.
+const RECONNECT_NOTICE_MS: i64 = 2 * 60 * 1000;
+
 pub fn freshness_indicator<'a>(
     connected: bool,
     last_update_ms: Option<i64>,
     now_ms: i64,
+    reconnected_at: Option<i64>,
 ) -> Element<'a, Message> {
     let verdict = Freshness::compute(connected, last_update_ms, now_ms);
     let dot = text("\u{25CF}") // ● filled circle — redundant with the label, never color-alone.
@@ -132,6 +140,23 @@ pub fn freshness_indicator<'a>(
                 color: Some(theme::colors(theme).text_dimmed()),
             },
         ));
+    }
+
+    // The moment of reconnect (#1116). A reconnected GUI otherwise looks
+    // exactly like one that has been watching all along, and the difference is
+    // whether anything on screen spans a gap — alerts that resolved during the
+    // blip, a host that went away, a sensor that was redeployed.
+    if let Some(at) = reconnected_at
+        && now_ms.saturating_sub(at) < RECONNECT_NOTICE_MS
+        && let Some(clock) = as_of_clock(Some(at))
+    {
+        content = content.push(
+            text(format!("· reconnected {clock}"))
+                .size(font::CAPTION)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(theme::colors(theme).text_dimmed()),
+                }),
+        );
     }
 
     content.into()

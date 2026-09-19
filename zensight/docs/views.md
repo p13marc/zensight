@@ -74,6 +74,48 @@ it is what lets you un-focus, or focus straight onto a different host. Focus is
 runtime-only — it is not persisted to `settings.json5`, and the configured
 `subscription_scope` is left untouched underneath it.
 
+**Everything outside the new scope is dropped, not kept** (#1116). The other
+forty-nine hosts' alerts and devices had no subscriber that could retire them
+while focused, so they were frozen at whatever value they held the moment focus
+was entered — and un-focusing did not fix it, because the liveliness replay
+covers only tokens that are *currently alive*: a sensor that died during focus
+has no transition left to deliver.
+
+Dropping is the honest answer. A projection the GUI is no longer subscribed to
+is not *stale*, it is **unobserved**, and showing an unobserved value as though
+it were current is the failure this whole crate is arranged against. The
+re-declared subscription re-seeds immediately, so the host in scope fills in at
+once.
+
+## Reconnect reconciles (#1116)
+
+A seed is a **snapshot of a class**, so it replaces one.
+
+That was true of `EntitySeed` and of nothing else. `AlertsSeed` and the
+catalog's ack / silence / incident seeds only *added*, so a two-minute blip left
+the GUI permanently wrong: an alert resolves while disconnected, its `Resolved`
+sample and tombstone go to a subscriber that no longer exists, and the seed on
+reconnect returns only what is *still* firing. The resolved one stayed in
+`alerts.external` for the life of the process — counted by the badge, drawn on
+the topology overlay, grouped into incidents, un-acknowledgeable.
+
+Three things make it work:
+
+- **the seed is yielded even when empty.** `if !seeded.is_empty()` was the bug's
+  other half: an empty snapshot is the answer *"nothing is firing"*, and it has
+  to replace just as loudly as a full one;
+- **the acks, silences and incidents arrive as one snapshot per class**
+  (`CatalogSeed`) rather than as a stream of additive `*Received` messages;
+- **the live subscriber is declared before the seed GET is issued**, so a sample
+  that arrives while the GET is in flight is delivered *after* the seed and
+  re-adds itself. That is what makes replacing safe.
+
+The reconnect also **invalidates the fleet sweep**, whose answer is a build
+property asked once on open and is a pre-disconnect inventory the moment the
+session drops; and it is marked in the freshness indicator for two minutes,
+because a reconnected GUI otherwise looks exactly like one that has been
+watching all along.
+
 ## Overlays (not routable)
 
 Three surfaces render *on top of* the current view rather than replacing it, so

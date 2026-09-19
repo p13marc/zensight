@@ -281,6 +281,7 @@ fn shell_ui() -> iced_test::Simulator<'static, Message> {
         None,
         None,
         false,
+        None,
         content,
     ))
 }
@@ -300,6 +301,7 @@ fn test_shell_shows_freshness_live() {
         None,
         None,
         false,
+        None,
         content,
     ));
     assert!(ui.find("Live").is_ok());
@@ -318,6 +320,7 @@ fn test_shell_shows_freshness_paused() {
         None,
         None,
         false,
+        None,
         content,
     ));
     assert!(ui.find("Paused").is_ok());
@@ -466,6 +469,7 @@ fn test_focus_mode_offers_a_way_out() {
         Some("server01".to_string()),
         None,
         false,
+        None,
         content,
     ));
     assert!(shell.find("Focused on server01").is_ok());
@@ -4240,6 +4244,7 @@ fn test_nav_opens_logs() {
         None,
         None,
         false,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Logs");
@@ -4263,6 +4268,7 @@ fn test_nav_opens_incidents() {
         None,
         None,
         false,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Incidents");
@@ -4286,6 +4292,7 @@ fn test_nav_opens_inventory() {
         None,
         None,
         false,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Inventory");
@@ -7763,6 +7770,7 @@ fn test_time_cursor_strip_announces_the_mode_and_returns_to_live() {
         None,
         Some(now - 2 * 3_600_000), // two hours back
         false,
+        None,
         content,
     ));
     assert!(
@@ -7798,6 +7806,7 @@ fn test_no_time_cursor_strip_when_live() {
         None,
         None,
         false,
+        None,
         content,
     ));
     assert!(
@@ -7822,6 +7831,7 @@ fn test_a_truncated_scrub_window_says_so() {
         None,
         Some(now - 3_600_000),
         true,
+        None,
         content,
     ));
     assert!(

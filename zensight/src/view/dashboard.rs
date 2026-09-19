@@ -178,6 +178,14 @@ pub enum ConnectionState {
 pub struct DashboardState {
     /// All known devices, keyed by DeviceId.
     pub devices: HashMap<DeviceId, DeviceState>,
+    /// When this session last (re)connected, epoch millis (#1116).
+    ///
+    /// `None` on the first connect of the process — there is nothing to mark,
+    /// because nothing on screen predates it. `Some` after a *re*connect, and
+    /// the freshness indicator says so: a reconnected GUI otherwise looks
+    /// exactly like one that has been watching all along, and the difference
+    /// is whether anything on screen is known to be current.
+    pub reconnected_at: Option<i64>,
     /// Active protocol filters (empty = show all).
     pub protocol_filters: std::collections::HashSet<Protocol>,
     /// Search filter for device names (applied after debounce).
@@ -230,6 +238,7 @@ impl Default for DashboardState {
     fn default() -> Self {
         Self {
             devices: HashMap::new(),
+            reconnected_at: None,
             protocol_filters: std::collections::HashSet::new(),
             search_filter: String::new(),
             pending_search: String::new(),
