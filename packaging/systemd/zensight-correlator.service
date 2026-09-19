@@ -30,6 +30,36 @@ StateDirectoryMode=0700
 # publishes entities, binds nothing, and makes no privileged syscall.
 CapabilityBoundingSet=
 
+# Sandbox (#1204). The four newest units (bmc/container/probe/pve) carried this
+# block and the sixteen older ones did not — a difference worth four points of
+# `systemd-analyze security` exposure that came from writing order, not from
+# anything these processes require.
+#
+# It subscribes to the bus and publishes entity documents: AF_INET/AF_INET6
+# for Zenoh, AF_UNIX for a local router socket. No devices, no other process's
+# /proc, no kernel interfaces.
+#
+# If you build this binary with `--features zensight-common/linux-audit`
+# (#957), add AF_NETLINK to RestrictAddressFamilies: the audit writer sends one
+# AUDIT_USYS_CONFIG datagram per write-procedure outcome, and without the
+# family it silently falls back to the `zensight::audit` tracing target.
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
 # The cgroup backstop (#812/#813/#1092). A STARTING POINT, not a measurement:
 # measure yours with `just fleet-sizing`, which reads the health doc's
 # self_stats. Keep it ABOVE this unit's `resources.budget_rss_mb` so the shed

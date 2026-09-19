@@ -769,6 +769,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Nine units went from 5.6 to 1.7 `systemd-analyze security` exposure — the
+  gap was writing order, not requirement** (#1204). Four units
+  (`bmc`/`container`/`probe`/`pve`, the newest) carried the full sandbox block;
+  the other sixteen carried a thinner, older template, and the difference is
+  worth about four points. `correlator`, `desired`, both exporters,
+  `historian`, `gnmi`, `netflow` and `snmp` are pure socket-and-disk processes
+  — the block costs them nothing, and they now carry it.
+
+  `modbus` lands at **1.9** rather than 1.7 because `PrivateDevices` is
+  deliberately left off it: the sensor also speaks Modbus RTU over a serial
+  port (`port: "/dev/ttyUSB0"`), and a private `/dev` holds only
+  null/zero/full/random/urandom/tty — the port would simply not be there, and
+  an RTU deployment would start cleanly and read nothing.
+
+  **Seven are deliberately untouched**, because each is one line away from a
+  sensor that starts cleanly and collects nothing: `netlink` and `netring`
+  need `AF_NETLINK`/`AF_PACKET` and `bpf(2)`; `ProtectProc=invisible` would
+  hide from `sysinfo` the processes that are most of what it reports;
+  `PrivateDevices` would take `/dev/video*` from `parallax`; `logs` binds 514
+  and reads the journal; `systemd` drives the D-Bus Manager API; `hostspec`
+  asserts on operator-chosen paths. Those want a host, not an argument, and
+  the README says so per unit.
+
+  **The score is now generated.** `scripts/packaging-check.sh --table` emits an
+  Exposure column beside capabilities and `MemoryMax`, and CI already fails on
+  a stale table — so a unit that *loses* hardening shows up as a diff instead
+  of in a re-measurement months later. The generator refuses to run without
+  `systemd-analyze` rather than printing an empty column, because a silently
+  absent check reads exactly like a passing one.
+
 - **Seven documentation claims a reader would act on and be wrong** (#1158).
   The 2026-09-06 review left a checklist of about thirty; most were fixed by
   the PRs that owned the code, and re-verifying each against the tree was the

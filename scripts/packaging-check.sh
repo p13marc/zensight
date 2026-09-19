@@ -161,12 +161,24 @@ for quad in "$QUAD_DIR"/*.container; do
 done
 
 if [ "${1:-}" = "--table" ]; then
-    echo "| Unit | Capabilities | \`MemoryMax\` | \`budget_rss_mb\` |"
-    echo "|---|---|---:|---:|"
+    # The exposure score rides in the generated table (#1204), so the README
+    # cannot drift from the units again and a unit that LOSES hardening shows
+    # up in the CI table-freshness diff. `systemd-analyze` is present on the
+    # ubuntu-24.04 runner; if it is missing we say so and fail rather than
+    # printing a table with an empty column, because a silently absent check
+    # reads exactly like a passing one.
+    if ! command -v systemd-analyze >/dev/null 2>&1; then
+        echo "packaging-check --table: systemd-analyze not found; cannot score units" >&2
+        exit 1
+    fi
+    echo "| Unit | Exposure | Capabilities | \`MemoryMax\` | \`budget_rss_mb\` |"
+    echo "|---|---|---|---:|---:|"
     for r in "${rows[@]}"; do
         IFS='|' read -r u sc qc sm qm b <<<"$r"
         caps=${sc:-—}
-        echo "| \`$u\` | ${caps// /, } | ${sm:-—} | $b |"
+        score=$(systemd-analyze security --offline=true "$SVC_DIR/$u.service" 2>/dev/null \
+            | tail -1 | grep -oE '[0-9]+\.[0-9]+ [A-Z]+')
+        echo "| \`$u\` | ${score:-?} | ${caps// /, } | ${sm:-—} | $b |"
     done
     exit 0
 fi

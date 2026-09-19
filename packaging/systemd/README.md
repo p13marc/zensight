@@ -66,43 +66,70 @@ what a compromised process could regain, and what `NoNewPrivileges=yes` alone
 does not close. Each of those units now carries an explicit empty
 `CapabilityBoundingSet=` with the reason next to it, and no unit is above 6.0:
 
-```
-$ for f in packaging/systemd/*.service; do
-    systemd-analyze security --offline=true "$f" | tail -1
-  done | sort -k1
+<!-- generated: scripts/packaging-check.sh --table ; CI fails if this is stale -->
 
-1.7 OK       bmc, probe, pve
-2.2 OK       container       (runs as root on purpose — see the end of this file)
-5.6 MEDIUM   correlator, desired, both exporters, historian, gnmi, modbus,
-             netflow, snmp, sysinfo, systemd
-5.7 MEDIUM   hostspec        (ProtectHome=read-only — an operator may assert on
-                              /home paths; everything hostspec reads, it reads
-                              read-only, and it executes nothing)
-5.7 MEDIUM   parallax        (empty set, plus DeviceAllow — see below)
-5.8 MEDIUM   logs            CAP_NET_BIND_SERVICE
-5.8 MEDIUM   netring         CAP_NET_RAW + CAP_IPC_LOCK
-5.9 MEDIUM   netlink         CAP_NET_ADMIN (+ CAP_BPF CAP_PERFMON)
-```
+| Unit | Exposure | Capabilities | `MemoryMax` | `budget_rss_mb` |
+|---|---|---|---:|---:|
+| `zensight-correlator` | 1.7 OK | — | 128M | — |
+| `zensight-desired` | 1.7 OK | — | 96M | — |
+| `zensight-exporter-otel` | 1.7 OK | — | 128M | — |
+| `zensight-exporter-prometheus` | 1.7 OK | — | 128M | — |
+| `zensight-historian` | 1.7 OK | — | 320M | 256 |
+| `zensight-sensor-bmc` | 1.7 OK | — | 96M | 72 |
+| `zensight-sensor-container` | 2.2 OK | — | 64M | 48 |
+| `zensight-sensor-gnmi` | 1.7 OK | — | 96M | 72 |
+| `zensight-sensor-hostspec` | 5.7 MEDIUM | — | 64M | 48 |
+| `zensight-sensor-logs` | 5.8 MEDIUM | NET_BIND_SERVICE | 256M | 192 |
+| `zensight-sensor-modbus` | 1.9 OK | — | 64M | 48 |
+| `zensight-sensor-netflow` | 1.7 OK | — | 128M | 96 |
+| `zensight-sensor-netlink` | 5.9 MEDIUM | BPF, NET_ADMIN, PERFMON | 128M | 96 |
+| `zensight-sensor-netring` | 5.8 MEDIUM | IPC_LOCK, NET_RAW | 512M | 448 |
+| `zensight-sensor-parallax` | 5.7 MEDIUM | — | 512M | 384 |
+| `zensight-sensor-probe` | 1.7 OK | — | 64M | 48 |
+| `zensight-sensor-pve` | 1.7 OK | — | 96M | 72 |
+| `zensight-sensor-snmp` | 1.7 OK | — | 128M | 96 |
+| `zensight-sensor-sysinfo` | 5.6 MEDIUM | — | 256M | 192 |
+| `zensight-sensor-systemd` | 5.6 MEDIUM | — | 128M | 96 |
 
-**Re-measured 2026-09-09 (#1092), and the old table was wrong in both
-directions.** It listed `bmc`, `probe` and `pve` at 5.6 and excused `container`
-as *"around 8"*; they are **1.7**, **1.7**, **1.7** and **2.2**. It omitted
-`historian` and `bmc` entirely, and put `hostspec` at 5.6 rather than 5.7.
+<!-- /generated -->
 
-The four-versus-sixteen split is not about capabilities at all — every unit
-here holds an empty or minimal set. It is that **bmc, container, probe and pve
-are the only units carrying the full sandbox block**: `PrivateTmp`,
+**Nine of the sixteen were closed in #1204.** `correlator`, `desired`, both
+exporters, `historian`, `gnmi`, `netflow`, `snmp` and `modbus` now carry the
+same full sandbox block the four newest units had — `PrivateTmp`,
 `PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`,
 `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `ProtectProc`,
 `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`,
 `LockPersonality`, `MemoryDenyWriteExecute`, `SystemCallFilter`,
-`SystemCallArchitectures` and `RestrictAddressFamilies`. The other sixteen
-carry the older, thinner template — `DynamicUser`, `NoNewPrivileges`,
-`ProtectSystem=strict`, `ProtectHome`, `CapabilityBoundingSet=` — and that
-difference is worth about **four points** of exposure. Closing it is
-[#1204](https://git.marcpardo.eu/marcpardo/zensight/issues/1204): a real
-security change, per unit, that deserves its own measurements rather than a
-ride on a consistency PR.
+`SystemCallArchitectures`, `RestrictAddressFamilies` — and each dropped from
+**5.6 to 1.7**. They are all pure socket-and-disk processes; the block costs
+them nothing, and the gap was writing order, not requirement.
+
+`modbus` lands at **1.9**, not 1.7, because `PrivateDevices` is deliberately
+left off it: the sensor also speaks Modbus RTU over a serial port
+(`port: "/dev/ttyUSB0"`), and a private `/dev` holds only
+null/zero/full/random/urandom/tty — the port would simply not be there, and an
+RTU deployment would start cleanly and read nothing. A TCP-only deployment can
+add `PrivateDevices=yes`; an RTU one wants `DeviceAllow=/dev/ttyUSB0 rw`.
+
+**Seven are still on the thin template, each for a reason that needs testing on
+real hardware, not reasoning** — this is the part of #1204 that cannot be
+closed from a score:
+
+| Unit | What the full block would break |
+|---|---|
+| `netlink` | `RestrictAddressFamilies` must name **`AF_NETLINK`**; `SystemCallFilter=@system-service` excludes `bpf(2)`, which the `ebpf` feature needs |
+| `netring` | **`AF_PACKET`** for capture and `AF_NETLINK`; same `bpf(2)` question for AF_XDP |
+| `sysinfo` | **`ProtectProc=invisible`** hides other processes — the process explorer is most of what this sensor is; `bpf(2)` again for its `ebpf` feature |
+| `parallax` | **`PrivateDevices=yes`** removes `/dev/video*`; it already carries a narrower `DeviceAllow` |
+| `logs` | binds **514**, and reads the journal — `PrivateDevices`/`ProtectProc` interact with both |
+| `systemd` | talks to the D-Bus Manager API and has the gated unit-control surface |
+| `hostspec` | asserts on operator-chosen paths, so every `Protect*` is a potential false failure |
+
+Each of those is one line that makes the sensor **start cleanly and collect
+nothing**, which is the failure this repository is most careful about — so they
+want a host, not an argument. The score above is generated by
+`scripts/packaging-check.sh --table` and checked by CI, so a unit that loses
+hardening shows up as a stale-table diff.
 
 Two of them carry a caveat in the unit rather than just a reason:
 
