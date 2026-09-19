@@ -221,11 +221,12 @@ impl<C: SensorConfig> SensorRunner<C> {
         tracing::info!(zid = %session.zid(), "Connected to Zenoh");
 
         // Create publisher
-        let publisher = Publisher::new(
-            session.clone(),
-            config.producer(),
-            Format::Json, // Default to JSON, can be overridden
-        );
+        // The operator's choice, not a second default (#1155). This was
+        // `Format::Json` with the comment "can be overridden", while
+        // `Format::default()` is CBOR — so a sensor that forgot
+        // `.with_format` published its framework documents in a format the
+        // deployment had not asked for, and five of them did.
+        let publisher = Publisher::new(session.clone(), config.producer(), config.serialization());
 
         // Health tracker publishes JSON to the origin-scoped
         // `state/<producer>/health` (publish_health ignores the publisher's

@@ -302,6 +302,16 @@ impl GnmiConfig {
 }
 
 impl zensight_sensor_core::SensorConfig for GnmiConfig {
+    /// The operator's `serialization`, for the framework documents too
+    /// (#1155). Without this the runner's own publisher kept its old
+    /// hard-coded JSON while this sensor's telemetry used the configured
+    /// format — the two disagreed and nothing said so.
+    fn serialization(&self) -> zensight_common::Format {
+        // gnmi keeps its own `SerializationFormat` enum with a `From` to the
+        // shared one, so the conversion happens here.
+        self.gnmi.serialization.into()
+    }
+
     fn zenoh(&self) -> &ZenohConfig {
         &self.zenoh
     }

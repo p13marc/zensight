@@ -321,6 +321,27 @@ link — but an alert is the one class where the latency is the point, and the
 ratified alert profile says so. This page claimed "off for every class" through
 0.13, which was the blanket `false` the code had already moved away from.
 
+### One key, one class (#1155)
+
+A Zenoh publisher carries its congestion control, priority, reliability and
+express flag **from the moment it is declared**, and they cannot be changed
+afterwards. `PublisherRegistry` caches one publisher per key, so the *first*
+class a key is published under is the one every later publication on that key
+gets — whatever class it asked for.
+
+That substitution used to be silent: `ensure` returned early on "a publisher
+exists" without comparing the class. It is dangerous in one direction in
+particular — a key first published as `Telemetry` (BestEffort, **Drop**) and
+later as `Alert` keeps BestEffort and Drop, so the one class that exists to be
+undroppable becomes droppable and nothing says so.
+
+The registry now records the declared class beside the publisher and reports a
+mismatch: a `warn!` naming the key and both classes, in release as well as
+debug, plus a `debug_assert!` so a test hits it hard. The publisher is still
+reused — tearing one down mid-flight would lose what is in flight and could not
+un-send what has already gone — so **the rule is a caller's obligation**: pick
+one class per key and keep it.
+
 Apply a class with the getters on a Zenoh publisher/put/declare builder (`.congestion_control(q.congestion_control())`,
 `.priority(q.priority())`, `.express(q.express())`, `.reliability(q.reliability())`).
 

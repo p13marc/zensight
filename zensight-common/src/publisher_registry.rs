@@ -75,7 +75,11 @@ impl PublishCounters {
 /// Caches one declared [`Publisher`] per key expression.
 pub struct PublisherRegistry {
     session: Arc<Session>,
-    publishers: RwLock<HashMap<String, Publisher<'static>>>,
+    /// `key -> (publisher, the class it was DECLARED with)`.
+    ///
+    /// The class is kept so a second `ensure` under a different class can be
+    /// reported (#1155) instead of silently riding the first one's QoS.
+    publishers: RwLock<HashMap<String, (Publisher<'static>, QosClass)>>,
     counters: Arc<PublishCounters>,
     /// Watches every point published through [`Self::put_point`] (#930).
     ///
@@ -116,20 +120,62 @@ impl PublisherRegistry {
     }
 
     /// Declare (once) and cache the publisher for `key` with the class's QoS.
+    ///
+    /// # A key may only have one QoS class (#1155)
+    ///
+    /// A Zenoh publisher carries its congestion control, priority, reliability
+    /// and express flag from the moment it is declared; they cannot be changed
+    /// afterwards. So the **first** class a key is published under is the one
+    /// every later publication on that key gets, whatever class it asked for.
+    ///
+    /// This used to return early on `contains_key` alone, which made that
+    /// substitution silent and let it happen in the dangerous direction: a key
+    /// first published as `Telemetry` (BestEffort, **Drop**) and later as
+    /// `Alert` keeps BestEffort/Drop — so the one class that exists to be
+    /// undroppable becomes droppable, and nothing says so.
+    ///
+    /// The publisher is still reused, because tearing one down and
+    /// re-declaring it mid-flight would lose whatever is in flight and would
+    /// not fix the publications already sent. What changes is that the
+    /// mismatch is **reported**: a `warn!` naming both classes, in release as
+    /// well as debug, plus a `debug_assert!` so a test hits it hard.
     async fn ensure(&self, key: &str, qos: QosClass) -> Result<()> {
         {
-            if self.publishers.read().await.contains_key(key) {
+            if let Some((_, declared)) = self.publishers.read().await.get(key) {
+                Self::check_class(key, *declared, qos);
                 return Ok(());
             }
         }
         let mut publishers = self.publishers.write().await;
-        if publishers.contains_key(key) {
+        if let Some((_, declared)) = publishers.get(key) {
+            Self::check_class(key, *declared, qos);
             return Ok(());
         }
         // Owned String → `KeyExpr<'static>` so the cached publisher is `'static`.
         let publisher = crate::qos::declare_publisher(&self.session, key.to_string(), qos).await?;
-        publishers.insert(key.to_string(), publisher);
+        publishers.insert(key.to_string(), (publisher, qos));
         Ok(())
+    }
+
+    /// Report a key published under a second QoS class (#1155).
+    ///
+    /// Separated so the test can reason about the rule without a session.
+    fn check_class(key: &str, declared: QosClass, asked: QosClass) {
+        if declared == asked {
+            return;
+        }
+        tracing::warn!(
+            key = %key,
+            declared = ?declared,
+            asked = ?asked,
+            "key already has a declared publisher under a different QoS class; \
+             the publication rides the DECLARED class — a Zenoh publisher's QoS \
+             is fixed at declare time and cannot be changed (#1155)"
+        );
+        debug_assert!(
+            false,
+            "{key} declared as {declared:?} and published as {asked:?}: one key, one class"
+        );
     }
 
     /// Publish `payload` on `key` via its declared publisher.
@@ -141,6 +187,7 @@ impl PublisherRegistry {
         publishers
             .get(key)
             .expect("publisher just ensured")
+            .0
             .put(payload)
             .await?;
         self.counters.record_publish(bytes);
@@ -165,6 +212,7 @@ impl PublisherRegistry {
         publishers
             .get(key)
             .expect("publisher just ensured")
+            .0
             .put(payload)
             .encoding(encoding)
             .await?;
@@ -213,6 +261,7 @@ impl PublisherRegistry {
         publishers
             .get(key)
             .expect("publisher just ensured")
+            .0
             .delete()
             .await?;
         Ok(())
@@ -226,5 +275,39 @@ impl PublisherRegistry {
     /// Whether no publisher has been declared yet.
     pub async fn is_empty(&self) -> bool {
         self.len().await == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1155: a Zenoh publisher's QoS is fixed at declare time, so the first
+    /// class a key is published under is the one every later publication gets.
+    /// Asking for a second class is a bug in the caller, and it used to be
+    /// silent.
+    ///
+    /// The dangerous direction is this one: a key first seen as `Telemetry`
+    /// (BestEffort, **Drop**) and later published as `Alert` keeps BestEffort
+    /// and Drop — so the one class that exists to be undroppable becomes
+    /// droppable.
+    #[test]
+    #[should_panic(expected = "one key, one class")]
+    fn a_second_qos_class_on_one_key_is_caught() {
+        PublisherRegistry::check_class(
+            "v1/h-000000000000/state/snmp/alert/x",
+            QosClass::Telemetry,
+            QosClass::Alert,
+        );
+    }
+
+    /// The ordinary case: the same key, the same class, every time.
+    #[test]
+    fn the_same_class_twice_is_fine() {
+        PublisherRegistry::check_class(
+            "v1/h-000000000000/telemetry/snmp/cpu",
+            QosClass::Telemetry,
+            QosClass::Telemetry,
+        );
     }
 }
