@@ -45,6 +45,39 @@
 //! itself, and filing its series under its own name would put them on no
 //! host's card at all.
 
+/// The `{chassis}` chunk: which chassis, of which endpoint, a key and an
+/// alert label name.
+///
+/// **Both halves are load-bearing.** The Redfish chassis id is `1`, `2`,
+/// `Self` or `Enclosure` — a name that is unique inside one service and
+/// nowhere else, so it cannot stand alone on a fleet. The endpoint name is
+/// unique on the fleet and says nothing about *which* chassis, so it cannot
+/// stand alone on a blade enclosure or a four-node twin, where one Redfish
+/// service fronts several (#1130). One chunk rather than two levels keeps the
+/// registry families as they are: `{chassis}` is a wildcard chunk and does not
+/// care what is in it.
+///
+/// It is deliberately NOT conditional on how many chassis this sweep found. A
+/// disambiguator that appears when a second chassis shows up and vanishes when
+/// it drops out moves every series of the survivor, and its old state document
+/// becomes an LWW ghost nothing ever overwrites.
+///
+/// (When #1153's `device_chunk()` lands in `sensor-core`, this is the caller
+/// it should replace.)
+pub fn chassis_chunk(endpoint: &str, chassis_id: &str) -> String {
+    zenkey::Chunk::slug(format!("{endpoint}-{chassis_id}"))
+        .as_str()
+        .to_string()
+}
+
+/// The chunk for a fact about the **endpoint** rather than about any one
+/// chassis: `reachable`, and the `bmc-unreachable` assertion. A BMC that did
+/// not answer produced no chassis list, so there is nothing else to name it
+/// with.
+pub fn endpoint_chunk(endpoint: &str) -> String {
+    zenkey::Chunk::slug(endpoint).as_str().to_string()
+}
+
 pub mod alerts;
 pub mod config;
 pub mod ipmi;

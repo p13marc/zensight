@@ -8,6 +8,14 @@
 # or fans either: SYS-SUP-010 was met only on hosts that happened to have
 # hwmon.
 #
+# THE `{chassis}` CHUNK is `{endpoint}-{Redfish chassis id}` (#1130). Both
+# halves are load-bearing: a Redfish chassis id is `1`, `2`, `Self` or
+# `Enclosure` — unique inside one service and nowhere else — and the endpoint
+# name says nothing about WHICH chassis, which on a blade enclosure or a
+# four-node Twin is several. It is one chunk rather than two levels because
+# `{chassis}` is a wildcard chunk and does not care what is in it, so nothing
+# here had to move.
+#
 # ATTRIBUTION (#883). The origin is the **reporting host** — the machine
 # running this sensor — and never the BMC. A managed chassis is a facet of the
 # vantage point that polls it, in exactly the sense a guest is a facet of its
@@ -125,7 +133,10 @@ description = "1 when the BMC answered this cycle, 0 when it did not — publish
 path = "chassis/{chassis}"
 class = "state"
 type = "BmcChassis"
-cardinality = 64
+# endpoint x chassis (#1130): one Redfish service fronts several chassis and
+# the chunk names both, so this is bays-per-enclosure times endpoints, not
+# endpoints.
+cardinality = 256
 ttl_s = 900
 since = "1.0"
 description = "the chassis rollup: power state, intrusion, health, firmware, identity — and WHICH Redfish surface answered (the modern PowerSubsystem/ThermalSubsystem or the legacy Power/Thermal), because a field absent on one is a different fact from one absent on the other"
@@ -202,7 +213,8 @@ path = "evidence/device/{device}"
 common = "evidence_device"
 class = "state"
 type = "HostEvidence"
-cardinality = 64
+# One document per CHASSIS (#1130), not per endpoint.
+cardinality = 256
 ttl_s = 900
 since = "1.0"
 description = "third-party identity claim about a managed chassis (observer = bmc): its serial, asset tag and, where Redfish exposes them, its NIC MACs — so the BMC's view of a machine fuses in the catalog with that machine's own sensors (RFC 06 §4)"
