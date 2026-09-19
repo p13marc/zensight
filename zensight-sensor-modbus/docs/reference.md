@@ -33,10 +33,46 @@ defaults to the local hostname unless `modbus.source` is set.
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
 
+### A silent slave is bounded, and says so (#1133)
+
+The realistic shape of a dead PLC is not a refused connection: the TCP
+handshake completes, because the kernel answers that, and then nothing comes
+back. `timeout_ms` used to apply to `tcp::connect_slave` and to nothing else,
+and `run()` awaits the poll — so the first read against such a slave stopped
+that device **permanently**, with `alive` still declared, because the sensor's
+liveliness token is about the process and not about the device.
+
+Now:
+
+- every read is wrapped in `timeout_ms`, on TCP **and** RTU;
+- `retries` is honoured, and bounds the cycle at `timeout_ms × (retries + 1)`
+  per register. A **timeout** is not retried on the same connection: the slave
+  accepted the socket and did not answer, and asking again down the same
+  half-open pipe buys another `timeout_ms` and the same silence. An error that
+  came back *as* an error — an exception response, a framing fault — is;
+- a cycle in which **no** register answered is a failed cycle, not an empty
+  one, and reaches the bus through the framework's per-device liveness. The
+  `state/modbus/device/<device>/liveness` document this page has advertised
+  since the crate existed had **no publisher** until #1133: `grep liveness
+  src/` came back empty;
+- the connection is reused across polls and dropped after a failed cycle. One
+  fresh TCP connection per poll with no `disconnect()` is how a PLC runs out —
+  they cap concurrent connections at four to eight.
+
+A register block larger than the protocol allows is refused **at startup**:
+125 registers for holding/input, 2 000 bits for coils/discrete. Above it the
+read is not slow, it is illegal — the slave answers with an exception, or a
+permissive stack truncates and this sensor publishes a short window under the
+configured names.
+
 ## Configuration
 
-JSON5, loaded with `--config`. Top-level keys: `zenoh`, `logging`, `artifacts`,
-and `modbus`.
+JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`,
+`logging`, `artifacts`, and `modbus`.
+
+`serialization` is the shared vocabulary's, CBOR by default. This sensor
+hard-coded JSON and offered no knob at all until #1133, so a deployment that
+set it got JSON from this one producer with nothing to say so.
 
 ### `modbus` block
 
@@ -55,8 +91,8 @@ and `modbus`.
 | `connection` | object | Transport (see below). |
 | `unit_id` | u8 | Modbus slave/unit id (1–247). |
 | `poll_interval_secs` | u64 | Polling cadence. |
-| `timeout_ms` | u64 | Per-request timeout. |
-| `retries` | u32 | Retry count on failure. |
+| `timeout_ms` | u64 | Per-request timeout — the connect **and** every read (#1133). |
+| `retries` | u32 | **Retries**, not attempts: `2` is up to three reads. A read that came back as an *error* is retried; one that came back as silence is not — see below. |
 | `registers[]` | array | Inline register definitions. |
 | `register_group` | string? | Reference a predefined `register_groups` entry instead of inline `registers`. |
 
