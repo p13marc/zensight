@@ -161,10 +161,25 @@ one `<prefix>_alert` gauge series with value 1:
 zensight_alert{source="host01",rule="socket-missing",severity="critical",…} 1
 ```
 
-Labels carry the alert's `source`, `rule`, `severity`, its own labels (reserved
-names are not overridden), and **`acked`** (#926 — see below). The series
-disappears when the alert resolves or its sensor tombstones it, so Alertmanager
-treats absence as resolved.
+Labels carry the alert's `alert_key`, `source`, `protocol`, `rule`, `severity`,
+`kind`, its own structured labels (reserved names are not overridden), and
+**`acked`** (#926 — see below). The series disappears when the alert resolves
+or its sensor tombstones it, so Alertmanager treats absence as resolved.
+
+### The summary is not a label (#1144)
+
+It was, and it is free text that typically embeds the measured value — *"disk
+/var 91 % full"*, *"load 14.2 > 8.0"*. Every distinct wording minted a TSDB
+series that lived for the retention period, multiplied by a churning `acked`:
+the canonical Prometheus cardinality anti-pattern, on the family that exists to
+be scraped by Alertmanager.
+
+A single scrape could not show it, which is exactly why it looked harmless —
+this exporter's own store holds one alert at a time, and the TSDB is what
+remembers. Alertmanager wants a summary as an **annotation** and gets it from
+the alert document; `alert_key` is what identifies the series. `summary`
+remains in the reserved set, so a sensor's own structured label of that name
+cannot put the free text back.
 
 Alerts are **not** staleness-swept, unlike metrics, and the difference is
 load-bearing (#758). Sensors publish alerts edge-triggered: a firing alert is
