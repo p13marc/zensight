@@ -100,12 +100,26 @@ JSON5, loaded with `--config`. Top-level keys: `zenoh`, `serialization`
 - Point the exporting devices' flow-export destination at the sensor's
   `listeners` bind address/port. Binding ports below 1024 needs elevated
   privileges; the example ports (2055/4739/9995) are unprivileged.
-- **Exporters are capped.** NetFlow is UDP with no handshake and the source
-  address is whatever the datagram says, so the per-exporter parser map — each
-  with its own template cache — is bounded and evicts least-recently-seen past
-  the cap. A real exporter re-sends its templates within its refresh interval,
-  which is the protocol's own recovery. The sampling registry is bounded the
-  same way.
+- **Exporters are capped — all three maps, at one number.** NetFlow is UDP with
+  no handshake and the source address is whatever the datagram says, so every
+  per-exporter map in this sensor is bounded at `MAX_EXPORTERS` (256) and
+  evicts least-recently-seen past it: the parser cache (each with its own
+  template state), the sampling registry, and **the rollup accumulator**.
+
+  The rollup was unbounded until #1139, which was the expensive one: a parser
+  is evicted and a real exporter re-sends its templates within its refresh
+  interval — the protocol's own recovery — but an *aggregate* that nothing
+  evicted was re-published at three or more keys, every rollup period,
+  forever. A /16 sweep was 65 000 permanent entries and a spoofing sender was
+  unbounded. Evicting a parser did not evict its aggregate.
+
+  The cap is one constant for that reason. It was written down twice, as 256
+  and 512, with the second commented as matching the first.
+
+  An evicted exporter's counters restart from zero if it comes back, which a
+  TSDB reads as a counter reset — the correct and recoverable answer, and a
+  smaller lie than an aggregate for an address that sent one spoofed datagram
+  in March.
 - v9 and IPFIX are **stateful**: a data record cannot be decoded before its
   template arrives. A sensor restarted mid-stream sees nothing from an exporter
   until its next template refresh.

@@ -76,11 +76,20 @@ Also update `flatpak/com.github.p13marc.ZenSight.metainfo.xml`: its `<releases>`
 
 | File | Note |
 |---|---|
-| `Cargo.toml` (`[workspace.package] version`) | the 25 normal crates inherit this |
+| `Cargo.toml` (`[workspace.package] version`) | the 29 crates that inherit it |
 | `zensight-sensor-netlink-ebpf/Cargo.toml` | **hardcodes its version — does not inherit** |
 | `zensight-sensor-sysinfo-ebpf/Cargo.toml` | **hardcodes its version — does not inherit** |
 
-> **Trap 1.** The two eBPF crates are the only 2 of the 27 member manifests that do not use
+> **The counts in this section were re-derived from the tree on 2026-09-09**
+> (#1158). They had said 25 crates / 27 manifests / 18 binaries / 19 images and
+> were 31 / 31 / 20 / 21 — bmc and `zensight-desired` were missing from both
+> lists. They are countable, so count them rather than trusting this file:
+> ```bash
+> python3 -c "import tomllib;print(len(tomllib.load(open('Cargo.toml','rb'))['workspace']['members']))"
+> grep -c -- '-p zensight' <(awk '/cargo build --release --locked/{print}' .forgejo/workflows/release.yml)
+> ```
+
+> **Trap 1.** The two eBPF crates are the only 2 of the 31 member manifests that do not use
 > `version.workspace = true`. They are `publish = false`, but every prior release moved them
 > and a mismatch is confusing. Verify with:
 > ```bash
@@ -96,7 +105,7 @@ Also update `flatpak/com.github.p13marc.ZenSight.metainfo.xml`: its `<releases>`
 Then regenerate the lock:
 
 ```bash
-cargo check --workspace     # updates Cargo.lock for the 27 workspace crates
+cargo check --workspace     # updates Cargo.lock for the 31 workspace crates
 ```
 
 > **Trap 2.** **Never `sed` `Cargo.lock`.** Several unrelated third-party crates
@@ -128,6 +137,23 @@ git push origin X.Y.Z
 ```
 
 
+> **The release now WAITS for CI on the tag's own commit (#1095).** `release.yml`
+> opens with a `gate` job that polls `/commits/<sha>/status` until every one of
+> `ci.yml`'s jobs has reported success, and every other job needs it. Before
+> this, images were built, smoke-tested and **pushed** while the suite might
+> still be running or red — `ci.yml`'s own header calls the tag run a "parallel
+> signal, not a gate". Expect the release run to sit in `gate` for as long as
+> the suite takes; it prints `combined state=… over n/6 status(es)` each minute
+> so you can see it waiting rather than hung. It refuses on a red suite and
+> times out after 80 minutes with instructions.
+
+> **`:latest` only moves for the newest release (#1095).** Re-dispatching an
+> older tag builds and attaches everything as before but leaves `:latest`
+> where it is, saying so in the log. Every quadlet in `packaging/` pulls
+> `:latest`, so the old behaviour meant a re-run of 0.11.0 rolled the whole
+> fleet back. The newest tag is read from the API, not from the job's shallow
+> clone, and an unreadable tag list leaves `:latest` alone rather than guessing.
+
 > **The tag takes no `v` prefix.** `release.yml` triggers on `[0-9]+.[0-9]+.[0-9]+`;
 > `v0.8.0` matches nothing and silently does nothing. Tags are **annotated** (`-a`), message
 > `ZenSight <version>[ — <theme>]`.
@@ -152,15 +178,16 @@ git push origin X.Y.Z
 Watch the run in the Actions tab. `release.yml` produces, all amd64-only:
 
 - **source tarball** + `SHA256SUMS` (release assets);
-- **`zensight-<ver>-linux-amd64.tar.gz`**: all 18 binaries (14 sensors, 2 exporters,
-  correlator, historian) with an internal `SHA256SUMS`, the `packaging/systemd/` units, and the
-  example configs — the native-install path. There is no separate `.tar.gz.sha256`
+- **`zensight-<ver>-linux-amd64.tar.gz`**: all 20 binaries (15 sensors, 2 exporters,
+  correlator, historian, `zensight-desired`) with an internal `SHA256SUMS`, the
+  `packaging/systemd/` units, and the example configs — the native-install path. There is no separate `.tar.gz.sha256`
   asset; the `checksums` job publishes one release-wide `SHA256SUMS`;
-- **19 container images** at `git.marcpardo.eu/marcpardo/<name>:{<ver>,latest}`:
-  `zensight-sensor-{logs,sysinfo,snmp,gnmi,modbus,netflow,netlink,netring,systemd,hostspec,pve,container,probe,parallax}`,
-  `zensight-exporter-{prometheus,otel}`, `zensight-correlator`, `zensight-historian`, and the all-in-one
-  `zensight-sensors` bundle (the six host sensors; parallax stays out of it on purpose —
-  see the 0.14.0 changelog);
+- **21 container images** at `git.marcpardo.eu/marcpardo/<name>:{<ver>,latest}`:
+  `zensight-sensor-{logs,sysinfo,snmp,gnmi,modbus,netflow,netlink,netring,systemd,hostspec,pve,bmc,container,probe,parallax}`,
+  `zensight-exporter-{prometheus,otel}`, `zensight-correlator`, `zensight-historian`,
+  `zensight-desired`, and the all-in-one `zensight-sensors` bundle (the six host sensors;
+  parallax stays out of it on purpose — see the 0.14.0 changelog). Since #1095 `:latest`
+  is pushed only when the tag being released is the newest semver tag in the repo;
 - **flatpak**: an unsigned `zensight-<ver>.flatpak` bundle on the release, plus a
   force-push of the OSTree export to the repo's `flatpak-export` branch — vm-edge's
   `deploy-flatpak.timer` picks that up within ~5 min, GPG-signs it, and publishes to

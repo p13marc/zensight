@@ -80,8 +80,24 @@ never returns `None`.)
 
 ### `tls`
 
-`enabled` (bool), `skip_verify` (bool — dev only), optional `ca_cert`,
-`client_cert`, `client_key` (paths; the latter two enable mTLS).
+`enabled` (bool), optional `ca_cert`, `client_cert`, `client_key` (paths; the
+latter two enable mTLS).
+
+**`skip_verify` is refused at startup** (#1137). It was documented here as
+"disables server-certificate validation — development only", shipped in
+`configs/gnmi.json5`, and did **nothing**: the connect path logged a warning
+and built the same TLS config. An operator set it, read the warning confirming
+it was off, and watched the connection keep failing `UnknownIssuer` while the
+backoff climbed to 300 s — with no per-target error document, only the log line
+they had already dismissed.
+
+A flag that cannot do what it says refuses loudly rather than sitting inert —
+the same call `bmc` makes for `ipmi` — and the refusal names `ca_cert`. Point
+it at the CA that signed the device's certificate; **a switch's own
+self-signed certificate works there**, which is what an operator reaching for
+`skip_verify` actually needs. With `tls.enabled: false` there is nothing to
+verify, so the flag is inert rather than a lie and a config carrying it still
+starts.
 
 ### `subscriptions[]`
 
@@ -99,8 +115,23 @@ never returns `None`.)
   Buffers compiler) on `PATH` at build time. Without it the build fails.
 - Enable gNMI/gRPC on the target device (common ports 9339, 6030, 50051) and
   ensure the user has gNMI/telemetry permissions.
-- `skip_verify: true` disables server-certificate validation — development only.
-  **It is currently logged and not honoured** (#1137, epic #1057); so are the
-  unslugged path elements a key is built from. Both are out of scope here.
+- **Every path element is slugged at the key boundary** (#1137). A gNMI path
+  element is a device-supplied string, and `Ethernet1/1/1` — an ordinary Arista
+  interface name — used to split the key into extra chunks, publishing that
+  leaf at a different subject depth from every other interface's. A `*`, `?` or
+  `#` in a description leaf made the key **illegal**, and the resulting `Err`
+  propagated out of `process_notification`, out of `subscribe_loop`, into
+  `run`'s error arm: a working subscription torn down and reconnected with
+  backoff because one leaf had an awkward name. A failed publish now drops the
+  **point**, not the connection.
+- **`notification.delete` tombstones the key** (#1137). It was ignored, so the
+  last value a removed leaf ever had stayed on the bus forever — a chart
+  showing the optical power of a transceiver that is in someone's pocket.
+  Deletes are applied before updates, so a notification carrying both for one
+  path leaves the update standing.
+- **Two targets may not share a `name`** (#1137), as `bmc` and `probe` already
+  refuse. It is the key chunk and the `source` of every point, so a duplicate
+  publishes over the other with nothing on the bus to say which device a
+  reading came from.
 - The `artifacts.report.redact_extra` list (see the example config) can add extra
   keys — e.g. `username` — to the debug-bundle redaction set.

@@ -127,7 +127,7 @@ async fn run_listener(
 }
 
 /// Upper bound on distinct exporter addresses with live parser state.
-const MAX_EXPORTERS: usize = 256;
+use crate::fields::MAX_EXPORTERS;
 /// Receive errors in a row before a listener gives up and lets the supervisor
 /// restart the process.
 const MAX_CONSECUTIVE_RECV_ERRORS: u32 = 50;

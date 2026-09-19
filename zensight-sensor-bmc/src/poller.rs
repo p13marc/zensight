@@ -22,9 +22,19 @@ pub const STATE_QOS: QosClass = QosClass::HealthLiveness;
 #[derive(Default)]
 struct EndpointState {
     consecutive_failures: u32,
-    /// Bays this endpoint has reported present at some point. A bay that was
+    /// Bays each CHASSIS has reported present at some point. A bay that was
     /// never populated is not a bay someone emptied — see `psu-absent`.
-    known_present: BTreeSet<String>,
+    ///
+    /// Keyed by chassis id, not flat (#1130): one Redfish service fronts
+    /// several chassis and every one of them numbers its bays from `0`, so a
+    /// flat set let chassis 1 having ever held a supply make chassis 2's empty
+    /// bay 0 fire `psu-absent`.
+    known_present: HashMap<String, BTreeSet<String>>,
+    /// Chassis ids the endpoint's `/redfish/v1/Chassis` collection listed last
+    /// time it answered. A chassis that LEAVES the collection has its rules
+    /// reconciled to empty; one that is merely unsweepable this cycle does
+    /// not, because "we could not read it" is not "it recovered".
+    known_chassis: BTreeSet<String>,
     due: Option<Instant>,
 }
 
@@ -124,15 +134,19 @@ impl Poller {
             .record_poll_duration(started.elapsed().as_millis() as u64);
 
         match outcome {
-            Ok(sweeps) => {
+            Ok((listed, sweeps)) => {
                 self.health.record_device_success(&endpoint.name);
                 if let Some(state) = self.state.get_mut(&endpoint.name) {
                     state.consecutive_failures = 0;
                 }
+                // Endpoint-level, and hoisted out of the per-chassis loop:
+                // `reachable` is a fact about the BMC that answered, and
+                // publishing it once per chassis wrote the same key N times.
+                self.publish_reachable(endpoint, 1.0).await;
                 for sweep in &sweeps {
                     self.publish(endpoint, sweep).await;
                 }
-                self.assert_endpoint(endpoint, sweeps.first()).await;
+                self.assert_endpoint(endpoint, &listed, &sweeps).await;
             }
             Err(e) => {
                 // One failure is the BMC's, not each component's.
@@ -144,34 +158,46 @@ impl Poller {
                 // chassis of zeroes would be inventing readings; publishing
                 // nothing at all would be indistinguishable from a sensor that
                 // is not running.
-                self.publish_point(endpoint, "reachable", 0.0, &[]).await;
-                self.assert_endpoint(endpoint, None).await;
+                self.publish_reachable(endpoint, 0.0).await;
+                self.assert_endpoint(endpoint, &[], &[]).await;
             }
         }
     }
 
-    async fn collect(client: &RedfishClient) -> Result<Vec<ChassisSweep>, String> {
+    /// The chassis the collection LISTED, and the ones that could be swept.
+    ///
+    /// Both, because they answer different questions (#1130). A chassis the
+    /// collection stopped listing is gone and its alerts must resolve; a
+    /// chassis that is listed but whose sweep failed is unreadable this cycle
+    /// and its alerts must NOT — resolving those announces that a failed
+    /// supply is fine because we could not see it.
+    #[allow(clippy::type_complexity)]
+    async fn collect(client: &RedfishClient) -> Result<(Vec<String>, Vec<ChassisSweep>), String> {
         let ids = client.chassis_ids().await.map_err(|e| e.to_string())?;
         let mut out = Vec::new();
-        for id in ids {
-            match client.sweep(&id).await {
+        for id in &ids {
+            match client.sweep(id).await {
                 Ok(sweep) => out.push(sweep),
                 // One unreadable chassis must not cost the others.
                 Err(e) => tracing::warn!(chassis = %id, error = %e, "bmc: chassis sweep failed"),
             }
         }
-        Ok(out)
+        Ok((ids, out))
     }
 
     async fn publish(&mut self, endpoint: &Endpoint, sweep: &ChassisSweep) {
-        let chassis = zenkey::Chunk::slug(&endpoint.name).as_str().to_string();
-        self.publish_point(endpoint, "reachable", 1.0, &[]).await;
+        // THE CHASSIS, not the endpoint (#1130). Every key below used to carry
+        // the endpoint name, so on a blade enclosure or a four-node twin —
+        // one Redfish service, several chassis — chassis 1 and chassis 2 both
+        // wrote `telemetry/bmc/rack-a-1/psu/0/input_watts` and took turns
+        // overwriting each other, sweep by sweep.
+        let chassis = crate::chassis_chunk(&endpoint.name, &sweep.chassis.id);
 
         for psu in &sweep.supplies {
             let id = zenkey::Chunk::slug(&psu.id).as_str().to_string();
             let labels = [("psu", psu.id.clone())];
             self.publish_point(
-                endpoint,
+                &chassis,
                 &format!("{chassis}/psu/{id}/present"),
                 f64::from(u8::from(psu.present)),
                 &labels,
@@ -186,7 +212,7 @@ impl Poller {
                 // is what makes an empty bay legible next to a metered one.
                 if let Some(v) = value {
                     self.publish_point(
-                        endpoint,
+                        &chassis,
                         &format!("{chassis}/psu/{id}/{suffix}"),
                         v,
                         &labels,
@@ -203,7 +229,7 @@ impl Poller {
             let id = zenkey::Chunk::slug(&fan.id).as_str().to_string();
             if let Some(rpm) = fan.rpm {
                 self.publish_point(
-                    endpoint,
+                    &chassis,
                     &format!("{chassis}/fan/{id}/rpm"),
                     rpm,
                     &[("fan", fan.id.clone())],
@@ -225,7 +251,7 @@ impl Poller {
             ] {
                 if let Some(v) = value {
                     self.publish_point(
-                        endpoint,
+                        &chassis,
                         &format!("{chassis}/thermal/{id}/{suffix}"),
                         v,
                         &labels,
@@ -246,7 +272,7 @@ impl Poller {
         }
         if sweep.chassis.surface == RedfishSurface::None {
             tracing::warn!(
-                chassis = %endpoint.name,
+                chassis = %chassis,
                 "bmc: this BMC served neither PowerSubsystem/ThermalSubsystem nor the legacy \
                  Power/Thermal resources — the chassis document is identity only"
             );
@@ -255,10 +281,17 @@ impl Poller {
         self.publish_evidence(endpoint, sweep).await;
 
         // Remember which bays have ever held a supply, so `psu-absent` can
-        // tell "someone pulled it" from "this model ships with one".
+        // tell "someone pulled it" from "this model ships with one". Per
+        // CHASSIS: every chassis of a multi-chassis service numbers its bays
+        // from zero, and a flat set made chassis 1's history speak for
+        // chassis 2's empty bay (#1130).
         if let Some(state) = self.state.get_mut(&endpoint.name) {
+            let seen = state
+                .known_present
+                .entry(sweep.chassis.id.clone())
+                .or_default();
             for psu in sweep.supplies.iter().filter(|p| p.present) {
-                state.known_present.insert(psu.id.clone());
+                seen.insert(psu.id.clone());
             }
         }
     }
@@ -274,7 +307,12 @@ impl Poller {
             // a claim about identity that carries none.
             return;
         }
-        let device = zenkey::Chunk::slug(&endpoint.name).as_str().to_string();
+        // Per chassis, like every other key here. The framework table owns
+        // this subject's spelling and calls the chunk `{device}` (RFC 04
+        // §1.4); the device IS the chassis, and writing the endpoint's name
+        // here made every chassis of one service overwrite one evidence
+        // document — undoing the per-chassis identity #1110 established.
+        let device = crate::chassis_chunk(&endpoint.name, &sweep.chassis.id);
         let Some(key) = self.state_key(&["evidence", "device", &device]) else {
             return;
         };
@@ -305,58 +343,160 @@ impl Poller {
         registry.publish_serializable(&key, &evidence).await.ok();
     }
 
-    async fn assert_endpoint(&mut self, endpoint: &Endpoint, sweep: Option<&ChassisSweep>) {
+    /// Grade the endpoint, then each chassis it served — and reconcile each
+    /// one in ITS OWN namespace (#1130).
+    ///
+    /// This used to grade `sweeps.first()` and reconcile the result under the
+    /// endpoint's name. On a service fronting several chassis that was worse
+    /// than missing the others: `reconcile_labeled` resolves every alert under
+    /// the label that is not in the list it is handed, so chassis 2's failed
+    /// supply was actively **resolved** every sweep by a `still` list computed
+    /// from chassis 1.
+    async fn assert_endpoint(
+        &mut self,
+        endpoint: &Endpoint,
+        listed: &[String],
+        sweeps: &[ChassisSweep],
+    ) {
         let Some(reporter) = self.reporter.clone() else {
             return;
         };
-        let (failures, known): (u32, Vec<String>) = self
+        let failures = self
             .state
             .get(&endpoint.name)
-            .map(|s| {
-                (
-                    s.consecutive_failures,
-                    s.known_present.iter().cloned().collect(),
-                )
-            })
+            .map(|s| s.consecutive_failures)
             .unwrap_or_default();
 
-        let empty_supplies = Vec::new();
-        let empty_fans = Vec::new();
-        let empty_thermal = Vec::new();
+        // --- the endpoint's own rule ----------------------------------------
+        //
+        // `bmc-unreachable` is a statement about the Redfish service, not
+        // about any chassis behind it — a BMC that did not answer returned no
+        // chassis list to attribute it to. It reconciles in the endpoint's
+        // namespace, alone: handing the whole rule table to a reconcile here
+        // would resolve the component alerts the chassis passes below are
+        // about to re-state.
+        let endpoint_chunk = crate::endpoint_chunk(&endpoint.name);
         let obs = Observation {
             source: &self.source,
             endpoint: &endpoint.name,
-            chassis: sweep.map(|s| &s.chassis),
-            supplies: sweep.map(|s| &s.supplies).unwrap_or(&empty_supplies),
-            fans: sweep.map(|s| &s.fans).unwrap_or(&empty_fans),
-            thermal: sweep.map(|s| &s.thermal).unwrap_or(&empty_thermal),
-            known_present: &known,
+            chassis: None,
+            supplies: &[],
+            fans: &[],
+            thermal: &[],
+            known_present: &[],
             consecutive_failures: failures,
         };
         let firing = alerts::grade(&self.cfg.alerts, &obs);
-
-        let mut by_rule: HashMap<&str, Vec<String>> = HashMap::new();
-        for a in &firing {
-            let rule = alerts::ALL_RULES
-                .iter()
-                .find(|r| **r == a.rule)
-                .copied()
-                .unwrap_or("");
-            by_rule.entry(rule).or_default().push(a.alert_key());
-        }
+        let still: Vec<String> = firing.iter().map(|a| a.alert_key()).collect();
         for a in firing {
             if let Err(e) = reporter.observe(a, None).await {
                 tracing::warn!(error = %e, "bmc: alert publish failed");
             }
         }
-        // Every rule reconciles every sweep, so a cleared condition resolves
-        // instead of firing until restart — and `reconcile_labeled` scopes it
-        // to THIS chassis, because one process polls several and one
-        // chassis's recovery must not resolve another's fault.
+        if let Err(e) = reporter
+            .reconcile_labeled(alerts::RULE_UNREACHABLE, "chassis", &endpoint_chunk, &still)
+            .await
+        {
+            tracing::warn!(rule = %alerts::RULE_UNREACHABLE, error = %e, "bmc: reconcile failed");
+        }
+
+        // --- nothing else while the BMC is silent ---------------------------
+        //
+        // A BMC that did not answer produced no components. Reconciling the
+        // component rules now would resolve every one of them as "recovered" —
+        // announcing that a failed power supply is fine because we cannot see
+        // it. The same reason `grade` returns early on `chassis: None`.
+        if sweeps.is_empty() {
+            return;
+        }
+
+        // --- one pass per chassis -------------------------------------------
+        for sweep in sweeps {
+            let chunk = crate::chassis_chunk(&endpoint.name, &sweep.chassis.id);
+            let known: Vec<String> = self
+                .state
+                .get(&endpoint.name)
+                .and_then(|s| s.known_present.get(&sweep.chassis.id))
+                .map(|set| set.iter().cloned().collect())
+                .unwrap_or_default();
+            let obs = Observation {
+                source: &self.source,
+                endpoint: &endpoint.name,
+                chassis: Some(&sweep.chassis),
+                supplies: &sweep.supplies,
+                fans: &sweep.fans,
+                thermal: &sweep.thermal,
+                known_present: &known,
+                consecutive_failures: failures,
+            };
+            let firing = alerts::grade(&self.cfg.alerts, &obs);
+
+            let mut by_rule: HashMap<&str, Vec<String>> = HashMap::new();
+            for a in &firing {
+                let rule = alerts::ALL_RULES
+                    .iter()
+                    .find(|r| **r == a.rule)
+                    .copied()
+                    .unwrap_or("");
+                by_rule.entry(rule).or_default().push(a.alert_key());
+            }
+            for a in firing {
+                if let Err(e) = reporter.observe(a, None).await {
+                    tracing::warn!(error = %e, "bmc: alert publish failed");
+                }
+            }
+            self.reconcile_chassis(&reporter, &chunk, &mut by_rule)
+                .await;
+        }
+
+        // --- a chassis that LEFT the collection ------------------------------
+        //
+        // Its rules reconcile to empty, or its alerts fire until the process
+        // restarts. `listed` and not `sweeps`: a chassis the collection still
+        // names but whose sweep failed is unreadable this cycle, not gone, and
+        // resolving that one is the mistake the block above exists to avoid.
+        let now: BTreeSet<String> = listed.iter().cloned().collect();
+        let gone: Vec<String> = self
+            .state
+            .get(&endpoint.name)
+            .map(|s| s.known_chassis.difference(&now).cloned().collect())
+            .unwrap_or_default();
+        for id in &gone {
+            tracing::info!(
+                endpoint = %endpoint.name, chassis = %id,
+                "bmc: chassis left the Chassis collection; resolving its assertions"
+            );
+            let chunk = crate::chassis_chunk(&endpoint.name, id);
+            let mut empty: HashMap<&str, Vec<String>> = HashMap::new();
+            self.reconcile_chassis(&reporter, &chunk, &mut empty).await;
+        }
+        if let Some(state) = self.state.get_mut(&endpoint.name) {
+            for id in &gone {
+                state.known_present.remove(id);
+            }
+            state.known_chassis = now;
+        }
+    }
+
+    /// Reconcile every CHASSIS-scoped rule in one chassis's namespace.
+    ///
+    /// `bmc-unreachable` is excluded on purpose: it lives in the endpoint's
+    /// namespace, and reconciling it here — once per chassis, against a list
+    /// no chassis pass ever puts it in — would resolve it the moment any
+    /// chassis answered.
+    async fn reconcile_chassis(
+        &self,
+        reporter: &Arc<AlertReporter>,
+        chunk: &str,
+        by_rule: &mut HashMap<&str, Vec<String>>,
+    ) {
         for rule in alerts::ALL_RULES {
+            if *rule == alerts::RULE_UNREACHABLE {
+                continue;
+            }
             let still = by_rule.remove(*rule).unwrap_or_default();
             if let Err(e) = reporter
-                .reconcile_labeled(rule, "chassis", &endpoint.name, &still)
+                .reconcile_labeled(rule, "chassis", chunk, &still)
                 .await
             {
                 tracing::warn!(rule = %rule, error = %e, "bmc: reconcile failed");
@@ -364,20 +504,38 @@ impl Poller {
         }
     }
 
+    /// `{endpoint}/reachable`: 1 when the BMC answered this cycle, 0 when it
+    /// did not.
+    ///
+    /// The one series keyed by the ENDPOINT rather than by a chassis, because
+    /// a BMC that did not answer returned no chassis list — there is nothing
+    /// else to name it with, and inventing a chassis chunk for it would claim
+    /// a chassis exists that we have never seen.
+    async fn publish_reachable(&self, endpoint: &Endpoint, value: f64) {
+        let chunk = crate::endpoint_chunk(&endpoint.name);
+        self.publish_point(&chunk, &format!("{chunk}/reachable"), value, &[])
+            .await;
+    }
+
+    /// Publish one gauge, labelled with the `{chassis}` chunk its key carries.
+    ///
+    /// The label is the chunk and not the endpoint name, so label and key name
+    /// the same thing. They disagreed (#1130), which is how one chassis's
+    /// series arrived under another's name in every consumer that groups by
+    /// the label rather than by the key.
     async fn publish_point(
         &self,
-        endpoint: &Endpoint,
+        chassis_chunk: &str,
         metric: &str,
         value: f64,
         labels: &[(&str, String)],
     ) {
-        let metric = if metric == "reachable" {
-            format!("{}/reachable", zenkey::Chunk::slug(&endpoint.name).as_str())
-        } else {
-            metric.to_string()
-        };
-        let mut point = checked_point(&self.source, metric, TelemetryValue::Gauge(value))
-            .with_label("chassis", endpoint.name.clone());
+        let mut point = checked_point(
+            &self.source,
+            metric.to_string(),
+            TelemetryValue::Gauge(value),
+        )
+        .with_label("chassis", chassis_chunk.to_string());
         for (k, v) in labels {
             point = point.with_label(*k, v.clone());
         }

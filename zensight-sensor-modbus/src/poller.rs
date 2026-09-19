@@ -35,6 +35,19 @@ pub struct ModbusPoller {
     /// cache per key, drop QoS) — never a one-shot `session.put`.
     registry: Arc<zensight_common::PublisherRegistry>,
     format: Format,
+    /// The framework's per-device liveness, so a device that stops answering
+    /// is a **bus signal** and not only an `error!` line (#1133).
+    ///
+    /// `docs/reference.md` advertised `state/modbus/device/<device>/liveness`
+    /// for a release while `grep liveness src/` came back empty: the document
+    /// promised a signal nothing published.
+    health: Option<Arc<zensight_sensor_core::SensorHealth>>,
+    /// The live connection, reused across polls (#1133).
+    ///
+    /// One fresh TCP connection per poll and no `disconnect()` is how a PLC
+    /// runs out: they cap concurrent connections at four to eight, and a
+    /// half-closed one lingers for the OS's timeout, not ours.
+    conn: tokio::sync::Mutex<Option<Context>>,
 }
 
 impl ModbusPoller {
@@ -56,7 +69,15 @@ impl ModbusPoller {
             register_names: config.register_names.clone(),
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,
+            health: None,
+            conn: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// Report this device's liveness through the framework (#1133).
+    pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {
+        self.health = Some(health);
+        self
     }
 
     /// Install the operator's threshold evaluator on this poller's own
@@ -86,12 +107,24 @@ impl ModbusPoller {
         loop {
             match self.poll_once().await {
                 Ok(count) => {
+                    if let Some(h) = &self.health {
+                        h.record_device_success(&device_name);
+                    }
                     debug!(
                         "Device '{}': published {} telemetry points",
                         device_name, count
                     );
                 }
                 Err(e) => {
+                    // The bus hears about it, not just the log (#1133).
+                    if let Some(h) = &self.health {
+                        h.record_device_failure(&device_name, &e.to_string());
+                    }
+                    // A failed cycle drops the connection: a half-open socket
+                    // that timed out once will time out every time, and the
+                    // next poll should pay for a fresh handshake rather than
+                    // another `timeout_ms`.
+                    *self.conn.lock().await = None;
                     error!("Device '{}': polling error: {}", device_name, e);
                 }
             }
@@ -100,13 +133,30 @@ impl ModbusPoller {
         }
     }
 
+    /// One poll cycle, for the silent-slave test (#1133). Nothing else calls
+    /// it: `run` is a loop and a test needs one turn of it.
+    #[doc(hidden)]
+    pub async fn poll_once_for_test(&self) -> Result<usize, PollerError> {
+        self.poll_once().await
+    }
+
     /// Perform a single poll cycle.
+    ///
+    /// Every network call inside is bounded (#1133). `run` awaits this, so one
+    /// unbounded read stops the device permanently — and a half-open TCP
+    /// connection, which is what a PLC power-cycled mid-session leaves behind,
+    /// is exactly the case where a read never returns and never errors.
     async fn poll_once(&self) -> Result<usize, PollerError> {
-        let mut ctx = self.connect().await?;
+        let mut guard = self.conn.lock().await;
+        if guard.is_none() {
+            *guard = Some(self.connect().await?);
+        }
+        let ctx = guard.as_mut().expect("just connected");
         let mut count = 0;
+        let mut last_error: Option<PollerError> = None;
 
         for register in &self.registers {
-            match self.read_register(&mut ctx, register).await {
+            match self.read_with_retries(ctx, register).await {
                 Ok(values) => {
                     // The address advances by REGISTERS, not by decoded values
                     // (#1073). A 32-bit type spans two registers per value, so
@@ -136,8 +186,22 @@ impl ModbusPoller {
                         "Device '{}': failed to read {:?} @ {}: {}",
                         self.device.name, register.register_type, register.address, e
                     );
+                    last_error = Some(e);
                 }
             }
+        }
+
+        // A cycle in which NOTHING was read is a failed cycle, not an empty
+        // one (#1133). It used to return `Ok(0)`, so a device that answered
+        // no register at all looked exactly like a device with nothing
+        // configured — and the liveness the framework derives from this would
+        // have called a silent PLC healthy. One register answering is enough
+        // to call the device alive; the others are `warn!` lines, as before.
+        if count == 0
+            && !self.registers.is_empty()
+            && let Some(e) = last_error
+        {
+            return Err(e);
         }
 
         Ok(count)
@@ -197,6 +261,48 @@ impl ModbusPoller {
 
                 let ctx = rtu::attach_slave(serial, slave);
                 Ok(ctx)
+            }
+        }
+    }
+
+    /// One read, bounded by `timeout_ms` and retried `retries` times (#1133).
+    ///
+    /// `retries` was documented in `docs/reference.md` and read by nothing.
+    /// It means **retries**, not attempts: `retries: 2` is up to three reads.
+    ///
+    /// A timeout is not retried on the same connection. The slave accepted the
+    /// socket and did not answer; asking again down the same half-open pipe
+    /// buys another `timeout_ms` of the poll interval and the same silence.
+    /// Errors that came back *as* errors — an exception response, a framing
+    /// fault — are worth another go.
+    async fn read_with_retries(
+        &self,
+        ctx: &mut Context,
+        register: &RegisterConfig,
+    ) -> Result<Vec<TelemetryValue>, PollerError> {
+        let timeout = Duration::from_millis(self.device.timeout_ms);
+        let mut attempt = 0u32;
+        loop {
+            match tokio::time::timeout(timeout, self.read_register(ctx, register)).await {
+                Err(_) => {
+                    return Err(PollerError::Read(format!(
+                        "no answer within {}ms",
+                        self.device.timeout_ms
+                    )));
+                }
+                Ok(Ok(values)) => return Ok(values),
+                Ok(Err(e)) if attempt >= self.device.retries => return Err(e),
+                Ok(Err(e)) => {
+                    attempt += 1;
+                    debug!(
+                        "Device '{}': read {:?} @ {} failed ({e}); retry {}/{}",
+                        self.device.name,
+                        register.register_type,
+                        register.address,
+                        attempt,
+                        self.device.retries
+                    );
+                }
             }
         }
     }

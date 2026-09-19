@@ -108,9 +108,18 @@ pub fn new_sampling() -> SharedSampling {
     std::sync::Arc::new(std::sync::Mutex::new(SamplingRegistry::default()))
 }
 
+/// The most exporters any per-exporter map in this crate remembers.
+///
+/// **One constant, because three maps key on the same thing** (#1139): the
+/// parser cache, this sampling registry and the rollup accumulator. They were
+/// 256, 512 and *unbounded*, while the sampling registry's own comment said
+/// it matched "the parser map's own cap" — which it did not. A cap that is
+/// written down three times is a cap that drifts.
+pub const MAX_EXPORTERS: usize = 256;
+
 impl SamplingRegistry {
-    /// The most exporters remembered, matching the parser map's own cap.
-    pub const MAX_EXPORTERS: usize = 512;
+    /// The most exporters remembered, matching every other per-exporter map.
+    pub const MAX_EXPORTERS: usize = super::fields::MAX_EXPORTERS;
 
     /// Record an exporter's declared "1 in N".
     ///
