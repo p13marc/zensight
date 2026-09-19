@@ -198,3 +198,66 @@ fn an_ipv6_literal_target_yields_its_address_not_a_fragment() {
         );
     }
 }
+
+// ── Burst resolution (#1135) ────────────────────────────────────────────────
+//
+// The burst path parsed an `IpAddr` and returned `false` for anything else —
+// and `false` from one probe is a **lost packet**. `validate()` only requires
+// `host:port` for tcp, so an icmp burst target is a bare host by design:
+// `{kind: "burst", transport: "icmp", target: "gw.example.net"}` published
+// `loss_pct: 100` every interval and a critical `probe-down` over a healthy
+// link.
+//
+// The tcp transport is exercised here rather than icmp because ICMP needs
+// `CAP_NET_RAW` and the feature is off by default — but the resolution is the
+// same code for both, and the two tests below pin both halves of it.
+
+fn burst_target(name: &str, t: &str, transport: &str) -> Target {
+    let mut b = target(name, ProbeKind::Burst, t);
+    b.transport = Some(transport.into());
+    b.count = Some(3);
+    b.spacing_ms = Some(1);
+    b
+}
+
+/// **The acceptance, in the shape CI can run.** A burst against a NAME — not
+/// an address — reports what actually happened, not 100 % loss.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_against_a_name_is_resolved_not_counted_as_loss() {
+    let addr = spawn().await;
+    let t = burst_target("gw", &format!("localhost:{}", addr.port()), "tcp");
+
+    let r = check::run(&t, "here", Duration::from_secs(2), &client()).await;
+    let burst = r.burst.expect("a burst result");
+    assert_eq!(
+        burst.received, 3,
+        "every probe answered; a name is not packet loss (#1135). error={:?}",
+        r.error
+    );
+    assert_eq!(burst.loss_pct, 0.0);
+    assert_eq!(r.outcome, ProbeOutcome::Ok);
+}
+
+/// A name that does not resolve fails the **check**, and says so. It is a
+/// different fact from "nothing answered", and reporting the first as the
+/// second is what made a healthy link read as down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_name_that_does_not_resolve_fails_the_check_not_the_packets() {
+    let t = burst_target("nope", "no-such-host.invalid:9", "tcp");
+
+    let r = check::run(&t, "here", Duration::from_secs(2), &client()).await;
+    assert_eq!(r.outcome, ProbeOutcome::Failed);
+    assert!(
+        r.burst.is_none(),
+        "no packets were sent, so there is no loss figure to publish"
+    );
+    let err = r.error.unwrap_or_default();
+    assert!(
+        err.contains("no-such-host.invalid"),
+        "the error must name the target that did not resolve: {err:?}"
+    );
+    assert!(
+        !err.contains("lost or timed out"),
+        "a resolution failure must not be reported as packet loss: {err:?}"
+    );
+}

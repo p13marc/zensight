@@ -193,12 +193,38 @@ async fn burst(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
     let spacing = Duration::from_millis(t.burst_spacing_ms());
     let transport = t.burst_transport().to_string();
 
+    // RESOLVED ONCE, BEFORE ANY PACKET (#1135).
+    //
+    // Two things were wrong with resolving inside the probe. The icmp path
+    // parsed an `IpAddr` and returned `false` on anything else — and `false`
+    // from one probe is a **lost packet**. `validate()` only requires
+    // `host:port` for tcp, so an icmp burst target is a bare host by design:
+    // `{kind: "burst", transport: "icmp", target: "gw.example.net"}` published
+    // `loss_pct: 100` every interval and a critical `probe-down` over a
+    // perfectly healthy link.
+    //
+    // And a burst is meant to measure ONE path. Re-resolving per packet, which
+    // is what `TcpStream::connect(&t.target)` does, lets a round-robin name
+    // spread a burst over several hosts and calls the result one target's
+    // latency distribution.
+    //
+    // A name that does not resolve now fails the CHECK, with a sentence that
+    // says so, and no packets are counted as lost.
+    let dest = match resolve_burst(t, &transport, timeout).await {
+        Ok(d) => d,
+        Err(e) => {
+            let mut r = result(t, vantage, ProbeOutcome::Failed, started);
+            r.error = Some(e);
+            return r;
+        }
+    };
+
     let mut samples: Vec<Option<f64>> = Vec::with_capacity(count as usize);
     for i in 0..count {
         if i > 0 {
             tokio::time::sleep(spacing).await;
         }
-        samples.push(one_burst_probe(t, &transport, timeout).await);
+        samples.push(one_burst_probe(&dest, timeout).await);
     }
 
     let reduced = zensight_common::probe::BurstResult::reduce(&samples, &transport);
@@ -218,20 +244,82 @@ async fn burst(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
     r
 }
 
-/// One probe of a burst: its RTT in milliseconds, or `None` if it did not
-/// answer.
-async fn one_burst_probe(t: &Target, transport: &str, timeout: Duration) -> Option<f64> {
-    let at = Instant::now();
+/// Where a burst's packets go, resolved once (#1135).
+///
+/// The tcp arm keeps the **whole answer, in order**, because that is what
+/// `TcpStream::connect(host)` does and a burst that lost it would fail on a
+/// dual-stack name whose first address is unreachable — `localhost` on a host
+/// serving v4 only, which is most CI. Each probe walks the same list in the
+/// same order, so it is still one path; what it is not any more is a fresh
+/// lookup per packet.
+#[derive(Debug, Clone)]
+enum BurstDest {
+    Icmp(std::net::IpAddr),
+    Tcp(Vec<std::net::SocketAddr>),
+}
+
+/// Resolve a burst target to one destination, for the whole burst.
+///
+/// The error is the **check's**, not a packet's: "did not resolve" is a
+/// different fact from "nothing answered", and reporting the first as the
+/// second is what made a healthy link read as 100 % loss.
+async fn resolve_burst(
+    t: &Target,
+    transport: &str,
+    timeout: Duration,
+) -> Result<BurstDest, String> {
+    let lookup = |hostport: String| async move {
+        match tokio::time::timeout(timeout, tokio::net::lookup_host(hostport)).await {
+            Ok(Ok(it)) => {
+                let all: Vec<std::net::SocketAddr> = it.collect();
+                if all.is_empty() {
+                    Err("did not resolve".to_string())
+                } else {
+                    Ok(all)
+                }
+            }
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err(format!("name lookup did not answer within {timeout:?}")),
+        }
+    };
     match transport {
-        "icmp" => burst_icmp(t, timeout).await.then(|| ms(at)),
+        "icmp" => {
+            if let Ok(ip) = t.target.parse::<std::net::IpAddr>() {
+                return Ok(BurstDest::Icmp(ip));
+            }
+            // Port 0: `lookup_host` wants one and ICMP has none. The first
+            // answer, as the plain `icmp` check takes.
+            lookup(format!("{}:0", t.target))
+                .await
+                .map(|all| BurstDest::Icmp(all[0].ip()))
+                .map_err(|e| format!("{}: {e}", t.target))
+        }
         // Default and only other option. `tcp` connect RTT: works in a default
         // build with no capability, which is what makes this measurable
         // everywhere including CI.
-        _ => matches!(
-            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&t.target)).await,
-            Ok(Ok(_))
-        )
-        .then(|| ms(at)),
+        _ => lookup(t.target.clone())
+            .await
+            .map(BurstDest::Tcp)
+            .map_err(|e| format!("{}: {e}", t.target)),
+    }
+}
+
+/// One probe of a burst: its RTT in milliseconds, or `None` if it did not
+/// answer.
+async fn one_burst_probe(dest: &BurstDest, timeout: Duration) -> Option<f64> {
+    let at = Instant::now();
+    match dest {
+        BurstDest::Icmp(ip) => burst_icmp(*ip, timeout).await.then(|| ms(at)),
+        BurstDest::Tcp(addrs) => {
+            for sa in addrs {
+                if let Ok(Ok(_)) =
+                    tokio::time::timeout(timeout, tokio::net::TcpStream::connect(sa)).await
+                {
+                    return Some(ms(at));
+                }
+            }
+            None
+        }
     }
 }
 
@@ -240,13 +328,7 @@ fn ms(at: Instant) -> f64 {
 }
 
 #[cfg(feature = "icmp")]
-async fn burst_icmp(t: &Target, timeout: Duration) -> bool {
-    let Ok(addr) = t.target.parse::<std::net::IpAddr>() else {
-        // Resolution failure is not packet loss, but from one probe's point of
-        // view it is indistinguishable, and the check-level error already says
-        // nothing answered.
-        return false;
-    };
+async fn burst_icmp(addr: std::net::IpAddr, timeout: Duration) -> bool {
     let Ok(client) = surge_ping::Client::new(&surge_ping::Config::default()) else {
         return false;
     };
@@ -261,7 +343,7 @@ async fn burst_icmp(t: &Target, timeout: Duration) -> bool {
 }
 
 #[cfg(not(feature = "icmp"))]
-async fn burst_icmp(_t: &Target, _timeout: Duration) -> bool {
+async fn burst_icmp(_addr: std::net::IpAddr, _timeout: Duration) -> bool {
     // Unreachable in practice: startup refuses an icmp burst in a build
     // without the feature, for the same reason it refuses a plain icmp target.
     false
@@ -870,6 +952,55 @@ mod tests {
         assert!(
             r.error.unwrap().contains("NOT evidence about the target"),
             "a check that did not run must not read as a target being down"
+        );
+    }
+
+    /// **#1135, and the half CI can actually run.** An ICMP burst target is a
+    /// bare host by design — `validate()` only requires `host:port` for tcp —
+    /// and the burst path parsed an `IpAddr` and returned `false` for anything
+    /// else. `false` from one probe is a LOST PACKET, so
+    /// `{kind: "burst", transport: "icmp", target: "gw.example.net"}`
+    /// published `loss_pct: 100` every interval and a critical `probe-down`
+    /// over a healthy link.
+    ///
+    /// The ping itself needs `CAP_NET_RAW` and the `icmp` feature; the
+    /// RESOLUTION is the bug, and it needs neither.
+    #[tokio::test]
+    async fn an_icmp_burst_resolves_its_name() {
+        let mut t = target(ProbeKind::Burst, "localhost");
+        t.transport = Some("icmp".into());
+        match resolve_burst(&t, "icmp", Duration::from_secs(2)).await {
+            Ok(BurstDest::Icmp(ip)) => assert!(
+                ip.is_loopback(),
+                "`localhost` must resolve to a loopback address, got {ip}"
+            ),
+            other => panic!("an icmp burst against a name must resolve: {other:?}"),
+        }
+    }
+
+    /// An address still works, and skips the resolver entirely.
+    #[tokio::test]
+    async fn an_icmp_burst_against_an_address_needs_no_resolver() {
+        let mut t = target(ProbeKind::Burst, "127.0.0.1");
+        t.transport = Some("icmp".into());
+        match resolve_burst(&t, "icmp", Duration::from_secs(2)).await {
+            Ok(BurstDest::Icmp(ip)) => assert_eq!(ip.to_string(), "127.0.0.1"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A name that does not resolve is the CHECK's failure, with a sentence
+    /// that names it — not a packet's.
+    #[tokio::test]
+    async fn an_unresolvable_icmp_burst_is_a_check_error() {
+        let mut t = target(ProbeKind::Burst, "no-such-host.invalid");
+        t.transport = Some("icmp".into());
+        let err = resolve_burst(&t, "icmp", Duration::from_secs(2))
+            .await
+            .expect_err("must not resolve");
+        assert!(
+            err.contains("no-such-host.invalid"),
+            "the error must name the target: {err:?}"
         );
     }
 }

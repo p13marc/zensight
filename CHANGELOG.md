@@ -471,6 +471,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **probe: an ICMP burst against a hostname reported 100 % loss forever**
+  (#1135). The burst path parsed an `IpAddr` and returned "this probe did not
+  answer" for anything else — and an ICMP burst target is a bare host **by
+  design**, since `validate()` only requires `host:port` for tcp. So
+  `{kind: "burst", transport: "icmp", target: "gw.example.net"}` published
+  `loss_pct: 100` every interval and a critical `probe-down` over a perfectly
+  healthy link, while the plain `icmp` check resolved names four hundred lines
+  away.
+
+  The target is resolved **once, before any packet**, and a name that does not
+  resolve fails the *check* with a sentence that says so rather than being
+  reported as loss. Resolving once is also what makes a burst one path: a
+  per-packet lookup — which is what `TcpStream::connect(host)` was doing — lets
+  a round-robin name spread a burst over several hosts and calls the result one
+  target's latency distribution. The tcp arm keeps the whole answer in order,
+  as `connect` would, so a dual-stack name whose first address is unreachable
+  still works.
+
+  The resolution is the bug and it needs no privilege, so it is tested
+  directly: `an_icmp_burst_resolves_its_name` and
+  `an_unresolvable_icmp_burst_is_a_check_error` both fail on the parent
+  commit, in a default build with the `icmp` feature off.
+
+- **probe: `follow_redirects` was documented, wire-carried and read nowhere**
+  (#1134). reqwest's redirect policy lives on the **client**; this flag lives
+  on the **target**. The poller built one shared client with
+  `Policy::limited(10)`, so every target followed — and a target written
+  `{follow_redirects: false, expect_status: [200]}` against an endpoint that
+  starts answering `302 → /login` followed it, got 200 from the login page and
+  reported **up**. The check written to catch exactly that reported green.
+
+  The client is built with `Policy::none()` now and `check::http` walks the
+  chain itself, which also fixes the two things that could not be fixed while
+  the policy lived on the client:
+
+  - `redirects` is the **chain**, in order, which is what the README has
+    always promised. It was "the final URL if it differs from the configured
+    string", so `https://example.com` reported a redirect to
+    `https://example.com/` every poll — a URL parser normalising, read as a
+    server redirecting.
+  - **Every hop** is host-checked, not only the last. A chain that leaves the
+    configured host and comes back has still left it.
+
+  Three siblings the issue bundled. The off-host comparison is
+  case-insensitive, so `Example.com` no longer reports a redirect against its
+  own answer. `Target::host()`'s `Http` arm trims IPv6 brackets and splits the
+  port safely — `rsplit_once(':')` cut `[::1]` at a colon *inside* the
+  address, so `https://[::1]:8443/` was a permanent
+  `probe-redirect-off-host`. And DNS `expect_addrs` is **any**, as both the
+  README and `docs/reference.md` say; it required *all*, which made a
+  round-robin name with two A records a permanent critical, since a resolver
+  hands back one.
+
+  Five of the six new tests fail on the parent commit, and the sixth is the
+  reason `http_client` is now a shared `pub fn`: the bug was one line in that
+  builder, so a test that constructed its own client would have proved nothing
+  about the sensor.
+
+
 - **modbus: a silent slave stopped its device forever, and nothing on the bus
   said so** (#1133). `timeout_ms` applied to `tcp::connect_slave` and to
   nothing else. The realistic shape of a dead PLC is not a refused connection
@@ -558,6 +617,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fires `["cluster-not-quorate", "guest-not-running"]` where it must fire only
   the first, and the offline-node fixture grades a guest on the node that did
   not answer.
+
 
 - **probe: `follow_redirects` was documented, wire-carried and read nowhere**
   (#1134). reqwest's redirect policy lives on the **client**; this flag lives
