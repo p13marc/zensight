@@ -582,6 +582,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gui: two "unacknowledged" counts, and a log search that quietly stopped
+  searching** (#1121, #1122). Two small ones in the same view.
+
+  **The nav badge and the Alerts page header counted different things.**
+  `external_count` excluded silenced alerts; `unacknowledged_external` did not.
+  So muting a noisy source dropped the badge to 3 while the header over the
+  same list still read "7 unacknowledged" — and two numbers for one question is
+  worse than either answer. One function now, with **`(N silenced)` beside it**
+  rather than folded into it: a silence is an operator's deliberate act, and a
+  header that simply got smaller after one would read as the problem going
+  away.
+
+  **The log filter went into the Zenoh selector unencoded.** A selector's
+  parameters are `;`-separated `k=v` pairs, and the pattern was interpolated
+  raw with only a `;`/`?` *skipped* — so a space, `=`, `#` or `&` went straight
+  in, and a pattern carrying `;` silently fell back to client-side filtering
+  over `LOG_FETCH_MAX` (500) rows with nothing on screen to say so. A search
+  that looked like it was scanning history was scanning five hundred lines.
+  `urlencode` had existed for exactly this since #925 and was used only by the
+  ack path.
+
+  **Encoding alone would have been a regression**, which is why this is a
+  two-sided change: zenoh's `Parameters` does not decode, so a `foo bar` that
+  works today would have reached the matcher as `foo%20bar`.
+  `zensight_common::percent_decode` is what `RpcRequest::param` and the logs
+  query handler read through now — and a value with no `%` decodes to itself,
+  so an unencoded caller is unaffected. One table for the encoder and the
+  decoder, because an encoder and a decoder that disagree about which
+  characters are unreserved is worse than neither.
+
+  That also fixes something nobody had filed: the `?actor=` on every
+  `@catalog` ack and silence was **stored percent-encoded**, so an operator
+  called `Ada Lovelace` appeared in the audit trail as `Ada%20Lovelace`.
+
+  A malformed escape is left exactly as it arrived, never guessed at — `100%`
+  is a perfectly ordinary thing to search a log for.
+
 - **gui: two SNMP pollers polling one `switch01` collided into one device**
   (#1118). `decode_sample` computes the publishing origin for every class and
   **dropped it** for the interface table, so `Message::SnmpInterfaceTable`

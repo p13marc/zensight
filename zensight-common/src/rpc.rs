@@ -178,13 +178,72 @@ impl RpcRequest {
         self.param(PARAM_REQUEST_ID)
     }
 
-    /// One selector parameter by name.
+    /// One selector parameter by name, **percent-decoded** (#1122).
+    ///
+    /// A selector's parameters are `;`-separated `k=v` pairs, so a value
+    /// carrying `;`, `=`, `?` or a space silently splits into something else —
+    /// which is why callers encode. They were not decoded here, so an
+    /// operator's name went into the audit record as `Ada%20Lovelace` and a
+    /// search for `foo bar` reached the matcher as `foo%20bar`.
+    ///
+    /// A value with no `%` in it decodes to itself, so an unencoded caller is
+    /// unaffected.
     pub fn param(&self, name: &str) -> Option<String> {
         self.parameters.split(';').find_map(|kv| {
             let (k, v) = kv.split_once('=')?;
-            (k == name).then(|| v.to_string())
+            (k == name).then(|| percent_decode(v))
         })
     }
+}
+
+/// Percent-decode one selector-parameter value (#1122).
+///
+/// **A malformed escape is left exactly as it arrived**, never guessed at.
+/// `100%` is a perfectly ordinary thing to search a log for, and turning it
+/// into a decode error — or into some other byte — would break a query that an
+/// operator has every right to make. Only a complete, valid `%XX` is consumed.
+#[must_use]
+pub fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        // The overwhelmingly common case, and the one that keeps an unencoded
+        // caller working unchanged.
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Percent-encode one selector-parameter value (#1122).
+///
+/// The inverse of [`percent_decode`], and the same table the GUI's ack path
+/// has used since #925 — unreserved characters through, everything else
+/// `%XX`.
+#[must_use]
+pub fn percent_encode(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for b in v.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Successful reply bytes (already encoded — typically JSON).
@@ -192,6 +251,56 @@ pub type RpcResult = std::result::Result<Vec<u8>, RpcError>;
 
 #[cfg(test)]
 mod tests {
+
+    /// The encoder and the decoder are inverses, and a malformed escape
+    /// survives (#1122).
+    #[test]
+    fn selector_values_round_trip_and_malformed_escapes_survive() {
+        for v in [
+            "plain",
+            "foo bar", // the space that used to go in raw
+            "a;b",     // the `;` that used to disable the filter
+            "a?b",
+            "k=v",
+            "100%", // a perfectly ordinary thing to search for
+            "Ada Lovelace",
+            "%zz",
+            "a%2",
+            "üñïçø∂é",
+        ] {
+            assert_eq!(percent_decode(&percent_encode(v)), v, "round trip: {v:?}");
+        }
+
+        // A value that was never encoded decodes to itself — which is what
+        // keeps an older caller working against a decoding sensor.
+        assert_eq!(percent_decode("foo bar"), "foo bar");
+        assert_eq!(percent_decode("a;b"), "a;b");
+
+        // Malformed escapes are left alone rather than guessed at.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("a%2"), "a%2");
+    }
+
+    /// A parameter value is decoded on the way out (#1122).
+    ///
+    /// It was not, so an operator's name reached the audit record as
+    /// `Ada%20Lovelace` and a log search for `foo bar` reached the matcher as
+    /// `foo%20bar`.
+    #[test]
+    fn a_parameter_is_decoded_when_it_is_read() {
+        let req = RpcRequest::new(
+            Vec::new(),
+            format!(
+                "actor={};pattern={}",
+                percent_encode("Ada Lovelace"),
+                percent_encode("foo; bar")
+            ),
+        );
+        assert_eq!(req.actor().as_deref(), Some("Ada Lovelace"));
+        assert_eq!(req.param("pattern").as_deref(), Some("foo; bar"));
+    }
+
     use super::*;
 
     #[test]
