@@ -437,7 +437,7 @@ jobs:
           scripts/packaging-check.sh --table > /tmp/packaging-table-fresh.md
           # The committed table is the block between the "do not hand-edit"
           # line and the paragraph after it.
-          awk '/^\| Unit \| Capabilities/,/^$/' packaging/README.md \
+          awk '/^\| Unit \| Exposure/,/^$/' packaging/README.md \
             | grep -v '^$' > /tmp/packaging-table-committed.md
           grep -v '^$' /tmp/packaging-table-fresh.md > /tmp/packaging-table-fresh-trimmed.md
           if ! diff -u /tmp/packaging-table-committed.md /tmp/packaging-table-fresh-trimmed.md; then
