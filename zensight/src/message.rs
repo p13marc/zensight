@@ -67,6 +67,17 @@ pub enum Message {
     /// downsampled buckets persisted (or `Err` with a message on failure). #22.
     StoreFlushed(Result<usize, String>),
 
+    /// The window manager asked the window to close (#1119).
+    ///
+    /// Not the same as the window having closed: this arrives *before*, and it
+    /// is the only chance to flush. Up to fifteen seconds of buckets, logs and
+    /// events sat in `MetricStore`'s pending buffers at any moment — the
+    /// fifteen seconds an operator was watching when they decided to quit and
+    /// go look — and closing discarded them. The same gap cost every parallax
+    /// tile its `close_stream`, so the sensor carried the viewer refcount
+    /// until its idle reaper fired.
+    CloseRequested(iced::window::Id),
+
     /// Off-thread history pre-load for a device finished (#22): metric name ->
     /// merged (warm/cold) samples to seed the device detail chart on open.
     /// Seeded history for a device, and whether the reply was capped.

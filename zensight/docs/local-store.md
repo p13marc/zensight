@@ -93,6 +93,25 @@ is currently named, `len()` is the id space, and the two diverge by design.
 Every redb read runs off the Iced update thread via `Task::future` +
 `spawn_blocking`; the hot-ring append is O(1) and runs inline.
 
+**Except one write** (#1119). Flush batches drain every 15 ticks, and closing
+the window used to discard whatever had accumulated since the last one — up to
+fifteen seconds of buckets, logs and events, which is the fifteen seconds an
+operator was watching when they decided to quit and go look. `iced::application`
+has no exit hook and `MetricStore` has no `Drop`, so nothing ran.
+
+`window::close_requests()` is subscribed, and its handler flushes
+**synchronously**: there is no *later*, and a `Task::future` scheduled at close
+is dropped with the event loop. It is bounded at two seconds, because a wedged
+redb must not turn "close the window" into "the window will not close" — an
+operator who has decided to quit reaches for the force-quit, and then nothing is
+written at all. The budget is checked *between* the three writes rather than
+interrupting one: a half-written transaction is worse than a missing one.
+
+The same handler tears down the parallax preview tiles first, so their
+`close_stream` GETs are in flight before `window::close` ends the runtime.
+Without it every tile left the sensor holding a viewer refcount until its idle
+reaper fired.
+
 ## Log events
 
 ### Logs view seeding

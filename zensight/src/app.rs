@@ -15,8 +15,81 @@ use zensight_common::{
     TelemetryValue, ZenohConfig,
 };
 
+/// The synchronous, bounded exit flush (#1119) — a free function so a test can
+/// drive it over a temporary store.
+///
+/// Every other flush in this application is off-thread, for the right reason:
+/// `update()` and `view()` must never block on disk. This one blocks
+/// deliberately, because there is no *later* — the event loop is about to end,
+/// and a `Task::future` scheduled at close would be dropped with it. That is
+/// precisely what happened: up to fifteen seconds of buckets, logs and events
+/// went with the window, and it was the fifteen seconds an operator was
+/// watching when they decided to quit and go look.
+///
+/// Bounded by `budget`, because a wedged redb must not turn "close the window"
+/// into "the window will not close" — an operator who has decided to quit will
+/// reach for the force-quit, and then nothing is written at all. The budget is
+/// checked **between** the three writes rather than interrupting one: a
+/// half-written transaction is worse than a missing one, and redb's own commit
+/// is atomic. Whatever does not fit is what closing lost unconditionally
+/// before this existed.
+///
+/// Returns the number of buckets written.
+pub fn exit_flush(store: &mut zensight_store::MetricStore, budget: std::time::Duration) -> usize {
+    let started = std::time::Instant::now();
+    let metric_batch = store.take_flush_batch();
+    let log_batch = store.take_log_flush_batch();
+    let event_batch = store.take_event_flush_batch();
+    let Some(db) = metric_batch
+        .as_ref()
+        .map(|(s, _)| s.clone())
+        .or_else(|| log_batch.as_ref().map(|(s, _)| s.clone()))
+        .or_else(|| event_batch.as_ref().map(|(s, _)| s.clone()))
+    else {
+        // Nothing pending, or no persistent store at all (demo mode, or a file
+        // that could not be opened). Both are "nothing to lose".
+        return 0;
+    };
+
+    let mut written = 0;
+    if let Some((_, batch)) = metric_batch {
+        match db.write_batch(&batch) {
+            Ok(n) => written = n,
+            Err(e) => tracing::warn!(error = %e, "Exit flush: buckets not written"),
+        }
+    }
+    if started.elapsed() < budget
+        && let Some((_, logs)) = log_batch
+        && let Err(e) = db.write_logs(&logs)
+    {
+        tracing::warn!(error = %e, "Exit flush: logs not written");
+    }
+    if started.elapsed() < budget
+        && let Some((_, events)) = event_batch
+        && let Err(e) = db.write_events(&events)
+    {
+        tracing::warn!(error = %e, "Exit flush: events not written");
+    }
+    if started.elapsed() >= budget {
+        tracing::warn!(
+            budget_ms = budget.as_millis() as u64,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Exit flush ran out of budget; some history was not written"
+        );
+    }
+    written
+}
+
 /// Flush the metric store to redb every this many 1s ticks (#22).
 const STORE_FLUSH_EVERY_TICKS: u32 = 15;
+
+/// How long the **exit** flush may block the closing window (#1119).
+///
+/// Two seconds. A wedged redb must not turn "close the window" into "the
+/// window will not close" — an operator who has decided to quit will reach for
+/// the force-quit, and then nothing is written at all. Whatever does not fit
+/// in the budget is what closing lost unconditionally before this existed.
+const EXIT_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Re-issue the topology edge/asset queries every N ticks (~seconds) while the
 /// topology view is open (#391), so edge rates stay live instead of freezing
@@ -2965,6 +3038,20 @@ impl ZenSight {
                 Ok(n) => tracing::debug!(buckets = n, "Flushed metric history to store"),
                 Err(e) => tracing::warn!(error = %e, "Metric store flush failed"),
             },
+
+            Message::CloseRequested(id) => {
+                // The last thing this process does (#1119). Flush what is
+                // pending, give the parallax sensors their refcounts back,
+                // then close.
+                let closes = self.teardown_parallax_tiles();
+                let flushed = self.flush_on_exit();
+                tracing::info!(buckets = flushed, "Flushed on close; closing the window");
+                // The stream closes are `@rpc` GETs, and they are BATCHED
+                // BEFORE the close so the runtime has them in flight. A
+                // `window::close` that ran first would drop the tasks with
+                // the event loop.
+                return Task::batch([closes, iced::window::close(id)]);
+            }
 
             Message::DeviceHistoryLoaded(device_id, series, truncated) => {
                 self.scrub_truncated = truncated;
@@ -8241,6 +8328,29 @@ impl ZenSight {
         Task::none()
     }
 
+    /// Write every pending bucket, log and event **synchronously**, bounded
+    /// (#1119).
+    ///
+    /// Every other flush in this application is off-thread, for the right
+    /// reason: `update()` and `view()` must never block on disk. This one
+    /// blocks deliberately, because there is no *later* — the event loop is
+    /// about to end, and a `Task::future` scheduled here would be dropped with
+    /// it. That is precisely what happened: up to fifteen seconds of buckets,
+    /// logs and events went with the window, and it was the fifteen seconds an
+    /// operator was watching when they decided to quit and go look.
+    ///
+    /// Bounded at [`EXIT_FLUSH_BUDGET`], because a wedged redb must not turn
+    /// "close the window" into "the window will not close". The budget is
+    /// checked between the three writes rather than interrupting one: a
+    /// half-written transaction is worse than a missing one, and redb's own
+    /// commit is atomic. Whatever does not fit is what the old behaviour lost
+    /// anyway.
+    ///
+    /// Returns the number of buckets written.
+    fn flush_on_exit(&mut self) -> usize {
+        exit_flush(&mut self.store, EXIT_FLUSH_BUDGET)
+    }
+
     /// Abort every open parallax preview tile and batch the `close_stream`
     /// sends (#408). Called whenever the device view goes away — deselect,
     /// disconnect, session replacement. `abort_on_drop` already kills the
@@ -8640,6 +8750,12 @@ impl ZenSight {
                 keyboard_subscription(),
             ]
         };
+        // The one chance to flush (#1119). `iced::application` has no exit
+        // hook and `MetricStore` has no `Drop`, so without this subscription
+        // closing the window discarded up to fifteen seconds of buckets, logs
+        // and events — and every parallax tile its `close_stream`.
+        subs.push(iced::window::close_requests().map(Message::CloseRequested));
+
         // Flow-dash animation (#394): only while the map is open AND traffic
         // is actually flowing — an idle network burns no frames. 10 fps is
         // plenty for a dash march and an order cheaper than window::frames.
