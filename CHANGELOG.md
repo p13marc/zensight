@@ -477,6 +477,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **logs: `@rpc/logs/events` applied `source=` after the page cap** (#1147,
+  partly — see below). The durable path asked the store for `max` rows and the
+  query handler filtered by host afterwards, while the hot-ring path filtered
+  first. On a receiver holding twenty hosts, `?source=web01;max=500` fetched
+  five hundred rows from all of them and replied with web01's twenty-five —
+  and the caller, paging from web01's twenty-fifth row, got an empty next page
+  and read it as end-of-history with days of matches still behind the cursor.
+
+  `LogStore::query` and `LogStore::search` are one `page()` walk now, taking a
+  named `PageQuery`, and every filter that decides whether a row is in the
+  answer — window, host, content matcher — is applied **inside** it. The seam
+  between the two was the bug, and a call site that names its filters cannot
+  put one on the wrong side by accident.
+
+  Two more on the same path. `max` is **clamped** to 10 000, as the
+  documentation has always claimed it was: any `usize` parsed, so
+  `?max=5000000` asked one blocking thread — which the handler awaits — to
+  materialise five million records into a `Vec` and serialise them into one
+  reply. And a `to=`-only walk now **starts at the window**: the uid is
+  `<13-digit ts_ms><12-digit seq>`, so the range is bounded above by
+  `to_ms + 1` padded with zeroes, where before it began at the newest row and
+  skipped down, unbounded.
+
+  **Half of #1147 is not fixed here, deliberately.** A search truncated by
+  `MAX_SEARCH_SCAN` with no matches is still indistinguishable from no
+  matches on the wire. The walk knows — `page()` returns a `Page<LogRecord>`
+  with `partial`, `scanned`, and a cursor taken from the last row *examined*
+  rather than the last row matched, which is exactly what RFC 05 §3.2 requires
+  — but `registry/logs.toml` declares this procedure's reply as
+  `Vec<LogRecord>`, and changing a reply type on an existing path is an
+  RFC 08 §3 **incompatible** edit: the lock refuses it, and the sanctioned
+  path is to retire `events` and add a sibling. That is a keyspace decision
+  with a GUI migration attached, not a line to slip into a bug fix, so it
+  stays open.
+
 - **Cardinality caps locked out the innocent** (#1145). At `max_series` both
   exporters refused **all** new series, with no per-producer quota and no
   attribution beyond one `warn!` naming nobody. A producer leaking a
