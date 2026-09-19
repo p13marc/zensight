@@ -34,6 +34,20 @@ use crate::telemetry::TelemetryPoint;
 /// namespace (#466), so a selector that spells the base matches nothing.
 pub const DEFAULT_TELEMETRY_KEY_EXPR: &str = "v1/*/telemetry/**";
 
+/// How many telemetry samples a consumer may fall behind before the oldest are
+/// dropped.
+///
+/// 32× zenoh's own default of 256, which is sized for a subscriber that keeps
+/// up rather than for a fleet-scale burst — and the burst that matters is the
+/// first one, because `detect_late_publishers` asks every producer for its
+/// whole history at once.
+///
+/// Not larger, because `RingChannel` **preallocates**: `RingBuffer::new` is a
+/// `VecDeque::with_capacity`, so this is resident from the first sample, per
+/// subscriber, against a `resources.budget_rss_mb` (#1091) of 192–256 MB. At
+/// roughly 300 bytes a `Sample` this is a couple of MB; 65 536 would be twenty.
+pub const TELEMETRY_CHANNEL_CAPACITY: usize = 8_192;
+
 /// Declare the telemetry subscriber, with history and recovery.
 ///
 /// # Why an advanced subscriber
@@ -47,15 +61,43 @@ pub const DEFAULT_TELEMETRY_KEY_EXPR: &str = "v1/*/telemetry/**";
 /// claim about the world, and "we never asked for the data" is not a reason to
 /// make it. `detect_late_publishers` covers the sensor that comes up after us;
 /// `recovery` covers the sample that went missing between us.
+///
+/// # Why a ring and not the default FIFO (#1211)
+///
+/// Zenoh's default handler is a bounded `FifoChannel`, and its own
+/// documentation says what that means: *"pushing on a `FifoChannel` that is
+/// full will block until a slot is available. E.g., a slow subscriber could
+/// block the underlying Zenoh thread because it is not emptying the
+/// `FifoChannel` fast enough."*
+///
+/// The thread it blocks is not this consumer's alone. It is the session's, so
+/// a consumer that falls behind stops that session answering **anything** —
+/// including its own `@rpc` procedures, and including the shutdown path. That
+/// is not a thought experiment: with two sensors publishing, the historian's
+/// `range`, `series`, `stats`, `introspect` and `describe` all answered
+/// `Timeout` while the process sat at 0.2% CPU with every thread parked, and
+/// the same build ignored SIGTERM. A sibling sensor's `@rpc` on the same hub
+/// answered instantly, which is how the fault was localised to the wedged
+/// session rather than to routing.
+///
+/// A ring drops the **oldest** sample when it is full. For telemetry that is
+/// the right degradation and close to free: a sample is restated on the next
+/// interval, and both consumers of this helper already treat a gap as
+/// survivable — the historian has a whole shedding ladder for exactly this
+/// pressure. Losing the oldest sample of a burst is a smaller failure than
+/// losing the bus.
 pub async fn declare_telemetry_subscriber(
     session: &Session,
     key_expr: &str,
-) -> zenoh::Result<zenoh_ext::AdvancedSubscriber<zenoh::handlers::FifoChannelHandler<Sample>>> {
+) -> zenoh::Result<zenoh_ext::AdvancedSubscriber<zenoh::handlers::RingChannelHandler<Sample>>> {
     session
         .declare_subscriber(key_expr)
         .history(HistoryConfig::default().detect_late_publishers())
         .recovery(RecoveryConfig::default())
         .subscriber_detection()
+        .with(zenoh::handlers::RingChannel::new(
+            TELEMETRY_CHANNEL_CAPACITY,
+        ))
         .await
 }
 

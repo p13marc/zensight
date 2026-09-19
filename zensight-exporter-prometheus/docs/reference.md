@@ -26,6 +26,22 @@ Two independent subscribers:
 (glob) / `include_sources` / `exclude_sources` apply as a post-receive filter on
 top of the subscription.
 
+### The telemetry subscriber is on a ring (#1211)
+
+`declare_telemetry_subscriber` hands zenoh a `RingChannel` of
+`TELEMETRY_CHANNEL_CAPACITY` (8 192) rather than its default `FifoChannel`, so
+an exporter that falls behind **drops the oldest samples instead of blocking
+the zenoh thread that feeds it**. That thread belongs to the session, so the
+alternative is not "the exporter lags": it is the whole session going silent —
+`@rpc` and the shutdown path with it — while publishers fail to push to it.
+The historian is where this was diagnosed; both exporters take the same helper
+and had the same exposure.
+
+A dropped sample is restated on the sensor's next interval. `/metrics` is a
+gauge snapshot, so a drop under burst costs at most one scrape's freshness for
+that series; remote-write's per-series watermark means the next push carries
+the newer point regardless.
+
 ## TelemetryPoint → Prometheus mapping
 
 Metric name: `{prefix}_{protocol}_{metric_path}` (prefix default `zensight`).
