@@ -16,7 +16,7 @@
 # it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "2.7"
+version = "2.8"
 app = "zensight"
 convention = 1
 
@@ -303,6 +303,13 @@ reply = "Vec<LogRecord>"
 idempotent = true
 since = "1.0"
 description = "bounded log history, newest first. Recent (ring): ?since=;max=;source=. Durable (store, #544): ?from=;to=;after_uid=;limit= — time window + cursor pagination across restarts. Search (#553): ?pattern=<regex>;severity_min=;unit=;app=;facility= — server-side content filter over ring+store (source filters the observed device)"
+[[procedure]]
+path = "events/page"
+kind = "read"
+reply = "Page<LogRecord>"
+idempotent = true
+since = "2.8"
+description = "the same walk as `events`, in the RFC 05 §3.2 envelope: {items, next_cursor, partial, scanned}. Accepts every selector `events` does. The sibling exists because `events` replies with a bare Vec, which has nowhere to say 'I stopped early' — a search truncated by MAX_SEARCH_SCAN with no matches is indistinguishable from no matches on that path (#1147). `partial: true` with a cursor is the difference between 'no OOM this week' and 'I did not finish looking'"
 [[procedure]]
 path = "filter"
 kind = "read"

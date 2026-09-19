@@ -103,6 +103,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<Vec<crate::query_detail::FlowRecord>>("Vec<FlowRecord>")
         .json::<Vec<crate::query_detail::Ja4hRecord>>("Vec<Ja4hRecord>")
         .json::<Vec<crate::query_detail::LogRecord>>("Vec<LogRecord>")
+        .json::<crate::page::Page<crate::query_detail::LogRecord>>("Page<LogRecord>")
         .json::<Vec<crate::query_detail::MatrixRecord>>("Vec<MatrixRecord>")
         .json::<Vec<crate::query_detail::RetransmitRecord>>("Vec<RetransmitRecord>")
         .json::<Vec<crate::query_detail::NeighborRecord>>("Vec<NeighborRecord>")

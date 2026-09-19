@@ -2171,11 +2171,19 @@ impl ZenSight {
             Message::LogOlderPageLoaded(result) => {
                 self.syslog_filter.loading_older = false;
                 match result {
-                    Ok(records) => {
-                        // A short page means the store had nothing more under
-                        // this filter — the only signal available, since the
-                        // reply carries no next-cursor.
-                        self.syslog_filter.exhausted = records.len() < LOG_FETCH_MAX;
+                    Ok(crate::message::LogPage { records, partial }) => {
+                        // The producer says whether its walk finished (#1147).
+                        //
+                        // This used to be `records.len() < LOG_FETCH_MAX` — a
+                        // short page read as "nothing more" — which is wrong in
+                        // exactly the case paging exists for. A search
+                        // truncated by the sensor's scan cap returns ZERO rows;
+                        // zero is shorter than the cap; so the operator was
+                        // told the walk had finished and could never page past
+                        // it. `?pattern=OOM;from=<7d>` with the last OOM far
+                        // back read as "no OOM this week", permanently.
+                        self.syslog_filter.exhausted = !partial;
+                        self.syslog_filter.last_page_partial = partial;
                         // Deliberately NOT advancing `last_log_event_ms`: an
                         // older page must never make the live tail skip
                         // forward past lines it has not seen.
@@ -3220,7 +3228,8 @@ impl ZenSight {
             Message::LogEventsLoaded(result) => {
                 self.log_fetch_inflight = false;
                 match result {
-                    Ok(records) => {
+                    Ok(crate::message::LogPage { records, partial }) => {
+                        self.syslog_filter.last_page_partial = partial;
                         let mut msgs = Vec::with_capacity(records.len());
                         for rec in &records {
                             self.last_log_event_ms = Some(
@@ -9443,9 +9452,14 @@ impl ZenSight {
     fn log_events_selector(&self, q: &LogQuery) -> String {
         // NB: zenoh selector parameters are `;`-separated (`Parameters`), not
         // `&` — the server reads them via `query.parameters().get(..)`.
+        // The PAGED sibling (#1147). `events` replies with a bare
+        // `Vec<LogRecord>`, which has nowhere to say "I stopped early";
+        // `events/page` answers the same selectors in the RFC 05 §3.2
+        // envelope. A sensor too old to have it simply does not answer this
+        // key, and the fleet fan-in already tolerates a silent member.
         let mut selector = format!(
             "{}?max={LOG_FETCH_MAX}",
-            zensight_common::fleet_rpc_key("logs", "events")
+            zensight_common::fleet_rpc_key("logs", "events/page")
         );
         if let Some(since) = q.since {
             selector.push_str(&format!(";since={since}"));
@@ -9542,7 +9556,7 @@ impl ZenSight {
     fn run_log_query_as(
         &self,
         q: LogQuery,
-        wrap: fn(Result<Vec<zensight_common::LogRecord>, String>) -> Message,
+        wrap: fn(Result<crate::message::LogPage, String>) -> Message,
     ) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::done(wrap(Err("Not connected to Zenoh".to_string())));
@@ -9558,17 +9572,22 @@ impl ZenSight {
             {
                 Ok(replies) => {
                     let mut records: Vec<zensight_common::LogRecord> = Vec::new();
+                    // Any sensor that stopped early makes the FLEET walk
+                    // partial: one member with more to give means the answer
+                    // is incomplete, whatever the others said.
+                    let mut partial = false;
                     while let Ok(reply) = replies.recv_async().await {
                         if let Ok(sample) = reply.result()
-                            && let Ok(mut batch) =
-                                zensight_common::decode_auto::<Vec<zensight_common::LogRecord>>(
-                                    &sample.payload().to_bytes(),
-                                )
+                            && let Ok(mut page) =
+                                zensight_common::decode_auto::<
+                                    zensight_common::page::Page<zensight_common::LogRecord>,
+                                >(&sample.payload().to_bytes())
                         {
-                            records.append(&mut batch);
+                            partial |= page.partial;
+                            records.append(&mut page.items);
                         }
                     }
-                    wrap(Ok(records))
+                    wrap(Ok(crate::message::LogPage { records, partial }))
                 }
                 Err(e) => wrap(Err(e.to_string())),
             }
@@ -10630,20 +10649,24 @@ mod log_fetch_tests {
     fn loaded_events_advance_watermark_and_merge() {
         let mut a = app();
         a.log_fetch_inflight = true;
-        let _ = a.update(Message::LogEventsLoaded(Ok(vec![
-            rec("u1", 1000, "first"),
-            rec("u2", 2000, "second"),
-        ])));
+        let _ = a.update(Message::LogEventsLoaded(Ok(
+            crate::message::LogPage::complete(vec![
+                rec("u1", 1000, "first"),
+                rec("u2", 2000, "second"),
+            ]),
+        )));
         assert!(!a.log_fetch_inflight, "fetch completion clears the flag");
         assert_eq!(a.last_log_event_ms, Some(2000));
         assert_eq!(a.recent_logs.len(), 2);
 
         // An overlapping refetch (same records + one new) merges without dupes.
         a.log_fetch_inflight = true;
-        let _ = a.update(Message::LogEventsLoaded(Ok(vec![
-            rec("u2", 2000, "second"),
-            rec("u3", 3000, "third"),
-        ])));
+        let _ = a.update(Message::LogEventsLoaded(Ok(
+            crate::message::LogPage::complete(vec![
+                rec("u2", 2000, "second"),
+                rec("u3", 3000, "third"),
+            ]),
+        )));
         assert_eq!(a.last_log_event_ms, Some(3000));
         assert_eq!(a.recent_logs.len(), 3, "overlap de-dups by uid");
         // Time-ordered after merge.
@@ -10658,10 +10681,12 @@ mod log_fetch_tests {
     fn same_ms_identical_text_distinct_uid_both_survive() {
         let mut a = app();
         a.log_fetch_inflight = true;
-        let _ = a.update(Message::LogEventsLoaded(Ok(vec![
-            rec("0000000001000000000001", 1000, "connection refused"),
-            rec("0000000001000000000002", 1000, "connection refused"),
-        ])));
+        let _ = a.update(Message::LogEventsLoaded(Ok(
+            crate::message::LogPage::complete(vec![
+                rec("0000000001000000000001", 1000, "connection refused"),
+                rec("0000000001000000000002", 1000, "connection refused"),
+            ]),
+        )));
         assert_eq!(
             a.recent_logs.len(),
             2,
@@ -10670,10 +10695,12 @@ mod log_fetch_tests {
 
         // Refetching the same two records de-dups by uid → still 2, not 4.
         a.log_fetch_inflight = true;
-        let _ = a.update(Message::LogEventsLoaded(Ok(vec![
-            rec("0000000001000000000001", 1000, "connection refused"),
-            rec("0000000001000000000002", 1000, "connection refused"),
-        ])));
+        let _ = a.update(Message::LogEventsLoaded(Ok(
+            crate::message::LogPage::complete(vec![
+                rec("0000000001000000000001", 1000, "connection refused"),
+                rec("0000000001000000000002", 1000, "connection refused"),
+            ]),
+        )));
         assert_eq!(
             a.recent_logs.len(),
             2,
@@ -10767,20 +10794,31 @@ mod log_fetch_tests {
         // A cursor alone routes to the durable store — no `since` tail read.
         assert!(!paged.contains("since="));
 
-        // A full page means there may be more; a short one means there is not.
+        // #1147: the PRODUCER says whether its walk finished. This used to be
+        // inferred from the page length — "a full page may have more, a short
+        // one is the end" — and that inference is wrong in exactly the case
+        // paging exists for. See `a_truncated_empty_page_does_not_end_the_walk`
+        // below, which is the case the length rule got backwards.
         let full: Vec<_> = (0..LOG_FETCH_MAX)
             .map(|i| rec(&format!("{:025}", i), 1_000 + i as i64, "boom"))
             .collect();
-        let _ = a.update(Message::LogOlderPageLoaded(Ok(full)));
-        assert!(!a.syslog_filter.exhausted, "a full page may have more");
+        let _ = a.update(Message::LogOlderPageLoaded(Ok(crate::message::LogPage {
+            records: full,
+            partial: true,
+        })));
+        assert!(
+            !a.syslog_filter.exhausted,
+            "the sensor said it stopped early"
+        );
         assert!(!a.syslog_filter.loading_older);
 
-        let _ = a.update(Message::LogOlderPageLoaded(Ok(vec![rec(
-            "0000000000000000000000999",
-            900,
-            "old",
-        )])));
-        assert!(a.syslog_filter.exhausted, "a short page ends the walk");
+        let _ = a.update(Message::LogOlderPageLoaded(Ok(
+            crate::message::LogPage::complete(vec![rec("0000000000000000000000999", 900, "old")]),
+        )));
+        assert!(
+            a.syslog_filter.exhausted,
+            "the sensor said the walk finished"
+        );
 
         // A changed filter re-opens the walk: a new filter can match older
         // records the previous one exhausted.
@@ -10789,24 +10827,81 @@ mod log_fetch_tests {
         assert_eq!(a.syslog_filter.extra_rows, 0, "paging resets with filters");
     }
 
+    /// #1147, the failure the length rule got exactly backwards.
+    ///
+    /// A search truncated by the sensor's scan cap returns **zero** rows.
+    /// Zero is shorter than `LOG_FETCH_MAX`, so the old
+    /// `exhausted = records.len() < LOG_FETCH_MAX` concluded the walk had
+    /// finished — and the operator could never page past it.
+    /// `?pattern=OOM;from=<7 d>` over a large store with the last OOM far back
+    /// read as "no OOM this week", deterministically, forever.
+    ///
+    /// The envelope's `partial` is the only thing that tells "I found nothing"
+    /// from "I stopped before I could look".
+    #[test]
+    fn a_truncated_empty_page_does_not_end_the_walk() {
+        let mut a = app();
+        let _ = a.update(Message::LogOlderPageLoaded(Ok(crate::message::LogPage {
+            records: Vec::new(),
+            partial: true,
+        })));
+        assert!(
+            !a.syslog_filter.exhausted,
+            "zero rows because the scan cap hit is NOT the end of history"
+        );
+        assert!(
+            a.syslog_filter.last_page_partial,
+            "and the feed must be able to say so instead of 'no matches'"
+        );
+    }
+
+    /// The other half of the same distinction: genuinely no matches, walk
+    /// complete. The operator must be able to stop looking.
+    #[test]
+    fn a_complete_empty_page_does_end_the_walk() {
+        let mut a = app();
+        let _ = a.update(Message::LogOlderPageLoaded(Ok(
+            crate::message::LogPage::complete(Vec::new()),
+        )));
+        assert!(a.syslog_filter.exhausted);
+        assert!(!a.syslog_filter.last_page_partial);
+    }
+
+    /// Fleet fan-in (RFC 05 §2.1): one sensor with more to give makes the
+    /// whole answer partial, whatever the others said. The disjunction is in
+    /// `run_log_query_as`; this pins the state it feeds.
+    #[test]
+    fn one_partial_sensor_makes_the_fleet_answer_partial() {
+        let mut a = app();
+        let _ = a.update(Message::LogEventsLoaded(Ok(crate::message::LogPage {
+            records: vec![rec("1700000000000000000000001", 1_000, "x")],
+            partial: true,
+        })));
+        assert!(a.syslog_filter.last_page_partial);
+    }
+
     /// #601: an older page must not advance the live-tail watermark, or the
     /// tail would skip forward past lines it never saw.
     #[test]
     fn older_page_does_not_move_the_tail_watermark() {
         let mut a = app();
-        let _ = a.update(Message::LogEventsLoaded(Ok(vec![rec(
-            "1700000000000000000000005",
-            5_000,
-            "recent",
-        )])));
+        let _ = a.update(Message::LogEventsLoaded(Ok(
+            crate::message::LogPage::complete(vec![rec(
+                "1700000000000000000000005",
+                5_000,
+                "recent",
+            )]),
+        )));
         let watermark = a.last_log_event_ms;
         assert_eq!(watermark, Some(5_000));
 
-        let _ = a.update(Message::LogOlderPageLoaded(Ok(vec![rec(
-            "1600000000000000000000001",
-            1_000,
-            "older",
-        )])));
+        let _ = a.update(Message::LogOlderPageLoaded(Ok(
+            crate::message::LogPage::complete(vec![rec(
+                "1600000000000000000000001",
+                1_000,
+                "older",
+            )]),
+        )));
         assert_eq!(
             a.last_log_event_ms, watermark,
             "an older page leaves the tail watermark alone"

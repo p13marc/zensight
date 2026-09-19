@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`@rpc/logs/events/page` — a truncated search can finally say it was
+  truncated** (#1147, the half that was left open). `events` replies with a
+  bare `Vec<LogRecord>`, which has nowhere to say "I stopped early". A search
+  truncated by the 500 000-row scan cap returns **zero** rows, and zero rows is
+  exactly what "no matches" looks like: `?pattern=OOM;from=<7 d>` over a large
+  store with the last OOM nine hundred thousand rows back replied `[]`,
+  deterministically, forever, and the operator read *"no OOM this week"*.
+
+  `events` **cannot be changed in place** — RFC 08 §3 calls a changed reply
+  type on an existing path incompatible and `registry.lock` refuses it — so the
+  envelope arrives as a **sibling**, which is the path RFC 08 §3 sanctions.
+  Both are served, over the same walk; only the wire shape differs, and every
+  caller already built against `events` keeps the contract it was promised.
+  `events/page` replies `{items, next_cursor, partial, scanned}` and accepts
+  every selector `events` does.
+
+  `partial` is the required marker, not a nicety:
+  `zenkey_fleet::CallAnswer::page_signal()` reads a boolean field named exactly
+  `partial` and deliberately does **not** synthesise `partial: false` for a
+  bare list, so a reply without one is invisible to `zenctl call` and to every
+  RFC 13 judge.
+
+  **The hot-ring path had the same bug, on the other branch of the same `if`.**
+  It answered `Page::complete` unconditionally, reasoning that "the ring is the
+  whole of recent history, so a short page really is the end of it" — true of a
+  short page, false of a full one. `?max=2` over a ring holding a hundred
+  matches replied with two and `partial: false`.
+
+  **And the GUI inferred the same thing from a page length.**
+  `exhausted = records.len() < LOG_FETCH_MAX` gets the truncated-empty case
+  exactly backwards: zero is shorter than the cap, so a search that never
+  reached a match was reported as a walk that finished, and the operator could
+  not page past it. It now reads the producer's `partial`, and an empty feed
+  after a truncated walk says the sensors stopped before finishing rather than
+  "No messages match the current filters".
+
 - **A probe view: "timed out after 20.0 s" is now a sentence the GUI can say**
   (#1126). `probe.toml`'s header is an eight-day outage post-mortem whose
   thesis is that *"timeout, 20 s" said once would have ended it*. Since #820

@@ -664,12 +664,19 @@ async fn main() -> Result<()> {
     // the durable store is on, historical (`from`/`to`/`after_uid`) queries are
     // answered from it; recent ones from the ring.
     let (event_ring, event_ring_capacity) = query::new_ring(syslog_config.events_ring_capacity);
-    runner.spawn(query::run_events(
-        session.clone(),
-        "logs".to_string(),
-        event_ring.clone(),
-        log_store.clone(),
-    ));
+    // Both sibling procedures, one walk each (#1147). `events` keeps its
+    // `Vec<LogRecord>` contract for callers already built against it;
+    // `events/page` answers the same selectors in the RFC 05 §3.2 envelope, so
+    // a truncated search can say it was truncated.
+    for procedure in [query::Procedure::Bare, query::Procedure::Paged] {
+        runner.spawn(query::run_events_procedure(
+            session.clone(),
+            "logs".to_string(),
+            event_ring.clone(),
+            log_store.clone(),
+            procedure,
+        ));
+    }
 
     // Register artifact producers now that the store + ring exist (#555). The
     // `logbundle` producer reads from both; report/snapshot need only the runner.

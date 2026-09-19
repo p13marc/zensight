@@ -211,9 +211,17 @@ pub struct SyslogFilterState {
     pub extra_rows: usize,
     /// A deeper page is being fetched from the sensors' durable stores (#601).
     pub loading_older: bool,
-    /// The last cursor page came back short, so there is nothing older to
-    /// fetch under the current filter (#601).
+    /// The producer said its walk finished, so there is nothing older to fetch
+    /// under the current filter (#601, corrected in #1147).
+    ///
+    /// Set from the reply envelope's `partial`, never from the page length: a
+    /// search truncated by the sensor's scan cap returns **zero** rows, and a
+    /// zero-length page read as "nothing more" is how "I did not finish
+    /// looking" became "no matches".
     pub exhausted: bool,
+    /// The last reply said at least one sensor stopped before finishing its
+    /// walk (#1147) — so an empty feed means "not found yet", not "not there".
+    pub last_page_partial: bool,
 }
 
 /// Rows rendered before "Show more" (#601).
@@ -1256,7 +1264,16 @@ fn render_log_stream<'a>(
     let filtered_messages = apply_local_filters(messages, filter_state);
 
     if filtered_messages.is_empty() {
-        let empty_text = if messages.is_empty() {
+        // #1147: an empty feed after a TRUNCATED walk is not "no matches".
+        // The sensor stopped at its scan cap before reaching any, and saying
+        // "no messages match" there is the sentence that turns "I did not
+        // finish looking" into "it is not there" — the failure this issue is
+        // named for. `partial` is the only thing that can tell them apart, and
+        // it now rides the reply.
+        let empty_text = if filter_state.last_page_partial {
+            "The sensors stopped before finishing this search — no matches \
+             *so far*. Load older to keep looking."
+        } else if messages.is_empty() {
             "No log messages received yet..."
         } else {
             "No messages match the current filters"
@@ -1381,6 +1398,8 @@ fn render_log_stream<'a>(
         footer = footer.push(text("Loading older…").size(font::DENSE));
     } else if filter_state.exhausted {
         footer = footer.push(
+            // Said only when the producer said its walk FINISHED — never
+            // inferred from a short page (#1147).
             text("No older records")
                 .size(font::DENSE)
                 .style(|t: &Theme| text::Style {

@@ -76,35 +76,92 @@ const MAX_SEARCH_SCAN: usize = 500_000;
 
 /// Pure reply builder: newest-first, `since`/`host` + content-matcher filtered,
 /// capped at `max` matches.
+///
+/// Returns one page rather than a bare `Vec` (#1147). A ring walk that stops
+/// because it hit `max` has **not** finished: the comment here used to read
+/// "the ring is the whole of recent history, so a short page really is the end
+/// of it", which is true of a short page and false of a full one. `?max=2`
+/// over a ring holding a hundred matches replied with two and
+/// `partial: false` — the same "I stopped early and did not say so" the
+/// durable path was fixed for, on the other branch of the same `if`.
+///
+/// Taking `max + 1` and keeping `max` is how the walk learns there was a next
+/// row without paying for it.
 fn filter_ring(
     records: &VecDeque<LogRecord>,
     since: Option<i64>,
     host: Option<&str>,
     max: usize,
     matcher: &crate::search::LogMatcher,
-) -> Vec<LogRecord> {
-    records
+) -> Page<LogRecord> {
+    let mut matches: Vec<LogRecord> = records
         .iter()
         .rev()
         .filter(|r| since.is_none_or(|s| r.ts >= s))
         .filter(|r| host.is_none_or(|h| r.host == h))
         .filter(|r| matcher.matches(r))
-        .take(max)
+        .take(max.saturating_add(1))
         .cloned()
-        .collect()
+        .collect();
+
+    let scanned = matches.len() as u64;
+    if matches.len() > max {
+        matches.truncate(max);
+        // The cursor is the last row EMITTED — a value, never a position
+        // (RFC 05 §3.2). An empty `max` is already rejected upstream
+        // (`.filter(|n| *n > 0)`), so `matches` is non-empty here.
+        let cursor = matches.last().map(|r| r.uid.clone()).unwrap_or_default();
+        return Page::more(matches, cursor).scanned(scanned);
+    }
+    Page::complete(matches).scanned(scanned)
 }
 
 /// Run the log-event query channel until the session closes. Replies with
 /// filtered records (most-recent first) as JSON `Vec<LogRecord>`. When `store`
 /// is `Some`, `from`/`to`/`after_uid` queries are answered from the durable
 /// store (#544); recent queries always come from the hot ring.
-pub async fn run_events(
+/// Which of the two sibling procedures this loop answers (#1147).
+///
+/// They run the **same walk over the same store** and differ only in what they
+/// put on the wire, which is the whole point: `events` cannot be changed in
+/// place — RFC 08 §3 calls a changed reply type on an existing path
+/// incompatible, and the lock refuses it — so the envelope arrives as a
+/// sibling and `events` keeps its contract for every caller already built
+/// against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Procedure {
+    /// `events` — `Vec<LogRecord>`. Cannot say "I stopped early".
+    Bare,
+    /// `events/page` — `Page<LogRecord>`, with `partial`, `next_cursor` and
+    /// `scanned`.
+    Paged,
+}
+
+impl Procedure {
+    /// This procedure's `@rpc` key.
+    ///
+    /// Built, not formatted: `events/page` is **two chunks**, and
+    /// `query_key(producer, "events/page")` panics on the embedded `/`
+    /// (RFC 03 §3 — a reserved token inside a chunk). `nested_query_key` is
+    /// the builder for a two-chunk read.
+    #[must_use]
+    pub fn key(self, producer: &str) -> String {
+        match self {
+            Self::Bare => zensight_common::command::query_key(producer, "events"),
+            Self::Paged => zensight_common::command::nested_query_key(producer, "events", "page"),
+        }
+    }
+}
+
+/// Serve one of the two event procedures.
+pub async fn run_events_procedure(
     session: Arc<zenoh::Session>,
     producer: String,
     ring: EventRing,
     store: Option<Arc<LogStore>>,
+    procedure: Procedure,
 ) {
-    let key = zensight_common::command::query_key(&producer, "events");
+    let key = procedure.key(&producer);
     let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
@@ -197,7 +254,7 @@ pub async fn run_events(
             // The ring is the whole of recent history, so a short page there
             // really is the end of it.
             match ring.lock() {
-                Ok(r) => Page::complete(filter_ring(&r, since, host.as_deref(), max, &matcher)),
+                Ok(r) => filter_ring(&r, since, host.as_deref(), max, &matcher),
                 Err(_) => Page::complete(Vec::new()),
             }
         };
@@ -205,29 +262,30 @@ pub async fn run_events(
             !page.is_contract_violation(),
             "a truncated page must carry a cursor (RFC 05 §3.2)"
         );
-        // STILL A BARE `Vec` ON THE WIRE (#1147, partly).
+        // The same walk, two wire shapes (#1147).
         //
-        // The envelope is built — `LogStore::page` returns a `Page<LogRecord>`
-        // with the cursor and `scanned` the RFC requires — and it is not sent,
-        // because `registry/logs.toml` declares this procedure's reply as
-        // `Vec<LogRecord>` and RFC 08 §3 calls a changed reply type on an
-        // existing path **incompatible**: the lock refuses it, and the
-        // sanctioned path is to retire `events` and add a sibling. That is a
-        // keyspace decision with a GUI migration attached, not a line to slip
-        // into a bug fix, so it stays open on #1147.
+        // `events/page` sends the envelope `LogStore::page` already built —
+        // `partial`, `next_cursor` and `scanned`, exactly the RFC 05 §3.2
+        // fields `zenkey_fleet::CallAnswer::page_signal()` reads. `events`
+        // sends the bare `Vec` its registry entry declares, unchanged, because
+        // RFC 08 §3 calls a changed reply type on an existing path
+        // incompatible and every caller already built against it is entitled
+        // to the shape it was promised.
         //
-        // What ships here is the half the issue's own comment calls local and
-        // unblocked: the filter moved inside the walk, the `max` clamp, and
-        // the bounded start. The truncated-search blind spot is the half that
-        // waits.
-        let records = page.items;
-        match serde_json::to_vec(&records) {
+        // The blind spot is closed on the sibling and remains on the original,
+        // which is the honest arrangement: a caller that wants to know whether
+        // the walk finished asks the procedure that can say.
+        let payload = match procedure {
+            Procedure::Paged => serde_json::to_vec(&page),
+            Procedure::Bare => serde_json::to_vec(&page.items),
+        };
+        match payload {
             Ok(payload) => {
                 if let Err(e) = query.reply(key.as_str(), payload).await {
-                    tracing::warn!(error = %e, "query: events reply failed");
+                    tracing::warn!(error = %e, key = %key, "query: events reply failed");
                 }
             }
-            Err(e) => tracing::warn!(error = %e, "query: events serialize failed"),
+            Err(e) => tracing::warn!(error = %e, key = %key, "query: events serialize failed"),
         }
     }
 }
@@ -259,7 +317,7 @@ mod tests {
         let m = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
         let out = filter_ring(&ring, Some(102), None, 100, &m);
         assert_eq!(
-            out.iter().map(|r| r.ts).collect::<Vec<_>>(),
+            out.items.iter().map(|r| r.ts).collect::<Vec<_>>(),
             vec![104, 103, 102],
             "since is an inclusive lower bound, newest first"
         );
@@ -274,9 +332,13 @@ mod tests {
         }
         let m = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
         let out = filter_ring(&ring, None, Some("web01"), 3, &m);
-        assert_eq!(out.len(), 3);
-        assert!(out.iter().all(|r| r.host == "web01"));
-        assert_eq!(out[0].ts, 8, "newest matching first");
+        assert_eq!(out.items.len(), 3);
+        assert!(out.items.iter().all(|r| r.host == "web01"));
+        assert_eq!(out.items[0].ts, 8, "newest matching first");
+        assert!(
+            out.partial,
+            "web01 has five matches and only three were sent"
+        );
     }
 
     /// Live round-trip: a single-session zenoh get against the running
@@ -311,7 +373,13 @@ mod tests {
                 rec(&format!("u{i}"), 100 + i, "web01", "m"),
             );
         }
-        tokio::spawn(run_events(session.clone(), prefix.clone(), ring, None));
+        tokio::spawn(run_events_procedure(
+            session.clone(),
+            prefix.clone(),
+            ring,
+            None,
+            Procedure::Bare,
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         // zenoh selector params are `;`-separated (Parameters), not `&`.
@@ -332,6 +400,166 @@ mod tests {
             vec![104, 103],
             "newest-first, since inclusive, capped at max=2"
         );
+    }
+
+    /// The acceptance criterion, on the wire (#1147).
+    ///
+    /// `events/page` must reply with an object carrying a **boolean field
+    /// named exactly `partial`** — not "truncated", not an absent field.
+    /// `zenkey_fleet::CallAnswer::page_signal()` returns `None` for anything
+    /// else and deliberately does not synthesise `partial: false` for a bare
+    /// list, so a reply without it is invisible to `zenctl call` and to every
+    /// RFC 13 judge. That invisibility is the half of this issue that a bare
+    /// `Vec` could not fix on the existing path.
+    ///
+    /// And `events` must be **unchanged**: a caller built against its declared
+    /// `Vec<LogRecord>` is entitled to the shape it was promised.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_paged_sibling_sends_an_envelope_and_events_stays_a_bare_list() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let prefix = format!("test-{nanos}-logs");
+
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .expect("disable multicast scouting");
+        let session = Arc::new(zenoh::open(config).await.expect("open zenoh session"));
+
+        let (ring, capacity) = new_ring(1000);
+        for i in 0..5 {
+            push(
+                &ring,
+                capacity,
+                rec(&format!("u{i}"), 100 + i, "web01", "m"),
+            );
+        }
+        for procedure in [Procedure::Bare, Procedure::Paged] {
+            tokio::spawn(run_events_procedure(
+                session.clone(),
+                prefix.clone(),
+                ring.clone(),
+                None,
+                procedure,
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // The sibling: an envelope, truncated, and it says so.
+        let paged_key = Procedure::Paged.key(&prefix);
+        let replies = session
+            .get(&format!("{paged_key}?max=2"))
+            .timeout(std::time::Duration::from_secs(5))
+            .await
+            .expect("get events/page");
+        let reply = replies.recv_async().await.expect("one reply");
+        let bytes = reply.result().expect("ok reply").payload().to_bytes();
+
+        // Read as raw JSON first: the FIELD NAME is the contract, and a typed
+        // decode would happily accept a struct that renamed it.
+        let raw: serde_json::Value = serde_json::from_slice(&bytes).expect("json object");
+        assert!(raw.is_object(), "an envelope, not a bare list");
+        assert_eq!(
+            raw.get("partial").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "a boolean field named exactly `partial` — what page_signal() reads"
+        );
+        assert!(
+            raw.get("next_cursor")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "a truncated page must carry a cursor (RFC 05 §3.2)"
+        );
+
+        let page: Page<LogRecord> = serde_json::from_slice(&bytes).expect("decode Page");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.partial);
+
+        // The original: unchanged, still a bare list.
+        let bare_key = Procedure::Bare.key(&prefix);
+        let replies = session
+            .get(&format!("{bare_key}?max=2"))
+            .timeout(std::time::Duration::from_secs(5))
+            .await
+            .expect("get events");
+        let reply = replies.recv_async().await.expect("one reply");
+        let bytes = reply.result().expect("ok reply").payload().to_bytes();
+        let raw: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(raw.is_array(), "`events` keeps its declared Vec<LogRecord>");
+        let records: Vec<LogRecord> = serde_json::from_slice(&bytes).expect("decode Vec");
+        assert_eq!(records.len(), 2);
+    }
+
+    /// #1147, the other branch of the same `if`. A ring walk capped by `max`
+    /// has not finished, and saying `partial: false` there is the same lie the
+    /// durable path was fixed for.
+    #[test]
+    fn a_ring_page_capped_by_max_says_it_stopped_early() {
+        let (ring, capacity) = new_ring(100);
+        for i in 0..10u64 {
+            push(
+                &ring,
+                capacity,
+                rec(&format!("u{i}"), 100 + i as i64, "web01", "m"),
+            );
+        }
+        let matcher = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
+        let r = ring.lock().unwrap();
+
+        let page = filter_ring(&r, None, None, 3, &matcher);
+        assert_eq!(page.items.len(), 3, "capped at max");
+        assert!(page.partial, "and there were more behind it");
+        assert_eq!(
+            page.next_cursor.as_deref(),
+            Some("u7"),
+            "the cursor is the last row EMITTED (newest-first: u9, u8, u7)"
+        );
+        assert!(!page.is_contract_violation());
+    }
+
+    /// A walk that really did finish says so, with no cursor — the caller must
+    /// be able to stop.
+    #[test]
+    fn a_ring_page_that_finished_carries_no_cursor() {
+        let (ring, capacity) = new_ring(100);
+        for i in 0..3u64 {
+            push(
+                &ring,
+                capacity,
+                rec(&format!("u{i}"), 100 + i as i64, "web01", "m"),
+            );
+        }
+        let matcher = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
+        let r = ring.lock().unwrap();
+
+        let page = filter_ring(&r, None, None, 50, &matcher);
+        assert_eq!(page.items.len(), 3);
+        assert!(!page.partial);
+        assert_eq!(page.next_cursor, None);
+    }
+
+    /// Exactly `max` matches and nothing behind them is a **complete** walk.
+    /// Reporting `partial` here would send the caller back for an empty page
+    /// forever — the failure mode inverted.
+    #[test]
+    fn exactly_max_matches_with_nothing_behind_is_complete() {
+        let (ring, capacity) = new_ring(100);
+        for i in 0..3u64 {
+            push(
+                &ring,
+                capacity,
+                rec(&format!("u{i}"), 100 + i as i64, "web01", "m"),
+            );
+        }
+        let matcher = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
+        let r = ring.lock().unwrap();
+
+        let page = filter_ring(&r, None, None, 3, &matcher);
+        assert_eq!(page.items.len(), 3);
+        assert!(!page.partial, "there is no fourth row to page to");
+        assert_eq!(page.next_cursor, None);
     }
 
     #[test]

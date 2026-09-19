@@ -177,6 +177,9 @@ kind = "json-schema"
 [types.UnitFile]
 kind = "json-schema"
 
+[types."Page<LogRecord>"]
+kind = "json-schema"
+
 [types."Vec<ActionStatus>"]
 kind = "json-schema"
 
