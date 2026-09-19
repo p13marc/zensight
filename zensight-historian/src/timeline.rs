@@ -96,6 +96,12 @@ pub async fn run_events(
                 }
             }
         }
+        // The same yield, for the same reason as `ingest::run` (#1211): flume
+        // is outside tokio's cooperative budget and `select!` adds none, so a
+        // backlog would hold this worker against the `@rpc` tasks sharing the
+        // runtime. After the `select!` rather than inside the arm, because the
+        // reject paths `continue`.
+        tokio::task::yield_now().await;
     }
 }
 
@@ -168,6 +174,12 @@ pub async fn run_alerts(
                 record(&store, row, &counters.alerts);
             }
         }
+        // The same yield, for the same reason as `ingest::run` (#1211): flume
+        // is outside tokio's cooperative budget and `select!` adds none, so a
+        // backlog would hold this worker against the `@rpc` tasks sharing the
+        // runtime. After the `select!` rather than inside the arm, because the
+        // reject paths `continue`.
+        tokio::task::yield_now().await;
     }
 }
 
